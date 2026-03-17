@@ -204,6 +204,46 @@ pub trait Node {
     fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId> + '_>;
     /// Outgoing link handles grouped by output index order.
     fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId> + '_>;
+    /// Incoming link slots in index order. `None` indicates a disconnected slot.
+    fn input_slots(&self) -> Box<dyn Iterator<Item = Option<GlobalId>> + '_> {
+        Box::new(self.inputs().map(Some))
+    }
+    /// Outgoing link slots in index order. `None` indicates an unbound output slot.
+    fn output_slots(&self) -> Box<dyn Iterator<Item = Option<GlobalId>> + '_> {
+        Box::new(self.outputs().map(Some))
+    }
+    /// Optional display labels aligned with input slot indices.
+    fn input_slot_labels(&self) -> Box<dyn Iterator<Item = Option<String>> + '_> {
+        Box::new(self.input_slots().map(|_| None))
+    }
+    /// Optional display labels aligned with output slot indices.
+    fn output_slot_labels(&self) -> Box<dyn Iterator<Item = Option<String>> + '_> {
+        Box::new(self.output_slots().map(|_| None))
+    }
+    /// Replace an input slot link by index. `None` disconnects the slot.
+    fn set_input_slot(
+        &mut self,
+        slot_index: usize,
+        _link: Option<GlobalId>,
+    ) -> Result<(), NodeSlotEditError> {
+        Err(NodeSlotEditError::unsupported(
+            self.op_kind().as_ref().to_string(),
+            SlotDirection::Input,
+            slot_index,
+        ))
+    }
+    /// Replace an output slot link by index. `None` disconnects the slot.
+    fn set_output_slot(
+        &mut self,
+        slot_index: usize,
+        _link: Option<GlobalId>,
+    ) -> Result<(), NodeSlotEditError> {
+        Err(NodeSlotEditError::unsupported(
+            self.op_kind().as_ref().to_string(),
+            SlotDirection::Output,
+            slot_index,
+        ))
+    }
     /// Optional label for debugging.
     fn label(&self) -> Option<String> {
         None
@@ -219,6 +259,26 @@ pub trait NodeDyn {
     fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId> + '_>;
     /// Outgoing link handles grouped by output index order.
     fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId> + '_>;
+    /// Incoming link slots in index order. `None` indicates a disconnected slot.
+    fn input_slots(&self) -> Box<dyn Iterator<Item = Option<GlobalId>> + '_>;
+    /// Outgoing link slots in index order. `None` indicates an unbound output slot.
+    fn output_slots(&self) -> Box<dyn Iterator<Item = Option<GlobalId>> + '_>;
+    /// Optional display labels aligned with input slot indices.
+    fn input_slot_labels(&self) -> Box<dyn Iterator<Item = Option<String>> + '_>;
+    /// Optional display labels aligned with output slot indices.
+    fn output_slot_labels(&self) -> Box<dyn Iterator<Item = Option<String>> + '_>;
+    /// Replace an input slot link by index. `None` disconnects the slot.
+    fn set_input_slot(
+        &mut self,
+        slot_index: usize,
+        link: Option<GlobalId>,
+    ) -> Result<(), NodeSlotEditError>;
+    /// Replace an output slot link by index. `None` disconnects the slot.
+    fn set_output_slot(
+        &mut self,
+        slot_index: usize,
+        link: Option<GlobalId>,
+    ) -> Result<(), NodeSlotEditError>;
     /// Optional label for debugging.
     fn label(&self) -> Option<String>;
 }
@@ -242,6 +302,38 @@ impl<N: Node> NodeDyn for N {
 
     fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId> + '_> {
         self.outputs()
+    }
+
+    fn input_slots(&self) -> Box<dyn Iterator<Item = Option<GlobalId>> + '_> {
+        self.input_slots()
+    }
+
+    fn output_slots(&self) -> Box<dyn Iterator<Item = Option<GlobalId>> + '_> {
+        self.output_slots()
+    }
+
+    fn input_slot_labels(&self) -> Box<dyn Iterator<Item = Option<String>> + '_> {
+        self.input_slot_labels()
+    }
+
+    fn output_slot_labels(&self) -> Box<dyn Iterator<Item = Option<String>> + '_> {
+        self.output_slot_labels()
+    }
+
+    fn set_input_slot(
+        &mut self,
+        slot_index: usize,
+        link: Option<GlobalId>,
+    ) -> Result<(), NodeSlotEditError> {
+        <N as Node>::set_input_slot(self, slot_index, link)
+    }
+
+    fn set_output_slot(
+        &mut self,
+        slot_index: usize,
+        link: Option<GlobalId>,
+    ) -> Result<(), NodeSlotEditError> {
+        <N as Node>::set_output_slot(self, slot_index, link)
     }
 }
 
@@ -331,9 +423,293 @@ impl<G: Graph + 'static> GraphDyn for G {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SlotDirection {
+    Input,
+    Output,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NodeSlotEditError {
+    Unsupported {
+        op_kind: String,
+        direction: SlotDirection,
+        slot_index: usize,
+    },
+    InvalidSlotIndex {
+        op_kind: String,
+        direction: SlotDirection,
+        slot_index: usize,
+        slot_count: usize,
+    },
+    MissingSlotKind {
+        op_kind: String,
+        direction: SlotDirection,
+        slot_index: usize,
+    },
+}
+
+impl NodeSlotEditError {
+    pub fn unsupported(op_kind: String, direction: SlotDirection, slot_index: usize) -> Self {
+        Self::Unsupported {
+            op_kind,
+            direction,
+            slot_index,
+        }
+    }
+
+    pub fn invalid_slot_index(
+        op_kind: String,
+        direction: SlotDirection,
+        slot_index: usize,
+        slot_count: usize,
+    ) -> Self {
+        Self::InvalidSlotIndex {
+            op_kind,
+            direction,
+            slot_index,
+            slot_count,
+        }
+    }
+
+    pub fn missing_slot_kind(op_kind: String, direction: SlotDirection, slot_index: usize) -> Self {
+        Self::MissingSlotKind {
+            op_kind,
+            direction,
+            slot_index,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DisconnectedNodeSlot {
+    pub node_id: GlobalId,
+    pub op_kind: String,
+    pub direction: SlotDirection,
+    pub slot_index: usize,
+    pub slot_label: Option<String>,
+}
+
+impl DisconnectedNodeSlot {
+    pub fn describe(&self) -> String {
+        let direction = match self.direction {
+            SlotDirection::Input => "input",
+            SlotDirection::Output => "output",
+        };
+        if let Some(label) = &self.slot_label {
+            format!(
+                "node {} ({}) has disconnected {} slot {} ('{}')",
+                self.node_id, self.op_kind, direction, self.slot_index, label
+            )
+        } else {
+            format!(
+                "node {} ({}) has disconnected {} slot {}",
+                self.node_id, self.op_kind, direction, self.slot_index
+            )
+        }
+    }
+}
+
+pub fn collect_disconnected_node_slots(graph: &dyn GraphDyn) -> Vec<DisconnectedNodeSlot> {
+    let mut issues = Vec::new();
+
+    for node_id in graph.node_ids() {
+        let Some(node) = graph.get_node_by_id(&node_id) else {
+            continue;
+        };
+        let op_kind = node.op_kind();
+
+        let input_slots = node.input_slots().collect::<Vec<_>>();
+        let input_labels = node.input_slot_labels().collect::<Vec<_>>();
+        let input_len = input_slots.len().max(input_labels.len());
+        for slot_index in 0..input_len {
+            let slot = input_slots.get(slot_index).copied().unwrap_or(None);
+            if slot.is_none() {
+                let slot_label = input_labels.get(slot_index).cloned().flatten();
+                issues.push(DisconnectedNodeSlot {
+                    node_id,
+                    op_kind: op_kind.clone(),
+                    direction: SlotDirection::Input,
+                    slot_index,
+                    slot_label,
+                });
+            }
+        }
+
+        let output_slots = node.output_slots().collect::<Vec<_>>();
+        let output_labels = node.output_slot_labels().collect::<Vec<_>>();
+        let output_len = output_slots.len().max(output_labels.len());
+        for slot_index in 0..output_len {
+            let slot = output_slots.get(slot_index).copied().unwrap_or(None);
+            if slot.is_none() {
+                let slot_label = output_labels.get(slot_index).cloned().flatten();
+                issues.push(DisconnectedNodeSlot {
+                    node_id,
+                    op_kind: op_kind.clone(),
+                    direction: SlotDirection::Output,
+                    slot_index,
+                    slot_label,
+                });
+            }
+        }
+    }
+
+    issues
+}
+
 /// Observer API for instrumentation across graph execution and transformations.
 pub trait Observer<G: Graph> {
     fn on_node_scheduled(&mut self, _path: &[GlobalId], _node: &G::AnyNode) {}
     fn on_node_executed(&mut self, _path: &[GlobalId], _node: &G::AnyNode) {}
     fn on_tensor_assigned(&mut self, _path: &[GlobalId], _tensor: &G::AnyLink) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    #[derive(Clone, Debug)]
+    struct DummyLink {
+        id: GlobalId,
+    }
+
+    impl Link for DummyLink {
+        fn global_id(&self) -> GlobalId {
+            self.id
+        }
+    }
+
+    impl LinkMetadata for DummyLink {}
+
+    #[derive(Clone, Debug)]
+    struct DummyNode {
+        id: GlobalId,
+        op_kind: &'static str,
+        input_slots: Vec<Option<GlobalId>>,
+        output_slots: Vec<Option<GlobalId>>,
+        input_labels: Vec<Option<String>>,
+        output_labels: Vec<Option<String>>,
+    }
+
+    impl Node for DummyNode {
+        type OpKind = &'static str;
+
+        fn global_id(&self) -> GlobalId {
+            self.id
+        }
+
+        fn op_kind(&self) -> Self::OpKind {
+            self.op_kind
+        }
+
+        fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId> + '_> {
+            Box::new(self.input_slots.iter().flatten().copied())
+        }
+
+        fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId> + '_> {
+            Box::new(self.output_slots.iter().flatten().copied())
+        }
+
+        fn input_slots(&self) -> Box<dyn Iterator<Item = Option<GlobalId>> + '_> {
+            Box::new(self.input_slots.iter().copied())
+        }
+
+        fn output_slots(&self) -> Box<dyn Iterator<Item = Option<GlobalId>> + '_> {
+            Box::new(self.output_slots.iter().copied())
+        }
+
+        fn input_slot_labels(&self) -> Box<dyn Iterator<Item = Option<String>> + '_> {
+            Box::new(self.input_labels.iter().cloned())
+        }
+
+        fn output_slot_labels(&self) -> Box<dyn Iterator<Item = Option<String>> + '_> {
+            Box::new(self.output_labels.iter().cloned())
+        }
+    }
+
+    impl NodeMetadata for DummyNode {}
+
+    struct DummyGraph {
+        id: GlobalId,
+        nodes: HashMap<GlobalId, DummyNode>,
+        links: HashMap<GlobalId, DummyLink>,
+    }
+
+    impl Default for DummyGraph {
+        fn default() -> Self {
+            Self {
+                id: GlobalId(0),
+                nodes: HashMap::new(),
+                links: HashMap::new(),
+            }
+        }
+    }
+
+    impl Graph for DummyGraph {
+        type Error = ();
+        type AnyNode = DummyNode;
+        type AnyLink = DummyLink;
+
+        fn global_id(&self) -> GlobalId {
+            self.id
+        }
+
+        fn node_ids(&self) -> impl Iterator<Item = GlobalId> {
+            self.nodes.keys().copied()
+        }
+
+        fn inner_link_ids(&self) -> impl Iterator<Item = GlobalId> {
+            self.links.keys().copied()
+        }
+
+        fn get_node_by_id(&self, id: &GlobalId) -> Option<&Self::AnyNode> {
+            self.nodes.get(id)
+        }
+
+        fn get_link_by_id(&self, id: &GlobalId) -> Option<&Self::AnyLink> {
+            self.links.get(id)
+        }
+
+        fn input_link_ids(&self) -> impl Iterator<Item = (GlobalId, GlobalId)> {
+            core::iter::empty()
+        }
+
+        fn output_link_ids(&self) -> impl Iterator<Item = (GlobalId, GlobalId)> {
+            core::iter::empty()
+        }
+
+        fn constant_link_ids(&self) -> impl Iterator<Item = GlobalId> {
+            core::iter::empty()
+        }
+    }
+
+    #[test]
+    fn collect_disconnected_node_slots_reports_disconnected_with_labels() {
+        let mut graph = DummyGraph {
+            id: GlobalId(1),
+            ..Default::default()
+        };
+        let node_id = GlobalId(2);
+        graph.nodes.insert(
+            node_id,
+            DummyNode {
+                id: node_id,
+                op_kind: "dummy",
+                input_slots: vec![Some(GlobalId(10)), None],
+                output_slots: vec![None, Some(GlobalId(11))],
+                input_labels: vec![Some("lhs".to_string()), Some("rhs".to_string())],
+                output_labels: vec![Some("primary".to_string()), Some("secondary".to_string())],
+            },
+        );
+
+        let issues = collect_disconnected_node_slots(&graph);
+        assert_eq!(issues.len(), 2);
+        assert_eq!(issues[0].direction, SlotDirection::Input);
+        assert_eq!(issues[0].slot_index, 1);
+        assert_eq!(issues[0].slot_label.as_deref(), Some("rhs"));
+        assert_eq!(issues[1].direction, SlotDirection::Output);
+        assert_eq!(issues[1].slot_index, 0);
+        assert_eq!(issues[1].slot_label.as_deref(), Some("primary"));
+    }
 }

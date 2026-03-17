@@ -79,7 +79,7 @@ impl STTExplorerApp {
         self.handle_pending_response(loaded_tokenizers, server_request_manager);
 
         let mut stt_interfaces = HashMap::new();
-        for (&interface_id, interface) in &loaded_models.current_interfaces {
+        for (&interface_id, interface) in &loaded_models.server_graphs.current_interfaces {
             if let AnyInterface::SpeechToTextInterface(_) = &interface.interface {
                 stt_interfaces.insert(interface.interface_name.clone(), interface_id);
             }
@@ -107,7 +107,7 @@ impl STTExplorerApp {
 
         let interface = self
             .selected_interface_id
-            .and_then(|id| loaded_models.current_interfaces.get(&id));
+            .and_then(|id| loaded_models.server_graphs.current_interfaces.get(&id));
 
         if let Some(interface) = interface {
             if let AnyInterface::SpeechToTextInterface(stt) = &interface.interface {

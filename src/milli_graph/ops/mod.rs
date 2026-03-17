@@ -66,7 +66,7 @@ pub use where_op::*;
 
 use crate::backends::eval_backend::EvalBackend;
 use crate::backends::ndarray_backend::NDArrayNumericTensor;
-use crate::graph::{GlobalId, Node, NodeMetadata};
+use crate::graph::{GlobalId, Node, NodeMetadata, NodeSlotEditError, SlotDirection};
 use crate::milli_graph::MilliOpGraphError;
 use crate::numeric_tensor::NumericTensor;
 use crate::scalar_info::ScalarInfoTyped;
@@ -624,6 +624,138 @@ impl Node for AnyMilliOp {
     delegate!(inputs() ->  Box<dyn Iterator<Item = GlobalId> + '_>);
     delegate!(outputs() -> Box<dyn Iterator<Item = GlobalId> + '_>);
     delegate!(global_id() -> GlobalId);
+    fn input_slots(&self) -> Box<dyn Iterator<Item = Option<GlobalId>> + '_> {
+        Box::new(self.inputs().map(Some))
+    }
+    fn output_slots(&self) -> Box<dyn Iterator<Item = Option<GlobalId>> + '_> {
+        Box::new(self.outputs().map(Some))
+    }
+    fn set_input_slot(
+        &mut self,
+        slot_index: usize,
+        link: Option<GlobalId>,
+    ) -> Result<(), NodeSlotEditError> {
+        let Some(new_link_id) = link else {
+            return Err(NodeSlotEditError::missing_slot_kind(
+                self.op_kind(),
+                SlotDirection::Input,
+                slot_index,
+            ));
+        };
+
+        let op_kind = self.op_kind();
+        let old_inputs = self.inputs().collect::<Vec<_>>();
+        let old_outputs = self.outputs().collect::<Vec<_>>();
+        if slot_index >= old_inputs.len() {
+            return Err(NodeSlotEditError::invalid_slot_index(
+                op_kind,
+                SlotDirection::Input,
+                slot_index,
+                old_inputs.len(),
+            ));
+        }
+        if old_inputs[slot_index] == new_link_id {
+            return Ok(());
+        }
+
+        let mut new_inputs = old_inputs.clone();
+        new_inputs[slot_index] = new_link_id;
+
+        let mut remap = HashMap::<GlobalId, GlobalId>::new();
+        for (old_id, new_id) in old_inputs.iter().zip(new_inputs.iter()) {
+            if let Some(existing) = remap.insert(*old_id, *new_id)
+                && existing != *new_id
+            {
+                return Err(NodeSlotEditError::unsupported(
+                    self.op_kind(),
+                    SlotDirection::Input,
+                    slot_index,
+                ));
+            }
+        }
+        for old_id in &old_outputs {
+            if let Some(existing) = remap.insert(*old_id, *old_id)
+                && existing != *old_id
+            {
+                return Err(NodeSlotEditError::unsupported(
+                    self.op_kind(),
+                    SlotDirection::Input,
+                    slot_index,
+                ));
+            }
+        }
+        remap.retain(|old_id, new_id| old_id != new_id);
+        if remap.is_empty() {
+            return Ok(());
+        }
+
+        let mut rng = rand::rng();
+        self.remap_tensors(&remap, &mut rng);
+        Ok(())
+    }
+    fn set_output_slot(
+        &mut self,
+        slot_index: usize,
+        link: Option<GlobalId>,
+    ) -> Result<(), NodeSlotEditError> {
+        let Some(new_link_id) = link else {
+            return Err(NodeSlotEditError::missing_slot_kind(
+                self.op_kind(),
+                SlotDirection::Output,
+                slot_index,
+            ));
+        };
+
+        let op_kind = self.op_kind();
+        let old_inputs = self.inputs().collect::<Vec<_>>();
+        let old_outputs = self.outputs().collect::<Vec<_>>();
+        if slot_index >= old_outputs.len() {
+            return Err(NodeSlotEditError::invalid_slot_index(
+                op_kind,
+                SlotDirection::Output,
+                slot_index,
+                old_outputs.len(),
+            ));
+        }
+        if old_outputs[slot_index] == new_link_id {
+            return Ok(());
+        }
+
+        let mut new_outputs = old_outputs.clone();
+        new_outputs[slot_index] = new_link_id;
+
+        let mut remap = HashMap::<GlobalId, GlobalId>::new();
+        for old_id in &old_inputs {
+            if let Some(existing) = remap.insert(*old_id, *old_id)
+                && existing != *old_id
+            {
+                return Err(NodeSlotEditError::unsupported(
+                    self.op_kind(),
+                    SlotDirection::Output,
+                    slot_index,
+                ));
+            }
+        }
+        for (old_id, new_id) in old_outputs.iter().zip(new_outputs.iter()) {
+            if let Some(existing) = remap.insert(*old_id, *new_id)
+                && existing != *new_id
+            {
+                return Err(NodeSlotEditError::unsupported(
+                    self.op_kind(),
+                    SlotDirection::Output,
+                    slot_index,
+                ));
+            }
+        }
+        remap.retain(|old_id, new_id| old_id != new_id);
+        if remap.is_empty() {
+            return Ok(());
+        }
+
+        let mut rng = rand::rng();
+        self.remap_tensors(&remap, &mut rng);
+        Ok(())
+    }
     fn label(&self) -> Option<String> {
         self.stored_label()
     }

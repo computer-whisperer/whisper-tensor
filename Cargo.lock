@@ -7065,6 +7065,7 @@ dependencies = [
  "blas-src",
  "candle-core",
  "candle-onnx",
+ "ciborium",
  "cranelift-codegen",
  "cranelift-frontend",
  "cranelift-jit",

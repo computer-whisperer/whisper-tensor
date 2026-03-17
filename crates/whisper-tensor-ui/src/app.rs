@@ -9,11 +9,16 @@ use egui::Margin;
 use rwkv_tokenizer::WorldTokenizer;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+#[cfg(not(target_arch = "wasm32"))]
+use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::mpsc;
+use whisper_tensor::graph::GraphDyn;
 use whisper_tensor::interfaces::AnyInterface;
 use whisper_tensor::loader::{ConfigFieldType, ConfigValue};
 use whisper_tensor::metadata::TokenizerInfo;
+use whisper_tensor::milli_graph::MilliOpGraph;
+use whisper_tensor::super_graph::SuperGraph;
 use whisper_tensor::symbolic_graph::SymbolicGraph;
 use whisper_tensor::tokenizer::AnyTokenizer;
 use whisper_tensor_server::{
@@ -73,13 +78,226 @@ impl Default for AppState {
 }
 
 pub(crate) type InterfaceId = u32;
+pub(crate) type ClientGraphId = u32;
 
-pub(crate) struct LoadedModels {
-    pub(crate) model_load_state: Option<ModelLoadState>,
+pub(crate) enum ClientLoadedGraphData {
+    Super(Box<SuperGraph>),
+    MilliOp(Box<MilliOpGraph>),
+    Symbolic(Box<SymbolicGraph>),
+}
+
+impl ClientLoadedGraphData {
+    pub(crate) fn as_graph_dyn(&self) -> &dyn GraphDyn {
+        match self {
+            Self::Super(graph) => graph.as_ref(),
+            Self::MilliOp(graph) => graph.as_ref(),
+            Self::Symbolic(graph) => graph.as_ref(),
+        }
+    }
+
+    pub(crate) fn kind_name(&self) -> &'static str {
+        match self {
+            Self::Super(_) => "SuperGraph",
+            Self::MilliOp(_) => "MilliOpGraph",
+            Self::Symbolic(_) => "SymbolicGraph",
+        }
+    }
+
+    pub(crate) fn supports_editing(&self) -> bool {
+        matches!(self, Self::Super(_) | Self::MilliOp(_))
+    }
+}
+
+pub(crate) struct ClientLoadedGraphEntry {
+    pub(crate) display_name: String,
+    pub(crate) graph: ClientLoadedGraphData,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GraphRootOwnership {
+    Server,
+    Client,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GraphEditability {
+    ServerReadOnly,
+    ClientEditable,
+    ClientReadOnlyUnsupported,
+}
+
+impl GraphEditability {
+    pub(crate) fn description(self) -> &'static str {
+        match self {
+            Self::ServerReadOnly => "server-loaded (read-only)",
+            Self::ClientEditable => "client-loaded (editable)",
+            Self::ClientReadOnlyUnsupported => "client-loaded (read-only, unsupported type)",
+        }
+    }
+
+    pub(crate) fn can_edit(self) -> bool {
+        matches!(self, Self::ClientEditable)
+    }
+}
+
+pub(crate) struct ResolvedRootGraph<'a> {
+    pub(crate) graph: &'a dyn GraphDyn,
+    pub(crate) ownership: GraphRootOwnership,
+    pub(crate) editability: GraphEditability,
+}
+
+#[allow(dead_code)] // Reserved for upcoming graph-edit command plumbing.
+pub(crate) enum EditableClientGraphMut<'a> {
+    SuperGraph(&'a mut SuperGraph),
+    MilliOpGraph(&'a mut MilliOpGraph),
+}
+
+#[allow(dead_code)] // Reserved for upcoming graph-edit command plumbing.
+#[derive(Debug)]
+pub(crate) enum GraphEditAccessError {
+    NotClientGraphRoot,
+    ClientGraphNotFound(ClientGraphId),
+    UnsupportedClientGraphType(&'static str),
+}
+
+impl core::fmt::Display for GraphEditAccessError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::NotClientGraphRoot => {
+                write!(f, "graph root is not a client-loaded graph")
+            }
+            Self::ClientGraphNotFound(id) => write!(f, "client graph {id} not found"),
+            Self::UnsupportedClientGraphType(kind) => {
+                write!(f, "client graph type {kind} is not editable")
+            }
+        }
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct ServerGraphCatalog {
     pub(crate) current_models: Vec<CurrentModelsReportEntry>,
     pub(crate) current_interfaces: HashMap<InterfaceId, CurrentInterfacesReportEntry>,
     pub(crate) currently_requesting_model: Option<LoadedModelId>,
-    pub(crate) loaded_models: HashMap<LoadedModelId, SymbolicGraph>,
+    pub(crate) symbolic_graphs: HashMap<LoadedModelId, SymbolicGraph>,
+}
+
+#[derive(Default)]
+pub(crate) struct ClientGraphCatalog {
+    next_graph_id: ClientGraphId,
+    pub(crate) graphs: HashMap<ClientGraphId, ClientLoadedGraphEntry>,
+}
+
+impl ClientGraphCatalog {
+    pub(crate) fn insert_graph(
+        &mut self,
+        display_name: String,
+        graph: ClientLoadedGraphData,
+    ) -> ClientGraphId {
+        let id = self.next_graph_id;
+        self.next_graph_id = self.next_graph_id.wrapping_add(1);
+        self.graphs.insert(
+            id,
+            ClientLoadedGraphEntry {
+                display_name,
+                graph,
+            },
+        );
+        id
+    }
+}
+
+pub(crate) struct LoadedModels {
+    pub(crate) model_load_state: Option<ModelLoadState>,
+    pub(crate) server_graphs: ServerGraphCatalog,
+    pub(crate) client_graphs: ClientGraphCatalog,
+}
+
+impl LoadedModels {
+    pub(crate) fn root_graph_editability(
+        &self,
+        selection: GraphRootSubjectSelection,
+    ) -> GraphEditability {
+        match selection {
+            GraphRootSubjectSelection::ServerModel(_)
+            | GraphRootSubjectSelection::ServerInterface(_) => GraphEditability::ServerReadOnly,
+            GraphRootSubjectSelection::ClientGraph(client_graph_id) => self
+                .client_graphs
+                .graphs
+                .get(&client_graph_id)
+                .map_or(GraphEditability::ClientReadOnlyUnsupported, |entry| {
+                    if entry.graph.supports_editing() {
+                        GraphEditability::ClientEditable
+                    } else {
+                        GraphEditability::ClientReadOnlyUnsupported
+                    }
+                }),
+        }
+    }
+
+    pub(crate) fn resolve_root_graph(
+        &self,
+        selection: GraphRootSubjectSelection,
+    ) -> Option<ResolvedRootGraph<'_>> {
+        let editability = self.root_graph_editability(selection);
+        match selection {
+            GraphRootSubjectSelection::ServerModel(model_id) => self
+                .server_graphs
+                .symbolic_graphs
+                .get(&model_id)
+                .map(|graph| ResolvedRootGraph {
+                    graph,
+                    ownership: GraphRootOwnership::Server,
+                    editability,
+                }),
+            GraphRootSubjectSelection::ServerInterface(interface_id) => self
+                .server_graphs
+                .current_interfaces
+                .get(&interface_id)
+                .map(|entry| ResolvedRootGraph {
+                    graph: entry.interface.get_super_graph(),
+                    ownership: GraphRootOwnership::Server,
+                    editability,
+                }),
+            GraphRootSubjectSelection::ClientGraph(client_graph_id) => self
+                .client_graphs
+                .graphs
+                .get(&client_graph_id)
+                .map(|entry| ResolvedRootGraph {
+                    graph: entry.graph.as_graph_dyn(),
+                    ownership: GraphRootOwnership::Client,
+                    editability,
+                }),
+        }
+    }
+
+    #[allow(dead_code)] // Reserved for upcoming graph-edit command plumbing.
+    pub(crate) fn with_editable_client_graph_mut<R>(
+        &mut self,
+        selection: GraphRootSubjectSelection,
+        f: impl FnOnce(EditableClientGraphMut<'_>) -> R,
+    ) -> Result<R, GraphEditAccessError> {
+        let client_graph_id = match selection {
+            GraphRootSubjectSelection::ClientGraph(client_graph_id) => client_graph_id,
+            _ => return Err(GraphEditAccessError::NotClientGraphRoot),
+        };
+        let entry = self
+            .client_graphs
+            .graphs
+            .get_mut(&client_graph_id)
+            .ok_or(GraphEditAccessError::ClientGraphNotFound(client_graph_id))?;
+        match &mut entry.graph {
+            ClientLoadedGraphData::Super(graph) => {
+                Ok(f(EditableClientGraphMut::SuperGraph(graph.as_mut())))
+            }
+            ClientLoadedGraphData::MilliOp(graph) => {
+                Ok(f(EditableClientGraphMut::MilliOpGraph(graph.as_mut())))
+            }
+            ClientLoadedGraphData::Symbolic(_) => Err(
+                GraphEditAccessError::UnsupportedClientGraphType("SymbolicGraph"),
+            ),
+        }
+    }
 }
 
 pub(crate) struct LoadedTokenizers {
@@ -109,6 +327,7 @@ pub struct WebUIApp {
     loaded_tokenizers: LoadedTokenizers,
     server_config_report: Option<ServerConfigReport>,
     loader_registry: Option<LoaderRegistryReport>,
+    graph_catalog_status: Option<String>,
 }
 
 impl WebUIApp {
@@ -133,10 +352,8 @@ impl WebUIApp {
         Self {
             loaded_models: LoadedModels {
                 model_load_state: None,
-                current_models: Vec::new(),
-                current_interfaces: HashMap::new(),
-                currently_requesting_model: None,
-                loaded_models: HashMap::new(),
+                server_graphs: ServerGraphCatalog::default(),
+                client_graphs: ClientGraphCatalog::default(),
             },
             server_request_manager: ServerRequestManager::new(client_server_sender),
             next_interface_id: 0,
@@ -151,6 +368,74 @@ impl WebUIApp {
             tts_explorer_app: TTSExplorerApp::new(),
             server_config_report: None,
             loader_registry: None,
+            graph_catalog_status: None,
+        }
+    }
+
+    fn decode_client_graph_bytes(bytes: &[u8]) -> Result<ClientLoadedGraphData, String> {
+        let super_res = SuperGraph::from_cbor_bytes(bytes);
+        if let Ok(graph) = super_res {
+            return Ok(ClientLoadedGraphData::Super(Box::new(graph)));
+        }
+
+        let milli_res = MilliOpGraph::from_cbor_bytes(bytes);
+        if let Ok(graph) = milli_res {
+            return Ok(ClientLoadedGraphData::MilliOp(Box::new(graph)));
+        }
+
+        let symbolic_res = ciborium::from_reader::<SymbolicGraph, _>(bytes);
+        if let Ok(graph) = symbolic_res {
+            return Ok(ClientLoadedGraphData::Symbolic(Box::new(graph)));
+        }
+
+        Err(format!(
+            "decode failed as SuperGraph ({:?}), MilliOpGraph ({:?}), and SymbolicGraph ({:?})",
+            super_res.err(),
+            milli_res.err(),
+            symbolic_res.err(),
+        ))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn import_client_graph_from_dialog(&mut self) -> Result<Option<String>, String> {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Whisper Tensor Graphs", &["cbor"])
+            .pick_file()
+        else {
+            return Ok(None);
+        };
+
+        let bytes = std::fs::read(&path)
+            .map_err(|err| format!("failed to read {}: {err}", path.display()))?;
+        let graph = Self::decode_client_graph_bytes(&bytes)?;
+        let kind_name = graph.kind_name().to_string();
+        let display_name = graph_display_name_from_path(path.as_path());
+        let graph_id = self
+            .loaded_models
+            .client_graphs
+            .insert_graph(display_name, graph);
+        self.selected_graph_explorer_tab = Some(GraphRootSubjectSelection::ClientGraph(graph_id));
+
+        Ok(Some(format!(
+            "Imported {kind_name} from {}",
+            path.display()
+        )))
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn import_client_graph_from_dialog(&mut self) -> Result<Option<String>, String> {
+        Err("Import graph is not available in the web build yet.".to_string())
+    }
+
+    fn trigger_graph_import(&mut self) {
+        match self.import_client_graph_from_dialog() {
+            Ok(Some(status)) => {
+                self.graph_catalog_status = Some(status);
+            }
+            Ok(None) => {}
+            Err(err) => {
+                self.graph_catalog_status = Some(format!("Import failed: {err}"));
+            }
         }
     }
 
@@ -369,6 +654,31 @@ impl WebUIApp {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+fn graph_display_name_from_path(path: &Path) -> String {
+    if let Some(file_stem) = path.file_stem().and_then(|x| x.to_str())
+        && !file_stem.is_empty()
+    {
+        return file_stem.to_string();
+    }
+    if let Some(file_name) = path.file_name().and_then(|x| x.to_str())
+        && !file_name.is_empty()
+    {
+        return file_name.to_string();
+    }
+    "client_graph".to_string()
+}
+
+fn interface_type_label(interface: &AnyInterface) -> &'static str {
+    match interface {
+        AnyInterface::TextInferenceTokensInLogitOutInterface(_) => "Text Inference",
+        AnyInterface::MultimodalLanguageInterface(_) => "Multimodal Language",
+        AnyInterface::ImageGenerationInterface(_) => "Image Generation",
+        AnyInterface::TextToSpeechInterface(_) => "Text to Speech",
+        AnyInterface::SpeechToTextInterface(_) => "Speech to Text",
+    }
+}
+
 impl eframe::App for WebUIApp {
     /// Called each time the UI needs repainting, which may be many times per second.
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
@@ -394,19 +704,19 @@ impl eframe::App for WebUIApp {
                             self.loader_registry = Some(report);
                         }
                         WebsocketServerClientMessage::CurrentModelsReport(res) => {
-                            self.loaded_models.current_models = res.models;
+                            self.loaded_models.server_graphs.current_models = res.models;
                             // Rebuild interfaces list
-                            self.loaded_models.current_interfaces = {
+                            self.loaded_models.server_graphs.current_interfaces = {
                                 let mut new_interfaces = HashMap::new();
                                 for interface in res.interfaces {
                                     let mut found = false;
                                     for (&id, existing_interface) in
-                                        &self.loaded_models.current_interfaces
+                                        &self.loaded_models.server_graphs.current_interfaces
                                     {
                                         if interface.interface_name
                                             == existing_interface.interface_name
                                         {
-                                            new_interfaces.insert(id, existing_interface.clone());
+                                            new_interfaces.insert(id, interface.clone());
                                             found = true;
                                             break;
                                         }
@@ -420,7 +730,9 @@ impl eframe::App for WebUIApp {
                             };
                             // Prompt tokenizer loading
                             let mut needed_tokenizers = Vec::new();
-                            for interface in self.loaded_models.current_interfaces.values() {
+                            for interface in
+                                self.loaded_models.server_graphs.current_interfaces.values()
+                            {
                                 match &interface.interface {
                                     AnyInterface::TextInferenceTokensInLogitOutInterface(iface) => {
                                         needed_tokenizers.push(iface.get_tokenizer().clone());
@@ -489,14 +801,17 @@ impl eframe::App for WebUIApp {
                         WebsocketServerClientMessage::ModelGraphReturn(res) => {
                             let (id, graph_bin) = res.unwrap();
                             if let Some(requesting_id) =
-                                self.loaded_models.currently_requesting_model
+                                self.loaded_models.server_graphs.currently_requesting_model
                                 && requesting_id == id
                             {
-                                self.loaded_models.currently_requesting_model = None;
+                                self.loaded_models.server_graphs.currently_requesting_model = None;
                                 let graph =
                                     ciborium::from_reader::<SymbolicGraph, _>(graph_bin.as_slice())
                                         .unwrap();
-                                self.loaded_models.loaded_models.insert(id, graph);
+                                self.loaded_models
+                                    .server_graphs
+                                    .symbolic_graphs
+                                    .insert(id, graph);
                             }
                         }
                         WebsocketServerClientMessage::TensorStoreReturn(
@@ -610,16 +925,32 @@ impl eframe::App for WebUIApp {
             // The central panel the region left after adding TopPanel's and SidePanel's
             match &self.app_state.selected_tab {
                 SelectedTab::Models => {
-                    if ui.button("Load New model").clicked() {
-                        self.loaded_models.model_load_state =
-                            Some(ModelLoadState::DialogOpen(None));
-                    };
                     ui.vertical(|ui| {
+                        ui.horizontal(|ui| {
+                            if ui.button("Load New model").clicked() {
+                                self.loaded_models.model_load_state =
+                                    Some(ModelLoadState::DialogOpen(None));
+                            }
+                            if ui.button("Import Graph").clicked() {
+                                self.trigger_graph_import();
+                            }
+                        });
+                        if let Some(status) = &self.graph_catalog_status {
+                            ui.label(status);
+                        }
+
                         ui.label("Loaded Models:");
                         egui::Grid::new("loaded_models")
                             .striped(true)
                             .show(ui, |ui| {
-                                for model in &self.loaded_models.current_models {
+                                ui.strong("Model ID");
+                                ui.strong("Name");
+                                ui.strong("Ops");
+                                ui.strong("Compiled");
+                                ui.strong("");
+                                ui.strong("");
+                                ui.end_row();
+                                for model in &self.loaded_models.server_graphs.current_models {
                                     ui.label(model.model_id.to_string());
                                     ui.label(model.model_name.clone());
                                     ui.label(format!("Operations: {:?}", model.num_ops));
@@ -641,96 +972,258 @@ impl eframe::App for WebUIApp {
                                     ui.end_row();
                                 }
                             });
+
+                        ui.separator();
+                        ui.label("Server-loaded Interfaces:");
+                        if self
+                            .loaded_models
+                            .server_graphs
+                            .current_interfaces
+                            .is_empty()
+                        {
+                            ui.label("None loaded");
+                        } else {
+                            let mut interface_rows = self
+                                .loaded_models
+                                .server_graphs
+                                .current_interfaces
+                                .iter()
+                                .map(|(&interface_id, interface)| {
+                                    (
+                                        interface_id,
+                                        interface.interface_name.clone(),
+                                        interface_type_label(&interface.interface),
+                                        interface
+                                            .model_ids
+                                            .iter()
+                                            .map(|id| id.to_string())
+                                            .collect::<Vec<_>>()
+                                            .join(", "),
+                                    )
+                                })
+                                .collect::<Vec<_>>();
+                            interface_rows.sort_by_key(|row| row.0);
+
+                            egui::Grid::new("server_loaded_interfaces")
+                                .striped(true)
+                                .show(ui, |ui| {
+                                    ui.strong("Interface ID");
+                                    ui.strong("Name");
+                                    ui.strong("Type");
+                                    ui.strong("Referenced Model IDs");
+                                    ui.end_row();
+
+                                    for (interface_id, interface_name, interface_type, model_ids) in
+                                        interface_rows
+                                    {
+                                        ui.label(interface_id.to_string());
+                                        ui.label(interface_name);
+                                        ui.label(interface_type);
+                                        if model_ids.is_empty() {
+                                            ui.label("-");
+                                        } else {
+                                            ui.label(model_ids);
+                                        }
+                                        ui.end_row();
+                                    }
+                                });
+                        }
+
+                        ui.separator();
+                        ui.label("Client-loaded Graphs:");
+                        if self.loaded_models.client_graphs.graphs.is_empty() {
+                            ui.label("None loaded");
+                        } else {
+                            let mut client_ids = self
+                                .loaded_models
+                                .client_graphs
+                                .graphs
+                                .keys()
+                                .copied()
+                                .collect::<Vec<_>>();
+                            client_ids.sort_unstable();
+
+                            let mut to_remove = Vec::new();
+                            egui::Grid::new("client_loaded_graphs")
+                                .striped(true)
+                                .show(ui, |ui| {
+                                    ui.strong("Graph ID");
+                                    ui.strong("Name");
+                                    ui.strong("Kind");
+                                    ui.strong("");
+                                    ui.strong("");
+                                    ui.end_row();
+
+                                    for graph_id in client_ids {
+                                        let Some(entry) =
+                                            self.loaded_models.client_graphs.graphs.get(&graph_id)
+                                        else {
+                                            continue;
+                                        };
+                                        ui.label(format!("client-{graph_id}"));
+                                        ui.label(entry.display_name.clone());
+                                        ui.label(entry.graph.kind_name());
+                                        if ui.button("Open").clicked() {
+                                            self.selected_graph_explorer_tab = Some(
+                                                GraphRootSubjectSelection::ClientGraph(graph_id),
+                                            );
+                                            self.app_state.selected_tab =
+                                                SelectedTab::GraphExplorer;
+                                        }
+                                        if ui.button("Remove").clicked() {
+                                            to_remove.push(graph_id);
+                                        }
+                                        ui.end_row();
+                                    }
+                                });
+
+                            for graph_id in to_remove {
+                                self.loaded_models.client_graphs.graphs.remove(&graph_id);
+                                let root = GraphRootSubjectSelection::ClientGraph(graph_id);
+                                self.graph_explorer_app.remove(&root);
+                                if self.selected_graph_explorer_tab == Some(root) {
+                                    self.selected_graph_explorer_tab = None;
+                                }
+                            }
+                        }
                     });
                 }
                 SelectedTab::GraphExplorer => {
-                    ui.horizontal(|ui| {
-                        let model_selector_options = {
-                            let mut options = vec![];
-                            for (interface_id, interface) in &self.loaded_models.current_interfaces
-                            {
-                                options.push((
-                                    GraphRootSubjectSelection::Interface(*interface_id),
-                                    format!(
-                                        "({}) {}",
-                                        interface_id,
-                                        interface.interface_name.clone()
-                                    ),
-                                ));
-                            }
-                            for model in &self.loaded_models.current_models {
-                                options.push((
-                                    GraphRootSubjectSelection::Model(model.model_id),
-                                    format!("({}) {}", model.model_id, model.model_name.clone()),
-                                ));
-                            }
-                            options
-                        };
-                        egui::ComboBox::from_id_salt(123661)
-                            .selected_text(
-                                model_selector_options
-                                    .iter()
-                                    .find(|(a, _b)| {
-                                        self.selected_graph_explorer_tab
-                                            .as_ref()
-                                            .map(|x| x == a)
-                                            .unwrap_or(false)
-                                    })
-                                    .map(|(_a, b)| b.clone())
-                                    .unwrap_or("Select a model or interface".to_string()),
-                            )
-                            .show_ui(ui, |ui| {
-                                for (a, b) in model_selector_options {
-                                    ui.selectable_value(
-                                        &mut self.selected_graph_explorer_tab,
-                                        Some(a),
-                                        b.to_string(),
-                                    );
+                    ui.vertical(|ui| {
+                        ui.horizontal(|ui| {
+                            let model_selector_options = {
+                                let mut options = vec![];
+                                for (interface_id, interface) in
+                                    &self.loaded_models.server_graphs.current_interfaces
+                                {
+                                    options.push((
+                                        GraphRootSubjectSelection::ServerInterface(*interface_id),
+                                        format!(
+                                            "({}) {}",
+                                            interface_id,
+                                            interface.interface_name.clone()
+                                        ),
+                                    ));
                                 }
-                            });
-                        if ui.button("Load New Model").clicked() {
-                            self.loaded_models.model_load_state =
-                                Some(ModelLoadState::DialogOpen(None));
-                        };
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            toggle_ui(
-                                ui,
-                                &mut self.app_state.graph_explorer_settings.explorer_minimap,
-                            );
-                            ui.label("Minimap:");
-                            if let Some(selected_tab) = self.selected_graph_explorer_tab
-                                && let Some(ge) = self.graph_explorer_app.get_mut(&selected_tab)
-                            {
-                                toggle_ui(ui, &mut ge.show_profiling_window);
-                                ui.label("Profiling:");
+                                for model in &self.loaded_models.server_graphs.current_models {
+                                    options.push((
+                                        GraphRootSubjectSelection::ServerModel(model.model_id),
+                                        format!(
+                                            "({}) {}",
+                                            model.model_id,
+                                            model.model_name.clone()
+                                        ),
+                                    ));
+                                }
+                                let mut client_ids = self
+                                    .loaded_models
+                                    .client_graphs
+                                    .graphs
+                                    .keys()
+                                    .copied()
+                                    .collect::<Vec<_>>();
+                                client_ids.sort_unstable();
+                                for client_id in client_ids {
+                                    if let Some(graph_entry) =
+                                        self.loaded_models.client_graphs.graphs.get(&client_id)
+                                    {
+                                        options.push((
+                                            GraphRootSubjectSelection::ClientGraph(client_id),
+                                            format!(
+                                                "(client-{client_id}) {} [{}]",
+                                                graph_entry.display_name,
+                                                graph_entry.graph.kind_name(),
+                                            ),
+                                        ));
+                                    }
+                                }
+                                options
+                            };
+                            egui::ComboBox::from_id_salt(123661)
+                                .selected_text(
+                                    model_selector_options
+                                        .iter()
+                                        .find(|(a, _b)| {
+                                            self.selected_graph_explorer_tab
+                                                .as_ref()
+                                                .map(|x| x == a)
+                                                .unwrap_or(false)
+                                        })
+                                        .map(|(_a, b)| b.clone())
+                                        .unwrap_or("Select a graph source".to_string()),
+                                )
+                                .show_ui(ui, |ui| {
+                                    for (a, b) in model_selector_options {
+                                        ui.selectable_value(
+                                            &mut self.selected_graph_explorer_tab,
+                                            Some(a),
+                                            b.to_string(),
+                                        );
+                                    }
+                                });
+                            if ui.button("Import Graph").clicked() {
+                                self.trigger_graph_import();
                             }
-                            toggle_ui(
-                                ui,
-                                &mut self.app_state.graph_explorer_settings.explorer_physics,
+                            if ui.button("Load New Model").clicked() {
+                                self.loaded_models.model_load_state =
+                                    Some(ModelLoadState::DialogOpen(None));
+                            };
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    toggle_ui(
+                                        ui,
+                                        &mut self
+                                            .app_state
+                                            .graph_explorer_settings
+                                            .explorer_minimap,
+                                    );
+                                    ui.label("Minimap:");
+                                    if let Some(selected_tab) = self.selected_graph_explorer_tab
+                                        && let Some(ge) =
+                                            self.graph_explorer_app.get_mut(&selected_tab)
+                                    {
+                                        toggle_ui(ui, &mut ge.show_profiling_window);
+                                        ui.label("Profiling:");
+                                    }
+                                    toggle_ui(
+                                        ui,
+                                        &mut self
+                                            .app_state
+                                            .graph_explorer_settings
+                                            .explorer_physics,
+                                    );
+                                    ui.label("Physics:");
+                                    toggle_ui(
+                                        ui,
+                                        &mut self
+                                            .app_state
+                                            .graph_explorer_settings
+                                            .explorer_node_wave,
+                                    );
+                                    ui.label("Activity:");
+                                    toggle_ui(
+                                        ui,
+                                        &mut self
+                                            .app_state
+                                            .graph_explorer_settings
+                                            .do_all_explorer_swatches,
+                                    );
+                                    ui.label("All Swatches:");
+                                    toggle_ui(
+                                        ui,
+                                        &mut self
+                                            .app_state
+                                            .graph_explorer_settings
+                                            .do_explorer_swatches_in_view,
+                                    );
+                                    ui.label("Swatches In-frame:");
+                                },
                             );
-                            ui.label("Physics:");
-                            toggle_ui(
-                                ui,
-                                &mut self.app_state.graph_explorer_settings.explorer_node_wave,
-                            );
-                            ui.label("Activity:");
-                            toggle_ui(
-                                ui,
-                                &mut self
-                                    .app_state
-                                    .graph_explorer_settings
-                                    .do_all_explorer_swatches,
-                            );
-                            ui.label("All Swatches:");
-                            toggle_ui(
-                                ui,
-                                &mut self
-                                    .app_state
-                                    .graph_explorer_settings
-                                    .do_explorer_swatches_in_view,
-                            );
-                            ui.label("Swatches In-frame:");
-                        })
+                        });
+                        if let Some(status) = &self.graph_catalog_status {
+                            ui.label(status);
+                        }
                     });
                     if let Some(selected_tab) = self.selected_graph_explorer_tab {
                         let graph_explorer = self

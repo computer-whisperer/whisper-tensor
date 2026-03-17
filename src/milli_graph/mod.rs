@@ -1,7 +1,7 @@
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
 use crate::dtype::{DType, DTypeError};
-use crate::graph::{GlobalId, Graph, Link, Node};
+use crate::graph::{GlobalId, Graph, Link, Node, collect_disconnected_node_slots};
 use crate::milli_graph::observer::MilliOpGraphObserver;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::numeric_tensor::NumericTensor;
@@ -48,6 +48,8 @@ pub enum MilliOpGraphError {
     UnimplementedOperatorError(String),
     #[error("Invalid input for operation {0}")]
     InvalidInput(String),
+    #[error("Invalid graph structure: {0}")]
+    InvalidGraph(String),
     #[error(transparent)]
     DTypeError(#[from] DTypeError),
     #[error(transparent)]
@@ -653,6 +655,69 @@ impl MilliOpGraph {
         self.output_ordering = Some(output_ordering);
     }
 
+    pub fn get_op_mut(&mut self, id: &GlobalId) -> Option<&mut AnyMilliOp> {
+        self.ops.get_mut(id)
+    }
+
+    pub fn has_internal_input_link(&self, internal_id: GlobalId) -> bool {
+        self.input_map.values().any(|x| *x == internal_id)
+    }
+
+    pub fn ensure_tensor_with_id(&mut self, tensor_id: GlobalId) {
+        self.tensors.entry(tensor_id).or_insert(MilliOpGraphTensor {
+            global_id: tensor_id,
+            source_tensor: None,
+            label: None,
+        });
+    }
+
+    fn ensure_output_map_with_ordering_defaults(&mut self) -> &mut HashMap<GlobalId, GlobalId> {
+        if self.output_map.is_none() {
+            self.output_map = Some(HashMap::new());
+        }
+
+        let output_map = self.output_map.as_mut().unwrap();
+        if let Some(output_ordering) = &self.output_ordering {
+            let mut mapped_external_ids = output_map.values().copied().collect::<HashSet<_>>();
+            for external_id in output_ordering {
+                if !mapped_external_ids.contains(external_id) {
+                    output_map.insert(*external_id, *external_id);
+                    mapped_external_ids.insert(*external_id);
+                }
+            }
+        }
+
+        output_map
+    }
+
+    pub fn retarget_output_internal_link(
+        &mut self,
+        old_internal_id: GlobalId,
+        new_internal_id: GlobalId,
+    ) -> Result<bool, String> {
+        self.ensure_tensor_with_id(new_internal_id);
+
+        let output_map = self.ensure_output_map_with_ordering_defaults();
+        let Some(external_id) = output_map.remove(&old_internal_id) else {
+            return Err(format!("missing graph output link {}", old_internal_id));
+        };
+        if old_internal_id == new_internal_id {
+            output_map.insert(old_internal_id, external_id);
+            return Ok(false);
+        }
+        if let Some(existing_external_id) = output_map.get(&new_internal_id).copied()
+            && existing_external_id != external_id
+        {
+            output_map.insert(old_internal_id, external_id);
+            return Err(format!(
+                "cannot retarget output {} to {}; external {} is already mapped to {}",
+                old_internal_id, new_internal_id, existing_external_id, new_internal_id
+            ));
+        }
+        output_map.insert(new_internal_id, external_id);
+        Ok(true)
+    }
+
     // --- Tensor role queries ---
 
     pub fn tensor_role(&self, id: GlobalId) -> Option<TensorRole> {
@@ -835,6 +900,135 @@ impl MilliOpGraph {
         )
     }
 
+    /// Returns structural issues for editor/draft scenarios where graphs may be partially wired.
+    /// This does not panic and can be called on intentionally invalid graphs.
+    pub fn validate_structure(&self) -> Vec<String> {
+        let mut issues = Vec::new();
+
+        for external_id in &self.input_ordering {
+            if !self.input_map.contains_key(external_id) {
+                issues.push(format!(
+                    "input_ordering contains external input {external_id} not present in input_map"
+                ));
+            }
+        }
+        for (external_id, internal_id) in &self.input_map {
+            if !self.tensors.contains_key(internal_id) {
+                issues.push(format!(
+                    "input_map maps external input {external_id} to missing internal tensor {internal_id}"
+                ));
+            }
+        }
+
+        let mut seen_ordered_ops = HashSet::new();
+        for op_id in &self.op_ordering {
+            if !self.ops.contains_key(op_id) {
+                issues.push(format!("op_ordering references missing op {op_id}"));
+                continue;
+            }
+            if !seen_ordered_ops.insert(*op_id) {
+                issues.push(format!("op_ordering contains duplicate op {op_id}"));
+            }
+        }
+        for op_id in self.ops.keys() {
+            if !seen_ordered_ops.contains(op_id) {
+                issues.push(format!(
+                    "op {op_id} exists in ops but is missing from op_ordering"
+                ));
+            }
+        }
+
+        let mut producers: HashMap<GlobalId, String> = HashMap::new();
+        for (&external_id, &internal_id) in &self.input_map {
+            producers.insert(internal_id, format!("input({external_id})"));
+        }
+
+        for (op_id, op) in &self.ops {
+            for input_id in op.inputs() {
+                if !self.tensors.contains_key(&input_id) {
+                    issues.push(format!("op {op_id} input tensor {input_id} is missing"));
+                }
+            }
+            for output_id in op.outputs() {
+                if !self.tensors.contains_key(&output_id) {
+                    issues.push(format!("op {op_id} output tensor {output_id} is missing"));
+                }
+                if let Some(existing_src) = producers.insert(output_id, format!("op({op_id})")) {
+                    issues.push(format!(
+                        "tensor {output_id} has multiple producers: {existing_src} and op({op_id})"
+                    ));
+                }
+            }
+        }
+
+        if let Some(output_map) = &self.output_map {
+            for (internal_id, external_id) in output_map {
+                if !self.tensors.contains_key(internal_id) {
+                    issues.push(format!(
+                        "output_map references missing internal tensor {internal_id} for external output {external_id}"
+                    ));
+                }
+            }
+        }
+
+        issues
+    }
+
+    fn validate_ready_for_interpreter(&self) -> Result<(), MilliOpGraphError> {
+        if self.output_map.is_none() {
+            return Err(MilliOpGraphError::InvalidGraph(
+                "output_map is not configured".to_string(),
+            ));
+        }
+
+        if let Some(first_issue) = collect_disconnected_node_slots(self).into_iter().next() {
+            return Err(MilliOpGraphError::InvalidGraph(first_issue.describe()));
+        }
+
+        if let Some(first_issue) = self.validate_structure().into_iter().next() {
+            return Err(MilliOpGraphError::InvalidGraph(first_issue));
+        }
+
+        let mut produced = HashSet::new();
+        produced.extend(self.input_map.values().copied());
+
+        for op_id in &self.op_ordering {
+            let op = self.ops.get(op_id).ok_or_else(|| {
+                MilliOpGraphError::InvalidGraph(format!(
+                    "op_ordering references missing op {op_id}"
+                ))
+            })?;
+            let missing_inputs = op
+                .inputs()
+                .filter(|input_id| !produced.contains(input_id))
+                .collect::<Vec<_>>();
+            if !missing_inputs.is_empty() {
+                return Err(MilliOpGraphError::InvalidGraph(format!(
+                    "op {op_id} has unsatisfied inputs in op_ordering: {}",
+                    missing_inputs
+                        .iter()
+                        .map(|id| id.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )));
+            }
+            produced.extend(op.outputs());
+        }
+
+        let output_map = self.output_map.as_ref().ok_or_else(|| {
+            MilliOpGraphError::InvalidGraph("output_map is not configured".to_string())
+        })?;
+        for internal_output_id in output_map.keys() {
+            if !produced.contains(internal_output_id) {
+                return Err(MilliOpGraphError::InvalidGraph(format!(
+                    "output tensor {internal_output_id} is not produced by graph inputs/ops"
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
     #[allow(clippy::type_complexity)]
     pub fn eval<T: MilliOpGraphObserver>(
         &self,
@@ -843,7 +1037,7 @@ impl MilliOpGraph {
         backend: &mut EvalBackend,
     ) -> Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, MilliOpGraphError>
     {
-        assert!(self.output_map.is_some());
+        self.validate_ready_for_interpreter()?;
 
         let mut intermediate_values = HashMap::new();
         for (tensor_id, tensor_value) in inputs {
@@ -856,24 +1050,35 @@ impl MilliOpGraph {
             if observer.should_cancel() {
                 return Err(MilliOpGraphError::Cancelled);
             }
-            let op = &self.ops[op_id];
+            let op = self.ops.get(op_id).ok_or_else(|| {
+                MilliOpGraphError::InvalidGraph(format!("missing op {op_id} in op_ordering"))
+            })?;
             let start_instant = Instant::now();
             let out_vec: Vec<_> = op.eval(&intermediate_values, backend)?.collect();
             let end_instant = Instant::now();
             observer.on_node_executed(&[op.global_id()], start_instant, end_instant, backend);
             for (tensor_id, value) in out_vec {
-                observer.on_tensor_assigned(
-                    &[self.tensors[&tensor_id].global_id()],
-                    &value,
-                    backend,
-                );
+                let observed_tensor_id = self
+                    .tensors
+                    .get(&tensor_id)
+                    .map(|tensor| tensor.global_id())
+                    .unwrap_or(tensor_id);
+                observer.on_tensor_assigned(&[observed_tensor_id], &value, backend);
                 intermediate_values.insert(tensor_id, value);
             }
         }
 
+        let output_map = self.output_map.as_ref().ok_or_else(|| {
+            MilliOpGraphError::InvalidGraph("output_map is not configured".to_string())
+        })?;
         let mut outputs = HashMap::new();
-        for (a, b) in self.output_map.as_ref().unwrap() {
-            outputs.insert(*b, intermediate_values[a].clone());
+        for (internal_id, external_id) in output_map {
+            let value = intermediate_values.get(internal_id).ok_or_else(|| {
+                MilliOpGraphError::InvalidGraph(format!(
+                    "missing computed output tensor {internal_id} for external output {external_id}"
+                ))
+            })?;
+            outputs.insert(*external_id, value.clone());
         }
 
         Ok(Box::new(outputs.into_iter()))
@@ -888,12 +1093,17 @@ impl MilliOpGraph {
         &self,
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
     ) -> Result<HashMap<GlobalId, Vec<usize>>, MilliOpGraphError> {
+        self.validate_ready_for_interpreter()?;
         let mut backend = EvalBackend::NDArray;
         let mut shapes = HashMap::new();
 
         let mut intermediate_values = HashMap::new();
         for (ext_id, tensor_value) in inputs {
-            let int_id = self.input_map[ext_id];
+            let int_id = self.input_map.get(ext_id).copied().ok_or_else(|| {
+                MilliOpGraphError::InvalidGraph(format!(
+                    "missing external input mapping for {ext_id}"
+                ))
+            })?;
             shapes.insert(
                 int_id,
                 tensor_value.shape().iter().map(|&d| d as usize).collect(),
@@ -902,7 +1112,9 @@ impl MilliOpGraph {
         }
 
         for op_id in &self.op_ordering {
-            let op = &self.ops[op_id];
+            let op = self.ops.get(op_id).ok_or_else(|| {
+                MilliOpGraphError::InvalidGraph(format!("missing op {op_id} in op_ordering"))
+            })?;
             let out_vec: Vec<_> = op.eval(&intermediate_values, &mut backend)?.collect();
             for (tensor_id, value) in out_vec {
                 shapes.insert(
@@ -928,13 +1140,18 @@ impl MilliOpGraph {
         ),
         MilliOpGraphError,
     > {
+        self.validate_ready_for_interpreter()?;
         let mut backend = EvalBackend::NDArray;
         let mut shapes = HashMap::new();
         let mut dtypes = HashMap::new();
 
         let mut intermediate_values = HashMap::new();
         for (ext_id, tensor_value) in inputs {
-            let int_id = self.input_map[ext_id];
+            let int_id = self.input_map.get(ext_id).copied().ok_or_else(|| {
+                MilliOpGraphError::InvalidGraph(format!(
+                    "missing external input mapping for {ext_id}"
+                ))
+            })?;
             shapes.insert(
                 int_id,
                 tensor_value.shape().iter().map(|&d| d as usize).collect(),
@@ -944,7 +1161,9 @@ impl MilliOpGraph {
         }
 
         for op_id in &self.op_ordering {
-            let op = &self.ops[op_id];
+            let op = self.ops.get(op_id).ok_or_else(|| {
+                MilliOpGraphError::InvalidGraph(format!("missing op {op_id} in op_ordering"))
+            })?;
             let out_vec: Vec<_> = op.eval(&intermediate_values, &mut backend)?.collect();
             for (tensor_id, value) in out_vec {
                 shapes.insert(
@@ -965,14 +1184,21 @@ impl MilliOpGraph {
         &self,
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
     ) -> Result<HashMap<GlobalId, NumericTensor<DynRank>>, MilliOpGraphError> {
+        self.validate_ready_for_interpreter()?;
         let mut backend = EvalBackend::NDArray;
         let mut intermediate_values = HashMap::new();
         for (ext_id, tensor_value) in inputs {
-            let int_id = self.input_map[ext_id];
+            let int_id = self.input_map.get(ext_id).copied().ok_or_else(|| {
+                MilliOpGraphError::InvalidGraph(format!(
+                    "missing external input mapping for {ext_id}"
+                ))
+            })?;
             intermediate_values.insert(int_id, tensor_value.clone());
         }
         for op_id in &self.op_ordering {
-            let op = &self.ops[op_id];
+            let op = self.ops.get(op_id).ok_or_else(|| {
+                MilliOpGraphError::InvalidGraph(format!("missing op {op_id} in op_ordering"))
+            })?;
             let out_vec: Vec<_> = op.eval(&intermediate_values, &mut backend)?.collect();
             for (tensor_id, value) in out_vec {
                 intermediate_values.insert(tensor_id, value);
@@ -998,19 +1224,33 @@ impl MilliOpGraph {
         &self,
         inputs: &HashMap<GlobalId, TensorInfo>,
     ) -> Result<HashMap<GlobalId, TensorInfo>, MilliOpGraphError> {
+        if let Some(first_issue) = collect_disconnected_node_slots(self).into_iter().next() {
+            return Err(MilliOpGraphError::InvalidGraph(first_issue.describe()));
+        }
+
+        if let Some(first_issue) = self.validate_structure().into_iter().next() {
+            return Err(MilliOpGraphError::InvalidGraph(first_issue));
+        }
+
         let mut backend = EvalBackend::NDArray;
         let mut resolver = SymbolicResolver::new();
         let mut known: HashMap<GlobalId, TensorInfo> = HashMap::new();
 
         // Map external input IDs to internal IDs.
         for (ext_id, info) in inputs {
-            let int_id = self.input_map[ext_id];
+            let int_id = self.input_map.get(ext_id).copied().ok_or_else(|| {
+                MilliOpGraphError::InvalidGraph(format!(
+                    "missing external input mapping for {ext_id}"
+                ))
+            })?;
             known.insert(int_id, info.clone());
         }
 
         // Walk ops in topological order.
         for op_id in &self.op_ordering {
-            let op = &self.ops[op_id];
+            let op = self.ops.get(op_id).ok_or_else(|| {
+                MilliOpGraphError::InvalidGraph(format!("missing op {op_id} in op_ordering"))
+            })?;
             match op.infer(&known, &mut resolver, &mut backend) {
                 Ok(outputs) => {
                     for (tensor_id, info) in outputs {
@@ -1067,7 +1307,14 @@ impl Graph for MilliOpGraph {
     }
 
     fn input_link_ids(&self) -> impl Iterator<Item = (GlobalId, GlobalId)> {
-        self.input_ordering.iter().map(|x| (*x, self.input_map[x]))
+        self.input_ordering.iter().map(|external_id| {
+            let internal_id = self
+                .input_map
+                .get(external_id)
+                .copied()
+                .unwrap_or(*external_id);
+            (*external_id, internal_id)
+        })
     }
 
     fn constant_link_ids(&self) -> impl Iterator<Item = GlobalId> {
@@ -1076,24 +1323,41 @@ impl Graph for MilliOpGraph {
 
     fn output_link_ids(&self) -> impl Iterator<Item = (GlobalId, GlobalId)> {
         let mut output = vec![];
-        if let Some(ordering) = &self.output_ordering {
-            let map = self.output_map.as_ref().unwrap();
-            output.extend(ordering.iter().cloned().map(move |x| {
-                let tid = map
-                    .iter()
-                    .find(|(_, id)| **id == x)
-                    .map(|(tid, _)| *tid)
-                    .expect("output id not found in map");
-                (x, tid)
-            }))
-        } else {
-            output.extend(
-                self.output_map
-                    .as_ref()
-                    .unwrap()
-                    .iter()
-                    .map(|(tid, id)| (*id, *tid)),
-            )
+        match (&self.output_map, &self.output_ordering) {
+            (Some(map), Some(ordering)) => {
+                let mut reverse = HashMap::new();
+                for (internal_id, external_id) in map {
+                    reverse.entry(*external_id).or_insert(*internal_id);
+                }
+
+                let mut seen = HashSet::new();
+                for external_id in ordering {
+                    let internal_id = reverse.get(external_id).copied().unwrap_or(*external_id);
+                    output.push((*external_id, internal_id));
+                    seen.insert(*external_id);
+                }
+
+                for (internal_id, external_id) in map {
+                    if seen.insert(*external_id) {
+                        output.push((*external_id, *internal_id));
+                    }
+                }
+            }
+            (Some(map), None) => {
+                output.extend(
+                    map.iter()
+                        .map(|(internal_id, external_id)| (*external_id, *internal_id)),
+                );
+            }
+            (None, Some(ordering)) => {
+                output.extend(
+                    ordering
+                        .iter()
+                        .copied()
+                        .map(|external_id| (external_id, external_id)),
+                );
+            }
+            (None, None) => {}
         }
         output.into_iter()
     }
@@ -1459,6 +1723,7 @@ mod tests {
     use super::*;
     use crate::backends::eval_backend::EvalBackend;
     use crate::backends::ndarray_backend::NDArrayNumericTensor;
+    use crate::graph::Graph;
     use crate::milli_graph::ops::{Constant, SimpleBinary};
 
     #[test]
@@ -4280,5 +4545,117 @@ mod tests {
         let shape_tensor = shape_info.as_numeric().unwrap();
         let values: Vec<i64> = shape_tensor.flatten().unwrap().try_into().unwrap();
         assert_eq!(values, vec![2, 3]);
+    }
+
+    #[test]
+    fn test_graph_io_iterators_tolerate_missing_maps() {
+        let rng = &mut rand::rng();
+        let mut graph = MilliOpGraph::new_empty(rng);
+
+        let ext_input = GlobalId::new(rng);
+        graph.input_ordering.push(ext_input);
+
+        let ext_output = GlobalId::new(rng);
+        graph.output_ordering = Some(vec![ext_output]);
+        graph.output_map = None;
+
+        let inputs: Vec<_> = graph.input_link_ids().collect();
+        let outputs: Vec<_> = graph.output_link_ids().collect();
+
+        assert_eq!(inputs, vec![(ext_input, ext_input)]);
+        assert_eq!(outputs, vec![(ext_output, ext_output)]);
+    }
+
+    #[test]
+    fn test_output_iterator_tolerates_ordering_map_mismatch() {
+        let rng = &mut rand::rng();
+        let mut graph = MilliOpGraph::new_empty(rng);
+
+        let ext_present = GlobalId::new(rng);
+        let ext_missing = GlobalId::new(rng);
+        let int_present = graph.get_new_tensor_id(rng);
+
+        graph.output_map = Some(HashMap::from([(int_present, ext_present)]));
+        graph.output_ordering = Some(vec![ext_present, ext_missing]);
+
+        let outputs: Vec<_> = graph.output_link_ids().collect();
+        assert_eq!(outputs[0], (ext_present, int_present));
+        assert_eq!(outputs[1], (ext_missing, ext_missing));
+    }
+
+    #[test]
+    fn test_eval_rejects_invalid_structure_without_panicking() {
+        let rng = &mut rand::rng();
+        let ext_input = GlobalId::new(rng);
+        let (mut graph, _) = MilliOpGraph::new([ext_input], rng);
+
+        let missing_internal = GlobalId::new(rng);
+        graph.output_map = Some(HashMap::from([(missing_internal, ext_input)]));
+        graph.output_ordering = Some(vec![ext_input]);
+
+        let mut backend = EvalBackend::NDArray;
+        let result = graph.eval(&HashMap::new(), &mut (), &mut backend);
+        assert!(matches!(result, Err(MilliOpGraphError::InvalidGraph(_))));
+    }
+
+    #[test]
+    fn retarget_output_internal_link_uses_output_ordering_identity_fallback() {
+        let mut rng = rand::rng();
+        let mut graph = MilliOpGraph::new_empty(&mut rng);
+        let old_internal = graph.add_input(&mut rng);
+        let new_internal = graph.add_input(&mut rng);
+        graph.set_outputs(vec![old_internal]);
+
+        // Simulate a partially-populated map loaded from legacy/edited state:
+        // ordering lists an output, but the explicit output_map entry is missing.
+        if let Some(output_map) = graph.output_map.as_mut() {
+            output_map.clear();
+        }
+
+        let changed = graph
+            .retarget_output_internal_link(old_internal, new_internal)
+            .unwrap();
+        assert!(changed);
+        assert!(
+            graph.output_link_ids().any(|(external_id, internal_id)| {
+                external_id == old_internal && internal_id == new_internal
+            }),
+            "expected output ordering external id to now map to new internal id"
+        );
+    }
+
+    #[test]
+    fn retarget_output_internal_link_preserves_existing_mapping_on_conflict() {
+        let mut rng = rand::rng();
+        let mut graph = MilliOpGraph::new_empty(&mut rng);
+        let old_internal = graph.add_input(&mut rng);
+        let new_internal = graph.add_input(&mut rng);
+        let external_old = GlobalId::new(&mut rng);
+        let external_new = GlobalId::new(&mut rng);
+        graph.set_output_map([(old_internal, external_old), (new_internal, external_new)]);
+
+        let err = graph
+            .retarget_output_internal_link(old_internal, new_internal)
+            .unwrap_err();
+        assert!(
+            err.contains("already mapped"),
+            "expected conflict error, got: {err}"
+        );
+        assert_eq!(
+            graph
+                .output_map
+                .as_ref()
+                .and_then(|map| map.get(&old_internal)),
+            Some(&external_old),
+            "old mapping should be preserved after failed retarget"
+        );
+        assert_eq!(
+            graph
+                .output_map
+                .as_ref()
+                .and_then(|map| map.get(&new_internal)),
+            Some(&external_new),
+            "new mapping should remain unchanged after failed retarget"
+        );
     }
 }

@@ -7,6 +7,7 @@ pub mod backends;
 pub mod compiler;
 pub mod dtype;
 pub mod graph;
+pub mod graph_format;
 pub mod interfaces;
 pub mod loader;
 pub mod metadata;

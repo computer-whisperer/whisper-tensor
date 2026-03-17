@@ -39,6 +39,7 @@ rwkv-tokenizer = {workspace=true, optional=true, features = ["serde"] }
 env_logger = "0.11.9"
 log = "0.4.27"
 serde_json = "1.0.140"
+ciborium = "0.2.2"
 typenum = { version="1.18.0", features=["const-generics"] }
 strum = "0.28"
 strum_macros = "0.28"
