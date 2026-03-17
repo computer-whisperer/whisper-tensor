@@ -278,15 +278,8 @@ impl GraphExplorerApp {
                         <dyn Any>::downcast_ref::<SuperGraph>(working_graph.as_any()).is_some();
                     let working_is_milli =
                         <dyn Any>::downcast_ref::<MilliOpGraph>(working_graph.as_any()).is_some();
-                    let root_is_super = root_graph.is_some_and(|graph| {
-                        <dyn Any>::downcast_ref::<SuperGraph>(graph.as_any()).is_some()
-                    });
-                    let root_is_milli = root_graph.is_some_and(|graph| {
-                        <dyn Any>::downcast_ref::<MilliOpGraph>(graph.as_any()).is_some()
-                    });
-                    let can_edit_links = root_editability.can_edit()
-                        && ((root_is_super && working_is_super)
-                            || (root_is_milli && working_is_milli));
+                    let can_edit_links =
+                        root_editability.can_edit() && (working_is_super || working_is_milli);
                     if !can_edit_links {
                         self.link_drag_controller.clear();
                     }

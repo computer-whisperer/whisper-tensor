@@ -2,7 +2,7 @@ use super::{GraphLayoutPatch, GraphLayoutSlotPatch, SlotPipEndpoint, SlotPipOwne
 use crate::app::EditableClientGraphMut;
 use whisper_tensor::graph::{GlobalId, Graph, Node, SlotDirection};
 use whisper_tensor::milli_graph::MilliOpGraph;
-use whisper_tensor::super_graph::nodes::SuperGraphNode;
+use whisper_tensor::super_graph::nodes::{SuperGraphAnyNode, SuperGraphNode};
 use whisper_tensor::super_graph::{SuperGraph, SuperGraphLink, SuperGraphLinkInfo};
 
 #[derive(Clone, Debug)]
@@ -75,6 +75,11 @@ enum MilliOpGraphEditOp {
     },
 }
 
+enum ResolvedEditableGraphRef<'a> {
+    SuperGraph,
+    Milli(&'a MilliOpGraph),
+}
+
 pub(super) fn plan_and_apply_link_drag_edit(
     graph: EditableClientGraphMut<'_>,
     working_path: &[GlobalId],
@@ -83,17 +88,42 @@ pub(super) fn plan_and_apply_link_drag_edit(
 ) -> Result<GraphEditPlan, String> {
     match graph {
         EditableClientGraphMut::SuperGraph(root_graph) => {
-            let plan = plan_supergraph_link_drag(
-                root_graph,
-                working_path,
-                output_endpoint,
-                input_endpoint,
-            )?;
-            let GraphEditCommand::SuperGraph(forward_batch) = &plan.forward_command else {
-                unreachable!();
-            };
-            apply_supergraph_edit_command(root_graph, forward_batch)?;
-            Ok(plan)
+            let resolved_graph =
+                resolve_editable_graph_in_supergraph_at_path(root_graph, working_path).ok_or_else(
+                    || {
+                        "Failed to resolve editable graph at current path inside SuperGraph root."
+                            .to_string()
+                    },
+                )?;
+            match resolved_graph {
+                ResolvedEditableGraphRef::SuperGraph => {
+                    let plan = plan_supergraph_link_drag(
+                        root_graph,
+                        working_path,
+                        output_endpoint,
+                        input_endpoint,
+                    )?;
+                    let GraphEditCommand::SuperGraph(forward_batch) = &plan.forward_command else {
+                        unreachable!();
+                    };
+                    apply_supergraph_edit_command(root_graph, forward_batch)?;
+                    Ok(plan)
+                }
+                ResolvedEditableGraphRef::Milli(graph) => {
+                    let plan = plan_milli_graph_link_drag(
+                        graph,
+                        working_path,
+                        output_endpoint,
+                        input_endpoint,
+                    )?;
+                    let GraphEditCommand::MilliOpGraph(forward_batch) = &plan.forward_command
+                    else {
+                        unreachable!();
+                    };
+                    apply_milli_graph_edit_command_in_supergraph(root_graph, forward_batch)?;
+                    Ok(plan)
+                }
+            }
         }
         EditableClientGraphMut::MilliOpGraph(graph) => {
             let plan =
@@ -115,11 +145,11 @@ pub(super) fn apply_graph_edit_command(
         (EditableClientGraphMut::SuperGraph(root_graph), GraphEditCommand::SuperGraph(batch)) => {
             apply_supergraph_edit_command(root_graph, batch)
         }
+        (EditableClientGraphMut::SuperGraph(root_graph), GraphEditCommand::MilliOpGraph(batch)) => {
+            apply_milli_graph_edit_command_in_supergraph(root_graph, batch)
+        }
         (EditableClientGraphMut::MilliOpGraph(graph), GraphEditCommand::MilliOpGraph(batch)) => {
             apply_milli_graph_edit_command(graph, batch)
-        }
-        (EditableClientGraphMut::SuperGraph(_), GraphEditCommand::MilliOpGraph(_)) => {
-            Err("graph edit command mismatch: expected SuperGraph command".to_string())
         }
         (EditableClientGraphMut::MilliOpGraph(_), GraphEditCommand::SuperGraph(_)) => {
             Err("graph edit command mismatch: expected MilliOpGraph command".to_string())
@@ -399,10 +429,6 @@ fn plan_milli_graph_link_drag(
     output_endpoint: SlotPipEndpoint,
     input_endpoint: SlotPipEndpoint,
 ) -> Result<GraphEditPlan, String> {
-    if !working_path.is_empty() {
-        return Err("MilliOpGraph link editing does not support nested graph paths.".to_string());
-    }
-
     let link_global_id = output_endpoint
         .link_id
         .or(input_endpoint.link_id)
@@ -617,7 +643,27 @@ fn apply_milli_graph_edit_command(
         return Err("MilliOpGraph edit command path must be empty.".to_string());
     }
 
-    for op in &command.ops {
+    apply_milli_graph_edit_ops(graph, &command.ops)
+}
+
+fn apply_milli_graph_edit_command_in_supergraph(
+    root_graph: &mut SuperGraph,
+    command: &MilliOpGraphEditCommandBatch,
+) -> Result<(), String> {
+    let graph = resolve_milli_graph_mut_in_supergraph_at_path(root_graph, &command.graph_path)
+        .ok_or_else(|| {
+            "Failed to resolve mutable MilliOpGraph at command path inside SuperGraph root."
+                .to_string()
+        })?;
+
+    apply_milli_graph_edit_ops(graph, &command.ops)
+}
+
+fn apply_milli_graph_edit_ops(
+    graph: &mut MilliOpGraph,
+    ops: &[MilliOpGraphEditOp],
+) -> Result<(), String> {
+    for op in ops {
         match op {
             MilliOpGraphEditOp::SetNodeInputSlot {
                 node_id,
@@ -669,6 +715,42 @@ fn apply_milli_graph_edit_command(
     }
 
     Ok(())
+}
+
+fn resolve_editable_graph_in_supergraph_at_path<'a>(
+    root_graph: &'a SuperGraph,
+    path: &[GlobalId],
+) -> Option<ResolvedEditableGraphRef<'a>> {
+    let Some((head, tail)) = path.split_first() else {
+        return Some(ResolvedEditableGraphRef::SuperGraph);
+    };
+
+    let node = root_graph.nodes.get(head)?;
+    if let SuperGraphAnyNode::MilliOpGraph(milli_node) = node {
+        if tail.is_empty() {
+            return Some(ResolvedEditableGraphRef::Milli(&milli_node.graph));
+        }
+        return None;
+    }
+    node.get_sub_graph()
+        .and_then(|next| resolve_editable_graph_in_supergraph_at_path(next, tail))
+}
+
+fn resolve_milli_graph_mut_in_supergraph_at_path<'a>(
+    root_graph: &'a mut SuperGraph,
+    path: &[GlobalId],
+) -> Option<&'a mut MilliOpGraph> {
+    let (head, tail) = path.split_first()?;
+
+    let node = root_graph.nodes.get_mut(head)?;
+    if let SuperGraphAnyNode::MilliOpGraph(milli_node) = node {
+        if tail.is_empty() {
+            return Some(&mut milli_node.graph);
+        }
+        return None;
+    }
+    node.get_sub_graph_mut()
+        .and_then(|next| resolve_milli_graph_mut_in_supergraph_at_path(next, tail))
 }
 
 fn resolve_supergraph_at_path<'a>(
@@ -819,8 +901,10 @@ mod tests {
     use egui::Pos2;
     use whisper_tensor::graph::{Graph, SlotDirection};
     use whisper_tensor::milli_graph::ops::SimpleUnaryOp;
-    use whisper_tensor::super_graph::SuperGraphBuilder;
-    use whisper_tensor::super_graph::nodes::{SuperGraphNode, SuperGraphNodeReportProgress};
+    use whisper_tensor::super_graph::nodes::{
+        SuperGraphAnyNode, SuperGraphNode, SuperGraphNodeMilliOpGraph, SuperGraphNodeReportProgress,
+    };
+    use whisper_tensor::super_graph::{SuperGraphBuilder, SuperGraphLink};
 
     fn endpoint(
         owner: SlotPipOwner,
@@ -1053,6 +1137,106 @@ mod tests {
         .unwrap();
         assert_eq!(
             milli_graph_node_input_slot(&graph, node_id, 0).unwrap(),
+            Some(internal_b)
+        );
+    }
+
+    #[test]
+    fn nested_milli_inside_supergraph_supports_edit_undo_redo() {
+        let mut rng = rand::rng();
+        let external_input_a = GlobalId::new(&mut rng);
+        let external_input_b = GlobalId::new(&mut rng);
+        let external_output = GlobalId::new(&mut rng);
+
+        let (mut inner_milli, input_map) =
+            MilliOpGraph::new([external_input_a, external_input_b], &mut rng);
+        let internal_a = input_map[&external_input_a];
+        let internal_b = input_map[&external_input_b];
+        let _inner_output = SimpleUnaryOp::neg(&mut inner_milli, internal_a, &mut rng);
+        let inner_node_id = Graph::node_ids(&inner_milli).next().unwrap();
+        inner_milli.set_output_map([(internal_a, external_output)]);
+
+        let mut builder = SuperGraphBuilder::new();
+        let milli_node =
+            SuperGraphAnyNode::MilliOpGraph(SuperGraphNodeMilliOpGraph::new(inner_milli, &mut rng));
+        let milli_node_id = builder.add_node(milli_node);
+        let mut graph = builder.build(
+            &mut rng,
+            &[
+                SuperGraphLink::tensor(external_input_a).to_any(),
+                SuperGraphLink::tensor(external_input_b).to_any(),
+            ],
+            &[SuperGraphLink::tensor(external_output).to_any()],
+        );
+
+        let output_endpoint = endpoint(
+            SlotPipOwner::InputLink(internal_b),
+            SlotDirection::Output,
+            0,
+            Some(internal_b),
+        );
+        let input_endpoint = endpoint(
+            SlotPipOwner::Node(inner_node_id),
+            SlotDirection::Input,
+            0,
+            Some(internal_a),
+        );
+        let working_path = vec![milli_node_id];
+
+        let plan = plan_and_apply_link_drag_edit(
+            EditableClientGraphMut::SuperGraph(&mut graph),
+            &working_path,
+            output_endpoint,
+            input_endpoint,
+        )
+        .unwrap();
+
+        assert!(!plan.requires_layout_refresh);
+        let GraphEditCommand::MilliOpGraph(forward_batch) = &plan.forward_command else {
+            panic!("expected milli command");
+        };
+        assert_eq!(forward_batch.graph_path, working_path);
+
+        let nested_graph = match resolve_editable_graph_in_supergraph_at_path(&graph, &working_path)
+        {
+            Some(ResolvedEditableGraphRef::Milli(nested)) => nested,
+            Some(ResolvedEditableGraphRef::SuperGraph) => panic!("expected nested milli graph"),
+            None => panic!("expected working path to resolve"),
+        };
+        assert_eq!(
+            milli_graph_node_input_slot(nested_graph, inner_node_id, 0).unwrap(),
+            Some(internal_b)
+        );
+
+        apply_graph_edit_command(
+            EditableClientGraphMut::SuperGraph(&mut graph),
+            &plan.undo_command,
+        )
+        .unwrap();
+        let nested_graph = match resolve_editable_graph_in_supergraph_at_path(&graph, &working_path)
+        {
+            Some(ResolvedEditableGraphRef::Milli(nested)) => nested,
+            Some(ResolvedEditableGraphRef::SuperGraph) => panic!("expected nested milli graph"),
+            None => panic!("expected working path to resolve"),
+        };
+        assert_eq!(
+            milli_graph_node_input_slot(nested_graph, inner_node_id, 0).unwrap(),
+            Some(internal_a)
+        );
+
+        apply_graph_edit_command(
+            EditableClientGraphMut::SuperGraph(&mut graph),
+            &plan.forward_command,
+        )
+        .unwrap();
+        let nested_graph = match resolve_editable_graph_in_supergraph_at_path(&graph, &working_path)
+        {
+            Some(ResolvedEditableGraphRef::Milli(nested)) => nested,
+            Some(ResolvedEditableGraphRef::SuperGraph) => panic!("expected nested milli graph"),
+            None => panic!("expected working path to resolve"),
+        };
+        assert_eq!(
+            milli_graph_node_input_slot(nested_graph, inner_node_id, 0).unwrap(),
             Some(internal_b)
         );
     }
