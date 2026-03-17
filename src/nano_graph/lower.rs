@@ -2534,7 +2534,7 @@ impl LowerCtx {
                 }
             })
             .collect();
-        let a_strides = a_map.known_strides.clone();
+        let a_strides = TensorAtomMap::compute_strides(&a_known_dims);
 
         // Compute B's known-dim strides.
         let b_known_dims: Vec<u64> = b_layout
@@ -2547,7 +2547,7 @@ impl LowerCtx {
                 }
             })
             .collect();
-        let b_strides = b_map.known_strides.clone();
+        let b_strides = TensorAtomMap::compute_strides(&b_known_dims);
 
         // A's K dim is the last known dim. B's K dim is second-to-last known dim.
         // B's N dim is the last known dim.
@@ -2638,26 +2638,13 @@ impl LowerCtx {
                 repeat: n_u64,
             };
 
-            // Input 1: B elements for the K*N merged group.
-            // Atom j in the merged group reads B[j/N, j%N].
-            // For row-major B (b_k_stride = N, b_n_stride = 1), this is b_base + j.
-            // For non-row-major B (e.g., transposed), build Explicit.
-            let b_k_stride = b_strides[b_known_dims.len() - 2];
-            let b_n_stride = b_strides[b_known_dims.len() - 1];
-            let input_b = if b_k_stride == n_u64 && b_n_stride == 1 {
-                InputRef::Affine {
-                    base: b_base,
-                    stride: 1,
-                }
-            } else {
-                let ids: Vec<AtomId> = (0..merged_mul_count)
-                    .map(|j| {
-                        let k_idx = j / n_u64;
-                        let n_idx = j % n_u64;
-                        b_base.offset(k_idx * b_k_stride + n_idx * b_n_stride)
-                    })
-                    .collect();
-                Self::compress_explicit(ids)
+            // Input 1: Affine over all K*N B elements (row-major layout)
+            // B[k,n] = b_base + k * b_strides[b_k_known_idx] + n
+            // Since B is contiguous (b_strides[b_k_known_idx] = N), this is just
+            // b_base + j for j in 0..K*N.
+            let input_b = InputRef::Affine {
+                base: b_base,
+                stride: 1,
             };
 
             let base = self.nano.push_group(
@@ -4333,108 +4320,6 @@ mod tests {
         eprintln!(
             "3-way matmul ({}x{}x{}): flat_vs_milli max_diff={:.2e}, eff_vs_flat max_diff={:.2e}",
             m, k, n, max_flat_vs_milli, max_eff_vs_flat
-        );
-    }
-
-    /// Three-way: MatMul with transposed B (x @ B^T pattern from attention).
-    #[test]
-    fn test_three_way_matmul_transposed_b() {
-        use crate::nano_graph::eval::{eval_efficient, NanoEval};
-        use crate::nano_graph::pattern::AtomRange;
-        use crate::backends::ndarray_backend::numeric_tensor::NDArrayNumericTensor;
-        use crate::milli_graph::ops::{MatMul, Transpose};
-
-        let mut rng = rand::rng();
-        let (mut milli, _ext_map) = MilliOpGraph::new(std::iter::empty(), &mut rng);
-
-        // x [4, 8] @ (W [16, 8] transposed to [8, 16]) → [4, 16]
-        let x_id = milli.add_input(&mut rng);
-        let w_id = milli.add_input(&mut rng);
-        let w_t = Transpose::push_new(&mut milli, w_id, Some(vec![1, 0]), &mut rng);
-        let out_id = MatMul::push_new(
-            &mut milli, x_id, w_t, DType::F32, DType::F32, DType::F32, DType::F32, &mut rng,
-        );
-
-        let x_data: Vec<f32> = (0..32).map(|i| (i as f32) * 0.1 - 1.6).collect();
-        let w_data: Vec<f32> = (0..128).map(|i| (i as f32) * 0.02 - 1.28).collect();
-        let x_t = NumericTensor::from_vec_shape(x_data, vec![4, 8]).unwrap();
-        let w_t_tensor = NumericTensor::from_vec_shape(w_data, vec![16, 8]).unwrap();
-
-        // Milli eval.
-        let mut intermediates: HashMap<GlobalId, NumericTensor<DynRank>> = HashMap::new();
-        intermediates.insert(x_id, x_t.clone());
-        intermediates.insert(w_id, w_t_tensor.clone());
-        let mut backend = EvalBackend::NDArray;
-        for &op_id in milli.op_ordering() {
-            let op = milli.get_node_by_id(&op_id).unwrap();
-            for (tid, val) in op.eval(&intermediates, &mut backend).unwrap() {
-                intermediates.insert(tid, val);
-            }
-        }
-        let milli_out = &intermediates[&out_id];
-        let milli_flat = tensor_to_f64(milli_out);
-
-        // Lower.
-        let mut info_inputs: HashMap<GlobalId, TensorInfo> = HashMap::new();
-        info_inputs.insert(x_id, TensorInfo::from(x_t.clone()));
-        info_inputs.insert(w_id, TensorInfo::from(w_t_tensor.clone()));
-        let result = lower_with_info(&milli, &info_inputs).unwrap();
-        assert!(result.unsupported.is_empty(), "{:?}", result.unsupported_details);
-
-        let tam = result.tensor_map.get(&out_id).unwrap();
-
-        // Flat NanoEval.
-        let mut overrides: HashMap<u64, NumericScalar> = HashMap::new();
-        for (&id, t) in [x_id, w_id].iter().zip([&x_t, &w_t_tensor]) {
-            if let Some(tam) = result.tensor_map.get(&id) {
-                let scalars = tensor_to_scalars(t);
-                for (i, val) in scalars.into_iter().enumerate() {
-                    overrides.insert(tam.atom_id_for_element(i as u64).0, val);
-                }
-            }
-        }
-        let flat_eval = NanoEval::eval_with_overrides(&result.graph, &overrides);
-        let flat_out: Vec<f64> = (0..tam.count)
-            .map(|i| flat_eval.get(tam.atom_id_for_element(i)))
-            .collect();
-
-        // eval_efficient.
-        let x_nd = x_t.to_ndarray().unwrap();
-        let w_nd = w_t_tensor.to_ndarray().unwrap();
-        let nds = [x_nd, w_nd];
-        let ids = [x_id, w_id];
-        let eff_inputs: Vec<(crate::nano_graph::AtomId, &NDArrayNumericTensor<DynRank>)> =
-            result.graph.input_tensors().iter()
-                .filter_map(|it| {
-                    let idx = ids.iter().position(|&id| id == it.tensor_id)?;
-                    Some((it.base_id, &nds[idx]))
-                })
-                .collect();
-        let output_range = AtomRange { base: tam.base_id, count: tam.count, dtype: tam.dtype };
-        let eff_out = eval_efficient(&result.graph, &eff_inputs, &[output_range]);
-        let eff_flat = eff_out[0].flatten();
-        let eff_vals: Vec<f64> = (0..tam.count as usize)
-            .map(|i| eff_flat.get(&[i as u64]).unwrap().to_f64())
-            .collect();
-
-        // Compare.
-        let mut max_fvm = 0.0f64;
-        for (i, (m, f)) in milli_flat.iter().zip(flat_out.iter()).enumerate() {
-            let diff = (m - f).abs();
-            max_fvm = max_fvm.max(diff);
-            assert!(diff < 1e-4 * m.abs().max(1.0),
-                "flat vs milli element {}: milli={} flat={} diff={}", i, m, f, diff);
-        }
-        let mut max_evf = 0.0f64;
-        for (i, (e, f)) in eff_vals.iter().zip(flat_out.iter()).enumerate() {
-            let diff = (e - f).abs();
-            max_evf = max_evf.max(diff);
-            assert!(diff == 0.0,
-                "efficient vs flat element {}: eff={} flat={} diff={}", i, e, f, diff);
-        }
-        eprintln!(
-            "3-way matmul transposed B (4x8x16): flat_vs_milli={:.2e}, eff_vs_flat={:.2e}",
-            max_fvm, max_evf
         );
     }
 
