@@ -9,7 +9,10 @@
 //! `AtomGroup`s. Groups are a convenience — every atom could exist standalone
 //! without changing semantics. The grouping never limits what can be expressed.
 
+use crate::dtype::DType;
+use crate::graph::GlobalId;
 use crate::nano_graph::ops::ScalarOp;
+use crate::range_map::RangeMap;
 use std::collections::HashMap;
 
 /// A symbolic runtime dimension (batch, seq_len, etc.).
@@ -37,6 +40,14 @@ impl std::fmt::Display for AtomId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "a{}", self.0)
     }
+}
+
+/// A contiguous range of atoms with a known element dtype.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AtomRange {
+    pub base: AtomId,
+    pub count: u64,
+    pub dtype: DType,
 }
 
 /// How an input to an atom group references source atoms.
@@ -161,6 +172,17 @@ pub struct AtomGroup {
     pub base_id: AtomId,
     /// Number of atoms in the group.
     pub count: u64,
+    /// Logical offset for InputRef resolution.
+    ///
+    /// When a group is split (e.g., for lane partitioning), the second half
+    /// needs its InputRefs to resolve as if it were still at the original
+    /// position. `atom_offset` is added to the local index `i` before
+    /// resolving InputRefs: `input.resolve(i + atom_offset, k)`.
+    ///
+    /// Zero for non-split groups (the common case). For a group split at
+    /// position `s`, the second half has `base_id = original_base + s`,
+    /// `count = original_count - s`, and `atom_offset = s`.
+    pub atom_offset: u64,
     /// The scalar operation each atom performs, including dtype precision.
     pub op: ScalarOp,
     /// Symbolic dimensions this group iterates over.
@@ -197,11 +219,46 @@ impl AtomGroup {
     }
 }
 
+/// An external tensor mapped into the graph's AtomId space.
+/// The executor uses this to know where to load tensor data.
+#[derive(Debug, Clone)]
+pub struct InputTensor {
+    /// The milli-graph tensor ID.
+    pub tensor_id: GlobalId,
+    /// First AtomId allocated for this tensor.
+    pub base_id: AtomId,
+    /// Number of atoms (elements) in the tensor.
+    pub count: u64,
+    /// Element dtype.
+    pub dtype: DType,
+}
+
+/// One entry from a liveness scan: an atom range and how many
+/// downstream groups consume it.
+#[derive(Debug, Clone)]
+pub struct GroupUseCount {
+    /// First atom ID in this group.
+    pub base: AtomId,
+    /// Number of atoms.
+    pub count: u64,
+    /// Element dtype (from the group's op).
+    pub dtype: DType,
+    /// Number of downstream groups that read atoms from this group.
+    /// Zero means this group's output is never consumed (dead code)
+    /// or is a final output of the graph.
+    pub use_count: u32,
+}
+
 /// The compressed scalar DAG for an entire computation.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct NanoGraph {
-    groups: Vec<AtomGroup>,
+    groups: RangeMap<AtomGroup>,
     next_atom_id: u64,
+    /// External input tensors mapped into the AtomId space.
+    /// These are NOT groups — they occupy atom IDs that compute groups
+    /// reference via InputRefs, but they have no ScalarOp. The executor
+    /// fills these ranges from the TensorStore or user-provided data.
+    input_ranges: RangeMap<InputTensor>,
     /// Named symbolic dimensions (e.g., "batch" → SymDim(0)).
     pub sym_dim_names: HashMap<String, SymDim>,
     /// Known upper bounds for symbolic dimensions. A SymDim with a known bound
@@ -243,6 +300,24 @@ impl NanoGraph {
         sd
     }
 
+    /// Reserve an AtomId range for an external input tensor.
+    /// Returns the base AtomId. No group is created — the executor fills
+    /// these atoms from the TensorStore or user data at runtime.
+    pub fn add_input_tensor(&mut self, tensor_id: GlobalId, count: u64, dtype: DType) -> AtomId {
+        let base_id = self.alloc_ids(count);
+        self.input_ranges.insert(
+            base_id.0,
+            count,
+            InputTensor {
+                tensor_id,
+                base_id,
+                count,
+                dtype,
+            },
+        );
+        base_id
+    }
+
     /// Allocate `count` contiguous AtomIds. Returns the base id.
     fn alloc_ids(&mut self, count: u64) -> AtomId {
         let base = AtomId(self.next_atom_id);
@@ -251,6 +326,50 @@ impl NanoGraph {
             .checked_add(count)
             .expect("AtomId overflow");
         base
+    }
+
+    /// Allocate space for a group without filling in its fields yet.
+    /// Returns the base AtomId. The group is initially a no-op Literal placeholder.
+    /// Call `fill_placeholder` to set the actual op and inputs.
+    pub fn alloc_placeholder(&mut self, count: u64) -> AtomId {
+        let base_id = self.alloc_ids(count);
+        self.groups.insert(
+            base_id.0,
+            count,
+            AtomGroup {
+                base_id,
+                count,
+                atom_offset: 0,
+                op: ScalarOp::Literal(crate::numeric_scalar::NumericScalar::F32(0.0)),
+                sym_dims: vec![],
+                reduce_dims: vec![],
+                inputs: vec![],
+            },
+        );
+        base_id
+    }
+
+    /// Fill in a previously allocated placeholder group.
+    /// The `base_id` must match one returned by `alloc_placeholder`.
+    pub fn fill_placeholder(
+        &mut self,
+        base_id: AtomId,
+        count: u64,
+        op: ScalarOp,
+        sym_dims: Vec<SymDim>,
+        reduce_dims: Vec<SymDim>,
+        inputs: Vec<InputRef>,
+    ) {
+        let idx = self
+            .groups
+            .find_index(base_id.0)
+            .expect("fill_placeholder: base_id not found");
+        let (_, _, g) = self.groups.get_by_index_mut(idx).unwrap();
+        debug_assert_eq!(g.count, count, "fill_placeholder: count mismatch");
+        g.op = op;
+        g.sym_dims = sym_dims;
+        g.reduce_dims = reduce_dims;
+        g.inputs = inputs;
     }
 
     /// Add an atom group to the graph. Returns the base AtomId.
@@ -263,14 +382,19 @@ impl NanoGraph {
         inputs: Vec<InputRef>,
     ) -> AtomId {
         let base_id = self.alloc_ids(count);
-        self.groups.push(AtomGroup {
-            base_id,
+        self.groups.insert(
+            base_id.0,
             count,
-            op,
-            sym_dims,
-            reduce_dims,
-            inputs,
-        });
+            AtomGroup {
+                base_id,
+                count,
+                atom_offset: 0,
+                op,
+                sym_dims,
+                reduce_dims,
+                inputs,
+            },
+        );
         base_id
     }
 
@@ -285,40 +409,42 @@ impl NanoGraph {
         self.push_group(1, op, sym_dims, reduce_dims, inputs)
     }
 
-    /// Find the group index for an AtomId via binary search on group ranges.
-    fn find_group_idx(&self, id: AtomId) -> Option<usize> {
-        // Groups have contiguous, non-overlapping AtomId ranges in insertion order.
-        // Binary search: find the last group whose base_id <= id.
-        let idx = self.groups.partition_point(|g| g.base_id.0 <= id.0);
-        if idx == 0 {
-            return None;
-        }
-        let gi = idx - 1;
-        let group = &self.groups[gi];
-        if group.contains(id) { Some(gi) } else { None }
+    /// Find the group index for an AtomId. O(log n) via RangeMap.
+    pub fn find_group_idx(&self, id: AtomId) -> Option<usize> {
+        self.groups.find_index(id.0)
     }
 
     /// Look up which group an atom belongs to.
     pub fn group_of(&self, id: AtomId) -> Option<&AtomGroup> {
-        self.find_group_idx(id).map(|gi| &self.groups[gi])
+        self.groups.get(id.0).map(|(g, _)| g)
     }
 
     /// Look up group and offset for an atom.
     pub fn group_and_offset(&self, id: AtomId) -> Option<(&AtomGroup, u64)> {
-        self.find_group_idx(id).map(|gi| {
-            let group = &self.groups[gi];
-            (group, id.0 - group.base_id.0)
-        })
+        self.groups.get(id.0)
     }
 
-    /// Check if an AtomId exists in any group.
+    /// Check if an AtomId exists in any group or input tensor range.
     pub fn contains_atom(&self, id: AtomId) -> bool {
-        self.find_group_idx(id).is_some()
+        self.groups.contains(id.0) || self.input_ranges.contains(id.0)
     }
 
     /// Iterate all groups in insertion order.
     pub fn groups(&self) -> &[AtomGroup] {
-        &self.groups
+        self.groups.values()
+    }
+
+    /// Access the input tensors.
+    pub fn input_tensors(&self) -> &[InputTensor] {
+        self.input_ranges.values()
+    }
+
+    /// Find which input tensor an AtomId belongs to.
+    /// Returns `(index_into_input_tensors, offset_within_tensor)`.
+    pub fn find_input_idx(&self, id: AtomId) -> Option<(usize, u64)> {
+        self.input_ranges
+            .find_index(id.0)
+            .map(|idx| (idx, id.0 - self.input_ranges.values()[idx].base_id.0))
     }
 
     /// Number of groups.
@@ -326,7 +452,7 @@ impl NanoGraph {
         self.groups.len()
     }
 
-    /// Total number of atoms.
+    /// Total number of atoms (including input tensor ranges).
     pub fn num_atoms(&self) -> u64 {
         self.next_atom_id
     }
@@ -338,7 +464,7 @@ impl NanoGraph {
         let mut symbolic_groups: u64 = 0;
         let mut groups_by_op: HashMap<&'static str, u64> = HashMap::new();
 
-        for group in &self.groups {
+        for group in self.groups.values() {
             total_atoms += group.count;
             if group.count == 1 {
                 singleton_groups += 1;
@@ -395,40 +521,257 @@ impl NanoGraph {
         }
     }
 
+    /// Compute group-level liveness: for each group, how many downstream
+    /// groups consume its atoms.
+    ///
+    /// Returns one entry per group in insertion order. Runs in
+    /// O(num_groups × inputs_per_group), not O(num_atoms).
+    pub fn liveness(&self) -> Vec<GroupUseCount> {
+        let groups = self.groups.values();
+        let n = groups.len();
+        let mut use_counts = vec![0u32; n];
+
+        for (gi, group) in groups.iter().enumerate() {
+            let mut seen = std::collections::HashSet::<usize>::new();
+
+            for input in &group.inputs {
+                self.collect_producer_indices(input, group.count, group.atom_offset, &mut seen);
+            }
+
+            // Reduce ops access additional atoms via stride.
+            match &group.op {
+                ScalarOp::ReduceSum { reduce_count, reduce_stride, .. }
+                | ScalarOp::ReduceMax { reduce_count, reduce_stride, .. }
+                    if *reduce_count > 1 && *reduce_stride != 0 =>
+                {
+                    for input in &group.inputs {
+                        let first = input.resolve(group.atom_offset, 0);
+                        let last = input.resolve(group.atom_offset + group.count - 1, 0);
+                        let end_off = (*reduce_count as i64 - 1) * reduce_stride;
+                        let endpoints = [
+                            first.0,
+                            (first.0 as i64 + end_off) as u64,
+                            last.0,
+                            (last.0 as i64 + end_off) as u64,
+                        ];
+                        let lo = *endpoints.iter().min().unwrap();
+                        let hi = *endpoints.iter().max().unwrap();
+                        self.insert_groups_in_id_range(lo, hi, &mut seen);
+                    }
+                }
+                _ => {}
+            }
+
+            // IndirectLoad table reference.
+            if let ScalarOp::IndirectLoad { table_base, .. } = &group.op {
+                if let Some(pi) = self.groups.find_index(table_base.0) {
+                    seen.insert(pi);
+                }
+            }
+
+            seen.remove(&gi);
+            for pi in seen {
+                use_counts[pi] += 1;
+            }
+        }
+
+        groups
+            .iter()
+            .zip(use_counts)
+            .map(|(g, uc)| GroupUseCount {
+                base: g.base_id,
+                count: g.count,
+                dtype: g.op.output_dtype(),
+                use_count: uc,
+            })
+            .collect()
+    }
+
+    /// Collect producer group indices for an InputRef (group-level, not per-atom).
+    fn collect_producer_indices(
+        &self,
+        input: &InputRef,
+        count: u64,
+        atom_offset: u64,
+        out: &mut std::collections::HashSet<usize>,
+    ) {
+        if count == 0 {
+            return;
+        }
+        match input {
+            InputRef::Broadcast(base) => {
+                if let Some(gi) = self.groups.find_index(base.0) {
+                    out.insert(gi);
+                }
+            }
+            InputRef::Affine { .. }
+            | InputRef::SymAffine { .. }
+            | InputRef::StridedBroadcast { .. } => {
+                let first = input.resolve(atom_offset, 0);
+                let last = input.resolve(atom_offset + count - 1, 0);
+                let lo = first.0.min(last.0);
+                let hi = first.0.max(last.0);
+                self.insert_groups_in_id_range(lo, hi, out);
+            }
+            InputRef::Modular { base, stride, modulus } => {
+                let a = base.0;
+                let b = (base.0 as i64 + *stride as i64 * (*modulus as i64 - 1)) as u64;
+                self.insert_groups_in_id_range(a.min(b), a.max(b), out);
+            }
+            InputRef::Explicit(ids) => {
+                let mut prev_gi: Option<usize> = None;
+                for id in ids.iter().skip(atom_offset as usize).take(count as usize) {
+                    let gi = self.groups.find_index(id.0);
+                    if gi != prev_gi {
+                        if let Some(g) = gi {
+                            out.insert(g);
+                        }
+                        prev_gi = gi;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Insert all group indices whose atom ranges overlap [lo, hi].
+    fn insert_groups_in_id_range(
+        &self,
+        lo: u64,
+        hi: u64,
+        out: &mut std::collections::HashSet<usize>,
+    ) {
+        let groups = self.groups.values();
+        if let Some(first_gi) = self.groups.find_index(lo) {
+            out.insert(first_gi);
+            for gi in (first_gi + 1)..groups.len() {
+                if groups[gi].base_id.0 > hi {
+                    break;
+                }
+                out.insert(gi);
+            }
+        } else {
+            // lo might be in an input_tensor range; try hi.
+            if let Some(gi) = self.groups.find_index(hi) {
+                out.insert(gi);
+            }
+        }
+    }
+
     /// Validate structural invariants. Returns a list of errors.
+    /// Validate the NanoGraph structure. Runs in O(groups), not O(atoms).
+    ///
+    /// Checks:
+    /// - All InputRefs resolve to existing atoms (sample-checked: first, last, mid)
+    /// - Topological ordering: inputs only reference earlier groups (no self/forward refs)
+    /// - Reduce stride ranges stay within earlier groups
+    /// - Explicit InputRef length matches group count
+    /// - Input count matches op expectation
     pub fn validate(&self) -> Vec<String> {
         let mut errors = Vec::new();
+        let groups = self.groups.values();
 
-        for (gi, group) in self.groups.iter().enumerate() {
-            // Verify input refs resolve to existing atoms.
+        for (gi, group) in groups.iter().enumerate() {
             for (inp_idx, input) in group.inputs.iter().enumerate() {
-                match input {
-                    InputRef::SymAffine { .. } => {
-                        // SymAffine depends on k — validate at k=0 only
-                        // (full validation would need sym_dim_bounds).
-                        for i in 0..group.count {
-                            let source = input.resolve(i, 0);
-                            if !self.contains_atom(source) {
+                // Determine k values to check for SymAffine.
+                let k_vals: Vec<u64> = if matches!(input, InputRef::SymAffine { .. }) {
+                    let k_max = group
+                        .reduce_dims
+                        .iter()
+                        .filter_map(|sd| self.sym_dim_bounds.get(sd).copied())
+                        .next();
+                    let mut v = vec![0u64];
+                    if let Some(km) = k_max
+                        && km > 1
+                    {
+                        v.push(km - 1);
+                    }
+                    v
+                } else {
+                    vec![0u64]
+                };
+
+                // Sample positions: first, last, and middle.
+                let sample_positions: Vec<u64> = if group.count <= 3 {
+                    (0..group.count).collect()
+                } else {
+                    vec![0, group.count / 2, group.count - 1]
+                };
+
+                // For Explicit, also check unique atoms that might span multiple groups.
+                let extra_positions: Vec<u64> = if let InputRef::Explicit(ids) = input {
+                    // Find positions where the atom ID jumps (different source groups).
+                    let mut extras = Vec::new();
+                    let mut prev_gi = None;
+                    for (i, id) in ids.iter().enumerate() {
+                        let cur_gi = self.groups.find_index(id.0);
+                        if cur_gi != prev_gi {
+                            extras.push(i as u64);
+                            prev_gi = cur_gi;
+                        }
+                    }
+                    extras
+                } else {
+                    vec![]
+                };
+
+                for &k in &k_vals {
+                    for &i in sample_positions.iter().chain(extra_positions.iter()) {
+                        if i >= group.count {
+                            continue;
+                        }
+                        let source = input.resolve(i + group.atom_offset, k);
+
+                        // Check existence.
+                        if !self.contains_atom(source) {
+                            errors.push(format!(
+                                "Group {} (base={}) input {} atom {} k={}: references nonexistent atom {}",
+                                gi, group.base_id, inp_idx, i, k, source
+                            ));
+                            break;
+                        }
+
+                        // Check topological ordering: source must be in an earlier group.
+                        if let Some(src_gi) = self.groups.find_index(source.0) {
+                            if src_gi >= gi {
                                 errors.push(format!(
-                                    "Group {} (base={}) input {} atom offset {} k=0: references nonexistent atom {}",
-                                    gi, group.base_id, inp_idx, i, source
+                                    "Group {} (base={}) input {} atom {}: references group {} (base={}) — not earlier (self/forward reference)",
+                                    gi, group.base_id, inp_idx, i,
+                                    src_gi, groups[src_gi].base_id,
                                 ));
                                 break;
                             }
                         }
                     }
-                    _ => {
-                        for i in 0..group.count {
-                            let source = input.resolve(i, 0);
-                            if !self.contains_atom(source) {
+                }
+
+                // For reduce ops, check the reduce-strided access range.
+                match &group.op {
+                    ScalarOp::ReduceSum { reduce_count, reduce_stride, .. }
+                    | ScalarOp::ReduceMax { reduce_count, reduce_stride, .. }
+                        if *reduce_count > 1 && *reduce_stride != 0 =>
+                    {
+                        // Check from first and last consumer atom.
+                        for &i in &[0u64, group.count.saturating_sub(1)] {
+                            let base_atom = input.resolve(i + group.atom_offset, 0);
+                            let last_k_atom = AtomId(
+                                (base_atom.0 as i64 + (*reduce_count as i64 - 1) * reduce_stride) as u64,
+                            );
+                            if !self.contains_atom(last_k_atom) {
                                 errors.push(format!(
-                                    "Group {} (base={}) input {} atom offset {}: references nonexistent atom {}",
-                                    gi, group.base_id, inp_idx, i, source
+                                    "Group {} (base={}) input {}: reduce stride from atom {} reaches nonexistent atom {}",
+                                    gi, group.base_id, inp_idx, i, last_k_atom,
                                 ));
-                                break;
+                            } else if let Some(src_gi) = self.groups.find_index(last_k_atom.0) {
+                                if src_gi >= gi {
+                                    errors.push(format!(
+                                        "Group {} (base={}) input {}: reduce stride reaches group {} which is not earlier",
+                                        gi, group.base_id, inp_idx, src_gi,
+                                    ));
+                                }
                             }
                         }
                     }
+                    _ => {}
                 }
 
                 // Explicit refs must have correct length.
@@ -437,10 +780,7 @@ impl NanoGraph {
                 {
                     errors.push(format!(
                         "Group {} input {}: Explicit has {} entries but group has {} atoms",
-                        gi,
-                        inp_idx,
-                        ids.len(),
-                        group.count
+                        gi, inp_idx, ids.len(), group.count
                     ));
                 }
             }

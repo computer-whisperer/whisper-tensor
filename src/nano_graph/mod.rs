@@ -13,4 +13,6 @@ pub mod optimize;
 mod pattern;
 
 pub use ops::{ScalarBinOp, ScalarOp, ScalarUnaryOp};
-pub use pattern::{AtomGroup, AtomId, InputRef, NanoGraph, NanoGraphStats, SymDim};
+pub use pattern::{
+    AtomGroup, AtomId, AtomRange, GroupUseCount, InputRef, NanoGraph, NanoGraphStats, SymDim,
+};

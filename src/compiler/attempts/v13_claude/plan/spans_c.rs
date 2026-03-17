@@ -1,10 +1,3 @@
-#![allow(
-    clippy::all,
-    dead_code,
-    unreachable_patterns,
-    unused_variables,
-    unused_imports
-)]
 //! Span-based execution planner: emits self-contained NanoGraphs per (phase, lane).
 //!
 //! Uses v2c's phase detection and lane assignment as the backbone, then converts
@@ -22,43 +15,13 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use crate::nano_graph::{AtomGroup, AtomId, InputRef, NanoGraph, ScalarOp};
 
-use super::nano_plan_v2c;
+use super::{v2c, AtomMapping, Phase, Span, SpanPlan};
 
 /// Literal groups with fewer atoms than this are duplicated into spans.
 /// Larger literals (weight matrices) become external inputs instead.
 const LITERAL_INLINE_THRESHOLD: u64 = 1024;
 
 // ─── Public API ──────────────────────────────────────────────────────────────
-
-/// A contiguous range of atoms mapped between main graph and span graph.
-#[derive(Debug, Clone)]
-pub struct AtomMapping {
-    pub main_base: AtomId,
-    pub span_base: AtomId,
-    pub count: u64,
-}
-
-/// A self-contained unit of work for one lane in one phase.
-pub struct Span {
-    /// Self-contained NanoGraph for this span's computation.
-    pub graph: NanoGraph,
-    /// Contiguous ranges of atoms this span reads from the main graph.
-    pub inputs: Vec<AtomMapping>,
-    /// Contiguous ranges of atoms this span writes back to the shared values buffer.
-    pub outputs: Vec<AtomMapping>,
-}
-
-/// One phase of execution.
-pub struct Phase {
-    /// One span per lane (may have empty graphs for idle lanes).
-    pub spans: Vec<Span>,
-}
-
-/// The full execution plan with self-contained span NanoGraphs.
-pub struct SpanPlan {
-    pub num_lanes: usize,
-    pub phases: Vec<Phase>,
-}
 
 /// Plan execution for a NanoGraph, emitting self-contained span NanoGraphs.
 pub fn plan_execution_spans(graph: &NanoGraph, num_lanes: usize) -> SpanPlan {
@@ -74,7 +37,7 @@ pub fn plan_execution_spans(graph: &NanoGraph, num_lanes: usize) -> SpanPlan {
     }
 
     // Step 1: Run v2c to get the lane/phase assignments.
-    let mut v2c_plan = nano_plan_v2c::plan_execution(graph, num_lanes);
+    let mut v2c_plan = v2c::plan_execution(graph, num_lanes);
 
     let is_literal: Vec<bool> = groups
         .iter()
@@ -145,6 +108,7 @@ pub fn plan_execution_spans(graph: &NanoGraph, num_lanes: usize) -> SpanPlan {
                     graph: NanoGraph::new(),
                     inputs: vec![],
                     outputs: vec![],
+                    literal_mappings: vec![],
                 });
                 continue;
             }
@@ -188,7 +152,7 @@ type DupInfo = HashMap<usize, Vec<(u64, u64)>>;
 /// Returns duplication info so `build_span` can output only the original
 /// per-lane slices (avoiding duplicate output atoms across lanes).
 fn fix_cross_lane_deps(
-    plan: &mut nano_plan_v2c::ExecutionPlan,
+    plan: &mut v2c::ExecutionPlan,
     groups: &[AtomGroup],
     is_literal: &[bool],
     num_lanes: usize,
@@ -430,7 +394,7 @@ fn fix_cross_lane_deps(
         // Add full-group work to every lane.
         for &gi in &dups_in_phase {
             for lane_idx in 0..num_lanes {
-                phase.lane_work[lane_idx].push(nano_plan_v2c::LaneWork {
+                phase.lane_work[lane_idx].push(v2c::LaneWork {
                     group_idx: gi,
                     atom_offset: 0,
                     atom_count: groups[gi].count,
@@ -535,7 +499,7 @@ fn build_span(
     groups: &[AtomGroup],
     is_literal: &[bool],
     atom_owner: &[Vec<(u64, u64, usize, usize)>],
-    lane_work: &[nano_plan_v2c::LaneWork],
+    lane_work: &[v2c::LaneWork],
     phase_idx: usize,
     lane_idx: usize,
     dup_info: &DupInfo,
@@ -699,6 +663,7 @@ fn build_span(
         graph: span_graph,
         inputs: input_mappings,
         outputs: output_mappings,
+        literal_mappings: vec![],
     }
 }
 
@@ -823,7 +788,6 @@ fn resolve_input_to_group_ranges(
             let base = atom_id.0 as i64;
             let (lo, hi) = reduce_extent(base, reduce_count, reduce_stride);
             for gi in find_groups_in_range(groups, lo as u64, hi as u64) {
-                let g = &groups[gi];
                 result.push((gi, lo as u64, (hi + 1) as u64));
             }
         }
@@ -1198,11 +1162,23 @@ fn remap_single_input_range(
             base,
             stride,
             modulus,
-        } => InputRef::Modular {
-            base: atom_map.get(*base).unwrap_or(*base),
-            stride: *stride,
-            modulus: *modulus,
-        },
+        } => {
+            if atom_offset % modulus == 0 {
+                InputRef::Modular {
+                    base: atom_map.get(*base).unwrap_or(*base),
+                    stride: *stride,
+                    modulus: *modulus,
+                }
+            } else {
+                // Misaligned split: fall back to explicit
+                let mut ids = Vec::with_capacity(atom_count as usize);
+                for i in 0..atom_count {
+                    let main_id = input.resolve(atom_offset + i, 0);
+                    ids.push(atom_map.get(main_id).unwrap_or(main_id));
+                }
+                InputRef::Explicit(ids)
+            }
+        }
         InputRef::SymAffine {
             base,
             stride_i,
@@ -1753,24 +1729,17 @@ fn remap_single_input(
         } => {
             // Modular: atom i reads base + stride * (i % modulus).
             // For sub-range: atom j reads base + stride * ((atom_offset + j) % modulus).
-            // This doesn't simplify nicely, so remap the base and keep the pattern.
-            // The modular pattern accesses the same set of atoms regardless of offset.
+            // When atom_offset % modulus == 0, the pattern is unchanged (just remap base).
+            // When misaligned, the phase shift means we must fall back to explicit.
             let local_base = main_to_local.get(base).copied().unwrap_or(*base);
-            if is_full {
+            if atom_offset % modulus == 0 {
                 InputRef::Modular {
                     base: local_base,
                     stride: *stride,
                     modulus: *modulus,
                 }
             } else {
-                // For sub-ranges, we need to shift the modular pattern.
-                // atom j -> base + stride * ((atom_offset + j) % modulus)
-                // This is still Modular but the offset changes the starting phase.
-                // Since the modular wrap accesses all modulus atoms anyway,
-                // we can keep it but we need to verify the local mapping is correct.
-                // Actually, for Modular, the base and all modular atoms are already
-                // in main_to_local. Just remap the base.
-                // But the offset shifts the access pattern. We should use Explicit.
+                // Misaligned split: fall back to explicit
                 let mut ids = Vec::with_capacity(atom_count as usize);
                 for j in 0..atom_count {
                     let main_atom = input.resolve(atom_offset + j, 0);
@@ -1838,137 +1807,135 @@ fn remap_op(op: &ScalarOp, main_to_local: &HashMap<AtomId, AtomId>) -> ScalarOp 
 
 // ─── Diagnostics ─────────────────────────────────────────────────────────────
 
-impl SpanPlan {
-    /// Print summary statistics about the span plan.
-    pub fn print_summary(&self) {
-        let total_spans: usize = self.phases.iter().map(|p| p.spans.len()).sum();
-        let non_empty_spans: usize = self
-            .phases
+/// Print summary statistics about the span plan.
+pub fn print_summary(plan: &SpanPlan) {
+    let total_spans: usize = plan.phases.iter().map(|p| p.spans.len()).sum();
+    let non_empty_spans: usize = plan
+        .phases
+        .iter()
+        .flat_map(|p| p.spans.iter())
+        .filter(|s| s.graph.num_groups() > 0)
+        .count();
+    let total_inputs: usize = plan
+        .phases
+        .iter()
+        .flat_map(|p| p.spans.iter())
+        .map(|s| s.inputs.len())
+        .sum();
+    let total_outputs: usize = plan
+        .phases
+        .iter()
+        .flat_map(|p| p.spans.iter())
+        .map(|s| s.outputs.len())
+        .sum();
+
+    println!(
+        "SpanPlan: {} lanes, {} phases, {} spans ({} non-empty)",
+        plan.num_lanes,
+        plan.phases.len(),
+        total_spans,
+        non_empty_spans
+    );
+    println!(
+        "  Total inputs: {}, Total outputs: {}",
+        total_inputs, total_outputs
+    );
+
+    for (phase_idx, phase) in plan.phases.iter().enumerate() {
+        let active = phase
+            .spans
             .iter()
-            .flat_map(|p| p.spans.iter())
             .filter(|s| s.graph.num_groups() > 0)
             .count();
-        let total_inputs: usize = self
-            .phases
+        let max_groups = phase
+            .spans
             .iter()
-            .flat_map(|p| p.spans.iter())
-            .map(|s| s.inputs.len())
-            .sum();
-        let total_outputs: usize = self
-            .phases
+            .map(|s| s.graph.num_groups())
+            .max()
+            .unwrap_or(0);
+        let max_atoms = phase
+            .spans
             .iter()
-            .flat_map(|p| p.spans.iter())
-            .map(|s| s.outputs.len())
-            .sum();
-
+            .map(|s| s.graph.num_atoms())
+            .max()
+            .unwrap_or(0);
+        let min_atoms = phase
+            .spans
+            .iter()
+            .filter(|s| s.graph.num_atoms() > 0)
+            .map(|s| s.graph.num_atoms())
+            .min()
+            .unwrap_or(0);
+        let balance = if min_atoms > 0 {
+            format!("{:.1}x", max_atoms as f64 / min_atoms as f64)
+        } else {
+            "N/A".to_string()
+        };
         println!(
-            "SpanPlan: {} lanes, {} phases, {} spans ({} non-empty)",
-            self.num_lanes,
-            self.phases.len(),
-            total_spans,
-            non_empty_spans
+            "  Phase {}: {} active lanes, max {} groups/{} atoms, balance {}",
+            phase_idx, active, max_groups, max_atoms, balance
         );
-        println!(
-            "  Total inputs: {}, Total outputs: {}",
-            total_inputs, total_outputs
-        );
+    }
+}
 
-        for (phase_idx, phase) in self.phases.iter().enumerate() {
-            let active = phase
-                .spans
-                .iter()
-                .filter(|s| s.graph.num_groups() > 0)
-                .count();
-            let max_groups = phase
-                .spans
-                .iter()
-                .map(|s| s.graph.num_groups())
-                .max()
-                .unwrap_or(0);
-            let max_atoms = phase
-                .spans
-                .iter()
-                .map(|s| s.graph.num_atoms())
-                .max()
-                .unwrap_or(0);
-            let min_atoms = phase
-                .spans
-                .iter()
-                .filter(|s| s.graph.num_atoms() > 0)
-                .map(|s| s.graph.num_atoms())
-                .min()
-                .unwrap_or(0);
-            let balance = if min_atoms > 0 {
-                format!("{:.1}x", max_atoms as f64 / min_atoms as f64)
-            } else {
-                "N/A".to_string()
-            };
-            println!(
-                "  Phase {}: {} active lanes, max {} groups/{} atoms, balance {}",
-                phase_idx, active, max_groups, max_atoms, balance
-            );
+/// Validate all span NanoGraphs.
+///
+/// Checks:
+/// 1. Each span's NanoGraph passes NanoGraph::validate()
+/// 2. All external inputs reference atoms that exist in earlier phases' outputs
+///    or in the original graph's literal groups
+/// 3. No cross-span dependencies within a phase (guaranteed by construction
+///    since we use v2c's phase assignments)
+pub fn validate(plan: &SpanPlan, original: &NanoGraph) -> Vec<String> {
+    let mut errors = Vec::new();
+
+    // Seed available atoms with all literal atoms from the original graph.
+    // These are always available (from the shared values buffer) without
+    // needing to be produced by an earlier phase.
+    let mut available_atoms: HashSet<AtomId> = HashSet::new();
+    for group in original.groups() {
+        if matches!(group.op, ScalarOp::Literal(_)) && group.inputs.is_empty() {
+            for i in 0..group.count {
+                available_atoms.insert(group.base_id.offset(i));
+            }
         }
     }
 
-    /// Validate all span NanoGraphs.
-    ///
-    /// Checks:
-    /// 1. Each span's NanoGraph passes NanoGraph::validate()
-    /// 2. All external inputs reference atoms that exist in earlier phases' outputs
-    ///    or in the original graph's literal groups
-    /// 3. No cross-span dependencies within a phase (guaranteed by construction
-    ///    since we use v2c's phase assignments)
-    pub fn validate(&self, original: &NanoGraph) -> Vec<String> {
-        let mut errors = Vec::new();
-
-        // Seed available atoms with all literal atoms from the original graph.
-        // These are always available (from the shared values buffer) without
-        // needing to be produced by an earlier phase.
-        let mut available_atoms: HashSet<AtomId> = HashSet::new();
-        for group in original.groups() {
-            if matches!(group.op, ScalarOp::Literal(_)) && group.inputs.is_empty() {
-                for i in 0..group.count {
-                    available_atoms.insert(group.base_id.offset(i));
-                }
+    for (phase_idx, phase) in plan.phases.iter().enumerate() {
+        for (lane_idx, span) in phase.spans.iter().enumerate() {
+            // Check 1: NanoGraph internal validation.
+            let graph_errors = span.graph.validate();
+            for err in graph_errors {
+                errors.push(format!(
+                    "Phase {} lane {}: graph validation error: {}",
+                    phase_idx, lane_idx, err
+                ));
             }
-        }
 
-        for (phase_idx, phase) in self.phases.iter().enumerate() {
-            for (lane_idx, span) in phase.spans.iter().enumerate() {
-                // Check 1: NanoGraph internal validation.
-                let graph_errors = span.graph.validate();
-                for err in graph_errors {
+            // Check 2: All external input base atoms must be available.
+            for mapping in &span.inputs {
+                if !available_atoms.contains(&mapping.main_base) {
                     errors.push(format!(
-                        "Phase {} lane {}: graph validation error: {}",
-                        phase_idx, lane_idx, err
+                        "Phase {} lane {}: external input base {:?} not available \
+                         (not produced by any earlier phase)",
+                        phase_idx, lane_idx, mapping.main_base
                     ));
                 }
-
-                // Check 2: All external input base atoms must be available.
-                for mapping in &span.inputs {
-                    if !available_atoms.contains(&mapping.main_base) {
-                        errors.push(format!(
-                            "Phase {} lane {}: external input base {:?} not available \
-                             (not produced by any earlier phase)",
-                            phase_idx, lane_idx, mapping.main_base
-                        ));
-                    }
-                }
-            }
-
-            // After processing all spans in this phase, add their outputs
-            // to the available set.
-            for span in &phase.spans {
-                for mapping in &span.outputs {
-                    for i in 0..mapping.count {
-                        available_atoms.insert(mapping.main_base.offset(i));
-                    }
-                }
             }
         }
 
-        errors
+        // After processing all spans in this phase, add their outputs
+        // to the available set.
+        for span in &phase.spans {
+            for mapping in &span.outputs {
+                for i in 0..mapping.count {
+                    available_atoms.insert(mapping.main_base.offset(i));
+                }
+            }
+        }
     }
+
+    errors
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
@@ -2355,7 +2322,7 @@ mod tests {
 
     /// Verify all span graphs pass internal validation and the plan is consistent.
     fn verify_span_plan(graph: &NanoGraph, plan: &SpanPlan) {
-        let errors = plan.validate(graph);
+        let errors = validate(plan, graph);
         assert!(
             errors.is_empty(),
             "Span plan validation errors:\n{}",
@@ -2499,7 +2466,7 @@ mod tests {
         verify_output_coverage(&g, &plan);
 
         println!("Single lane matmul:");
-        plan.print_summary();
+        print_summary(&plan);
     }
 
     #[test]
@@ -2525,7 +2492,7 @@ mod tests {
         assert_eq!(active, 2);
 
         println!("Matmul 2 lanes:");
-        plan.print_summary();
+        print_summary(&plan);
     }
 
     #[test]
@@ -2540,7 +2507,7 @@ mod tests {
         assert_eq!(plan.phases.len(), 1);
 
         println!("Matmul 8 lanes:");
-        plan.print_summary();
+        print_summary(&plan);
     }
 
     #[test]
@@ -2560,7 +2527,7 @@ mod tests {
         );
 
         println!("Matmul chain (monolithic) 2 lanes:");
-        plan.print_summary();
+        print_summary(&plan);
     }
 
     #[test]
@@ -2583,7 +2550,7 @@ mod tests {
         assert!(active >= 2, "Should have >= 2 active lanes, got {}", active);
 
         println!("Elementwise 4 lanes:");
-        plan.print_summary();
+        print_summary(&plan);
     }
 
     #[test]
@@ -2604,7 +2571,7 @@ mod tests {
         );
 
         println!("AllRows chain 8 lanes:");
-        plan.print_summary();
+        print_summary(&plan);
     }
 
     #[test]
@@ -2619,7 +2586,7 @@ mod tests {
         assert_eq!(plan.phases.len(), 1);
 
         println!("Parallel matmuls 4 lanes:");
-        plan.print_summary();
+        print_summary(&plan);
     }
 
     #[test]
@@ -2714,7 +2681,7 @@ mod tests {
         );
 
         println!("Larger matmul chain 4 lanes:");
-        plan.print_summary();
+        print_summary(&plan);
     }
 
     #[test]
@@ -2730,7 +2697,7 @@ mod tests {
         assert!(plan.phases.len() <= 5);
 
         println!("Realistic matmul chain 8 lanes:");
-        plan.print_summary();
+        print_summary(&plan);
     }
 
     #[test]
@@ -2847,7 +2814,7 @@ mod tests {
         verify_input_availability(&plan, &g);
 
         println!("Reduce stride consumer 4 lanes:");
-        plan.print_summary();
+        print_summary(&plan);
     }
 
     #[test]
@@ -2861,7 +2828,7 @@ mod tests {
         verify_input_availability(&plan, &g);
 
         println!("Reduce stride consumer 8 lanes:");
-        plan.print_summary();
+        print_summary(&plan);
     }
 
     /// Build a graph with a cross-lane dependency: an AllRows Select-like group
@@ -2980,7 +2947,7 @@ mod tests {
         verify_input_availability(&plan, &g);
 
         println!("Cross-lane Select 8 lanes:");
-        plan.print_summary();
+        print_summary(&plan);
     }
 
     #[test]

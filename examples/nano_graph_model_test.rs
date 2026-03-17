@@ -255,31 +255,17 @@ fn main() {
     } else {
         println!("  Buffer fits in memory, proceeding with nano execution");
 
-        // Build nano inputs:
-        // 1. Start with numeric_overrides (weights, constants)
-        let mut nano_inputs: HashMap<u64, NumericScalar> = result.numeric_overrides.clone();
-        println!(
-            "  Numeric overrides (weights/constants): {} atoms",
-            nano_inputs.len()
-        );
-
-        // 2. Add user input tensor values using tensor_map
-        let mut user_input_atoms = 0u64;
+        // Build nano inputs from all tensors via tensor_map.
+        let mut nano_inputs: HashMap<u64, NumericScalar> = HashMap::new();
         let mut backend = whisper_tensor::backends::eval_backend::EvalBackend::NDArray;
-        for (name, (_dtype, _shape_dims)) in &input_info {
-            let Some(id) = tensors_by_name.get(name) else {
+        for (ext_id, tensor) in &milli_inputs {
+            let Some(&int_id) = milli_graph.input_map.get(ext_id) else {
                 continue;
             };
-            let Some(tam) = result.tensor_map.get(id) else {
-                println!(
-                    "    WARNING: input '{}' ({:?}) not found in tensor_map",
-                    name, id
-                );
+            let Some(tam) = result.tensor_map.get(&int_id) else {
                 continue;
             };
-
-            let tensor = &milli_inputs[id];
-            // Cast to F32, flatten, extract values
+            let dtype = tensor.dtype();
             let f32_tensor = tensor.cast(DType::F32, &mut backend).unwrap();
             let flat = f32_tensor.flatten().unwrap();
             let nd = flat.to_ndarray().unwrap();
@@ -287,8 +273,8 @@ fn main() {
 
             if v.len() != tam.count as usize {
                 println!(
-                    "    WARNING: input '{}' has {} elements but tensor_map says {} atoms",
-                    name,
+                    "    WARNING: tensor {:?} has {} elements but tensor_map says {} atoms",
+                    ext_id,
                     v.len(),
                     tam.count
                 );
@@ -297,32 +283,39 @@ fn main() {
 
             for (i, &val) in v.iter().enumerate() {
                 let atom_id = tam.base_id.0 + i as u64;
-                // Use original dtype for the scalar value
-                let scalar = match tensor.dtype() {
-                    DType::I64 => {
-                        // Recover the original i64 value
-                        NumericScalar::I64(val as i64)
-                    }
+                let scalar = match dtype {
+                    DType::I64 => NumericScalar::I64(val as i64),
                     DType::I32 => NumericScalar::I32(val as i32),
                     _ => NumericScalar::F32(val),
                 };
                 nano_inputs.insert(atom_id, scalar);
             }
-            user_input_atoms += tam.count;
-            println!(
-                "    Input '{}': {} atoms at base {:?}",
-                name, tam.count, tam.base_id
-            );
         }
-        println!("  User input atoms: {}", user_input_atoms);
-        println!("  Total input atoms: {}", nano_inputs.len());
+        println!(
+            "  Numeric overrides (all tensors): {} atoms",
+            nano_inputs.len()
+        );
 
         // ---- Run nano interpreter ----
         println!("\n=== Step 3: Nano Interpreter ===");
-        use whisper_tensor::compiler::attempts::v13_claude::nano_execute::execute_nanograph_naive;
+        use whisper_tensor::nano_graph::eval::NanoEval;
 
         let t_nano = Instant::now();
-        let nano_outputs = execute_nanograph_naive(&result.graph, &nano_inputs);
+        let nano_eval = NanoEval::eval_with_overrides(&result.graph, &nano_inputs);
+        // Build lookup for output tensor atoms (compare_tensor_with_nano
+        // looks up atoms by base_id + offset from TensorAtomMapInfo).
+        let mut nano_outputs: HashMap<u64, NumericScalar> = HashMap::new();
+        for tam in result.tensor_map.values() {
+            for i in 0..tam.count {
+                let aid = tam.base_id.0 + i;
+                nano_outputs.insert(
+                    aid,
+                    nano_eval
+                        .get_scalar(whisper_tensor::nano_graph::AtomId(aid))
+                        .clone(),
+                );
+            }
+        }
         let nano_elapsed = t_nano.elapsed();
         println!(
             "  Nano interpreter completed in {:.1}s",
@@ -411,271 +404,6 @@ fn main() {
         println!("  Nano interpreter:  {:.3}s", nano_elapsed.as_secs_f64());
     }
 
-    // ---- Step 5: Partitioner (runs regardless of nano execution feasibility) ----
-    println!("\n=== Step 5: Partitioner ===");
-    use whisper_tensor::compiler::attempts::v13_claude::nano_part_creative::partition_nanograph;
-
-    let t_part = Instant::now();
-    let partition = partition_nanograph(&result.graph, 8);
-    let part_elapsed = t_part.elapsed();
-
-    println!("  Partition: {} kernels", partition.num_kernels);
-    println!("  Partitioning time: {:.3}s", part_elapsed.as_secs_f64());
-
-    // Report kernel sizes
-    let groups = result.graph.groups();
-    let mut kernel_sizes: Vec<u64> = partition
-        .kernel_groups
-        .iter()
-        .map(|kg| kg.iter().map(|&gi| groups[gi].count).sum::<u64>())
-        .collect();
-    kernel_sizes.sort_unstable_by(|a, b| b.cmp(a));
-
-    // Build group_idx → kernel_idx map
-    let mut group_to_kernel = vec![usize::MAX; groups.len()];
-    for (ki, kg) in partition.kernel_groups.iter().enumerate() {
-        for &gi in kg {
-            group_to_kernel[gi] = ki;
-        }
-    }
-
-    // Find which group index an atom belongs to, using binary search on base_ids
-    let group_base_ids: Vec<u64> = groups.iter().map(|g| g.base_id.0).collect();
-    let find_group_idx = |atom_id: whisper_tensor::nano_graph::AtomId| -> Option<usize> {
-        match group_base_ids.binary_search(&atom_id.0) {
-            Ok(i) => Some(i),
-            Err(0) => None,
-            Err(i) => {
-                let gi = i - 1;
-                if atom_id.0 < groups[gi].base_id.0 + groups[gi].count {
-                    Some(gi)
-                } else {
-                    None
-                }
-            }
-        }
-    };
-
-    // Per-kernel analysis
-    println!("\n  === Per-kernel breakdown ===");
-    for (ki, kg) in partition.kernel_groups.iter().enumerate() {
-        let total_atoms: u64 = kg.iter().map(|&gi| groups[gi].count).sum::<u64>();
-
-        // Op breakdown
-        let mut op_counts: HashMap<String, usize> = HashMap::new();
-        let mut explicit_entries = 0u64;
-        for &gi in kg {
-            let op_name = format!("{:?}", groups[gi].op)
-                .chars()
-                .take_while(|c| *c != ' ' && *c != '{' && *c != '(')
-                .collect::<String>();
-            *op_counts.entry(op_name).or_default() += 1;
-            for input in &groups[gi].inputs {
-                if let whisper_tensor::nano_graph::InputRef::Explicit(ids) = input {
-                    explicit_entries += ids.len() as u64;
-                }
-            }
-        }
-        let mut sorted_ops: Vec<_> = op_counts.into_iter().collect();
-        sorted_ops.sort_by(|a, b| b.1.cmp(&a.1));
-        let op_summary: String = sorted_ops
-            .iter()
-            .take(5)
-            .map(|(op, count)| format!("{}x{}", count, op))
-            .collect::<Vec<_>>()
-            .join(", ");
-
-        // Dependencies: which other kernels does this kernel read from?
-        let mut reads_from: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
-        for &gi in kg {
-            for input in &groups[gi].inputs {
-                use whisper_tensor::nano_graph::InputRef;
-                let sample_atoms: Vec<whisper_tensor::nano_graph::AtomId> = match input {
-                    InputRef::Broadcast(id) => vec![*id],
-                    InputRef::Affine { base, .. } => vec![*base],
-                    InputRef::StridedBroadcast { base, .. } => vec![*base],
-                    InputRef::SymAffine { base, .. } => vec![*base],
-                    InputRef::Explicit(ids) => {
-                        let mut s = vec![];
-                        if !ids.is_empty() {
-                            s.push(ids[0]);
-                        }
-                        if ids.len() > 1 {
-                            s.push(ids[ids.len() - 1]);
-                        }
-                        s
-                    }
-                    InputRef::Modular { base, .. } => vec![*base],
-                };
-                for id in sample_atoms {
-                    if let Some(src_gi) = find_group_idx(id) {
-                        let src_ki = group_to_kernel[src_gi];
-                        if src_ki != ki && src_ki != usize::MAX {
-                            reads_from.insert(src_ki);
-                        }
-                    }
-                }
-            }
-        }
-
-        // Min/max group index range (shows where in topo order this kernel sits)
-        let min_gi = kg.iter().copied().min().unwrap_or(0);
-        let max_gi = kg.iter().copied().max().unwrap_or(0);
-
-        println!(
-            "  kernel {:>2}: {:>6} groups [{:>5}..{:>5}], {:>12} atoms, {:>8} explicit, reads_from={:?}",
-            ki,
-            kg.len(),
-            min_gi,
-            max_gi,
-            total_atoms,
-            explicit_entries,
-            reads_from
-        );
-        println!("            ops: {}", op_summary);
-    }
-
-    // ---- Step 6: JIT Codegen Execution (f32 buffer — 4 bytes/atom) ----
-    #[cfg(feature = "cranelift")]
-    {
-        let f32_buffer_gb = num_atoms as f64 * 4.0 / (1024.0 * 1024.0 * 1024.0);
-        println!("\n=== Step 6: JIT Codegen Execution ===");
-        println!(
-            "  f32 buffer: {:.1} GB ({} atoms × 4 bytes)",
-            f32_buffer_gb, num_atoms
-        );
-
-        if f32_buffer_gb > 120.0 {
-            println!("  SKIPPING: f32 buffer too large ({:.1} GB)", f32_buffer_gb);
-        } else {
-            use whisper_tensor::compiler::attempts::v13_claude::nano_codegen::CompiledPipeline;
-
-            // Compile per-kernel
-            println!("  Compiling {} kernels...", partition.num_kernels);
-            let t_compile = Instant::now();
-            match CompiledPipeline::compile_partitioned(&result.graph, &partition) {
-                Ok(pipeline) => {
-                    let compile_elapsed = t_compile.elapsed();
-                    println!("  Compiled in {:.3}s", compile_elapsed.as_secs_f64());
-
-                    // Allocate buffer and fill directly (no HashMap intermediary)
-                    println!("  Allocating {:.1} GB values buffer...", f32_buffer_gb);
-                    let t_alloc = Instant::now();
-                    let mut values = vec![0.0f32; num_atoms as usize];
-                    println!("  Allocated in {:.3}s", t_alloc.elapsed().as_secs_f64());
-
-                    // Fill literals directly into buffer
-                    pipeline.fill_literals(&mut values);
-
-                    // Fill numeric_overrides directly into buffer
-                    for (&atom_idx, scalar) in &result.numeric_overrides {
-                        values[atom_idx as usize] = scalar.to_f64() as f32;
-                    }
-
-                    // Fill user input values directly into buffer
-                    let mut backend = whisper_tensor::backends::eval_backend::EvalBackend::NDArray;
-                    for (name, (_dtype, _shape_dims)) in &input_info {
-                        let Some(id) = tensors_by_name.get(name) else {
-                            continue;
-                        };
-                        let Some(tam) = result.tensor_map.get(id) else {
-                            continue;
-                        };
-                        let tensor = &milli_inputs[id];
-                        let f32_tensor = tensor.cast(DType::F32, &mut backend).unwrap();
-                        let flat = f32_tensor.flatten().unwrap();
-                        let nd = flat.to_ndarray().unwrap();
-                        let v: Vec<f32> = nd.try_into().unwrap();
-                        for (i, &val) in v.iter().enumerate() {
-                            values[(tam.base_id.0 + i as u64) as usize] = val;
-                        }
-                    }
-
-                    // Execute
-                    println!("  Executing...");
-                    let t_exec = Instant::now();
-                    pipeline.execute_on_buffer(&mut values);
-                    let exec_elapsed = t_exec.elapsed();
-                    println!("  Executed in {:.3}s", exec_elapsed.as_secs_f64());
-
-                    // Compare JIT output vs milli interpreter
-                    let reverse_output_map: HashMap<GlobalId, GlobalId> = milli_graph
-                        .output_map
-                        .as_ref()
-                        .map(|m| m.iter().map(|(&int, &ext)| (ext, int)).collect())
-                        .unwrap_or_default();
-
-                    let mut total_compared = 0u64;
-                    let mut max_abs_error: f64 = 0.0;
-                    let mut max_rel_error: f64 = 0.0;
-
-                    for (ext_id, milli_tensor) in &milli_outputs {
-                        let internal_id = reverse_output_map.get(ext_id).unwrap_or(ext_id);
-                        let tam = result
-                            .tensor_map
-                            .get(internal_id)
-                            .or_else(|| result.tensor_map.get(ext_id));
-                        let Some(tam) = tam else {
-                            println!("    Output {:?}: not in tensor_map", ext_id);
-                            continue;
-                        };
-
-                        let f32_tensor = milli_tensor.cast(DType::F32, &mut backend).unwrap();
-                        let flat = f32_tensor.flatten().unwrap();
-                        let nd = flat.to_ndarray().unwrap();
-                        let milli_vals: Vec<f32> = nd.try_into().unwrap();
-
-                        let mut local_max_abs = 0.0f64;
-                        for (i, &milli_val) in milli_vals.iter().enumerate() {
-                            let atom_idx = (tam.base_id.0 + i as u64) as usize;
-                            if atom_idx >= values.len() {
-                                break;
-                            }
-                            let jit_val = values[atom_idx];
-                            let abs_err = (milli_val - jit_val).abs() as f64;
-                            local_max_abs = local_max_abs.max(abs_err);
-                            let rel_err = if milli_val.abs() > 1e-8 {
-                                abs_err / milli_val.abs() as f64
-                            } else {
-                                0.0
-                            };
-                            max_rel_error = max_rel_error.max(rel_err);
-                            total_compared += 1;
-                        }
-                        max_abs_error = max_abs_error.max(local_max_abs);
-                        println!(
-                            "    Output {:?}: {} elems, max_abs_err={:.6e}",
-                            ext_id,
-                            milli_vals.len(),
-                            local_max_abs
-                        );
-                    }
-
-                    println!("  Elements compared: {}", total_compared);
-                    println!("  Max absolute error: {:.6e}", max_abs_error);
-                    println!("  Max relative error: {:.6e}", max_rel_error);
-
-                    if total_compared > 0 && max_abs_error < 1e-2 {
-                        println!("  RESULT: PASS");
-                    } else if total_compared > 0 {
-                        println!("  RESULT: MISMATCH (max abs error = {:.6e})", max_abs_error);
-                    } else {
-                        println!("  RESULT: NO ELEMENTS COMPARED");
-                    }
-
-                    println!("\n=== JIT Timing Summary ===");
-                    println!("  Milli interpreter: {:.3}s", milli_elapsed.as_secs_f64());
-                    println!("  NanoGraph lowering: {:.3}s", lower_elapsed.as_secs_f64());
-                    println!("  Partitioning:      {:.3}s", part_elapsed.as_secs_f64());
-                    println!("  JIT compilation:   {:.3}s", compile_elapsed.as_secs_f64());
-                    println!("  JIT execution:     {:.3}s", exec_elapsed.as_secs_f64());
-                }
-                Err(e) => {
-                    println!("  Compilation FAILED: {}", e);
-                }
-            }
-        }
-    }
 }
 
 fn compare_tensor_with_nano(
