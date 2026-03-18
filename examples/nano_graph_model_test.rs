@@ -371,6 +371,7 @@ fn main() {
         let mut num_perfect = 0u64;
         let mut num_close = 0u64;
         let mut num_bad = 0u64;
+        let mut error_map: HashMap<GlobalId, f64> = HashMap::new();
 
         for (idx, &tid) in check_ids.iter().enumerate() {
             let tam = &result.tensor_map[&tid];
@@ -404,34 +405,58 @@ fn main() {
                 local_max = local_max.max(diff);
             }
 
+            error_map.insert(tid, local_max);
             if local_max == 0.0 {
                 num_perfect += 1;
             } else if local_max < 1e-3 {
                 num_close += 1;
             } else {
                 num_bad += 1;
-                if first_bad.is_none() {
+                if num_bad <= 10 {
                     let (op_kind, input_info) = producers.get(&tid)
                         .map(|(k, inputs)| (k.clone(), inputs.clone()))
                         .unwrap_or_else(|| ("input".to_string(), vec![]));
-                    first_bad = Some((tid, op_kind.clone(), local_max));
+                    if first_bad.is_none() {
+                        first_bad = Some((tid, op_kind.clone(), local_max));
+                    }
                     let milli_shape = intermediates.get(&tid)
                         .map(|t| format!("{:?} {:?}", t.dtype(), t.shape()))
                         .unwrap_or_default();
-                    println!(
-                        "  FIRST DIVERGENCE: tensor {:?} (op: {}, shape: {}, {} elements): max_abs_err={:.6e}",
-                        tid, op_kind, milli_shape, milli_vals.len(), local_max
-                    );
+                    // Check whether each input is itself bad.
+                    let mut input_status = Vec::new();
                     for (inp_id, inp_shape) in &input_info {
-                        println!("    input {:?}: shape {:?}", inp_id, inp_shape);
+                        let status = if let Some(tam) = result.tensor_map.get(inp_id) {
+                            if tam.segments.is_empty() && tam.count <= 1_000_000 {
+                                // We checked this tensor — see if it's in error_map.
+                                error_map.get(inp_id).map(|e| {
+                                    if *e == 0.0 { "perfect".to_string() }
+                                    else if *e < 1e-3 { format!("close({:.1e})", e) }
+                                    else { format!("BAD({:.1e})", e) }
+                                }).unwrap_or_else(|| "not-checked".to_string())
+                            } else {
+                                format!("skipped(count={},segs={})", tam.count, tam.segments.len())
+                            }
+                        } else {
+                            "no-tensor-map".to_string()
+                        };
+                        input_status.push((inp_id, inp_shape, status));
                     }
-                    // Print first few mismatched elements.
-                    let mut shown = 0;
-                    for (i, (m, n)) in milli_vals.iter().zip(nano_f32.iter()).enumerate() {
-                        let diff = (m - n).abs();
-                        if diff > 1e-3 && shown < 5 {
-                            println!("    elem {}: milli={:.6} nano={:.6} diff={:.6}", i, m, n, diff);
-                            shown += 1;
+                    println!(
+                        "  BAD #{}: {:?} (op: {}, shape: {}, {} elems, err={:.2e})",
+                        num_bad, tid, op_kind, milli_shape, milli_vals.len(), local_max
+                    );
+                    for (inp_id, inp_shape, status) in &input_status {
+                        println!("    input {:?} {:?}: {}", inp_id, inp_shape, status);
+                    }
+                    if num_bad == 1 {
+                        // Print first few mismatched elements for the first bad tensor.
+                        let mut shown = 0;
+                        for (i, (m, n)) in milli_vals.iter().zip(nano_f32.iter()).enumerate() {
+                            let diff = (m - n).abs();
+                            if diff > 1e-3 && shown < 5 {
+                                println!("    elem {}: milli={:.6} nano={:.6} diff={:.6}", i, m, n, diff);
+                                shown += 1;
+                            }
                         }
                     }
                 }
