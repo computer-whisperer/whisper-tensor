@@ -23,6 +23,51 @@ pub fn interpret_milli_graph(
     Ok(graph.eval(inputs, &mut (), &mut backend)?.collect())
 }
 
+/// Run a MilliOpGraph through the interpreter and return ALL intermediate tensors,
+/// not just the final outputs. Useful for debugging lowering mismatches.
+pub fn interpret_milli_graph_all_intermediates(
+    graph: &MilliOpGraph,
+    inputs: &std::collections::HashMap<
+        crate::graph::GlobalId,
+        crate::numeric_tensor::NumericTensor<crate::DynRank>,
+    >,
+) -> Result<
+    std::collections::HashMap<
+        crate::graph::GlobalId,
+        crate::numeric_tensor::NumericTensor<crate::DynRank>,
+    >,
+    crate::milli_graph::MilliOpGraphError,
+> {
+    use crate::graph::{Graph, Node};
+    use crate::milli_graph::ops::MilliOp;
+
+    let mut backend = crate::backends::eval_backend::EvalBackend::NDArray;
+    let mut intermediates = inputs.clone();
+
+    // Map external input IDs to internal IDs.
+    for (ext_id, tensor) in inputs {
+        if let Some(&int_id) = graph.input_map.get(ext_id) {
+            intermediates.insert(int_id, tensor.clone());
+        }
+    }
+
+    for &op_id in graph.op_ordering() {
+        let Some(op) = graph.get_node_by_id(&op_id) else {
+            continue;
+        };
+        match op.eval(&intermediates, &mut backend) {
+            Ok(iter) => {
+                for (tid, val) in iter {
+                    intermediates.insert(tid, val);
+                }
+            }
+            Err(_) => {} // Skip ops that fail to eval (e.g., NonZero)
+        }
+    }
+
+    Ok(intermediates)
+}
+
 /// Return a sorted list of (op_kind, count) for all ops in the graph.
 pub fn op_census(graph: &MilliOpGraph) -> Vec<(String, usize)> {
     use crate::graph::{Graph, Node};

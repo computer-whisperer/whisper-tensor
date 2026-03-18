@@ -336,8 +336,117 @@ fn main() {
             nano_elapsed.as_secs_f64()
         );
 
-        // ---- Compare outputs ----
-        println!("\n=== Step 4: Output Comparison ===");
+        // ---- Compare ALL intermediate tensors to find first divergence ----
+        println!("\n=== Step 4: Intermediate Comparison (finding first divergence) ===");
+
+        // Collect all milli intermediate tensors.
+        let intermediates = whisper_tensor::compiler::interpret_milli_graph_all_intermediates(
+            &milli_graph, &milli_inputs,
+        )
+        .unwrap();
+
+        // Build ranges for all non-trivial tensor_map entries and request them from nano eval.
+        // We already have nano_results for the output ranges. Now request intermediate ranges.
+        let mut check_ids: Vec<GlobalId> = Vec::new();
+        let mut check_ranges: Vec<AtomRange> = Vec::new();
+        for (&tid, tam) in &result.tensor_map {
+            if tam.count == 0 || tam.count > 1_000_000 {
+                continue; // Skip huge tensors and empty ones
+            }
+            if !tam.segments.is_empty() {
+                continue; // Skip segmented (concat) tensors for now
+            }
+            if intermediates.get(&tid).is_none() {
+                continue; // No milli reference
+            }
+            check_ids.push(tid);
+            check_ranges.push(AtomRange {
+                base: tam.base_id,
+                count: tam.count,
+                dtype: tam.dtype,
+            });
+        }
+        println!("  Checking {} intermediate tensors...", check_ids.len());
+
+        let t_check = Instant::now();
+        let check_results =
+            whisper_tensor::nano_graph::eval::eval(&result.graph, &eval_input_refs, &check_ranges);
+        println!(
+            "  Eval for intermediates: {:.1}s",
+            t_check.elapsed().as_secs_f64()
+        );
+
+        // Compare each intermediate.
+        let mut first_bad: Option<(GlobalId, String, f64)> = None;
+        let mut num_perfect = 0u64;
+        let mut num_close = 0u64;
+        let mut num_bad = 0u64;
+
+        for (idx, &tid) in check_ids.iter().enumerate() {
+            let tam = &result.tensor_map[&tid];
+            let milli_tensor = &intermediates[&tid];
+
+            let Ok(f32_t) = milli_tensor.cast(DType::F32, &mut backend) else { continue };
+            let flat = f32_t.flatten().unwrap();
+            let nd = flat.to_ndarray().unwrap();
+            let milli_vals: Vec<f32> = nd.try_into().unwrap();
+
+            let nano_tensor = &check_results[idx];
+            let nano_f32: Vec<f32> = match nano_tensor {
+                NDArrayNumericTensor::F32(a) => a.iter().copied().collect(),
+                other => {
+                    let cast = NumericTensor::from(other.clone())
+                        .cast(DType::F32, &mut backend)
+                        .unwrap();
+                    let flat = cast.flatten().unwrap();
+                    let nd = flat.to_ndarray().unwrap();
+                    nd.try_into().unwrap()
+                }
+            };
+
+            if milli_vals.len() != nano_f32.len() {
+                continue;
+            }
+
+            let mut local_max = 0.0f64;
+            for (m, n) in milli_vals.iter().zip(nano_f32.iter()) {
+                let diff = (m - n).abs() as f64;
+                local_max = local_max.max(diff);
+            }
+
+            if local_max == 0.0 {
+                num_perfect += 1;
+            } else if local_max < 1e-3 {
+                num_close += 1;
+            } else {
+                num_bad += 1;
+                if first_bad.is_none() {
+                    let op_kind = "unknown".to_string();
+                    first_bad = Some((tid, op_kind.clone(), local_max));
+                    println!(
+                        "  FIRST DIVERGENCE: tensor {:?} (op: {}, {} elements): max_abs_err={:.6e}",
+                        tid, op_kind, milli_vals.len(), local_max
+                    );
+                    // Print first few mismatched elements.
+                    let mut shown = 0;
+                    for (i, (m, n)) in milli_vals.iter().zip(nano_f32.iter()).enumerate() {
+                        let diff = (m - n).abs();
+                        if diff > 1e-3 && shown < 5 {
+                            println!("    elem {}: milli={:.6} nano={:.6} diff={:.6}", i, m, n, diff);
+                            shown += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        println!(
+            "\n  Summary: {} perfect, {} close (<1e-3), {} bad (>1e-3)",
+            num_perfect, num_close, num_bad
+        );
+
+        // ---- Also compare final outputs ----
+        println!("\n=== Step 5: Output Comparison ===");
         let mut total_compared = 0u64;
         let mut max_abs_error: f64 = 0.0;
         let mut max_rel_error: f64 = 0.0;

@@ -443,6 +443,22 @@ fn scalars_to_tensor(
             let data: Vec<u32> = scalars.iter().map(|s| s.to_f64() as u32).collect();
             NDArrayNumericTensor::U32(ArcArray::from_shape_vec(shape, data).unwrap())
         }
+        crate::dtype::DType::I8 => {
+            let data: Vec<i8> = scalars.iter().map(|s| s.to_f64() as i8).collect();
+            NDArrayNumericTensor::I8(ArcArray::from_shape_vec(shape, data).unwrap())
+        }
+        crate::dtype::DType::U8 => {
+            let data: Vec<u8> = scalars.iter().map(|s| s.to_f64() as u8).collect();
+            NDArrayNumericTensor::U8(ArcArray::from_shape_vec(shape, data).unwrap())
+        }
+        crate::dtype::DType::I16 => {
+            let data: Vec<i16> = scalars.iter().map(|s| s.to_f64() as i16).collect();
+            NDArrayNumericTensor::I16(ArcArray::from_shape_vec(shape, data).unwrap())
+        }
+        crate::dtype::DType::U16 => {
+            let data: Vec<u16> = scalars.iter().map(|s| s.to_f64() as u16).collect();
+            NDArrayNumericTensor::U16(ArcArray::from_shape_vec(shape, data).unwrap())
+        }
         crate::dtype::DType::BOOL => {
             let data: Vec<bool> = scalars.iter().map(|s| s.to_f64() != 0.0).collect();
             NDArrayNumericTensor::BOOL(ArcArray::from_shape_vec(shape, data).unwrap())
