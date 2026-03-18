@@ -15,11 +15,15 @@ use whisper_tensor::dtype::DType;
 use whisper_tensor::graph::GlobalId;
 use whisper_tensor::model::Model;
 use whisper_tensor::nano_graph::lower;
+use whisper_tensor::nano_graph::pattern::AtomRange;
+use whisper_tensor::nano_graph::AtomId;
 use whisper_tensor::numeric_scalar::NumericScalar;
 use whisper_tensor::numeric_tensor::NumericTensor;
 use whisper_tensor::tensor_info::TensorInfo;
 use whisper_tensor_import::identify_and_load;
 use whisper_tensor_import::onnx_graph::WeightStorageStrategy;
+
+use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
 
 fn main() {
     let onnx_path = std::env::args()
@@ -240,7 +244,10 @@ fn main() {
     println!("  num_atoms = {}", num_atoms);
     println!("  Required buffer = {:.1} GB", buffer_gb);
 
-    let max_buffer_gb = 48.0; // Skip NumericScalar interpreter for large graphs (use JIT path instead)
+    // The eval uses per-group buffers with refcount freeing, so actual peak
+    // memory is much less than total_atoms * sizeof(NumericScalar). Allow up to
+    // 500 GB of "theoretical" buffer since the real peak is ~5% of that.
+    let max_buffer_gb = 500.0;
     let nano_feasible = buffer_gb <= max_buffer_gb;
 
     if !nano_feasible {
@@ -255,139 +262,150 @@ fn main() {
     } else {
         println!("  Buffer fits in memory, proceeding with nano execution");
 
-        // Build nano inputs from all tensors via tensor_map.
-        let mut nano_inputs: HashMap<u64, NumericScalar> = HashMap::new();
+        // Build nano inputs from input_tensors (tensor-based API).
         let mut backend = whisper_tensor::backends::eval_backend::EvalBackend::NDArray;
-        for (ext_id, tensor) in &milli_inputs {
-            let Some(&int_id) = milli_graph.input_map.get(ext_id) else {
-                continue;
-            };
-            let Some(tam) = result.tensor_map.get(&int_id) else {
-                continue;
-            };
-            let dtype = tensor.dtype();
-            let f32_tensor = tensor.cast(DType::F32, &mut backend).unwrap();
-            let flat = f32_tensor.flatten().unwrap();
-            let nd = flat.to_ndarray().unwrap();
-            let v: Vec<f32> = nd.try_into().unwrap();
+        let mut nd_tensors: Vec<NDArrayNumericTensor<DynRank>> = Vec::new();
+        let mut eval_inputs: Vec<(AtomId, usize)> = Vec::new(); // (base_id, index into nd_tensors)
 
-            if v.len() != tam.count as usize {
-                println!(
-                    "    WARNING: tensor {:?} has {} elements but tensor_map says {} atoms",
-                    ext_id,
-                    v.len(),
-                    tam.count
-                );
-                continue;
-            }
+        for it in result.graph.input_tensors() {
+            // Find external ID for this input tensor's internal tensor_id.
+            let ext_id = milli_graph
+                .input_map
+                .iter()
+                .find(|(_, int)| **int == it.tensor_id)
+                .map(|(ext, _)| *ext);
 
-            for (i, &val) in v.iter().enumerate() {
-                let atom_id = tam.base_id.0 + i as u64;
-                let scalar = match dtype {
-                    DType::I64 => NumericScalar::I64(val as i64),
-                    DType::I32 => NumericScalar::I32(val as i32),
-                    _ => NumericScalar::F32(val),
-                };
-                nano_inputs.insert(atom_id, scalar);
+            if let Some(ext_id) = ext_id {
+                if let Some(tensor) = milli_inputs.get(&ext_id) {
+                    let nd = tensor.to_ndarray().unwrap();
+                    let idx = nd_tensors.len();
+                    nd_tensors.push(nd);
+                    eval_inputs.push((it.base_id, idx));
+                }
             }
         }
+
+        let eval_input_refs: Vec<(AtomId, &NDArrayNumericTensor<DynRank>)> = eval_inputs
+            .iter()
+            .map(|&(base, idx)| (base, &nd_tensors[idx]))
+            .collect();
+
         println!(
-            "  Numeric overrides (all tensors): {} atoms",
-            nano_inputs.len()
+            "  Input tensors for eval: {} ranges",
+            eval_input_refs.len()
         );
 
-        // ---- Run nano interpreter ----
-        println!("\n=== Step 3: Nano Interpreter ===");
-        use whisper_tensor::nano_graph::eval::NanoEval;
-
-        let t_nano = Instant::now();
-        let nano_eval = NanoEval::eval_with_overrides(&result.graph, &nano_inputs);
-        // Build lookup for output tensor atoms (compare_tensor_with_nano
-        // looks up atoms by base_id + offset from TensorAtomMapInfo).
-        let mut nano_outputs: HashMap<u64, NumericScalar> = HashMap::new();
-        for tam in result.tensor_map.values() {
-            for i in 0..tam.count {
-                let aid = tam.base_id.0 + i;
-                nano_outputs.insert(
-                    aid,
-                    nano_eval
-                        .get_scalar(whisper_tensor::nano_graph::AtomId(aid))
-                        .clone(),
-                );
-            }
-        }
-        let nano_elapsed = t_nano.elapsed();
-        println!(
-            "  Nano interpreter completed in {:.1}s",
-            nano_elapsed.as_secs_f64()
-        );
-
-        // ---- Step 3: Compare outputs ----
-        println!("\n=== Step 4: Output Comparison ===");
-
-        // Build reverse output_map: external_id -> internal_id
+        // Build output ranges from milli_outputs via tensor_map.
         let reverse_output_map: HashMap<GlobalId, GlobalId> = milli_graph
             .output_map
             .as_ref()
             .map(|m| m.iter().map(|(&int, &ext)| (ext, int)).collect())
             .unwrap_or_default();
 
+        let mut output_ext_ids: Vec<GlobalId> = Vec::new();
+        let mut output_tams: Vec<&lower::TensorAtomMapInfo> = Vec::new();
+        let mut output_ranges: Vec<AtomRange> = Vec::new();
+
+        for (ext_id, _milli_tensor) in &milli_outputs {
+            let internal_id = reverse_output_map.get(ext_id).unwrap_or(ext_id);
+            let Some(tam) = result
+                .tensor_map
+                .get(internal_id)
+                .or_else(|| result.tensor_map.get(ext_id))
+            else {
+                println!("  WARNING: Output {:?} not found in tensor_map", ext_id);
+                continue;
+            };
+            output_ext_ids.push(*ext_id);
+            output_tams.push(tam);
+            output_ranges.push(AtomRange {
+                base: tam.base_id,
+                count: tam.count,
+                dtype: tam.dtype,
+            });
+        }
+
+        // ---- Run nano interpreter ----
+        println!("\n=== Step 3: Nano Interpreter ===");
+        let t_nano = Instant::now();
+        let nano_results =
+            whisper_tensor::nano_graph::eval::eval(&result.graph, &eval_input_refs, &output_ranges);
+        let nano_elapsed = t_nano.elapsed();
+        println!(
+            "  Nano interpreter completed in {:.1}s",
+            nano_elapsed.as_secs_f64()
+        );
+
+        // ---- Compare outputs ----
+        println!("\n=== Step 4: Output Comparison ===");
         let mut total_compared = 0u64;
         let mut max_abs_error: f64 = 0.0;
         let mut max_rel_error: f64 = 0.0;
-        let mut comparison_errors = Vec::new();
 
-        for (ext_id, milli_tensor) in &milli_outputs {
-            // Find the internal ID
-            let internal_id = reverse_output_map.get(ext_id).unwrap_or(ext_id);
+        for (i, ext_id) in output_ext_ids.iter().enumerate() {
+            let milli_tensor = &milli_outputs[ext_id];
 
-            // Look up in tensor_map
-            let Some(tam) = result.tensor_map.get(internal_id) else {
-                // Try the external ID as a fallback
-                let Some(tam) = result.tensor_map.get(ext_id) else {
-                    comparison_errors.push(format!(
-                        "Output {:?} (internal {:?}) not found in tensor_map",
-                        ext_id, internal_id
-                    ));
-                    continue;
-                };
-                compare_tensor_with_nano(
-                    ext_id,
-                    milli_tensor,
-                    tam,
-                    &nano_outputs,
-                    &mut total_compared,
-                    &mut max_abs_error,
-                    &mut max_rel_error,
-                    &mut backend,
-                    &mut comparison_errors,
-                );
+            // Get milli values as f32.
+            let Ok(f32_tensor) = milli_tensor.cast(DType::F32, &mut backend) else {
+                println!("    Output {:?}: failed to cast to F32", ext_id);
                 continue;
             };
+            let flat = f32_tensor.flatten().unwrap();
+            let nd = flat.to_ndarray().unwrap();
+            let milli_values: Vec<f32> = nd.try_into().unwrap();
 
-            compare_tensor_with_nano(
+            // Get nano values as f32.
+            let nano_tensor = &nano_results[i];
+            let nano_f32 = match nano_tensor {
+                NDArrayNumericTensor::F32(a) => a.iter().copied().collect::<Vec<f32>>(),
+                other => {
+                    let cast = NumericTensor::from(other.clone())
+                        .cast(DType::F32, &mut backend)
+                        .unwrap();
+                    let flat = cast.flatten().unwrap();
+                    let nd = flat.to_ndarray().unwrap();
+                    nd.try_into().unwrap()
+                }
+            };
+
+            if milli_values.len() != nano_f32.len() {
+                println!(
+                    "    Output {:?}: milli has {} elements, nano has {}",
+                    ext_id,
+                    milli_values.len(),
+                    nano_f32.len()
+                );
+                continue;
+            }
+
+            let mut local_max_abs = 0.0f64;
+            let mut local_max_rel = 0.0f64;
+            for (m, n) in milli_values.iter().zip(nano_f32.iter()) {
+                let abs_err = (m - n).abs() as f64;
+                let rel_err = if m.abs() > 1e-8 {
+                    abs_err / m.abs() as f64
+                } else {
+                    0.0
+                };
+                local_max_abs = local_max_abs.max(abs_err);
+                local_max_rel = local_max_rel.max(rel_err);
+                total_compared += 1;
+            }
+
+            println!(
+                "    Output {:?}: {} elements, max_abs_err={:.6e}, max_rel_err={:.6e}",
                 ext_id,
-                milli_tensor,
-                tam,
-                &nano_outputs,
-                &mut total_compared,
-                &mut max_abs_error,
-                &mut max_rel_error,
-                &mut backend,
-                &mut comparison_errors,
+                milli_values.len(),
+                local_max_abs,
+                local_max_rel
             );
+            max_abs_error = max_abs_error.max(local_max_abs);
+            max_rel_error = max_rel_error.max(local_max_rel);
         }
 
-        println!("  Elements compared: {}", total_compared);
+        println!("\n  Elements compared: {}", total_compared);
         println!("  Max absolute error: {:.6e}", max_abs_error);
         println!("  Max relative error: {:.6e}", max_rel_error);
-
-        if !comparison_errors.is_empty() {
-            println!("  Comparison issues ({}):", comparison_errors.len());
-            for e in &comparison_errors {
-                println!("    {}", e);
-            }
-        }
 
         if total_compared > 0 && max_abs_error < 1e-3 {
             println!("  RESULT: PASS (max abs error < 1e-3)");
@@ -403,80 +421,4 @@ fn main() {
         println!("  NanoGraph lowering: {:.3}s", lower_elapsed.as_secs_f64());
         println!("  Nano interpreter:  {:.3}s", nano_elapsed.as_secs_f64());
     }
-}
-
-fn compare_tensor_with_nano(
-    ext_id: &GlobalId,
-    milli_tensor: &NumericTensor<DynRank>,
-    tam: &lower::TensorAtomMapInfo,
-    nano_outputs: &HashMap<u64, NumericScalar>,
-    total_compared: &mut u64,
-    max_abs_error: &mut f64,
-    max_rel_error: &mut f64,
-    backend: &mut whisper_tensor::backends::eval_backend::EvalBackend,
-    comparison_errors: &mut Vec<String>,
-) {
-    // Cast milli output to f32 and flatten
-    let Ok(f32_tensor) = milli_tensor.cast(DType::F32, backend) else {
-        comparison_errors.push(format!("Output {:?}: failed to cast to F32", ext_id));
-        return;
-    };
-    let Ok(flat) = f32_tensor.flatten() else {
-        comparison_errors.push(format!("Output {:?}: failed to flatten", ext_id));
-        return;
-    };
-    let Ok(nd) = flat.to_ndarray() else {
-        comparison_errors.push(format!("Output {:?}: failed to convert to ndarray", ext_id));
-        return;
-    };
-    let Ok(milli_values): Result<Vec<f32>, _> = nd.try_into() else {
-        comparison_errors.push(format!("Output {:?}: failed to extract f32 values", ext_id));
-        return;
-    };
-
-    if milli_values.len() != tam.count as usize {
-        comparison_errors.push(format!(
-            "Output {:?}: milli has {} elements but tensor_map has {} atoms",
-            ext_id,
-            milli_values.len(),
-            tam.count
-        ));
-        return;
-    }
-
-    let mut local_max_abs = 0.0f64;
-    let mut local_max_rel = 0.0f64;
-    let mut compared = 0u64;
-
-    for (i, &milli_val) in milli_values.iter().enumerate() {
-        let atom_id = tam.base_id.0 + i as u64;
-        let Some(nano_scalar) = nano_outputs.get(&atom_id) else {
-            comparison_errors.push(format!(
-                "Output {:?}: atom {} not found in nano outputs",
-                ext_id, atom_id
-            ));
-            return;
-        };
-
-        let nano_val = nano_scalar.to_f64() as f32;
-        let abs_err = (milli_val - nano_val).abs() as f64;
-        let rel_err = if milli_val.abs() > 1e-8 {
-            abs_err / milli_val.abs() as f64
-        } else {
-            0.0
-        };
-
-        local_max_abs = local_max_abs.max(abs_err);
-        local_max_rel = local_max_rel.max(rel_err);
-        compared += 1;
-    }
-
-    println!(
-        "    Output {:?}: {} elements, max_abs_err={:.6e}, max_rel_err={:.6e}",
-        ext_id, compared, local_max_abs, local_max_rel
-    );
-
-    *total_compared += compared;
-    *max_abs_error = max_abs_error.max(local_max_abs);
-    *max_rel_error = max_rel_error.max(local_max_rel);
 }

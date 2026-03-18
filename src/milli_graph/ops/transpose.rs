@@ -114,7 +114,7 @@ impl Transpose {
         };
 
         // Get input known dim sizes (only the Known dims, in original order).
-        let in_known_sizes: Vec<u64> = in_map
+        let _in_known_sizes: Vec<u64> = in_map
             .layout
             .iter()
             .filter_map(|d| {
@@ -125,7 +125,10 @@ impl Transpose {
                 }
             })
             .collect();
-        let in_strides = TensorAtomMap::compute_strides(&in_known_sizes);
+        // Use the input's actual physical strides (may already be non-row-major
+        // from a prior Transpose). Do NOT recompute row-major — that loses the
+        // physical layout.
+        let in_strides = &in_map.known_strides;
         let _out_strides = TensorAtomMap::compute_strides(&out_known_dims);
 
         // We need to map between original dim indices and known-dim indices.

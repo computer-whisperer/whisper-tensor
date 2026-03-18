@@ -3143,4 +3143,425 @@ mod tests {
             ],
         );
     }
+
+    // =========================================================================
+    // GPT-2 pattern tests — scaling toward full model coverage
+    // =========================================================================
+
+    #[test]
+    fn test_gather_2d_indices() {
+        // Embedding lookup: data=[10, 4], indices=[2, 3] → [2, 3, 4]
+        check_integrity(
+            |g, rng| {
+                let data = g.add_input(rng);
+                let indices = g.add_input(rng);
+                let out = crate::milli_graph::ops::Gather::push_new(g, data, indices, 0, rng);
+                (vec![data, indices], vec![out])
+            },
+            vec![
+                NumericTensor::from_vec_shape(
+                    (0..40).map(|i| (i as f32) * 0.1).collect(),
+                    vec![10, 4],
+                )
+                .unwrap(),
+                NumericTensor::from_vec_shape(vec![0i64, 3, 7, 1, 5, 9], vec![2, 3]).unwrap(),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_gather_then_add() {
+        // Embedding lookup + position embedding add: typical GPT-2 input
+        // token_embed[10, 8] gathered by indices[2, 3] → [2, 3, 8]
+        // pos_embed[3, 8] broadcast-added → [2, 3, 8]
+        check_integrity(
+            |g, rng| {
+                let tok_data = g.add_input(rng);
+                let pos_data = g.add_input(rng);
+                let indices = g.add_input(rng);
+                let tok_emb = crate::milli_graph::ops::Gather::push_new(g, tok_data, indices, 0, rng);
+                let out = crate::milli_graph::ops::SimpleBinary::add(g, tok_emb, pos_data, rng);
+                (vec![tok_data, pos_data, indices], vec![out])
+            },
+            vec![
+                NumericTensor::from_vec_shape(
+                    (0..80).map(|i| (i as f32) * 0.01).collect(),
+                    vec![10, 8],
+                )
+                .unwrap(),
+                NumericTensor::from_vec_shape(
+                    (0..24).map(|i| (i as f32) * 0.1).collect(),
+                    vec![3, 8],
+                )
+                .unwrap(),
+                NumericTensor::from_vec_shape(vec![0i64, 3, 7, 1, 5, 9], vec![2, 3]).unwrap(),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_reshape_split_heads() {
+        // GPT-2 head split: [2, 4, 12] → reshape to [2, 4, 3, 4]
+        check_integrity(
+            |g, rng| {
+                let a = g.add_input(rng);
+                let shape = g.add_input(rng);
+                let b = crate::milli_graph::ops::Reshape::push_new(g, a, shape, false, rng);
+                (vec![a, shape], vec![b])
+            },
+            vec![
+                NumericTensor::from_vec_shape(
+                    (0..96).map(|i| (i as f32) * 0.01).collect(),
+                    vec![2, 4, 12],
+                )
+                .unwrap(),
+                NumericTensor::from_vec_shape(vec![2i64, 4, 3, 4], vec![4]).unwrap(),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_transpose_4d_attention() {
+        // GPT-2 attention head reorder: [B, S, H, D] → [B, H, S, D]
+        // perm = [0, 2, 1, 3]
+        check_integrity(
+            |g, rng| {
+                let a = g.add_input(rng);
+                let b = crate::milli_graph::ops::Transpose::push_new(
+                    g, a, Some(vec![0, 2, 1, 3]), rng,
+                );
+                (vec![a], vec![b])
+            },
+            vec![NumericTensor::from_vec_shape(
+                (0..48).map(|i| (i as f32) * 0.1).collect(),
+                vec![2, 3, 2, 4], // [B=2, S=3, H=2, D=4]
+            )
+            .unwrap()],
+        );
+    }
+
+    #[test]
+    fn test_matmul_4d_batched() {
+        // Attention scores: [B, H, S, D] @ [B, H, D, S] → [B, H, S, S]
+        // B=1, H=2, S=3, D=4
+        check_integrity(
+            |g, rng| {
+                let q = g.add_input(rng);
+                let k = g.add_input(rng);
+                let c = crate::milli_graph::ops::MatMul::push_new_default_precision(
+                    g, q, k, DType::F32, rng,
+                );
+                (vec![q, k], vec![c])
+            },
+            vec![
+                NumericTensor::from_vec_shape(
+                    (0..24).map(|i| (i as f32) * 0.1).collect(),
+                    vec![1, 2, 3, 4], // Q: [B, H, S, D]
+                )
+                .unwrap(),
+                NumericTensor::from_vec_shape(
+                    (0..24).map(|i| (i as f32) * 0.1).collect(),
+                    vec![1, 2, 4, 3], // K^T: [B, H, D, S]
+                )
+                .unwrap(),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_reshape_transpose_matmul_chain() {
+        // Full head split + transpose + attention score pattern:
+        // Q [2, 3, 8] → reshape [2, 3, 2, 4] → transpose [2, 2, 3, 4] → matmul with K^T [2, 2, 4, 3]
+        check_integrity(
+            |g, rng| {
+                let q_flat = g.add_input(rng);
+                let q_shape = g.add_input(rng);
+                let k_t = g.add_input(rng);
+                let q_4d = crate::milli_graph::ops::Reshape::push_new(
+                    g, q_flat, q_shape, false, rng,
+                );
+                let q_perm = crate::milli_graph::ops::Transpose::push_new(
+                    g, q_4d, Some(vec![0, 2, 1, 3]), rng,
+                );
+                let scores = crate::milli_graph::ops::MatMul::push_new_default_precision(
+                    g, q_perm, k_t, DType::F32, rng,
+                );
+                (vec![q_flat, q_shape, k_t], vec![scores])
+            },
+            vec![
+                NumericTensor::from_vec_shape(
+                    (0..48).map(|i| (i as f32) * 0.01).collect(),
+                    vec![2, 3, 8], // Q: [B=2, S=3, D=8]
+                )
+                .unwrap(),
+                NumericTensor::from_vec_shape(vec![2i64, 3, 2, 4], vec![4]).unwrap(),
+                NumericTensor::from_vec_shape(
+                    (0..48).map(|i| (i as f32) * 0.01).collect(),
+                    vec![2, 2, 4, 3], // K^T: [B=2, H=2, D=4, S=3]
+                )
+                .unwrap(),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_softmax_pattern() {
+        // Softmax: ReduceMax → Sub → Exp → ReduceSum → Div
+        // input [2, 4]
+        check_integrity(
+            |g, rng| {
+                use crate::backends::ndarray_backend::NDArrayNumericTensor;
+                use ndarray::{ArcArray, IxDyn};
+
+                let x = g.add_input(rng);
+                let axes_tensor = NDArrayNumericTensor::I64(
+                    ArcArray::from_shape_vec(IxDyn(&[1]), vec![1i64]).unwrap(),
+                );
+                let axes = crate::milli_graph::ops::Constant::push_new(g, axes_tensor, rng);
+                let axes2 = crate::milli_graph::ops::Constant::push_new(
+                    g,
+                    NDArrayNumericTensor::I64(
+                        ArcArray::from_shape_vec(IxDyn(&[1]), vec![1i64]).unwrap(),
+                    ),
+                    rng,
+                );
+
+                // max_val = ReduceMax(x, axis=1, keepdims=true)
+                let max_val =
+                    crate::milli_graph::ops::ReduceMax::push_new(g, x, Some(axes), true, false, rng);
+                // shifted = x - max_val
+                let shifted = crate::milli_graph::ops::SimpleBinary::sub(g, x, max_val, rng);
+                // exp_val = Exp(shifted)
+                let exp_val = crate::milli_graph::ops::SimpleUnaryOp::exp(g, shifted, rng);
+                // sum_exp = ReduceSum(exp_val, axis=1, keepdims=true)
+                let sum_exp = crate::milli_graph::ops::ReduceSum::push_new(
+                    g, exp_val, Some(axes2), true, false, rng,
+                );
+                // result = exp_val / sum_exp
+                let result = crate::milli_graph::ops::SimpleBinary::div(g, exp_val, sum_exp, rng);
+
+                (vec![x], vec![result])
+            },
+            vec![NumericTensor::from_vec_shape(
+                vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 1.0, 0.5, 2.0],
+                vec![2, 4],
+            )
+            .unwrap()],
+        );
+    }
+
+    #[test]
+    fn test_layernorm_pattern() {
+        // LayerNorm: ReduceMean → Sub → Pow(2) → ReduceMean → Add(eps) → Sqrt → Div → Mul(gamma) → Add(beta)
+        // input [2, 4], gamma [4], beta [4]
+        check_integrity(
+            |g, rng| {
+                use crate::backends::ndarray_backend::NDArrayNumericTensor;
+                use ndarray::{ArcArray, IxDyn};
+
+                let x = g.add_input(rng);
+                let gamma = g.add_input(rng);
+                let beta = g.add_input(rng);
+
+                let axes1 = crate::milli_graph::ops::Constant::push_new(
+                    g,
+                    NDArrayNumericTensor::I64(
+                        ArcArray::from_shape_vec(IxDyn(&[1]), vec![-1i64]).unwrap(),
+                    ),
+                    rng,
+                );
+                let axes2 = crate::milli_graph::ops::Constant::push_new(
+                    g,
+                    NDArrayNumericTensor::I64(
+                        ArcArray::from_shape_vec(IxDyn(&[1]), vec![-1i64]).unwrap(),
+                    ),
+                    rng,
+                );
+                let pow2 = crate::milli_graph::ops::Constant::push_new(
+                    g,
+                    NDArrayNumericTensor::F32(
+                        ArcArray::from_shape_vec(IxDyn(&[1]), vec![2.0f32]).unwrap(),
+                    ),
+                    rng,
+                );
+                let eps = crate::milli_graph::ops::Constant::push_new(
+                    g,
+                    NDArrayNumericTensor::F32(
+                        ArcArray::from_shape_vec(IxDyn(&[1]), vec![1e-5f32]).unwrap(),
+                    ),
+                    rng,
+                );
+
+                let mean = crate::milli_graph::ops::ReduceMean::push_new(
+                    g, x, Some(axes1), true, false, rng,
+                );
+                let centered = crate::milli_graph::ops::SimpleBinary::sub(g, x, mean, rng);
+                let squared = crate::milli_graph::ops::Pow::push_new(g, centered, pow2, rng);
+                let var = crate::milli_graph::ops::ReduceMean::push_new(
+                    g, squared, Some(axes2), true, false, rng,
+                );
+                let var_eps = crate::milli_graph::ops::SimpleBinary::add(g, var, eps, rng);
+                let std_dev = crate::milli_graph::ops::SimpleUnaryOp::sqrt(g, var_eps, rng);
+                let normed = crate::milli_graph::ops::SimpleBinary::div(g, centered, std_dev, rng);
+                let scaled = crate::milli_graph::ops::SimpleBinary::mul(g, normed, gamma, rng);
+                let out = crate::milli_graph::ops::SimpleBinary::add(g, scaled, beta, rng);
+
+                (vec![x, gamma, beta], vec![out])
+            },
+            vec![
+                NumericTensor::from_vec_shape(
+                    vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 1.0, 0.5, 2.0],
+                    vec![2, 4],
+                )
+                .unwrap(),
+                NumericTensor::from_vec_shape(vec![1.0f32, 1.0, 1.0, 1.0], vec![4]).unwrap(),
+                NumericTensor::from_vec_shape(vec![0.0f32, 0.0, 0.0, 0.0], vec![4]).unwrap(),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_double_transpose_matmul() {
+        // Transpose twice then matmul — isolates the K^T double-transpose pattern.
+        // K [1, 3, 4] → reshape [1, 3, 2, 2] → transpose [0,2,1,3] → [1, 2, 3, 2]
+        //   → transpose [0,1,3,2] → [1, 2, 2, 3]
+        // Q [1, 2, 3, 2] (direct input)
+        // scores = Q @ K^T = [1, 2, 3, 3]
+
+        check_integrity(
+            |g, rng| {
+                let k_flat = g.add_input(rng);
+                let k_shape = g.add_input(rng);
+                let q = g.add_input(rng);
+
+                let k4 = crate::milli_graph::ops::Reshape::push_new(
+                    g, k_flat, k_shape, false, rng,
+                );
+                let kt1 = crate::milli_graph::ops::Transpose::push_new(
+                    g, k4, Some(vec![0, 2, 1, 3]), rng,
+                );
+                let kt2 = crate::milli_graph::ops::Transpose::push_new(
+                    g, kt1, Some(vec![0, 1, 3, 2]), rng,
+                );
+                let scores = crate::milli_graph::ops::MatMul::push_new_default_precision(
+                    g, q, kt2, DType::F32, rng,
+                );
+
+                (vec![k_flat, k_shape, q], vec![scores])
+            },
+            vec![
+                // K [1, 3, 4]
+                NumericTensor::from_vec_shape(
+                    (0..12).map(|i| (i as f32) * 0.1).collect(),
+                    vec![1, 3, 4],
+                )
+                .unwrap(),
+                // shape for [1, 3, 2, 2]
+                NumericTensor::from_vec_shape(vec![1i64, 3, 2, 2], vec![4]).unwrap(),
+                // Q [1, 2, 3, 2]
+                NumericTensor::from_vec_shape(
+                    (0..12).map(|i| (i as f32) * 0.1).collect(),
+                    vec![1, 2, 3, 2],
+                )
+                .unwrap(),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_attention_block_small() {
+        // Minimal attention: Q/K/V projections → head split → attention scores → output
+        // B=1, S=3, D=4, H=2, D_h=2
+        check_integrity(
+            |g, rng| {
+                let x = g.add_input(rng);     // [1, 3, 4]
+                let wq = g.add_input(rng);    // [4, 4]
+                let wk = g.add_input(rng);    // [4, 4]
+                let wv = g.add_input(rng);    // [4, 4]
+
+                // Q = x @ Wq, K = x @ Wk, V = x @ Wv  → all [1, 3, 4]
+                let q = crate::milli_graph::ops::MatMul::push_new_default_precision(
+                    g, x, wq, DType::F32, rng,
+                );
+                let k = crate::milli_graph::ops::MatMul::push_new_default_precision(
+                    g, x, wk, DType::F32, rng,
+                );
+                let v = crate::milli_graph::ops::MatMul::push_new_default_precision(
+                    g, x, wv, DType::F32, rng,
+                );
+
+                // Reshape to [1, 3, 2, 2] for head split
+                let shape4d = g.add_input(rng);
+                let q4 = crate::milli_graph::ops::Reshape::push_new(g, q, shape4d, false, rng);
+
+                // We need separate shape tensors for K and V since tensor IDs
+                // are consumed (each Reshape reads a different shape tensor).
+                let shape4d_k = g.add_input(rng);
+                let shape4d_v = g.add_input(rng);
+                let k4 = crate::milli_graph::ops::Reshape::push_new(g, k, shape4d_k, false, rng);
+                let v4 = crate::milli_graph::ops::Reshape::push_new(g, v, shape4d_v, false, rng);
+
+                // Transpose to [1, 2, 3, 2]  (B, H, S, D_h)
+                let qt = crate::milli_graph::ops::Transpose::push_new(
+                    g, q4, Some(vec![0, 2, 1, 3]), rng,
+                );
+                let kt = crate::milli_graph::ops::Transpose::push_new(
+                    g, k4, Some(vec![0, 2, 1, 3]), rng,
+                );
+                let vt = crate::milli_graph::ops::Transpose::push_new(
+                    g, v4, Some(vec![0, 2, 1, 3]), rng,
+                );
+
+                // K^T: [1, 2, 3, 2] → [1, 2, 2, 3]
+                let kt_t = crate::milli_graph::ops::Transpose::push_new(
+                    g, kt, Some(vec![0, 1, 3, 2]), rng,
+                );
+
+                // Attention scores: Q @ K^T = [1, 2, 3, 2] @ [1, 2, 2, 3] → [1, 2, 3, 3]
+                let scores = crate::milli_graph::ops::MatMul::push_new_default_precision(
+                    g, qt, kt_t, DType::F32, rng,
+                );
+
+                // Attention output: scores @ V = [1, 2, 3, 3] @ [1, 2, 3, 2] → [1, 2, 3, 2]
+                let attn_out = crate::milli_graph::ops::MatMul::push_new_default_precision(
+                    g, scores, vt, DType::F32, rng,
+                );
+
+                (
+                    vec![x, wq, wk, wv, shape4d, shape4d_k, shape4d_v],
+                    vec![scores, attn_out],
+                )
+            },
+            vec![
+                // x [1, 3, 4]
+                NumericTensor::from_vec_shape(
+                    (0..12).map(|i| (i as f32) * 0.1).collect(),
+                    vec![1, 3, 4],
+                )
+                .unwrap(),
+                // Wq [4, 4]
+                NumericTensor::from_vec_shape(
+                    (0..16).map(|i| (i as f32) * 0.05 - 0.4).collect(),
+                    vec![4, 4],
+                )
+                .unwrap(),
+                // Wk [4, 4]
+                NumericTensor::from_vec_shape(
+                    (0..16).map(|i| (i as f32) * 0.03 + 0.1).collect(),
+                    vec![4, 4],
+                )
+                .unwrap(),
+                // Wv [4, 4]
+                NumericTensor::from_vec_shape(
+                    (0..16).map(|i| (i as f32) * 0.04 - 0.2).collect(),
+                    vec![4, 4],
+                )
+                .unwrap(),
+                // shape [1, 3, 2, 2] — three copies for Q, K, V
+                NumericTensor::from_vec_shape(vec![1i64, 3, 2, 2], vec![4]).unwrap(),
+                NumericTensor::from_vec_shape(vec![1i64, 3, 2, 2], vec![4]).unwrap(),
+                NumericTensor::from_vec_shape(vec![1i64, 3, 2, 2], vec![4]).unwrap(),
+            ],
+        );
+    }
 }
