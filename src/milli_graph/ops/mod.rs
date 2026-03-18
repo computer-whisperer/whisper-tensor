@@ -123,6 +123,18 @@ pub enum MilliOpTensorIDOrLiteral {
     Literal(NDArrayNumericTensor<DynRank>),
 }
 
+/// Configuration for milli-op evaluation.
+#[derive(Debug, Clone, Default)]
+pub struct MilliEvalConfig {
+    /// When true, reductions and matmuls may use BLAS or other fast paths
+    /// that don't guarantee a specific accumulation order. Results may
+    /// differ from the op's `AccumulationMode` but will be faster.
+    ///
+    /// When false (default), all ops respect their specified `AccumulationMode`
+    /// exactly, producing deterministic, bit-reproducible results.
+    pub relaxed_accumulation: bool,
+}
+
 pub type EvalResult =
     Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, MilliOpGraphError>;
 pub trait MilliOp: Node {
@@ -146,7 +158,7 @@ pub trait MilliOp: Node {
         }
 
         let collected: Vec<(GlobalId, TensorInfo)> = self
-            .eval(&resolved_inputs, backend)?
+            .eval(&resolved_inputs, &MilliEvalConfig::default(), backend)?
             .map(|(a, b)| (a, TensorInfo::from(b)))
             .collect();
         Ok(Box::new(collected.into_iter()))
@@ -155,6 +167,7 @@ pub trait MilliOp: Node {
     fn eval(
         &self,
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
+        config: &MilliEvalConfig,
         _backend: &mut EvalBackend,
     ) -> EvalResult;
 
@@ -582,6 +595,7 @@ macro_rules! delegate {
 impl MilliOp for AnyMilliOp {
     delegate!(eval(
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
+        config: &MilliEvalConfig,
         backend: &mut EvalBackend
     ) -> Result<
         Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>,

@@ -121,6 +121,7 @@ impl MilliOp for Pad {
     fn eval(
         &self,
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
+        _config: &super::MilliEvalConfig,
         backend: &mut EvalBackend,
     ) -> Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, MilliOpGraphError>
     {

@@ -402,6 +402,7 @@ impl MilliOp for Conv {
     fn eval(
         &self,
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
+        _config: &super::MilliEvalConfig,
         backend: &mut EvalBackend,
     ) -> super::EvalResult {
         let input = &inputs[&self.input];
@@ -817,6 +818,7 @@ impl MilliOp for ConvInputGrad {
     fn eval(
         &self,
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
+        _config: &super::MilliEvalConfig,
         backend: &mut EvalBackend,
     ) -> super::EvalResult {
         let grad_out = &inputs[&self.grad_output];
@@ -1069,6 +1071,7 @@ impl MilliOp for ConvWeightGrad {
     fn eval(
         &self,
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
+        _config: &super::MilliEvalConfig,
         backend: &mut EvalBackend,
     ) -> super::EvalResult {
         let grad_out = &inputs[&self.grad_output];
@@ -1259,6 +1262,7 @@ impl MilliOp for ConvBiasGrad {
     fn eval(
         &self,
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
+        _config: &super::MilliEvalConfig,
         backend: &mut EvalBackend,
     ) -> super::EvalResult {
         // grad_output: [N, C_out, *spatial] → sum over all axes except 1

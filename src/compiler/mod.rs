@@ -55,7 +55,7 @@ pub fn interpret_milli_graph_all_intermediates(
         let Some(op) = graph.get_node_by_id(&op_id) else {
             continue;
         };
-        if let Ok(iter) = op.eval(&intermediates, &mut backend) {
+        if let Ok(iter) = op.eval(&intermediates, &crate::milli_graph::ops::MilliEvalConfig::default(), &mut backend) {
             for (tid, val) in iter {
                 intermediates.insert(tid, val);
             }

@@ -117,6 +117,7 @@ impl MilliOp for Constant {
     fn eval(
         &self,
         _inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
+        _config: &super::MilliEvalConfig,
         _backend: &mut EvalBackend,
     ) -> Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, MilliOpGraphError>
     {
@@ -218,7 +219,7 @@ impl MilliOp for ConstantOfShape {
             let mut resolved = HashMap::new();
             resolved.insert(self.shape, shape_info.as_numeric().unwrap().clone());
             let collected: Vec<(GlobalId, TensorInfo)> = self
-                .eval(&resolved, backend)?
+                .eval(&resolved, &super::MilliEvalConfig::default(), backend)?
                 .map(|(a, b)| (a, TensorInfo::from(b)))
                 .collect();
             return Ok(Box::new(collected.into_iter()));
@@ -279,6 +280,7 @@ impl MilliOp for ConstantOfShape {
     fn eval(
         &self,
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
+        _config: &super::MilliEvalConfig,
         _backend: &mut EvalBackend,
     ) -> Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, MilliOpGraphError>
     {

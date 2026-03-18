@@ -174,7 +174,7 @@ impl MilliOp for Expand {
                 (self.shape, shape_num.clone()),
             ]);
             let out: Vec<_> = self
-                .eval(&inputs, backend)?
+                .eval(&inputs, &super::MilliEvalConfig::default(), backend)?
                 .map(|(id, t)| (id, TensorInfo::from(t)))
                 .collect();
             return Ok(Box::new(out.into_iter()));
@@ -273,6 +273,7 @@ impl MilliOp for Expand {
     fn eval(
         &self,
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
+        _config: &super::MilliEvalConfig,
         _backend: &mut EvalBackend,
     ) -> Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, MilliOpGraphError>
     {

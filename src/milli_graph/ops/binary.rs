@@ -2,7 +2,7 @@ use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
 use crate::dtype::DType;
 use crate::milli_graph::MilliOpGraphError;
-use crate::milli_graph::ops::MilliOp;
+use crate::milli_graph::ops::{AccumulationMode, MilliOp};
 use crate::numeric_tensor::NumericTensor;
 use crate::scalar_info::ScalarInfoTyped;
 use rand::Rng;
@@ -365,7 +365,7 @@ impl MilliOp for SimpleBinary {
             resolved.insert(self.a, a_info.as_numeric().unwrap().clone());
             resolved.insert(self.b, b_info.as_numeric().unwrap().clone());
             let collected: Vec<(GlobalId, TensorInfo)> = self
-                .eval(&resolved, backend)?
+                .eval(&resolved, &super::MilliEvalConfig::default(), backend)?
                 .map(|(a, b)| (a, TensorInfo::from(b)))
                 .collect();
             return Ok(Box::new(collected.into_iter()));
@@ -419,6 +419,7 @@ impl MilliOp for SimpleBinary {
     fn eval(
         &self,
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
+        _config: &super::MilliEvalConfig,
         backend: &mut EvalBackend,
     ) -> Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, MilliOpGraphError>
     {
@@ -661,7 +662,7 @@ impl MilliOp for Pow {
             resolved.insert(self.a, a_info.as_numeric().unwrap().clone());
             resolved.insert(self.b, b_info.as_numeric().unwrap().clone());
             let collected: Vec<(GlobalId, TensorInfo)> = self
-                .eval(&resolved, backend)?
+                .eval(&resolved, &super::MilliEvalConfig::default(), backend)?
                 .map(|(a, b)| (a, TensorInfo::from(b)))
                 .collect();
             return Ok(Box::new(collected.into_iter()));
@@ -705,6 +706,7 @@ impl MilliOp for Pow {
     fn eval(
         &self,
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
+        _config: &super::MilliEvalConfig,
         backend: &mut EvalBackend,
     ) -> Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, MilliOpGraphError>
     {
@@ -738,6 +740,9 @@ pub struct MatMul {
     /// Dtype of the output tensor.
     #[serde(default = "default_f32")]
     output_dtype: DType,
+    /// Accumulation order for the contraction (K) dimension.
+    #[serde(default)]
+    accumulation_mode: AccumulationMode,
 }
 
 impl MatMul {
@@ -752,6 +757,9 @@ impl MatMul {
     }
     pub fn output_dtype(&self) -> DType {
         self.output_dtype
+    }
+    pub fn accumulation_mode(&self) -> AccumulationMode {
+        self.accumulation_mode
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -799,6 +807,7 @@ impl MatMul {
             product_dtype,
             accumulate_dtype,
             output_dtype,
+            accumulation_mode: AccumulationMode::default(),
             global_id: GlobalId::new(rng),
             label,
         };
@@ -1218,7 +1227,7 @@ impl MilliOp for MatMul {
             resolved.insert(self.a, a_info.as_numeric().unwrap().clone());
             resolved.insert(self.b, b_info.as_numeric().unwrap().clone());
             let collected: Vec<(GlobalId, TensorInfo)> = self
-                .eval(&resolved, backend)?
+                .eval(&resolved, &super::MilliEvalConfig::default(), backend)?
                 .map(|(a, b)| (a, TensorInfo::from(b)))
                 .collect();
             return Ok(Box::new(collected.into_iter()));
@@ -1306,6 +1315,7 @@ impl MilliOp for MatMul {
     fn eval(
         &self,
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
+        _config: &super::MilliEvalConfig,
         backend: &mut EvalBackend,
     ) -> Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, MilliOpGraphError>
     {

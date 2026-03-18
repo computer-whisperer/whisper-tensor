@@ -102,7 +102,7 @@ impl MilliOp for Cast {
             let mut resolved = HashMap::new();
             resolved.insert(self.data, input_info.as_numeric().unwrap().clone());
             let collected: Vec<(GlobalId, TensorInfo)> = self
-                .eval(&resolved, backend)?
+                .eval(&resolved, &super::MilliEvalConfig::default(), backend)?
                 .map(|(a, b)| (a, TensorInfo::from(b)))
                 .collect();
             return Ok(Box::new(collected.into_iter()));
@@ -143,6 +143,7 @@ impl MilliOp for Cast {
     fn eval(
         &self,
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
+        _config: &super::MilliEvalConfig,
         backend: &mut EvalBackend,
     ) -> Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, MilliOpGraphError>
     {

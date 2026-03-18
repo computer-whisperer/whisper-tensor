@@ -1667,7 +1667,7 @@ mod tests {
         let mut backend = EvalBackend::NDArray;
         for &op_id in milli.op_ordering() {
             let op = milli.get_node_by_id(&op_id).unwrap();
-            for (tid, val) in op.eval(&intermediates, &mut backend).unwrap() {
+            for (tid, val) in op.eval(&intermediates, &crate::milli_graph::ops::MilliEvalConfig::default(), &mut backend).unwrap() {
                 intermediates.insert(tid, val);
             }
         }

@@ -104,7 +104,7 @@ impl MilliOp for Squeeze {
             let inputs =
                 HashMap::from([(self.data, data_num.clone()), (self.axes, axes_num.clone())]);
             let out: Vec<_> = self
-                .eval(&inputs, backend)?
+                .eval(&inputs, &super::MilliEvalConfig::default(), backend)?
                 .map(|(id, t)| (id, TensorInfo::from(t)))
                 .collect();
             return Ok(Box::new(out.into_iter()));
@@ -194,6 +194,7 @@ impl MilliOp for Squeeze {
     fn eval(
         &self,
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
+        _config: &super::MilliEvalConfig,
         backend: &mut EvalBackend,
     ) -> Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, MilliOpGraphError>
     {

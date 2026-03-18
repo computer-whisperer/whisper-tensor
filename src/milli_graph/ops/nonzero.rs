@@ -80,7 +80,7 @@ impl MilliOp for NonZero {
         if let Some(input) = known_inputs.get(&self.input).and_then(|ti| ti.as_numeric()) {
             let inputs = HashMap::from([(self.input, input.clone())]);
             let out = self
-                .eval(&inputs, backend)?
+                .eval(&inputs, &super::MilliEvalConfig::default(), backend)?
                 .map(|(tid, t)| (tid, TensorInfo::from(t)))
                 .collect::<Vec<_>>();
             return Ok(Box::new(out.into_iter()));
@@ -97,6 +97,7 @@ impl MilliOp for NonZero {
     fn eval(
         &self,
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
+        _config: &super::MilliEvalConfig,
         backend: &mut EvalBackend,
     ) -> Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, MilliOpGraphError>
     {
