@@ -1584,9 +1584,19 @@ mod tests {
     use crate::nano_graph::pattern::AtomRange;
     use crate::numeric_tensor::NumericTensor;
 
-    /// Extract flat f32 values from a NumericTensor, returned as f64.
+    /// Extract flat values from a NumericTensor, returned as f64.
     fn tensor_to_f64(t: &NumericTensor<DynRank>) -> Vec<f64> {
         let mut backend = EvalBackend::NDArray;
+        // BOOL can't cast to F32 — handle separately.
+        if t.dtype() == crate::dtype::DType::BOOL {
+            let nd = t.to_ndarray().unwrap();
+            match nd {
+                NDArrayNumericTensor::BOOL(a) => {
+                    return a.iter().map(|&v| if v { 1.0 } else { 0.0 }).collect()
+                }
+                _ => unreachable!(),
+            }
+        }
         let f32_tensor = t.cast(crate::dtype::DType::F32, &mut backend).unwrap();
         let flat = f32_tensor.flatten().unwrap();
         let v: Vec<f32> = flat.to_ndarray().unwrap().try_into().unwrap();
@@ -1700,6 +1710,9 @@ mod tests {
                 NDArrayNumericTensor::F64(a) => a.iter().copied().collect(),
                 NDArrayNumericTensor::I64(a) => a.iter().map(|&v| v as f64).collect(),
                 NDArrayNumericTensor::I32(a) => a.iter().map(|&v| v as f64).collect(),
+                NDArrayNumericTensor::BOOL(a) => {
+                    a.iter().map(|&v| if v { 1.0 } else { 0.0 }).collect()
+                }
                 other => panic!("Unsupported output dtype: {:?}", other.dtype()),
             };
             for (i, &v) in flat.iter().enumerate() {
@@ -1731,11 +1744,20 @@ mod tests {
                 nano_flat.len()
             );
 
+            // For BOOL outputs, compare as 0/1.
+            let is_bool = tam.dtype == crate::dtype::DType::BOOL;
             for (i, (m, n)) in milli_flat.iter().zip(nano_flat.iter()).enumerate() {
-                let diff = (m - n).abs();
-                let tol = 1e-4 * m.abs().max(1.0);
+                let diff = if is_bool {
+                    // Both should be 0.0 or 1.0
+                    let mb: f64 = if *m != 0.0 { 1.0 } else { 0.0 };
+                    let nb: f64 = if *n != 0.0 { 1.0 } else { 0.0 };
+                    (mb - nb).abs()
+                } else {
+                    (m - n).abs()
+                };
+                let tol = if is_bool { 0.0 } else { 1e-4 * m.abs().max(1.0) };
                 assert!(
-                    diff < tol,
+                    diff <= tol,
                     "Output {:?} element {}: milli={} nano={} diff={}",
                     out_id,
                     i,
@@ -2409,6 +2431,721 @@ mod tests {
                 NumericTensor::from_vec_shape((0..64).map(|i| (i as f32) * 0.02 - 0.64).collect(), vec![8, 8]).unwrap(),
                 NumericTensor::from_vec_shape(vec![1.0f32, 1.1, 0.9, 1.05], vec![4]).unwrap(),
                 NumericTensor::from_vec_shape(vec![0.0f32, 0.1, -0.1, 0.05], vec![4]).unwrap(),
+            ],
+        );
+    }
+
+    // =========================================================================
+    // Binary ops — each variant
+    // =========================================================================
+
+    #[test]
+    fn test_binary_sub() {
+        check_integrity(
+            |g, rng| {
+                let a = g.add_input(rng);
+                let b = g.add_input(rng);
+                let c = crate::milli_graph::ops::SimpleBinary::sub(g, a, b, rng);
+                (vec![a, b], vec![c])
+            },
+            vec![
+                NumericTensor::from_vec_shape(vec![10.0f32, 20.0, 30.0], vec![3]).unwrap(),
+                NumericTensor::from_vec_shape(vec![1.0f32, 2.0, 3.0], vec![3]).unwrap(),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_binary_div() {
+        check_integrity(
+            |g, rng| {
+                let a = g.add_input(rng);
+                let b = g.add_input(rng);
+                let c = crate::milli_graph::ops::SimpleBinary::div(g, a, b, rng);
+                (vec![a, b], vec![c])
+            },
+            vec![
+                NumericTensor::from_vec_shape(vec![12.0f32, 20.0, 30.0, 7.0], vec![4]).unwrap(),
+                NumericTensor::from_vec_shape(vec![3.0f32, 4.0, 5.0, 2.0], vec![4]).unwrap(),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_binary_max() {
+        check_integrity(
+            |g, rng| {
+                let a = g.add_input(rng);
+                let b = g.add_input(rng);
+                let c = crate::milli_graph::ops::SimpleBinary::max(g, a, b, rng);
+                (vec![a, b], vec![c])
+            },
+            vec![
+                NumericTensor::from_vec_shape(vec![1.0f32, 5.0, 3.0, 8.0], vec![4]).unwrap(),
+                NumericTensor::from_vec_shape(vec![4.0f32, 2.0, 6.0, 1.0], vec![4]).unwrap(),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_binary_min() {
+        check_integrity(
+            |g, rng| {
+                let a = g.add_input(rng);
+                let b = g.add_input(rng);
+                let c = crate::milli_graph::ops::SimpleBinary::min(g, a, b, rng);
+                (vec![a, b], vec![c])
+            },
+            vec![
+                NumericTensor::from_vec_shape(vec![1.0f32, 5.0, 3.0, 8.0], vec![4]).unwrap(),
+                NumericTensor::from_vec_shape(vec![4.0f32, 2.0, 6.0, 1.0], vec![4]).unwrap(),
+            ],
+        );
+    }
+
+    #[test]
+    #[ignore] // BUG: comparison ops use output dtype (BOOL) as compute_dtype, should use input dtype
+    fn test_binary_equal() {
+        check_integrity(
+            |g, rng| {
+                let a = g.add_input(rng);
+                let b = g.add_input(rng);
+                let c = crate::milli_graph::ops::SimpleBinary::equal(g, a, b, rng);
+                (vec![a, b], vec![c])
+            },
+            vec![
+                NumericTensor::from_vec_shape(vec![1.0f32, 2.0, 3.0, 4.0], vec![4]).unwrap(),
+                NumericTensor::from_vec_shape(vec![1.0f32, 9.0, 3.0, 0.0], vec![4]).unwrap(),
+            ],
+        );
+    }
+
+    #[test]
+    #[ignore] // BUG: comparison ops use output dtype (BOOL) as compute_dtype, should use input dtype
+    fn test_binary_greater() {
+        check_integrity(
+            |g, rng| {
+                let a = g.add_input(rng);
+                let b = g.add_input(rng);
+                let c = crate::milli_graph::ops::SimpleBinary::greater(g, a, b, rng);
+                (vec![a, b], vec![c])
+            },
+            vec![
+                NumericTensor::from_vec_shape(vec![1.0f32, 5.0, 3.0, 4.0], vec![4]).unwrap(),
+                NumericTensor::from_vec_shape(vec![4.0f32, 2.0, 3.0, 8.0], vec![4]).unwrap(),
+            ],
+        );
+    }
+
+    #[test]
+    #[ignore] // BUG: comparison ops use output dtype (BOOL) as compute_dtype, should use input dtype
+    fn test_binary_less() {
+        check_integrity(
+            |g, rng| {
+                let a = g.add_input(rng);
+                let b = g.add_input(rng);
+                let c = crate::milli_graph::ops::SimpleBinary::less(g, a, b, rng);
+                (vec![a, b], vec![c])
+            },
+            vec![
+                NumericTensor::from_vec_shape(vec![1.0f32, 5.0, 3.0, 4.0], vec![4]).unwrap(),
+                NumericTensor::from_vec_shape(vec![4.0f32, 2.0, 3.0, 8.0], vec![4]).unwrap(),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_binary_broadcast_scalar() {
+        // scalar + [4] broadcast
+        check_integrity(
+            |g, rng| {
+                let a = g.add_input(rng);
+                let b = g.add_input(rng);
+                let c = crate::milli_graph::ops::SimpleBinary::mul(g, a, b, rng);
+                (vec![a, b], vec![c])
+            },
+            vec![
+                NumericTensor::from_vec_shape(vec![1.0f32, 2.0, 3.0, 4.0], vec![4]).unwrap(),
+                NumericTensor::from_vec_shape(vec![10.0f32], vec![1]).unwrap(),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_binary_broadcast_2d() {
+        // [3,4] + [4] → broadcast along axis 0
+        check_integrity(
+            |g, rng| {
+                let a = g.add_input(rng);
+                let b = g.add_input(rng);
+                let c = crate::milli_graph::ops::SimpleBinary::add(g, a, b, rng);
+                (vec![a, b], vec![c])
+            },
+            vec![
+                NumericTensor::from_vec_shape(
+                    (0..12).map(|i| i as f32).collect(),
+                    vec![3, 4],
+                )
+                .unwrap(),
+                NumericTensor::from_vec_shape(vec![100.0f32, 200.0, 300.0, 400.0], vec![4])
+                    .unwrap(),
+            ],
+        );
+    }
+
+    // =========================================================================
+    // Unary ops
+    // =========================================================================
+
+    #[test]
+    fn test_unary_neg() {
+        check_integrity(
+            |g, rng| {
+                let a = g.add_input(rng);
+                let b = crate::milli_graph::ops::SimpleUnaryOp::neg(g, a, rng);
+                (vec![a], vec![b])
+            },
+            vec![NumericTensor::from_vec_shape(vec![1.0f32, -2.0, 0.0, 3.5], vec![4]).unwrap()],
+        );
+    }
+
+    #[test]
+    fn test_unary_abs() {
+        check_integrity(
+            |g, rng| {
+                let a = g.add_input(rng);
+                let b = crate::milli_graph::ops::SimpleUnaryOp::abs(g, a, rng);
+                (vec![a], vec![b])
+            },
+            vec![NumericTensor::from_vec_shape(vec![-3.0f32, 2.0, -1.0, 0.0], vec![4]).unwrap()],
+        );
+    }
+
+    #[test]
+    fn test_unary_sqrt() {
+        check_integrity(
+            |g, rng| {
+                let a = g.add_input(rng);
+                let b = crate::milli_graph::ops::SimpleUnaryOp::sqrt(g, a, rng);
+                (vec![a], vec![b])
+            },
+            vec![NumericTensor::from_vec_shape(vec![4.0f32, 9.0, 16.0, 1.0], vec![4]).unwrap()],
+        );
+    }
+
+    #[test]
+    fn test_unary_reciprocal() {
+        check_integrity(
+            |g, rng| {
+                let a = g.add_input(rng);
+                let b = crate::milli_graph::ops::SimpleUnaryOp::reciprocal(g, a, rng);
+                (vec![a], vec![b])
+            },
+            vec![NumericTensor::from_vec_shape(vec![2.0f32, 4.0, 0.5, 1.0], vec![4]).unwrap()],
+        );
+    }
+
+    #[test]
+    fn test_unary_tanh() {
+        check_integrity(
+            |g, rng| {
+                let a = g.add_input(rng);
+                let b = crate::milli_graph::ops::SimpleUnaryOp::trig(g, a, crate::TrigOp::Tanh, rng);
+                (vec![a], vec![b])
+            },
+            vec![NumericTensor::from_vec_shape(vec![0.0f32, 1.0, -1.0, 2.0], vec![4]).unwrap()],
+        );
+    }
+
+    #[test]
+    fn test_unary_ln() {
+        check_integrity(
+            |g, rng| {
+                let a = g.add_input(rng);
+                let b = crate::milli_graph::ops::SimpleUnaryOp::ln(g, a, rng);
+                (vec![a], vec![b])
+            },
+            vec![NumericTensor::from_vec_shape(vec![1.0f32, 2.0, 0.5, 10.0], vec![4]).unwrap()],
+        );
+    }
+
+    #[test]
+    fn test_unary_floor_ceil() {
+        check_integrity(
+            |g, rng| {
+                let a = g.add_input(rng);
+                let b = crate::milli_graph::ops::SimpleUnaryOp::floor(g, a, rng);
+                let c = crate::milli_graph::ops::SimpleUnaryOp::ceil(g, a, rng);
+                (vec![a], vec![b, c])
+            },
+            vec![NumericTensor::from_vec_shape(vec![1.5f32, -1.5, 2.0, 0.1], vec![4]).unwrap()],
+        );
+    }
+
+    // =========================================================================
+    // Pow, ClampMin, Where
+    // =========================================================================
+
+    #[test]
+    fn test_pow() {
+        check_integrity(
+            |g, rng| {
+                let a = g.add_input(rng);
+                let b = g.add_input(rng);
+                let c = crate::milli_graph::ops::Pow::push_new(g, a, b, rng);
+                (vec![a, b], vec![c])
+            },
+            vec![
+                NumericTensor::from_vec_shape(vec![2.0f32, 3.0, 4.0, 5.0], vec![4]).unwrap(),
+                NumericTensor::from_vec_shape(vec![3.0f32, 2.0, 0.5, 1.0], vec![4]).unwrap(),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_clamp_min() {
+        check_integrity(
+            |g, rng| {
+                let a = g.add_input(rng);
+                let b = crate::milli_graph::ops::ClampMin::push_new(g, a, 0.0, rng);
+                (vec![a], vec![b])
+            },
+            vec![NumericTensor::from_vec_shape(vec![-2.0f32, -0.5, 0.0, 1.0, 3.0], vec![5])
+                .unwrap()],
+        );
+    }
+
+    #[test]
+    #[ignore] // Depends on comparison ops which have the BOOL compute_dtype bug
+    fn test_where_op() {
+        check_integrity(
+            |g, rng| {
+                // Where expects BOOL condition. Build via Greater(a, 0).
+                let a = g.add_input(rng);
+                let x = g.add_input(rng);
+                let y = g.add_input(rng);
+                let zero = g.add_input(rng);
+                let cond = crate::milli_graph::ops::SimpleBinary::greater(g, a, zero, rng);
+                let out = crate::milli_graph::ops::Where::push_new(g, cond, x, y, rng);
+                (vec![a, x, y, zero], vec![out])
+            },
+            vec![
+                NumericTensor::from_vec_shape(vec![1.0f32, -1.0, 2.0, -2.0], vec![4]).unwrap(),
+                NumericTensor::from_vec_shape(vec![10.0f32, 20.0, 30.0, 40.0], vec![4]).unwrap(),
+                NumericTensor::from_vec_shape(vec![100.0f32, 200.0, 300.0, 400.0], vec![4])
+                    .unwrap(),
+                NumericTensor::from_vec_shape(vec![0.0f32, 0.0, 0.0, 0.0], vec![4]).unwrap(),
+            ],
+        );
+    }
+
+    // =========================================================================
+    // View ops: Reshape, Squeeze, Unsqueeze, Expand
+    // =========================================================================
+
+    #[test]
+    fn test_reshape() {
+        check_integrity(
+            |g, rng| {
+                let a = g.add_input(rng);
+                let shape = g.add_input(rng);
+                let b = crate::milli_graph::ops::Reshape::push_new(g, a, shape, false, rng);
+                (vec![a, shape], vec![b])
+            },
+            vec![
+                NumericTensor::from_vec_shape(
+                    (0..12).map(|i| i as f32).collect(),
+                    vec![3, 4],
+                )
+                .unwrap(),
+                NumericTensor::from_vec_shape(vec![2i64, 6], vec![2]).unwrap(),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_squeeze() {
+        check_integrity(
+            |g, rng| {
+                let a = g.add_input(rng);
+                let axes = g.add_input(rng);
+                let b = crate::milli_graph::ops::Squeeze::push_new(g, a, axes, rng);
+                (vec![a, axes], vec![b])
+            },
+            vec![
+                NumericTensor::from_vec_shape(vec![1.0f32, 2.0, 3.0], vec![1, 3]).unwrap(),
+                NumericTensor::from_vec_shape(vec![0i64], vec![1]).unwrap(),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_unsqueeze() {
+        check_integrity(
+            |g, rng| {
+                let a = g.add_input(rng);
+                let axes = g.add_input(rng);
+                let b = crate::milli_graph::ops::Unsqueeze::push_new(g, a, axes, rng);
+                (vec![a, axes], vec![b])
+            },
+            vec![
+                NumericTensor::from_vec_shape(vec![1.0f32, 2.0, 3.0], vec![3]).unwrap(),
+                NumericTensor::from_vec_shape(vec![0i64], vec![1]).unwrap(),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_expand() {
+        // [1, 3] → [4, 3]
+        check_integrity(
+            |g, rng| {
+                let a = g.add_input(rng);
+                let shape = g.add_input(rng);
+                let b = crate::milli_graph::ops::Expand::push_new(g, a, shape, rng);
+                (vec![a, shape], vec![b])
+            },
+            vec![
+                NumericTensor::from_vec_shape(vec![1.0f32, 2.0, 3.0], vec![1, 3]).unwrap(),
+                NumericTensor::from_vec_shape(vec![4i64, 3], vec![2]).unwrap(),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_transpose_2d() {
+        // [3, 4] → [4, 3]
+        check_integrity(
+            |g, rng| {
+                let a = g.add_input(rng);
+                let b = crate::milli_graph::ops::Transpose::push_new(g, a, Some(vec![1, 0]), rng);
+                (vec![a], vec![b])
+            },
+            vec![NumericTensor::from_vec_shape(
+                (0..12).map(|i| i as f32).collect(),
+                vec![3, 4],
+            )
+            .unwrap()],
+        );
+    }
+
+    #[test]
+    fn test_transpose_3d() {
+        // [2, 3, 4] → [2, 4, 3]  perm=[0,2,1]
+        check_integrity(
+            |g, rng| {
+                let a = g.add_input(rng);
+                let b =
+                    crate::milli_graph::ops::Transpose::push_new(g, a, Some(vec![0, 2, 1]), rng);
+                (vec![a], vec![b])
+            },
+            vec![NumericTensor::from_vec_shape(
+                (0..24).map(|i| i as f32).collect(),
+                vec![2, 3, 4],
+            )
+            .unwrap()],
+        );
+    }
+
+    // =========================================================================
+    // Cast / CastLike
+    // =========================================================================
+
+    #[test]
+    fn test_cast_f32_to_f64() {
+        check_integrity(
+            |g, rng| {
+                let a = g.add_input(rng);
+                let b = crate::milli_graph::ops::Cast::push_new(
+                    g,
+                    a,
+                    crate::dtype::DType::F64,
+                    rng,
+                );
+                (vec![a], vec![b])
+            },
+            vec![NumericTensor::from_vec_shape(vec![1.5f32, -2.5, 0.0, 3.14], vec![4]).unwrap()],
+        );
+    }
+
+    // =========================================================================
+    // Reduce ops
+    // =========================================================================
+
+    #[test]
+    fn test_reduce_sum_axis0() {
+        // [3, 4] → reduce sum axis 0 → [4]
+        check_integrity(
+            |g, rng| {
+                use crate::backends::ndarray_backend::NDArrayNumericTensor;
+                use ndarray::{ArcArray, IxDyn};
+                let a = g.add_input(rng);
+                let axes_tensor =
+                    NDArrayNumericTensor::I64(ArcArray::from_shape_vec(IxDyn(&[1]), vec![0i64]).unwrap());
+                let axes = crate::milli_graph::ops::Constant::push_new(g, axes_tensor, rng);
+                let b = crate::milli_graph::ops::ReduceSum::push_new(g, a, Some(axes), false, false, rng);
+                (vec![a], vec![b])
+            },
+            vec![NumericTensor::from_vec_shape(
+                (1..=12).map(|i| i as f32).collect(),
+                vec![3, 4],
+            )
+            .unwrap()],
+        );
+    }
+
+    #[test]
+    fn test_reduce_sum_axis1() {
+        // [3, 4] → reduce sum axis 1 → [3]
+        check_integrity(
+            |g, rng| {
+                use crate::backends::ndarray_backend::NDArrayNumericTensor;
+                use ndarray::{ArcArray, IxDyn};
+                let a = g.add_input(rng);
+                let axes_tensor =
+                    NDArrayNumericTensor::I64(ArcArray::from_shape_vec(IxDyn(&[1]), vec![1i64]).unwrap());
+                let axes = crate::milli_graph::ops::Constant::push_new(g, axes_tensor, rng);
+                let b = crate::milli_graph::ops::ReduceSum::push_new(g, a, Some(axes), false, false, rng);
+                (vec![a], vec![b])
+            },
+            vec![NumericTensor::from_vec_shape(
+                (1..=12).map(|i| i as f32).collect(),
+                vec![3, 4],
+            )
+            .unwrap()],
+        );
+    }
+
+    #[test]
+    fn test_reduce_max_axis1() {
+        // [3, 4] → reduce max axis 1 → [3]
+        check_integrity(
+            |g, rng| {
+                use crate::backends::ndarray_backend::NDArrayNumericTensor;
+                use ndarray::{ArcArray, IxDyn};
+                let a = g.add_input(rng);
+                let axes_tensor =
+                    NDArrayNumericTensor::I64(ArcArray::from_shape_vec(IxDyn(&[1]), vec![1i64]).unwrap());
+                let axes = crate::milli_graph::ops::Constant::push_new(g, axes_tensor, rng);
+                let b = crate::milli_graph::ops::ReduceMax::push_new(g, a, Some(axes), false, false, rng);
+                (vec![a], vec![b])
+            },
+            vec![NumericTensor::from_vec_shape(
+                vec![3.0f32, 1.0, 4.0, 1.5, 9.0, 2.6, 5.3, 5.8, 9.7, 9.3, 2.3, 8.4],
+                vec![3, 4],
+            )
+            .unwrap()],
+        );
+    }
+
+    #[test]
+    fn test_reduce_mean_axis1() {
+        // [3, 4] → reduce mean axis 1 → [3]
+        check_integrity(
+            |g, rng| {
+                use crate::backends::ndarray_backend::NDArrayNumericTensor;
+                use ndarray::{ArcArray, IxDyn};
+                let a = g.add_input(rng);
+                let axes_tensor =
+                    NDArrayNumericTensor::I64(ArcArray::from_shape_vec(IxDyn(&[1]), vec![1i64]).unwrap());
+                let axes = crate::milli_graph::ops::Constant::push_new(g, axes_tensor, rng);
+                let b = crate::milli_graph::ops::ReduceMean::push_new(g, a, Some(axes), false, false, rng);
+                (vec![a], vec![b])
+            },
+            vec![NumericTensor::from_vec_shape(
+                (1..=12).map(|i| i as f32).collect(),
+                vec![3, 4],
+            )
+            .unwrap()],
+        );
+    }
+
+    // =========================================================================
+    // Batched MatMul
+    // =========================================================================
+
+    #[test]
+    fn test_matmul_batched() {
+        // [2, 3, 4] @ [4, 5] → [2, 3, 5]
+        check_integrity(
+            |g, rng| {
+                let a = g.add_input(rng);
+                let b = g.add_input(rng);
+                let c = crate::milli_graph::ops::MatMul::push_new_default_precision(
+                    g, a, b, DType::F32, rng,
+                );
+                (vec![a, b], vec![c])
+            },
+            vec![
+                NumericTensor::from_vec_shape(
+                    (0..24).map(|i| (i as f32) * 0.1).collect(),
+                    vec![2, 3, 4],
+                )
+                .unwrap(),
+                NumericTensor::from_vec_shape(
+                    (0..20).map(|i| (i as f32) * 0.1).collect(),
+                    vec![4, 5],
+                )
+                .unwrap(),
+            ],
+        );
+    }
+
+    // =========================================================================
+    // Transpose then compute (exercises non-row-major strides propagation)
+    // =========================================================================
+
+    #[test]
+    fn test_transpose_then_add() {
+        // [3,4] transpose to [4,3], then add a [3] bias
+        check_integrity(
+            |g, rng| {
+                let a = g.add_input(rng);
+                let bias = g.add_input(rng);
+                let t = crate::milli_graph::ops::Transpose::push_new(g, a, Some(vec![1, 0]), rng);
+                let out = crate::milli_graph::ops::SimpleBinary::add(g, t, bias, rng);
+                (vec![a, bias], vec![out])
+            },
+            vec![
+                NumericTensor::from_vec_shape(
+                    (0..12).map(|i| i as f32).collect(),
+                    vec![3, 4],
+                )
+                .unwrap(),
+                NumericTensor::from_vec_shape(vec![100.0f32, 200.0, 300.0], vec![3]).unwrap(),
+            ],
+        );
+    }
+
+    #[test]
+    #[ignore] // MatMul lowering assumes row-major A input strides
+    fn test_transpose_then_matmul() {
+        // A [3,4] transposed to [4,3], then matmul with B [3,2] → [4,2]
+        check_integrity(
+            |g, rng| {
+                let a = g.add_input(rng);
+                let b = g.add_input(rng);
+                let at = crate::milli_graph::ops::Transpose::push_new(g, a, Some(vec![1, 0]), rng);
+                let c = crate::milli_graph::ops::MatMul::push_new_default_precision(
+                    g, at, b, DType::F32, rng,
+                );
+                (vec![a, b], vec![c])
+            },
+            vec![
+                NumericTensor::from_vec_shape(
+                    (0..12).map(|i| (i as f32) * 0.1).collect(),
+                    vec![3, 4],
+                )
+                .unwrap(),
+                NumericTensor::from_vec_shape(
+                    (0..6).map(|i| (i as f32) * 0.1).collect(),
+                    vec![3, 2],
+                )
+                .unwrap(),
+            ],
+        );
+    }
+
+    // =========================================================================
+    // ConstantOfShape
+    // =========================================================================
+
+    #[test]
+    #[ignore] // ConstantOfShape milli eval needs shape tensor as NumericTensor, not just TensorInfo
+    fn test_constant_of_shape() {
+        use crate::numeric_scalar::NumericScalar;
+        // ConstantOfShape(shape=[2,3], val=7.0) → [2,3] of 7s.
+        // Then add with an input to force nano eval of the constant.
+        check_integrity(
+            |g, rng| {
+                let shape = g.add_input(rng);
+                let x = g.add_input(rng);
+                let constant = crate::milli_graph::ops::ConstantOfShape::push_new(
+                    g,
+                    NumericScalar::F32(7.0),
+                    shape,
+                    rng,
+                );
+                let out = crate::milli_graph::ops::SimpleBinary::add(g, x, constant, rng);
+                (vec![shape, x], vec![out])
+            },
+            vec![
+                NumericTensor::from_vec_shape(vec![2i64, 3], vec![2]).unwrap(),
+                NumericTensor::from_vec_shape(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3])
+                    .unwrap(),
+            ],
+        );
+    }
+
+    // =========================================================================
+    // Slice with steps
+    // =========================================================================
+
+    #[test]
+    #[ignore] // Slice lowering panics on step>1 with single-element axes
+    fn test_slice_with_step() {
+        // [8] slice [0:8:2] → [4]
+        check_integrity(
+            |g, rng| {
+                let a = g.add_input(rng);
+                let starts = g.add_input(rng);
+                let ends = g.add_input(rng);
+                let axes = g.add_input(rng);
+                let steps = g.add_input(rng);
+                let b = crate::milli_graph::ops::Slice::push_new(
+                    g, a, starts, ends, Some(axes), Some(steps), rng,
+                );
+                (vec![a, starts, ends, axes, steps], vec![b])
+            },
+            vec![
+                NumericTensor::from_vec_shape(
+                    (0..8).map(|i| (i as f32) * 10.0).collect(),
+                    vec![8],
+                )
+                .unwrap(),
+                NumericTensor::from_vec_shape(vec![0i64], vec![1]).unwrap(),
+                NumericTensor::from_vec_shape(vec![8i64], vec![1]).unwrap(),
+                NumericTensor::from_vec_shape(vec![0i64], vec![1]).unwrap(),
+                NumericTensor::from_vec_shape(vec![2i64], vec![1]).unwrap(),
+            ],
+        );
+    }
+
+    // =========================================================================
+    // Concat then compute
+    // =========================================================================
+
+    #[test]
+    #[ignore] // MatMul lowering assumes row-major A input strides
+    fn test_concat_then_matmul() {
+        // concat([2,3], [2,3], axis=0) → [4,3], then matmul with [3,2]
+        check_integrity(
+            |g, rng| {
+                let a = g.add_input(rng);
+                let b = g.add_input(rng);
+                let w = g.add_input(rng);
+                let cat = crate::milli_graph::ops::Concat::push_new(g, vec![a, b], 0, rng);
+                let out = crate::milli_graph::ops::MatMul::push_new_default_precision(
+                    g, cat, w, DType::F32, rng,
+                );
+                (vec![a, b, w], vec![out])
+            },
+            vec![
+                NumericTensor::from_vec_shape(
+                    (0..6).map(|i| (i as f32) * 0.1).collect(),
+                    vec![2, 3],
+                )
+                .unwrap(),
+                NumericTensor::from_vec_shape(
+                    (6..12).map(|i| (i as f32) * 0.1).collect(),
+                    vec![2, 3],
+                )
+                .unwrap(),
+                NumericTensor::from_vec_shape(
+                    (0..6).map(|i| (i as f32) * 0.1).collect(),
+                    vec![3, 2],
+                )
+                .unwrap(),
             ],
         );
     }

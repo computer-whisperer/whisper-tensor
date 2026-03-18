@@ -443,6 +443,10 @@ fn scalars_to_tensor(
             let data: Vec<u32> = scalars.iter().map(|s| s.to_f64() as u32).collect();
             NDArrayNumericTensor::U32(ArcArray::from_shape_vec(shape, data).unwrap())
         }
+        crate::dtype::DType::BOOL => {
+            let data: Vec<bool> = scalars.iter().map(|s| s.to_f64() != 0.0).collect();
+            NDArrayNumericTensor::BOOL(ArcArray::from_shape_vec(shape, data).unwrap())
+        }
         other => panic!("scalars_to_tensor: unsupported dtype {:?}", other),
     }
 }
