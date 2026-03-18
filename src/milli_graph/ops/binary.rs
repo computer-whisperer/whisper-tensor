@@ -2,7 +2,8 @@ use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
 use crate::dtype::DType;
 use crate::milli_graph::MilliOpGraphError;
-use crate::milli_graph::ops::{AccumulationMode, MilliOp};
+use super::AccumulationMode;
+use crate::milli_graph::ops::MilliOp;
 use crate::numeric_tensor::NumericTensor;
 use crate::scalar_info::ScalarInfoTyped;
 use rand::Rng;
@@ -1315,21 +1316,24 @@ impl MilliOp for MatMul {
     fn eval(
         &self,
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
-        _config: &super::MilliEvalConfig,
+        config: &super::MilliEvalConfig,
         backend: &mut EvalBackend,
     ) -> Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, MilliOpGraphError>
     {
         let a_input = &inputs[&self.a];
         let b_input = &inputs[&self.b];
-        // Pass accumulate_dtype to the backend when it differs from the input dtype.
-        // The backend's BLAS path handles both product and accumulation precision
-        // through this single parameter (products are computed at accumulate precision).
         let accumulate_dtype = if self.accumulate_dtype != a_input.dtype() {
             Some(self.accumulate_dtype)
         } else {
             None
         };
-        let out = NumericTensor::<DynRank>::matmul(a_input, b_input, accumulate_dtype, backend)?;
+        let mode = if config.relaxed_accumulation {
+            AccumulationMode::Pairwise // allows BLAS
+        } else {
+            self.accumulation_mode
+        };
+        let out =
+            NumericTensor::<DynRank>::matmul(a_input, b_input, accumulate_dtype, mode, backend)?;
         Ok(Box::new([(self.output, out)].into_iter()))
     }
 

@@ -534,7 +534,7 @@ impl MilliOp for Conv {
                         backend,
                     )?;
                     // matmul: [cpg_out, cpg_in] @ [cpg_in, spatial] → [cpg_out, spatial]
-                    let out_2d = NumericTensor::matmul(&w_2d, &in_2d, Some(DType::F32), backend)?;
+                    let out_2d = NumericTensor::matmul(&w_2d, &in_2d, Some(DType::F32), crate::milli_graph::ops::AccumulationMode::default(), backend)?;
                     result_parts.push(out_2d);
                 }
             }
@@ -591,7 +591,7 @@ impl MilliOp for Conv {
                     )?;
                     // matmul: [cpg_out, K] @ [K, spatial] → [cpg_out, spatial]
                     let out_2d =
-                        NumericTensor::matmul(&w_2d, &col_tensor, Some(DType::F32), backend)?;
+                        NumericTensor::matmul(&w_2d, &col_tensor, Some(DType::F32), crate::milli_graph::ops::AccumulationMode::default(), backend)?;
                     result_parts.push(out_2d);
                 }
             }
@@ -927,7 +927,7 @@ impl MilliOp for ConvInputGrad {
                     vec![channels_per_group_out, out_spatial_size],
                 )?;
                 let w_t = w_2d.transpose(None, backend)?;
-                let d_col = NumericTensor::matmul(&w_t, &grad_tensor, Some(DType::F32), backend)?;
+                let d_col = NumericTensor::matmul(&w_t, &grad_tensor, Some(DType::F32), crate::milli_graph::ops::AccumulationMode::default(), backend)?;
                 let d_col_data: Vec<f32> = d_col.to_ndarray()?.flatten().try_into()?;
 
                 // col2im: scatter d_col back to input space
@@ -1181,7 +1181,7 @@ impl MilliOp for ConvWeightGrad {
                 )?;
                 let col_t = col_tensor.transpose(None, backend)?;
                 let dw_part =
-                    NumericTensor::matmul(&grad_tensor, &col_t, Some(DType::F32), backend)?;
+                    NumericTensor::matmul(&grad_tensor, &col_t, Some(DType::F32), crate::milli_graph::ops::AccumulationMode::default(), backend)?;
                 let dw_data: Vec<f32> = dw_part.to_ndarray()?.flatten().try_into()?;
 
                 let dw_offset = g * channels_per_group_out * k_per_group;

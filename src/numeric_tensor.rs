@@ -845,11 +845,13 @@ impl NumericTensor<DynRank> {
         a: &Self,
         b: &Self,
         accumulate_dtype: Option<DType>,
+        mode: AccumulationMode,
         backend: &mut EvalBackend,
     ) -> Result<Self, NumericTensorError> {
         if backend.supports_dtype(a.dtype()) && backend.supports_dtype(b.dtype()) {
             #[cfg(feature = "candle")]
             if let EvalBackend::Candle(device) = backend {
+                // Candle always uses its own BLAS/accelerated path.
                 return Ok(NumericTensor::Candle(
                     (a.to_candle(device)?.broadcast_matmul(&b.to_candle(device)?))?,
                 ));
@@ -876,6 +878,7 @@ impl NumericTensor<DynRank> {
             &a.try_into()?,
             &b.try_into()?,
             accumulate_dtype,
+            mode,
         )?))
     }
 

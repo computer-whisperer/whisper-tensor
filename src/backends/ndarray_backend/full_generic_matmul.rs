@@ -25,6 +25,7 @@ pub fn matmul_with_accum_dtype<T>(
     a: &ndarray::ArcArray<T, IxDyn>,
     b: &ndarray::ArcArray<T, IxDyn>,
     accum_dtype: Option<DType>,
+    mode: crate::milli_graph::ops::AccumulationMode,
 ) -> Result<ndarray::ArcArray<T, IxDyn>, NDArrayOperationError>
 where
     T: ndarray::LinalgScalar + One + Zero + Copy + ToPrimitive + FromPrimitive,
@@ -105,19 +106,19 @@ where
     let result_3d = match accum_dtype {
         None => {
             // Accumulate in T (fast GEMM path for f32/f64/c64/c128, etc.).
-            batched_gemm_in_type::<T>(a_b.view(), b_b.view())?
+            batched_gemm_in_type::<T>(a_b.view(), b_b.view(), mode)?
         }
         Some(DType::F32) => {
             // Cast to f32, gemm, cast back to T.
             let a32 = cast3::<T, f32>(a_b.view())?;
             let b32 = cast3::<T, f32>(b_b.view())?;
-            let c32 = batched_gemm_in_type::<f32>(a32.view(), b32.view())?;
+            let c32 = batched_gemm_in_type::<f32>(a32.view(), b32.view(), mode)?;
             cast3_back::<f32, T>(c32.view())?
         }
         Some(DType::F64) => {
             let a64 = cast3::<T, f64>(a_b.view())?;
             let b64 = cast3::<T, f64>(b_b.view())?;
-            let c64 = batched_gemm_in_type::<f64>(a64.view(), b64.view())?;
+            let c64 = batched_gemm_in_type::<f64>(a64.view(), b64.view(), mode)?;
             cast3_back::<f64, T>(c64.view())?
         }
         Some(DType::BF16) => {
@@ -276,11 +277,27 @@ where
 fn batched_gemm_in_type<S>(
     a3: ArrayView3<'_, S>,
     b3: ArrayView3<'_, S>,
+    mode: crate::milli_graph::ops::AccumulationMode,
 ) -> Result<Array3<S>, NDArrayOperationError>
 where
     S: ndarray::LinalgScalar + One + Zero + Copy,
 {
-    Ok(batched_naive(a3, b3))
+    match mode {
+        crate::milli_graph::ops::AccumulationMode::Sequential => Ok(batched_naive(a3, b3)),
+        crate::milli_graph::ops::AccumulationMode::Pairwise => {
+            // Use BLAS via ndarray's general_mat_mul.
+            let (batch, m, _k) = a3.dim();
+            let (_, _, p) = b3.dim();
+            let mut out = Array::<S, Ix3>::zeros((batch, m, p));
+            for i in 0..batch {
+                let a = a3.slice(s![i, .., ..]);
+                let b = b3.slice(s![i, .., ..]);
+                let mut c = out.slice_mut(s![i, .., ..]);
+                ndarray::linalg::general_mat_mul(S::one(), &a, &b, S::zero(), &mut c);
+            }
+            Ok(out)
+        }
+    }
 }
 
 #[allow(dead_code)]

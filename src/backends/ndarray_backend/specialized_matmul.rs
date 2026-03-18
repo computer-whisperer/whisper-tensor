@@ -15,75 +15,76 @@ impl NDArrayNumericTensor<DynRank> {
         outer_a: &Self,
         outer_b: &Self,
         accumulate_dtype: Option<DType>,
+        mode: crate::milli_graph::ops::AccumulationMode,
     ) -> Result<Self, NDArrayNumericTensorError> {
         Ok(match (outer_a, outer_b) {
             (NDArrayNumericTensor::F32(a), NDArrayNumericTensor::F32(b)) => {
                 NDArrayNumericTensor::F32(
                     if accumulate_dtype.is_none() || accumulate_dtype == Some(outer_a.dtype()) {
-                        generic_matmul_accum_same_type(a, b)?
+                        generic_matmul_accum_same_type(a, b, mode)?
                     } else {
-                        full_generic_matmul::matmul_with_accum_dtype(a, b, accumulate_dtype)?
+                        full_generic_matmul::matmul_with_accum_dtype(a, b, accumulate_dtype, mode)?
                     },
                 )
             }
             (NDArrayNumericTensor::F64(a), NDArrayNumericTensor::F64(b)) => {
                 NDArrayNumericTensor::F64(
                     if accumulate_dtype.is_none() || accumulate_dtype == Some(outer_a.dtype()) {
-                        generic_matmul_accum_same_type(a, b)?
+                        generic_matmul_accum_same_type(a, b, mode)?
                     } else {
-                        full_generic_matmul::matmul_with_accum_dtype(a, b, accumulate_dtype)?
+                        full_generic_matmul::matmul_with_accum_dtype(a, b, accumulate_dtype, mode)?
                     },
                 )
             }
             (NDArrayNumericTensor::BF16(a), NDArrayNumericTensor::BF16(b)) => {
                 NDArrayNumericTensor::BF16(match accumulate_dtype {
-                    Some(DType::BF16) => generic_matmul_accum_same_type(a, b)?,
-                    Some(DType::F32) => matmul_bf16_fp32_accumulate(a, b)?,
-                    _ => full_generic_matmul::matmul_with_accum_dtype(a, b, accumulate_dtype)?,
+                    Some(DType::BF16) => generic_matmul_accum_same_type(a, b, mode)?,
+                    Some(DType::F32) => matmul_bf16_fp32_accumulate(a, b, mode)?,
+                    _ => full_generic_matmul::matmul_with_accum_dtype(a, b, accumulate_dtype, mode)?,
                 })
             }
             (NDArrayNumericTensor::F16(a), NDArrayNumericTensor::F16(b)) => {
                 NDArrayNumericTensor::F16(
                     if accumulate_dtype.is_none() || accumulate_dtype == Some(outer_a.dtype()) {
-                        generic_matmul_accum_same_type(a, b)?
+                        generic_matmul_accum_same_type(a, b, mode)?
                     } else {
-                        full_generic_matmul::matmul_with_accum_dtype(a, b, accumulate_dtype)?
+                        full_generic_matmul::matmul_with_accum_dtype(a, b, accumulate_dtype, mode)?
                     },
                 )
             }
             (NDArrayNumericTensor::U64(a), NDArrayNumericTensor::U64(b)) => {
                 NDArrayNumericTensor::U64(
                     if accumulate_dtype.is_none() || accumulate_dtype == Some(outer_a.dtype()) {
-                        generic_matmul_accum_same_type(a, b)?
+                        generic_matmul_accum_same_type(a, b, mode)?
                     } else {
-                        full_generic_matmul::matmul_with_accum_dtype(a, b, accumulate_dtype)?
+                        full_generic_matmul::matmul_with_accum_dtype(a, b, accumulate_dtype, mode)?
                     },
                 )
             }
             (NDArrayNumericTensor::I64(a), NDArrayNumericTensor::I64(b)) => {
                 NDArrayNumericTensor::I64(
                     if accumulate_dtype.is_none() || accumulate_dtype == Some(outer_a.dtype()) {
-                        generic_matmul_accum_same_type(a, b)?
+                        generic_matmul_accum_same_type(a, b, mode)?
                     } else {
-                        full_generic_matmul::matmul_with_accum_dtype(a, b, accumulate_dtype)?
+                        full_generic_matmul::matmul_with_accum_dtype(a, b, accumulate_dtype, mode)?
                     },
                 )
             }
             (NDArrayNumericTensor::U32(a), NDArrayNumericTensor::U32(b)) => {
                 NDArrayNumericTensor::U32(
                     if accumulate_dtype.is_none() || accumulate_dtype == Some(outer_a.dtype()) {
-                        generic_matmul_accum_same_type(a, b)?
+                        generic_matmul_accum_same_type(a, b, mode)?
                     } else {
-                        full_generic_matmul::matmul_with_accum_dtype(a, b, accumulate_dtype)?
+                        full_generic_matmul::matmul_with_accum_dtype(a, b, accumulate_dtype, mode)?
                     },
                 )
             }
             (NDArrayNumericTensor::I32(a), NDArrayNumericTensor::I32(b)) => {
                 NDArrayNumericTensor::I32(
                     if accumulate_dtype.is_none() || accumulate_dtype == Some(outer_a.dtype()) {
-                        generic_matmul_accum_same_type(a, b)?
+                        generic_matmul_accum_same_type(a, b, mode)?
                     } else {
-                        full_generic_matmul::matmul_with_accum_dtype(a, b, accumulate_dtype)?
+                        full_generic_matmul::matmul_with_accum_dtype(a, b, accumulate_dtype, mode)?
                     },
                 )
             }
@@ -100,6 +101,7 @@ impl NDArrayNumericTensor<DynRank> {
 pub fn matmul_bf16_fp32_accumulate(
     a: &ArcArray<bf16, IxDyn>,
     b: &ArcArray<bf16, IxDyn>,
+    mode: crate::milli_graph::ops::AccumulationMode,
 ) -> Result<ArcArray<bf16, IxDyn>, NDArrayOperationError> {
     // 0: cast to fp32
     let a = a.mapv(|x| x.to_f32());
@@ -189,14 +191,20 @@ pub fn matmul_bf16_fp32_accumulate(
             (a_b.slice(s![i, .., ..]), b_b.slice(s![i, .., ..]));
         let mut c: ArrayViewMut2<'_, _> = out.slice_mut(s![i, .., ..]);
 
-        // Sequential left-to-right accumulation to match nano eval's k-loop.
-        for r in 0..m {
-            for col in 0..p {
-                let mut acc = 0.0f32;
-                for kk in 0..k_left {
-                    acc += a_mat[(r, kk)] * b_mat[(kk, col)];
+        match mode {
+            crate::milli_graph::ops::AccumulationMode::Sequential => {
+                for r in 0..m {
+                    for col in 0..p {
+                        let mut acc = 0.0f32;
+                        for kk in 0..k_left {
+                            acc += a_mat[(r, kk)] * b_mat[(kk, col)];
+                        }
+                        c[(r, col)] = acc;
+                    }
                 }
-                c[(r, col)] = acc;
+            }
+            crate::milli_graph::ops::AccumulationMode::Pairwise => {
+                ndarray::linalg::general_mat_mul(1.0f32, &a_mat, &b_mat, 0.0f32, &mut c);
             }
         }
     }
@@ -241,6 +249,7 @@ pub fn matmul_bf16_fp32_accumulate(
 pub fn generic_matmul_accum_same_type<T>(
     a: &ArcArray<T, IxDyn>,
     b: &ArcArray<T, IxDyn>,
+    mode: crate::milli_graph::ops::AccumulationMode,
 ) -> Result<ArcArray<T, IxDyn>, NDArrayOperationError>
 where
     T: LinalgScalar + One + Zero,
@@ -322,24 +331,39 @@ where
         .to_shape((batch_shape.iter().product::<usize>(), k_left, p))
         .map_err(|_| NDArrayOperationError::Internal)?;
 
-    // ---------- 4. Batched multiply (sequential left-to-right accumulation) ----------
-    // Uses a simple triple loop to match AccumulationMode::Sequential.
+    // ---------- 4. Batched multiply ----------
     let mut out = Array::<T, _>::zeros((a_b.dim().0, m, p));
-    for i in 0..a_b.dim().0 {
-        let a_mat = a_b.slice(s![i, .., ..]);
-        let b_mat = b_b.slice(s![i, .., ..]);
-        let mut c = out.slice_mut(s![i, .., ..]);
+    match mode {
+        crate::milli_graph::ops::AccumulationMode::Sequential => {
+            // Sequential left-to-right accumulation via triple loop.
+            // Produces bit-identical results to the nano scalar evaluator.
+            for i in 0..a_b.dim().0 {
+                let a_mat = a_b.slice(s![i, .., ..]);
+                let b_mat = b_b.slice(s![i, .., ..]);
+                let mut c = out.slice_mut(s![i, .., ..]);
 
-        for r in 0..m {
-            for col in 0..p {
-                let mut acc = T::zero();
-                for kk in 0..k_left {
-                    #[allow(clippy::assign_op_pattern)]
-                    {
-                        acc = acc + a_mat[(r, kk)] * b_mat[(kk, col)];
+                for r in 0..m {
+                    for col in 0..p {
+                        let mut acc = T::zero();
+                        for kk in 0..k_left {
+                            #[allow(clippy::assign_op_pattern)]
+                            {
+                                acc = acc + a_mat[(r, kk)] * b_mat[(kk, col)];
+                            }
+                        }
+                        c[(r, col)] = acc;
                     }
                 }
-                c[(r, col)] = acc;
+            }
+        }
+        crate::milli_graph::ops::AccumulationMode::Pairwise => {
+            // Relaxed accumulation — use ndarray's general_mat_mul (BLAS when available).
+            // Faster but may produce different floating-point results.
+            for i in 0..a_b.dim().0 {
+                let a_mat = a_b.slice(s![i, .., ..]);
+                let b_mat = b_b.slice(s![i, .., ..]);
+                let mut c = out.slice_mut(s![i, .., ..]);
+                ndarray::linalg::general_mat_mul(T::one(), &a_mat, &b_mat, T::zero(), &mut c);
             }
         }
     }
