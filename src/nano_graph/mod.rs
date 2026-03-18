@@ -8,9 +8,9 @@
 
 pub mod eval;
 pub mod lower;
-mod ops;
+pub mod ops;
 pub mod optimize;
-mod pattern;
+pub mod pattern;
 
 pub use lower::{
     ConcatSegment, DimClassification, DimKind, NanoLoweringContext, ReduceAccessors,

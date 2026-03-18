@@ -1,9 +1,10 @@
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
 use crate::dtype::DType;
-use crate::graph::GlobalId;
+use crate::graph::{GlobalId, Node};
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
+use crate::nano_graph::lower::{DimKind, TensorAtomMap};
 use crate::numeric_tensor::NumericTensor;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -79,7 +80,206 @@ impl Slice {
     }
 
     pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
-        ctx.lower_slice(self);
+        let all_infos = ctx.all_infos;
+        let data_id = self.data_id();
+        let out_id = Node::outputs(self).next().unwrap();
+
+        let Some(in_map) = ctx.tensor_map.get(&data_id).cloned() else {
+            ctx.lower_as_boundary_named(self, "Slice");
+            return;
+        };
+        let Some(out_info) = all_infos.get(&out_id) else {
+            ctx.lower_as_boundary_named(self, "Slice");
+            return;
+        };
+
+        let Some((out_layout, out_known_dims, out_sym_dims, out_count)) =
+            ctx.classify_dims(out_info)
+        else {
+            ctx.lower_as_boundary_named(self, "Slice");
+            return;
+        };
+        let out_count = out_count.max(1);
+
+        // Extract concrete slice parameters.
+        let extract_i64 = |id: &GlobalId| -> Option<Vec<i64>> {
+            let info = all_infos.get(id)?;
+            let tensor = info.as_numeric()?;
+            let as_i64 = tensor
+                .cast(
+                    DType::I64,
+                    &mut crate::backends::eval_backend::EvalBackend::NDArray,
+                )
+                .ok()?;
+            let rank1 = as_i64.try_to_rank::<typenum::P1>().ok()?;
+            Vec::<i64>::try_from(rank1.to_ndarray().ok()?).ok()
+        };
+
+        let starts = extract_i64(&self.starts_id());
+        let ends = extract_i64(&self.ends_id());
+        let steps: Option<Vec<i64>> = if let Some(steps_id) = self.steps_id() {
+            extract_i64(&steps_id)
+        } else {
+            starts.as_ref().map(|s| s.iter().map(|_| 1i64).collect())
+        };
+
+        let in_rank = in_map.layout.len();
+        let axes: Option<Vec<usize>> = if let Some(axes_id) = self.axes_id() {
+            extract_i64(&axes_id).map(|a| {
+                a.iter()
+                    .map(|&v| {
+                        if v < 0 {
+                            (v + in_rank as i64) as usize
+                        } else {
+                            v as usize
+                        }
+                    })
+                    .collect()
+            })
+        } else {
+            starts.as_ref().map(|s| (0..s.len()).collect())
+        };
+
+        let (Some(starts), Some(_ends), Some(steps), Some(axes)) = (starts, ends, steps, axes)
+        else {
+            ctx.lower_as_boundary_named(self, "Slice");
+            return;
+        };
+
+        // Build per-axis (start, step) for known dims.
+        // The input's known dims define the coordinate space.
+        let in_known: Vec<u64> = in_map
+            .layout
+            .iter()
+            .filter_map(|d| {
+                if let DimKind::Known(s) = d {
+                    Some(*s)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Map tensor-axis -> known-dim index (None if symbolic).
+        let axis_to_known_idx: Vec<Option<usize>> = {
+            let mut ki = 0;
+            in_map
+                .layout
+                .iter()
+                .map(|d| {
+                    if matches!(d, DimKind::Known(_)) {
+                        let idx = ki;
+                        ki += 1;
+                        Some(idx)
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
+
+        // Build the start offset and step for each known dim.
+        // Default: start=0, step=1 (full range).
+        let mut known_starts = vec![0i64; in_known.len()];
+        let mut known_steps = vec![1i64; in_known.len()];
+
+        for (i, &axis) in axes.iter().enumerate() {
+            if axis >= in_rank {
+                ctx.lower_as_boundary_named(self, "Slice");
+                return;
+            }
+            let Some(ki) = axis_to_known_idx[axis] else {
+                // Slicing a symbolic dim -- boundary.
+                ctx.lower_as_boundary_named(self, "Slice");
+                return;
+            };
+
+            let dim = in_known[ki] as i64;
+            let step = steps[i];
+            if step == 0 {
+                ctx.lower_as_boundary_named(self, "Slice");
+                return;
+            }
+
+            let start = if step > 0 {
+                let s = starts[i].clamp(-dim, dim);
+                if s < 0 { s + dim } else { s }
+            } else {
+                let s = starts[i].clamp(-dim, dim - 1);
+                if s < 0 { s + dim } else { s }
+            };
+
+            known_starts[ki] = start;
+            known_steps[ki] = step;
+        }
+
+        if out_known_dims.len() != in_known.len() {
+            ctx.lower_as_boundary_named(self, "Slice");
+            return;
+        }
+
+        // Zero-cost slice: if the output atoms are contiguous in the input's
+        // atom space, we can reuse the input's atoms with an offset base_id.
+        //
+        // Contiguity requires that the output row-major strides match the
+        // input strides scaled by steps. This fails when inner dims are
+        // sliced (shrunk) because outer strides then differ.
+        let out_rowmajor = TensorAtomMap::compute_strides(&out_known_dims);
+        let contiguous = (0..in_known.len()).all(|k| {
+            let expected = (in_map.known_strides[k] as i64 * known_steps[k]) as u64;
+            out_rowmajor[k] == expected
+        });
+
+        let slice_dt = out_info.dtype();
+        if contiguous {
+            // All steps must be positive for simple offset-based addressing.
+            let all_positive_steps = known_steps.iter().all(|&s| s > 0);
+            if all_positive_steps {
+                let mut base_offset: u64 = 0;
+                for (&start, &stride) in known_starts.iter().zip(in_map.known_strides.iter()) {
+                    base_offset += start as u64 * stride;
+                }
+                ctx.tensor_map.insert(
+                    out_id,
+                    TensorAtomMap::simple(
+                        in_map.base_id.offset(base_offset),
+                        out_count,
+                        slice_dt,
+                        out_layout,
+                        TensorAtomMap::compute_strides(&out_known_dims),
+                        out_sym_dims,
+                    ),
+                );
+                return;
+            }
+        }
+
+        // Non-contiguous slice: zero-cost view with strides that account for steps.
+        // Output stride[k] = input_stride[k] * step[k] (for positive steps).
+        let all_positive_steps = known_steps.iter().all(|&s| s > 0);
+        if all_positive_steps {
+            let mut base_offset: u64 = 0;
+            let mut out_phys_strides = Vec::with_capacity(in_known.len());
+            for ki in 0..in_known.len() {
+                base_offset += known_starts[ki] as u64 * in_map.known_strides[ki];
+                out_phys_strides.push((in_map.known_strides[ki] as i64 * known_steps[ki]) as u64);
+            }
+            ctx.tensor_map.insert(
+                out_id,
+                TensorAtomMap::simple(
+                    in_map.base_id.offset(base_offset),
+                    out_count,
+                    slice_dt,
+                    out_layout,
+                    out_phys_strides,
+                    out_sym_dims,
+                ),
+            );
+            return;
+        }
+
+        // Negative steps: fall back to boundary (rare).
+        ctx.lower_as_boundary_named(self, "Slice(negative step)");
     }
 
     pub fn remap_tensors(&mut self, map: &HashMap<GlobalId, GlobalId>, rng: &mut impl rand::Rng) {

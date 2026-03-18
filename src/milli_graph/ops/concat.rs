@@ -1,8 +1,10 @@
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
-use crate::graph::GlobalId;
+use crate::graph::{GlobalId, Node};
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp, MilliOpTensorIDOrLiteral};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
+use crate::nano_graph::lower::{ConcatSegment, DimKind, TensorAtomMap};
+use crate::nano_graph::pattern::AtomId;
 use crate::numeric_tensor::NumericTensor;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -57,7 +59,142 @@ impl Concat {
     }
 
     pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
-        ctx.lower_concat(self);
+        let all_infos = ctx.all_infos;
+        let axis_raw = self.axis();
+        let out_id = Node::outputs(self).next().unwrap();
+        let input_ids = self.concat_inputs();
+
+        let Some(out_info) = all_infos.get(&out_id) else {
+            ctx.lower_as_boundary_named(self, "Concat");
+            return;
+        };
+
+        let Some((out_layout, out_known_dims, out_sym_dims, out_count)) =
+            ctx.classify_dims(out_info)
+        else {
+            ctx.lower_as_boundary_named(self, "Concat");
+            return;
+        };
+        let out_count = out_count.max(1);
+
+        // Normalize axis.
+        let rank = out_layout.len();
+        let axis = if axis_raw < 0 {
+            (axis_raw + rank as i64) as usize
+        } else {
+            axis_raw as usize
+        };
+
+        // Concat axis must be a known dim.
+        if axis >= rank || !matches!(out_layout[axis], DimKind::Known(_)) {
+            ctx.lower_as_boundary_named(self, "Concat");
+            return;
+        }
+
+        // Known-dim index of the concat axis.
+        let concat_known_idx = out_layout[..=axis]
+            .iter()
+            .filter(|d| matches!(d, DimKind::Known(_)))
+            .count()
+            - 1;
+
+        // Gather input maps and their concat-axis sizes.
+        let mut input_maps = Vec::with_capacity(input_ids.len());
+        let mut concat_dim_sizes = Vec::with_capacity(input_ids.len());
+        for &inp_id in input_ids {
+            let Some(inp_map) = ctx.tensor_map.get(&inp_id).cloned() else {
+                ctx.lower_as_boundary_named(self, "Concat");
+                return;
+            };
+            let inp_known: Vec<u64> = inp_map
+                .layout
+                .iter()
+                .filter_map(|d| {
+                    if let DimKind::Known(s) = d {
+                        Some(*s)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            if inp_known.len() != out_known_dims.len() {
+                ctx.lower_as_boundary_named(self, "Concat");
+                return;
+            }
+            concat_dim_sizes.push(inp_known[concat_known_idx]);
+            input_maps.push(inp_map);
+        }
+
+        // Zero-cost concat: check if all inputs have row-major strides and
+        // are laid out contiguously along the concat axis in atom space.
+        // If so, the output is just a wider view of the same atoms.
+        let ref_strides = &input_maps[0].known_strides;
+        let concat_stride = ref_strides[concat_known_idx];
+        let inp0_known: Vec<u64> = input_maps[0]
+            .layout
+            .iter()
+            .filter_map(|d| {
+                if let DimKind::Known(s) = d {
+                    Some(*s)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let inp0_rowmajor = TensorAtomMap::compute_strides(&inp0_known);
+
+        if *ref_strides == inp0_rowmajor {
+            // Inputs have row-major strides. Check contiguity.
+            let mut contiguous = true;
+            let mut expected_base = input_maps[0].base_id;
+            for (i, inp_map) in input_maps.iter().enumerate() {
+                if inp_map.known_strides != *ref_strides || inp_map.base_id != expected_base {
+                    contiguous = false;
+                    break;
+                }
+                expected_base = AtomId(expected_base.0 + concat_dim_sizes[i] * concat_stride);
+            }
+            if contiguous {
+                ctx.tensor_map.insert(
+                    out_id,
+                    TensorAtomMap::simple(
+                        input_maps[0].base_id,
+                        out_count,
+                        out_info.dtype(),
+                        out_layout,
+                        TensorAtomMap::compute_strides(&out_known_dims),
+                        out_sym_dims,
+                    ),
+                );
+                return;
+            }
+        }
+
+        // Non-contiguous concat: zero-cost segmented view.
+        // Each input becomes a segment with its own base_id and strides.
+        let mut segments = Vec::with_capacity(input_maps.len());
+        let mut cum = 0u64;
+        for (i, inp_map) in input_maps.iter().enumerate() {
+            segments.push(ConcatSegment {
+                concat_dim: concat_known_idx,
+                start: cum,
+                size: concat_dim_sizes[i],
+                base_id: inp_map.base_id,
+                known_strides: inp_map.known_strides.clone(),
+            });
+            cum += concat_dim_sizes[i];
+        }
+
+        ctx.tensor_map.insert(
+            out_id,
+            TensorAtomMap::segmented(
+                out_count,
+                out_info.dtype(),
+                out_layout,
+                out_sym_dims,
+                segments,
+            ),
+        );
     }
 
     pub fn remap_tensors(&mut self, map: &HashMap<GlobalId, GlobalId>, rng: &mut impl rand::Rng) {

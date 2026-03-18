@@ -4,6 +4,10 @@ use crate::dtype::DType;
 use crate::graph::{GlobalId, Node};
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
+use crate::nano_graph::lower::{DimKind, TensorAtomMap};
+use crate::nano_graph::ops::{ScalarBinOp, ScalarOp};
+use crate::nano_graph::pattern::InputRef;
+use crate::numeric_scalar::NumericScalar;
 use crate::numeric_tensor::NumericTensor;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -67,7 +71,305 @@ impl Gather {
     }
 
     pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
-        ctx.lower_gather(self);
+        let all_infos = ctx.all_infos;
+        let data_id = self.data_id();
+        let indices_id = self.indices_id();
+        let out_id = self.output_id();
+
+        // If both inputs are fully numeric (constant-folded), treat as constant.
+        let all_numeric = [data_id, indices_id]
+            .iter()
+            .all(|id| all_infos.get(id).is_some_and(|i| i.as_numeric().is_some()));
+        if all_numeric && let Some(out_info) = all_infos.get(&out_id) {
+            ctx.register_constant(out_id, out_info);
+            return;
+        }
+
+        let Some(data_map) = ctx.tensor_map.get(&data_id).cloned() else {
+            ctx.lower_as_boundary_named(self, "Gather");
+            return;
+        };
+        let Some(indices_map) = ctx.tensor_map.get(&indices_id).cloned() else {
+            ctx.lower_as_boundary_named(self, "Gather");
+            return;
+        };
+        let Some(out_info) = all_infos.get(&out_id) else {
+            ctx.lower_as_boundary_named(self, "Gather");
+            return;
+        };
+        let Some(data_info) = all_infos.get(&data_id) else {
+            ctx.lower_as_boundary_named(self, "Gather");
+            return;
+        };
+        let Some(_indices_info) = all_infos.get(&indices_id) else {
+            ctx.lower_as_boundary_named(self, "Gather");
+            return;
+        };
+
+        // Normalize axis.
+        let data_rank = match data_info.rank_if_known() {
+            Some(r) => r,
+            None => {
+                ctx.lower_as_boundary_named(self, "Gather");
+                return;
+            }
+        };
+        let axis = if self.axis() < 0 {
+            (self.axis() + data_rank as i64) as usize
+        } else {
+            self.axis() as usize
+        };
+
+        // Only handle axis=0 for now.
+        if axis != 0 {
+            ctx.lower_as_boundary_named(self, "Gather");
+            return;
+        }
+
+        // Indices can be any rank — we treat them as a flat list of index values.
+        // The output shape is indices_shape + data_shape[1:] for axis=0.
+
+        // data shape must be fully known (it's an embedding table).
+        let data_known: Vec<u64> = data_map
+            .layout
+            .iter()
+            .filter_map(|d| {
+                if let DimKind::Known(s) = d {
+                    Some(*s)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        if data_known.len() != data_rank {
+            // Some data dims are symbolic — can't lower.
+            ctx.lower_as_boundary_named(self, "Gather");
+            return;
+        }
+
+        // For axis=0: data=[V, D, ...], D_total = product of data_known[1..]
+        let d_total: u64 = data_known[1..].iter().product();
+        let d_total = d_total.max(1); // handle scalar gather (data_rank == 1)
+
+        // Check if indices are symbolic (runtime) or known.
+        let indices_sym = !indices_map.sym_dims.is_empty();
+
+        // Output classification.
+        let Some((out_layout, out_known_dims, out_sym_dims, out_count)) =
+            ctx.classify_dims(out_info)
+        else {
+            ctx.lower_as_boundary_named(self, "Gather");
+            return;
+        };
+        let out_count = out_count.max(1);
+
+        let out_dt = out_info.dtype();
+
+        // The output shape for axis=0, 1D indices is [N, D, ...] where N = indices count.
+        // N may be symbolic (runtime token IDs) or known.
+        //
+        // For each output element (i, j) where j indexes the D_total trailing dims:
+        //   flat_index_into_data = indices[i] * D_total + j
+        //   output[i, j] = data[flat_index_into_data]
+        //
+        // We emit:
+        //   1. A Literal group for the stride constant (D_total)
+        //   2. A Mul group: indices[i] * D_total
+        //   3. An Add group: (indices[i] * D_total) + j  (j is the column offset per atom)
+        //   4. An IndirectLoad group: load from data table at the computed index
+
+        // Step 1: stride literal (single atom)
+        let stride_lit = ctx.nano.push_atom(
+            DType::F32,
+            ScalarOp::Literal(NumericScalar::F32(d_total as f32)),
+            vec![],
+            vec![],
+        );
+
+        if indices_sym {
+            // Indices are symbolic (runtime). The indices_map has N atoms with sym_dims.
+            // Output has N*D_total known atoms with the same sym_dims.
+            // For each output atom j (0..D_total), it reads indices[0] (the single atom
+            // in the indices group), since the sym dim handles the N dimension.
+
+            // Simple case: indices_map.count == 1, sym_dims present
+            // Output should have count == D_total, same sym_dims
+            if indices_map.count != 1 || out_count != d_total {
+                ctx.lower_as_boundary_named(self, "Gather");
+                return;
+            }
+
+            // Mul group: 1 atom * broadcast stride → 1 atom (sym_dims from indices)
+            let mul_id = ctx.nano.push_atom(
+                DType::F32,
+                ScalarOp::Binary {
+                    op: ScalarBinOp::Mul,
+                    compute_dtype: DType::F32,
+                },
+                indices_map.sym_dims.clone(),
+                vec![
+                    InputRef::Broadcast(indices_map.base_id),
+                    InputRef::Broadcast(stride_lit),
+                ],
+            );
+
+            // Step 3: Add group — D_total atoms, each adds its column offset j
+            let col_offsets_base = ctx.nano.push_atom(
+                DType::F32,
+                ScalarOp::Literal(NumericScalar::F32(0.0)),
+                vec![],
+                vec![],
+            );
+            for j in 1..d_total {
+                ctx.nano.push_atom(
+                    DType::F32,
+                    ScalarOp::Literal(NumericScalar::F32(j as f32)),
+                    vec![],
+                    vec![],
+                );
+            }
+
+            let add_id = ctx.nano.push_group(
+                d_total,
+                DType::F32,
+                ScalarOp::Binary {
+                    op: ScalarBinOp::Add,
+                    compute_dtype: DType::F32,
+                },
+                indices_map.sym_dims.clone(),
+                vec![
+                    InputRef::Broadcast(mul_id),
+                    InputRef::Affine {
+                        base: col_offsets_base,
+                        stride: 1,
+                    },
+                ],
+            );
+
+            // Step 4: IndirectLoad group — D_total atoms, each loads from data table
+            let base_id = ctx.nano.push_group(
+                d_total,
+                out_dt,
+                ScalarOp::IndirectLoad {
+                    table_base: data_map.base_id,
+                },
+                indices_map.sym_dims.clone(),
+                vec![InputRef::Affine {
+                    base: add_id,
+                    stride: 1,
+                }],
+            );
+
+            let out_strides = TensorAtomMap::compute_strides(&out_known_dims);
+            ctx.tensor_map.insert(
+                out_id,
+                TensorAtomMap::simple(
+                    base_id,
+                    d_total,
+                    out_dt,
+                    out_layout,
+                    out_strides,
+                    out_sym_dims,
+                ),
+            );
+        } else {
+            // Indices are fully known (constant). out_count = indices_count * D_total.
+            let _indices_count = indices_map.count;
+
+            // Build the indices InputRef: for output atom `flat`, row = flat / D_total
+            let indices_ref = if d_total == 1 {
+                // 1:1 mapping
+                InputRef::Affine {
+                    base: indices_map.base_id,
+                    stride: 1,
+                }
+            } else {
+                // For each output flat index, the row is flat / D_total
+                let mut ids = Vec::with_capacity(out_count as usize);
+                for flat in 0..out_count {
+                    let row = flat / d_total;
+                    ids.push(indices_map.base_id.offset(row));
+                }
+                InputRef::Explicit(ids)
+            };
+
+            // Mul group: out_count atoms, each computes indices[row] * D_total
+            let mul_base = ctx.nano.push_group(
+                out_count,
+                DType::F32,
+                ScalarOp::Binary {
+                    op: ScalarBinOp::Mul,
+                    compute_dtype: DType::F32,
+                },
+                vec![],
+                vec![indices_ref, InputRef::Broadcast(stride_lit)],
+            );
+
+            // Column offset literals: d_total singletons with values [0, 1, ..., d_total-1].
+            let col_lit_base = ctx.nano.push_atom(
+                DType::F32,
+                ScalarOp::Literal(NumericScalar::F32(0.0)),
+                vec![],
+                vec![],
+            );
+            for j in 1..d_total {
+                ctx.nano.push_atom(
+                    DType::F32,
+                    ScalarOp::Literal(NumericScalar::F32(j as f32)),
+                    vec![],
+                    vec![],
+                );
+            }
+
+            // Add group: mul_result + column_offset (via Modular over d_total literals)
+            let add_base = ctx.nano.push_group(
+                out_count,
+                DType::F32,
+                ScalarOp::Binary {
+                    op: ScalarBinOp::Add,
+                    compute_dtype: DType::F32,
+                },
+                vec![],
+                vec![
+                    InputRef::Affine {
+                        base: mul_base,
+                        stride: 1,
+                    },
+                    InputRef::Modular {
+                        base: col_lit_base,
+                        stride: 1,
+                        modulus: d_total,
+                    },
+                ],
+            );
+
+            // IndirectLoad group
+            let base_id = ctx.nano.push_group(
+                out_count,
+                out_dt,
+                ScalarOp::IndirectLoad {
+                    table_base: data_map.base_id,
+                },
+                vec![],
+                vec![InputRef::Affine {
+                    base: add_base,
+                    stride: 1,
+                }],
+            );
+
+            let out_strides = TensorAtomMap::compute_strides(&out_known_dims);
+            ctx.tensor_map.insert(
+                out_id,
+                TensorAtomMap::simple(
+                    base_id,
+                    out_count,
+                    out_dt,
+                    out_layout,
+                    out_strides,
+                    out_sym_dims,
+                ),
+            );
+        }
     }
 
     pub fn remap_tensors(&mut self, map: &HashMap<GlobalId, GlobalId>, rng: &mut impl rand::Rng) {

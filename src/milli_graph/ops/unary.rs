@@ -2,6 +2,10 @@ use crate::backends::eval_backend::EvalBackend;
 use crate::graph::{GlobalId, Node};
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
+use crate::nano_graph::lower::{NanoLoweringContext, TensorAtomMap};
+use crate::nano_graph::ops::{ScalarBinOp, ScalarOp, ScalarUnaryOp};
+use crate::nano_graph::pattern::InputRef;
+use crate::numeric_scalar::NumericScalar;
 use crate::numeric_tensor::NumericTensor;
 use crate::tensor_info::TensorInfo;
 use crate::{DynRank, TrigOp};
@@ -144,7 +148,86 @@ impl SimpleUnaryOp {
 
 impl SimpleUnaryOp {
     pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
-        ctx.lower_simple_unary(self);
+        let all_infos = ctx.all_infos;
+
+        let in_id = Node::inputs(self).next().unwrap();
+        let out_id = Node::outputs(self).next().unwrap();
+
+        let Some(in_map) = ctx.tensor_map.get(&in_id).cloned() else {
+            ctx.lower_as_boundary_named(self, "SimpleUnary");
+            return;
+        };
+        let Some(out_info) = all_infos.get(&out_id) else {
+            ctx.lower_as_boundary_named(self, "SimpleUnary");
+            return;
+        };
+
+        let dt = out_info.dtype();
+        let scalar_op = match self.which_op() {
+            WhichSimpleUnaryOp::Neg => ScalarOp::Unary {
+                op: ScalarUnaryOp::Neg,
+                compute_dtype: dt,
+            },
+            WhichSimpleUnaryOp::Abs => ScalarOp::Unary {
+                op: ScalarUnaryOp::Abs,
+                compute_dtype: dt,
+            },
+            WhichSimpleUnaryOp::Exp => ScalarOp::Unary {
+                op: ScalarUnaryOp::Exp,
+                compute_dtype: dt,
+            },
+            WhichSimpleUnaryOp::Ln => ScalarOp::Unary {
+                op: ScalarUnaryOp::Ln,
+                compute_dtype: dt,
+            },
+            WhichSimpleUnaryOp::Sqrt => ScalarOp::Unary {
+                op: ScalarUnaryOp::Sqrt,
+                compute_dtype: dt,
+            },
+            WhichSimpleUnaryOp::Reciprocal => ScalarOp::Unary {
+                op: ScalarUnaryOp::Reciprocal,
+                compute_dtype: dt,
+            },
+            WhichSimpleUnaryOp::Trig(crate::TrigOp::Tanh) => ScalarOp::Unary {
+                op: ScalarUnaryOp::Tanh,
+                compute_dtype: dt,
+            },
+            WhichSimpleUnaryOp::Floor => ScalarOp::Unary {
+                op: ScalarUnaryOp::Floor,
+                compute_dtype: dt,
+            },
+            WhichSimpleUnaryOp::Ceil => ScalarOp::Unary {
+                op: ScalarUnaryOp::Ceil,
+                compute_dtype: dt,
+            },
+            _ => {
+                ctx.lower_as_boundary_named(self, "SimpleUnary");
+                return;
+            }
+        };
+
+        let known_dims = in_map.known_dims();
+        let input_ref = NanoLoweringContext::pointwise_input_ref(&in_map);
+
+        let base_id = ctx.nano.push_group(
+            in_map.count,
+            dt,
+            scalar_op,
+            in_map.sym_dims.clone(),
+            vec![input_ref],
+        );
+
+        ctx.tensor_map.insert(
+            out_id,
+            TensorAtomMap::simple(
+                base_id,
+                in_map.count,
+                dt,
+                in_map.layout.clone(),
+                TensorAtomMap::compute_strides(&known_dims),
+                in_map.sym_dims.clone(),
+            ),
+        );
     }
 
     pub fn remap_tensors(&mut self, map: &HashMap<GlobalId, GlobalId>, rng: &mut impl rand::Rng) {
@@ -355,7 +438,53 @@ impl ClampMin {
 
 impl ClampMin {
     pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
-        ctx.lower_clamp_min(self);
+        let all_infos = ctx.all_infos;
+        let in_id = Node::inputs(self).next().unwrap();
+        let out_id = Node::outputs(self).next().unwrap();
+
+        let Some(in_map) = ctx.tensor_map.get(&in_id).cloned() else {
+            ctx.lower_as_boundary_named(self, "ClampMin");
+            return;
+        };
+        let Some(out_info) = all_infos.get(&out_id) else {
+            ctx.lower_as_boundary_named(self, "ClampMin");
+            return;
+        };
+
+        let min_val = self.min_val();
+        let dt = out_info.dtype();
+        let min_id = ctx.nano.push_atom(
+            dt,
+            ScalarOp::Literal(NumericScalar::F32(min_val)),
+            vec![],
+            vec![],
+        );
+
+        let known_dims = in_map.known_dims();
+        let input_ref = NanoLoweringContext::pointwise_input_ref(&in_map);
+
+        let base_id = ctx.nano.push_group(
+            in_map.count,
+            dt,
+            ScalarOp::Binary {
+                op: ScalarBinOp::Max,
+                compute_dtype: dt,
+            },
+            in_map.sym_dims.clone(),
+            vec![input_ref, InputRef::Broadcast(min_id)],
+        );
+
+        ctx.tensor_map.insert(
+            out_id,
+            TensorAtomMap::simple(
+                base_id,
+                in_map.count,
+                dt,
+                in_map.layout.clone(),
+                TensorAtomMap::compute_strides(&known_dims),
+                in_map.sym_dims.clone(),
+            ),
+        );
     }
 
     pub fn remap_tensors(&mut self, map: &HashMap<GlobalId, GlobalId>, rng: &mut impl rand::Rng) {

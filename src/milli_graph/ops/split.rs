@@ -1,8 +1,10 @@
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
+use crate::dtype::DType;
 use crate::graph::{GlobalId, Node};
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp, MilliOpTensorIDOrLiteral};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
+use crate::nano_graph::lower::{DimKind, TensorAtomMap};
 use crate::numeric_tensor::NumericTensor;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -74,7 +76,154 @@ impl Split {
 
 impl Split {
     pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
-        ctx.lower_split(self);
+        let all_infos = ctx.all_infos;
+        let in_id = Node::inputs(self).next().unwrap();
+        let out_id = Node::outputs(self).next().unwrap();
+
+        let Some(in_map) = ctx.tensor_map.get(&in_id).cloned() else {
+            ctx.lower_as_boundary_named(self, "Split");
+            return;
+        };
+        let Some(out_info) = all_infos.get(&out_id) else {
+            ctx.lower_as_boundary_named(self, "Split");
+            return;
+        };
+        let Some(_in_info) = all_infos.get(&in_id) else {
+            ctx.lower_as_boundary_named(self, "Split");
+            return;
+        };
+
+        let Some((out_layout, out_known_dims, out_sym_dims, out_count)) =
+            ctx.classify_dims(out_info)
+        else {
+            ctx.lower_as_boundary_named(self, "Split");
+            return;
+        };
+        let out_count = out_count.max(1);
+
+        // Normalize axis.
+        let rank = in_map.layout.len();
+        let axis_raw = self.axis();
+        let axis = if axis_raw < 0 {
+            (axis_raw + rank as i64) as usize
+        } else {
+            axis_raw as usize
+        };
+
+        if axis >= rank || !matches!(in_map.layout[axis], DimKind::Known(_)) {
+            ctx.lower_as_boundary_named(self, "Split");
+            return;
+        }
+
+        // Determine the offset along the split axis for this output_id.
+        // We need the split sizes. If all outputs have known dims, compute from the
+        // input dim and output sizes. Otherwise use the output info directly.
+        let split_known_idx = in_map.layout[..=axis]
+            .iter()
+            .filter(|d| matches!(d, DimKind::Known(_)))
+            .count()
+            - 1;
+
+        // Get the input's full dim along split axis.
+        let in_known: Vec<u64> = in_map
+            .layout
+            .iter()
+            .filter_map(|d| {
+                if let DimKind::Known(s) = d {
+                    Some(*s)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let _in_split_size = in_known[split_known_idx];
+
+        // Figure out the offset: we need to know what came before this output_id's chunk.
+        // The output_id tells us which chunk we are. We need the sizes of all prior chunks.
+        // We can compute this from the axis dim of the output info and output_id index.
+        let output_id_idx = self.output_id();
+        let out_split_size = match &out_layout[axis] {
+            DimKind::Known(s) => *s,
+            _ => {
+                ctx.lower_as_boundary_named(self, "Split");
+                return;
+            }
+        };
+
+        // Compute offset: we need the sum of split sizes for all outputs before this one.
+        // Since we might not have the split tensor values, estimate from output_id * output_size.
+        // This is only correct for equal splits. For unequal splits we need the actual sizes.
+        // Try to get them from the split tensor.
+        let offset_along_axis =
+            self.compute_split_offset(ctx, output_id_idx, out_split_size);
+
+        if out_known_dims.len() != in_known.len() {
+            ctx.lower_as_boundary_named(self, "Split");
+            return;
+        }
+
+        // Zero-cost split for outermost axis with row-major strides:
+        // output atoms are a contiguous sub-range.
+        let out_dt = out_info.dtype();
+        let in_rowmajor = TensorAtomMap::compute_strides(&in_known);
+        if split_known_idx == 0 && in_map.known_strides == in_rowmajor {
+            let base_offset = offset_along_axis * in_map.known_strides[split_known_idx];
+            ctx.tensor_map.insert(
+                out_id,
+                TensorAtomMap::simple(
+                    in_map.base_id.offset(base_offset),
+                    out_count,
+                    out_dt,
+                    out_layout,
+                    TensorAtomMap::compute_strides(&out_known_dims),
+                    out_sym_dims,
+                ),
+            );
+            return;
+        }
+
+        // Non-outermost split: zero-cost view with input's strides.
+        // The strides address the input's atom space with gaps between chunks.
+        // build_input_ref handles this correctly via stride decomposition.
+        let base_offset = offset_along_axis * in_map.known_strides[split_known_idx];
+        ctx.tensor_map.insert(
+            out_id,
+            TensorAtomMap::simple(
+                in_map.base_id.offset(base_offset),
+                out_count,
+                out_dt,
+                out_layout,
+                in_map.known_strides.clone(),
+                out_sym_dims,
+            ),
+        );
+    }
+
+    /// Compute the cumulative offset along the split axis for output_id_idx.
+    fn compute_split_offset(
+        &self,
+        ctx: &crate::nano_graph::NanoLoweringContext,
+        output_id_idx: usize,
+        out_split_size: u64,
+    ) -> u64 {
+        let all_infos = ctx.all_infos;
+        // Try to get concrete split sizes from the split tensor.
+        if let Some(crate::milli_graph::ops::MilliOpTensorIDOrLiteral::TensorID(tensor_id)) =
+            self.split_tensor()
+            && let Some(info) = all_infos.get(tensor_id)
+            && let Some(numeric) = info.as_numeric()
+            && let Ok(cast) = numeric.cast(
+                DType::I64,
+                &mut crate::backends::eval_backend::EvalBackend::NDArray,
+            )
+            && let Ok(rank1) = cast.try_to_rank::<typenum::P1>()
+            && let Ok(vals) = Vec::<i64>::try_from(rank1.to_ndarray().unwrap())
+        {
+            let offset: i64 = vals[..output_id_idx].iter().sum();
+            return offset as u64;
+        }
+        // Fallback: assume equal splits.
+        output_id_idx as u64 * out_split_size
     }
 
     pub fn remap_tensors(&mut self, map: &HashMap<GlobalId, GlobalId>, rng: &mut impl rand::Rng) {

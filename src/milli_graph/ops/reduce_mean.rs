@@ -1,8 +1,13 @@
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
+use crate::dtype::DType;
 use crate::graph::{GlobalId, Node};
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
+use crate::nano_graph::lower::{NanoLoweringContext, TensorAtomMap};
+use crate::nano_graph::ops::{ScalarBinOp, ScalarOp, ReduceKind};
+use crate::nano_graph::pattern::InputRef;
+use crate::numeric_scalar::NumericScalar;
 use crate::numeric_tensor::NumericTensor;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -78,7 +83,109 @@ impl ReduceMean {
 
 impl ReduceMean {
     pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
-        ctx.lower_reduce_mean(self);
+        let all_infos = ctx.all_infos;
+        let out_id = Node::outputs(self).next().unwrap();
+
+        // First try to lower as ReduceSum.
+        // We need to know the reduction extent to divide.
+        let axes_vals: Option<Vec<i64>> = self
+            .axes_tensor()
+            .and_then(|id| NanoLoweringContext::extract_i64(all_infos, &id));
+
+        // Get input info for extent computation.
+        let in_id = Node::inputs(self).next().unwrap();
+        let in_info = all_infos.get(&in_id);
+
+        // Compute the reduction extent from input dims.
+        let extent: Option<u64> = (|| {
+            let axes = axes_vals.as_ref()?;
+            let info = in_info?;
+            let rank = info.rank_if_known()?;
+            let mut product = 1u64;
+            for &a in axes {
+                let ax = if a < 0 {
+                    (a + rank as i64) as usize
+                } else {
+                    a as usize
+                };
+                product *= info.dim_if_known(ax)?;
+            }
+            Some(product)
+        })();
+
+        let Some(extent) = extent else {
+            ctx.lower_as_boundary_named(self, "ReduceMean");
+            return;
+        };
+
+        let Some(out_info) = all_infos.get(&out_id) else {
+            ctx.lower_as_boundary_named(self, "ReduceMean");
+            return;
+        };
+        let out_dt = out_info.dtype();
+        let in_dt = in_info.map(|i| i.dtype()).unwrap_or(out_dt);
+
+        // For BF16/F16: keep entire mean computation in F32, cast at the end.
+        // This matches milli eval where ndarray accumulates in F32.
+        let compute_dt = match in_dt {
+            DType::BF16 | DType::F16 => DType::F32,
+            other => other,
+        };
+
+        // Lower as ReduceSum, keeping output in compute_dt (not out_dt).
+        ctx.lower_reduce(self, |cd, count, stride| {
+            ScalarOp::Reduce {
+                kind: ReduceKind::Sum,
+                reduce_count: count,
+                reduce_stride: stride,
+                compute_dtype: cd,
+            }
+        });
+
+        // If ReduceSum succeeded (output is in tensor_map), divide by extent.
+        let Some(sum_map) = ctx.tensor_map.get(&out_id).cloned() else {
+            return; // ReduceSum failed, already boundaried.
+        };
+
+        // Create literal for 1/extent.
+        let recip = 1.0 / extent as f64;
+        let lit_id = ctx.nano.push_atom(
+            compute_dt,
+            ScalarOp::Literal(NumericScalar::F32(recip as f32)),
+            vec![],
+            vec![],
+        );
+
+        // Multiply by 1/extent in compute_dt, then cast to output dtype.
+        let base_id = ctx.nano.push_group(
+            sum_map.count,
+            out_dt,
+            ScalarOp::Binary {
+                op: ScalarBinOp::Mul,
+                compute_dtype: compute_dt,
+            },
+            sum_map.sym_dims.clone(),
+            vec![
+                InputRef::Affine {
+                    base: sum_map.base_id,
+                    stride: 1,
+                },
+                InputRef::Broadcast(lit_id),
+            ],
+        );
+
+        // Update tensor_map to point to the divided result.
+        ctx.tensor_map.insert(
+            out_id,
+            TensorAtomMap::simple(
+                base_id,
+                sum_map.count,
+                out_dt,
+                sum_map.layout,
+                sum_map.known_strides,
+                sum_map.sym_dims,
+            ),
+        );
     }
 
     pub fn remap_tensors(&mut self, map: &HashMap<GlobalId, GlobalId>, rng: &mut impl rand::Rng) {

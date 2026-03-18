@@ -1,8 +1,11 @@
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
-use crate::graph::GlobalId;
+use crate::graph::{GlobalId, Node};
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
+use crate::nano_graph::lower::TensorAtomMap;
+use crate::nano_graph::ops::ScalarOp;
+use crate::nano_graph::pattern::AtomId;
 use crate::numeric_tensor::NumericTensor;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -50,7 +53,71 @@ impl Expand {
 
 impl Expand {
     pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
-        ctx.lower_expand(self);
+        let all_infos = ctx.all_infos;
+        let in_id = Node::inputs(self).next().unwrap();
+        let out_id = Node::outputs(self).next().unwrap();
+
+        let Some(in_map) = ctx.tensor_map.get(&in_id).cloned() else {
+            ctx.lower_as_boundary_named(self, "Expand");
+            return;
+        };
+        let Some(out_info) = all_infos.get(&out_id) else {
+            ctx.register_opaque(out_id);
+            return;
+        };
+        let in_info = all_infos.get(&in_id);
+
+        let Some((layout, known_dims, sym_dims, count)) = ctx.classify_dims(out_info) else {
+            ctx.lower_as_boundary_named(self, "Expand");
+            return;
+        };
+        let count = count.max(1);
+
+        let dt = out_info.dtype();
+        if count == in_map.count {
+            ctx.tensor_map.insert(
+                out_id,
+                TensorAtomMap::simple(
+                    in_map.base_id,
+                    count,
+                    dt,
+                    layout,
+                    TensorAtomMap::compute_strides(&known_dims),
+                    sym_dims,
+                ),
+            );
+        } else {
+            let out_tmp = TensorAtomMap::simple(
+                AtomId(0),
+                count,
+                dt,
+                layout.clone(),
+                TensorAtomMap::compute_strides(&known_dims),
+                sym_dims.clone(),
+            );
+            let input_ref =
+                ctx.compute_input_ref(&out_tmp, &in_map, out_info, in_info.unwrap_or(out_info));
+
+            let base_id = ctx.nano.push_group(
+                count,
+                dt,
+                ScalarOp::Identity,
+                sym_dims.clone(),
+                vec![input_ref],
+            );
+
+            ctx.tensor_map.insert(
+                out_id,
+                TensorAtomMap::simple(
+                    base_id,
+                    count,
+                    dt,
+                    layout,
+                    TensorAtomMap::compute_strides(&known_dims),
+                    sym_dims,
+                ),
+            );
+        }
     }
 
     pub fn remap_tensors(&mut self, map: &HashMap<GlobalId, GlobalId>, rng: &mut impl rand::Rng) {

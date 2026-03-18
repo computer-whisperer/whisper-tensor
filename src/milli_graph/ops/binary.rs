@@ -190,7 +190,135 @@ impl SimpleBinary {
 
 impl SimpleBinary {
     pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
-        ctx.lower_simple_binary(self);
+        use crate::nano_graph::lower::TensorAtomMap;
+        use crate::nano_graph::ops::{ScalarBinOp, ScalarOp};
+        use crate::nano_graph::pattern::AtomId;
+
+        let all_infos = ctx.all_infos;
+        let mut inputs_iter = Node::inputs(self);
+        let a_id = inputs_iter.next().unwrap();
+        let b_id = inputs_iter.next().unwrap();
+        let out_id = Node::outputs(self).next().unwrap();
+
+        let (Some(a_map), Some(b_map)) = (
+            ctx.tensor_map.get(&a_id).cloned(),
+            ctx.tensor_map.get(&b_id).cloned(),
+        ) else {
+            ctx.lower_as_boundary_named(self, "SimpleBinary");
+            return;
+        };
+        let Some(out_info) = all_infos.get(&out_id) else {
+            ctx.lower_as_boundary_named(self, "SimpleBinary");
+            return;
+        };
+
+        let dt = out_info.dtype();
+        let scalar_op = match self.which_op() {
+            WhichSimpleBinaryOp::Add => ScalarOp::Binary {
+                op: ScalarBinOp::Add,
+                compute_dtype: dt,
+            },
+            WhichSimpleBinaryOp::Sub => ScalarOp::Binary {
+                op: ScalarBinOp::Sub,
+                compute_dtype: dt,
+            },
+            WhichSimpleBinaryOp::Mul => ScalarOp::Binary {
+                op: ScalarBinOp::Mul,
+                compute_dtype: dt,
+            },
+            WhichSimpleBinaryOp::Div => ScalarOp::Binary {
+                op: ScalarBinOp::Div,
+                compute_dtype: dt,
+            },
+            WhichSimpleBinaryOp::Max => ScalarOp::Binary {
+                op: ScalarBinOp::Max,
+                compute_dtype: dt,
+            },
+            WhichSimpleBinaryOp::Min => ScalarOp::Binary {
+                op: ScalarBinOp::Min,
+                compute_dtype: dt,
+            },
+            WhichSimpleBinaryOp::Modulo(_) => ScalarOp::Binary {
+                op: ScalarBinOp::Mod,
+                compute_dtype: dt,
+            },
+            WhichSimpleBinaryOp::Equal => ScalarOp::Binary {
+                op: ScalarBinOp::Equal,
+                compute_dtype: dt,
+            },
+            WhichSimpleBinaryOp::Greater => ScalarOp::Binary {
+                op: ScalarBinOp::Greater,
+                compute_dtype: dt,
+            },
+            WhichSimpleBinaryOp::GreaterOrEqual => ScalarOp::Binary {
+                op: ScalarBinOp::GreaterOrEqual,
+                compute_dtype: dt,
+            },
+            WhichSimpleBinaryOp::Less => ScalarOp::Binary {
+                op: ScalarBinOp::Less,
+                compute_dtype: dt,
+            },
+            WhichSimpleBinaryOp::LessOrEqual => ScalarOp::Binary {
+                op: ScalarBinOp::LessOrEqual,
+                compute_dtype: dt,
+            },
+            WhichSimpleBinaryOp::And => ScalarOp::Binary {
+                op: ScalarBinOp::And,
+                compute_dtype: dt,
+            },
+            WhichSimpleBinaryOp::Or => ScalarOp::Binary {
+                op: ScalarBinOp::Or,
+                compute_dtype: dt,
+            },
+            WhichSimpleBinaryOp::Xor | WhichSimpleBinaryOp::BitwiseXor => ScalarOp::Binary {
+                op: ScalarBinOp::Xor,
+                compute_dtype: dt,
+            },
+            WhichSimpleBinaryOp::BitwiseAnd => ScalarOp::Binary {
+                op: ScalarBinOp::And,
+                compute_dtype: dt,
+            },
+            WhichSimpleBinaryOp::BitwiseOr => ScalarOp::Binary {
+                op: ScalarBinOp::Or,
+                compute_dtype: dt,
+            },
+        };
+
+        let Some((layout, known_dims, sym_dims, count)) = ctx.classify_dims(out_info) else {
+            ctx.lower_as_boundary_named(self, "SimpleBinary");
+            return;
+        };
+        let count = count.max(1);
+        let strides = TensorAtomMap::compute_strides(&known_dims);
+
+        let out_tmp = TensorAtomMap::simple(
+            AtomId(0),
+            count,
+            dt,
+            layout.clone(),
+            strides.clone(),
+            sym_dims.clone(),
+        );
+
+        let a_info = all_infos.get(&a_id);
+        let b_info = all_infos.get(&b_id);
+        let input_a =
+            ctx.compute_input_ref(&out_tmp, &a_map, out_info, a_info.unwrap_or(out_info));
+        let input_b =
+            ctx.compute_input_ref(&out_tmp, &b_map, out_info, b_info.unwrap_or(out_info));
+
+        let base_id = ctx.nano.push_group(
+            count,
+            dt,
+            scalar_op,
+            sym_dims.clone(),
+            vec![input_a, input_b],
+        );
+
+        ctx.tensor_map.insert(
+            out_id,
+            TensorAtomMap::simple(base_id, count, dt, layout, strides, sym_dims),
+        );
     }
 
     pub fn remap_tensors(&mut self, map: &HashMap<GlobalId, GlobalId>, rng: &mut impl Rng) {
@@ -426,7 +554,67 @@ impl Pow {
 
 impl Pow {
     pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
-        ctx.lower_pow(self);
+        use crate::nano_graph::lower::TensorAtomMap;
+        use crate::nano_graph::ops::{ScalarBinOp, ScalarOp};
+        use crate::nano_graph::pattern::AtomId;
+
+        let all_infos = ctx.all_infos;
+        let mut inputs_iter = Node::inputs(self);
+        let a_id = inputs_iter.next().unwrap();
+        let b_id = inputs_iter.next().unwrap();
+        let out_id = Node::outputs(self).next().unwrap();
+
+        let (Some(a_map), Some(b_map)) = (
+            ctx.tensor_map.get(&a_id).cloned(),
+            ctx.tensor_map.get(&b_id).cloned(),
+        ) else {
+            ctx.lower_as_boundary_named(self, "Pow");
+            return;
+        };
+        let Some(out_info) = all_infos.get(&out_id) else {
+            ctx.lower_as_boundary_named(self, "Pow");
+            return;
+        };
+
+        let Some((layout, known_dims, sym_dims, count)) = ctx.classify_dims(out_info) else {
+            ctx.lower_as_boundary_named(self, "Pow");
+            return;
+        };
+        let count = count.max(1);
+        let strides = TensorAtomMap::compute_strides(&known_dims);
+
+        let dt = out_info.dtype();
+        let out_tmp = TensorAtomMap::simple(
+            AtomId(0),
+            count,
+            dt,
+            layout.clone(),
+            strides.clone(),
+            sym_dims.clone(),
+        );
+
+        let a_info = all_infos.get(&a_id);
+        let b_info = all_infos.get(&b_id);
+        let input_a =
+            ctx.compute_input_ref(&out_tmp, &a_map, out_info, a_info.unwrap_or(out_info));
+        let input_b =
+            ctx.compute_input_ref(&out_tmp, &b_map, out_info, b_info.unwrap_or(out_info));
+
+        let base_id = ctx.nano.push_group(
+            count,
+            dt,
+            ScalarOp::Binary {
+                op: ScalarBinOp::Pow,
+                compute_dtype: dt,
+            },
+            sym_dims.clone(),
+            vec![input_a, input_b],
+        );
+
+        ctx.tensor_map.insert(
+            out_id,
+            TensorAtomMap::simple(base_id, count, dt, layout, strides, sym_dims),
+        );
     }
 
     pub fn remap_tensors(&mut self, map: &HashMap<GlobalId, GlobalId>, rng: &mut impl Rng) {
@@ -633,7 +821,307 @@ impl MatMul {
 
 impl MatMul {
     pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
-        ctx.lower_matmul(self);
+        use crate::nano_graph::lower::DimKind;
+        use crate::nano_graph::lower::TensorAtomMap;
+        use crate::nano_graph::ops::{ReduceKind, ScalarBinOp, ScalarOp};
+        use crate::nano_graph::pattern::{AtomId, InputRef};
+
+        let all_infos = ctx.all_infos;
+        let mut inputs_iter = Node::inputs(self);
+        let a_id = inputs_iter.next().unwrap();
+        let b_id = inputs_iter.next().unwrap();
+        let out_id = Node::outputs(self).next().unwrap();
+
+        let (Some(a_map), Some(b_map)) = (
+            ctx.tensor_map.get(&a_id).cloned(),
+            ctx.tensor_map.get(&b_id).cloned(),
+        ) else {
+            ctx.lower_as_boundary_named(self, "MatMul");
+            return;
+        };
+        let Some(out_info) = all_infos.get(&out_id) else {
+            ctx.lower_as_boundary_named(self, "MatMul");
+            return;
+        };
+
+        // MatMul operates on the last 2 tensor dims: A=[...,M,K] @ B=[...,K,N].
+        // We look at the full layout (not just known dims) to handle symbolic M.
+        // Requirements:
+        //   - K (last dim of A, second-to-last of B): must be Known, must match
+        //   - N (last dim of B): must be Known
+        //   - M (second-to-last of A): can be Known or Symbolic
+        //   - Known batch dims must match between A and B
+        let a_layout = &a_map.layout;
+        let b_layout = &b_map.layout;
+
+        if a_layout.len() < 2 || b_layout.len() < 2 {
+            ctx.lower_as_boundary_named(self, "MatMul");
+            return;
+        }
+
+        // Extract K from last dim of A and second-to-last of B.
+        let k = match (&a_layout[a_layout.len() - 1], &b_layout[b_layout.len() - 2]) {
+            (DimKind::Known(ka), DimKind::Known(kb)) if ka == kb && *ka > 0 => *ka,
+            _ => {
+                ctx.lower_as_boundary_named(self, "MatMul");
+                return;
+            }
+        };
+
+        // Extract N from last dim of B.
+        let n = match &b_layout[b_layout.len() - 1] {
+            DimKind::Known(n) if *n > 0 => *n,
+            _ => {
+                ctx.lower_as_boundary_named(self, "MatMul");
+                return;
+            }
+        };
+
+        // M from second-to-last of A: can be known or symbolic.
+        let m_known: Option<u64> = match &a_layout[a_layout.len() - 2] {
+            DimKind::Known(m) => Some(*m),
+            DimKind::Symbolic(_) => None,
+        };
+
+        // Extract known batch dims from A and B (everything except last 2).
+        let a_batch_layout = &a_layout[..a_layout.len() - 2];
+        let b_batch_layout = &b_layout[..b_layout.len() - 2];
+
+        let a_batch_known: Vec<u64> = a_batch_layout
+            .iter()
+            .filter_map(|d| {
+                if let DimKind::Known(s) = d {
+                    Some(*s)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let b_batch_known: Vec<u64> = b_batch_layout
+            .iter()
+            .filter_map(|d| {
+                if let DimKind::Known(s) = d {
+                    Some(*s)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // B can have fewer batch dims (broadcasting). If B has batch dims, they must match.
+        if !b_batch_known.is_empty() && a_batch_known != b_batch_known {
+            ctx.lower_as_boundary_named(self, "MatMul");
+            return;
+        }
+
+        let batch_known_product: u64 = a_batch_known.iter().product::<u64>().max(1);
+
+        // Classify output dims.
+        let Some((out_layout, out_known_dims, out_sym_dims, out_count)) =
+            ctx.classify_dims(out_info)
+        else {
+            ctx.lower_as_boundary_named(self, "MatMul");
+            return;
+        };
+        let out_count = out_count.max(1);
+
+        if out_count > 64_000_000 {
+            ctx.lower_as_boundary_named(self, "MatMul");
+            return;
+        }
+
+        // Use the MatMul's explicit dtype fields for nano group precision.
+        // product_dtype: precision of A*B products (Mul groups).
+        // accumulate_dtype: precision for summing products (ReduceSum groups).
+        // output_dtype: final output precision (Identity cast-back if needed).
+        let product_dtype = self.product_dtype();
+        let accumulate_dtype = self.accumulate_dtype();
+        let out_dtype = self.output_dtype();
+
+        // Compute A's known-dim strides (for addressing within A's atoms).
+        let a_known_dims: Vec<u64> = a_layout
+            .iter()
+            .filter_map(|d| {
+                if let DimKind::Known(s) = d {
+                    Some(*s)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let a_strides = TensorAtomMap::compute_strides(&a_known_dims);
+
+        // Compute B's known-dim strides.
+        let b_known_dims: Vec<u64> = b_layout
+            .iter()
+            .filter_map(|d| {
+                if let DimKind::Known(s) = d {
+                    Some(*s)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let b_strides = TensorAtomMap::compute_strides(&b_known_dims);
+
+        // A's K dim is the last known dim. B's K dim is second-to-last known dim.
+        // B's N dim is the last known dim.
+        let a_k_known_idx = a_known_dims.len() - 1;
+        let _b_k_known_idx = b_known_dims.len() - 2;
+
+        // The number of row groups: batch_known_product * (M if known, else 1).
+        let m_groups = m_known.unwrap_or(1);
+        let num_row_groups = (batch_known_product * m_groups) as usize;
+        let n_u64 = n;
+
+        // For each row group, compute the A and B base offsets within their atoms.
+        // A's known dims: [...batch_known, (M if known), K]
+        // B's known dims: [...batch_known, K, N]
+        let a_m_known_idx = if m_known.is_some() {
+            Some(a_known_dims.len() - 2) // M is second-to-last known dim
+        } else {
+            None
+        };
+
+        // Merged matmul Mul groups: one per row instead of K per row.
+        // Each merged group has K*N atoms. Atom j in the merged group computes:
+        //   A[m, j/N] * B[j/N, j%N]
+        //
+        // Input 0: StridedBroadcast { base: A[m,0], stride: 1, repeat: N }
+        //   → each block of N atoms broadcasts the same A element
+        // Input 1: Affine { base: B[0,0], stride: 1 }
+        //   → B is row-major, so B[k,n] = B_base + k*N + n = B_base + j
+        //
+        // The ReduceSum groups still have count=N and use SymAffine with
+        // stride_k = N to hop between k-blocks within the merged Mul group.
+        let mut mul_base_id = None;
+        let k_u64 = k;
+        let merged_mul_count = k_u64 * n_u64;
+
+        for g in 0..num_row_groups {
+            let m_idx = if m_known.is_some() {
+                g as u64 % m_groups
+            } else {
+                0
+            };
+            let batch_idx = if m_known.is_some() {
+                g as u64 / m_groups
+            } else {
+                g as u64
+            };
+
+            // Compute A's base offset: set batch indices + m_idx, K=0.
+            let mut a_offset = 0u64;
+            let mut batch_rem = batch_idx;
+            let a_batch_strides = TensorAtomMap::compute_strides(&a_batch_known);
+            for (i, &stride) in a_batch_strides.iter().enumerate() {
+                if stride > 0 {
+                    let idx = batch_rem / stride;
+                    batch_rem %= stride;
+                    a_offset += idx * a_strides[i];
+                }
+            }
+            if let Some(m_ki) = a_m_known_idx {
+                a_offset += m_idx * a_strides[m_ki];
+            }
+
+            // Compute B's base offset: set batch indices, K=0, N=0.
+            let mut b_offset = 0u64;
+            if !b_batch_known.is_empty() {
+                let mut batch_rem_b = batch_idx;
+                let b_batch_strides = TensorAtomMap::compute_strides(&b_batch_known);
+                for (i, &stride) in b_batch_strides.iter().enumerate() {
+                    if stride > 0 {
+                        let idx = batch_rem_b / stride;
+                        batch_rem_b %= stride;
+                        b_offset += idx * b_strides[i];
+                    }
+                }
+            }
+
+            // A[m, 0] — base of this row's A elements
+            let a_row_base = a_map.base_id.offset(a_offset);
+            // B[0, 0] — base of B for this batch
+            let b_base = b_map.base_id.offset(b_offset);
+
+            // Input 0: StridedBroadcast over A elements, each repeated N times
+            // A atoms have stride = a_strides[a_k_known_idx] between successive k values
+            let a_k_stride = a_strides[a_k_known_idx] as i64;
+            let input_a = InputRef::StridedBroadcast {
+                base: a_row_base,
+                stride: a_k_stride,
+                repeat: n_u64,
+            };
+
+            // Input 1: Affine over all K*N B elements (row-major layout)
+            // B[k,n] = b_base + k * b_strides[b_k_known_idx] + n
+            // Since B is contiguous (b_strides[b_k_known_idx] = N), this is just
+            // b_base + j for j in 0..K*N.
+            let input_b = InputRef::Affine {
+                base: b_base,
+                stride: 1,
+            };
+
+            let base = ctx.nano.push_group(
+                merged_mul_count,
+                product_dtype,
+                ScalarOp::Binary {
+                    op: ScalarBinOp::Mul,
+                    compute_dtype: product_dtype,
+                },
+                out_sym_dims.clone(),
+                vec![input_a, input_b],
+            );
+
+            if mul_base_id.is_none() {
+                mul_base_id = Some(base);
+            }
+        }
+
+        let mul_base = mul_base_id.unwrap();
+
+        // ReduceSum: one group per row, each with N atoms.
+        // reduce_stride = N so that stepping k hops between k-blocks within the
+        // merged Mul group. Input stride = 1 for consecutive output atoms.
+        let mut reduce_base_id = None;
+
+        for g in 0..num_row_groups {
+            let row_mul_base = AtomId(mul_base.0 + (g as u64) * merged_mul_count);
+
+            let base = ctx.nano.push_group(
+                n_u64,
+                out_dtype,
+                ScalarOp::Reduce {
+                    kind: ReduceKind::Sum,
+                    reduce_count: k_u64,
+                    reduce_stride: n_u64 as i64,
+                    compute_dtype: accumulate_dtype,
+                },
+                out_sym_dims.clone(),
+                vec![InputRef::Affine {
+                    base: row_mul_base,
+                    stride: 1,
+                }],
+            );
+
+            if reduce_base_id.is_none() {
+                reduce_base_id = Some(base);
+            }
+        }
+
+        let base_id = reduce_base_id.unwrap();
+
+        ctx.tensor_map.insert(
+            out_id,
+            TensorAtomMap::simple(
+                base_id,
+                out_count,
+                out_dtype,
+                out_layout,
+                TensorAtomMap::compute_strides(&out_known_dims),
+                out_sym_dims,
+            ),
+        );
     }
 
     pub fn remap_tensors(&mut self, map: &HashMap<GlobalId, GlobalId>, rng: &mut impl Rng) {

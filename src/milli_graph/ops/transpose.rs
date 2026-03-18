@@ -3,6 +3,7 @@ use crate::backends::eval_backend::EvalBackend;
 use crate::graph::{GlobalId, Node};
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
+use crate::nano_graph::lower::{DimKind, TensorAtomMap};
 use crate::numeric_tensor::NumericTensor;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -52,7 +53,126 @@ impl Transpose {
 
 impl Transpose {
     pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
-        ctx.lower_transpose(self);
+        let all_infos = ctx.all_infos;
+        let in_id = Node::inputs(self).next().unwrap();
+        let out_id = Node::outputs(self).next().unwrap();
+
+        let Some(in_map) = ctx.tensor_map.get(&in_id).cloned() else {
+            ctx.lower_as_boundary_named(self, "Transpose");
+            return;
+        };
+        let Some(out_info) = all_infos.get(&out_id) else {
+            ctx.register_opaque(out_id);
+            return;
+        };
+        let Some(in_info) = all_infos.get(&in_id) else {
+            ctx.lower_as_boundary_named(self, "Transpose");
+            return;
+        };
+
+        let in_rank = match in_info.rank_if_known() {
+            Some(r) => r,
+            None => {
+                ctx.lower_as_boundary_named(self, "Transpose");
+                return;
+            }
+        };
+
+        let Some((out_layout, out_known_dims, _out_sym_dims, _out_count)) =
+            ctx.classify_dims(out_info)
+        else {
+            ctx.lower_as_boundary_named(self, "Transpose");
+            return;
+        };
+
+        // Build full permutation (handling None=reverse, partial perms, negative indices).
+        let full_perm: Vec<usize> = match self.perm() {
+            None => (0..in_rank).rev().collect(),
+            Some(perm) => {
+                let expanded = if perm.len() < in_rank {
+                    let prefix_len = in_rank - perm.len();
+                    let mut fp: Vec<i64> = (0..prefix_len as i64).collect();
+                    fp.extend(
+                        perm.iter()
+                            .map(|&x| if x < 0 { x + in_rank as i64 } else { x }),
+                    );
+                    fp
+                } else {
+                    perm.to_vec()
+                };
+                expanded
+                    .iter()
+                    .map(|&x| {
+                        if x < 0 {
+                            (x + in_rank as i64) as usize
+                        } else {
+                            x as usize
+                        }
+                    })
+                    .collect()
+            }
+        };
+
+        // Get input known dim sizes (only the Known dims, in original order).
+        let in_known_sizes: Vec<u64> = in_map
+            .layout
+            .iter()
+            .filter_map(|d| {
+                if let DimKind::Known(s) = d {
+                    Some(*s)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let in_strides = TensorAtomMap::compute_strides(&in_known_sizes);
+        let _out_strides = TensorAtomMap::compute_strides(&out_known_dims);
+
+        // We need to map between original dim indices and known-dim indices.
+        // For now, assume all dims are known (symbolic dims in transpose would
+        // be unusual). If any dim is symbolic, fall back to boundary.
+        if in_map
+            .layout
+            .iter()
+            .any(|d| matches!(d, DimKind::Symbolic(_)))
+            || out_layout.iter().any(|d| matches!(d, DimKind::Symbolic(_)))
+        {
+            ctx.register_boundary(out_id, out_info, "Transpose");
+            ctx.push_unsupported(self, "Transpose(symbolic dims)");
+            return;
+        }
+
+        // Zero-cost transpose: reuse the input's atoms with permuted strides.
+        //
+        // The input atoms are laid out in row-major order with `in_strides`.
+        // After transposing with perm, output dim j corresponds to input dim perm[j].
+        // So the output's strides (into the SAME flat atom buffer) are:
+        //   output_stride[j] = input_stride[perm[j]]
+        //
+        // This means downstream ops will decompose their flat index using
+        // the output strides and arrive at the correct input atom.
+        let mut transposed_strides = vec![0u64; full_perm.len()];
+        for (out_dim, &in_dim) in full_perm.iter().enumerate() {
+            transposed_strides[out_dim] = in_strides[in_dim];
+        }
+
+        // Permute the layout as well.
+        let mut transposed_layout = vec![DimKind::Known(0); full_perm.len()];
+        for (out_dim, &in_dim) in full_perm.iter().enumerate() {
+            transposed_layout[out_dim] = in_map.layout[in_dim].clone();
+        }
+
+        ctx.tensor_map.insert(
+            out_id,
+            TensorAtomMap::simple(
+                in_map.base_id,
+                in_map.count,
+                out_info.dtype(),
+                transposed_layout,
+                transposed_strides,
+                in_map.sym_dims.clone(),
+            ),
+        );
     }
 
     pub fn remap_tensors(&mut self, map: &HashMap<GlobalId, GlobalId>, rng: &mut impl rand::Rng) {
