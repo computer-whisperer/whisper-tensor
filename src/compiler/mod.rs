@@ -68,6 +68,32 @@ pub fn interpret_milli_graph_all_intermediates(
     Ok(intermediates)
 }
 
+/// For each tensor produced by an op, return (tensor_id, op_kind, op_input_shapes).
+/// Used to identify which op produces a diverging tensor.
+pub fn tensor_producers(
+    graph: &MilliOpGraph,
+    intermediates: &std::collections::HashMap<GlobalId, NumericTensor<DynRank>>,
+) -> std::collections::HashMap<GlobalId, (String, Vec<(GlobalId, Vec<u64>)>)> {
+    use crate::graph::{Graph, Node};
+    let mut result = std::collections::HashMap::new();
+    for &op_id in graph.op_ordering() {
+        let Some(op) = graph.get_node_by_id(&op_id) else { continue };
+        let kind = op.op_kind();
+        let input_shapes: Vec<(GlobalId, Vec<u64>)> = op.inputs()
+            .map(|id| {
+                let shape = intermediates.get(&id)
+                    .map(|t| t.shape().to_vec())
+                    .unwrap_or_default();
+                (id, shape)
+            })
+            .collect();
+        for out_id in op.outputs() {
+            result.insert(out_id, (kind.clone(), input_shapes.clone()));
+        }
+    }
+    result
+}
+
 /// Return a sorted list of (op_kind, count) for all ops in the graph.
 pub fn op_census(graph: &MilliOpGraph) -> Vec<(String, usize)> {
     use crate::graph::{Graph, Node};

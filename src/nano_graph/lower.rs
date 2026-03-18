@@ -3564,4 +3564,118 @@ mod tests {
             ],
         );
     }
+
+    // =========================================================================
+    // GPT-2 scale tests — exercising dimensions seen in the real model
+    // =========================================================================
+
+    #[test]
+    fn test_reduce_mean_large_axis() {
+        // ReduceMean on [2, 4, 64] axis -1 → [2, 4, 1] (GPT-2 layernorm scale)
+        check_integrity(
+            |g, rng| {
+                use crate::backends::ndarray_backend::NDArrayNumericTensor;
+                use ndarray::{ArcArray, IxDyn};
+                let a = g.add_input(rng);
+                let axes_tensor = NDArrayNumericTensor::I64(
+                    ArcArray::from_shape_vec(IxDyn(&[1]), vec![-1i64]).unwrap(),
+                );
+                let axes = crate::milli_graph::ops::Constant::push_new(g, axes_tensor, rng);
+                let b = crate::milli_graph::ops::ReduceMean::push_new(
+                    g, a, Some(axes), true, false, rng,
+                );
+                (vec![a], vec![b])
+            },
+            vec![NumericTensor::from_vec_shape(
+                (0..512).map(|i| (i as f32) * 0.01 - 2.56).collect(),
+                vec![2, 4, 64],
+            )
+            .unwrap()],
+        );
+    }
+
+    #[test]
+    fn test_matmul_large_k() {
+        // MatMul [2, 4, 64] @ [64, 64] → [2, 4, 64] — GPT-2 projection scale
+        check_integrity(
+            |g, rng| {
+                let a = g.add_input(rng);
+                let b = g.add_input(rng);
+                let c = crate::milli_graph::ops::MatMul::push_new_default_precision(
+                    g, a, b, DType::F32, rng,
+                );
+                (vec![a, b], vec![c])
+            },
+            vec![
+                NumericTensor::from_vec_shape(
+                    (0..512).map(|i| (i as f32) * 0.01 - 2.56).collect(),
+                    vec![2, 4, 64],
+                )
+                .unwrap(),
+                NumericTensor::from_vec_shape(
+                    (0..4096).map(|i| (i as f32) * 0.001 - 2.048).collect(),
+                    vec![64, 64],
+                )
+                .unwrap(),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_reshape_transpose_matmul_gpt2_scale() {
+        // Full attention head split at GPT-2 scale:
+        // Q [2, 4, 64] → reshape [2, 4, 4, 16] → transpose [0,2,1,3] → [2, 4, 4, 16]
+        // matmul with K^T [2, 4, 16, 4] → scores [2, 4, 4, 4]
+        check_integrity(
+            |g, rng| {
+                let q_flat = g.add_input(rng);
+                let q_shape = g.add_input(rng);
+                let k_flat = g.add_input(rng);
+                let k_shape = g.add_input(rng);
+
+                // Reshape Q: [2, 4, 64] → [2, 4, 4, 16]
+                let q_4d = crate::milli_graph::ops::Reshape::push_new(
+                    g, q_flat, q_shape, false, rng,
+                );
+                // Transpose Q: [2, 4, 4, 16] → [2, 4, 4, 16] perm=[0,2,1,3]
+                let q_t = crate::milli_graph::ops::Transpose::push_new(
+                    g, q_4d, Some(vec![0, 2, 1, 3]), rng,
+                );
+
+                // Reshape K: [2, 4, 64] → [2, 4, 4, 16]
+                let k_4d = crate::milli_graph::ops::Reshape::push_new(
+                    g, k_flat, k_shape, false, rng,
+                );
+                // Transpose K: → [2, 4, 4, 16] perm=[0,2,1,3]
+                let k_t1 = crate::milli_graph::ops::Transpose::push_new(
+                    g, k_4d, Some(vec![0, 2, 1, 3]), rng,
+                );
+                // Transpose K^T: [2, 4, 4, 16] → [2, 4, 16, 4] perm=[0,1,3,2]
+                let k_t2 = crate::milli_graph::ops::Transpose::push_new(
+                    g, k_t1, Some(vec![0, 1, 3, 2]), rng,
+                );
+
+                // Attention scores: Q @ K^T = [2, 4, 4, 16] @ [2, 4, 16, 4] → [2, 4, 4, 4]
+                let scores = crate::milli_graph::ops::MatMul::push_new_default_precision(
+                    g, q_t, k_t2, DType::F32, rng,
+                );
+
+                (vec![q_flat, q_shape, k_flat, k_shape], vec![scores])
+            },
+            vec![
+                NumericTensor::from_vec_shape(
+                    (0..512).map(|i| (i as f32) * 0.01 - 2.56).collect(),
+                    vec![2, 4, 64],
+                )
+                .unwrap(),
+                NumericTensor::from_vec_shape(vec![2i64, 4, 4, 16], vec![4]).unwrap(),
+                NumericTensor::from_vec_shape(
+                    (0..512).map(|i| (i as f32) * 0.005 - 1.28).collect(),
+                    vec![2, 4, 64],
+                )
+                .unwrap(),
+                NumericTensor::from_vec_shape(vec![2i64, 4, 4, 16], vec![4]).unwrap(),
+            ],
+        );
+    }
 }

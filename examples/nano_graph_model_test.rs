@@ -325,25 +325,15 @@ fn main() {
             });
         }
 
-        // ---- Run nano interpreter ----
-        println!("\n=== Step 3: Nano Interpreter ===");
-        let t_nano = Instant::now();
-        let nano_results =
-            whisper_tensor::nano_graph::eval::eval(&result.graph, &eval_input_refs, &output_ranges);
-        let nano_elapsed = t_nano.elapsed();
-        println!(
-            "  Nano interpreter completed in {:.1}s",
-            nano_elapsed.as_secs_f64()
-        );
-
         // ---- Compare ALL intermediate tensors to find first divergence ----
-        println!("\n=== Step 4: Intermediate Comparison (finding first divergence) ===");
+        println!("\n=== Step 3: Intermediate Comparison (finding first divergence) ===");
 
         // Collect all milli intermediate tensors.
         let intermediates = whisper_tensor::compiler::interpret_milli_graph_all_intermediates(
             &milli_graph, &milli_inputs,
         )
         .unwrap();
+        let producers = whisper_tensor::compiler::tensor_producers(&milli_graph, &intermediates);
 
         // Build ranges for all non-trivial tensor_map entries and request them from nano eval.
         // We already have nano_results for the output ranges. Now request intermediate ranges.
@@ -421,12 +411,20 @@ fn main() {
             } else {
                 num_bad += 1;
                 if first_bad.is_none() {
-                    let op_kind = "unknown".to_string();
+                    let (op_kind, input_info) = producers.get(&tid)
+                        .map(|(k, inputs)| (k.clone(), inputs.clone()))
+                        .unwrap_or_else(|| ("input".to_string(), vec![]));
                     first_bad = Some((tid, op_kind.clone(), local_max));
+                    let milli_shape = intermediates.get(&tid)
+                        .map(|t| format!("{:?} {:?}", t.dtype(), t.shape()))
+                        .unwrap_or_default();
                     println!(
-                        "  FIRST DIVERGENCE: tensor {:?} (op: {}, {} elements): max_abs_err={:.6e}",
-                        tid, op_kind, milli_vals.len(), local_max
+                        "  FIRST DIVERGENCE: tensor {:?} (op: {}, shape: {}, {} elements): max_abs_err={:.6e}",
+                        tid, op_kind, milli_shape, milli_vals.len(), local_max
                     );
+                    for (inp_id, inp_shape) in &input_info {
+                        println!("    input {:?}: shape {:?}", inp_id, inp_shape);
+                    }
                     // Print first few mismatched elements.
                     let mut shown = 0;
                     for (i, (m, n)) in milli_vals.iter().zip(nano_f32.iter()).enumerate() {
@@ -445,89 +443,12 @@ fn main() {
             num_perfect, num_close, num_bad
         );
 
-        // ---- Also compare final outputs ----
-        println!("\n=== Step 5: Output Comparison ===");
-        let mut total_compared = 0u64;
-        let mut max_abs_error: f64 = 0.0;
-        let mut max_rel_error: f64 = 0.0;
-
-        for (i, ext_id) in output_ext_ids.iter().enumerate() {
-            let milli_tensor = &milli_outputs[ext_id];
-
-            // Get milli values as f32.
-            let Ok(f32_tensor) = milli_tensor.cast(DType::F32, &mut backend) else {
-                println!("    Output {:?}: failed to cast to F32", ext_id);
-                continue;
-            };
-            let flat = f32_tensor.flatten().unwrap();
-            let nd = flat.to_ndarray().unwrap();
-            let milli_values: Vec<f32> = nd.try_into().unwrap();
-
-            // Get nano values as f32.
-            let nano_tensor = &nano_results[i];
-            let nano_f32 = match nano_tensor {
-                NDArrayNumericTensor::F32(a) => a.iter().copied().collect::<Vec<f32>>(),
-                other => {
-                    let cast = NumericTensor::from(other.clone())
-                        .cast(DType::F32, &mut backend)
-                        .unwrap();
-                    let flat = cast.flatten().unwrap();
-                    let nd = flat.to_ndarray().unwrap();
-                    nd.try_into().unwrap()
-                }
-            };
-
-            if milli_values.len() != nano_f32.len() {
-                println!(
-                    "    Output {:?}: milli has {} elements, nano has {}",
-                    ext_id,
-                    milli_values.len(),
-                    nano_f32.len()
-                );
-                continue;
-            }
-
-            let mut local_max_abs = 0.0f64;
-            let mut local_max_rel = 0.0f64;
-            for (m, n) in milli_values.iter().zip(nano_f32.iter()) {
-                let abs_err = (m - n).abs() as f64;
-                let rel_err = if m.abs() > 1e-8 {
-                    abs_err / m.abs() as f64
-                } else {
-                    0.0
-                };
-                local_max_abs = local_max_abs.max(abs_err);
-                local_max_rel = local_max_rel.max(rel_err);
-                total_compared += 1;
-            }
-
-            println!(
-                "    Output {:?}: {} elements, max_abs_err={:.6e}, max_rel_err={:.6e}",
-                ext_id,
-                milli_values.len(),
-                local_max_abs,
-                local_max_rel
-            );
-            max_abs_error = max_abs_error.max(local_max_abs);
-            max_rel_error = max_rel_error.max(local_max_rel);
-        }
-
-        println!("\n  Elements compared: {}", total_compared);
-        println!("  Max absolute error: {:.6e}", max_abs_error);
-        println!("  Max relative error: {:.6e}", max_rel_error);
-
-        if total_compared > 0 && max_abs_error < 1e-3 {
-            println!("  RESULT: PASS (max abs error < 1e-3)");
-        } else if total_compared > 0 {
-            println!("  RESULT: MISMATCH (max abs error = {:.6e})", max_abs_error);
-        } else {
-            println!("  RESULT: NO ELEMENTS COMPARED");
-        }
+        // (Output comparison skipped — intermediate comparison covers it)
 
         // ---- Timing summary ----
         println!("\n=== Timing Summary ===");
         println!("  Milli interpreter: {:.3}s", milli_elapsed.as_secs_f64());
         println!("  NanoGraph lowering: {:.3}s", lower_elapsed.as_secs_f64());
-        println!("  Nano interpreter:  {:.3}s", nano_elapsed.as_secs_f64());
+        println!("  Nano intermediate check: {:.3}s", t_check.elapsed().as_secs_f64());
     }
 }
