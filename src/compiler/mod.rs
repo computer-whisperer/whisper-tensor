@@ -1,7 +1,6 @@
 // See README.md in this directory — this module is a volatile sandbox.
 
 pub mod attempts;
-pub mod common;
 
 use crate::milli_graph::MilliOpGraph;
 

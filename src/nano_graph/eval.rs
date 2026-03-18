@@ -5,9 +5,10 @@
 //! verify that the lowered NanoGraph produces the same values as the
 //! original MilliOpGraph.
 //!
-//! Precision semantics come from each ScalarOp variant's compute_dtype
-//! and output_dtype fields. Inputs are cast to compute_dtype, the op
-//! executes at that precision, then the result is cast to output_dtype.
+//! Precision semantics: ops with a `compute_dtype` cast inputs to that
+//! precision, execute the op, then cast the result to the group's
+//! `output_dtype`. Ops without `compute_dtype` (Identity, Select,
+//! IndirectLoad) use the group's `output_dtype` directly.
 
 use std::collections::HashMap;
 
@@ -15,7 +16,7 @@ use crate::DynRank;
 use crate::backends::ndarray_backend::numeric_tensor::NDArrayNumericTensor;
 use crate::numeric_scalar::NumericScalar;
 
-use super::ops::{ScalarBinOp, ScalarOp, ScalarUnaryOp};
+use super::ops::{ReduceKind, ScalarBinOp, ScalarOp, ScalarUnaryOp};
 use super::pattern::{AtomId, NanoGraph};
 
 /// Flat storage of one NumericScalar per atom.
@@ -87,44 +88,31 @@ impl NanoEval {
         let mut nan_reported = false;
 
         for (group_idx, group) in graph.groups().iter().enumerate() {
-            let is_reduce = group.op.is_reduce();
+            let output_dtype = group.output_dtype;
 
             for i in 0..group.count {
                 let atom_idx = group.base_id.0 + i;
                 let ri = i + group.atom_offset;
 
-                if is_reduce {
-                    let (reduce_count, reduce_stride, compute_dtype, output_dtype) = match &group.op
-                    {
-                        ScalarOp::ReduceSum {
-                            reduce_count,
-                            reduce_stride,
-                            compute_dtype,
-                            output_dtype,
-                        } => (*reduce_count, *reduce_stride, *compute_dtype, *output_dtype),
-                        ScalarOp::ReduceMax {
-                            reduce_count,
-                            reduce_stride,
-                            compute_dtype,
-                            output_dtype,
-                        } => (*reduce_count, *reduce_stride, *compute_dtype, *output_dtype),
-                        _ => unreachable!(),
+                if let ScalarOp::Reduce {
+                    kind,
+                    reduce_count,
+                    reduce_stride,
+                    compute_dtype,
+                } = &group.op
+                {
+                    let mut acc = match kind {
+                        ReduceKind::Sum => NumericScalar::zero_of(*compute_dtype),
+                        ReduceKind::Max => NumericScalar::neg_infinity_of(*compute_dtype),
                     };
 
-                    let mut acc = match &group.op {
-                        ScalarOp::ReduceSum { .. } => NumericScalar::zero_of(compute_dtype),
-                        ScalarOp::ReduceMax { .. } => NumericScalar::neg_infinity_of(compute_dtype),
-                        _ => unreachable!(),
-                    };
-
-                    let base = group.inputs[0].resolve(ri, 0);
-                    for k in 0..reduce_count {
+                    let base = group.inputs[0].resolve(ri);
+                    for k in 0..*reduce_count {
                         let src_idx = (base.0 as i64 + k as i64 * reduce_stride) as u64;
-                        let val = values[src_idx as usize].cast_to(compute_dtype);
-                        acc = match &group.op {
-                            ScalarOp::ReduceSum { .. } => acc.add(&val),
-                            ScalarOp::ReduceMax { .. } => acc.scalar_max(&val),
-                            _ => unreachable!(),
+                        let val = values[src_idx as usize].cast_to(*compute_dtype);
+                        acc = match kind {
+                            ReduceKind::Sum => acc.add(&val),
+                            ReduceKind::Max => acc.scalar_max(&val),
                         };
                     }
                     if debug_nan && !nan_reported && !acc.to_f64().is_finite() {
@@ -148,22 +136,17 @@ impl NanoEval {
                                 scalar.clone()
                             }
                         }
-                        ScalarOp::Identity {
-                            compute_dtype,
-                            output_dtype,
-                        } => {
-                            let src = group.inputs[0].resolve(ri, 0);
-                            let x = values[src.0 as usize].cast_to(*compute_dtype);
-                            x.cast_to(*output_dtype)
+                        ScalarOp::Identity => {
+                            let src = group.inputs[0].resolve(ri);
+                            values[src.0 as usize].cast_to(output_dtype)
                         }
                         ScalarOp::Binary {
                             op,
                             compute_dtype,
-                            output_dtype,
                         } => {
-                            let a = values[group.inputs[0].resolve(ri, 0).0 as usize]
+                            let a = values[group.inputs[0].resolve(ri).0 as usize]
                                 .cast_to(*compute_dtype);
-                            let b = values[group.inputs[1].resolve(ri, 0).0 as usize]
+                            let b = values[group.inputs[1].resolve(ri).0 as usize]
                                 .cast_to(*compute_dtype);
                             let result = match op {
                                 ScalarBinOp::Add => a.add(&b),
@@ -231,14 +214,13 @@ impl NanoEval {
                                     }
                                 }
                             };
-                            result.cast_to(*output_dtype)
+                            result.cast_to(output_dtype)
                         }
                         ScalarOp::Unary {
                             op,
                             compute_dtype,
-                            output_dtype,
                         } => {
-                            let x = values[group.inputs[0].resolve(ri, 0).0 as usize]
+                            let x = values[group.inputs[0].resolve(ri).0 as usize]
                                 .cast_to(*compute_dtype);
                             let result = match op {
                                 ScalarUnaryOp::Neg => x.neg(),
@@ -251,33 +233,27 @@ impl NanoEval {
                                 ScalarUnaryOp::Floor => x.floor(),
                                 ScalarUnaryOp::Ceil => x.ceil(),
                             };
-                            result.cast_to(*output_dtype)
+                            result.cast_to(output_dtype)
                         }
-                        ScalarOp::Select {
-                            compute_dtype,
-                            output_dtype,
-                        } => {
-                            let cond = values[group.inputs[0].resolve(ri, 0).0 as usize]
-                                .cast_to(*compute_dtype);
-                            let result = if cond.is_nonzero() {
-                                values[group.inputs[1].resolve(ri, 0).0 as usize]
-                                    .cast_to(*compute_dtype)
+                        ScalarOp::Select => {
+                            let cond = values[group.inputs[0].resolve(ri).0 as usize].clone();
+                            if cond.is_nonzero() {
+                                values[group.inputs[1].resolve(ri).0 as usize]
+                                    .cast_to(output_dtype)
                             } else {
-                                values[group.inputs[2].resolve(ri, 0).0 as usize]
-                                    .cast_to(*compute_dtype)
-                            };
-                            result.cast_to(*output_dtype)
+                                values[group.inputs[2].resolve(ri).0 as usize]
+                                    .cast_to(output_dtype)
+                            }
                         }
                         ScalarOp::IndirectLoad {
                             table_base,
-                            output_dtype,
                         } => {
-                            let src = group.inputs[0].resolve(ri, 0);
+                            let src = group.inputs[0].resolve(ri);
                             let index = values[src.0 as usize].to_f64() as usize;
                             let table_atom = table_base.0 as usize + index;
-                            values[table_atom].cast_to(*output_dtype)
+                            values[table_atom].cast_to(output_dtype)
                         }
-                        ScalarOp::ReduceSum { .. } | ScalarOp::ReduceMax { .. } => unreachable!(),
+                        ScalarOp::Reduce { .. } => unreachable!(),
                     };
                     if debug_nan && !nan_reported && !val.to_f64().is_finite() {
                         let input_detail: Vec<String> = group
@@ -285,7 +261,7 @@ impl NanoEval {
                             .iter()
                             .enumerate()
                             .map(|(j, inp)| {
-                                let src = inp.resolve(ri, 0);
+                                let src = inp.resolve(ri);
                                 format!("inp[{}]=atom{}={:?}", j, src.0, values[src.0 as usize])
                             })
                             .collect();
@@ -395,33 +371,28 @@ pub fn eval_efficient(
         }
 
         // Reduce ops access additional atoms via stride.
-        match &group.op {
-            ScalarOp::ReduceSum {
-                reduce_count,
-                reduce_stride,
-                ..
+        if let ScalarOp::Reduce {
+            reduce_count,
+            reduce_stride,
+            ..
+        } = &group.op
+            && *reduce_count > 1
+            && *reduce_stride != 0
+        {
+            for input in &group.inputs {
+                let first = input.resolve(group.atom_offset);
+                let last = input.resolve(group.atom_offset + group.count - 1);
+                let end_off = (*reduce_count as i64 - 1) * reduce_stride;
+                let endpoints = [
+                    first.0,
+                    (first.0 as i64 + end_off) as u64,
+                    last.0,
+                    (last.0 as i64 + end_off) as u64,
+                ];
+                let lo = *endpoints.iter().min().unwrap();
+                let hi = *endpoints.iter().max().unwrap();
+                insert_groups_in_range_static(graph, lo, hi, &mut seen);
             }
-            | ScalarOp::ReduceMax {
-                reduce_count,
-                reduce_stride,
-                ..
-            } if *reduce_count > 1 && *reduce_stride != 0 => {
-                for input in &group.inputs {
-                    let first = input.resolve(group.atom_offset, 0);
-                    let last = input.resolve(group.atom_offset + group.count - 1, 0);
-                    let end_off = (*reduce_count as i64 - 1) * reduce_stride;
-                    let endpoints = [
-                        first.0,
-                        (first.0 as i64 + end_off) as u64,
-                        last.0,
-                        (last.0 as i64 + end_off) as u64,
-                    ];
-                    let lo = *endpoints.iter().min().unwrap();
-                    let hi = *endpoints.iter().max().unwrap();
-                    insert_groups_in_range_static(graph, lo, hi, &mut seen);
-                }
-            }
-            _ => {}
         }
 
         // IndirectLoad table reference.
@@ -472,137 +443,113 @@ pub fn eval_efficient(
 
         let count = group.count as usize;
         let mut buf = vec![NumericScalar::F32(0.0); count];
-        let is_reduce = group.op.is_reduce();
+        let output_dtype = group.output_dtype;
 
         for i in 0..group.count {
             let ri = i + group.atom_offset;
 
-            if is_reduce {
-                let (reduce_count, reduce_stride, compute_dtype, output_dtype) = match &group.op {
-                    ScalarOp::ReduceSum {
-                        reduce_count,
-                        reduce_stride,
-                        compute_dtype,
-                        output_dtype,
-                    } => (*reduce_count, *reduce_stride, *compute_dtype, *output_dtype),
-                    ScalarOp::ReduceMax {
-                        reduce_count,
-                        reduce_stride,
-                        compute_dtype,
-                        output_dtype,
-                    } => (*reduce_count, *reduce_stride, *compute_dtype, *output_dtype),
-                    _ => unreachable!(),
+            if let ScalarOp::Reduce {
+                kind,
+                reduce_count,
+                reduce_stride,
+                compute_dtype,
+            } = &group.op
+            {
+                let mut acc = match kind {
+                    ReduceKind::Sum => NumericScalar::zero_of(*compute_dtype),
+                    ReduceKind::Max => NumericScalar::neg_infinity_of(*compute_dtype),
                 };
 
-                let mut acc = match &group.op {
-                    ScalarOp::ReduceSum { .. } => NumericScalar::zero_of(compute_dtype),
-                    ScalarOp::ReduceMax { .. } => NumericScalar::neg_infinity_of(compute_dtype),
-                    _ => unreachable!(),
-                };
-
-                let base_atom = group.inputs[0].resolve(ri, 0);
-                for k in 0..reduce_count {
+                let base_atom = group.inputs[0].resolve(ri);
+                for k in 0..*reduce_count {
                     let src_id = AtomId((base_atom.0 as i64 + k as i64 * reduce_stride) as u64);
                     let val = lookup_atom(src_id, graph, &group_buffers, &input_buffers)
-                        .cast_to(compute_dtype);
-                    acc = match &group.op {
-                        ScalarOp::ReduceSum { .. } => acc.add(&val),
-                        ScalarOp::ReduceMax { .. } => acc.scalar_max(&val),
-                        _ => unreachable!(),
+                        .cast_to(*compute_dtype);
+                    acc = match kind {
+                        ReduceKind::Sum => acc.add(&val),
+                        ReduceKind::Max => acc.scalar_max(&val),
                     };
                 }
                 buf[i as usize] = acc.cast_to(output_dtype);
             } else {
                 let val = match &group.op {
                     ScalarOp::Literal(scalar) => scalar.clone(),
-                    ScalarOp::Identity {
-                        compute_dtype,
-                        output_dtype,
-                    } => {
-                        let src = group.inputs[0].resolve(ri, 0);
+                    ScalarOp::Identity => {
+                        let src = group.inputs[0].resolve(ri);
                         lookup_atom(src, graph, &group_buffers, &input_buffers)
-                            .cast_to(*compute_dtype)
-                            .cast_to(*output_dtype)
+                            .cast_to(output_dtype)
                     }
                     ScalarOp::Binary {
                         op,
                         compute_dtype,
-                        output_dtype,
                     } => {
                         let a = lookup_atom(
-                            group.inputs[0].resolve(ri, 0),
+                            group.inputs[0].resolve(ri),
                             graph,
                             &group_buffers,
                             &input_buffers,
                         )
                         .cast_to(*compute_dtype);
                         let b = lookup_atom(
-                            group.inputs[1].resolve(ri, 0),
+                            group.inputs[1].resolve(ri),
                             graph,
                             &group_buffers,
                             &input_buffers,
                         )
                         .cast_to(*compute_dtype);
                         let result = eval_binop(op, &a, &b);
-                        result.cast_to(*output_dtype)
+                        result.cast_to(output_dtype)
                     }
                     ScalarOp::Unary {
                         op,
                         compute_dtype,
-                        output_dtype,
                     } => {
                         let x = lookup_atom(
-                            group.inputs[0].resolve(ri, 0),
+                            group.inputs[0].resolve(ri),
                             graph,
                             &group_buffers,
                             &input_buffers,
                         )
                         .cast_to(*compute_dtype);
                         let result = eval_unaryop(op, &x);
-                        result.cast_to(*output_dtype)
+                        result.cast_to(output_dtype)
                     }
-                    ScalarOp::Select {
-                        compute_dtype,
-                        output_dtype,
-                    } => {
+                    ScalarOp::Select => {
                         let cond = lookup_atom(
-                            group.inputs[0].resolve(ri, 0),
+                            group.inputs[0].resolve(ri),
                             graph,
                             &group_buffers,
                             &input_buffers,
-                        )
-                        .cast_to(*compute_dtype);
-                        let result = if cond.is_nonzero() {
+                        );
+                        if cond.is_nonzero() {
                             lookup_atom(
-                                group.inputs[1].resolve(ri, 0),
+                                group.inputs[1].resolve(ri),
                                 graph,
                                 &group_buffers,
                                 &input_buffers,
                             )
-                            .cast_to(*compute_dtype)
+                            .cast_to(output_dtype)
                         } else {
                             lookup_atom(
-                                group.inputs[2].resolve(ri, 0),
+                                group.inputs[2].resolve(ri),
                                 graph,
                                 &group_buffers,
                                 &input_buffers,
                             )
-                            .cast_to(*compute_dtype)
-                        };
-                        result.cast_to(*output_dtype)
+                            .cast_to(output_dtype)
+                        }
                     }
                     ScalarOp::IndirectLoad {
                         table_base,
-                        output_dtype,
                     } => {
-                        let src = group.inputs[0].resolve(ri, 0);
+                        let src = group.inputs[0].resolve(ri);
                         let index =
                             lookup_atom(src, graph, &group_buffers, &input_buffers).to_f64() as u64;
                         let table_atom = AtomId(table_base.0 + index);
                         lookup_atom(table_atom, graph, &group_buffers, &input_buffers)
-                            .cast_to(*output_dtype)
+                            .cast_to(output_dtype)
                     }
-                    ScalarOp::ReduceSum { .. } | ScalarOp::ReduceMax { .. } => unreachable!(),
+                    ScalarOp::Reduce { .. } => unreachable!(),
                 };
                 buf[i as usize] = val;
             }
@@ -731,10 +678,9 @@ fn collect_producer_indices_static(
             }
         }
         InputRef::Affine { .. }
-        | InputRef::SymAffine { .. }
         | InputRef::StridedBroadcast { .. } => {
-            let first = input.resolve(atom_offset, 0);
-            let last = input.resolve(atom_offset + count - 1, 0);
+            let first = input.resolve(atom_offset);
+            let last = input.resolve(atom_offset + count - 1);
             let lo = first.0.min(last.0);
             let hi = first.0.max(last.0);
             insert_groups_in_range_static(graph, lo, hi, out);
@@ -745,7 +691,7 @@ fn collect_producer_indices_static(
             modulus,
         } => {
             let a = base.0;
-            let b = (base.0 as i64 + *stride as i64 * (*modulus as i64 - 1)) as u64;
+            let b = (base.0 as i64 + *stride * (*modulus as i64 - 1)) as u64;
             insert_groups_in_range_static(graph, a.min(b), a.max(b), out);
         }
         InputRef::Explicit(ids) => {
@@ -870,97 +816,11 @@ fn populate_from_tensor_into(
     }
 }
 
-/// Populate a values slice from an NDArrayNumericTensor's flattened elements.
-fn populate_from_tensor(
-    values: &mut [NumericScalar],
-    base: usize,
-    tensor: &NDArrayNumericTensor<DynRank>,
-) {
-    match tensor {
-        NDArrayNumericTensor::F32(a) => {
-            for (i, &v) in a.iter().enumerate() {
-                values[base + i] = NumericScalar::F32(v);
-            }
-        }
-        NDArrayNumericTensor::F64(a) => {
-            for (i, &v) in a.iter().enumerate() {
-                values[base + i] = NumericScalar::F64(v);
-            }
-        }
-        NDArrayNumericTensor::BF16(a) => {
-            for (i, &v) in a.iter().enumerate() {
-                values[base + i] = NumericScalar::BF16(v);
-            }
-        }
-        NDArrayNumericTensor::F16(a) => {
-            for (i, &v) in a.iter().enumerate() {
-                values[base + i] = NumericScalar::F16(v);
-            }
-        }
-        NDArrayNumericTensor::I64(a) => {
-            for (i, &v) in a.iter().enumerate() {
-                values[base + i] = NumericScalar::I64(v);
-            }
-        }
-        NDArrayNumericTensor::U64(a) => {
-            for (i, &v) in a.iter().enumerate() {
-                values[base + i] = NumericScalar::U64(v);
-            }
-        }
-        NDArrayNumericTensor::I32(a) => {
-            for (i, &v) in a.iter().enumerate() {
-                values[base + i] = NumericScalar::I32(v);
-            }
-        }
-        NDArrayNumericTensor::U32(a) => {
-            for (i, &v) in a.iter().enumerate() {
-                values[base + i] = NumericScalar::U32(v);
-            }
-        }
-        NDArrayNumericTensor::I16(a) => {
-            for (i, &v) in a.iter().enumerate() {
-                values[base + i] = NumericScalar::I16(v);
-            }
-        }
-        NDArrayNumericTensor::U16(a) => {
-            for (i, &v) in a.iter().enumerate() {
-                values[base + i] = NumericScalar::U16(v);
-            }
-        }
-        NDArrayNumericTensor::I8(a) => {
-            for (i, &v) in a.iter().enumerate() {
-                values[base + i] = NumericScalar::I8(v);
-            }
-        }
-        NDArrayNumericTensor::U8(a) => {
-            for (i, &v) in a.iter().enumerate() {
-                values[base + i] = NumericScalar::U8(v);
-            }
-        }
-        NDArrayNumericTensor::F8E4M3(a) => {
-            for (i, &v) in a.iter().enumerate() {
-                values[base + i] = NumericScalar::F8E4M3(v);
-            }
-        }
-        NDArrayNumericTensor::F8E5M2(a) => {
-            for (i, &v) in a.iter().enumerate() {
-                values[base + i] = NumericScalar::F8E5M2(v);
-            }
-        }
-        NDArrayNumericTensor::BOOL(a) => {
-            for (i, &v) in a.iter().enumerate() {
-                values[base + i] = NumericScalar::BOOL(v);
-            }
-        }
-        NDArrayNumericTensor::STRING(_) => panic!("Cannot populate values from string tensor"),
-    }
+fn populate_from_tensor(values: &mut [NumericScalar], base: usize, tensor: &NDArrayNumericTensor<DynRank>) {
+    populate_from_tensor_into(values, base, tensor);
 }
 
-/// Convert a slice of NumericScalars to a 1D NDArrayNumericTensor.
-fn scalars_to_tensor(
-    scalars: &[NumericScalar],
-    dtype: crate::dtype::DType,
-) -> NDArrayNumericTensor<DynRank> {
+fn scalars_to_tensor(scalars: &[NumericScalar], dtype: crate::dtype::DType) -> NDArrayNumericTensor<DynRank> {
     use ndarray::{ArcArray, IxDyn};
     let shape = IxDyn(&[scalars.len()]);
     match dtype {
@@ -1011,7 +871,7 @@ mod tests {
     use super::*;
     use crate::dtype::DType;
     use crate::graph::GlobalId;
-    use crate::nano_graph::ops::{ScalarBinOp, ScalarOp, ScalarUnaryOp};
+    use crate::nano_graph::ops::{ReduceKind, ScalarBinOp, ScalarOp, ScalarUnaryOp};
     use crate::nano_graph::pattern::{AtomRange, InputRef, NanoGraph};
     use crate::numeric_scalar::NumericScalar;
     use ndarray::{ArcArray, IxDyn};
@@ -1022,33 +882,27 @@ mod tests {
         )
     }
 
-    /// Build a small graph: input → mul(2) → add(bias) → output.
-    /// Verify eval_efficient matches NanoEval::eval.
     #[test]
     fn test_efficient_matches_flat() {
         let mut g = NanoGraph::new();
         let gid = GlobalId(1);
 
-        // 4-element input tensor.
         let inp = g.add_input_tensor(gid, 4, DType::F32);
 
-        // Literal constant: 2.0
         let two = g.push_atom(
+            DType::F32,
             ScalarOp::Literal(NumericScalar::F32(2.0)),
-            vec![],
             vec![],
             vec![],
         );
 
-        // mul = input * 2
         let mul = g.push_group(
             4,
+            DType::F32,
             ScalarOp::Binary {
                 op: ScalarBinOp::Mul,
                 compute_dtype: DType::F32,
-                output_dtype: DType::F32,
             },
-            vec![],
             vec![],
             vec![
                 InputRef::Affine {
@@ -1059,24 +913,21 @@ mod tests {
             ],
         );
 
-        // bias literal
         let bias = g.push_group(
             4,
+            DType::F32,
             ScalarOp::Literal(NumericScalar::F32(10.0)),
-            vec![],
             vec![],
             vec![],
         );
 
-        // out = mul + bias
         let out = g.push_group(
             4,
+            DType::F32,
             ScalarOp::Binary {
                 op: ScalarBinOp::Add,
                 compute_dtype: DType::F32,
-                output_dtype: DType::F32,
             },
-            vec![],
             vec![],
             vec![
                 InputRef::Affine {
@@ -1093,10 +944,8 @@ mod tests {
         let input_data = make_f32_tensor(&[1.0, 2.0, 3.0, 4.0]);
         let inputs = vec![(inp, &input_data)];
 
-        // Flat eval.
         let flat = NanoEval::eval(&g, &inputs);
 
-        // Efficient eval.
         let output_range = AtomRange {
             base: out,
             count: 4,
@@ -1105,38 +954,32 @@ mod tests {
         let efficient = eval_efficient(&g, &inputs, &[output_range]);
         assert_eq!(efficient.len(), 1);
 
-        // Compare.
         let flat_vals: Vec<f64> = (0..4).map(|i| flat.get(out.offset(i))).collect();
-        let eff_tensor = &efficient[0];
-        let eff_vals: Vec<f64> = match eff_tensor {
+        let eff_vals: Vec<f64> = match &efficient[0] {
             NDArrayNumericTensor::F32(a) => a.iter().map(|&v| v as f64).collect(),
             _ => panic!("expected F32"),
         };
 
         assert_eq!(flat_vals, eff_vals);
-        // Expected: (1*2+10, 2*2+10, 3*2+10, 4*2+10) = (12, 14, 16, 18)
         assert_eq!(eff_vals, vec![12.0, 14.0, 16.0, 18.0]);
     }
 
-    /// Test with a reduce op.
     #[test]
     fn test_efficient_reduce() {
         let mut g = NanoGraph::new();
         let gid = GlobalId(1);
 
-        // 8-element input.
         let inp = g.add_input_tensor(gid, 8, DType::F32);
 
-        // ReduceSum: 2 outputs, each summing 4 elements with stride 1.
         let red = g.push_group(
             2,
-            ScalarOp::ReduceSum {
+            DType::F32,
+            ScalarOp::Reduce {
+                kind: ReduceKind::Sum,
                 reduce_count: 4,
                 reduce_stride: 1,
                 compute_dtype: DType::F32,
-                output_dtype: DType::F32,
             },
-            vec![],
             vec![],
             vec![InputRef::Affine {
                 base: inp,
@@ -1162,11 +1005,9 @@ mod tests {
         };
 
         assert_eq!(flat_vals, eff_vals);
-        // sum([1,2,3,4])=10, sum([10,20,30,40])=100
         assert_eq!(eff_vals, vec![10.0, 100.0]);
     }
 
-    /// Test that dead groups are skipped and intermediate buffers are freed.
     #[test]
     fn test_efficient_frees_intermediates() {
         let mut g = NanoGraph::new();
@@ -1174,15 +1015,13 @@ mod tests {
 
         let inp = g.add_input_tensor(gid, 4, DType::F32);
 
-        // chain: inp → neg → exp → output
         let neg = g.push_group(
             4,
+            DType::F32,
             ScalarOp::Unary {
                 op: ScalarUnaryOp::Neg,
                 compute_dtype: DType::F32,
-                output_dtype: DType::F32,
             },
-            vec![],
             vec![],
             vec![InputRef::Affine {
                 base: inp,
@@ -1192,12 +1031,11 @@ mod tests {
 
         let exp = g.push_group(
             4,
+            DType::F32,
             ScalarOp::Unary {
                 op: ScalarUnaryOp::Exp,
                 compute_dtype: DType::F32,
-                output_dtype: DType::F32,
             },
-            vec![],
             vec![],
             vec![InputRef::Affine {
                 base: neg,
@@ -1205,11 +1043,10 @@ mod tests {
             }],
         );
 
-        // Dead branch: not consumed by anything, not in outputs.
         let _dead = g.push_group(
             4,
+            DType::F32,
             ScalarOp::Literal(NumericScalar::F32(999.0)),
-            vec![],
             vec![],
             vec![],
         );
@@ -1236,26 +1073,21 @@ mod tests {
         }
     }
 
-    /// Test with IndirectLoad (Gather pattern).
     #[test]
     fn test_efficient_indirect_load() {
         let mut g = NanoGraph::new();
         let table_gid = GlobalId(1);
         let idx_gid = GlobalId(2);
 
-        // Table: 4 elements [10, 20, 30, 40].
         let table = g.add_input_tensor(table_gid, 4, DType::F32);
-        // Indices: 2 elements [2, 0] — pick elements 2 and 0 from table.
         let indices = g.add_input_tensor(idx_gid, 2, DType::F32);
 
-        // IndirectLoad: output[i] = table[indices[i]]
         let gathered = g.push_group(
             2,
+            DType::F32,
             ScalarOp::IndirectLoad {
                 table_base: table,
-                output_dtype: DType::F32,
             },
-            vec![],
             vec![],
             vec![InputRef::Affine {
                 base: indices,

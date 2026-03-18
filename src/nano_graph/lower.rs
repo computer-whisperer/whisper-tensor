@@ -11,7 +11,7 @@ use crate::dtype::DType;
 use crate::graph::{GlobalId, Graph, Node};
 use crate::milli_graph::MilliOpGraph;
 use crate::milli_graph::ops::AnyMilliOp;
-use crate::nano_graph::ops::{ScalarBinOp, ScalarOp, ScalarUnaryOp};
+use crate::nano_graph::ops::{ReduceKind, ScalarBinOp, ScalarOp, ScalarUnaryOp};
 use crate::nano_graph::pattern::{AtomId, InputRef, NanoGraph, SymDim};
 use crate::numeric_scalar::NumericScalar;
 use crate::tensor_info::TensorInfo;
@@ -534,9 +534,9 @@ impl LowerCtx {
             }
             let gid = self.nano.push_group(
                 run_len as u64,
+                dt,
                 ScalarOp::Literal(run_val.clone()),
                 sym_dims.clone(),
-                vec![],
                 vec![],
             );
             if base_id.is_none() {
@@ -588,8 +588,8 @@ impl LowerCtx {
         let dt = info.dtype();
         let Some((layout, known_dims, sym_dims, count)) = self.classify_dims(info) else {
             let base_id = self.nano.push_atom(
+                dt,
                 ScalarOp::Literal(NumericScalar::F32(0.0)),
-                vec![],
                 vec![],
                 vec![],
             );
@@ -605,9 +605,9 @@ impl LowerCtx {
 
         let base_id = self.nano.push_group(
             count,
+            dt,
             ScalarOp::Literal(NumericScalar::F32(0.0)),
             sym_dims.clone(),
-            vec![],
             vec![],
         );
 
@@ -848,7 +848,7 @@ impl LowerCtx {
         if is_affine {
             return InputRef::Affine {
                 base: ids[0],
-                stride: stride as i32,
+                stride,
             };
         }
 
@@ -907,7 +907,7 @@ impl LowerCtx {
             if inner_is_affine {
                 return InputRef::Modular {
                     base: ids[0],
-                    stride: inner_stride as i32,
+                    stride: inner_stride,
                     modulus: period as u64,
                 };
             }
@@ -1073,22 +1073,22 @@ impl LowerCtx {
             AnyMilliOp::Slice(s) => self.lower_slice(s, all_infos),
             AnyMilliOp::MatMul(m) => self.lower_matmul(m, all_infos),
             AnyMilliOp::ReduceSum(r) => {
-                self.lower_reduce(r, all_infos, |compute_dt, out_dt, count, stride| {
-                    ScalarOp::ReduceSum {
+                self.lower_reduce(r, all_infos, |compute_dt, count, stride| {
+                    ScalarOp::Reduce {
+                        kind: ReduceKind::Sum,
                         reduce_count: count,
                         reduce_stride: stride,
                         compute_dtype: compute_dt,
-                        output_dtype: out_dt,
                     }
                 })
             }
             AnyMilliOp::ReduceMax(r) => {
-                self.lower_reduce(r, all_infos, |compute_dt, out_dt, count, stride| {
-                    ScalarOp::ReduceMax {
+                self.lower_reduce(r, all_infos, |compute_dt, count, stride| {
+                    ScalarOp::Reduce {
+                        kind: ReduceKind::Max,
                         reduce_count: count,
                         reduce_stride: stride,
                         compute_dtype: compute_dt,
-                        output_dtype: out_dt,
                     }
                 })
             }
@@ -1153,87 +1153,70 @@ impl LowerCtx {
             WhichSimpleBinaryOp::Add => ScalarOp::Binary {
                 op: ScalarBinOp::Add,
                 compute_dtype: dt,
-                output_dtype: dt,
             },
             WhichSimpleBinaryOp::Sub => ScalarOp::Binary {
                 op: ScalarBinOp::Sub,
                 compute_dtype: dt,
-                output_dtype: dt,
             },
             WhichSimpleBinaryOp::Mul => ScalarOp::Binary {
                 op: ScalarBinOp::Mul,
                 compute_dtype: dt,
-                output_dtype: dt,
             },
             WhichSimpleBinaryOp::Div => ScalarOp::Binary {
                 op: ScalarBinOp::Div,
                 compute_dtype: dt,
-                output_dtype: dt,
             },
             WhichSimpleBinaryOp::Max => ScalarOp::Binary {
                 op: ScalarBinOp::Max,
                 compute_dtype: dt,
-                output_dtype: dt,
             },
             WhichSimpleBinaryOp::Min => ScalarOp::Binary {
                 op: ScalarBinOp::Min,
                 compute_dtype: dt,
-                output_dtype: dt,
             },
             WhichSimpleBinaryOp::Modulo(_) => ScalarOp::Binary {
                 op: ScalarBinOp::Mod,
                 compute_dtype: dt,
-                output_dtype: dt,
             },
             WhichSimpleBinaryOp::Equal => ScalarOp::Binary {
                 op: ScalarBinOp::Equal,
                 compute_dtype: dt,
-                output_dtype: dt,
             },
             WhichSimpleBinaryOp::Greater => ScalarOp::Binary {
                 op: ScalarBinOp::Greater,
                 compute_dtype: dt,
-                output_dtype: dt,
             },
             WhichSimpleBinaryOp::GreaterOrEqual => ScalarOp::Binary {
                 op: ScalarBinOp::GreaterOrEqual,
                 compute_dtype: dt,
-                output_dtype: dt,
             },
             WhichSimpleBinaryOp::Less => ScalarOp::Binary {
                 op: ScalarBinOp::Less,
                 compute_dtype: dt,
-                output_dtype: dt,
             },
             WhichSimpleBinaryOp::LessOrEqual => ScalarOp::Binary {
                 op: ScalarBinOp::LessOrEqual,
                 compute_dtype: dt,
-                output_dtype: dt,
             },
             WhichSimpleBinaryOp::And => ScalarOp::Binary {
                 op: ScalarBinOp::And,
                 compute_dtype: dt,
-                output_dtype: dt,
             },
             WhichSimpleBinaryOp::Or => ScalarOp::Binary {
                 op: ScalarBinOp::Or,
                 compute_dtype: dt,
-                output_dtype: dt,
             },
             WhichSimpleBinaryOp::Xor | WhichSimpleBinaryOp::BitwiseXor => ScalarOp::Binary {
                 op: ScalarBinOp::Xor,
                 compute_dtype: dt,
-                output_dtype: dt,
             },
             WhichSimpleBinaryOp::BitwiseAnd => ScalarOp::Binary {
                 op: ScalarBinOp::And,
                 compute_dtype: dt,
-                output_dtype: dt,
             },
             WhichSimpleBinaryOp::BitwiseOr => ScalarOp::Binary {
                 op: ScalarBinOp::Or,
                 compute_dtype: dt,
-                output_dtype: dt,
             },
         };
 
@@ -1262,9 +1245,9 @@ impl LowerCtx {
 
         let base_id = self.nano.push_group(
             count,
+            dt,
             scalar_op,
             sym_dims.clone(),
-            vec![],
             vec![input_a, input_b],
         );
 
@@ -1321,47 +1304,38 @@ impl LowerCtx {
             WhichSimpleUnaryOp::Neg => ScalarOp::Unary {
                 op: ScalarUnaryOp::Neg,
                 compute_dtype: dt,
-                output_dtype: dt,
             },
             WhichSimpleUnaryOp::Abs => ScalarOp::Unary {
                 op: ScalarUnaryOp::Abs,
                 compute_dtype: dt,
-                output_dtype: dt,
             },
             WhichSimpleUnaryOp::Exp => ScalarOp::Unary {
                 op: ScalarUnaryOp::Exp,
                 compute_dtype: dt,
-                output_dtype: dt,
             },
             WhichSimpleUnaryOp::Ln => ScalarOp::Unary {
                 op: ScalarUnaryOp::Ln,
                 compute_dtype: dt,
-                output_dtype: dt,
             },
             WhichSimpleUnaryOp::Sqrt => ScalarOp::Unary {
                 op: ScalarUnaryOp::Sqrt,
                 compute_dtype: dt,
-                output_dtype: dt,
             },
             WhichSimpleUnaryOp::Reciprocal => ScalarOp::Unary {
                 op: ScalarUnaryOp::Reciprocal,
                 compute_dtype: dt,
-                output_dtype: dt,
             },
             WhichSimpleUnaryOp::Trig(crate::TrigOp::Tanh) => ScalarOp::Unary {
                 op: ScalarUnaryOp::Tanh,
                 compute_dtype: dt,
-                output_dtype: dt,
             },
             WhichSimpleUnaryOp::Floor => ScalarOp::Unary {
                 op: ScalarUnaryOp::Floor,
                 compute_dtype: dt,
-                output_dtype: dt,
             },
             WhichSimpleUnaryOp::Ceil => ScalarOp::Unary {
                 op: ScalarUnaryOp::Ceil,
                 compute_dtype: dt,
-                output_dtype: dt,
             },
             _ => {
                 self.lower_as_boundary_named(un, all_infos, "SimpleUnary");
@@ -1374,9 +1348,9 @@ impl LowerCtx {
 
         let base_id = self.nano.push_group(
             in_map.count,
+            dt,
             scalar_op,
             in_map.sym_dims.clone(),
-            vec![],
             vec![input_ref],
         );
 
@@ -1413,8 +1387,8 @@ impl LowerCtx {
         let min_val = clamp.min_val();
         let dt = out_info.dtype();
         let min_id = self.nano.push_atom(
+            dt,
             ScalarOp::Literal(NumericScalar::F32(min_val)),
-            vec![],
             vec![],
             vec![],
         );
@@ -1424,13 +1398,12 @@ impl LowerCtx {
 
         let base_id = self.nano.push_group(
             in_map.count,
+            dt,
             ScalarOp::Binary {
                 op: ScalarBinOp::Max,
                 compute_dtype: dt,
-                output_dtype: dt,
             },
             in_map.sym_dims.clone(),
-            vec![],
             vec![input_ref, InputRef::Broadcast(min_id)],
         );
 
@@ -1483,12 +1456,9 @@ impl LowerCtx {
 
         let base_id = self.nano.push_group(
             in_map.count,
-            ScalarOp::Identity {
-                compute_dtype: out_dt,
-                output_dtype: out_dt,
-            },
+            out_dt,
+            ScalarOp::Identity,
             in_map.sym_dims.clone(),
-            vec![],
             vec![input_ref],
         );
 
@@ -1729,12 +1699,9 @@ impl LowerCtx {
 
             let base_id = self.nano.push_group(
                 count,
-                ScalarOp::Identity {
-                    compute_dtype: dt,
-                    output_dtype: dt,
-                },
+                dt,
+                ScalarOp::Identity,
                 sym_dims.clone(),
-                vec![],
                 vec![input_ref],
             );
 
@@ -1800,13 +1767,12 @@ impl LowerCtx {
 
         let base_id = self.nano.push_group(
             count,
+            dt,
             ScalarOp::Binary {
                 op: ScalarBinOp::Pow,
                 compute_dtype: dt,
-                output_dtype: dt,
             },
             sym_dims.clone(),
-            vec![],
             vec![input_a, input_b],
         );
 
@@ -1869,12 +1835,9 @@ impl LowerCtx {
 
         let base_id = self.nano.push_group(
             count,
-            ScalarOp::Select {
-                compute_dtype: dt,
-                output_dtype: dt,
-            },
+            dt,
+            ScalarOp::Select,
             sym_dims.clone(),
-            vec![],
             vec![input_cond, input_x, input_y],
         );
 
@@ -2642,13 +2605,12 @@ impl LowerCtx {
 
             let base = self.nano.push_group(
                 merged_mul_count,
+                product_dtype,
                 ScalarOp::Binary {
                     op: ScalarBinOp::Mul,
                     compute_dtype: product_dtype,
-                    output_dtype: product_dtype,
                 },
                 out_sym_dims.clone(),
-                vec![],
                 vec![input_a, input_b],
             );
 
@@ -2669,14 +2631,14 @@ impl LowerCtx {
 
             let base = self.nano.push_group(
                 n_u64,
-                ScalarOp::ReduceSum {
+                out_dtype,
+                ScalarOp::Reduce {
+                    kind: ReduceKind::Sum,
                     reduce_count: k_u64,
                     reduce_stride: n_u64 as i64,
                     compute_dtype: accumulate_dtype,
-                    output_dtype: out_dtype,
                 },
                 out_sym_dims.clone(),
-                vec![],
                 vec![InputRef::Affine {
                     base: row_mul_base,
                     stride: 1,
@@ -2712,7 +2674,7 @@ impl LowerCtx {
     ) where
         R: Node,
         R: ReduceAccessors,
-        F: Fn(DType, DType, u64, i64) -> ScalarOp,
+        F: Fn(DType, u64, i64) -> ScalarOp,
     {
         let in_id = Node::inputs(reduce).next().unwrap();
         let out_id = Node::outputs(reduce).next().unwrap();
@@ -2744,12 +2706,9 @@ impl LowerCtx {
             let input_ref = Self::pointwise_input_ref(&in_map);
             let base_id = self.nano.push_group(
                 count,
-                ScalarOp::Identity {
-                    compute_dtype: dt,
-                    output_dtype: dt,
-                },
+                dt,
+                ScalarOp::Identity,
                 sym_dims.clone(),
-                vec![],
                 vec![input_ref],
             );
             self.tensor_map.insert(
@@ -2915,7 +2874,7 @@ impl LowerCtx {
         // with reduce_count and reduce_stride encoded in the op itself.
         let input_ref = if is_affine && out_count > 0 {
             let stride_i = if out_count > 1 {
-                (base_ids[1] as i64 - base_ids[0] as i64) as i32
+                base_ids[1] as i64 - base_ids[0] as i64
             } else {
                 1
             };
@@ -2955,12 +2914,12 @@ impl LowerCtx {
         // ReduceSum/ReduceMax group: the op carries reduce_count and reduce_stride,
         // and the input uses Affine addressing (base at k=0).
         // The evaluator loops k=0..reduce_count, reading at base + stride*i + k*reduce_stride.
-        let reduce_op = make_reduce_op(compute_dt, out_dt, reduce_extent, reduce_stride);
+        let reduce_op = make_reduce_op(compute_dt, reduce_extent, reduce_stride);
         let base_id = self.nano.push_group(
             out_count,
+            out_dt,
             reduce_op,
             out_sym_dims.clone(),
-            vec![],
             vec![input_ref],
         );
 
@@ -3035,12 +2994,12 @@ impl LowerCtx {
         };
 
         // Lower as ReduceSum, keeping output in compute_dt (not out_dt).
-        self.lower_reduce(reduce, all_infos, |cd, _od, count, stride| {
-            ScalarOp::ReduceSum {
+        self.lower_reduce(reduce, all_infos, |cd, count, stride| {
+            ScalarOp::Reduce {
+                kind: ReduceKind::Sum,
                 reduce_count: count,
                 reduce_stride: stride,
                 compute_dtype: cd,
-                output_dtype: cd,
             }
         });
 
@@ -3052,8 +3011,8 @@ impl LowerCtx {
         // Create literal for 1/extent.
         let recip = 1.0 / extent as f64;
         let lit_id = self.nano.push_atom(
+            compute_dt,
             ScalarOp::Literal(NumericScalar::F32(recip as f32)),
-            vec![],
             vec![],
             vec![],
         );
@@ -3061,13 +3020,12 @@ impl LowerCtx {
         // Multiply by 1/extent in compute_dt, then cast to output dtype.
         let base_id = self.nano.push_group(
             sum_map.count,
+            out_dt,
             ScalarOp::Binary {
                 op: ScalarBinOp::Mul,
                 compute_dtype: compute_dt,
-                output_dtype: out_dt,
             },
             sum_map.sym_dims.clone(),
-            vec![],
             vec![
                 InputRef::Affine {
                     base: sum_map.base_id,
@@ -3211,8 +3169,8 @@ impl LowerCtx {
 
         // Step 1: stride literal (single atom)
         let stride_lit = self.nano.push_atom(
+            DType::F32,
             ScalarOp::Literal(NumericScalar::F32(d_total as f32)),
-            vec![],
             vec![],
             vec![],
         );
@@ -3257,13 +3215,12 @@ impl LowerCtx {
             // iterated over the sym dim. The output needs D_total atoms with the same sym_dims.
 
             let mul_id = self.nano.push_atom(
+                DType::F32,
                 ScalarOp::Binary {
                     op: ScalarBinOp::Mul,
                     compute_dtype: DType::F32,
-                    output_dtype: DType::F32,
                 },
                 indices_map.sym_dims.clone(),
-                vec![],
                 vec![
                     InputRef::Broadcast(indices_map.base_id),
                     InputRef::Broadcast(stride_lit),
@@ -3276,15 +3233,15 @@ impl LowerCtx {
             // push_atom allocates contiguous AtomIds, so downstream Affine
             // addressing (stride=1) works correctly.
             let col_offsets_base = self.nano.push_atom(
+                DType::F32,
                 ScalarOp::Literal(NumericScalar::F32(0.0)),
-                vec![],
                 vec![],
                 vec![],
             );
             for j in 1..d_total {
                 self.nano.push_atom(
+                    DType::F32,
                     ScalarOp::Literal(NumericScalar::F32(j as f32)),
-                    vec![],
                     vec![],
                     vec![],
                 );
@@ -3292,13 +3249,12 @@ impl LowerCtx {
 
             let add_id = self.nano.push_group(
                 d_total,
+                DType::F32,
                 ScalarOp::Binary {
                     op: ScalarBinOp::Add,
                     compute_dtype: DType::F32,
-                    output_dtype: DType::F32,
                 },
                 indices_map.sym_dims.clone(),
-                vec![],
                 vec![
                     InputRef::Broadcast(mul_id),
                     InputRef::Affine {
@@ -3311,12 +3267,11 @@ impl LowerCtx {
             // Step 4: IndirectLoad group — D_total atoms, each loads from data table
             let base_id = self.nano.push_group(
                 d_total,
+                out_dt,
                 ScalarOp::IndirectLoad {
                     table_base: data_map.base_id,
-                    output_dtype: out_dt,
                 },
                 indices_map.sym_dims.clone(),
-                vec![],
                 vec![InputRef::Affine {
                     base: add_id,
                     stride: 1,
@@ -3359,12 +3314,11 @@ impl LowerCtx {
             // Mul group: out_count atoms, each computes indices[row] * D_total
             let mul_base = self.nano.push_group(
                 out_count,
+                DType::F32,
                 ScalarOp::Binary {
                     op: ScalarBinOp::Mul,
                     compute_dtype: DType::F32,
-                    output_dtype: DType::F32,
                 },
-                vec![],
                 vec![],
                 vec![indices_ref, InputRef::Broadcast(stride_lit)],
             );
@@ -3372,15 +3326,15 @@ impl LowerCtx {
             // Column offset literals: d_total singletons with values [0, 1, ..., d_total-1].
             // The out_count Add group references these via Modular (i % d_total).
             let col_lit_base = self.nano.push_atom(
+                DType::F32,
                 ScalarOp::Literal(NumericScalar::F32(0.0)),
-                vec![],
                 vec![],
                 vec![],
             );
             for j in 1..d_total {
                 self.nano.push_atom(
+                    DType::F32,
                     ScalarOp::Literal(NumericScalar::F32(j as f32)),
-                    vec![],
                     vec![],
                     vec![],
                 );
@@ -3389,12 +3343,11 @@ impl LowerCtx {
             // Add group: mul_result + column_offset (via Modular over d_total literals)
             let add_base = self.nano.push_group(
                 out_count,
+                DType::F32,
                 ScalarOp::Binary {
                     op: ScalarBinOp::Add,
                     compute_dtype: DType::F32,
-                    output_dtype: DType::F32,
                 },
-                vec![],
                 vec![],
                 vec![
                     InputRef::Affine {
@@ -3412,11 +3365,10 @@ impl LowerCtx {
             // IndirectLoad group
             let base_id = self.nano.push_group(
                 out_count,
+                out_dt,
                 ScalarOp::IndirectLoad {
                     table_base: data_map.base_id,
-                    output_dtype: out_dt,
                 },
-                vec![],
                 vec![],
                 vec![InputRef::Affine {
                     base: add_base,
@@ -3510,8 +3462,8 @@ impl LowerCtx {
             return;
         }
         let base_id = self.nano.push_atom(
+            DType::F32,
             ScalarOp::Literal(NumericScalar::F32(0.0)),
-            vec![],
             vec![],
             vec![],
         );
@@ -3918,7 +3870,7 @@ mod tests {
             .graph
             .groups()
             .iter()
-            .filter(|g| matches!(&g.op, crate::nano_graph::ops::ScalarOp::Identity { .. }))
+            .filter(|g| matches!(&g.op, crate::nano_graph::ops::ScalarOp::Identity))
             .count();
         assert_eq!(
             identity_count, 0,
@@ -4142,7 +4094,7 @@ mod tests {
             .graph
             .groups()
             .iter()
-            .filter(|g| matches!(&g.op, crate::nano_graph::ops::ScalarOp::Identity { .. }))
+            .filter(|g| matches!(&g.op, crate::nano_graph::ops::ScalarOp::Identity))
             .count();
         assert_eq!(
             identity_count, 0,

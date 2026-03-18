@@ -4,7 +4,8 @@
 //! so partition quality on these graphs is representative of real workloads.
 
 use crate::dtype::DType;
-use crate::nano_graph::{AtomId, InputRef, NanoGraph, ScalarBinOp, ScalarOp, ScalarUnaryOp};
+#[allow(unused_imports)]
+use crate::nano_graph::{AtomId, InputRef, NanoGraph, ReduceKind, ScalarBinOp, ScalarOp, ScalarUnaryOp};
 use crate::numeric_scalar::NumericScalar;
 
 /// Elementwise binary op: C[N] = A[N] op B[N].
@@ -13,26 +14,25 @@ pub fn elementwise_binary(n: u64, op: ScalarBinOp) -> (NanoGraph, AtomId, AtomId
     let mut g = NanoGraph::new();
     let a = g.push_group(
         n,
+        DType::F32,
         ScalarOp::Literal(NumericScalar::F32(0.0)),
-        vec![],
         vec![],
         vec![],
     );
     let b = g.push_group(
         n,
+        DType::F32,
         ScalarOp::Literal(NumericScalar::F32(0.0)),
-        vec![],
         vec![],
         vec![],
     );
     let c = g.push_group(
         n,
+        DType::F32,
         ScalarOp::Binary {
             op,
             compute_dtype: DType::F32,
-            output_dtype: DType::F32,
         },
-        vec![],
         vec![],
         vec![
             InputRef::Affine { base: a, stride: 1 },
@@ -49,8 +49,8 @@ pub fn unary_chain(n: u64, ops: &[ScalarUnaryOp]) -> (NanoGraph, AtomId, AtomId)
     let mut g = NanoGraph::new();
     let input = g.push_group(
         n,
+        DType::F32,
         ScalarOp::Literal(NumericScalar::F32(0.0)),
-        vec![],
         vec![],
         vec![],
     );
@@ -58,12 +58,11 @@ pub fn unary_chain(n: u64, ops: &[ScalarUnaryOp]) -> (NanoGraph, AtomId, AtomId)
     for &op in ops {
         prev = g.push_group(
             n,
+            DType::F32,
             ScalarOp::Unary {
                 op,
                 compute_dtype: DType::F32,
-                output_dtype: DType::F32,
             },
-            vec![],
             vec![],
             vec![InputRef::Affine {
                 base: prev,
@@ -81,25 +80,24 @@ pub fn broadcast_add(n: u64) -> (NanoGraph, AtomId, AtomId, AtomId) {
     let mut g = NanoGraph::new();
     let a = g.push_group(
         n,
+        DType::F32,
         ScalarOp::Literal(NumericScalar::F32(0.0)),
-        vec![],
         vec![],
         vec![],
     );
     let b = g.push_atom(
+        DType::F32,
         ScalarOp::Literal(NumericScalar::F32(0.0)),
-        vec![],
         vec![],
         vec![],
     );
     let c = g.push_group(
         n,
+        DType::F32,
         ScalarOp::Binary {
             op: ScalarBinOp::Add,
             compute_dtype: DType::F32,
-            output_dtype: DType::F32,
         },
-        vec![],
         vec![],
         vec![
             InputRef::Affine { base: a, stride: 1 },
@@ -116,7 +114,7 @@ pub fn broadcast_add(n: u64) -> (NanoGraph, AtomId, AtomId, AtomId) {
 /// - M*K Mul groups, each of count N. Group (m,k) has:
 ///   - Input 0: Broadcast(A[m, k])
 ///   - Input 1: Affine(B[k, 0], stride=1)
-/// - M ReduceSum groups, each of count N, with SymAffine(stride_i=1, stride_k=N).
+/// - M Reduce groups, each of count N.
 ///
 /// Returns (graph, a_base, b_base, reduce_base) where reduce_base is the
 /// output matmul result.
@@ -126,8 +124,8 @@ pub fn matmul(m: u64, k: u64, n: u64) -> (NanoGraph, AtomId, AtomId, AtomId) {
     // A[M, K] — laid out row-major, so A[m, k] = a_base + m*K + k
     let a = g.push_group(
         m * k,
+        DType::F32,
         ScalarOp::Literal(NumericScalar::F32(0.0)),
-        vec![],
         vec![],
         vec![],
     );
@@ -135,8 +133,8 @@ pub fn matmul(m: u64, k: u64, n: u64) -> (NanoGraph, AtomId, AtomId, AtomId) {
     // B[K, N] — laid out row-major, so B[k, j] = b_base + k*N + j
     let b = g.push_group(
         k * n,
+        DType::F32,
         ScalarOp::Literal(NumericScalar::F32(0.0)),
-        vec![],
         vec![],
         vec![],
     );
@@ -150,12 +148,11 @@ pub fn matmul(m: u64, k: u64, n: u64) -> (NanoGraph, AtomId, AtomId, AtomId) {
 
             let base = g.push_group(
                 n,
+                DType::F32,
                 ScalarOp::Binary {
                     op: ScalarBinOp::Mul,
                     compute_dtype: DType::F32,
-                    output_dtype: DType::F32,
                 },
-                vec![],
                 vec![],
                 vec![
                     InputRef::Broadcast(a_atom),
@@ -172,20 +169,20 @@ pub fn matmul(m: u64, k: u64, n: u64) -> (NanoGraph, AtomId, AtomId, AtomId) {
     }
     let mul_base = mul_base.unwrap();
 
-    // M ReduceSum groups, each of count N.
+    // M Reduce groups, each of count N.
     let mut reduce_base: Option<AtomId> = None;
     for mi in 0..m {
         let row_mul_base = AtomId(mul_base.0 + mi * k * n);
 
         let base = g.push_group(
             n,
-            ScalarOp::ReduceSum {
+            DType::F32,
+            ScalarOp::Reduce {
+                kind: ReduceKind::Sum,
                 reduce_count: k,
                 reduce_stride: n as i64,
                 compute_dtype: DType::F32,
-                output_dtype: DType::F32,
             },
-            vec![],
             vec![],
             vec![InputRef::Affine {
                 base: row_mul_base,
@@ -214,15 +211,15 @@ pub fn matmul_activation(
 
     let a = g.push_group(
         m * k,
+        DType::F32,
         ScalarOp::Literal(NumericScalar::F32(0.0)),
-        vec![],
         vec![],
         vec![],
     );
     let b = g.push_group(
         k * n,
+        DType::F32,
         ScalarOp::Literal(NumericScalar::F32(0.0)),
-        vec![],
         vec![],
         vec![],
     );
@@ -234,12 +231,11 @@ pub fn matmul_activation(
             let b_row_start = b.offset(ki * n);
             let base = g.push_group(
                 n,
+                DType::F32,
                 ScalarOp::Binary {
                     op: ScalarBinOp::Mul,
                     compute_dtype: DType::F32,
-                    output_dtype: DType::F32,
                 },
-                vec![],
                 vec![],
                 vec![
                     InputRef::Broadcast(a_atom),
@@ -261,13 +257,13 @@ pub fn matmul_activation(
         let row_mul_base = AtomId(mul_base.0 + mi * k * n);
         let base = g.push_group(
             n,
-            ScalarOp::ReduceSum {
+            DType::F32,
+            ScalarOp::Reduce {
+                kind: ReduceKind::Sum,
                 reduce_count: k,
                 reduce_stride: n as i64,
                 compute_dtype: DType::F32,
-                output_dtype: DType::F32,
             },
-            vec![],
             vec![],
             vec![InputRef::Affine {
                 base: row_mul_base,
@@ -283,12 +279,11 @@ pub fn matmul_activation(
     // Elementwise activation on the matmul output.
     let out = g.push_group(
         m * n,
+        DType::F32,
         ScalarOp::Unary {
             op: activation,
             compute_dtype: DType::F32,
-            output_dtype: DType::F32,
         },
-        vec![],
         vec![],
         vec![InputRef::Affine {
             base: reduce_base,
@@ -322,24 +317,24 @@ pub fn matmul_chain(
     // A[M, K1]
     let a = g.push_group(
         m * k1,
+        DType::F32,
         ScalarOp::Literal(NumericScalar::F32(0.0)),
-        vec![],
         vec![],
         vec![],
     );
     // B[K1, N1]
     let b = g.push_group(
         k1 * n1,
+        DType::F32,
         ScalarOp::Literal(NumericScalar::F32(0.0)),
-        vec![],
         vec![],
         vec![],
     );
     // C[K2, N2] (K2 == N1)
     let c = g.push_group(
         k2 * n2,
+        DType::F32,
         ScalarOp::Literal(NumericScalar::F32(0.0)),
-        vec![],
         vec![],
         vec![],
     );
@@ -352,12 +347,11 @@ pub fn matmul_chain(
             let b_row_start = b.offset(ki * n1);
             let base = g.push_group(
                 n1,
+                DType::F32,
                 ScalarOp::Binary {
                     op: ScalarBinOp::Mul,
                     compute_dtype: DType::F32,
-                    output_dtype: DType::F32,
                 },
-                vec![],
                 vec![],
                 vec![
                     InputRef::Broadcast(a_atom),
@@ -379,13 +373,13 @@ pub fn matmul_chain(
         let row_mul_base = AtomId(mul1_base.0 + mi * k1 * n1);
         let base = g.push_group(
             n1,
-            ScalarOp::ReduceSum {
+            DType::F32,
+            ScalarOp::Reduce {
+                kind: ReduceKind::Sum,
                 reduce_count: k1,
                 reduce_stride: n1 as i64,
                 compute_dtype: DType::F32,
-                output_dtype: DType::F32,
             },
-            vec![],
             vec![],
             vec![InputRef::Affine {
                 base: row_mul_base,
@@ -408,12 +402,11 @@ pub fn matmul_chain(
             let c_row_start = c.offset(ki * n2);
             let base = g.push_group(
                 n2,
+                DType::F32,
                 ScalarOp::Binary {
                     op: ScalarBinOp::Mul,
                     compute_dtype: DType::F32,
-                    output_dtype: DType::F32,
                 },
-                vec![],
                 vec![],
                 vec![
                     InputRef::Broadcast(ab_atom),
@@ -435,13 +428,13 @@ pub fn matmul_chain(
         let row_mul_base = AtomId(mul2_base.0 + mi * k2 * n2);
         let base = g.push_group(
             n2,
-            ScalarOp::ReduceSum {
+            DType::F32,
+            ScalarOp::Reduce {
+                kind: ReduceKind::Sum,
                 reduce_count: k2,
                 reduce_stride: n2 as i64,
                 compute_dtype: DType::F32,
-                output_dtype: DType::F32,
             },
-            vec![],
             vec![],
             vec![InputRef::Affine {
                 base: row_mul_base,

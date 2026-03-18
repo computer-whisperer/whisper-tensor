@@ -60,20 +60,11 @@ pub enum InputRef {
     Broadcast(AtomId),
     /// Atom at offset `i` in this group reads source atom `base + stride * i`.
     /// Covers elementwise (stride=1), strided views, and reversed access.
-    Affine { base: AtomId, stride: i32 },
+    Affine { base: AtomId, stride: i64 },
     /// Arbitrary per-atom source mapping. Used when no regular pattern exists
     /// (e.g., Gather with compile-time-known indices, irregular Concat).
     /// Length must equal the group's `count`.
     Explicit(Vec<AtomId>),
-    /// Source depends on both atom offset `i` and sym_dim iteration index `k`.
-    /// Resolves to `base + stride_i * i + stride_k * k`.
-    /// Used for contractions (MatMul) where each output atom's source
-    /// varies with the reduction iteration.
-    SymAffine {
-        base: AtomId,
-        stride_i: i32,
-        stride_k: i32,
-    },
     /// Strided broadcast: each block of `repeat` consecutive atoms shares one
     /// source atom. Atom at offset `i` reads `base + stride * (i / repeat)`.
     /// Used for merged matmul Mul groups where chunks of N atoms broadcast the
@@ -88,30 +79,20 @@ pub enum InputRef {
     /// (e.g., bias broadcast along batch dimension).
     Modular {
         base: AtomId,
-        stride: i32,
+        stride: i64,
         modulus: u64,
     },
 }
 
 impl InputRef {
-    /// Resolve the source atom for the `i`-th atom in the group,
-    /// at sym_dim iteration `k` (ignored for non-SymAffine variants).
-    pub fn resolve(&self, i: u64, k: u64) -> AtomId {
+    /// Resolve the source atom for the `i`-th atom in the group.
+    pub fn resolve(&self, i: u64) -> AtomId {
         match self {
             InputRef::Broadcast(id) => *id,
             InputRef::Affine { base, stride } => {
-                AtomId(base.0.wrapping_add((*stride as i64 * i as i64) as u64))
+                AtomId(base.0.wrapping_add((*stride * i as i64) as u64))
             }
             InputRef::Explicit(ids) => ids[i as usize],
-            InputRef::SymAffine {
-                base,
-                stride_i,
-                stride_k,
-            } => {
-                AtomId(base.0.wrapping_add(
-                    (*stride_i as i64 * i as i64 + *stride_k as i64 * k as i64) as u64,
-                ))
-            }
             InputRef::StridedBroadcast {
                 base,
                 stride,
@@ -128,7 +109,7 @@ impl InputRef {
                 let wrapped = i % modulus;
                 AtomId(
                     base.0
-                        .wrapping_add((*stride as i64 * wrapped as i64) as u64),
+                        .wrapping_add((*stride * wrapped as i64) as u64),
                 )
             }
         }
@@ -145,7 +126,6 @@ impl InputRef {
                 seen.dedup();
                 seen.len()
             }
-            InputRef::SymAffine { .. } => count as usize, // lower bound; actual depends on k range
             InputRef::StridedBroadcast { repeat, .. } => {
                 // Each block of `repeat` atoms shares one source.
                 count.div_ceil(*repeat) as usize
@@ -161,9 +141,6 @@ impl InputRef {
 /// and input addressing pattern. The group stores `count` atoms with
 /// contiguous `AtomId`s starting at `base_id`.
 ///
-/// Dtype precision semantics (compute_dtype, output_dtype) live on the
-/// ScalarOp itself, so each op variant can carry its own behavioral config.
-///
 /// A group of count=1 is a standalone atom — this is the degenerate case
 /// for ops that don't compress (e.g., Gather boundary atoms).
 #[derive(Debug, Clone)]
@@ -177,21 +154,20 @@ pub struct AtomGroup {
     /// When a group is split (e.g., for lane partitioning), the second half
     /// needs its InputRefs to resolve as if it were still at the original
     /// position. `atom_offset` is added to the local index `i` before
-    /// resolving InputRefs: `input.resolve(i + atom_offset, k)`.
+    /// resolving InputRefs: `input.resolve(i + atom_offset)`.
     ///
     /// Zero for non-split groups (the common case). For a group split at
     /// position `s`, the second half has `base_id = original_base + s`,
     /// `count = original_count - s`, and `atom_offset = s`.
     pub atom_offset: u64,
-    /// The scalar operation each atom performs, including dtype precision.
+    /// Element dtype of this group's output.
+    pub output_dtype: DType,
+    /// The scalar operation each atom performs.
     pub op: ScalarOp,
     /// Symbolic dimensions this group iterates over.
     /// Each atom in the group independently iterates over these dims.
     /// E.g., `[batch, seq_len]` means each atom produces a 2D tile of values.
     pub sym_dims: Vec<SymDim>,
-    /// Symbolic dimensions reduced by this op (for ReduceSum/ReduceMax).
-    /// The op accumulates over these dims, so the output doesn't have them.
-    pub reduce_dims: Vec<SymDim>,
     /// Inputs to the operation. Number must match what `op` expects.
     pub inputs: Vec<InputRef>,
 }
@@ -241,7 +217,7 @@ pub struct GroupUseCount {
     pub base: AtomId,
     /// Number of atoms.
     pub count: u64,
-    /// Element dtype (from the group's op).
+    /// Element dtype (from the group's output_dtype).
     pub dtype: DType,
     /// Number of downstream groups that read atoms from this group.
     /// Zero means this group's output is never consumed (dead code)
@@ -331,7 +307,7 @@ impl NanoGraph {
     /// Allocate space for a group without filling in its fields yet.
     /// Returns the base AtomId. The group is initially a no-op Literal placeholder.
     /// Call `fill_placeholder` to set the actual op and inputs.
-    pub fn alloc_placeholder(&mut self, count: u64) -> AtomId {
+    pub fn alloc_placeholder(&mut self, count: u64, output_dtype: DType) -> AtomId {
         let base_id = self.alloc_ids(count);
         self.groups.insert(
             base_id.0,
@@ -340,9 +316,9 @@ impl NanoGraph {
                 base_id,
                 count,
                 atom_offset: 0,
+                output_dtype,
                 op: ScalarOp::Literal(crate::numeric_scalar::NumericScalar::F32(0.0)),
                 sym_dims: vec![],
-                reduce_dims: vec![],
                 inputs: vec![],
             },
         );
@@ -355,9 +331,9 @@ impl NanoGraph {
         &mut self,
         base_id: AtomId,
         count: u64,
+        output_dtype: DType,
         op: ScalarOp,
         sym_dims: Vec<SymDim>,
-        reduce_dims: Vec<SymDim>,
         inputs: Vec<InputRef>,
     ) {
         let idx = self
@@ -366,9 +342,9 @@ impl NanoGraph {
             .expect("fill_placeholder: base_id not found");
         let (_, _, g) = self.groups.get_by_index_mut(idx).unwrap();
         debug_assert_eq!(g.count, count, "fill_placeholder: count mismatch");
+        g.output_dtype = output_dtype;
         g.op = op;
         g.sym_dims = sym_dims;
-        g.reduce_dims = reduce_dims;
         g.inputs = inputs;
     }
 
@@ -376,9 +352,9 @@ impl NanoGraph {
     pub fn push_group(
         &mut self,
         count: u64,
+        output_dtype: DType,
         op: ScalarOp,
         sym_dims: Vec<SymDim>,
-        reduce_dims: Vec<SymDim>,
         inputs: Vec<InputRef>,
     ) -> AtomId {
         let base_id = self.alloc_ids(count);
@@ -389,9 +365,9 @@ impl NanoGraph {
                 base_id,
                 count,
                 atom_offset: 0,
+                output_dtype,
                 op,
                 sym_dims,
-                reduce_dims,
                 inputs,
             },
         );
@@ -401,12 +377,12 @@ impl NanoGraph {
     /// Convenience: push a single-atom group.
     pub fn push_atom(
         &mut self,
+        output_dtype: DType,
         op: ScalarOp,
         sym_dims: Vec<SymDim>,
-        reduce_dims: Vec<SymDim>,
         inputs: Vec<InputRef>,
     ) -> AtomId {
-        self.push_group(1, op, sym_dims, reduce_dims, inputs)
+        self.push_group(1, output_dtype, op, sym_dims, inputs)
     }
 
     /// Find the group index for an AtomId. O(log n) via RangeMap.
@@ -459,6 +435,8 @@ impl NanoGraph {
 
     /// Summary stats for debugging.
     pub fn stats(&self) -> NanoGraphStats {
+        use crate::nano_graph::ops::ReduceKind;
+
         let mut total_atoms: u64 = 0;
         let mut singleton_groups: u64 = 0;
         let mut symbolic_groups: u64 = 0;
@@ -502,11 +480,11 @@ impl NanoGraph {
                     crate::nano_graph::ScalarUnaryOp::Floor => "Floor",
                     crate::nano_graph::ScalarUnaryOp::Ceil => "Ceil",
                 },
-                ScalarOp::Identity { .. } => "Identity",
+                ScalarOp::Identity => "Identity",
                 ScalarOp::Literal(_) => "Literal",
-                ScalarOp::Select { .. } => "Select",
-                ScalarOp::ReduceSum { .. } => "ReduceSum",
-                ScalarOp::ReduceMax { .. } => "ReduceMax",
+                ScalarOp::Select => "Select",
+                ScalarOp::Reduce { kind: ReduceKind::Sum, .. } => "ReduceSum",
+                ScalarOp::Reduce { kind: ReduceKind::Max, .. } => "ReduceMax",
                 ScalarOp::IndirectLoad { .. } => "IndirectLoad",
             };
             *groups_by_op.entry(op_name).or_default() += 1;
@@ -539,33 +517,28 @@ impl NanoGraph {
             }
 
             // Reduce ops access additional atoms via stride.
-            match &group.op {
-                ScalarOp::ReduceSum {
-                    reduce_count,
-                    reduce_stride,
-                    ..
+            if let ScalarOp::Reduce {
+                reduce_count,
+                reduce_stride,
+                ..
+            } = &group.op
+                && *reduce_count > 1
+                && *reduce_stride != 0
+            {
+                for input in &group.inputs {
+                    let first = input.resolve(group.atom_offset);
+                    let last = input.resolve(group.atom_offset + group.count - 1);
+                    let end_off = (*reduce_count as i64 - 1) * reduce_stride;
+                    let endpoints = [
+                        first.0,
+                        (first.0 as i64 + end_off) as u64,
+                        last.0,
+                        (last.0 as i64 + end_off) as u64,
+                    ];
+                    let lo = *endpoints.iter().min().unwrap();
+                    let hi = *endpoints.iter().max().unwrap();
+                    self.insert_groups_in_id_range(lo, hi, &mut seen);
                 }
-                | ScalarOp::ReduceMax {
-                    reduce_count,
-                    reduce_stride,
-                    ..
-                } if *reduce_count > 1 && *reduce_stride != 0 => {
-                    for input in &group.inputs {
-                        let first = input.resolve(group.atom_offset, 0);
-                        let last = input.resolve(group.atom_offset + group.count - 1, 0);
-                        let end_off = (*reduce_count as i64 - 1) * reduce_stride;
-                        let endpoints = [
-                            first.0,
-                            (first.0 as i64 + end_off) as u64,
-                            last.0,
-                            (last.0 as i64 + end_off) as u64,
-                        ];
-                        let lo = *endpoints.iter().min().unwrap();
-                        let hi = *endpoints.iter().max().unwrap();
-                        self.insert_groups_in_id_range(lo, hi, &mut seen);
-                    }
-                }
-                _ => {}
             }
 
             // IndirectLoad table reference.
@@ -587,7 +560,7 @@ impl NanoGraph {
             .map(|(g, uc)| GroupUseCount {
                 base: g.base_id,
                 count: g.count,
-                dtype: g.op.output_dtype(),
+                dtype: g.output_dtype,
                 use_count: uc,
             })
             .collect()
@@ -611,10 +584,9 @@ impl NanoGraph {
                 }
             }
             InputRef::Affine { .. }
-            | InputRef::SymAffine { .. }
             | InputRef::StridedBroadcast { .. } => {
-                let first = input.resolve(atom_offset, 0);
-                let last = input.resolve(atom_offset + count - 1, 0);
+                let first = input.resolve(atom_offset);
+                let last = input.resolve(atom_offset + count - 1);
                 let lo = first.0.min(last.0);
                 let hi = first.0.max(last.0);
                 self.insert_groups_in_id_range(lo, hi, out);
@@ -625,7 +597,7 @@ impl NanoGraph {
                 modulus,
             } => {
                 let a = base.0;
-                let b = (base.0 as i64 + *stride as i64 * (*modulus as i64 - 1)) as u64;
+                let b = (base.0 as i64 + *stride * (*modulus as i64 - 1)) as u64;
                 self.insert_groups_in_id_range(a.min(b), a.max(b), out);
             }
             InputRef::Explicit(ids) => {
@@ -680,24 +652,6 @@ impl NanoGraph {
 
         for (gi, group) in groups.iter().enumerate() {
             for (inp_idx, input) in group.inputs.iter().enumerate() {
-                // Determine k values to check for SymAffine.
-                let k_vals: Vec<u64> = if matches!(input, InputRef::SymAffine { .. }) {
-                    let k_max = group
-                        .reduce_dims
-                        .iter()
-                        .filter_map(|sd| self.sym_dim_bounds.get(sd).copied())
-                        .next();
-                    let mut v = vec![0u64];
-                    if let Some(km) = k_max
-                        && km > 1
-                    {
-                        v.push(km - 1);
-                    }
-                    v
-                } else {
-                    vec![0u64]
-                };
-
                 // Sample positions: first, last, and middle.
                 let sample_positions: Vec<u64> = if group.count <= 3 {
                     (0..group.count).collect()
@@ -722,71 +676,64 @@ impl NanoGraph {
                     vec![]
                 };
 
-                for &k in &k_vals {
-                    for &i in sample_positions.iter().chain(extra_positions.iter()) {
-                        if i >= group.count {
-                            continue;
-                        }
-                        let source = input.resolve(i + group.atom_offset, k);
+                for &i in sample_positions.iter().chain(extra_positions.iter()) {
+                    if i >= group.count {
+                        continue;
+                    }
+                    let source = input.resolve(i + group.atom_offset);
 
-                        // Check existence.
-                        if !self.contains_atom(source) {
-                            errors.push(format!(
-                                "Group {} (base={}) input {} atom {} k={}: references nonexistent atom {}",
-                                gi, group.base_id, inp_idx, i, k, source
-                            ));
-                            break;
-                        }
+                    // Check existence.
+                    if !self.contains_atom(source) {
+                        errors.push(format!(
+                            "Group {} (base={}) input {} atom {}: references nonexistent atom {}",
+                            gi, group.base_id, inp_idx, i, source
+                        ));
+                        break;
+                    }
 
-                        // Check topological ordering: source must be in an earlier group.
-                        if let Some(src_gi) = self.groups.find_index(source.0)
-                            && src_gi >= gi
-                        {
-                            errors.push(format!(
-                                "Group {} (base={}) input {} atom {}: references group {} (base={}) — not earlier (self/forward reference)",
-                                gi, group.base_id, inp_idx, i,
-                                src_gi, groups[src_gi].base_id,
-                            ));
-                            break;
-                        }
+                    // Check topological ordering: source must be in an earlier group.
+                    if let Some(src_gi) = self.groups.find_index(source.0)
+                        && src_gi >= gi
+                    {
+                        errors.push(format!(
+                            "Group {} (base={}) input {} atom {}: references group {} (base={}) — not earlier (self/forward reference)",
+                            gi, group.base_id, inp_idx, i,
+                            src_gi, groups[src_gi].base_id,
+                        ));
+                        break;
                     }
                 }
 
                 // For reduce ops, check the reduce-strided access range.
-                match &group.op {
-                    ScalarOp::ReduceSum {
-                        reduce_count,
-                        reduce_stride,
-                        ..
-                    }
-                    | ScalarOp::ReduceMax {
-                        reduce_count,
-                        reduce_stride,
-                        ..
-                    } if *reduce_count > 1 && *reduce_stride != 0 => {
-                        // Check from first and last consumer atom.
-                        for &i in &[0u64, group.count.saturating_sub(1)] {
-                            let base_atom = input.resolve(i + group.atom_offset, 0);
-                            let last_k_atom = AtomId(
-                                (base_atom.0 as i64 + (*reduce_count as i64 - 1) * reduce_stride)
-                                    as u64,
-                            );
-                            if !self.contains_atom(last_k_atom) {
-                                errors.push(format!(
-                                    "Group {} (base={}) input {}: reduce stride from atom {} reaches nonexistent atom {}",
-                                    gi, group.base_id, inp_idx, i, last_k_atom,
-                                ));
-                            } else if let Some(src_gi) = self.groups.find_index(last_k_atom.0)
-                                && src_gi >= gi
-                            {
-                                errors.push(format!(
-                                    "Group {} (base={}) input {}: reduce stride reaches group {} which is not earlier",
-                                    gi, group.base_id, inp_idx, src_gi,
-                                ));
-                            }
+                if let ScalarOp::Reduce {
+                    reduce_count,
+                    reduce_stride,
+                    ..
+                } = &group.op
+                    && *reduce_count > 1
+                    && *reduce_stride != 0
+                {
+                    // Check from first and last consumer atom.
+                    for &i in &[0u64, group.count.saturating_sub(1)] {
+                        let base_atom = input.resolve(i + group.atom_offset);
+                        let last_k_atom = AtomId(
+                            (base_atom.0 as i64 + (*reduce_count as i64 - 1) * reduce_stride)
+                                as u64,
+                        );
+                        if !self.contains_atom(last_k_atom) {
+                            errors.push(format!(
+                                "Group {} (base={}) input {}: reduce stride from atom {} reaches nonexistent atom {}",
+                                gi, group.base_id, inp_idx, i, last_k_atom,
+                            ));
+                        } else if let Some(src_gi) = self.groups.find_index(last_k_atom.0)
+                            && src_gi >= gi
+                        {
+                            errors.push(format!(
+                                "Group {} (base={}) input {}: reduce stride reaches group {} which is not earlier",
+                                gi, group.base_id, inp_idx, src_gi,
+                            ));
                         }
                     }
-                    _ => {}
                 }
 
                 // Explicit refs must have correct length.
@@ -807,11 +754,11 @@ impl NanoGraph {
             let expected_inputs = match &group.op {
                 ScalarOp::Literal(_) => 0,
                 ScalarOp::Unary { .. }
-                | ScalarOp::Identity { .. }
+                | ScalarOp::Identity
                 | ScalarOp::IndirectLoad { .. } => 1,
                 ScalarOp::Binary { .. } => 2,
-                ScalarOp::Select { .. } => 3,
-                ScalarOp::ReduceSum { .. } | ScalarOp::ReduceMax { .. } => 1,
+                ScalarOp::Select => 3,
+                ScalarOp::Reduce { .. } => 1,
             };
             if group.inputs.len() != expected_inputs {
                 errors.push(format!(
@@ -862,7 +809,7 @@ impl std::fmt::Display for NanoGraphStats {
 mod tests {
     use super::*;
     use crate::dtype::DType;
-    use crate::nano_graph::ops::{ScalarBinOp, ScalarOp, ScalarUnaryOp};
+    use crate::nano_graph::ops::{ReduceKind, ScalarBinOp, ScalarOp, ScalarUnaryOp};
     use crate::numeric_scalar::NumericScalar;
 
     /// Build a tiny graph: c = a + b, elementwise over 1024 atoms.
@@ -872,27 +819,26 @@ mod tests {
 
         let a = g.push_group(
             1024,
+            DType::F32,
             ScalarOp::Literal(NumericScalar::F32(0.0)),
-            vec![],
             vec![],
             vec![],
         );
         let b = g.push_group(
             1024,
+            DType::F32,
             ScalarOp::Literal(NumericScalar::F32(0.0)),
-            vec![],
             vec![],
             vec![],
         );
 
         let c = g.push_group(
             1024,
+            DType::F32,
             ScalarOp::Binary {
                 op: ScalarBinOp::Add,
                 compute_dtype: DType::F32,
-                output_dtype: DType::F32,
             },
-            vec![],
             vec![],
             vec![
                 InputRef::Affine { base: a, stride: 1 },
@@ -916,26 +862,25 @@ mod tests {
 
         let a = g.push_group(
             1024,
+            DType::F32,
             ScalarOp::Literal(NumericScalar::F32(1.0)),
-            vec![],
             vec![],
             vec![],
         );
         let b = g.push_atom(
+            DType::F32,
             ScalarOp::Literal(NumericScalar::F32(2.0)),
-            vec![],
             vec![],
             vec![],
         );
 
         let _c = g.push_group(
             1024,
+            DType::F32,
             ScalarOp::Binary {
                 op: ScalarBinOp::Add,
                 compute_dtype: DType::F32,
-                output_dtype: DType::F32,
             },
-            vec![],
             vec![],
             vec![
                 InputRef::Affine { base: a, stride: 1 },
@@ -955,27 +900,26 @@ mod tests {
 
         let a = g.push_group(
             1024,
+            DType::F32,
             ScalarOp::Literal(NumericScalar::F32(0.0)),
             vec![batch],
-            vec![],
             vec![],
         );
         let b = g.push_group(
             1024,
+            DType::F32,
             ScalarOp::Literal(NumericScalar::F32(0.0)),
             vec![batch],
-            vec![],
             vec![],
         );
         let _c = g.push_group(
             1024,
+            DType::F32,
             ScalarOp::Binary {
                 op: ScalarBinOp::Add,
                 compute_dtype: DType::F32,
-                output_dtype: DType::F32,
             },
             vec![batch],
-            vec![],
             vec![
                 InputRef::Affine { base: a, stride: 1 },
                 InputRef::Affine { base: b, stride: 1 },
@@ -995,9 +939,9 @@ mod tests {
 
         let input = g.push_group(
             768,
+            DType::F32,
             ScalarOp::Literal(NumericScalar::F32(1.0)),
             vec![seq],
-            vec![],
             vec![],
         );
 
@@ -1005,14 +949,14 @@ mod tests {
         // reduce_count=0 signals "driven by SymDim" rather than a known count.
         let _reduced = g.push_group(
             768,
-            ScalarOp::ReduceSum {
+            DType::F32,
+            ScalarOp::Reduce {
+                kind: ReduceKind::Sum,
                 reduce_count: 0,
                 reduce_stride: 0,
                 compute_dtype: DType::F32,
-                output_dtype: DType::F32,
             },
             vec![], // seq is reduced away
-            vec![seq],
             vec![InputRef::Affine {
                 base: input,
                 stride: 1,
@@ -1032,12 +976,9 @@ mod tests {
 
         // A Gather boundary: single atom, runtime-variable dims.
         let _gather = g.push_atom(
-            ScalarOp::Identity {
-                compute_dtype: DType::F32,
-                output_dtype: DType::F32,
-            },
+            DType::F32,
+            ScalarOp::Identity,
             vec![batch, seq],
-            vec![],
             vec![], // no inputs tracked (boundary)
         );
 
@@ -1055,8 +996,8 @@ mod tests {
         // 4 source atoms.
         let src = g.push_group(
             4,
+            DType::F32,
             ScalarOp::Literal(NumericScalar::F32(0.0)),
-            vec![],
             vec![],
             vec![],
         );
@@ -1064,12 +1005,11 @@ mod tests {
         // 3 consumer atoms that pick from source irregularly: [2, 0, 3].
         let _consumer = g.push_group(
             3,
+            DType::F32,
             ScalarOp::Unary {
                 op: ScalarUnaryOp::Neg,
                 compute_dtype: DType::F32,
-                output_dtype: DType::F32,
             },
-            vec![],
             vec![],
             vec![InputRef::Explicit(vec![
                 src.offset(2),
@@ -1086,29 +1026,18 @@ mod tests {
     fn test_input_ref_resolve() {
         let base = AtomId(100);
         let broadcast = InputRef::Broadcast(AtomId(5));
-        assert_eq!(broadcast.resolve(0, 0), AtomId(5));
-        assert_eq!(broadcast.resolve(99, 0), AtomId(5));
+        assert_eq!(broadcast.resolve(0), AtomId(5));
+        assert_eq!(broadcast.resolve(99), AtomId(5));
 
         let affine = InputRef::Affine { base, stride: 2 };
-        assert_eq!(affine.resolve(0, 0), AtomId(100));
-        assert_eq!(affine.resolve(1, 0), AtomId(102));
-        assert_eq!(affine.resolve(3, 0), AtomId(106));
+        assert_eq!(affine.resolve(0), AtomId(100));
+        assert_eq!(affine.resolve(1), AtomId(102));
+        assert_eq!(affine.resolve(3), AtomId(106));
 
         let explicit = InputRef::Explicit(vec![AtomId(10), AtomId(20), AtomId(30)]);
-        assert_eq!(explicit.resolve(0, 0), AtomId(10));
-        assert_eq!(explicit.resolve(1, 0), AtomId(20));
-        assert_eq!(explicit.resolve(2, 0), AtomId(30));
-
-        // SymAffine: base=100, stride_i=3, stride_k=10
-        let sym = InputRef::SymAffine {
-            base: AtomId(100),
-            stride_i: 3,
-            stride_k: 10,
-        };
-        assert_eq!(sym.resolve(0, 0), AtomId(100));
-        assert_eq!(sym.resolve(1, 0), AtomId(103));
-        assert_eq!(sym.resolve(0, 1), AtomId(110));
-        assert_eq!(sym.resolve(2, 3), AtomId(100 + 6 + 30)); // 136
+        assert_eq!(explicit.resolve(0), AtomId(10));
+        assert_eq!(explicit.resolve(1), AtomId(20));
+        assert_eq!(explicit.resolve(2), AtomId(30));
 
         // StridedBroadcast: base=200, stride=1, repeat=4
         // Blocks of 4 atoms share the same source.
@@ -1117,11 +1046,11 @@ mod tests {
             stride: 1,
             repeat: 4,
         };
-        assert_eq!(sb.resolve(0, 0), AtomId(200)); // block 0
-        assert_eq!(sb.resolve(1, 0), AtomId(200)); // block 0
-        assert_eq!(sb.resolve(3, 0), AtomId(200)); // block 0
-        assert_eq!(sb.resolve(4, 0), AtomId(201)); // block 1
-        assert_eq!(sb.resolve(7, 0), AtomId(201)); // block 1
-        assert_eq!(sb.resolve(8, 0), AtomId(202)); // block 2
+        assert_eq!(sb.resolve(0), AtomId(200)); // block 0
+        assert_eq!(sb.resolve(1), AtomId(200)); // block 0
+        assert_eq!(sb.resolve(3), AtomId(200)); // block 0
+        assert_eq!(sb.resolve(4), AtomId(201)); // block 1
+        assert_eq!(sb.resolve(7), AtomId(201)); // block 1
+        assert_eq!(sb.resolve(8), AtomId(202)); // block 2
     }
 }

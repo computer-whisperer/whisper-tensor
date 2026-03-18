@@ -21,7 +21,7 @@ use cranelift_module::{Linkage, Module};
 
 use crate::dtype::DType;
 use crate::nano_graph::{
-    AtomGroup, AtomId, InputRef, NanoGraph, ScalarBinOp, ScalarOp, ScalarUnaryOp,
+    AtomGroup, AtomId, InputRef, NanoGraph, ReduceKind, ScalarBinOp, ScalarOp, ScalarUnaryOp,
 };
 
 use super::plan::v2c::{ExecutionPlan, LaneWork, Phase};
@@ -437,10 +437,12 @@ fn emit_group_body(
 ) -> Result<(), String> {
     let base_id = group.base_id.0;
 
+    let output_dtype = group.output_dtype;
+
     match &group.op {
         ScalarOp::Literal(_) => Ok(()),
 
-        ScalarOp::Identity { output_dtype, .. } => {
+        ScalarOp::Identity => {
             let src = load_input_ref(
                 builder,
                 module,
@@ -450,14 +452,12 @@ fn emit_group_body(
                 i_const,
                 table_counter,
             )?;
-            let rounded = emit_output_round(builder, module, math, src, *output_dtype);
+            let rounded = emit_output_round(builder, module, math, src, output_dtype);
             store_atom(builder, values_ptr, base_id, i_val, i_const, rounded);
             Ok(())
         }
 
-        ScalarOp::Binary {
-            op, output_dtype, ..
-        } => {
+        ScalarOp::Binary { op, .. } => {
             let a = load_input_ref(
                 builder,
                 module,
@@ -477,14 +477,12 @@ fn emit_group_body(
                 table_counter,
             )?;
             let result = emit_binop(builder, module, math, *op, a, b)?;
-            let rounded = emit_output_round(builder, module, math, result, *output_dtype);
+            let rounded = emit_output_round(builder, module, math, result, output_dtype);
             store_atom(builder, values_ptr, base_id, i_val, i_const, rounded);
             Ok(())
         }
 
-        ScalarOp::Unary {
-            op, output_dtype, ..
-        } => {
+        ScalarOp::Unary { op, .. } => {
             let x = load_input_ref(
                 builder,
                 module,
@@ -495,12 +493,12 @@ fn emit_group_body(
                 table_counter,
             )?;
             let result = emit_unop(builder, module, math, *op, x)?;
-            let rounded = emit_output_round(builder, module, math, result, *output_dtype);
+            let rounded = emit_output_round(builder, module, math, result, output_dtype);
             store_atom(builder, values_ptr, base_id, i_val, i_const, rounded);
             Ok(())
         }
 
-        ScalarOp::Select { output_dtype, .. } => {
+        ScalarOp::Select => {
             let cond = load_input_ref(
                 builder,
                 module,
@@ -535,12 +533,12 @@ fn emit_group_body(
                 zero,
             );
             let result = builder.ins().select(is_nonzero, x, y);
-            let rounded = emit_output_round(builder, module, math, result, *output_dtype);
+            let rounded = emit_output_round(builder, module, math, result, output_dtype);
             store_atom(builder, values_ptr, base_id, i_val, i_const, rounded);
             Ok(())
         }
 
-        ScalarOp::ReduceSum { output_dtype, .. } => emit_reduce(
+        ScalarOp::Reduce { kind: ReduceKind::Sum, .. } => emit_reduce(
             builder,
             module,
             group,
@@ -552,10 +550,10 @@ fn emit_group_body(
             var_counter,
             table_counter,
             true,
-            *output_dtype,
+            output_dtype,
         ),
 
-        ScalarOp::ReduceMax { output_dtype, .. } => emit_reduce(
+        ScalarOp::Reduce { kind: ReduceKind::Max, .. } => emit_reduce(
             builder,
             module,
             group,
@@ -567,12 +565,11 @@ fn emit_group_body(
             var_counter,
             table_counter,
             false,
-            *output_dtype,
+            output_dtype,
         ),
 
         ScalarOp::IndirectLoad {
             table_base,
-            output_dtype,
         } => {
             let idx_f32 = load_input_ref(
                 builder,
@@ -589,7 +586,7 @@ fn emit_group_body(
             let byte_offset = builder.ins().ishl_imm(atom_idx, 2);
             let addr = builder.ins().iadd(values_ptr, byte_offset);
             let result = builder.ins().load(types::F32, MemFlags::trusted(), addr, 0);
-            let rounded = emit_output_round(builder, module, math, result, *output_dtype);
+            let rounded = emit_output_round(builder, module, math, result, output_dtype);
             store_atom(builder, values_ptr, base_id, i_val, i_const, rounded);
             Ok(())
         }
@@ -613,12 +610,7 @@ fn emit_reduce(
     output_dtype: DType,
 ) -> Result<(), String> {
     let (reduce_count, reduce_stride) = match &group.op {
-        ScalarOp::ReduceSum {
-            reduce_count,
-            reduce_stride,
-            ..
-        } => (*reduce_count, *reduce_stride),
-        ScalarOp::ReduceMax {
+        ScalarOp::Reduce {
             reduce_count,
             reduce_stride,
             ..
@@ -815,27 +807,6 @@ fn load_input_ref(
             Ok(builder
                 .ins()
                 .load(types::F32, MemFlags::new(), data_addr, 0))
-        }
-
-        InputRef::SymAffine {
-            base,
-            stride_i,
-            stride_k,
-        } => {
-            // In non-reduce context, k=0, so this reduces to base + stride_i * i.
-            let atom_idx = match i_val {
-                Some(iv) => {
-                    let si = builder.ins().imul_imm(iv, *stride_i as i64);
-                    builder.ins().iadd_imm(si, base.0 as i64)
-                }
-                None => {
-                    let idx = (base.0 as i64) + (*stride_i as i64) * (i_const as i64);
-                    builder.ins().iconst(types::I64, idx)
-                }
-            };
-            let byte_offset = builder.ins().imul_imm(atom_idx, 4);
-            let addr = builder.ins().iadd(values_ptr, byte_offset);
-            Ok(builder.ins().load(types::F32, MemFlags::new(), addr, 0))
         }
 
         InputRef::StridedBroadcast {
@@ -1103,7 +1074,7 @@ fn emit_unop(
 mod tests {
     use super::*;
     use crate::nano_graph::eval::NanoEval;
-    use crate::nano_graph::{AtomId, InputRef, NanoGraph, ScalarOp};
+    use crate::nano_graph::{AtomId, InputRef, NanoGraph, ReduceKind, ScalarOp};
     use crate::numeric_scalar::NumericScalar;
 
     /// Build f32 overrides from TensorInfo inputs using the tensor_map in LowerResult.
@@ -1654,17 +1625,12 @@ mod tests {
         let mut sources = Vec::new();
         match &group.op {
             ScalarOp::Literal(_) => {}
-            ScalarOp::ReduceSum {
-                reduce_count,
-                reduce_stride,
-                ..
-            }
-            | ScalarOp::ReduceMax {
+            ScalarOp::Reduce {
                 reduce_count,
                 reduce_stride,
                 ..
             } => {
-                let base = group.inputs[0].resolve(i, 0);
+                let base = group.inputs[0].resolve(i);
                 for k in 0..*reduce_count {
                     let src = (base.0 as i64 + k as i64 * reduce_stride) as u64;
                     sources.push(src);
@@ -1672,7 +1638,7 @@ mod tests {
             }
             ScalarOp::IndirectLoad { table_base, .. } => {
                 // The index input
-                let idx_src = group.inputs[0].resolve(i, 0);
+                let idx_src = group.inputs[0].resolve(i);
                 sources.push(idx_src.0);
                 // The table base is also a dependency but we can't know which
                 // element at compile time. We'll skip the table atoms for ordering
@@ -1681,7 +1647,7 @@ mod tests {
             _ => {
                 // Identity, Binary, Unary, Select: resolve each input
                 for input in &group.inputs {
-                    let src = input.resolve(i, 0);
+                    let src = input.resolve(i);
                     sources.push(src.0);
                 }
             }
@@ -1694,13 +1660,13 @@ mod tests {
     fn compute_atom_f32(group: &AtomGroup, i: u64, values: &[f32]) -> f32 {
         match &group.op {
             ScalarOp::Literal(scalar) => scalar.to_f64() as f32,
-            ScalarOp::Identity { .. } => {
-                let src = group.inputs[0].resolve(i, 0);
+            ScalarOp::Identity => {
+                let src = group.inputs[0].resolve(i);
                 values[src.0 as usize]
             }
             ScalarOp::Binary { op, .. } => {
-                let a = values[group.inputs[0].resolve(i, 0).0 as usize];
-                let b = values[group.inputs[1].resolve(i, 0).0 as usize];
+                let a = values[group.inputs[0].resolve(i).0 as usize];
+                let b = values[group.inputs[1].resolve(i).0 as usize];
                 match op {
                     ScalarBinOp::Add => a + b,
                     ScalarBinOp::Sub => a - b,
@@ -1769,7 +1735,7 @@ mod tests {
                 }
             }
             ScalarOp::Unary { op, .. } => {
-                let x = values[group.inputs[0].resolve(i, 0).0 as usize];
+                let x = values[group.inputs[0].resolve(i).0 as usize];
                 match op {
                     ScalarUnaryOp::Neg => -x,
                     ScalarUnaryOp::Abs => x.abs(),
@@ -1782,20 +1748,20 @@ mod tests {
                     ScalarUnaryOp::Ceil => x.ceil(),
                 }
             }
-            ScalarOp::Select { .. } => {
-                let cond = values[group.inputs[0].resolve(i, 0).0 as usize];
+            ScalarOp::Select => {
+                let cond = values[group.inputs[0].resolve(i).0 as usize];
                 if cond != 0.0 {
-                    values[group.inputs[1].resolve(i, 0).0 as usize]
+                    values[group.inputs[1].resolve(i).0 as usize]
                 } else {
-                    values[group.inputs[2].resolve(i, 0).0 as usize]
+                    values[group.inputs[2].resolve(i).0 as usize]
                 }
             }
-            ScalarOp::ReduceSum {
+            ScalarOp::Reduce { kind: ReduceKind::Sum,
                 reduce_count,
                 reduce_stride,
                 ..
             } => {
-                let base = group.inputs[0].resolve(i, 0);
+                let base = group.inputs[0].resolve(i);
                 let mut acc = 0.0f32;
                 for k in 0..*reduce_count {
                     let src_idx = (base.0 as i64 + k as i64 * reduce_stride) as u64;
@@ -1803,12 +1769,12 @@ mod tests {
                 }
                 acc
             }
-            ScalarOp::ReduceMax {
+            ScalarOp::Reduce { kind: ReduceKind::Max,
                 reduce_count,
                 reduce_stride,
                 ..
             } => {
-                let base = group.inputs[0].resolve(i, 0);
+                let base = group.inputs[0].resolve(i);
                 let mut acc = f32::NEG_INFINITY;
                 for k in 0..*reduce_count {
                     let src_idx = (base.0 as i64 + k as i64 * reduce_stride) as u64;
@@ -1817,7 +1783,7 @@ mod tests {
                 acc
             }
             ScalarOp::IndirectLoad { table_base, .. } => {
-                let idx_src = group.inputs[0].resolve(i, 0);
+                let idx_src = group.inputs[0].resolve(i);
                 let index = values[idx_src.0 as usize] as usize;
                 values[table_base.0 as usize + index]
             }
@@ -2436,26 +2402,25 @@ mod tests {
 
         let a = g.push_group(
             4,
+            DType::F32,
             ScalarOp::Literal(NumericScalar::F32(0.0)),
-            vec![],
             vec![],
             vec![],
         );
         let b = g.push_group(
             4,
+            DType::F32,
             ScalarOp::Literal(NumericScalar::F32(0.0)),
-            vec![],
             vec![],
             vec![],
         );
         let c = g.push_group(
             4,
+            DType::F32,
             ScalarOp::Binary {
                 op: ScalarBinOp::Add,
                 compute_dtype: DType::F32,
-                output_dtype: DType::BF16,
             },
-            vec![],
             vec![],
             vec![
                 InputRef::Affine { base: a, stride: 1 },
@@ -2484,26 +2449,25 @@ mod tests {
 
         let a = g.push_group(
             4,
+            DType::F32,
             ScalarOp::Literal(NumericScalar::F32(0.0)),
-            vec![],
             vec![],
             vec![],
         );
         let b = g.push_group(
             4,
+            DType::F32,
             ScalarOp::Literal(NumericScalar::F32(0.0)),
-            vec![],
             vec![],
             vec![],
         );
         let c = g.push_group(
             4,
+            DType::F32,
             ScalarOp::Binary {
                 op: ScalarBinOp::Add,
                 compute_dtype: DType::F32,
-                output_dtype: DType::BF16,
             },
-            vec![],
             vec![],
             vec![
                 InputRef::Affine { base: a, stride: 1 },
@@ -2512,12 +2476,11 @@ mod tests {
         );
         let d = g.push_group(
             4,
+            DType::F32,
             ScalarOp::Unary {
                 op: ScalarUnaryOp::Neg,
                 compute_dtype: DType::F32,
-                output_dtype: DType::F32,
             },
-            vec![],
             vec![],
             vec![InputRef::Affine { base: c, stride: 1 }],
         );
@@ -2543,26 +2506,25 @@ mod tests {
 
         let a = g.push_group(
             4,
+            DType::F32,
             ScalarOp::Literal(NumericScalar::F32(0.0)),
-            vec![],
             vec![],
             vec![],
         );
         let b = g.push_group(
             4,
+            DType::F32,
             ScalarOp::Literal(NumericScalar::F32(0.0)),
-            vec![],
             vec![],
             vec![],
         );
         let c = g.push_group(
             4,
+            DType::F32,
             ScalarOp::Binary {
                 op: ScalarBinOp::Add,
                 compute_dtype: DType::F32,
-                output_dtype: DType::F16,
             },
-            vec![],
             vec![],
             vec![
                 InputRef::Affine { base: a, stride: 1 },
@@ -2591,21 +2553,20 @@ mod tests {
 
         let a = g.push_group(
             8,
+            DType::F32,
             ScalarOp::Literal(NumericScalar::F32(0.0)),
-            vec![],
             vec![],
             vec![],
         );
 
         let c = g.push_group(
             1,
-            ScalarOp::ReduceSum {
+            DType::F32,
+            ScalarOp::Reduce { kind: ReduceKind::Sum,
                 reduce_count: 8,
                 reduce_stride: 1,
                 compute_dtype: DType::F32,
-                output_dtype: DType::BF16,
             },
-            vec![],
             vec![],
             vec![InputRef::Affine { base: a, stride: 0 }],
         );
@@ -2627,18 +2588,15 @@ mod tests {
 
         let a = g.push_group(
             4,
+            DType::F32,
             ScalarOp::Literal(NumericScalar::F32(0.0)),
-            vec![],
             vec![],
             vec![],
         );
         let b = g.push_group(
             4,
-            ScalarOp::Identity {
-                compute_dtype: DType::F32,
-                output_dtype: DType::BF16,
-            },
-            vec![],
+            DType::F32,
+            ScalarOp::Identity,
             vec![],
             vec![InputRef::Affine { base: a, stride: 1 }],
         );
@@ -2699,32 +2657,29 @@ mod tests {
 
         let cond = g.push_group(
             4,
+            DType::F32,
             ScalarOp::Literal(NumericScalar::F32(0.0)),
-            vec![],
             vec![],
             vec![],
         );
         let x = g.push_group(
             4,
+            DType::F32,
             ScalarOp::Literal(NumericScalar::F32(0.0)),
-            vec![],
             vec![],
             vec![],
         );
         let y = g.push_group(
             4,
+            DType::F32,
             ScalarOp::Literal(NumericScalar::F32(0.0)),
-            vec![],
             vec![],
             vec![],
         );
         let result = g.push_group(
             4,
-            ScalarOp::Select {
-                compute_dtype: DType::F32,
-                output_dtype: DType::F32,
-            },
-            vec![],
+            DType::F32,
+            ScalarOp::Select,
             vec![],
             vec![
                 InputRef::Affine {
@@ -2761,21 +2716,20 @@ mod tests {
 
         let a = g.push_group(
             8,
+            DType::F32,
             ScalarOp::Literal(NumericScalar::F32(0.0)),
-            vec![],
             vec![],
             vec![],
         );
 
         let c = g.push_group(
             1,
-            ScalarOp::ReduceMax {
+            DType::F32,
+            ScalarOp::Reduce { kind: ReduceKind::Max,
                 reduce_count: 8,
                 reduce_stride: 1,
                 compute_dtype: DType::F32,
-                output_dtype: DType::F32,
             },
-            vec![],
             vec![],
             vec![InputRef::Affine { base: a, stride: 0 }],
         );
@@ -2797,20 +2751,19 @@ mod tests {
 
         let a = g.push_group(
             4,
+            DType::F32,
             ScalarOp::Literal(NumericScalar::F32(0.0)),
-            vec![],
             vec![],
             vec![],
         );
 
         let b = g.push_group(
             3,
+            DType::F32,
             ScalarOp::Unary {
                 op: ScalarUnaryOp::Neg,
                 compute_dtype: DType::F32,
-                output_dtype: DType::F32,
             },
-            vec![],
             vec![],
             vec![InputRef::Explicit(vec![
                 a.offset(2),

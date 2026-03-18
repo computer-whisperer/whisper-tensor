@@ -73,7 +73,6 @@ set itself, rather than routing through per-op handcrafted happy paths.
 
 ## Active Experiments
 
-- `common/v1_frontend`: shared nano-op IR + iterator-based lowering frontend.
 - `v1_scalar_crystal`: nano-op expansion + crystal loop detection.
 - `v2_fusion`: direct kernel planning + elementwise fusion + matmul kernel.
 - `v3_nano_fusion`: v1 nano/crystal pipeline with post-crystal loop fusion.
