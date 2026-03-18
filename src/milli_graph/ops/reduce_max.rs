@@ -67,6 +67,18 @@ impl ReduceMax {
 }
 
 impl ReduceMax {
+    pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
+        use crate::nano_graph::{ScalarOp, ReduceKind};
+        ctx.lower_reduce(self, |compute_dt, count, stride| {
+            ScalarOp::Reduce {
+                kind: ReduceKind::Max,
+                reduce_count: count,
+                reduce_stride: stride,
+                compute_dtype: compute_dt,
+            }
+        });
+    }
+
     pub fn remap_tensors(&mut self, map: &HashMap<GlobalId, GlobalId>, rng: &mut impl rand::Rng) {
         self.global_id = GlobalId::new(rng);
         super::remap(&mut self.output, map);

@@ -82,6 +82,15 @@ impl Constant {
 }
 
 impl Constant {
+    pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
+        let out_id = self.output;
+        if let Some(info) = ctx.all_infos.get(&out_id) {
+            ctx.register_constant(out_id, info);
+        } else {
+            ctx.register_opaque(out_id);
+        }
+    }
+
     pub fn remap_tensors(&mut self, map: &HashMap<GlobalId, GlobalId>, rng: &mut impl Rng) {
         self.global_id = GlobalId::new(rng);
         super::remap(&mut self.output, map);
@@ -155,6 +164,15 @@ impl ConstantOfShape {
 }
 
 impl ConstantOfShape {
+    pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
+        let out_id = self.output;
+        if let Some(info) = ctx.all_infos.get(&out_id) {
+            ctx.register_constant(out_id, info);
+        } else {
+            ctx.register_opaque(out_id);
+        }
+    }
+
     pub fn remap_tensors(&mut self, map: &HashMap<GlobalId, GlobalId>, rng: &mut impl Rng) {
         self.global_id = GlobalId::new(rng);
         super::remap(&mut self.output, map);

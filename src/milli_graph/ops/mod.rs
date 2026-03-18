@@ -409,6 +409,36 @@ pub enum AnyMilliOp {
 }
 
 impl AnyMilliOp {
+    pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
+        match self {
+            AnyMilliOp::SimpleBinary(x) => x.lower_to_nano(ctx),
+            AnyMilliOp::SimpleUnary(x) => x.lower_to_nano(ctx),
+            AnyMilliOp::ClampMin(x) => x.lower_to_nano(ctx),
+            AnyMilliOp::Cast(x) => x.lower_to_nano(ctx),
+            AnyMilliOp::CastLike(x) => x.lower_to_nano(ctx),
+            AnyMilliOp::Constant(x) => x.lower_to_nano(ctx),
+            AnyMilliOp::ConstantOfShape(x) => x.lower_to_nano(ctx),
+            AnyMilliOp::Shape(x) => x.lower_to_nano(ctx),
+            AnyMilliOp::Reshape(x) => x.lower_to_nano(ctx),
+            AnyMilliOp::Squeeze(x) => x.lower_to_nano(ctx),
+            AnyMilliOp::Unsqueeze(x) => x.lower_to_nano(ctx),
+            AnyMilliOp::Transpose(x) => x.lower_to_nano(ctx),
+            AnyMilliOp::Expand(x) => x.lower_to_nano(ctx),
+            AnyMilliOp::Pow(x) => x.lower_to_nano(ctx),
+            AnyMilliOp::Where(x) => x.lower_to_nano(ctx),
+            AnyMilliOp::Concat(x) => x.lower_to_nano(ctx),
+            AnyMilliOp::Split(x) => x.lower_to_nano(ctx),
+            AnyMilliOp::Slice(x) => x.lower_to_nano(ctx),
+            AnyMilliOp::MatMul(x) => x.lower_to_nano(ctx),
+            AnyMilliOp::ReduceSum(x) => x.lower_to_nano(ctx),
+            AnyMilliOp::ReduceMax(x) => x.lower_to_nano(ctx),
+            AnyMilliOp::ReduceMean(x) => x.lower_to_nano(ctx),
+            AnyMilliOp::Gather(x) => x.lower_to_nano(ctx),
+            // Everything else: constant-fold if numeric, otherwise boundary.
+            _ => ctx.lower_default(self),
+        }
+    }
+
     pub fn stored_label(&self) -> Option<String> {
         match self {
             AnyMilliOp::Constant(x) => x.label.clone(),

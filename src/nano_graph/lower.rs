@@ -17,7 +17,7 @@ use crate::numeric_scalar::NumericScalar;
 use crate::tensor_info::TensorInfo;
 
 /// Common accessors for reduce ops (ReduceSum, ReduceMax, ReduceMean).
-trait ReduceAccessors {
+pub trait ReduceAccessors {
     fn axes_tensor(&self) -> Option<GlobalId>;
     fn noop_with_empty_axes(&self) -> bool;
     #[allow(dead_code)]
@@ -145,53 +145,53 @@ impl TensorAtomMapInfo {
 /// For concatenated tensors, `segments` describes how the concat axis is
 /// split across multiple source atom ranges, each with its own base_id and strides.
 #[derive(Debug, Clone)]
-struct TensorAtomMap {
+pub struct TensorAtomMap {
     /// First atom id in the group (for simple views).
-    base_id: AtomId,
+    pub base_id: AtomId,
     /// Total number of atoms (product of known dims).
-    count: u64,
+    pub count: u64,
     /// Data type of this tensor.
-    dtype: DType,
+    pub dtype: DType,
     /// The full tensor layout: one entry per dim, preserving original order.
-    layout: Vec<DimKind>,
+    pub layout: Vec<DimKind>,
     /// Physical strides for the known dims into the atom buffer.
     /// May be non-row-major for transposed or strided views.
-    known_strides: Vec<u64>,
+    pub known_strides: Vec<u64>,
     /// Symbolic dims attached to each atom.
-    sym_dims: Vec<SymDim>,
+    pub sym_dims: Vec<SymDim>,
     /// For concatenated tensors: segments along a specific known dim.
     /// If empty, this is a simple single-range view.
-    segments: Vec<ConcatSegment>,
+    pub segments: Vec<ConcatSegment>,
 }
 
 /// A segment of a concatenated tensor along one axis.
 #[derive(Debug, Clone)]
-struct ConcatSegment {
+pub struct ConcatSegment {
     /// Which known dim index the concat is along.
-    concat_dim: usize,
+    pub concat_dim: usize,
     /// Starting index along the concat dim for this segment.
-    start: u64,
+    pub start: u64,
     /// Number of elements along the concat dim in this segment.
-    size: u64,
+    pub size: u64,
     /// Base atom ID for this segment's source tensor.
-    base_id: AtomId,
+    pub base_id: AtomId,
     /// Physical strides for this segment (into its source atom space).
-    known_strides: Vec<u64>,
+    pub known_strides: Vec<u64>,
 }
 
 /// Classification of one tensor dimension.
 #[derive(Debug, Clone)]
-enum DimKind {
+pub enum DimKind {
     Known(u64),
     Symbolic(#[allow(dead_code)] SymDim),
 }
 
 /// (layout, known_dims, sym_dims, atom_count)
-type DimClassification = (Vec<DimKind>, Vec<u64>, Vec<SymDim>, u64);
+pub type DimClassification = (Vec<DimKind>, Vec<u64>, Vec<SymDim>, u64);
 
 impl TensorAtomMap {
     /// Create a simple (non-segmented) tensor atom map.
-    fn simple(
+    pub fn simple(
         base_id: AtomId,
         count: u64,
         dtype: DType,
@@ -211,7 +211,7 @@ impl TensorAtomMap {
     }
 
     /// Create a segmented tensor atom map (for Concat).
-    fn segmented(
+    pub fn segmented(
         count: u64,
         dtype: DType,
         layout: Vec<DimKind>,
@@ -240,7 +240,7 @@ impl TensorAtomMap {
     }
 
     /// Compute row-major strides from known dim sizes.
-    fn compute_strides(known_dims: &[u64]) -> Vec<u64> {
+    pub fn compute_strides(known_dims: &[u64]) -> Vec<u64> {
         let mut strides = vec![0u64; known_dims.len()];
         if known_dims.is_empty() {
             return strides;
@@ -254,7 +254,7 @@ impl TensorAtomMap {
     }
 
     /// Get the known dim sizes from the layout.
-    fn known_dims(&self) -> Vec<u64> {
+    pub fn known_dims(&self) -> Vec<u64> {
         self.layout
             .iter()
             .filter_map(|d| {
@@ -330,7 +330,7 @@ pub fn lower(
         "  [lower] infer_all: {:.1}ms",
         t0.elapsed().as_secs_f64() * 1e3
     );
-    let mut ctx = LowerCtx::new();
+    let mut ctx = NanoLoweringContext::new(&all_infos);
 
     // Register all tensors that exist before ops run (graph inputs + inferred
     // constants) and are NOT produced by any op.
@@ -340,7 +340,9 @@ pub fn lower(
         .filter_map(|op_id| graph.get_node_by_id(op_id))
         .flat_map(|op| op.outputs().collect::<Vec<_>>())
         .collect();
-    for (id, info) in &all_infos {
+    // Copy the shared reference to avoid borrowing ctx during iteration.
+    let infos_ref = ctx.all_infos;
+    for (id, info) in infos_ref {
         if !op_outputs.contains(id) {
             ctx.register_input(*id, info);
         }
@@ -352,7 +354,7 @@ pub fn lower(
         let Some(op) = graph.get_node_by_id(&op_id) else {
             continue;
         };
-        ctx.lower_op(op, &all_infos);
+        ctx.lower_op(op);
     }
     eprintln!(
         "  [lower] ops: {:.1}ms ({} groups, {} atoms)",
@@ -438,19 +440,26 @@ pub fn lower_with_info(
     lower(graph, inputs)
 }
 
-struct LowerCtx {
-    nano: NanoGraph,
-    tensor_map: HashMap<GlobalId, TensorAtomMap>,
+/// Context for lowering milli ops to nano graph.
+///
+/// Holds all mutable state needed during lowering. The `all_infos` field
+/// is a shared reference to tensor shape information computed by inference,
+/// so methods can freely read tensor info without borrowing self.
+pub struct NanoLoweringContext<'a> {
+    pub nano: NanoGraph,
+    pub tensor_map: HashMap<GlobalId, TensorAtomMap>,
+    pub all_infos: &'a HashMap<GlobalId, TensorInfo>,
     next_anon_sym: usize,
-    unsupported: Vec<(GlobalId, String)>,
-    unsupported_details: Vec<String>,
+    pub unsupported: Vec<(GlobalId, String)>,
+    pub unsupported_details: Vec<String>,
 }
 
-impl LowerCtx {
-    fn new() -> Self {
+impl<'a> NanoLoweringContext<'a> {
+    pub fn new(all_infos: &'a HashMap<GlobalId, TensorInfo>) -> Self {
         Self {
             nano: NanoGraph::new(),
             tensor_map: HashMap::new(),
+            all_infos,
             next_anon_sym: 0,
             unsupported: Vec::new(),
             unsupported_details: Vec::new(),
@@ -459,7 +468,7 @@ impl LowerCtx {
 
     /// Classify tensor dims and return layout info.
     /// Returns None if rank is unknown or atom count overflows u32.
-    fn classify_dims(&mut self, info: &TensorInfo) -> Option<DimClassification> {
+    pub fn classify_dims(&mut self, info: &TensorInfo) -> Option<DimClassification> {
         let rank = info.rank_if_known()?;
         let mut layout = Vec::with_capacity(rank);
         let mut known_dims = Vec::new();
@@ -481,7 +490,7 @@ impl LowerCtx {
         Some((layout, known_dims, sym_dims, count))
     }
 
-    fn alloc_sym_dim(&mut self) -> SymDim {
+    pub fn alloc_sym_dim(&mut self) -> SymDim {
         let name = format!("sym_{}", self.next_anon_sym);
         self.next_anon_sym += 1;
         self.nano.sym_dim(&name)
@@ -492,7 +501,7 @@ impl LowerCtx {
     /// Extracts scalar values from the TensorInfo and creates Literal groups.
     /// Runs of identical values are coalesced into single groups. If the
     /// TensorInfo has no numeric data, falls back to `register_input`.
-    fn register_constant(&mut self, id: GlobalId, info: &TensorInfo) {
+    pub fn register_constant(&mut self, id: GlobalId, info: &TensorInfo) {
         let Some(numeric) = info.as_numeric() else {
             self.register_input(id, info);
             return;
@@ -558,7 +567,7 @@ impl LowerCtx {
     /// For constant tensors whose values are known at lowering time, the
     /// Literal(0.0) placeholder is similarly overridden by the executor using
     /// the tensor data from `all_infos`.
-    fn register_input(&mut self, id: GlobalId, info: &TensorInfo) {
+    pub fn register_input(&mut self, id: GlobalId, info: &TensorInfo) {
         let Some((layout, known_dims, sym_dims, count)) = self.classify_dims(info) else {
             // Unknown rank — register a single atom.
             let dt = info.dtype();
@@ -584,7 +593,7 @@ impl LowerCtx {
 
     /// Register a tensor as a boundary (opaque) group.
     /// Boundary atoms are leaves — they use Literal(0) with no inputs.
-    fn register_boundary(&mut self, output_id: GlobalId, info: &TensorInfo, _op_kind: &str) {
+    pub fn register_boundary(&mut self, output_id: GlobalId, info: &TensorInfo, _op_kind: &str) {
         let dt = info.dtype();
         let Some((layout, known_dims, sym_dims, count)) = self.classify_dims(info) else {
             let base_id = self.nano.push_atom(
@@ -618,7 +627,7 @@ impl LowerCtx {
     }
 
     /// Compute an InputRef mapping consumer atoms → producer atoms.
-    fn compute_input_ref(
+    pub fn compute_input_ref(
         &self,
         consumer: &TensorAtomMap,
         producer: &TensorAtomMap,
@@ -827,7 +836,7 @@ impl LowerCtx {
     }
 
     /// Given an Explicit atom ID list, detect if it's actually a simpler pattern.
-    fn compress_explicit(ids: Vec<AtomId>) -> InputRef {
+    pub fn compress_explicit(ids: Vec<AtomId>) -> InputRef {
         if ids.is_empty() {
             return InputRef::Explicit(ids);
         }
@@ -1030,105 +1039,41 @@ impl LowerCtx {
         Self::compress_explicit(ids)
     }
 
-    fn lower_op(&mut self, op: &AnyMilliOp, all_infos: &HashMap<GlobalId, TensorInfo>) {
-        match op {
-            AnyMilliOp::SimpleBinary(bin) => self.lower_simple_binary(bin, all_infos),
-            AnyMilliOp::SimpleUnary(un) => self.lower_simple_unary(un, all_infos),
-            AnyMilliOp::ClampMin(clamp) => self.lower_clamp_min(clamp, all_infos),
-            AnyMilliOp::Cast(cast) => self.lower_identity_passthrough(cast, all_infos),
-            AnyMilliOp::CastLike(cl) => self.lower_identity_passthrough(cl, all_infos),
-            AnyMilliOp::Constant(c) => {
-                let out_id = Node::outputs(c).next().unwrap();
-                if let Some(info) = all_infos.get(&out_id) {
+    pub fn lower_op(&mut self, op: &AnyMilliOp) {
+        op.lower_to_nano(self);
+    }
+
+    /// Default lowering for unsupported ops: if all outputs are numeric
+    /// (constant-folded), register as constants; otherwise register as boundary.
+    pub fn lower_default(&mut self, op: &AnyMilliOp) {
+        let all_infos = self.all_infos;
+        let op_kind = op.op_kind();
+        let all_numeric = op.outputs().all(|out_id| {
+            all_infos
+                .get(&out_id)
+                .is_some_and(|i| i.as_numeric().is_some())
+        });
+        for out_id in op.outputs() {
+            if let Some(info) = all_infos.get(&out_id) {
+                if all_numeric {
                     self.register_constant(out_id, info);
                 } else {
-                    self.register_opaque(out_id);
+                    self.register_boundary(out_id, info, &op_kind);
                 }
+            } else {
+                self.register_opaque(out_id);
             }
-            AnyMilliOp::ConstantOfShape(c) => {
-                let out_id = Node::outputs(c).next().unwrap();
-                if let Some(info) = all_infos.get(&out_id) {
-                    self.register_constant(out_id, info);
-                } else {
-                    self.register_opaque(out_id);
-                }
-            }
-            AnyMilliOp::Shape(s) => {
-                let out_id = Node::outputs(s).next().unwrap();
-                if let Some(info) = all_infos.get(&out_id) {
-                    self.register_constant(out_id, info);
-                } else {
-                    self.register_opaque(out_id);
-                }
-            }
-            AnyMilliOp::Reshape(r) => self.lower_view_op(r, all_infos),
-            AnyMilliOp::Squeeze(s) => self.lower_view_op(s, all_infos),
-            AnyMilliOp::Unsqueeze(u) => self.lower_view_op(u, all_infos),
-            AnyMilliOp::Transpose(t) => self.lower_transpose(t, all_infos),
-            AnyMilliOp::Expand(e) => self.lower_expand(e, all_infos),
-            AnyMilliOp::Pow(p) => self.lower_pow(p, all_infos),
-            AnyMilliOp::Where(w) => self.lower_where(w, all_infos),
-            AnyMilliOp::Concat(c) => self.lower_concat(c, all_infos),
-            AnyMilliOp::Split(s) => self.lower_split(s, all_infos),
-            AnyMilliOp::Slice(s) => self.lower_slice(s, all_infos),
-            AnyMilliOp::MatMul(m) => self.lower_matmul(m, all_infos),
-            AnyMilliOp::ReduceSum(r) => {
-                self.lower_reduce(r, all_infos, |compute_dt, count, stride| {
-                    ScalarOp::Reduce {
-                        kind: ReduceKind::Sum,
-                        reduce_count: count,
-                        reduce_stride: stride,
-                        compute_dtype: compute_dt,
-                    }
-                })
-            }
-            AnyMilliOp::ReduceMax(r) => {
-                self.lower_reduce(r, all_infos, |compute_dt, count, stride| {
-                    ScalarOp::Reduce {
-                        kind: ReduceKind::Max,
-                        reduce_count: count,
-                        reduce_stride: stride,
-                        compute_dtype: compute_dt,
-                    }
-                })
-            }
-            AnyMilliOp::ReduceMean(r) => self.lower_reduce_mean(r, all_infos),
-            AnyMilliOp::Gather(g) => self.lower_gather(g, all_infos),
-            // Everything else: check if outputs are fully concrete (constant-folded),
-            // otherwise register as boundary.
-            other => {
-                let op_kind = other.op_kind();
-                let _op_id = other.global_id();
-                // If all outputs are Numeric (fully constant), treat like a Constant —
-                // the inference already computed the values, no need to lower the op.
-                let all_numeric = other.outputs().all(|out_id| {
-                    all_infos
-                        .get(&out_id)
-                        .is_some_and(|i| i.as_numeric().is_some())
-                });
-                for out_id in other.outputs() {
-                    if let Some(info) = all_infos.get(&out_id) {
-                        if all_numeric {
-                            self.register_constant(out_id, info);
-                        } else {
-                            self.register_boundary(out_id, info, &op_kind);
-                        }
-                    } else {
-                        self.register_opaque(out_id);
-                    }
-                }
-                if !all_numeric {
-                    self.push_unsupported(other, all_infos, &op_kind);
-                }
-            }
+        }
+        if !all_numeric {
+            self.push_unsupported(op, &op_kind);
         }
     }
 
-    fn lower_simple_binary(
+    pub fn lower_simple_binary(
         &mut self,
         bin: &crate::milli_graph::ops::SimpleBinary,
-        all_infos: &HashMap<GlobalId, TensorInfo>,
     ) {
+        let all_infos = self.all_infos;
         use crate::milli_graph::ops::binary::WhichSimpleBinaryOp;
 
         let mut inputs_iter = Node::inputs(bin);
@@ -1140,11 +1085,11 @@ impl LowerCtx {
             self.tensor_map.get(&a_id).cloned(),
             self.tensor_map.get(&b_id).cloned(),
         ) else {
-            self.lower_as_boundary_named(bin, all_infos, "SimpleBinary");
+            self.lower_as_boundary_named(bin, "SimpleBinary");
             return;
         };
         let Some(out_info) = all_infos.get(&out_id) else {
-            self.lower_as_boundary_named(bin, all_infos, "SimpleBinary");
+            self.lower_as_boundary_named(bin, "SimpleBinary");
             return;
         };
 
@@ -1221,7 +1166,7 @@ impl LowerCtx {
         };
 
         let Some((layout, known_dims, sym_dims, count)) = self.classify_dims(out_info) else {
-            self.lower_as_boundary_named(bin, all_infos, "SimpleBinary");
+            self.lower_as_boundary_named(bin, "SimpleBinary");
             return;
         };
         let count = count.max(1);
@@ -1263,7 +1208,7 @@ impl LowerCtx {
     /// For non-row-major tensors (transposed views, non-contiguous slices)
     /// this builds an Explicit mapping so each output atom reads the
     /// correct source atom.
-    fn pointwise_input_ref(in_map: &TensorAtomMap) -> InputRef {
+    pub fn pointwise_input_ref(in_map: &TensorAtomMap) -> InputRef {
         let known_dims = in_map.known_dims();
         let row_major = TensorAtomMap::compute_strides(&known_dims);
         if in_map.known_strides == row_major || in_map.count <= 1 {
@@ -1280,22 +1225,22 @@ impl LowerCtx {
         }
     }
 
-    fn lower_simple_unary(
+    pub fn lower_simple_unary(
         &mut self,
         un: &crate::milli_graph::ops::SimpleUnaryOp,
-        all_infos: &HashMap<GlobalId, TensorInfo>,
     ) {
+        let all_infos = self.all_infos;
         use crate::milli_graph::ops::unary::WhichSimpleUnaryOp;
 
         let in_id = Node::inputs(un).next().unwrap();
         let out_id = Node::outputs(un).next().unwrap();
 
         let Some(in_map) = self.tensor_map.get(&in_id).cloned() else {
-            self.lower_as_boundary_named(un, all_infos, "SimpleUnary");
+            self.lower_as_boundary_named(un, "SimpleUnary");
             return;
         };
         let Some(out_info) = all_infos.get(&out_id) else {
-            self.lower_as_boundary_named(un, all_infos, "SimpleUnary");
+            self.lower_as_boundary_named(un, "SimpleUnary");
             return;
         };
 
@@ -1338,7 +1283,7 @@ impl LowerCtx {
                 compute_dtype: dt,
             },
             _ => {
-                self.lower_as_boundary_named(un, all_infos, "SimpleUnary");
+                self.lower_as_boundary_named(un, "SimpleUnary");
                 return;
             }
         };
@@ -1367,20 +1312,20 @@ impl LowerCtx {
         );
     }
 
-    fn lower_clamp_min(
+    pub fn lower_clamp_min(
         &mut self,
         clamp: &crate::milli_graph::ops::ClampMin,
-        all_infos: &HashMap<GlobalId, TensorInfo>,
     ) {
+        let all_infos = self.all_infos;
         let in_id = Node::inputs(clamp).next().unwrap();
         let out_id = Node::outputs(clamp).next().unwrap();
 
         let Some(in_map) = self.tensor_map.get(&in_id).cloned() else {
-            self.lower_as_boundary_named(clamp, all_infos, "ClampMin");
+            self.lower_as_boundary_named(clamp, "ClampMin");
             return;
         };
         let Some(out_info) = all_infos.get(&out_id) else {
-            self.lower_as_boundary_named(clamp, all_infos, "ClampMin");
+            self.lower_as_boundary_named(clamp, "ClampMin");
             return;
         };
 
@@ -1424,20 +1369,20 @@ impl LowerCtx {
     ///
     /// If input and output dtypes match, this is a zero-cost view (no atoms created).
     /// Otherwise, emits an Identity group that performs the dtype cast.
-    fn lower_identity_passthrough<T: Node>(
+    pub fn lower_identity_passthrough<T: Node>(
         &mut self,
         op: &T,
-        all_infos: &HashMap<GlobalId, TensorInfo>,
     ) {
+        let all_infos = self.all_infos;
         let in_id = Node::inputs(op).next().unwrap();
         let out_id = Node::outputs(op).next().unwrap();
 
         let Some(in_map) = self.tensor_map.get(&in_id).cloned() else {
-            self.lower_as_boundary_named(op, all_infos, "ViewOp");
+            self.lower_as_boundary_named(op, "ViewOp");
             return;
         };
         let Some(out_info) = all_infos.get(&out_id) else {
-            self.lower_as_boundary_named(op, all_infos, "ViewOp");
+            self.lower_as_boundary_named(op, "ViewOp");
             return;
         };
 
@@ -1482,16 +1427,16 @@ impl LowerCtx {
     /// order), Transpose changes the physical row-major order of elements.
     /// We emit an Identity group with an Explicit InputRef that maps each output
     /// atom to the correct input atom based on the permutation.
-    fn lower_transpose(
+    pub fn lower_transpose(
         &mut self,
         t: &crate::milli_graph::ops::Transpose,
-        all_infos: &HashMap<GlobalId, TensorInfo>,
     ) {
+        let all_infos = self.all_infos;
         let in_id = Node::inputs(t).next().unwrap();
         let out_id = Node::outputs(t).next().unwrap();
 
         let Some(in_map) = self.tensor_map.get(&in_id).cloned() else {
-            self.lower_as_boundary_named(t, all_infos, "Transpose");
+            self.lower_as_boundary_named(t, "Transpose");
             return;
         };
         let Some(out_info) = all_infos.get(&out_id) else {
@@ -1499,14 +1444,14 @@ impl LowerCtx {
             return;
         };
         let Some(in_info) = all_infos.get(&in_id) else {
-            self.lower_as_boundary_named(t, all_infos, "Transpose");
+            self.lower_as_boundary_named(t, "Transpose");
             return;
         };
 
         let in_rank = match in_info.rank_if_known() {
             Some(r) => r,
             None => {
-                self.lower_as_boundary_named(t, all_infos, "Transpose");
+                self.lower_as_boundary_named(t, "Transpose");
                 return;
             }
         };
@@ -1514,7 +1459,7 @@ impl LowerCtx {
         let Some((out_layout, out_known_dims, _out_sym_dims, _out_count)) =
             self.classify_dims(out_info)
         else {
-            self.lower_as_boundary_named(t, all_infos, "Transpose");
+            self.lower_as_boundary_named(t, "Transpose");
             return;
         };
 
@@ -1571,7 +1516,7 @@ impl LowerCtx {
             || out_layout.iter().any(|d| matches!(d, DimKind::Symbolic(_)))
         {
             self.register_boundary(out_id, out_info, "Transpose");
-            self.push_unsupported(t, all_infos, "Transpose(symbolic dims)");
+            self.push_unsupported(t, "Transpose(symbolic dims)");
             return;
         }
 
@@ -1609,12 +1554,13 @@ impl LowerCtx {
     }
 
     /// View op: no compute, just re-register with the new shape.
-    fn lower_view_op<T: Node>(&mut self, op: &T, all_infos: &HashMap<GlobalId, TensorInfo>) {
+    pub fn lower_view_op<T: Node>(&mut self, op: &T) {
+        let all_infos = self.all_infos;
         let in_id = Node::inputs(op).next().unwrap();
         let out_id = Node::outputs(op).next().unwrap();
 
         let Some(in_map) = self.tensor_map.get(&in_id).cloned() else {
-            self.lower_as_boundary_named(op, all_infos, "ViewOp");
+            self.lower_as_boundary_named(op, "ViewOp");
             return;
         };
         let Some(out_info) = all_infos.get(&out_id) else {
@@ -1623,7 +1569,7 @@ impl LowerCtx {
         };
 
         let Some((layout, known_dims, sym_dims, count)) = self.classify_dims(out_info) else {
-            self.lower_as_boundary_named(op, all_infos, "ViewOp");
+            self.lower_as_boundary_named(op, "ViewOp");
             return;
         };
         let count = count.max(1);
@@ -1644,20 +1590,20 @@ impl LowerCtx {
         } else {
             self.register_boundary(out_id, out_info, "ViewOp");
             let name = format!("ViewOp(count {} → {})", in_map.count, count);
-            self.push_unsupported(op, all_infos, &name);
+            self.push_unsupported(op, &name);
         }
     }
 
-    fn lower_expand(
+    pub fn lower_expand(
         &mut self,
         e: &crate::milli_graph::ops::Expand,
-        all_infos: &HashMap<GlobalId, TensorInfo>,
     ) {
+        let all_infos = self.all_infos;
         let in_id = Node::inputs(e).next().unwrap();
         let out_id = Node::outputs(e).next().unwrap();
 
         let Some(in_map) = self.tensor_map.get(&in_id).cloned() else {
-            self.lower_as_boundary_named(e, all_infos, "Expand");
+            self.lower_as_boundary_named(e, "Expand");
             return;
         };
         let Some(out_info) = all_infos.get(&out_id) else {
@@ -1667,7 +1613,7 @@ impl LowerCtx {
         let in_info = all_infos.get(&in_id);
 
         let Some((layout, known_dims, sym_dims, count)) = self.classify_dims(out_info) else {
-            self.lower_as_boundary_named(e, all_infos, "Expand");
+            self.lower_as_boundary_named(e, "Expand");
             return;
         };
         let count = count.max(1);
@@ -1719,11 +1665,11 @@ impl LowerCtx {
         }
     }
 
-    fn lower_pow(
+    pub fn lower_pow(
         &mut self,
         pow: &crate::milli_graph::ops::Pow,
-        all_infos: &HashMap<GlobalId, TensorInfo>,
     ) {
+        let all_infos = self.all_infos;
         let mut inputs_iter = Node::inputs(pow);
         let a_id = inputs_iter.next().unwrap();
         let b_id = inputs_iter.next().unwrap();
@@ -1733,16 +1679,16 @@ impl LowerCtx {
             self.tensor_map.get(&a_id).cloned(),
             self.tensor_map.get(&b_id).cloned(),
         ) else {
-            self.lower_as_boundary_named(pow, all_infos, "Pow");
+            self.lower_as_boundary_named(pow, "Pow");
             return;
         };
         let Some(out_info) = all_infos.get(&out_id) else {
-            self.lower_as_boundary_named(pow, all_infos, "Pow");
+            self.lower_as_boundary_named(pow, "Pow");
             return;
         };
 
         let Some((layout, known_dims, sym_dims, count)) = self.classify_dims(out_info) else {
-            self.lower_as_boundary_named(pow, all_infos, "Pow");
+            self.lower_as_boundary_named(pow, "Pow");
             return;
         };
         let count = count.max(1);
@@ -1782,11 +1728,11 @@ impl LowerCtx {
         );
     }
 
-    fn lower_where(
+    pub fn lower_where(
         &mut self,
         where_op: &crate::milli_graph::ops::Where,
-        all_infos: &HashMap<GlobalId, TensorInfo>,
     ) {
+        let all_infos = self.all_infos;
         let mut inputs_iter = Node::inputs(where_op);
         let cond_id = inputs_iter.next().unwrap();
         let x_id = inputs_iter.next().unwrap();
@@ -1798,16 +1744,16 @@ impl LowerCtx {
             self.tensor_map.get(&x_id).cloned(),
             self.tensor_map.get(&y_id).cloned(),
         ) else {
-            self.lower_as_boundary_named(where_op, all_infos, "Where");
+            self.lower_as_boundary_named(where_op, "Where");
             return;
         };
         let Some(out_info) = all_infos.get(&out_id) else {
-            self.lower_as_boundary_named(where_op, all_infos, "Where");
+            self.lower_as_boundary_named(where_op, "Where");
             return;
         };
 
         let Some((layout, known_dims, sym_dims, count)) = self.classify_dims(out_info) else {
-            self.lower_as_boundary_named(where_op, all_infos, "Where");
+            self.lower_as_boundary_named(where_op, "Where");
             return;
         };
         let count = count.max(1);
@@ -1847,24 +1793,24 @@ impl LowerCtx {
         );
     }
 
-    fn lower_concat(
+    pub fn lower_concat(
         &mut self,
         concat: &crate::milli_graph::ops::Concat,
-        all_infos: &HashMap<GlobalId, TensorInfo>,
     ) {
+        let all_infos = self.all_infos;
         let axis_raw = concat.axis();
         let out_id = Node::outputs(concat).next().unwrap();
         let input_ids = concat.concat_inputs();
 
         let Some(out_info) = all_infos.get(&out_id) else {
-            self.lower_as_boundary_named(concat, all_infos, "Concat");
+            self.lower_as_boundary_named(concat, "Concat");
             return;
         };
 
         let Some((out_layout, out_known_dims, out_sym_dims, out_count)) =
             self.classify_dims(out_info)
         else {
-            self.lower_as_boundary_named(concat, all_infos, "Concat");
+            self.lower_as_boundary_named(concat, "Concat");
             return;
         };
         let out_count = out_count.max(1);
@@ -1879,7 +1825,7 @@ impl LowerCtx {
 
         // Concat axis must be a known dim.
         if axis >= rank || !matches!(out_layout[axis], DimKind::Known(_)) {
-            self.lower_as_boundary_named(concat, all_infos, "Concat");
+            self.lower_as_boundary_named(concat, "Concat");
             return;
         }
 
@@ -1895,7 +1841,7 @@ impl LowerCtx {
         let mut concat_dim_sizes = Vec::with_capacity(input_ids.len());
         for &inp_id in input_ids {
             let Some(inp_map) = self.tensor_map.get(&inp_id).cloned() else {
-                self.lower_as_boundary_named(concat, all_infos, "Concat");
+                self.lower_as_boundary_named(concat, "Concat");
                 return;
             };
             let inp_known: Vec<u64> = inp_map
@@ -1910,7 +1856,7 @@ impl LowerCtx {
                 })
                 .collect();
             if inp_known.len() != out_known_dims.len() {
-                self.lower_as_boundary_named(concat, all_infos, "Concat");
+                self.lower_as_boundary_named(concat, "Concat");
                 return;
             }
             concat_dim_sizes.push(inp_known[concat_known_idx]);
@@ -1989,31 +1935,31 @@ impl LowerCtx {
         );
     }
 
-    fn lower_split(
+    pub fn lower_split(
         &mut self,
         split: &crate::milli_graph::ops::Split,
-        all_infos: &HashMap<GlobalId, TensorInfo>,
     ) {
+        let all_infos = self.all_infos;
         let in_id = Node::inputs(split).next().unwrap();
         let out_id = Node::outputs(split).next().unwrap();
 
         let Some(in_map) = self.tensor_map.get(&in_id).cloned() else {
-            self.lower_as_boundary_named(split, all_infos, "Split");
+            self.lower_as_boundary_named(split, "Split");
             return;
         };
         let Some(out_info) = all_infos.get(&out_id) else {
-            self.lower_as_boundary_named(split, all_infos, "Split");
+            self.lower_as_boundary_named(split, "Split");
             return;
         };
         let Some(_in_info) = all_infos.get(&in_id) else {
-            self.lower_as_boundary_named(split, all_infos, "Split");
+            self.lower_as_boundary_named(split, "Split");
             return;
         };
 
         let Some((out_layout, out_known_dims, out_sym_dims, out_count)) =
             self.classify_dims(out_info)
         else {
-            self.lower_as_boundary_named(split, all_infos, "Split");
+            self.lower_as_boundary_named(split, "Split");
             return;
         };
         let out_count = out_count.max(1);
@@ -2028,7 +1974,7 @@ impl LowerCtx {
         };
 
         if axis >= rank || !matches!(in_map.layout[axis], DimKind::Known(_)) {
-            self.lower_as_boundary_named(split, all_infos, "Split");
+            self.lower_as_boundary_named(split, "Split");
             return;
         }
 
@@ -2062,7 +2008,7 @@ impl LowerCtx {
         let out_split_size = match &out_layout[axis] {
             DimKind::Known(s) => *s,
             _ => {
-                self.lower_as_boundary_named(split, all_infos, "Split");
+                self.lower_as_boundary_named(split, "Split");
                 return;
             }
         };
@@ -2072,10 +2018,10 @@ impl LowerCtx {
         // This is only correct for equal splits. For unequal splits we need the actual sizes.
         // Try to get them from the split tensor.
         let offset_along_axis =
-            self.compute_split_offset(split, output_id_idx, out_split_size, all_infos);
+            self.compute_split_offset(split, output_id_idx, out_split_size);
 
         if out_known_dims.len() != in_known.len() {
-            self.lower_as_boundary_named(split, all_infos, "Split");
+            self.lower_as_boundary_named(split, "Split");
             return;
         }
 
@@ -2117,13 +2063,13 @@ impl LowerCtx {
     }
 
     /// Compute the cumulative offset along the split axis for output_id_idx.
-    fn compute_split_offset(
+    pub fn compute_split_offset(
         &self,
         split: &crate::milli_graph::ops::Split,
         output_id_idx: usize,
         out_split_size: u64,
-        all_infos: &HashMap<GlobalId, TensorInfo>,
     ) -> u64 {
+        let all_infos = self.all_infos;
         // Try to get concrete split sizes from the split tensor.
         if let Some(crate::milli_graph::ops::MilliOpTensorIDOrLiteral::TensorID(tensor_id)) =
             split.split_tensor()
@@ -2143,27 +2089,27 @@ impl LowerCtx {
         output_id_idx as u64 * out_split_size
     }
 
-    fn lower_slice(
+    pub fn lower_slice(
         &mut self,
         slice: &crate::milli_graph::ops::Slice,
-        all_infos: &HashMap<GlobalId, TensorInfo>,
     ) {
+        let all_infos = self.all_infos;
         let data_id = slice.data_id();
         let out_id = Node::outputs(slice).next().unwrap();
 
         let Some(in_map) = self.tensor_map.get(&data_id).cloned() else {
-            self.lower_as_boundary_named(slice, all_infos, "Slice");
+            self.lower_as_boundary_named(slice, "Slice");
             return;
         };
         let Some(out_info) = all_infos.get(&out_id) else {
-            self.lower_as_boundary_named(slice, all_infos, "Slice");
+            self.lower_as_boundary_named(slice, "Slice");
             return;
         };
 
         let Some((out_layout, out_known_dims, out_sym_dims, out_count)) =
             self.classify_dims(out_info)
         else {
-            self.lower_as_boundary_named(slice, all_infos, "Slice");
+            self.lower_as_boundary_named(slice, "Slice");
             return;
         };
         let out_count = out_count.max(1);
@@ -2209,7 +2155,7 @@ impl LowerCtx {
 
         let (Some(starts), Some(_ends), Some(steps), Some(axes)) = (starts, ends, steps, axes)
         else {
-            self.lower_as_boundary_named(slice, all_infos, "Slice");
+            self.lower_as_boundary_named(slice, "Slice");
             return;
         };
 
@@ -2252,19 +2198,19 @@ impl LowerCtx {
 
         for (i, &axis) in axes.iter().enumerate() {
             if axis >= in_rank {
-                self.lower_as_boundary_named(slice, all_infos, "Slice");
+                self.lower_as_boundary_named(slice, "Slice");
                 return;
             }
             let Some(ki) = axis_to_known_idx[axis] else {
                 // Slicing a symbolic dim — boundary.
-                self.lower_as_boundary_named(slice, all_infos, "Slice");
+                self.lower_as_boundary_named(slice, "Slice");
                 return;
             };
 
             let dim = in_known[ki] as i64;
             let step = steps[i];
             if step == 0 {
-                self.lower_as_boundary_named(slice, all_infos, "Slice");
+                self.lower_as_boundary_named(slice, "Slice");
                 return;
             }
 
@@ -2281,7 +2227,7 @@ impl LowerCtx {
         }
 
         if out_known_dims.len() != in_known.len() {
-            self.lower_as_boundary_named(slice, all_infos, "Slice");
+            self.lower_as_boundary_named(slice, "Slice");
             return;
         }
 
@@ -2346,11 +2292,11 @@ impl LowerCtx {
         }
 
         // Negative steps: fall back to boundary (rare).
-        self.lower_as_boundary_named(slice, all_infos, "Slice(negative step)");
+        self.lower_as_boundary_named(slice, "Slice(negative step)");
     }
 
     /// Extract concrete i64 values from a tensor in all_infos.
-    fn extract_i64(all_infos: &HashMap<GlobalId, TensorInfo>, id: &GlobalId) -> Option<Vec<i64>> {
+    pub fn extract_i64(all_infos: &HashMap<GlobalId, TensorInfo>, id: &GlobalId) -> Option<Vec<i64>> {
         let info = all_infos.get(id)?;
         let tensor = info.as_numeric()?;
         let as_i64 = tensor
@@ -2363,11 +2309,11 @@ impl LowerCtx {
         Vec::<i64>::try_from(rank1.to_ndarray().ok()?).ok()
     }
 
-    fn lower_matmul(
+    pub fn lower_matmul(
         &mut self,
         matmul: &crate::milli_graph::ops::MatMul,
-        all_infos: &HashMap<GlobalId, TensorInfo>,
     ) {
+        let all_infos = self.all_infos;
         let mut inputs_iter = Node::inputs(matmul);
         let a_id = inputs_iter.next().unwrap();
         let b_id = inputs_iter.next().unwrap();
@@ -2377,11 +2323,11 @@ impl LowerCtx {
             self.tensor_map.get(&a_id).cloned(),
             self.tensor_map.get(&b_id).cloned(),
         ) else {
-            self.lower_as_boundary_named(matmul, all_infos, "MatMul");
+            self.lower_as_boundary_named(matmul, "MatMul");
             return;
         };
         let Some(out_info) = all_infos.get(&out_id) else {
-            self.lower_as_boundary_named(matmul, all_infos, "MatMul");
+            self.lower_as_boundary_named(matmul, "MatMul");
             return;
         };
 
@@ -2396,7 +2342,7 @@ impl LowerCtx {
         let b_layout = &b_map.layout;
 
         if a_layout.len() < 2 || b_layout.len() < 2 {
-            self.lower_as_boundary_named(matmul, all_infos, "MatMul");
+            self.lower_as_boundary_named(matmul, "MatMul");
             return;
         }
 
@@ -2404,7 +2350,7 @@ impl LowerCtx {
         let k = match (&a_layout[a_layout.len() - 1], &b_layout[b_layout.len() - 2]) {
             (DimKind::Known(ka), DimKind::Known(kb)) if ka == kb && *ka > 0 => *ka,
             _ => {
-                self.lower_as_boundary_named(matmul, all_infos, "MatMul");
+                self.lower_as_boundary_named(matmul, "MatMul");
                 return;
             }
         };
@@ -2413,7 +2359,7 @@ impl LowerCtx {
         let n = match &b_layout[b_layout.len() - 1] {
             DimKind::Known(n) if *n > 0 => *n,
             _ => {
-                self.lower_as_boundary_named(matmul, all_infos, "MatMul");
+                self.lower_as_boundary_named(matmul, "MatMul");
                 return;
             }
         };
@@ -2451,7 +2397,7 @@ impl LowerCtx {
 
         // B can have fewer batch dims (broadcasting). If B has batch dims, they must match.
         if !b_batch_known.is_empty() && a_batch_known != b_batch_known {
-            self.lower_as_boundary_named(matmul, all_infos, "MatMul");
+            self.lower_as_boundary_named(matmul, "MatMul");
             return;
         }
 
@@ -2461,13 +2407,13 @@ impl LowerCtx {
         let Some((out_layout, out_known_dims, out_sym_dims, out_count)) =
             self.classify_dims(out_info)
         else {
-            self.lower_as_boundary_named(matmul, all_infos, "MatMul");
+            self.lower_as_boundary_named(matmul, "MatMul");
             return;
         };
         let out_count = out_count.max(1);
 
         if out_count > 64_000_000 {
-            self.lower_as_boundary_named(matmul, all_infos, "MatMul");
+            self.lower_as_boundary_named(matmul, "MatMul");
             return;
         }
 
@@ -2666,39 +2612,39 @@ impl LowerCtx {
     }
 
     /// Lower ReduceSum or ReduceMax over known axes.
-    fn lower_reduce<R, F>(
+    pub fn lower_reduce<R, F>(
         &mut self,
         reduce: &R,
-        all_infos: &HashMap<GlobalId, TensorInfo>,
         make_reduce_op: F,
     ) where
         R: Node,
         R: ReduceAccessors,
         F: Fn(DType, u64, i64) -> ScalarOp,
     {
+        let all_infos = self.all_infos;
         let in_id = Node::inputs(reduce).next().unwrap();
         let out_id = Node::outputs(reduce).next().unwrap();
 
         let Some(in_map) = self.tensor_map.get(&in_id).cloned() else {
-            self.lower_as_boundary_named(reduce, all_infos, "Reduce");
+            self.lower_as_boundary_named(reduce, "Reduce");
             return;
         };
         let Some(out_info) = all_infos.get(&out_id) else {
-            self.lower_as_boundary_named(reduce, all_infos, "Reduce");
+            self.lower_as_boundary_named(reduce, "Reduce");
             return;
         };
 
         // Get the concrete reduction axes.
         let axes: Vec<i64> = if let Some(axes_id) = reduce.axes_tensor() {
             let Some(vals) = Self::extract_i64(all_infos, &axes_id) else {
-                self.lower_as_boundary_named(reduce, all_infos, "Reduce");
+                self.lower_as_boundary_named(reduce, "Reduce");
                 return;
             };
             vals
         } else if reduce.noop_with_empty_axes() {
             // No axes + noop = identity.
             let Some((layout, known_dims, sym_dims, count)) = self.classify_dims(out_info) else {
-                self.lower_as_boundary_named(reduce, all_infos, "Reduce");
+                self.lower_as_boundary_named(reduce, "Reduce");
                 return;
             };
             let count = count.max(1);
@@ -2725,7 +2671,7 @@ impl LowerCtx {
             return;
         } else {
             // No axes = reduce all. Boundary for now.
-            self.lower_as_boundary_named(reduce, all_infos, "Reduce");
+            self.lower_as_boundary_named(reduce, "Reduce");
             return;
         };
 
@@ -2777,13 +2723,13 @@ impl LowerCtx {
         let mut reduce_known_indices = Vec::new();
         for &ax in &norm_axes {
             if ax >= in_rank {
-                self.lower_as_boundary_named(reduce, all_infos, "Reduce");
+                self.lower_as_boundary_named(reduce, "Reduce");
                 return;
             }
             let Some(ki) = axis_to_known_idx[ax] else {
                 // Reducing a symbolic dim — use the symbolic reduce path.
                 // For now, boundary.
-                self.lower_as_boundary_named(reduce, all_infos, "Reduce");
+                self.lower_as_boundary_named(reduce, "Reduce");
                 return;
             };
             reduce_known_indices.push(ki);
@@ -2795,7 +2741,7 @@ impl LowerCtx {
             .map(|&ki| in_known[ki])
             .product();
         if reduce_extent == 0 {
-            self.lower_as_boundary_named(reduce, all_infos, "Reduce");
+            self.lower_as_boundary_named(reduce, "Reduce");
             return;
         }
 
@@ -2810,7 +2756,7 @@ impl LowerCtx {
 
         // For now, handle single-axis reduction (covers most cases).
         if reduce_known_indices.len() != 1 {
-            self.lower_as_boundary_named(reduce, all_infos, "Reduce");
+            self.lower_as_boundary_named(reduce, "Reduce");
             return;
         }
 
@@ -2890,7 +2836,7 @@ impl LowerCtx {
                     .collect(),
             )
         } else {
-            self.lower_as_boundary_named(reduce, all_infos, "Reduce");
+            self.lower_as_boundary_named(reduce, "Reduce");
             return;
         };
 
@@ -2907,7 +2853,7 @@ impl LowerCtx {
         let Some((out_layout, out_known_dims_full, out_sym_dims, _)) = self.classify_dims(out_info)
         else {
             // This shouldn't happen since we computed out_count, but be safe.
-            self.lower_as_boundary_named(reduce, all_infos, "Reduce");
+            self.lower_as_boundary_named(reduce, "Reduce");
             return;
         };
 
@@ -2940,11 +2886,11 @@ impl LowerCtx {
     ///
     /// Matches milli eval semantics: for BF16/F16, the entire mean computation
     /// (sum + divide) happens in F32, with only the final result cast back.
-    fn lower_reduce_mean(
+    pub fn lower_reduce_mean(
         &mut self,
         reduce: &crate::milli_graph::ops::ReduceMean,
-        all_infos: &HashMap<GlobalId, TensorInfo>,
     ) {
+        let all_infos = self.all_infos;
         let out_id = Node::outputs(reduce).next().unwrap();
 
         // First try to lower as ReduceSum.
@@ -2975,12 +2921,12 @@ impl LowerCtx {
         })();
 
         let Some(extent) = extent else {
-            self.lower_as_boundary_named(reduce, all_infos, "ReduceMean");
+            self.lower_as_boundary_named(reduce, "ReduceMean");
             return;
         };
 
         let Some(out_info) = all_infos.get(&out_id) else {
-            self.lower_as_boundary_named(reduce, all_infos, "ReduceMean");
+            self.lower_as_boundary_named(reduce, "ReduceMean");
             return;
         };
         let out_dt = out_info.dtype();
@@ -2994,7 +2940,7 @@ impl LowerCtx {
         };
 
         // Lower as ReduceSum, keeping output in compute_dt (not out_dt).
-        self.lower_reduce(reduce, all_infos, |cd, count, stride| {
+        self.lower_reduce(reduce, |cd, count, stride| {
             ScalarOp::Reduce {
                 kind: ReduceKind::Sum,
                 reduce_count: count,
@@ -3056,11 +3002,11 @@ impl LowerCtx {
     /// output[i, j] = data[indices[i], j]
     ///
     /// For other axis values or multi-dim indices, falls back to boundary.
-    fn lower_gather(
+    pub fn lower_gather(
         &mut self,
         g: &crate::milli_graph::ops::Gather,
-        all_infos: &HashMap<GlobalId, TensorInfo>,
     ) {
+        let all_infos = self.all_infos;
         let data_id = g.data_id();
         let indices_id = g.indices_id();
         let out_id = g.output_id();
@@ -3075,23 +3021,23 @@ impl LowerCtx {
         }
 
         let Some(data_map) = self.tensor_map.get(&data_id).cloned() else {
-            self.lower_as_boundary_named(g, all_infos, "Gather");
+            self.lower_as_boundary_named(g, "Gather");
             return;
         };
         let Some(indices_map) = self.tensor_map.get(&indices_id).cloned() else {
-            self.lower_as_boundary_named(g, all_infos, "Gather");
+            self.lower_as_boundary_named(g, "Gather");
             return;
         };
         let Some(out_info) = all_infos.get(&out_id) else {
-            self.lower_as_boundary_named(g, all_infos, "Gather");
+            self.lower_as_boundary_named(g, "Gather");
             return;
         };
         let Some(data_info) = all_infos.get(&data_id) else {
-            self.lower_as_boundary_named(g, all_infos, "Gather");
+            self.lower_as_boundary_named(g, "Gather");
             return;
         };
         let Some(_indices_info) = all_infos.get(&indices_id) else {
-            self.lower_as_boundary_named(g, all_infos, "Gather");
+            self.lower_as_boundary_named(g, "Gather");
             return;
         };
 
@@ -3099,7 +3045,7 @@ impl LowerCtx {
         let data_rank = match data_info.rank_if_known() {
             Some(r) => r,
             None => {
-                self.lower_as_boundary_named(g, all_infos, "Gather");
+                self.lower_as_boundary_named(g, "Gather");
                 return;
             }
         };
@@ -3111,7 +3057,7 @@ impl LowerCtx {
 
         // Only handle axis=0 for now.
         if axis != 0 {
-            self.lower_as_boundary_named(g, all_infos, "Gather");
+            self.lower_as_boundary_named(g, "Gather");
             return;
         }
 
@@ -3132,7 +3078,7 @@ impl LowerCtx {
             .collect();
         if data_known.len() != data_rank {
             // Some data dims are symbolic — can't lower.
-            self.lower_as_boundary_named(g, all_infos, "Gather");
+            self.lower_as_boundary_named(g, "Gather");
             return;
         }
 
@@ -3147,7 +3093,7 @@ impl LowerCtx {
         let Some((out_layout, out_known_dims, out_sym_dims, out_count)) =
             self.classify_dims(out_info)
         else {
-            self.lower_as_boundary_named(g, all_infos, "Gather");
+            self.lower_as_boundary_named(g, "Gather");
             return;
         };
         let out_count = out_count.max(1);
@@ -3205,7 +3151,7 @@ impl LowerCtx {
             // Simple case: indices_map.count == 1, sym_dims present
             // Output should have count == D_total, same sym_dims
             if indices_map.count != 1 || out_count != d_total {
-                self.lower_as_boundary_named(g, all_infos, "Gather");
+                self.lower_as_boundary_named(g, "Gather");
                 return;
             }
 
@@ -3393,12 +3339,12 @@ impl LowerCtx {
 
     /// Generic boundary fallback. Always registers outputs in tensor_map
     /// so downstream ops can reference them.
-    fn lower_as_boundary_named<T: Node>(
+    pub fn lower_as_boundary_named<T: Node>(
         &mut self,
         op: &T,
-        all_infos: &HashMap<GlobalId, TensorInfo>,
         name: &str,
     ) {
+        let all_infos = self.all_infos;
         let _op_id = op.global_id();
         for out_id in op.outputs() {
             if let Some(info) = all_infos.get(&out_id) {
@@ -3409,15 +3355,15 @@ impl LowerCtx {
                 self.register_opaque(out_id);
             }
         }
-        self.push_unsupported(op, all_infos, name);
+        self.push_unsupported(op, name);
     }
 
-    fn push_unsupported<T: Node>(
+    pub fn push_unsupported<T: Node>(
         &mut self,
         op: &T,
-        all_infos: &HashMap<GlobalId, TensorInfo>,
         name: &str,
     ) {
+        let all_infos = self.all_infos;
         let in_shapes: Vec<String> = op
             .inputs()
             .map(|id| Self::fmt_info(all_infos.get(&id)))
@@ -3436,7 +3382,7 @@ impl LowerCtx {
         self.unsupported_details.push(detail);
     }
 
-    fn fmt_info(info: Option<&TensorInfo>) -> String {
+    pub fn fmt_info(info: Option<&TensorInfo>) -> String {
         let Some(info) = info else {
             return "?".to_string();
         };
@@ -3457,7 +3403,7 @@ impl LowerCtx {
     }
 
     /// Register a tensor with no shape info as a single opaque atom.
-    fn register_opaque(&mut self, id: GlobalId) {
+    pub fn register_opaque(&mut self, id: GlobalId) {
         if self.tensor_map.contains_key(&id) {
             return;
         }

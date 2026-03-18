@@ -189,6 +189,10 @@ impl SimpleBinary {
 }
 
 impl SimpleBinary {
+    pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
+        ctx.lower_simple_binary(self);
+    }
+
     pub fn remap_tensors(&mut self, map: &HashMap<GlobalId, GlobalId>, rng: &mut impl Rng) {
         self.global_id = GlobalId::new(rng);
         super::remap(&mut self.output, map);
@@ -421,6 +425,10 @@ impl Pow {
 }
 
 impl Pow {
+    pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
+        ctx.lower_pow(self);
+    }
+
     pub fn remap_tensors(&mut self, map: &HashMap<GlobalId, GlobalId>, rng: &mut impl Rng) {
         self.global_id = GlobalId::new(rng);
         super::remap(&mut self.output, map);
@@ -624,6 +632,10 @@ impl MatMul {
 }
 
 impl MatMul {
+    pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
+        ctx.lower_matmul(self);
+    }
+
     pub fn remap_tensors(&mut self, map: &HashMap<GlobalId, GlobalId>, rng: &mut impl Rng) {
         self.global_id = GlobalId::new(rng);
         super::remap(&mut self.output, map);

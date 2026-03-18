@@ -12,6 +12,10 @@ mod ops;
 pub mod optimize;
 mod pattern;
 
+pub use lower::{
+    ConcatSegment, DimClassification, DimKind, NanoLoweringContext, ReduceAccessors,
+    TensorAtomMap,
+};
 pub use ops::{ReduceKind, ScalarBinOp, ScalarOp, ScalarUnaryOp};
 pub use pattern::{
     AtomGroup, AtomId, AtomRange, GroupUseCount, InputRef, NanoGraph, NanoGraphStats, SymDim,
