@@ -1,16 +1,13 @@
-//! Naive scalar evaluator for NanoGraph integrity checks.
+//! Scalar evaluator for NanoGraph integrity checks.
 //!
-//! Walks every atom in group order, evaluates the scalar op, and stores
-//! the result. This is intentionally simple and slow — it exists only to
-//! verify that the lowered NanoGraph produces the same values as the
-//! original MilliOpGraph.
+//! Evaluates groups in topological order using per-group buffers with
+//! refcount-based freeing. Peak memory is bounded by the max live set
+//! rather than total atoms.
 //!
 //! Precision semantics: ops with a `compute_dtype` cast inputs to that
 //! precision, execute the op, then cast the result to the group's
 //! `output_dtype`. Ops without `compute_dtype` (Identity, Select,
 //! IndirectLoad) use the group's `output_dtype` directly.
-
-use std::collections::HashMap;
 
 use crate::DynRank;
 use crate::backends::ndarray_backend::numeric_tensor::NDArrayNumericTensor;
@@ -19,317 +16,14 @@ use crate::numeric_scalar::NumericScalar;
 use super::ops::{ReduceKind, ScalarBinOp, ScalarOp, ScalarUnaryOp};
 use super::pattern::{AtomId, NanoGraph};
 
-/// Flat storage of one NumericScalar per atom.
-pub struct NanoEval {
-    values: Vec<NumericScalar>,
-}
-
-impl NanoEval {
-    /// Evaluate a NanoGraph, providing external data as tensors keyed by base AtomId.
-    ///
-    /// Each `(AtomId, tensor)` pair fills a contiguous atom range starting at
-    /// the given AtomId with the tensor's flattened elements. Typically these
-    /// correspond to the graph's `input_tensors` entries (weights, user inputs).
-    pub fn eval(graph: &NanoGraph, inputs: &[(AtomId, &NDArrayNumericTensor<DynRank>)]) -> Self {
-        let num_atoms = graph.num_atoms() as usize;
-        let mut values: Vec<NumericScalar> = vec![NumericScalar::F32(0.0); num_atoms];
-
-        for &(base, tensor) in inputs {
-            populate_from_tensor(&mut values, base.0 as usize, tensor);
-        }
-
-        Self::run_eval(graph, &mut values, None, false)
-    }
-
-    /// Legacy API: evaluate with per-atom scalar overrides.
-    ///
-    /// `overrides` maps atom index → NumericScalar for input atoms.
-    /// Kept for backward compatibility with existing tests and v13 code.
-    pub fn eval_with_overrides(graph: &NanoGraph, overrides: &HashMap<u64, NumericScalar>) -> Self {
-        Self::eval_with_overrides_inner(graph, overrides, false)
-    }
-
-    /// Like eval_with_overrides, but prints the first group that produces NaN/Inf.
-    pub fn eval_with_overrides_debug(
-        graph: &NanoGraph,
-        overrides: &HashMap<u64, NumericScalar>,
-    ) -> Self {
-        Self::eval_with_overrides_inner(graph, overrides, true)
-    }
-
-    fn eval_with_overrides_inner(
-        graph: &NanoGraph,
-        overrides: &HashMap<u64, NumericScalar>,
-        debug_nan: bool,
-    ) -> Self {
-        let num_atoms = graph.num_atoms() as usize;
-        let mut values: Vec<NumericScalar> = vec![NumericScalar::F32(0.0); num_atoms];
-
-        for (&idx, val) in overrides {
-            if (idx as usize) < num_atoms {
-                values[idx as usize] = val.clone();
-            }
-        }
-
-        Self::run_eval(graph, &mut values, Some(overrides), debug_nan)
-    }
-
-    /// Core evaluation loop shared by all entry points.
-    ///
-    /// `literal_overrides` is Some for the legacy API where Literal(0.0)
-    /// placeholder groups need to be overridden with actual values.
-    /// None for the new API where input data lives in input_tensor ranges.
-    fn run_eval(
-        graph: &NanoGraph,
-        values: &mut Vec<NumericScalar>,
-        literal_overrides: Option<&HashMap<u64, NumericScalar>>,
-        debug_nan: bool,
-    ) -> Self {
-        let mut nan_reported = false;
-
-        for (group_idx, group) in graph.groups().iter().enumerate() {
-            let output_dtype = group.output_dtype;
-
-            for i in 0..group.count {
-                let atom_idx = group.base_id.0 + i;
-                let ri = i + group.atom_offset;
-
-                if let ScalarOp::Reduce {
-                    kind,
-                    reduce_count,
-                    reduce_stride,
-                    compute_dtype,
-                } = &group.op
-                {
-                    let mut acc = match kind {
-                        ReduceKind::Sum => NumericScalar::zero_of(*compute_dtype),
-                        ReduceKind::Max => NumericScalar::neg_infinity_of(*compute_dtype),
-                    };
-
-                    let base = group.inputs[0].resolve(ri);
-                    for k in 0..*reduce_count {
-                        let src_idx = (base.0 as i64 + k as i64 * reduce_stride) as u64;
-                        let val = values[src_idx as usize].cast_to(*compute_dtype);
-                        acc = match kind {
-                            ReduceKind::Sum => acc.add(&val),
-                            ReduceKind::Max => acc.scalar_max(&val),
-                        };
-                    }
-                    if debug_nan && !nan_reported && !acc.to_f64().is_finite() {
-                        eprintln!(
-                            "[NaN-debug] group {} (reduce {:?}): atom {} = {:?}",
-                            group_idx, group.op, atom_idx, acc
-                        );
-                        nan_reported = true;
-                    }
-                    values[atom_idx as usize] = acc.cast_to(output_dtype);
-                } else {
-                    let val = match &group.op {
-                        ScalarOp::Literal(scalar) => {
-                            if let Some(ovs) = literal_overrides {
-                                if let Some(ov) = ovs.get(&atom_idx) {
-                                    ov.cast_to(scalar.dtype())
-                                } else {
-                                    scalar.clone()
-                                }
-                            } else {
-                                scalar.clone()
-                            }
-                        }
-                        ScalarOp::Identity => {
-                            let src = group.inputs[0].resolve(ri);
-                            values[src.0 as usize].cast_to(output_dtype)
-                        }
-                        ScalarOp::Binary {
-                            op,
-                            compute_dtype,
-                        } => {
-                            let a = values[group.inputs[0].resolve(ri).0 as usize]
-                                .cast_to(*compute_dtype);
-                            let b = values[group.inputs[1].resolve(ri).0 as usize]
-                                .cast_to(*compute_dtype);
-                            let result = match op {
-                                ScalarBinOp::Add => a.add(&b),
-                                ScalarBinOp::Sub => a.sub(&b),
-                                ScalarBinOp::Mul => a.mul(&b),
-                                ScalarBinOp::Div => a.div(&b),
-                                ScalarBinOp::Max => a.scalar_max(&b),
-                                ScalarBinOp::Min => a.scalar_min(&b),
-                                ScalarBinOp::Mod => a.modulo(&b),
-                                ScalarBinOp::Pow => a.pow(&b),
-                                ScalarBinOp::Equal => {
-                                    if a.to_f64() == b.to_f64() {
-                                        NumericScalar::F32(1.0)
-                                    } else {
-                                        NumericScalar::F32(0.0)
-                                    }
-                                }
-                                ScalarBinOp::Greater => {
-                                    if a.to_f64() > b.to_f64() {
-                                        NumericScalar::F32(1.0)
-                                    } else {
-                                        NumericScalar::F32(0.0)
-                                    }
-                                }
-                                ScalarBinOp::GreaterOrEqual => {
-                                    if a.to_f64() >= b.to_f64() {
-                                        NumericScalar::F32(1.0)
-                                    } else {
-                                        NumericScalar::F32(0.0)
-                                    }
-                                }
-                                ScalarBinOp::Less => {
-                                    if a.to_f64() < b.to_f64() {
-                                        NumericScalar::F32(1.0)
-                                    } else {
-                                        NumericScalar::F32(0.0)
-                                    }
-                                }
-                                ScalarBinOp::LessOrEqual => {
-                                    if a.to_f64() <= b.to_f64() {
-                                        NumericScalar::F32(1.0)
-                                    } else {
-                                        NumericScalar::F32(0.0)
-                                    }
-                                }
-                                ScalarBinOp::And => {
-                                    if a.to_f64() != 0.0 && b.to_f64() != 0.0 {
-                                        NumericScalar::F32(1.0)
-                                    } else {
-                                        NumericScalar::F32(0.0)
-                                    }
-                                }
-                                ScalarBinOp::Or => {
-                                    if a.to_f64() != 0.0 || b.to_f64() != 0.0 {
-                                        NumericScalar::F32(1.0)
-                                    } else {
-                                        NumericScalar::F32(0.0)
-                                    }
-                                }
-                                ScalarBinOp::Xor => {
-                                    if (a.to_f64() != 0.0) ^ (b.to_f64() != 0.0) {
-                                        NumericScalar::F32(1.0)
-                                    } else {
-                                        NumericScalar::F32(0.0)
-                                    }
-                                }
-                            };
-                            result.cast_to(output_dtype)
-                        }
-                        ScalarOp::Unary {
-                            op,
-                            compute_dtype,
-                        } => {
-                            let x = values[group.inputs[0].resolve(ri).0 as usize]
-                                .cast_to(*compute_dtype);
-                            let result = match op {
-                                ScalarUnaryOp::Neg => x.neg(),
-                                ScalarUnaryOp::Abs => x.abs(),
-                                ScalarUnaryOp::Exp => x.exp(),
-                                ScalarUnaryOp::Ln => x.ln(),
-                                ScalarUnaryOp::Sqrt => x.sqrt(),
-                                ScalarUnaryOp::Reciprocal => x.recip(),
-                                ScalarUnaryOp::Tanh => x.tanh(),
-                                ScalarUnaryOp::Floor => x.floor(),
-                                ScalarUnaryOp::Ceil => x.ceil(),
-                            };
-                            result.cast_to(output_dtype)
-                        }
-                        ScalarOp::Select => {
-                            let cond = values[group.inputs[0].resolve(ri).0 as usize].clone();
-                            if cond.is_nonzero() {
-                                values[group.inputs[1].resolve(ri).0 as usize]
-                                    .cast_to(output_dtype)
-                            } else {
-                                values[group.inputs[2].resolve(ri).0 as usize]
-                                    .cast_to(output_dtype)
-                            }
-                        }
-                        ScalarOp::IndirectLoad {
-                            table_base,
-                        } => {
-                            let src = group.inputs[0].resolve(ri);
-                            let index = values[src.0 as usize].to_f64() as usize;
-                            let table_atom = table_base.0 as usize + index;
-                            values[table_atom].cast_to(output_dtype)
-                        }
-                        ScalarOp::Reduce { .. } => unreachable!(),
-                    };
-                    if debug_nan && !nan_reported && !val.to_f64().is_finite() {
-                        let input_detail: Vec<String> = group
-                            .inputs
-                            .iter()
-                            .enumerate()
-                            .map(|(j, inp)| {
-                                let src = inp.resolve(ri);
-                                format!("inp[{}]=atom{}={:?}", j, src.0, values[src.0 as usize])
-                            })
-                            .collect();
-                        eprintln!(
-                            "[NaN-debug] group {} ({:?}): atom {} = {:?} inputs: {}",
-                            group_idx,
-                            group.op,
-                            atom_idx,
-                            val,
-                            input_detail.join(", ")
-                        );
-                        nan_reported = true;
-                    }
-                    values[atom_idx as usize] = val;
-                }
-            }
-        }
-
-        NanoEval {
-            values: std::mem::take(values),
-        }
-    }
-
-    /// Get the value of an atom as f64 (for comparison).
-    pub fn get(&self, id: AtomId) -> f64 {
-        self.values[id.0 as usize].to_f64()
-    }
-
-    /// Get the raw NumericScalar for an atom.
-    pub fn get_scalar(&self, id: AtomId) -> &NumericScalar {
-        &self.values[id.0 as usize]
-    }
-
-    /// Get values for a contiguous range of atoms as f64.
-    pub fn get_range(&self, base: AtomId, count: u64) -> Vec<f64> {
-        let start = base.0 as usize;
-        self.values[start..start + count as usize]
-            .iter()
-            .map(|v| v.to_f64())
-            .collect()
-    }
-
-    /// Extract a contiguous atom range as a 1D NDArrayNumericTensor.
-    ///
-    /// Reads `range.count` scalars starting at `range.base`, converts
-    /// them to the dtype specified by `range.dtype`.
-    pub fn extract_tensor(
-        &self,
-        range: &super::pattern::AtomRange,
-    ) -> NDArrayNumericTensor<DynRank> {
-        let start = range.base.0 as usize;
-        let count = range.count as usize;
-        let scalars = &self.values[start..start + count];
-        scalars_to_tensor(scalars, range.dtype)
-    }
-}
-
-/// Memory-efficient evaluation: per-group buffers with refcount-based freeing.
+/// Evaluate a NanoGraph, returning one tensor per requested output range.
 ///
-/// Instead of allocating one `NumericScalar` per atom in the entire graph
-/// (infeasible for large models — 8.1B atoms = ~130GB for GPT-2), this
-/// allocates per-group buffers and frees them when all consumers are done.
+/// Each `(AtomId, tensor)` input pair fills a contiguous atom range starting
+/// at the given AtomId. These typically correspond to `input_tensors` entries.
 ///
 /// Peak memory is bounded by the max live set (groups whose values are
 /// needed by some future group) rather than total atoms.
-///
-/// Returns one `NDArrayNumericTensor` per requested output range.
-pub fn eval_efficient(
+pub fn eval(
     graph: &NanoGraph,
     inputs: &[(AtomId, &NDArrayNumericTensor<DynRank>)],
     output_ranges: &[super::pattern::AtomRange],
@@ -349,7 +43,7 @@ pub fn eval_efficient(
     for &(base, tensor) in inputs {
         if let Some((ti, offset)) = graph.find_input_idx(base) {
             let buf = &mut input_buffers[ti];
-            populate_from_tensor_into(buf, offset as usize, tensor);
+            populate_from_tensor(buf, offset as usize, tensor);
         }
     }
 
@@ -359,50 +53,8 @@ pub fn eval_efficient(
 
     for (gi, group) in groups.iter().enumerate() {
         let mut seen = HashSet::<usize>::new();
+        graph.collect_all_producer_indices(group, gi, &mut seen);
 
-        for input in &group.inputs {
-            collect_producer_indices_static(
-                graph,
-                input,
-                group.count,
-                group.atom_offset,
-                &mut seen,
-            );
-        }
-
-        // Reduce ops access additional atoms via stride.
-        if let ScalarOp::Reduce {
-            reduce_count,
-            reduce_stride,
-            ..
-        } = &group.op
-            && *reduce_count > 1
-            && *reduce_stride != 0
-        {
-            for input in &group.inputs {
-                let first = input.resolve(group.atom_offset);
-                let last = input.resolve(group.atom_offset + group.count - 1);
-                let end_off = (*reduce_count as i64 - 1) * reduce_stride;
-                let endpoints = [
-                    first.0,
-                    (first.0 as i64 + end_off) as u64,
-                    last.0,
-                    (last.0 as i64 + end_off) as u64,
-                ];
-                let lo = *endpoints.iter().min().unwrap();
-                let hi = *endpoints.iter().max().unwrap();
-                insert_groups_in_range_static(graph, lo, hi, &mut seen);
-            }
-        }
-
-        // IndirectLoad table reference.
-        if let ScalarOp::IndirectLoad { table_base, .. } = &group.op
-            && let Some(pi) = graph.find_group_idx(*table_base)
-        {
-            seen.insert(pi);
-        }
-
-        seen.remove(&gi);
         let deps: Vec<usize> = seen.into_iter().collect();
         for &pi in &deps {
             remaining[pi] += 1;
@@ -411,16 +63,13 @@ pub fn eval_efficient(
     }
 
     // --- Step 3: Mark output groups with extra use count ---
-    // Find which groups produce atoms in the requested output ranges.
     for range in output_ranges {
         let base = range.base.0;
         let end = base + range.count;
-        // Find all groups overlapping [base, base+count).
         let mut id = base;
         while id < end {
             if let Some(gi) = graph.find_group_idx(AtomId(id)) {
                 remaining[gi] += 1;
-                // Skip past this group.
                 let g = &groups[gi];
                 id = g.base_id.0 + g.count;
             } else {
@@ -433,11 +82,8 @@ pub fn eval_efficient(
     let mut group_buffers: Vec<Option<Vec<NumericScalar>>> = vec![None; n];
 
     for (gi, group) in groups.iter().enumerate() {
-        // Skip dead groups.
+        // Skip dead groups (unless they're literals that might be needed).
         if remaining[gi] == 0 && !matches!(&group.op, ScalarOp::Literal(_)) {
-            // Check if any output range needs this group — if remaining is 0
-            // and we already marked outputs, this group is truly dead.
-            let _ = producers.get(gi); // keep producers vec in sync
             continue;
         }
 
@@ -497,8 +143,7 @@ pub fn eval_efficient(
                             &input_buffers,
                         )
                         .cast_to(*compute_dtype);
-                        let result = eval_binop(op, &a, &b);
-                        result.cast_to(output_dtype)
+                        eval_binop(op, &a, &b).cast_to(output_dtype)
                     }
                     ScalarOp::Unary {
                         op,
@@ -511,8 +156,7 @@ pub fn eval_efficient(
                             &input_buffers,
                         )
                         .cast_to(*compute_dtype);
-                        let result = eval_unaryop(op, &x);
-                        result.cast_to(output_dtype)
+                        eval_unaryop(op, &x).cast_to(output_dtype)
                     }
                     ScalarOp::Select => {
                         let cond = lookup_atom(
@@ -539,12 +183,11 @@ pub fn eval_efficient(
                             .cast_to(output_dtype)
                         }
                     }
-                    ScalarOp::IndirectLoad {
-                        table_base,
-                    } => {
+                    ScalarOp::IndirectLoad { table_base } => {
                         let src = group.inputs[0].resolve(ri);
                         let index =
-                            lookup_atom(src, graph, &group_buffers, &input_buffers).to_f64() as u64;
+                            lookup_atom(src, graph, &group_buffers, &input_buffers).to_f64()
+                                as u64;
                         let table_atom = AtomId(table_base.0 + index);
                         lookup_atom(table_atom, graph, &group_buffers, &input_buffers)
                             .cast_to(output_dtype)
@@ -580,14 +223,13 @@ pub fn eval_efficient(
         .collect()
 }
 
-/// Look up an atom's value from sparse per-group or per-input-tensor buffers.
+/// Look up an atom's value from per-group or per-input-tensor buffers.
 fn lookup_atom(
     atom_id: AtomId,
     graph: &NanoGraph,
     group_buffers: &[Option<Vec<NumericScalar>>],
     input_buffers: &[Vec<NumericScalar>],
 ) -> NumericScalar {
-    // Try compute groups.
     if let Some(gi) = graph.find_group_idx(atom_id) {
         let group = &graph.groups()[gi];
         let offset = (atom_id.0 - group.base_id.0) as usize;
@@ -599,7 +241,6 @@ fn lookup_atom(
         })[offset]
             .clone();
     }
-    // Try input tensors.
     if let Some((ti, offset)) = graph.find_input_idx(atom_id) {
         return input_buffers[ti][offset as usize].clone();
     }
@@ -617,30 +258,42 @@ fn eval_binop(op: &ScalarBinOp, a: &NumericScalar, b: &NumericScalar) -> Numeric
         ScalarBinOp::Min => a.scalar_min(b),
         ScalarBinOp::Mod => a.modulo(b),
         ScalarBinOp::Pow => a.pow(b),
-        ScalarBinOp::Equal => NumericScalar::F32(if a.to_f64() == b.to_f64() { 1.0 } else { 0.0 }),
-        ScalarBinOp::Greater => NumericScalar::F32(if a.to_f64() > b.to_f64() { 1.0 } else { 0.0 }),
+        ScalarBinOp::Equal => {
+            NumericScalar::F32(if a.to_f64() == b.to_f64() { 1.0 } else { 0.0 })
+        }
+        ScalarBinOp::Greater => {
+            NumericScalar::F32(if a.to_f64() > b.to_f64() { 1.0 } else { 0.0 })
+        }
         ScalarBinOp::GreaterOrEqual => {
             NumericScalar::F32(if a.to_f64() >= b.to_f64() { 1.0 } else { 0.0 })
         }
-        ScalarBinOp::Less => NumericScalar::F32(if a.to_f64() < b.to_f64() { 1.0 } else { 0.0 }),
+        ScalarBinOp::Less => {
+            NumericScalar::F32(if a.to_f64() < b.to_f64() { 1.0 } else { 0.0 })
+        }
         ScalarBinOp::LessOrEqual => {
             NumericScalar::F32(if a.to_f64() <= b.to_f64() { 1.0 } else { 0.0 })
         }
-        ScalarBinOp::And => NumericScalar::F32(if a.to_f64() != 0.0 && b.to_f64() != 0.0 {
-            1.0
-        } else {
-            0.0
-        }),
-        ScalarBinOp::Or => NumericScalar::F32(if a.to_f64() != 0.0 || b.to_f64() != 0.0 {
-            1.0
-        } else {
-            0.0
-        }),
-        ScalarBinOp::Xor => NumericScalar::F32(if (a.to_f64() != 0.0) ^ (b.to_f64() != 0.0) {
-            1.0
-        } else {
-            0.0
-        }),
+        ScalarBinOp::And => NumericScalar::F32(
+            if a.to_f64() != 0.0 && b.to_f64() != 0.0 {
+                1.0
+            } else {
+                0.0
+            },
+        ),
+        ScalarBinOp::Or => NumericScalar::F32(
+            if a.to_f64() != 0.0 || b.to_f64() != 0.0 {
+                1.0
+            } else {
+                0.0
+            },
+        ),
+        ScalarBinOp::Xor => NumericScalar::F32(
+            if (a.to_f64() != 0.0) ^ (b.to_f64() != 0.0) {
+                1.0
+            } else {
+                0.0
+            },
+        ),
     }
 }
 
@@ -659,79 +312,8 @@ fn eval_unaryop(op: &ScalarUnaryOp, x: &NumericScalar) -> NumericScalar {
     }
 }
 
-/// Collect producer group indices for an InputRef (free function version).
-fn collect_producer_indices_static(
-    graph: &NanoGraph,
-    input: &super::pattern::InputRef,
-    count: u64,
-    atom_offset: u64,
-    out: &mut std::collections::HashSet<usize>,
-) {
-    use super::pattern::InputRef;
-    if count == 0 {
-        return;
-    }
-    match input {
-        InputRef::Broadcast(base) => {
-            if let Some(gi) = graph.find_group_idx(*base) {
-                out.insert(gi);
-            }
-        }
-        InputRef::Affine { .. }
-        | InputRef::StridedBroadcast { .. } => {
-            let first = input.resolve(atom_offset);
-            let last = input.resolve(atom_offset + count - 1);
-            let lo = first.0.min(last.0);
-            let hi = first.0.max(last.0);
-            insert_groups_in_range_static(graph, lo, hi, out);
-        }
-        InputRef::Modular {
-            base,
-            stride,
-            modulus,
-        } => {
-            let a = base.0;
-            let b = (base.0 as i64 + *stride * (*modulus as i64 - 1)) as u64;
-            insert_groups_in_range_static(graph, a.min(b), a.max(b), out);
-        }
-        InputRef::Explicit(ids) => {
-            let mut prev_gi: Option<usize> = None;
-            for id in ids.iter().skip(atom_offset as usize).take(count as usize) {
-                let gi = graph.find_group_idx(*id);
-                if gi != prev_gi {
-                    if let Some(g) = gi {
-                        out.insert(g);
-                    }
-                    prev_gi = gi;
-                }
-            }
-        }
-    }
-}
-
-/// Insert all group indices whose atom ranges overlap [lo, hi].
-fn insert_groups_in_range_static(
-    graph: &NanoGraph,
-    lo: u64,
-    hi: u64,
-    out: &mut std::collections::HashSet<usize>,
-) {
-    let groups = graph.groups();
-    if let Some(first_gi) = graph.find_group_idx(AtomId(lo)) {
-        out.insert(first_gi);
-        for (gi, group) in groups.iter().enumerate().skip(first_gi + 1) {
-            if group.base_id.0 > hi {
-                break;
-            }
-            out.insert(gi);
-        }
-    } else if let Some(gi) = graph.find_group_idx(AtomId(hi)) {
-        out.insert(gi);
-    }
-}
-
-/// Populate a buffer from an NDArrayNumericTensor, starting at `offset` within the buffer.
-fn populate_from_tensor_into(
+/// Populate a buffer from an NDArrayNumericTensor.
+fn populate_from_tensor(
     buf: &mut [NumericScalar],
     offset: usize,
     tensor: &NDArrayNumericTensor<DynRank>,
@@ -816,11 +398,10 @@ fn populate_from_tensor_into(
     }
 }
 
-fn populate_from_tensor(values: &mut [NumericScalar], base: usize, tensor: &NDArrayNumericTensor<DynRank>) {
-    populate_from_tensor_into(values, base, tensor);
-}
-
-fn scalars_to_tensor(scalars: &[NumericScalar], dtype: crate::dtype::DType) -> NDArrayNumericTensor<DynRank> {
+fn scalars_to_tensor(
+    scalars: &[NumericScalar],
+    dtype: crate::dtype::DType,
+) -> NDArrayNumericTensor<DynRank> {
     use ndarray::{ArcArray, IxDyn};
     let shape = IxDyn(&[scalars.len()]);
     match dtype {
@@ -862,7 +443,7 @@ fn scalars_to_tensor(scalars: &[NumericScalar], dtype: crate::dtype::DType) -> N
             let data: Vec<u32> = scalars.iter().map(|s| s.to_f64() as u32).collect();
             NDArrayNumericTensor::U32(ArcArray::from_shape_vec(shape, data).unwrap())
         }
-        other => panic!("extract_tensor: unsupported dtype {:?}", other),
+        other => panic!("scalars_to_tensor: unsupported dtype {:?}", other),
     }
 }
 
@@ -882,8 +463,20 @@ mod tests {
         )
     }
 
+    fn eval_f32(
+        graph: &NanoGraph,
+        inputs: &[(AtomId, &NDArrayNumericTensor<DynRank>)],
+        output_range: AtomRange,
+    ) -> Vec<f64> {
+        let result = eval(graph, inputs, &[output_range]);
+        match &result[0] {
+            NDArrayNumericTensor::F32(a) => a.iter().map(|&v| v as f64).collect(),
+            _ => panic!("expected F32"),
+        }
+    }
+
     #[test]
-    fn test_efficient_matches_flat() {
+    fn test_elementwise_mul_add() {
         let mut g = NanoGraph::new();
         let gid = GlobalId(1);
 
@@ -943,29 +536,18 @@ mod tests {
 
         let input_data = make_f32_tensor(&[1.0, 2.0, 3.0, 4.0]);
         let inputs = vec![(inp, &input_data)];
-
-        let flat = NanoEval::eval(&g, &inputs);
-
         let output_range = AtomRange {
             base: out,
             count: 4,
             dtype: DType::F32,
         };
-        let efficient = eval_efficient(&g, &inputs, &[output_range]);
-        assert_eq!(efficient.len(), 1);
 
-        let flat_vals: Vec<f64> = (0..4).map(|i| flat.get(out.offset(i))).collect();
-        let eff_vals: Vec<f64> = match &efficient[0] {
-            NDArrayNumericTensor::F32(a) => a.iter().map(|&v| v as f64).collect(),
-            _ => panic!("expected F32"),
-        };
-
-        assert_eq!(flat_vals, eff_vals);
-        assert_eq!(eff_vals, vec![12.0, 14.0, 16.0, 18.0]);
+        let vals = eval_f32(&g, &inputs, output_range);
+        assert_eq!(vals, vec![12.0, 14.0, 16.0, 18.0]);
     }
 
     #[test]
-    fn test_efficient_reduce() {
+    fn test_reduce_sum() {
         let mut g = NanoGraph::new();
         let gid = GlobalId(1);
 
@@ -989,27 +571,18 @@ mod tests {
 
         let input_data = make_f32_tensor(&[1.0, 2.0, 3.0, 4.0, 10.0, 20.0, 30.0, 40.0]);
         let inputs = vec![(inp, &input_data)];
-
-        let flat = NanoEval::eval(&g, &inputs);
         let output_range = AtomRange {
             base: red,
             count: 2,
             dtype: DType::F32,
         };
-        let efficient = eval_efficient(&g, &inputs, &[output_range]);
 
-        let flat_vals: Vec<f64> = (0..2).map(|i| flat.get(red.offset(i))).collect();
-        let eff_vals: Vec<f64> = match &efficient[0] {
-            NDArrayNumericTensor::F32(a) => a.iter().map(|&v| v as f64).collect(),
-            _ => panic!("expected F32"),
-        };
-
-        assert_eq!(flat_vals, eff_vals);
-        assert_eq!(eff_vals, vec![10.0, 100.0]);
+        let vals = eval_f32(&g, &inputs, output_range);
+        assert_eq!(vals, vec![10.0, 100.0]);
     }
 
     #[test]
-    fn test_efficient_frees_intermediates() {
+    fn test_frees_intermediates() {
         let mut g = NanoGraph::new();
         let gid = GlobalId(1);
 
@@ -1053,28 +626,28 @@ mod tests {
 
         let input_data = make_f32_tensor(&[0.0, 1.0, 2.0, 3.0]);
         let inputs = vec![(inp, &input_data)];
-
-        let flat = NanoEval::eval(&g, &inputs);
         let output_range = AtomRange {
             base: exp,
             count: 4,
             dtype: DType::F32,
         };
-        let efficient = eval_efficient(&g, &inputs, &[output_range]);
 
-        let flat_vals: Vec<f64> = (0..4).map(|i| flat.get(exp.offset(i))).collect();
-        let eff_vals: Vec<f64> = match &efficient[0] {
-            NDArrayNumericTensor::F32(a) => a.iter().map(|&v| v as f64).collect(),
-            _ => panic!("expected F32"),
-        };
-
-        for (f, e) in flat_vals.iter().zip(eff_vals.iter()) {
-            assert!((f - e).abs() < 1e-6, "mismatch: flat={} eff={}", f, e);
+        let vals = eval_f32(&g, &inputs, output_range);
+        // exp(-x) for x = 0, 1, 2, 3
+        for (i, &v) in vals.iter().enumerate() {
+            let expected = (-(i as f64)).exp();
+            assert!(
+                (v - expected).abs() < 1e-6,
+                "element {}: got {} expected {}",
+                i,
+                v,
+                expected
+            );
         }
     }
 
     #[test]
-    fn test_efficient_indirect_load() {
+    fn test_indirect_load() {
         let mut g = NanoGraph::new();
         let table_gid = GlobalId(1);
         let idx_gid = GlobalId(2);
@@ -1085,9 +658,7 @@ mod tests {
         let gathered = g.push_group(
             2,
             DType::F32,
-            ScalarOp::IndirectLoad {
-                table_base: table,
-            },
+            ScalarOp::IndirectLoad { table_base: table },
             vec![],
             vec![InputRef::Affine {
                 base: indices,
@@ -1098,22 +669,13 @@ mod tests {
         let table_data = make_f32_tensor(&[10.0, 20.0, 30.0, 40.0]);
         let idx_data = make_f32_tensor(&[2.0, 0.0]);
         let inputs = vec![(table, &table_data), (indices, &idx_data)];
-
-        let flat = NanoEval::eval(&g, &inputs);
         let output_range = AtomRange {
             base: gathered,
             count: 2,
             dtype: DType::F32,
         };
-        let efficient = eval_efficient(&g, &inputs, &[output_range]);
 
-        let flat_vals: Vec<f64> = (0..2).map(|i| flat.get(gathered.offset(i))).collect();
-        let eff_vals: Vec<f64> = match &efficient[0] {
-            NDArrayNumericTensor::F32(a) => a.iter().map(|&v| v as f64).collect(),
-            _ => panic!("expected F32"),
-        };
-
-        assert_eq!(flat_vals, eff_vals);
-        assert_eq!(eff_vals, vec![30.0, 10.0]);
+        let vals = eval_f32(&g, &inputs, output_range);
+        assert_eq!(vals, vec![30.0, 10.0]);
     }
 }

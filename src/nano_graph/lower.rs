@@ -1579,8 +1579,9 @@ mod tests {
     use crate::graph::Graph;
     use crate::milli_graph::MilliOpGraph;
     use crate::milli_graph::ops::MilliOp;
-    use crate::nano_graph::eval::NanoEval;
-    use crate::numeric_scalar::NumericScalar;
+    use crate::backends::ndarray_backend::NDArrayNumericTensor;
+    use crate::nano_graph::eval;
+    use crate::nano_graph::pattern::AtomRange;
     use crate::numeric_tensor::NumericTensor;
 
     /// Extract flat f32 values from a NumericTensor, returned as f64.
@@ -1592,16 +1593,9 @@ mod tests {
         v.into_iter().map(|x| x as f64).collect()
     }
 
-    /// Extract flat values from a NumericTensor as NumericScalar in the tensor's dtype.
-    fn tensor_to_scalars(t: &NumericTensor<DynRank>) -> Vec<NumericScalar> {
-        let mut backend = EvalBackend::NDArray;
-        let dtype = t.dtype();
-        let f32_tensor = t.cast(crate::dtype::DType::F32, &mut backend).unwrap();
-        let flat = f32_tensor.flatten().unwrap();
-        let v: Vec<f32> = flat.to_ndarray().unwrap().try_into().unwrap();
-        v.into_iter()
-            .map(|x| NumericScalar::F32(x).cast_to(dtype))
-            .collect()
+    /// Convert a NumericTensor to an NDArrayNumericTensor for eval input.
+    fn to_ndarray(t: &NumericTensor<DynRank>) -> NDArrayNumericTensor<DynRank> {
+        t.to_ndarray().unwrap()
     }
 
     /// Build a milli graph, eval through both milli and nano, compare results.
@@ -1618,7 +1612,7 @@ mod tests {
         let (input_ids, output_ids) = build_graph(&mut milli, &mut rng);
         assert_eq!(input_ids.len(), inputs.len());
 
-        // Prepare inputs: add_input makes ext==int, so id maps to itself.
+        // Prepare inputs.
         let mut info_inputs: HashMap<GlobalId, TensorInfo> = HashMap::new();
         let mut intermediates: HashMap<GlobalId, NumericTensor<DynRank>> = HashMap::new();
         for (id, tensor) in input_ids.iter().zip(inputs.iter()) {
@@ -1626,7 +1620,7 @@ mod tests {
             intermediates.insert(*id, tensor.clone());
         }
 
-        // Eval through MilliOpGraph (walk ops manually).
+        // Eval through MilliOpGraph.
         let mut backend = EvalBackend::NDArray;
         for &op_id in milli.op_ordering() {
             let op = milli.get_node_by_id(&op_id).unwrap();
@@ -1643,36 +1637,89 @@ mod tests {
             result.unsupported_details
         );
 
-        // Build overrides from input tensors via tensor_map.
-        let mut overrides: HashMap<u64, NumericScalar> = HashMap::new();
-        for (&id, tensor) in input_ids.iter().zip(inputs.iter()) {
-            if let Some(tam) = result.tensor_map.get(&id) {
-                let scalars = tensor_to_scalars(tensor);
-                assert_eq!(scalars.len(), tam.count as usize);
-                for (i, val) in scalars.into_iter().enumerate() {
-                    overrides.insert(tam.atom_id_for_element(i as u64).0, val);
+        // Build eval inputs from input_tensors (the graph knows where each tensor lives).
+        let nd_inputs: Vec<NDArrayNumericTensor<DynRank>> = input_ids
+            .iter()
+            .zip(inputs.iter())
+            .map(|(_, t)| to_ndarray(t))
+            .collect();
+        let eval_inputs: Vec<(AtomId, &NDArrayNumericTensor<DynRank>)> = result
+            .graph
+            .input_tensors()
+            .iter()
+            .filter_map(|it| {
+                let idx = input_ids.iter().position(|&id| id == it.tensor_id)?;
+                Some((it.base_id, &nd_inputs[idx]))
+            })
+            .collect();
+
+        // Build output ranges per group (not per tensor_map entry, which may be segmented).
+        // Collect all groups that contain output atoms.
+        let mut all_output_ranges: Vec<AtomRange> = Vec::new();
+        for out_id in &output_ids {
+            let tam = result.tensor_map.get(out_id).unwrap();
+            assert!(tam.sym_dims.is_empty(), "Sym dims not yet supported in test");
+            // For segmented tensors, we need all groups that contain atoms.
+            // Collect unique groups by walking atom_id_for_element.
+            let mut seen_groups = std::collections::HashSet::new();
+            for i in 0..tam.count {
+                let atom = tam.atom_id_for_element(i);
+                if let Some(gi) = result.graph.find_group_idx(atom) {
+                    if seen_groups.insert(gi) {
+                        let g = &result.graph.groups()[gi];
+                        all_output_ranges.push(AtomRange {
+                            base: g.base_id,
+                            count: g.count,
+                            dtype: g.output_dtype,
+                        });
+                    }
+                }
+                // Also check input tensor ranges.
+                if let Some((ti, _)) = result.graph.find_input_idx(atom) {
+                    let it = &result.graph.input_tensors()[ti];
+                    let fake_gi = usize::MAX - ti;
+                    if seen_groups.insert(fake_gi) {
+                        all_output_ranges.push(AtomRange {
+                            base: it.base_id,
+                            count: it.count,
+                            dtype: it.dtype,
+                        });
+                    }
                 }
             }
         }
 
         // Eval NanoGraph.
-        let nano_eval = NanoEval::eval_with_overrides(&result.graph, &overrides);
+        let nano_results = eval::eval(&result.graph, &eval_inputs, &all_output_ranges);
+
+        // Build a lookup from AtomId -> f64.
+        let mut atom_vals: std::collections::HashMap<u64, f64> = std::collections::HashMap::new();
+        for (range, tensor) in all_output_ranges.iter().zip(nano_results.iter()) {
+            let flat: Vec<f64> = match tensor {
+                NDArrayNumericTensor::F32(a) => a.iter().map(|&v| v as f64).collect(),
+                NDArrayNumericTensor::F64(a) => a.iter().copied().collect(),
+                NDArrayNumericTensor::I64(a) => a.iter().map(|&v| v as f64).collect(),
+                NDArrayNumericTensor::I32(a) => a.iter().map(|&v| v as f64).collect(),
+                other => panic!("Unsupported output dtype: {:?}", other.dtype()),
+            };
+            for (i, &v) in flat.iter().enumerate() {
+                atom_vals.insert(range.base.0 + i as u64, v);
+            }
+        }
 
         // Compare outputs.
         for out_id in &output_ids {
             let milli_tensor = &intermediates[out_id];
             let milli_flat = tensor_to_f64(milli_tensor);
-
-            let Some(tam) = result.tensor_map.get(out_id) else {
-                panic!("Output tensor {:?} not in tensor_map", out_id);
-            };
-            assert!(
-                tam.sym_dims.is_empty(),
-                "Sym dims not yet supported in test"
-            );
+            let tam = result.tensor_map.get(out_id).unwrap();
 
             let nano_flat: Vec<f64> = (0..tam.count)
-                .map(|i| nano_eval.get(tam.atom_id_for_element(i)))
+                .map(|i| {
+                    let atom = tam.atom_id_for_element(i);
+                    *atom_vals.get(&atom.0).unwrap_or_else(|| {
+                        panic!("atom {} not found in eval results", atom)
+                    })
+                })
                 .collect();
 
             assert_eq!(
@@ -2261,540 +2308,108 @@ mod tests {
         );
     }
 
-    /// Three-way comparison: milli eval vs flat NanoEval vs eval_efficient.
-    /// Tests a 4x64x64 MatMul to check for accumulation or addressing bugs.
+
+    /// Large MatMul to check for accumulation or addressing bugs.
     #[test]
     fn test_three_way_matmul() {
-        use crate::backends::ndarray_backend::numeric_tensor::NDArrayNumericTensor;
-        use crate::nano_graph::eval::{NanoEval, eval_efficient};
-        use crate::nano_graph::pattern::AtomRange;
+        let m = 4usize;
+        let k = 64usize;
+        let n = 64usize;
+        let a_data: Vec<f32> = (0..m * k).map(|i| (i as f32) * 0.01 - 1.28).collect();
+        let b_data: Vec<f32> = (0..k * n).map(|i| (i as f32) * 0.007 + 0.5).collect();
 
-        let mut rng = rand::rng();
-        let (mut milli, _ext_map) = MilliOpGraph::new(std::iter::empty(), &mut rng);
-
-        let m = 4u64;
-        let k = 64u64;
-        let n = 64u64;
-
-        let a_id = milli.add_input(&mut rng);
-        let b_id = milli.add_input(&mut rng);
-        let out_id = crate::milli_graph::ops::MatMul::push_new(
-            &mut milli,
-            a_id,
-            b_id,
-            DType::F32,
-            DType::F32,
-            DType::F32,
-            DType::F32,
-            &mut rng,
-        );
-
-        // Create input tensors with deterministic values.
-        let a_data: Vec<f32> = (0..(m * k) as usize)
-            .map(|i| (i as f32) * 0.01 - 1.28)
-            .collect();
-        let b_data: Vec<f32> = (0..(k * n) as usize)
-            .map(|i| (i as f32) * 0.007 + 0.5)
-            .collect();
-        let a_tensor = NumericTensor::from_vec_shape(a_data, vec![m as usize, k as usize]).unwrap();
-        let b_tensor = NumericTensor::from_vec_shape(b_data, vec![k as usize, n as usize]).unwrap();
-
-        // Milli eval.
-        let mut intermediates: HashMap<GlobalId, NumericTensor<DynRank>> = HashMap::new();
-        intermediates.insert(a_id, a_tensor.clone());
-        intermediates.insert(b_id, b_tensor.clone());
-        let mut backend = EvalBackend::NDArray;
-        for &op_id in milli.op_ordering() {
-            let op = milli.get_node_by_id(&op_id).unwrap();
-            for (tid, val) in op.eval(&intermediates, &mut backend).unwrap() {
-                intermediates.insert(tid, val);
-            }
-        }
-        let milli_out = &intermediates[&out_id];
-        let milli_flat = tensor_to_f64(milli_out);
-
-        // Lower.
-        let mut info_inputs: HashMap<GlobalId, TensorInfo> = HashMap::new();
-        info_inputs.insert(a_id, TensorInfo::from(a_tensor.clone()));
-        info_inputs.insert(b_id, TensorInfo::from(b_tensor.clone()));
-        let result = lower_with_info(&milli, &info_inputs).unwrap();
-        assert!(result.unsupported.is_empty());
-
-        let tam = result.tensor_map.get(&out_id).unwrap();
-
-        // Flat NanoEval (via overrides).
-        let mut overrides: HashMap<u64, NumericScalar> = HashMap::new();
-        for (&id, tensor) in [a_id, b_id].iter().zip([&a_tensor, &b_tensor]) {
-            if let Some(tam) = result.tensor_map.get(&id) {
-                let scalars = tensor_to_scalars(tensor);
-                for (i, val) in scalars.into_iter().enumerate() {
-                    overrides.insert(tam.atom_id_for_element(i as u64).0, val);
-                }
-            }
-        }
-        let flat_eval = NanoEval::eval_with_overrides(&result.graph, &overrides);
-        let flat_out: Vec<f64> = (0..tam.count)
-            .map(|i| flat_eval.get(tam.atom_id_for_element(i)))
-            .collect();
-
-        // eval_efficient.
-        let a_nd: NDArrayNumericTensor<DynRank> = a_tensor.to_ndarray().unwrap();
-        let b_nd: NDArrayNumericTensor<DynRank> = b_tensor.to_ndarray().unwrap();
-        let mut eff_inputs: Vec<(crate::nano_graph::AtomId, &NDArrayNumericTensor<DynRank>)> =
-            Vec::new();
-        for it in result.graph.input_tensors() {
-            if it.tensor_id == a_id {
-                eff_inputs.push((it.base_id, &a_nd));
-            } else if it.tensor_id == b_id {
-                eff_inputs.push((it.base_id, &b_nd));
-            }
-        }
-        let output_range = AtomRange {
-            base: tam.base_id,
-            count: tam.count,
-            dtype: tam.dtype,
-        };
-        let eff_out = eval_efficient(&result.graph, &eff_inputs, &[output_range]);
-        let eff_flat = eff_out[0].flatten();
-        let eff_vals: Vec<f64> = (0..tam.count as usize)
-            .map(|i| eff_flat.get(&[i as u64]).unwrap().to_f64())
-            .collect();
-
-        // Compare: flat vs milli.
-        let mut max_flat_vs_milli = 0.0f64;
-        for (i, (m, f)) in milli_flat.iter().zip(flat_out.iter()).enumerate() {
-            let diff = (m - f).abs();
-            max_flat_vs_milli = max_flat_vs_milli.max(diff);
-            let tol = 1e-4 * m.abs().max(1.0);
-            assert!(
-                diff < tol,
-                "flat vs milli element {}: milli={} flat={} diff={}",
-                i,
-                m,
-                f,
-                diff
-            );
-        }
-
-        // Compare: efficient vs flat (should be EXACT since same eval logic).
-        let mut max_eff_vs_flat = 0.0f64;
-        for (i, (e, f)) in eff_vals.iter().zip(flat_out.iter()).enumerate() {
-            let diff = (e - f).abs();
-            max_eff_vs_flat = max_eff_vs_flat.max(diff);
-            assert!(
-                diff == 0.0,
-                "efficient vs flat element {}: eff={} flat={} diff={}",
-                i,
-                e,
-                f,
-                diff
-            );
-        }
-
-        eprintln!(
-            "3-way matmul ({}x{}x{}): flat_vs_milli max_diff={:.2e}, eff_vs_flat max_diff={:.2e}",
-            m, k, n, max_flat_vs_milli, max_eff_vs_flat
+        check_integrity(
+            |graph, rng| {
+                let a = graph.add_input(rng);
+                let b = graph.add_input(rng);
+                let c = crate::milli_graph::ops::MatMul::push_new(
+                    graph, a, b, DType::F32, DType::F32, DType::F32, DType::F32, rng,
+                );
+                (vec![a, b], vec![c])
+            },
+            vec![
+                NumericTensor::from_vec_shape(a_data, vec![m, k]).unwrap(),
+                NumericTensor::from_vec_shape(b_data, vec![k, n]).unwrap(),
+            ],
         );
     }
 
-    /// Three-way comparison on a chain: MatMul → Add(bias) → MatMul → Add(bias).
-    /// Exercises the constant inlining path (biases are small constants).
+    /// MatMul -> Add(bias) -> MatMul -> Add(bias) chain.
     #[test]
     fn test_three_way_matmul_chain_with_bias() {
-        use crate::backends::ndarray_backend::numeric_tensor::NDArrayNumericTensor;
         use crate::milli_graph::ops::{MatMul, SimpleBinary};
-        use crate::nano_graph::eval::{NanoEval, eval_efficient};
-        use crate::nano_graph::pattern::AtomRange;
 
-        let mut rng = rand::rng();
-        let (mut milli, _ext_map) = MilliOpGraph::new(std::iter::empty(), &mut rng);
+        check_integrity(
+            |graph, rng| {
+                let x = graph.add_input(rng);
+                let w1 = graph.add_input(rng);
+                let b1 = graph.add_input(rng);
+                let w2 = graph.add_input(rng);
+                let b2 = graph.add_input(rng);
 
-        // x [4, 64] @ W1 [64, 64] + b1 [64] → h [4, 64] @ W2 [64, 32] + b2 [32] → out [4, 32]
-        let x_id = milli.add_input(&mut rng);
-        let w1_id = milli.add_input(&mut rng);
-        let b1_id = milli.add_input(&mut rng);
-        let w2_id = milli.add_input(&mut rng);
-        let b2_id = milli.add_input(&mut rng);
-
-        let mm1 = MatMul::push_new(
-            &mut milli,
-            x_id,
-            w1_id,
-            DType::F32,
-            DType::F32,
-            DType::F32,
-            DType::F32,
-            &mut rng,
-        );
-        let h_id = SimpleBinary::add(&mut milli, mm1, b1_id, &mut rng);
-        let mm2 = MatMul::push_new(
-            &mut milli,
-            h_id,
-            w2_id,
-            DType::F32,
-            DType::F32,
-            DType::F32,
-            DType::F32,
-            &mut rng,
-        );
-        let out_id = SimpleBinary::add(&mut milli, mm2, b2_id, &mut rng);
-
-        let x_data: Vec<f32> = (0..256).map(|i| (i as f32) * 0.01 - 1.28).collect();
-        let w1_data: Vec<f32> = (0..4096).map(|i| (i as f32) * 0.002 - 4.0).collect();
-        let b1_data: Vec<f32> = (0..64).map(|i| (i as f32) * 0.1 - 3.2).collect();
-        let w2_data: Vec<f32> = (0..2048).map(|i| (i as f32) * 0.003 - 3.0).collect();
-        let b2_data: Vec<f32> = (0..32).map(|i| (i as f32) * 0.05 - 0.8).collect();
-
-        let x_t = NumericTensor::from_vec_shape(x_data, vec![4, 64]).unwrap();
-        let w1_t = NumericTensor::from_vec_shape(w1_data, vec![64, 64]).unwrap();
-        let b1_t = NumericTensor::from_vec_shape(b1_data, vec![64]).unwrap();
-        let w2_t = NumericTensor::from_vec_shape(w2_data, vec![64, 32]).unwrap();
-        let b2_t = NumericTensor::from_vec_shape(b2_data, vec![32]).unwrap();
-
-        let all_ids = [x_id, w1_id, b1_id, w2_id, b2_id];
-        let all_tensors = [&x_t, &w1_t, &b1_t, &w2_t, &b2_t];
-
-        // Milli eval.
-        let mut intermediates: HashMap<GlobalId, NumericTensor<DynRank>> = HashMap::new();
-        for (&id, t) in all_ids.iter().zip(all_tensors.iter()) {
-            intermediates.insert(id, (*t).clone());
-        }
-        let mut backend = EvalBackend::NDArray;
-        for &op_id in milli.op_ordering() {
-            let op = milli.get_node_by_id(&op_id).unwrap();
-            for (tid, val) in op.eval(&intermediates, &mut backend).unwrap() {
-                intermediates.insert(tid, val);
-            }
-        }
-        let milli_out = &intermediates[&out_id];
-        let milli_flat = tensor_to_f64(milli_out);
-
-        // Lower.
-        let mut info_inputs: HashMap<GlobalId, TensorInfo> = HashMap::new();
-        for (&id, t) in all_ids.iter().zip(all_tensors.iter()) {
-            info_inputs.insert(id, TensorInfo::from((*t).clone()));
-        }
-        let result = lower_with_info(&milli, &info_inputs).unwrap();
-        assert!(
-            result.unsupported.is_empty(),
-            "{:?}",
-            result.unsupported_details
-        );
-
-        let tam = result.tensor_map.get(&out_id).unwrap();
-
-        // Flat NanoEval.
-        let mut overrides: HashMap<u64, NumericScalar> = HashMap::new();
-        for (&id, t) in all_ids.iter().zip(all_tensors.iter()) {
-            if let Some(tam) = result.tensor_map.get(&id) {
-                let scalars = tensor_to_scalars(t);
-                for (i, val) in scalars.into_iter().enumerate() {
-                    overrides.insert(tam.atom_id_for_element(i as u64).0, val);
-                }
-            }
-        }
-        let flat_eval = NanoEval::eval_with_overrides(&result.graph, &overrides);
-        let flat_out: Vec<f64> = (0..tam.count)
-            .map(|i| flat_eval.get(tam.atom_id_for_element(i)))
-            .collect();
-
-        // eval_efficient.
-        let nds: Vec<NDArrayNumericTensor<DynRank>> = all_tensors
-            .iter()
-            .map(|t| t.to_ndarray().unwrap())
-            .collect();
-        let eff_inputs: Vec<(crate::nano_graph::AtomId, &NDArrayNumericTensor<DynRank>)> = result
-            .graph
-            .input_tensors()
-            .iter()
-            .filter_map(|it| {
-                let idx = all_ids.iter().position(|&id| id == it.tensor_id)?;
-                Some((it.base_id, &nds[idx]))
-            })
-            .collect();
-        let output_range = AtomRange {
-            base: tam.base_id,
-            count: tam.count,
-            dtype: tam.dtype,
-        };
-        let eff_out = eval_efficient(&result.graph, &eff_inputs, &[output_range]);
-        let eff_flat = eff_out[0].flatten();
-        let eff_vals: Vec<f64> = (0..tam.count as usize)
-            .map(|i| eff_flat.get(&[i as u64]).unwrap().to_f64())
-            .collect();
-
-        // Compare flat vs milli.
-        let mut max_flat_vs_milli = 0.0f64;
-        for (i, (m, f)) in milli_flat.iter().zip(flat_out.iter()).enumerate() {
-            let diff = (m - f).abs();
-            max_flat_vs_milli = max_flat_vs_milli.max(diff);
-            let tol = 1e-3 * m.abs().max(1.0);
-            assert!(
-                diff < tol,
-                "flat vs milli element {}: milli={} flat={} diff={}",
-                i,
-                m,
-                f,
-                diff
-            );
-        }
-
-        // Compare efficient vs flat.
-        let mut max_eff_vs_flat = 0.0f64;
-        for (i, (e, f)) in eff_vals.iter().zip(flat_out.iter()).enumerate() {
-            let diff = (e - f).abs();
-            max_eff_vs_flat = max_eff_vs_flat.max(diff);
-            assert!(
-                diff == 0.0,
-                "efficient vs flat element {}: eff={} flat={} diff={}",
-                i,
-                e,
-                f,
-                diff
-            );
-        }
-
-        eprintln!(
-            "3-way chain (matmul+bias x2): flat_vs_milli max_diff={:.2e}, eff_vs_flat max_diff={:.2e}, output_count={}",
-            max_flat_vs_milli, max_eff_vs_flat, tam.count
+                let mm1 = MatMul::push_new(graph, x, w1, DType::F32, DType::F32, DType::F32, DType::F32, rng);
+                let h = SimpleBinary::add(graph, mm1, b1, rng);
+                let mm2 = MatMul::push_new(graph, h, w2, DType::F32, DType::F32, DType::F32, DType::F32, rng);
+                let out = SimpleBinary::add(graph, mm2, b2, rng);
+                (vec![x, w1, b1, w2, b2], vec![out])
+            },
+            vec![
+                NumericTensor::from_vec_shape((0..256).map(|i| (i as f32) * 0.01 - 1.28).collect(), vec![4, 64]).unwrap(),
+                NumericTensor::from_vec_shape((0..4096).map(|i| (i as f32) * 0.002 - 4.0).collect(), vec![64, 64]).unwrap(),
+                NumericTensor::from_vec_shape((0..64).map(|i| (i as f32) * 0.1 - 3.2).collect(), vec![64]).unwrap(),
+                NumericTensor::from_vec_shape((0..2048).map(|i| (i as f32) * 0.003 - 3.0).collect(), vec![64, 32]).unwrap(),
+                NumericTensor::from_vec_shape((0..32).map(|i| (i as f32) * 0.05 - 0.8).collect(), vec![32]).unwrap(),
+            ],
         );
     }
 
-    /// Three-way comparison: MatMul → Transpose → LayerNorm-like chain.
-    /// Exercises Transpose (non-row-major strides), ReduceMean (broadcast),
-    /// Sub, Pow, Sqrt, Div, Mul, Add patterns from GPT-2 transformers.
+    /// MatMul -> Transpose -> LayerNorm-like chain.
     #[test]
     fn test_three_way_transpose_layernorm() {
-        use crate::backends::ndarray_backend::numeric_tensor::NDArrayNumericTensor;
+        use crate::backends::ndarray_backend::NDArrayNumericTensor;
         use crate::milli_graph::ops::{
             Constant, MatMul, Pow, ReduceMean, SimpleBinary, SimpleUnaryOp, Transpose,
         };
-        use crate::nano_graph::eval::{NanoEval, eval_efficient};
-        use crate::nano_graph::pattern::AtomRange;
         use ndarray::{ArcArray, IxDyn};
 
-        let mut rng = rand::rng();
-        let (mut milli, _ext_map) = MilliOpGraph::new(std::iter::empty(), &mut rng);
+        check_integrity(
+            |graph, rng| {
+                let x = graph.add_input(rng);
+                let w = graph.add_input(rng);
+                let gamma = graph.add_input(rng);
+                let beta = graph.add_input(rng);
 
-        // Shape: x [2, 4, 8] → MatMul with W [8, 8] → [2, 4, 8]
-        //        → Transpose [0, 2, 1] → [2, 8, 4]
-        //        → LayerNorm on last dim (4): ReduceMean, Sub, Pow(2), ReduceMean, Add(eps), Sqrt, Div, Mul(gamma), Add(beta)
-        let x_id = milli.add_input(&mut rng);
-        let w_id = milli.add_input(&mut rng);
-        let gamma_id = milli.add_input(&mut rng);
-        let beta_id = milli.add_input(&mut rng);
+                let mm = MatMul::push_new(graph, x, w, DType::F32, DType::F32, DType::F32, DType::F32, rng);
+                let transposed = Transpose::push_new(graph, mm, Some(vec![0, 2, 1]), rng);
 
-        // MatMul: [2,4,8] @ [8,8] → [2,4,8]
-        let mm = MatMul::push_new(
-            &mut milli,
-            x_id,
-            w_id,
-            DType::F32,
-            DType::F32,
-            DType::F32,
-            DType::F32,
-            &mut rng,
+                let axes_tensor = NDArrayNumericTensor::I64(ArcArray::from_shape_vec(IxDyn(&[1]), vec![-1i64]).unwrap());
+                let axes_id = Constant::push_new(graph, axes_tensor, rng);
+                let mean = ReduceMean::push_new(graph, transposed, Some(axes_id), true, false, rng);
+                let centered = SimpleBinary::sub(graph, transposed, mean, rng);
+
+                let pow2_tensor = NDArrayNumericTensor::F32(ArcArray::from_shape_vec(IxDyn(&[1]), vec![2.0f32]).unwrap());
+                let pow2_id = Constant::push_new(graph, pow2_tensor, rng);
+                let squared = Pow::push_new(graph, centered, pow2_id, rng);
+
+                let axes_id2 = Constant::push_new(graph, NDArrayNumericTensor::I64(ArcArray::from_shape_vec(IxDyn(&[1]), vec![-1i64]).unwrap()), rng);
+                let var = ReduceMean::push_new(graph, squared, Some(axes_id2), true, false, rng);
+
+                let eps_tensor = NDArrayNumericTensor::F32(ArcArray::from_shape_vec(IxDyn(&[1]), vec![1e-5f32]).unwrap());
+                let eps_id = Constant::push_new(graph, eps_tensor, rng);
+                let var_eps = SimpleBinary::add(graph, var, eps_id, rng);
+                let std_dev = SimpleUnaryOp::sqrt(graph, var_eps, rng);
+                let normed = SimpleBinary::div(graph, centered, std_dev, rng);
+                let scaled = SimpleBinary::mul(graph, normed, gamma, rng);
+                let out = SimpleBinary::add(graph, scaled, beta, rng);
+
+                (vec![x, w, gamma, beta], vec![out])
+            },
+            vec![
+                NumericTensor::from_vec_shape((0..64).map(|i| (i as f32) * 0.1 - 3.2).collect(), vec![2, 4, 8]).unwrap(),
+                NumericTensor::from_vec_shape((0..64).map(|i| (i as f32) * 0.02 - 0.64).collect(), vec![8, 8]).unwrap(),
+                NumericTensor::from_vec_shape(vec![1.0f32, 1.1, 0.9, 1.05], vec![4]).unwrap(),
+                NumericTensor::from_vec_shape(vec![0.0f32, 0.1, -0.1, 0.05], vec![4]).unwrap(),
+            ],
         );
-
-        // Transpose: [2,4,8] → [2,8,4]  (perm = [0,2,1])
-        let transposed = Transpose::push_new(&mut milli, mm, Some(vec![0, 2, 1]), &mut rng);
-
-        // LayerNorm on last axis (dim=4):
-        // axes constant for ReduceMean
-        let axes_tensor =
-            NDArrayNumericTensor::I64(ArcArray::from_shape_vec(IxDyn(&[1]), vec![-1i64]).unwrap());
-        let axes_id = Constant::push_new(&mut milli, axes_tensor, &mut rng);
-
-        // mean = ReduceMean(transposed, axes=[-1], keepdims=true)
-        let mean =
-            ReduceMean::push_new(&mut milli, transposed, Some(axes_id), true, false, &mut rng);
-
-        // centered = transposed - mean
-        let centered = SimpleBinary::sub(&mut milli, transposed, mean, &mut rng);
-
-        // pow2 constant
-        let pow2_tensor =
-            NDArrayNumericTensor::F32(ArcArray::from_shape_vec(IxDyn(&[1]), vec![2.0f32]).unwrap());
-        let pow2_id = Constant::push_new(&mut milli, pow2_tensor, &mut rng);
-
-        // squared = Pow(centered, 2)
-        let squared = Pow::push_new(&mut milli, centered, pow2_id, &mut rng);
-
-        // var = ReduceMean(squared, axes=[-1], keepdims=true)
-        let axes_id2 = Constant::push_new(
-            &mut milli,
-            NDArrayNumericTensor::I64(ArcArray::from_shape_vec(IxDyn(&[1]), vec![-1i64]).unwrap()),
-            &mut rng,
-        );
-        let var = ReduceMean::push_new(&mut milli, squared, Some(axes_id2), true, false, &mut rng);
-
-        // eps constant
-        let eps_tensor = NDArrayNumericTensor::F32(
-            ArcArray::from_shape_vec(IxDyn(&[1]), vec![1e-5f32]).unwrap(),
-        );
-        let eps_id = Constant::push_new(&mut milli, eps_tensor, &mut rng);
-
-        // var_eps = var + eps
-        let var_eps = SimpleBinary::add(&mut milli, var, eps_id, &mut rng);
-
-        // std = Sqrt(var_eps)
-        let std_dev = SimpleUnaryOp::sqrt(&mut milli, var_eps, &mut rng);
-
-        // normed = centered / std
-        let normed = SimpleBinary::div(&mut milli, centered, std_dev, &mut rng);
-
-        // out = normed * gamma + beta   (gamma, beta shape [4])
-        let scaled = SimpleBinary::mul(&mut milli, normed, gamma_id, &mut rng);
-        let out_id = SimpleBinary::add(&mut milli, scaled, beta_id, &mut rng);
-
-        // Build input data.
-        let x_data: Vec<f32> = (0..64).map(|i| (i as f32) * 0.1 - 3.2).collect();
-        let w_data: Vec<f32> = (0..64).map(|i| (i as f32) * 0.02 - 0.64).collect();
-        let gamma_data: Vec<f32> = vec![1.0, 1.1, 0.9, 1.05];
-        let beta_data: Vec<f32> = vec![0.0, 0.1, -0.1, 0.05];
-
-        let x_t = NumericTensor::from_vec_shape(x_data, vec![2, 4, 8]).unwrap();
-        let w_t = NumericTensor::from_vec_shape(w_data, vec![8, 8]).unwrap();
-        let gamma_t = NumericTensor::from_vec_shape(gamma_data, vec![4]).unwrap();
-        let beta_t = NumericTensor::from_vec_shape(beta_data, vec![4]).unwrap();
-
-        let ext_ids = [x_id, w_id, gamma_id, beta_id];
-        let ext_tensors: Vec<&NumericTensor<DynRank>> = vec![&x_t, &w_t, &gamma_t, &beta_t];
-
-        // Milli eval.
-        let mut intermediates: HashMap<GlobalId, NumericTensor<DynRank>> = HashMap::new();
-        for (&id, t) in ext_ids.iter().zip(ext_tensors.iter()) {
-            intermediates.insert(id, (*t).clone());
-        }
-        let mut backend = EvalBackend::NDArray;
-        for &op_id in milli.op_ordering() {
-            let op = milli.get_node_by_id(&op_id).unwrap();
-            for (tid, val) in op.eval(&intermediates, &mut backend).unwrap() {
-                intermediates.insert(tid, val);
-            }
-        }
-        let milli_out = &intermediates[&out_id];
-        let milli_flat = tensor_to_f64(milli_out);
-
-        // Lower.
-        let mut info_inputs: HashMap<GlobalId, TensorInfo> = HashMap::new();
-        for (&id, t) in ext_ids.iter().zip(ext_tensors.iter()) {
-            info_inputs.insert(id, TensorInfo::from((*t).clone()));
-        }
-        let result = lower_with_info(&milli, &info_inputs).unwrap();
-        for d in &result.unsupported_details {
-            eprintln!("UNSUPPORTED: {}", d);
-        }
-        assert!(
-            result.unsupported.is_empty(),
-            "{:?}",
-            result.unsupported_details
-        );
-
-        let tam = result.tensor_map.get(&out_id).unwrap();
-
-        // Flat NanoEval.
-        let mut overrides: HashMap<u64, NumericScalar> = HashMap::new();
-        for (&id, t) in ext_ids.iter().zip(ext_tensors.iter()) {
-            if let Some(tam) = result.tensor_map.get(&id) {
-                let scalars = tensor_to_scalars(t);
-                for (i, val) in scalars.into_iter().enumerate() {
-                    overrides.insert(tam.atom_id_for_element(i as u64).0, val);
-                }
-            }
-        }
-        let flat_eval = NanoEval::eval_with_overrides(&result.graph, &overrides);
-        let flat_out: Vec<f64> = (0..tam.count)
-            .map(|i| flat_eval.get(tam.atom_id_for_element(i)))
-            .collect();
-
-        // eval_efficient.
-        let nds: Vec<NDArrayNumericTensor<DynRank>> = ext_tensors
-            .iter()
-            .map(|t| t.to_ndarray().unwrap())
-            .collect();
-        let eff_inputs: Vec<(crate::nano_graph::AtomId, &NDArrayNumericTensor<DynRank>)> = result
-            .graph
-            .input_tensors()
-            .iter()
-            .filter_map(|it| {
-                let idx = ext_ids.iter().position(|&id| id == it.tensor_id)?;
-                Some((it.base_id, &nds[idx]))
-            })
-            .collect();
-        let output_range = AtomRange {
-            base: tam.base_id,
-            count: tam.count,
-            dtype: tam.dtype,
-        };
-        let eff_out = eval_efficient(&result.graph, &eff_inputs, &[output_range]);
-        let eff_flat = eff_out[0].flatten();
-        let eff_vals: Vec<f64> = (0..tam.count as usize)
-            .map(|i| eff_flat.get(&[i as u64]).unwrap().to_f64())
-            .collect();
-
-        // Check ALL intermediate tensors to find where divergence starts.
-        let mut first_bad_op = None;
-        for (&tid, milli_tensor) in &intermediates {
-            if let Some(tam) = result.tensor_map.get(&tid) {
-                if !tam.sym_dims.is_empty() {
-                    continue;
-                }
-                let milli_f = tensor_to_f64(milli_tensor);
-                if milli_f.len() != tam.count as usize {
-                    continue;
-                }
-                let nano_f: Vec<f64> = (0..tam.count)
-                    .map(|i| flat_eval.get(tam.atom_id_for_element(i)))
-                    .collect();
-                let mut max_diff = 0.0f64;
-                for (i, (m, n)) in milli_f.iter().zip(nano_f.iter()).enumerate() {
-                    let diff = (m - n).abs();
-                    if diff > max_diff {
-                        max_diff = diff;
-                    }
-                    if diff > 1e-3 * m.abs().max(1.0) && first_bad_op.is_none() {
-                        eprintln!(
-                            "DIVERGE at tensor {:?} element {}: milli={} nano={} diff={:.6}",
-                            tid, i, m, n, diff
-                        );
-                        first_bad_op = Some(tid);
-                    }
-                }
-                if max_diff > 1e-6 {
-                    eprintln!(
-                        "  tensor {:?}: {} elements, max_diff={:.6e}",
-                        tid, tam.count, max_diff
-                    );
-                }
-            }
-        }
-        if first_bad_op.is_none() {
-            eprintln!("All intermediates match!");
-        }
-
-        // Dump the first bad tensor fully.
-        if let Some(bad_id) = first_bad_op {
-            let tam = result.tensor_map.get(&bad_id).unwrap();
-            let milli_f = tensor_to_f64(&intermediates[&bad_id]);
-            let nano_f: Vec<f64> = (0..tam.count)
-                .map(|i| flat_eval.get(tam.atom_id_for_element(i)))
-                .collect();
-            eprintln!(
-                "First bad tensor {:?} (count={}, base={}):",
-                bad_id, tam.count, tam.base_id
-            );
-            eprintln!("  strides: {:?}", tam.known_strides);
-            eprintln!("  known_dims: {:?}", tam.known_dims);
-            eprintln!("  milli: {:?}", milli_f);
-            eprintln!("  nano:  {:?}", nano_f);
-            // Also dump its producers: which ops/tensors feed into it.
-            let milli_shape = intermediates[&bad_id]
-                .to_ndarray()
-                .unwrap()
-                .shape()
-                .to_vec();
-            eprintln!("  milli shape: {:?}", milli_shape);
-        }
     }
 }

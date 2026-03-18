@@ -10,7 +10,7 @@ use crate::DynRank;
 use crate::backends::ndarray_backend::numeric_tensor::NDArrayNumericTensor;
 use crate::graph::GlobalId;
 use crate::nano_graph::AtomId;
-use crate::nano_graph::eval::eval_efficient;
+use crate::nano_graph::eval;
 
 use super::types::*;
 
@@ -78,7 +78,7 @@ pub fn execute(
 
             // Evaluate the span's NanoGraph with memory-efficient evaluator.
             let eval_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                eval_efficient(&span.graph, &span_inputs, &span.outputs)
+                eval::eval(&span.graph, &span_inputs, &span.outputs)
             }));
 
             match eval_result {

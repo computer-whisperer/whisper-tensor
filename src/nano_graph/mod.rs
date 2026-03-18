@@ -9,7 +9,6 @@
 pub mod eval;
 pub mod lower;
 pub mod ops;
-pub mod optimize;
 pub mod pattern;
 
 pub use lower::{

@@ -511,44 +511,7 @@ impl NanoGraph {
 
         for (gi, group) in groups.iter().enumerate() {
             let mut seen = std::collections::HashSet::<usize>::new();
-
-            for input in &group.inputs {
-                self.collect_producer_indices(input, group.count, group.atom_offset, &mut seen);
-            }
-
-            // Reduce ops access additional atoms via stride.
-            if let ScalarOp::Reduce {
-                reduce_count,
-                reduce_stride,
-                ..
-            } = &group.op
-                && *reduce_count > 1
-                && *reduce_stride != 0
-            {
-                for input in &group.inputs {
-                    let first = input.resolve(group.atom_offset);
-                    let last = input.resolve(group.atom_offset + group.count - 1);
-                    let end_off = (*reduce_count as i64 - 1) * reduce_stride;
-                    let endpoints = [
-                        first.0,
-                        (first.0 as i64 + end_off) as u64,
-                        last.0,
-                        (last.0 as i64 + end_off) as u64,
-                    ];
-                    let lo = *endpoints.iter().min().unwrap();
-                    let hi = *endpoints.iter().max().unwrap();
-                    self.insert_groups_in_id_range(lo, hi, &mut seen);
-                }
-            }
-
-            // IndirectLoad table reference.
-            if let ScalarOp::IndirectLoad { table_base, .. } = &group.op
-                && let Some(pi) = self.groups.find_index(table_base.0)
-            {
-                seen.insert(pi);
-            }
-
-            seen.remove(&gi);
+            self.collect_all_producer_indices(group, gi, &mut seen);
             for pi in seen {
                 use_counts[pi] += 1;
             }
@@ -564,6 +527,56 @@ impl NanoGraph {
                 use_count: uc,
             })
             .collect()
+    }
+
+    /// Collect all producer group indices for a group: InputRef producers,
+    /// reduce-stride ranges, and IndirectLoad table references.
+    ///
+    /// Removes self-references (the group's own index `gi`).
+    /// Used by both `liveness()` and the evaluator.
+    pub fn collect_all_producer_indices(
+        &self,
+        group: &AtomGroup,
+        gi: usize,
+        out: &mut std::collections::HashSet<usize>,
+    ) {
+        for input in &group.inputs {
+            self.collect_producer_indices(input, group.count, group.atom_offset, out);
+        }
+
+        // Reduce ops access additional atoms via stride.
+        if let ScalarOp::Reduce {
+            reduce_count,
+            reduce_stride,
+            ..
+        } = &group.op
+            && *reduce_count > 1
+            && *reduce_stride != 0
+        {
+            for input in &group.inputs {
+                let first = input.resolve(group.atom_offset);
+                let last = input.resolve(group.atom_offset + group.count - 1);
+                let end_off = (*reduce_count as i64 - 1) * reduce_stride;
+                let endpoints = [
+                    first.0,
+                    (first.0 as i64 + end_off) as u64,
+                    last.0,
+                    (last.0 as i64 + end_off) as u64,
+                ];
+                let lo = *endpoints.iter().min().unwrap();
+                let hi = *endpoints.iter().max().unwrap();
+                self.insert_groups_in_id_range(lo, hi, out);
+            }
+        }
+
+        // IndirectLoad table reference.
+        if let ScalarOp::IndirectLoad { table_base, .. } = &group.op
+            && let Some(pi) = self.groups.find_index(table_base.0)
+        {
+            out.insert(pi);
+        }
+
+        out.remove(&gi);
     }
 
     /// Collect producer group indices for an InputRef (group-level, not per-atom).
