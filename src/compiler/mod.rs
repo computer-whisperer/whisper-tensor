@@ -38,7 +38,7 @@ pub fn interpret_milli_graph_all_intermediates(
     >,
     crate::milli_graph::MilliOpGraphError,
 > {
-    use crate::graph::{Graph, Node};
+    use crate::graph::Graph;
     use crate::milli_graph::ops::MilliOp;
 
     let mut backend = crate::backends::eval_backend::EvalBackend::NDArray;
@@ -55,13 +55,10 @@ pub fn interpret_milli_graph_all_intermediates(
         let Some(op) = graph.get_node_by_id(&op_id) else {
             continue;
         };
-        match op.eval(&intermediates, &mut backend) {
-            Ok(iter) => {
-                for (tid, val) in iter {
-                    intermediates.insert(tid, val);
-                }
+        if let Ok(iter) = op.eval(&intermediates, &mut backend) {
+            for (tid, val) in iter {
+                intermediates.insert(tid, val);
             }
-            Err(_) => {} // Skip ops that fail to eval (e.g., NonZero)
         }
     }
 
@@ -73,7 +70,9 @@ pub fn interpret_milli_graph_all_intermediates(
 pub fn tensor_producers(
     graph: &MilliOpGraph,
     intermediates: &std::collections::HashMap<GlobalId, NumericTensor<DynRank>>,
-) -> std::collections::HashMap<GlobalId, (String, Vec<(GlobalId, Vec<u64>)>)> {
+) -> std::collections::HashMap<GlobalId, (String, Vec<(GlobalId, Vec<u64>)>)>
+{
+    #![allow(clippy::type_complexity)]
     use crate::graph::{Graph, Node};
     let mut result = std::collections::HashMap::new();
     for &op_id in graph.op_ordering() {

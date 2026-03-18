@@ -1174,18 +1174,51 @@ impl<'a> NanoLoweringContext<'a> {
         let count = count.max(1);
 
         if count == in_map.count {
-            // Atom-count preserving: just re-register with new layout.
-            self.tensor_map.insert(
-                out_id,
-                TensorAtomMap::simple(
-                    in_map.base_id,
+            // Check if input is row-major (or trivial). If so, zero-cost re-register.
+            // If input has non-row-major strides (from Transpose or non-leading Split),
+            // we must materialize an Identity group to reorder elements into row-major.
+            let in_known = in_map.known_dims();
+            let in_rowmajor = TensorAtomMap::compute_strides(&in_known);
+            let is_row_major = in_map.known_strides == in_rowmajor
+                || in_map.count <= 1
+                || in_map.segments.is_empty() && in_map.known_strides.iter().all(|&s| s <= 1);
+
+            if is_row_major && in_map.segments.is_empty() {
+                // Zero-cost: just re-register with new layout.
+                self.tensor_map.insert(
+                    out_id,
+                    TensorAtomMap::simple(
+                        in_map.base_id,
+                        count,
+                        out_info.dtype(),
+                        layout,
+                        TensorAtomMap::compute_strides(&known_dims),
+                        sym_dims,
+                    ),
+                );
+            } else {
+                // Non-row-major input: emit Identity group to materialize row-major order.
+                let dt = out_info.dtype();
+                let input_ref = Self::pointwise_input_ref(&in_map);
+                let base_id = self.nano.push_group(
                     count,
-                    out_info.dtype(),
-                    layout,
-                    TensorAtomMap::compute_strides(&known_dims),
-                    sym_dims,
-                ),
-            );
+                    dt,
+                    ScalarOp::Identity,
+                    in_map.sym_dims.clone(),
+                    vec![input_ref],
+                );
+                self.tensor_map.insert(
+                    out_id,
+                    TensorAtomMap::simple(
+                        base_id,
+                        count,
+                        dt,
+                        layout,
+                        TensorAtomMap::compute_strides(&known_dims),
+                        sym_dims,
+                    ),
+                );
+            }
         } else {
             self.register_boundary(out_id, out_info, "ViewOp");
             let name = format!("ViewOp(count {} → {})", in_map.count, count);
@@ -3675,6 +3708,172 @@ mod tests {
                 )
                 .unwrap(),
                 NumericTensor::from_vec_shape(vec![2i64, 4, 4, 16], vec![4]).unwrap(),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_split_last_axis_3way() {
+        // GPT-2 QKV split: [2, 4, 12] → split axis=2 into 3 × [2, 4, 4]
+        // Then add each piece with a bias to force evaluation.
+        check_integrity(
+            |g, rng| {
+                use crate::backends::ndarray_backend::NDArrayNumericTensor;
+                use ndarray::{ArcArray, IxDyn};
+
+                let x = g.add_input(rng);
+                let bias_q = g.add_input(rng);
+                let bias_k = g.add_input(rng);
+                let bias_v = g.add_input(rng);
+
+                let split_tensor = NDArrayNumericTensor::I64(
+                    ArcArray::from_shape_vec(IxDyn(&[3]), vec![4i64, 4, 4]).unwrap(),
+                );
+                let split_sizes = crate::milli_graph::ops::Constant::push_new(g, split_tensor, rng);
+
+                let q = crate::milli_graph::ops::Split::push_new(g, x, Some(crate::milli_graph::ops::MilliOpTensorIDOrLiteral::TensorID(split_sizes)), 2, Some(3), 0, rng);
+                let k = crate::milli_graph::ops::Split::push_new(g, x, Some(crate::milli_graph::ops::MilliOpTensorIDOrLiteral::TensorID(split_sizes)), 2, Some(3), 1, rng);
+                let v = crate::milli_graph::ops::Split::push_new(g, x, Some(crate::milli_graph::ops::MilliOpTensorIDOrLiteral::TensorID(split_sizes)), 2, Some(3), 2, rng);
+
+                let q_biased = crate::milli_graph::ops::SimpleBinary::add(g, q, bias_q, rng);
+                let k_biased = crate::milli_graph::ops::SimpleBinary::add(g, k, bias_k, rng);
+                let v_biased = crate::milli_graph::ops::SimpleBinary::add(g, v, bias_v, rng);
+
+                (vec![x, bias_q, bias_k, bias_v], vec![q_biased, k_biased, v_biased])
+            },
+            vec![
+                NumericTensor::from_vec_shape(
+                    (0..96).map(|i| (i as f32) * 0.1).collect(),
+                    vec![2, 4, 12],
+                )
+                .unwrap(),
+                NumericTensor::from_vec_shape(vec![1.0f32; 4], vec![4]).unwrap(),
+                NumericTensor::from_vec_shape(vec![2.0f32; 4], vec![4]).unwrap(),
+                NumericTensor::from_vec_shape(vec![3.0f32; 4], vec![4]).unwrap(),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_matmul_then_split() {
+        // MatMul → Split pattern (GPT-2 QKV projection):
+        // x [2, 3, 4] @ W [4, 6] → [2, 3, 6] → split axis=-1 into 3 × [2, 3, 2]
+        check_integrity(
+            |g, rng| {
+                use crate::backends::ndarray_backend::NDArrayNumericTensor;
+                use ndarray::{ArcArray, IxDyn};
+
+                let x = g.add_input(rng);
+                let w = g.add_input(rng);
+                let proj = crate::milli_graph::ops::MatMul::push_new_default_precision(
+                    g, x, w, DType::F32, rng,
+                );
+
+                let split_tensor = NDArrayNumericTensor::I64(
+                    ArcArray::from_shape_vec(IxDyn(&[3]), vec![2i64, 2, 2]).unwrap(),
+                );
+                let split_sizes = crate::milli_graph::ops::Constant::push_new(g, split_tensor, rng);
+
+                let q = crate::milli_graph::ops::Split::push_new(g, proj, Some(crate::milli_graph::ops::MilliOpTensorIDOrLiteral::TensorID(split_sizes)), 2, Some(3), 0, rng);
+                let k = crate::milli_graph::ops::Split::push_new(g, proj, Some(crate::milli_graph::ops::MilliOpTensorIDOrLiteral::TensorID(split_sizes)), 2, Some(3), 1, rng);
+                let v = crate::milli_graph::ops::Split::push_new(g, proj, Some(crate::milli_graph::ops::MilliOpTensorIDOrLiteral::TensorID(split_sizes)), 2, Some(3), 2, rng);
+
+                (vec![x, w], vec![q, k, v])
+            },
+            vec![
+                NumericTensor::from_vec_shape(
+                    (0..24).map(|i| (i as f32) * 0.1).collect(),
+                    vec![2, 3, 4],
+                )
+                .unwrap(),
+                NumericTensor::from_vec_shape(
+                    (0..24).map(|i| (i as f32) * 0.05 - 0.6).collect(),
+                    vec![4, 6],
+                )
+                .unwrap(),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_qkv_attention_full() {
+        // Full QKV attention pattern (no softmax):
+        // x [1, 4, 8] @ Wqkv [8, 24] → [1, 4, 24] → Split into Q,K,V [1, 4, 8]
+        // → Reshape [1, 4, 2, 4] → Transpose [0,2,1,3] → [1, 2, 4, 4]
+        // K: → Transpose [0,1,3,2] → [1, 2, 4, 4]
+        // scores = Q @ K^T → [1, 2, 4, 4]
+        // output = scores @ V → [1, 2, 4, 4]
+        check_integrity(
+            |g, rng| {
+                use crate::backends::ndarray_backend::NDArrayNumericTensor;
+                use ndarray::{ArcArray, IxDyn};
+
+                let x = g.add_input(rng);
+                let wqkv = g.add_input(rng);
+
+                // QKV projection: [1, 4, 8] @ [8, 24] → [1, 4, 24]
+                let proj = crate::milli_graph::ops::MatMul::push_new_default_precision(
+                    g, x, wqkv, DType::F32, rng,
+                );
+
+                // Split into Q, K, V each [1, 4, 8]
+                let split_tensor = NDArrayNumericTensor::I64(
+                    ArcArray::from_shape_vec(IxDyn(&[3]), vec![8i64, 8, 8]).unwrap(),
+                );
+                let split_sizes = crate::milli_graph::ops::Constant::push_new(g, split_tensor, rng);
+
+                let q_raw = crate::milli_graph::ops::Split::push_new(g, proj, Some(crate::milli_graph::ops::MilliOpTensorIDOrLiteral::TensorID(split_sizes)), 2, Some(3), 0, rng);
+                let k_raw = crate::milli_graph::ops::Split::push_new(g, proj, Some(crate::milli_graph::ops::MilliOpTensorIDOrLiteral::TensorID(split_sizes)), 2, Some(3), 1, rng);
+                let v_raw = crate::milli_graph::ops::Split::push_new(g, proj, Some(crate::milli_graph::ops::MilliOpTensorIDOrLiteral::TensorID(split_sizes)), 2, Some(3), 2, rng);
+
+                // Reshape to [1, 4, 2, 4] for head split
+                let shape4d_q = g.add_input(rng);
+                let shape4d_k = g.add_input(rng);
+                let shape4d_v = g.add_input(rng);
+                let q4 = crate::milli_graph::ops::Reshape::push_new(g, q_raw, shape4d_q, false, rng);
+                let k4 = crate::milli_graph::ops::Reshape::push_new(g, k_raw, shape4d_k, false, rng);
+                let v4 = crate::milli_graph::ops::Reshape::push_new(g, v_raw, shape4d_v, false, rng);
+
+                // Transpose to [1, 2, 4, 4] (B, H, S, D)
+                let qt = crate::milli_graph::ops::Transpose::push_new(g, q4, Some(vec![0, 2, 1, 3]), rng);
+                let kt = crate::milli_graph::ops::Transpose::push_new(g, k4, Some(vec![0, 2, 1, 3]), rng);
+                let vt = crate::milli_graph::ops::Transpose::push_new(g, v4, Some(vec![0, 2, 1, 3]), rng);
+
+                // K^T: [1, 2, 4, 4] → [1, 2, 4, 4] (transpose last 2 dims)
+                let kt_t = crate::milli_graph::ops::Transpose::push_new(g, kt, Some(vec![0, 1, 3, 2]), rng);
+
+                // Attention scores: Q @ K^T
+                let scores = crate::milli_graph::ops::MatMul::push_new_default_precision(
+                    g, qt, kt_t, DType::F32, rng,
+                );
+
+                // Attention output: scores @ V
+                let attn_out = crate::milli_graph::ops::MatMul::push_new_default_precision(
+                    g, scores, vt, DType::F32, rng,
+                );
+
+                (
+                    vec![x, wqkv, shape4d_q, shape4d_k, shape4d_v],
+                    vec![q_raw, k_raw, v_raw, scores, attn_out],
+                )
+            },
+            vec![
+                // x [1, 4, 8]
+                NumericTensor::from_vec_shape(
+                    (0..32).map(|i| (i as f32) * 0.1 - 1.6).collect(),
+                    vec![1, 4, 8],
+                )
+                .unwrap(),
+                // Wqkv [8, 24]
+                NumericTensor::from_vec_shape(
+                    (0..192).map(|i| (i as f32) * 0.01 - 0.96).collect(),
+                    vec![8, 24],
+                )
+                .unwrap(),
+                // shape tensors for Q, K, V reshape
+                NumericTensor::from_vec_shape(vec![1i64, 4, 2, 4], vec![4]).unwrap(),
+                NumericTensor::from_vec_shape(vec![1i64, 4, 2, 4], vec![4]).unwrap(),
+                NumericTensor::from_vec_shape(vec![1i64, 4, 2, 4], vec![4]).unwrap(),
             ],
         );
     }

@@ -339,15 +339,29 @@ fn main() {
         // We already have nano_results for the output ranges. Now request intermediate ranges.
         let mut check_ids: Vec<GlobalId> = Vec::new();
         let mut check_ranges: Vec<AtomRange> = Vec::new();
+        let mut skipped_no_milli = 0u64;
+        let mut skipped_segmented = 0u64;
+        let mut skipped_large = 0u64;
         for (&tid, tam) in &result.tensor_map {
-            if tam.count == 0 || tam.count > 1_000_000 {
-                continue; // Skip huge tensors and empty ones
+            if tam.count == 0 {
+                continue;
             }
             if !tam.segments.is_empty() {
-                continue; // Skip segmented (concat) tensors for now
+                skipped_segmented += 1;
+                continue;
             }
             if intermediates.get(&tid).is_none() {
-                continue; // No milli reference
+                skipped_no_milli += 1;
+                if skipped_no_milli <= 5 {
+                    let (op_kind, _) = producers.get(&tid)
+                        .map(|(k, i)| (k.as_str(), i.as_slice()))
+                        .unwrap_or(("?", &[]));
+                    println!(
+                        "    no-milli: {:?} (op: {}, count: {}, dtype: {:?})",
+                        tid, op_kind, tam.count, tam.dtype
+                    );
+                }
+                continue;
             }
             check_ids.push(tid);
             check_ranges.push(AtomRange {
@@ -356,7 +370,10 @@ fn main() {
                 dtype: tam.dtype,
             });
         }
-        println!("  Checking {} intermediate tensors...", check_ids.len());
+        println!(
+            "  Checking {} intermediate tensors (skipped: {} no-milli, {} segmented, {} large)",
+            check_ids.len(), skipped_no_milli, skipped_segmented, skipped_large
+        );
 
         let t_check = Instant::now();
         let check_results =
