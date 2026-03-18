@@ -212,75 +212,86 @@ impl SimpleBinary {
             return;
         };
 
-        let dt = out_info.dtype();
+        let out_dt = out_info.dtype();
+        // Comparison ops output BOOL but compute in input precision.
+        // Use input dtype for compute_dtype when output is BOOL.
+        let input_dt = all_infos
+            .get(&a_id)
+            .map(|i| i.dtype())
+            .unwrap_or(out_dt);
+        let compute_dt = if out_dt == crate::dtype::DType::BOOL {
+            input_dt
+        } else {
+            out_dt
+        };
         let scalar_op = match self.which_op() {
             WhichSimpleBinaryOp::Add => ScalarOp::Binary {
                 op: ScalarBinOp::Add,
-                compute_dtype: dt,
+                compute_dtype: compute_dt,
             },
             WhichSimpleBinaryOp::Sub => ScalarOp::Binary {
                 op: ScalarBinOp::Sub,
-                compute_dtype: dt,
+                compute_dtype: compute_dt,
             },
             WhichSimpleBinaryOp::Mul => ScalarOp::Binary {
                 op: ScalarBinOp::Mul,
-                compute_dtype: dt,
+                compute_dtype: compute_dt,
             },
             WhichSimpleBinaryOp::Div => ScalarOp::Binary {
                 op: ScalarBinOp::Div,
-                compute_dtype: dt,
+                compute_dtype: compute_dt,
             },
             WhichSimpleBinaryOp::Max => ScalarOp::Binary {
                 op: ScalarBinOp::Max,
-                compute_dtype: dt,
+                compute_dtype: compute_dt,
             },
             WhichSimpleBinaryOp::Min => ScalarOp::Binary {
                 op: ScalarBinOp::Min,
-                compute_dtype: dt,
+                compute_dtype: compute_dt,
             },
             WhichSimpleBinaryOp::Modulo(_) => ScalarOp::Binary {
                 op: ScalarBinOp::Mod,
-                compute_dtype: dt,
+                compute_dtype: compute_dt,
             },
             WhichSimpleBinaryOp::Equal => ScalarOp::Binary {
                 op: ScalarBinOp::Equal,
-                compute_dtype: dt,
+                compute_dtype: compute_dt,
             },
             WhichSimpleBinaryOp::Greater => ScalarOp::Binary {
                 op: ScalarBinOp::Greater,
-                compute_dtype: dt,
+                compute_dtype: compute_dt,
             },
             WhichSimpleBinaryOp::GreaterOrEqual => ScalarOp::Binary {
                 op: ScalarBinOp::GreaterOrEqual,
-                compute_dtype: dt,
+                compute_dtype: compute_dt,
             },
             WhichSimpleBinaryOp::Less => ScalarOp::Binary {
                 op: ScalarBinOp::Less,
-                compute_dtype: dt,
+                compute_dtype: compute_dt,
             },
             WhichSimpleBinaryOp::LessOrEqual => ScalarOp::Binary {
                 op: ScalarBinOp::LessOrEqual,
-                compute_dtype: dt,
+                compute_dtype: compute_dt,
             },
             WhichSimpleBinaryOp::And => ScalarOp::Binary {
                 op: ScalarBinOp::And,
-                compute_dtype: dt,
+                compute_dtype: compute_dt,
             },
             WhichSimpleBinaryOp::Or => ScalarOp::Binary {
                 op: ScalarBinOp::Or,
-                compute_dtype: dt,
+                compute_dtype: compute_dt,
             },
             WhichSimpleBinaryOp::Xor | WhichSimpleBinaryOp::BitwiseXor => ScalarOp::Binary {
                 op: ScalarBinOp::Xor,
-                compute_dtype: dt,
+                compute_dtype: compute_dt,
             },
             WhichSimpleBinaryOp::BitwiseAnd => ScalarOp::Binary {
                 op: ScalarBinOp::And,
-                compute_dtype: dt,
+                compute_dtype: compute_dt,
             },
             WhichSimpleBinaryOp::BitwiseOr => ScalarOp::Binary {
                 op: ScalarBinOp::Or,
-                compute_dtype: dt,
+                compute_dtype: compute_dt,
             },
         };
 
@@ -294,7 +305,7 @@ impl SimpleBinary {
         let out_tmp = TensorAtomMap::simple(
             AtomId(0),
             count,
-            dt,
+            out_dt,
             layout.clone(),
             strides.clone(),
             sym_dims.clone(),
@@ -309,7 +320,7 @@ impl SimpleBinary {
 
         let base_id = ctx.nano.push_group(
             count,
-            dt,
+            out_dt,
             scalar_op,
             sym_dims.clone(),
             vec![input_a, input_b],
@@ -317,7 +328,7 @@ impl SimpleBinary {
 
         ctx.tensor_map.insert(
             out_id,
-            TensorAtomMap::simple(base_id, count, dt, layout, strides, sym_dims),
+            TensorAtomMap::simple(base_id, count, out_dt, layout, strides, sym_dims),
         );
     }
 
@@ -938,7 +949,7 @@ impl MatMul {
         let accumulate_dtype = self.accumulate_dtype();
         let out_dtype = self.output_dtype();
 
-        // Compute A's known-dim strides (for addressing within A's atoms).
+        // Use A and B's actual physical strides (may be non-row-major after Transpose).
         let a_known_dims: Vec<u64> = a_layout
             .iter()
             .filter_map(|d| {
@@ -949,9 +960,8 @@ impl MatMul {
                 }
             })
             .collect();
-        let a_strides = TensorAtomMap::compute_strides(&a_known_dims);
+        let a_strides = &a_map.known_strides;
 
-        // Compute B's known-dim strides.
         let b_known_dims: Vec<u64> = b_layout
             .iter()
             .filter_map(|d| {
@@ -962,7 +972,7 @@ impl MatMul {
                 }
             })
             .collect();
-        let b_strides = TensorAtomMap::compute_strides(&b_known_dims);
+        let b_strides = &b_map.known_strides;
 
         // A's K dim is the last known dim. B's K dim is second-to-last known dim.
         // B's N dim is the last known dim.
@@ -1039,27 +1049,77 @@ impl MatMul {
                 }
             }
 
-            // A[m, 0] — base of this row's A elements
-            let a_row_base = a_map.base_id.offset(a_offset);
             // B[0, 0] — base of B for this batch
             let b_base = b_map.base_id.offset(b_offset);
 
-            // Input 0: StridedBroadcast over A elements, each repeated N times
-            // A atoms have stride = a_strides[a_k_known_idx] between successive k values
-            let a_k_stride = a_strides[a_k_known_idx] as i64;
-            let input_a = InputRef::StridedBroadcast {
-                base: a_row_base,
-                stride: a_k_stride,
-                repeat: n_u64,
+            // Input 0: A elements for this row, each repeated N times.
+            // For each k, we need A[batch, m, k]. With physical strides,
+            // offset = a_offset + k * a_k_stride.
+            // For segmented A (from Concat), use atom_id_for_element to resolve.
+            let a_k_stride = a_strides[a_k_known_idx];
+            let input_a = if a_map.segments.is_empty() {
+                // Simple A: StridedBroadcast with physical k-stride.
+                let a_row_base = a_map.base_id.offset(a_offset);
+                InputRef::StridedBroadcast {
+                    base: a_row_base,
+                    stride: a_k_stride as i64,
+                    repeat: n_u64,
+                }
+            } else {
+                // Segmented A: build explicit per-atom mapping.
+                // Atom j in the merged group reads A[m, j/N], repeated N times.
+                let a_rowmajor = TensorAtomMap::compute_strides(&a_known_dims);
+                let mut ids = Vec::with_capacity(merged_mul_count as usize);
+                for j in 0..merged_mul_count {
+                    let k_idx = j / n_u64;
+                    // Recover batch and m indices from a_offset using physical strides,
+                    // then set K to k_idx and compute flat logical index.
+                    let mut indices = vec![0u64; a_known_dims.len()];
+                    let mut remaining = a_offset;
+                    for d in 0..a_known_dims.len() {
+                        if d == a_k_known_idx {
+                            indices[d] = 0;
+                        } else if a_strides[d] > 0 {
+                            indices[d] = remaining / a_strides[d];
+                            remaining %= a_strides[d];
+                        }
+                    }
+                    indices[a_k_known_idx] = k_idx;
+                    // Convert to flat logical index (row-major)
+                    let flat_a: u64 = indices
+                        .iter()
+                        .zip(a_rowmajor.iter())
+                        .map(|(&idx, &stride)| idx * stride)
+                        .sum();
+                    ids.push(a_map.atom_id_for_element(flat_a));
+                }
+                crate::nano_graph::NanoLoweringContext::compress_explicit(ids)
             };
 
-            // Input 1: Affine over all K*N B elements (row-major layout)
-            // B[k,n] = b_base + k * b_strides[b_k_known_idx] + n
-            // Since B is contiguous (b_strides[b_k_known_idx] = N), this is just
-            // b_base + j for j in 0..K*N.
-            let input_b = InputRef::Affine {
-                base: b_base,
-                stride: 1,
+            // Input 1: B elements for all K*N positions in the merged group.
+            // Atom j reads B[k=j/N, n=j%N].
+            // With physical strides: offset = k * b_k_stride + n * b_n_stride.
+            // If B is row-major (b_k_stride=N, b_n_stride=1), this simplifies to Affine{stride:1}.
+            let b_k_known_idx = b_known_dims.len() - 2;
+            let b_n_known_idx = b_known_dims.len() - 1;
+            let b_k_stride = b_strides[b_k_known_idx];
+            let b_n_stride = b_strides[b_n_known_idx];
+            let input_b = if b_k_stride == n_u64 && b_n_stride == 1 {
+                // Row-major B: simple affine.
+                InputRef::Affine {
+                    base: b_base,
+                    stride: 1,
+                }
+            } else {
+                // Non-row-major B: build explicit mapping.
+                let mut ids = Vec::with_capacity(merged_mul_count as usize);
+                for j in 0..merged_mul_count {
+                    let k_idx = j / n_u64;
+                    let n_idx = j % n_u64;
+                    let offset = k_idx * b_k_stride + n_idx * b_n_stride;
+                    ids.push(b_base.offset(offset));
+                }
+                crate::nano_graph::NanoLoweringContext::compress_explicit(ids)
             };
 
             let base = ctx.nano.push_group(

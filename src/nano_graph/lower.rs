@@ -269,7 +269,7 @@ impl TensorAtomMap {
 
     /// Map logical element index to AtomId using strides.
     /// Handles simple views, transposed/strided views, and segmented (concat) views.
-    fn atom_id_for_element(&self, flat: u64) -> AtomId {
+    pub fn atom_id_for_element(&self, flat: u64) -> AtomId {
         let known_dims = self.known_dims();
         let row_major = Self::compute_strides(&known_dims);
 
@@ -2504,7 +2504,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // BUG: comparison ops use output dtype (BOOL) as compute_dtype, should use input dtype
     fn test_binary_equal() {
         check_integrity(
             |g, rng| {
@@ -2521,7 +2520,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // BUG: comparison ops use output dtype (BOOL) as compute_dtype, should use input dtype
     fn test_binary_greater() {
         check_integrity(
             |g, rng| {
@@ -2538,7 +2536,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // BUG: comparison ops use output dtype (BOOL) as compute_dtype, should use input dtype
     fn test_binary_less() {
         check_integrity(
             |g, rng| {
@@ -2716,7 +2713,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // Depends on comparison ops which have the BOOL compute_dtype bug
     fn test_where_op() {
         check_integrity(
             |g, rng| {
@@ -3018,7 +3014,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // MatMul lowering assumes row-major A input strides
     fn test_transpose_then_matmul() {
         // A [3,4] transposed to [4,3], then matmul with B [3,2] → [4,2]
         check_integrity(
@@ -3051,7 +3046,6 @@ mod tests {
     // =========================================================================
 
     #[test]
-    #[ignore] // ConstantOfShape milli eval needs shape tensor as NumericTensor, not just TensorInfo
     fn test_constant_of_shape() {
         use crate::numeric_scalar::NumericScalar;
         // ConstantOfShape(shape=[2,3], val=7.0) → [2,3] of 7s.
@@ -3060,12 +3054,14 @@ mod tests {
             |g, rng| {
                 let shape = g.add_input(rng);
                 let x = g.add_input(rng);
-                let constant = crate::milli_graph::ops::ConstantOfShape::push_new(
+                // Note: ConstantOfShape::push_new returns the OP id (not output tensor id).
+                let cos_op_id = crate::milli_graph::ops::ConstantOfShape::push_new(
                     g,
                     NumericScalar::F32(7.0),
                     shape,
                     rng,
                 );
+                let constant = g.get_node_by_id(&cos_op_id).unwrap().outputs().next().unwrap();
                 let out = crate::milli_graph::ops::SimpleBinary::add(g, x, constant, rng);
                 (vec![shape, x], vec![out])
             },
@@ -3082,7 +3078,6 @@ mod tests {
     // =========================================================================
 
     #[test]
-    #[ignore] // Slice lowering panics on step>1 with single-element axes
     fn test_slice_with_step() {
         // [8] slice [0:8:2] → [4]
         check_integrity(
@@ -3093,7 +3088,7 @@ mod tests {
                 let axes = g.add_input(rng);
                 let steps = g.add_input(rng);
                 let b = crate::milli_graph::ops::Slice::push_new(
-                    g, a, starts, ends, Some(axes), Some(steps), rng,
+                    g, a, starts, ends, Some(steps), Some(axes), rng,
                 );
                 (vec![a, starts, ends, axes, steps], vec![b])
             },
@@ -3116,7 +3111,6 @@ mod tests {
     // =========================================================================
 
     #[test]
-    #[ignore] // MatMul lowering assumes row-major A input strides
     fn test_concat_then_matmul() {
         // concat([2,3], [2,3], axis=0) → [4,3], then matmul with [3,2]
         check_integrity(
