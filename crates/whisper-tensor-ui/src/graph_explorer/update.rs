@@ -1411,6 +1411,9 @@ impl GraphExplorerApp {
                                 sd_data.show_image_window = open;
                         }
                     }
+                    AnyInterface::VideoGenerationInterface(_video_interface) => {
+                        ui.label("Video generation interface (not yet runnable from UI)");
+                    }
                     AnyInterface::TextToSpeechInterface(tts_interface) => {
                         let tts_data = self
                             .tts_inference_data

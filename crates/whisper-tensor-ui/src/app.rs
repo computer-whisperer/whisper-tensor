@@ -678,6 +678,7 @@ fn interface_type_label(interface: &AnyInterface) -> &'static str {
         AnyInterface::TextInferenceTokensInLogitOutInterface(_) => "Text Inference",
         AnyInterface::MultimodalLanguageInterface(_) => "Multimodal Language",
         AnyInterface::ImageGenerationInterface(_) => "Image Generation",
+        AnyInterface::VideoGenerationInterface(_) => "Video Generation",
         AnyInterface::TextToSpeechInterface(_) => "Text to Speech",
         AnyInterface::SpeechToTextInterface(_) => "Speech to Text",
     }
@@ -745,6 +746,7 @@ impl eframe::App for WebUIApp {
                                         needed_tokenizers.push(iface.get_tokenizer().clone());
                                     }
                                     AnyInterface::ImageGenerationInterface(_) => {}
+                                    AnyInterface::VideoGenerationInterface(_) => {}
                                     AnyInterface::TextToSpeechInterface(_) => {}
                                     AnyInterface::SpeechToTextInterface(iface) => {
                                         needed_tokenizers.push(iface.tokenizer.clone());

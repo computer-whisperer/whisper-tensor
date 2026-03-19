@@ -1572,6 +1572,185 @@ impl SuperGraphNode for SuperGraphNodeTensorToAudioClip {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SuperGraphNodeTensorToVideoClip {
+    global_id: GlobalId,
+    pub label: Option<String>,
+    tensor_input: Option<SuperGraphLink>,
+    video_output: Option<SuperGraphLink>,
+    fps: f32,
+}
+
+impl SuperGraphNodeTensorToVideoClip {
+    pub fn new(
+        _builder: &mut SuperGraphBuilder,
+        tensor_input: SuperGraphLink,
+        fps: f32,
+        rng: &mut impl Rng,
+    ) -> Self {
+        Self {
+            global_id: GlobalId::new(rng),
+            label: None,
+            tensor_input: Some(tensor_input),
+            video_output: Some(SuperGraphLink::new(SuperGraphLinkKind::VideoClip, rng)),
+            fps,
+        }
+    }
+
+    pub fn new_and_add(
+        builder: &mut SuperGraphBuilder,
+        tensor_input: SuperGraphLink,
+        fps: f32,
+        rng: &mut impl Rng,
+    ) -> SuperGraphLink {
+        let node = Self::new(builder, tensor_input, fps, rng);
+        let output = node.get_video_output();
+        builder.add_node(node.to_any());
+        output
+    }
+
+    pub fn get_video_output(&self) -> SuperGraphLink {
+        self.video_output
+            .expect("tensor-to-video output link should be configured")
+    }
+}
+
+impl SuperGraphNode for SuperGraphNodeTensorToVideoClip {
+    fn to_any(self) -> SuperGraphAnyNode {
+        SuperGraphAnyNode::TensorToVideoClip(self)
+    }
+
+    fn eval<T: SuperGraphObserver>(
+        &self,
+        _node_path: &[GlobalId],
+        data: &mut SuperGraphData,
+        _context: &mut SuperGraphContext<T>,
+    ) -> Result<(), SuperGraphError> {
+        let tensor_input_link =
+            require_node_link(self.tensor_input, "TensorToVideoClip", "tensor_input")?;
+        let video_output_link =
+            require_node_link(self.video_output, "TensorToVideoClip", "video_output")?;
+        let tensor = data
+            .tensors
+            .get(&tensor_input_link)
+            .ok_or(SuperGraphError::MissingLinkError(format!(
+                ": missing tensor input link {:?}",
+                tensor_input_link
+            )))?
+            .clone();
+        data.video_clips.insert(
+            video_output_link,
+            super::data::SuperGraphVideoClip::new(tensor, self.fps),
+        );
+        Ok(())
+    }
+
+    fn op_kind(&self) -> String {
+        "TensorToVideoClip".to_string()
+    }
+    fn label(&self) -> Option<String> {
+        self.label.clone()
+    }
+
+    fn inputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
+        Box::new(self.tensor_input.map(|link| link.to_any()).into_iter())
+    }
+
+    fn outputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
+        Box::new(self.video_output.map(|link| link.to_any()).into_iter())
+    }
+
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SuperGraphNodeVideoClipToTensor {
+    global_id: GlobalId,
+    pub label: Option<String>,
+    video_input: Option<SuperGraphLink>,
+    tensor_output: Option<SuperGraphLink>,
+}
+
+impl SuperGraphNodeVideoClipToTensor {
+    pub fn new(
+        _builder: &mut SuperGraphBuilder,
+        video_input: SuperGraphLink,
+        rng: &mut impl Rng,
+    ) -> Self {
+        Self {
+            global_id: GlobalId::new(rng),
+            label: None,
+            video_input: Some(video_input),
+            tensor_output: Some(SuperGraphLink::new(SuperGraphLinkKind::Tensor, rng)),
+        }
+    }
+
+    pub fn new_and_add(
+        builder: &mut SuperGraphBuilder,
+        video_input: SuperGraphLink,
+        rng: &mut impl Rng,
+    ) -> SuperGraphLink {
+        let node = Self::new(builder, video_input, rng);
+        let output = node.get_tensor_output();
+        builder.add_node(node.to_any());
+        output
+    }
+
+    pub fn get_tensor_output(&self) -> SuperGraphLink {
+        self.tensor_output
+            .expect("video-to-tensor output link should be configured")
+    }
+}
+
+impl SuperGraphNode for SuperGraphNodeVideoClipToTensor {
+    fn to_any(self) -> SuperGraphAnyNode {
+        SuperGraphAnyNode::VideoClipToTensor(self)
+    }
+
+    fn eval<T: SuperGraphObserver>(
+        &self,
+        _node_path: &[GlobalId],
+        data: &mut SuperGraphData,
+        _context: &mut SuperGraphContext<T>,
+    ) -> Result<(), SuperGraphError> {
+        let video_input_link =
+            require_node_link(self.video_input, "VideoClipToTensor", "video_input")?;
+        let tensor_output_link =
+            require_node_link(self.tensor_output, "VideoClipToTensor", "tensor_output")?;
+        let clip =
+            data.video_clips
+                .get(&video_input_link)
+                .ok_or(SuperGraphError::MissingLinkError(format!(
+                    ": missing video clip input link {:?}",
+                    video_input_link
+                )))?;
+        data.tensors
+            .insert(tensor_output_link, clip.frames.clone());
+        Ok(())
+    }
+
+    fn op_kind(&self) -> String {
+        "VideoClipToTensor".to_string()
+    }
+    fn label(&self) -> Option<String> {
+        self.label.clone()
+    }
+
+    fn inputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
+        Box::new(self.video_input.map(|link| link.to_any()).into_iter())
+    }
+
+    fn outputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
+        Box::new(self.tensor_output.map(|link| link.to_any()).into_iter())
+    }
+
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SuperGraphNodeAudioClipToTensor {
     global_id: GlobalId,
     pub label: Option<String>,
@@ -3181,7 +3360,9 @@ pub enum SuperGraphAnyNode {
     F5TextToTensor(SuperGraphNodeF5TextToTensor),
     TensorToImage(SuperGraphNodeTensorToImage),
     TensorToAudioClip(SuperGraphNodeTensorToAudioClip),
+    TensorToVideoClip(SuperGraphNodeTensorToVideoClip),
     AudioClipToTensor(SuperGraphNodeAudioClipToTensor),
+    VideoClipToTensor(SuperGraphNodeVideoClipToTensor),
     AudioClipToMelSpectrogram(SuperGraphNodeAudioClipToMelSpectrogram),
     MilliOpGraph(SuperGraphNodeMilliOpGraph),
     Scan(SuperGraphNodeScan),
@@ -3208,7 +3389,9 @@ macro_rules! delegate {
                 SuperGraphAnyNode::F5TextToTensor(x) => SuperGraphNode::$name(x,$($arg),*),
                 SuperGraphAnyNode::TensorToImage(x) => SuperGraphNode::$name(x,$($arg),*),
                 SuperGraphAnyNode::TensorToAudioClip(x) => SuperGraphNode::$name(x,$($arg),*),
+                SuperGraphAnyNode::TensorToVideoClip(x) => SuperGraphNode::$name(x,$($arg),*),
                 SuperGraphAnyNode::AudioClipToTensor(x) => SuperGraphNode::$name(x,$($arg),*),
+                SuperGraphAnyNode::VideoClipToTensor(x) => SuperGraphNode::$name(x,$($arg),*),
                 SuperGraphAnyNode::AudioClipToMelSpectrogram(x) => SuperGraphNode::$name(x,$($arg),*),
                 SuperGraphAnyNode::MilliOpGraph(x) => SuperGraphNode::$name(x,$($arg),*),
                 SuperGraphAnyNode::Scan(x) => SuperGraphNode::$name(x,$($arg),*),
@@ -3262,7 +3445,9 @@ impl SuperGraphNode for SuperGraphAnyNode {
             SuperGraphAnyNode::F5TextToTensor(node) => node.eval(node_path, data, context),
             SuperGraphAnyNode::TensorToImage(node) => node.eval(node_path, data, context),
             SuperGraphAnyNode::TensorToAudioClip(node) => node.eval(node_path, data, context),
+            SuperGraphAnyNode::TensorToVideoClip(node) => node.eval(node_path, data, context),
             SuperGraphAnyNode::AudioClipToTensor(node) => node.eval(node_path, data, context),
+            SuperGraphAnyNode::VideoClipToTensor(node) => node.eval(node_path, data, context),
             SuperGraphAnyNode::AudioClipToMelSpectrogram(node) => {
                 node.eval(node_path, data, context)
             }
@@ -3314,8 +3499,14 @@ impl SuperGraphNode for SuperGraphAnyNode {
             SuperGraphAnyNode::TensorToAudioClip(node) => {
                 vec![node.tensor_input.map(|x| x.to_any())]
             }
+            SuperGraphAnyNode::TensorToVideoClip(node) => {
+                vec![node.tensor_input.map(|x| x.to_any())]
+            }
             SuperGraphAnyNode::AudioClipToTensor(node) => {
                 vec![node.audio_input.map(|x| x.to_any())]
+            }
+            SuperGraphAnyNode::VideoClipToTensor(node) => {
+                vec![node.video_input.map(|x| x.to_any())]
             }
             SuperGraphAnyNode::AudioClipToMelSpectrogram(node) => {
                 vec![node.audio_input.map(|x| x.to_any())]
@@ -3436,7 +3627,13 @@ impl SuperGraphNode for SuperGraphAnyNode {
             SuperGraphAnyNode::TensorToAudioClip(node) => {
                 vec![node.audio_output.map(|x| x.to_any())]
             }
+            SuperGraphAnyNode::TensorToVideoClip(node) => {
+                vec![node.video_output.map(|x| x.to_any())]
+            }
             SuperGraphAnyNode::AudioClipToTensor(node) => {
+                vec![node.tensor_output.map(|x| x.to_any())]
+            }
+            SuperGraphAnyNode::VideoClipToTensor(node) => {
                 vec![node.tensor_output.map(|x| x.to_any())]
             }
             SuperGraphAnyNode::AudioClipToMelSpectrogram(node) => {
@@ -3624,6 +3821,18 @@ impl SuperGraphNode for SuperGraphAnyNode {
                     1,
                 )),
             },
+            SuperGraphAnyNode::TensorToVideoClip(node) => match slot_index {
+                0 => {
+                    node.tensor_input = set_slot_link(link, SuperGraphLinkKind::Tensor);
+                    Ok(())
+                }
+                _ => Err(NodeSlotEditError::invalid_slot_index(
+                    "TensorToVideoClip".to_string(),
+                    SlotDirection::Input,
+                    slot_index,
+                    1,
+                )),
+            },
             SuperGraphAnyNode::AudioClipToTensor(node) => match slot_index {
                 0 => {
                     node.audio_input = set_slot_link(link, SuperGraphLinkKind::AudioClip);
@@ -3631,6 +3840,18 @@ impl SuperGraphNode for SuperGraphAnyNode {
                 }
                 _ => Err(NodeSlotEditError::invalid_slot_index(
                     "AudioClipToTensor".to_string(),
+                    SlotDirection::Input,
+                    slot_index,
+                    1,
+                )),
+            },
+            SuperGraphAnyNode::VideoClipToTensor(node) => match slot_index {
+                0 => {
+                    node.video_input = set_slot_link(link, SuperGraphLinkKind::VideoClip);
+                    Ok(())
+                }
+                _ => Err(NodeSlotEditError::invalid_slot_index(
+                    "VideoClipToTensor".to_string(),
                     SlotDirection::Input,
                     slot_index,
                     1,
@@ -3978,6 +4199,18 @@ impl SuperGraphNode for SuperGraphAnyNode {
                     1,
                 )),
             },
+            SuperGraphAnyNode::TensorToVideoClip(node) => match slot_index {
+                0 => {
+                    node.video_output = set_slot_link(link, SuperGraphLinkKind::VideoClip);
+                    Ok(())
+                }
+                _ => Err(NodeSlotEditError::invalid_slot_index(
+                    "TensorToVideoClip".to_string(),
+                    SlotDirection::Output,
+                    slot_index,
+                    1,
+                )),
+            },
             SuperGraphAnyNode::AudioClipToTensor(node) => match slot_index {
                 0 => {
                     node.tensor_output = set_slot_link(link, SuperGraphLinkKind::Tensor);
@@ -3985,6 +4218,18 @@ impl SuperGraphNode for SuperGraphAnyNode {
                 }
                 _ => Err(NodeSlotEditError::invalid_slot_index(
                     "AudioClipToTensor".to_string(),
+                    SlotDirection::Output,
+                    slot_index,
+                    1,
+                )),
+            },
+            SuperGraphAnyNode::VideoClipToTensor(node) => match slot_index {
+                0 => {
+                    node.tensor_output = set_slot_link(link, SuperGraphLinkKind::Tensor);
+                    Ok(())
+                }
+                _ => Err(NodeSlotEditError::invalid_slot_index(
+                    "VideoClipToTensor".to_string(),
                     SlotDirection::Output,
                     slot_index,
                     1,

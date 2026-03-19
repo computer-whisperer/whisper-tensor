@@ -2392,6 +2392,14 @@ impl SymbolicGraphMutator {
                 &onnx_node.attribute,
                 rng,
             )?)),
+            "AveragePool" => Some(AnyOperation::AveragePool(
+                ops::AveragePoolOperation::from_onnx(
+                    &input_tensors,
+                    &output_tensors,
+                    &onnx_node.attribute,
+                    rng,
+                )?,
+            )),
             "InstanceNormalization" => Some(AnyOperation::InstanceNormalization(
                 ops::InstanceNormalizationOperation::from_onnx(
                     &input_tensors,

@@ -325,6 +325,10 @@ impl SuperGraphBuilder {
         SuperGraphLink::new(SuperGraphLinkKind::AudioClip, rng)
     }
 
+    pub fn new_video_clip_link(&mut self, rng: &mut impl Rng) -> SuperGraphLink {
+        SuperGraphLink::new(SuperGraphLinkKind::VideoClip, rng)
+    }
+
     pub fn new_multimodal_item_link(&mut self, rng: &mut impl Rng) -> SuperGraphLink {
         SuperGraphLink::new(SuperGraphLinkKind::MultimodalItem, rng)
     }

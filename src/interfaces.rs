@@ -32,6 +32,7 @@ pub enum AnyInterface {
     TextInferenceTokensInLogitOutInterface(TextInferenceTokensInLogitOutInterface),
     MultimodalLanguageInterface(MultimodalLanguageInterface),
     ImageGenerationInterface(ImageGenerationInterface),
+    VideoGenerationInterface(VideoGenerationInterface),
     TextToSpeechInterface(TextToSpeechInterface),
     SpeechToTextInterface(SpeechToTextInterface),
 }
@@ -44,6 +45,7 @@ impl AnyInterface {
             }
             AnyInterface::MultimodalLanguageInterface(_) => "MultimodalLanguage".to_string(),
             AnyInterface::ImageGenerationInterface(_) => "ImageGeneration".to_string(),
+            AnyInterface::VideoGenerationInterface(_) => "VideoGeneration".to_string(),
             AnyInterface::TextToSpeechInterface(_) => "TextToSpeech".to_string(),
             AnyInterface::SpeechToTextInterface(_) => "SpeechToText".to_string(),
         }
@@ -54,6 +56,7 @@ impl AnyInterface {
             AnyInterface::TextInferenceTokensInLogitOutInterface(x) => &x.super_graph,
             AnyInterface::MultimodalLanguageInterface(x) => &x.super_graph,
             AnyInterface::ImageGenerationInterface(x) => &x.super_graph,
+            AnyInterface::VideoGenerationInterface(x) => &x.super_graph,
             AnyInterface::TextToSpeechInterface(x) => &x.super_graph,
             AnyInterface::SpeechToTextInterface(x) => &x.super_graph,
         }
@@ -344,6 +347,33 @@ pub struct ImageGenerationInterface {
     pub scheduler: SchedulerType,
     /// Number of latent channels (4 for SD/SDXL, 16 for Flux).
     pub latent_channels: usize,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VideoGenerationInterface {
+    pub super_graph: SuperGraph,
+    // Prompt inputs
+    pub positive_prompt_input: SuperGraphLink,
+    pub negative_prompt_input: Option<SuperGraphLink>,
+    // Latent / scheduler inputs
+    pub initial_latent_input: SuperGraphLink,
+    pub timesteps_input: SuperGraphLink,
+    pub dt_input: SuperGraphLink,
+    pub sigmas_input: SuperGraphLink,
+    pub iteration_count_input: SuperGraphLink,
+    pub guidance_scale_input: Option<SuperGraphLink>,
+    // Model weight maps (in order matching loader's model_ids)
+    pub model_weights: Vec<SuperGraphLink>,
+    // Output
+    pub video_output: SuperGraphLink,
+    /// Scheduler type for the denoising loop.
+    pub scheduler: SchedulerType,
+    /// Number of latent channels.
+    pub latent_channels: usize,
+    /// Frames per second for the output video.
+    pub fps: f32,
+    /// Number of output frames.
+    pub num_frames: usize,
 }
 
 /// Helper: build a MilliOpGraph node that casts a tensor to a target dtype.

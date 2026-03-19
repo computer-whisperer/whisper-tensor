@@ -483,7 +483,7 @@ macro_rules! do_tests {
         do_test!($runner_fn, $runner_name, test_attention_4d_with_qk_matmul_softmax);
         do_test!($runner_fn, $runner_name, test_attention_4d_with_qk_matmul_softmax_expanded);*/
 
-      /*  do_test!($runner_fn, $runner_name, test_averagepool_1d_default);
+        do_test!($runner_fn, $runner_name, test_averagepool_1d_default);
         do_test!($runner_fn, $runner_name, test_averagepool_2d_ceil);
         do_test!($runner_fn, $runner_name, test_averagepool_2d_ceil_last_window_starts_on_pad);
         do_test!($runner_fn, $runner_name, test_averagepool_2d_default);
@@ -502,7 +502,7 @@ macro_rules! do_tests {
         do_test!($runner_fn, $runner_name, test_averagepool_3d_dilations_large_count_include_pad_is_0_ceil_mode_is_True);
         do_test!($runner_fn, $runner_name, test_averagepool_3d_dilations_large_count_include_pad_is_1_ceil_mode_is_False);
         do_test!($runner_fn, $runner_name, test_averagepool_3d_dilations_large_count_include_pad_is_1_ceil_mode_is_True);
-        do_test!($runner_fn, $runner_name, test_averagepool_3d_dilations_small);*/
+        do_test!($runner_fn, $runner_name, test_averagepool_3d_dilations_small);
 
         do_test!($runner_fn, $runner_name, test_basic_conv_without_padding);
         do_test!($runner_fn, $runner_name, test_basic_conv_with_padding);

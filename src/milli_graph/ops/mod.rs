@@ -11,6 +11,7 @@ mod expand;
 mod gather;
 mod nonzero;
 mod pad;
+
 mod random_normal_like;
 mod range;
 mod reduce_max;
@@ -44,6 +45,7 @@ pub use expand::*;
 pub use gather::*;
 pub use nonzero::*;
 pub use pad::*;
+
 pub use random_normal_like::*;
 pub use range::*;
 pub use reduce_max::*;
@@ -417,6 +419,7 @@ pub enum AnyMilliOp {
     ConvWeightGrad(ConvWeightGrad),
     ConvBiasGrad(ConvBiasGrad),
     Pad(Pad),
+
     TopK(TopK),
     RandomNormalLike(RandomNormalLike),
 }
@@ -492,6 +495,7 @@ impl AnyMilliOp {
             AnyMilliOp::ConvWeightGrad(x) => x.label.clone(),
             AnyMilliOp::ConvBiasGrad(x) => x.label.clone(),
             AnyMilliOp::Pad(x) => x.label.clone(),
+
             AnyMilliOp::TopK(x) => x.label.clone(),
             AnyMilliOp::RandomNormalLike(x) => x.label.clone(),
         }
@@ -537,6 +541,7 @@ impl AnyMilliOp {
             AnyMilliOp::ConvWeightGrad(x) => x.remap_tensors(map, rng),
             AnyMilliOp::ConvBiasGrad(x) => x.remap_tensors(map, rng),
             AnyMilliOp::Pad(x) => x.remap_tensors(map, rng),
+
             AnyMilliOp::TopK(x) => x.remap_tensors(map, rng),
             AnyMilliOp::RandomNormalLike(x) => x.remap_tensors(map, rng),
         }
@@ -585,6 +590,7 @@ macro_rules! delegate {
                 AnyMilliOp::ConvWeightGrad(x) => x.$name($($arg),*),
                 AnyMilliOp::ConvBiasGrad(x) => x.$name($($arg),*),
                 AnyMilliOp::Pad(x) => x.$name($($arg),*),
+
                 AnyMilliOp::TopK(x) => x.$name($($arg),*),
                 AnyMilliOp::RandomNormalLike(x) => x.$name($($arg),*),
             }

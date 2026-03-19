@@ -11,6 +11,7 @@ pub enum SuperGraphAtomicLinkKind {
     Hash,
     Image,
     AudioClip,
+    VideoClip,
     MultimodalItem,
 }
 
@@ -23,6 +24,7 @@ pub enum SuperGraphLinkKind {
     Hash,
     Image,
     AudioClip,
+    VideoClip,
     MultimodalItem,
     List(SuperGraphAtomicLinkKind),
 }
@@ -48,6 +50,7 @@ impl SuperGraphLinkKind {
             SuperGraphLinkKind::Hash => "Hash",
             SuperGraphLinkKind::Image => "Image",
             SuperGraphLinkKind::AudioClip => "AudioClip",
+            SuperGraphLinkKind::VideoClip => "VideoClip",
             SuperGraphLinkKind::MultimodalItem => "MultimodalItem",
             SuperGraphLinkKind::List(SuperGraphAtomicLinkKind::Tensor) => "TensorList",
             SuperGraphLinkKind::List(SuperGraphAtomicLinkKind::String) => "StringList",
@@ -56,6 +59,7 @@ impl SuperGraphLinkKind {
             SuperGraphLinkKind::List(SuperGraphAtomicLinkKind::Hash) => "HashList",
             SuperGraphLinkKind::List(SuperGraphAtomicLinkKind::Image) => "ImageList",
             SuperGraphLinkKind::List(SuperGraphAtomicLinkKind::AudioClip) => "AudioClipList",
+            SuperGraphLinkKind::List(SuperGraphAtomicLinkKind::VideoClip) => "VideoClipList",
             SuperGraphLinkKind::List(SuperGraphAtomicLinkKind::MultimodalItem) => {
                 "MultimodalItemList"
             }
@@ -91,6 +95,10 @@ impl SuperGraphLink {
 
     pub fn audio_clip(global_id: GlobalId) -> Self {
         Self::with_global_id(global_id, SuperGraphLinkKind::AudioClip)
+    }
+
+    pub fn video_clip(global_id: GlobalId) -> Self {
+        Self::with_global_id(global_id, SuperGraphLinkKind::VideoClip)
     }
 
     pub fn multimodal_item(global_id: GlobalId) -> Self {

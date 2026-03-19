@@ -42,10 +42,23 @@ impl SuperGraphAudioClip {
 }
 
 #[derive(Clone, Debug)]
+pub struct SuperGraphVideoClip {
+    pub frames: NumericTensor<DynRank>,
+    pub fps: f32,
+}
+
+impl SuperGraphVideoClip {
+    pub fn new(frames: NumericTensor<DynRank>, fps: f32) -> Self {
+        Self { frames, fps }
+    }
+}
+
+#[derive(Clone, Debug)]
 pub enum SuperGraphMultimodalItem {
     Text(String),
     Image(SuperGraphImage),
     AudioClip(SuperGraphAudioClip),
+    VideoClip(SuperGraphVideoClip),
 }
 
 #[derive(Clone)]
@@ -57,6 +70,7 @@ pub enum SuperGraphListValue<'models> {
     Hash(Vec<SuperGraphHash>),
     Image(Vec<SuperGraphImage>),
     AudioClip(Vec<SuperGraphAudioClip>),
+    VideoClip(Vec<SuperGraphVideoClip>),
     MultimodalItem(Vec<SuperGraphMultimodalItem>),
 }
 
@@ -70,6 +84,7 @@ impl<'models> SuperGraphListValue<'models> {
             SuperGraphListValue::Hash(_) => SuperGraphAtomicLinkKind::Hash,
             SuperGraphListValue::Image(_) => SuperGraphAtomicLinkKind::Image,
             SuperGraphListValue::AudioClip(_) => SuperGraphAtomicLinkKind::AudioClip,
+            SuperGraphListValue::VideoClip(_) => SuperGraphAtomicLinkKind::VideoClip,
             SuperGraphListValue::MultimodalItem(_) => SuperGraphAtomicLinkKind::MultimodalItem,
         }
     }
@@ -84,6 +99,7 @@ pub struct SuperGraphData<'models> {
     pub hashes: HashMap<SuperGraphLink, SuperGraphHash>,
     pub images: HashMap<SuperGraphLink, SuperGraphImage>,
     pub audio_clips: HashMap<SuperGraphLink, SuperGraphAudioClip>,
+    pub video_clips: HashMap<SuperGraphLink, SuperGraphVideoClip>,
     pub multimodal_items: HashMap<SuperGraphLink, SuperGraphMultimodalItem>,
     pub lists: HashMap<SuperGraphLink, SuperGraphListValue<'models>>,
 }
@@ -98,6 +114,7 @@ impl<'models> SuperGraphData<'models> {
             hashes: HashMap::new(),
             images: HashMap::new(),
             audio_clips: HashMap::new(),
+            video_clips: HashMap::new(),
             multimodal_items: HashMap::new(),
             lists: HashMap::new(),
         }
@@ -112,6 +129,7 @@ impl<'models> SuperGraphData<'models> {
             SuperGraphLinkKind::Hash => self.hashes.contains_key(link),
             SuperGraphLinkKind::Image => self.images.contains_key(link),
             SuperGraphLinkKind::AudioClip => self.audio_clips.contains_key(link),
+            SuperGraphLinkKind::VideoClip => self.video_clips.contains_key(link),
             SuperGraphLinkKind::MultimodalItem => self.multimodal_items.contains_key(link),
             SuperGraphLinkKind::List(_) => self.lists.contains_key(link),
         }
@@ -204,6 +222,17 @@ impl<'models> SuperGraphData<'models> {
                         )))?;
                 self.audio_clips.insert(output, value.clone());
             }
+            SuperGraphLinkKind::VideoClip => {
+                let value =
+                    source
+                        .video_clips
+                        .get(&input)
+                        .ok_or(SuperGraphError::MissingLinkError(format!(
+                            ": missing video clip link {:?}",
+                            input
+                        )))?;
+                self.video_clips.insert(output, value.clone());
+            }
             SuperGraphLinkKind::MultimodalItem => {
                 let value = source.multimodal_items.get(&input).ok_or(
                     SuperGraphError::MissingLinkError(format!(
@@ -269,6 +298,8 @@ impl<'models> SuperGraphData<'models> {
             .extend(other.images.iter().map(|(a, b)| (*a, b.clone())));
         self.audio_clips
             .extend(other.audio_clips.iter().map(|(a, b)| (*a, b.clone())));
+        self.video_clips
+            .extend(other.video_clips.iter().map(|(a, b)| (*a, b.clone())));
         self.multimodal_items
             .extend(other.multimodal_items.iter().map(|(a, b)| (*a, b.clone())));
         self.lists

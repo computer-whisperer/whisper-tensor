@@ -9,6 +9,7 @@ mod gather_elements;
 mod lstm;
 mod misc;
 mod normalization;
+mod pool;
 mod quant_matmul;
 mod reduce;
 mod reshape;
@@ -40,6 +41,7 @@ pub use misc::{
     ClipOperation, ExpandOperation, IfOperation, PadOperation, RandomNormalLikeOperation,
     RangeOperation, WhereOperation,
 };
+pub use pool::AveragePoolOperation;
 pub use normalization::{
     GroupNormalizationOperation, InstanceNormalizationOperation, LayerNormalizationOperation,
     LpNormalizationOperation, RMSNormalizationOperation,
@@ -260,6 +262,7 @@ pub enum AnyOperation {
     Modulo(ModuloOperation),
     Expand(ExpandOperation),
     Conv(ConvOperation),
+    AveragePool(AveragePoolOperation),
     InstanceNormalization(InstanceNormalizationOperation),
     Resize(ResizeOperation),
     Pad(PadOperation),
@@ -328,6 +331,7 @@ macro_rules! delegate {
             AnyOperation::Modulo(x) => x.$name($($arg),*),
             AnyOperation::Expand(x) => x.$name($($arg),*),
             AnyOperation::Conv(x) => x.$name($($arg),*),
+            AnyOperation::AveragePool(x) => x.$name($($arg),*),
             AnyOperation::InstanceNormalization(x) => x.$name($($arg),*),
             AnyOperation::Resize(x) => x.$name($($arg),*),
             AnyOperation::Pad(x) => x.$name($($arg),*),
