@@ -3603,6 +3603,32 @@ mod tests {
     // =========================================================================
 
     #[test]
+    fn test_reduce_mean_gpt2_scale() {
+        // ReduceMean on [4, 768] axis=-1 with large values — GPT-2 LayerNorm scale.
+        // This should be bit-perfect with sequential accumulation.
+        check_integrity(
+            |g, rng| {
+                use crate::backends::ndarray_backend::NDArrayNumericTensor;
+                use ndarray::{ArcArray, IxDyn};
+                let a = g.add_input(rng);
+                let axes_tensor = NDArrayNumericTensor::I64(
+                    ArcArray::from_shape_vec(IxDyn(&[1]), vec![-1i64]).unwrap(),
+                );
+                let axes = crate::milli_graph::ops::Constant::push_new(g, axes_tensor, rng);
+                let b = crate::milli_graph::ops::ReduceMean::push_new(
+                    g, a, Some(axes), true, false, rng,
+                );
+                (vec![a], vec![b])
+            },
+            vec![NumericTensor::from_vec_shape(
+                (0..3072).map(|i| ((i as f32) * 7.3 - 1500.0).sin() * 5000.0).collect(),
+                vec![4, 768],
+            )
+            .unwrap()],
+        );
+    }
+
+    #[test]
     fn test_reduce_mean_large_axis() {
         // ReduceMean on [2, 4, 64] axis -1 → [2, 4, 1] (GPT-2 layernorm scale)
         check_integrity(

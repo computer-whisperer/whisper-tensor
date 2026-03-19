@@ -342,12 +342,13 @@ fn main() {
         let mut skipped_no_milli = 0u64;
         let mut skipped_segmented = 0u64;
         let mut skipped_large = 0u64;
+        // For segmented tensors, we need to request each underlying group.
+        // Track which atom ranges belong to which tensor for post-eval assembly.
+        let mut seg_tensor_ids: Vec<GlobalId> = Vec::new();
+        let mut seg_ranges: Vec<Vec<AtomRange>> = Vec::new();
+
         for (&tid, tam) in &result.tensor_map {
             if tam.count == 0 {
-                continue;
-            }
-            if !tam.segments.is_empty() {
-                skipped_segmented += 1;
                 continue;
             }
             if intermediates.get(&tid).is_none() {
@@ -363,13 +364,50 @@ fn main() {
                 }
                 continue;
             }
-            check_ids.push(tid);
-            check_ranges.push(AtomRange {
-                base: tam.base_id,
-                count: tam.count,
-                dtype: tam.dtype,
-            });
+            if tam.segments.is_empty() {
+                check_ids.push(tid);
+                check_ranges.push(AtomRange {
+                    base: tam.base_id,
+                    count: tam.count,
+                    dtype: tam.dtype,
+                });
+            } else {
+                // Segmented tensor: collect all groups/input ranges that contain its atoms.
+                let mut ranges_for_this = Vec::new();
+                let mut seen = std::collections::HashSet::new();
+                for i in 0..tam.count {
+                    let atom = tam.atom_id_for_element(i);
+                    if let Some(gi) = result.graph.find_group_idx(atom) {
+                        if seen.insert(("g", gi)) {
+                            let g = &result.graph.groups()[gi];
+                            ranges_for_this.push(AtomRange {
+                                base: g.base_id,
+                                count: g.count,
+                                dtype: g.output_dtype,
+                            });
+                        }
+                    } else if let Some((ti, _)) = result.graph.find_input_idx(atom) {
+                        if seen.insert(("i", ti)) {
+                            let it = &result.graph.input_tensors()[ti];
+                            ranges_for_this.push(AtomRange {
+                                base: it.base_id,
+                                count: it.count,
+                                dtype: it.dtype,
+                            });
+                        }
+                    }
+                }
+                seg_tensor_ids.push(tid);
+                seg_ranges.push(ranges_for_this);
+            }
         }
+
+        // Flatten segmented ranges into check_ranges too.
+        let seg_range_start = check_ranges.len();
+        for ranges in &seg_ranges {
+            check_ranges.extend(ranges.iter().cloned());
+        }
+        skipped_segmented = 0; // We're checking them now
         println!(
             "  Checking {} intermediate tensors (skipped: {} no-milli, {} segmented, {} large)",
             check_ids.len(), skipped_no_milli, skipped_segmented, skipped_large
@@ -383,24 +421,10 @@ fn main() {
             t_check.elapsed().as_secs_f64()
         );
 
-        // Compare each intermediate.
-        let mut first_bad: Option<(GlobalId, String, f64)> = None;
-        let mut num_perfect = 0u64;
-        let mut num_close = 0u64;
-        let mut num_bad = 0u64;
-        let mut error_map: HashMap<GlobalId, f64> = HashMap::new();
-
-        for (idx, &tid) in check_ids.iter().enumerate() {
-            let tam = &result.tensor_map[&tid];
-            let milli_tensor = &intermediates[&tid];
-
-            let Ok(f32_t) = milli_tensor.cast(DType::F32, &mut backend) else { continue };
-            let flat = f32_t.flatten().unwrap();
-            let nd = flat.to_ndarray().unwrap();
-            let milli_vals: Vec<f32> = nd.try_into().unwrap();
-
-            let nano_tensor = &check_results[idx];
-            let nano_f32: Vec<f32> = match nano_tensor {
+        // Build atom_vals from ALL check results (simple + segmented ranges).
+        let mut atom_vals: HashMap<u64, f32> = HashMap::new();
+        for (range, tensor) in check_ranges.iter().zip(check_results.iter()) {
+            let vals: Vec<f32> = match tensor {
                 NDArrayNumericTensor::F32(a) => a.iter().copied().collect(),
                 other => {
                     let cast = NumericTensor::from(other.clone())
@@ -411,16 +435,52 @@ fn main() {
                     nd.try_into().unwrap()
                 }
             };
-
-            if milli_vals.len() != nano_f32.len() {
-                continue;
+            for (i, &v) in vals.iter().enumerate() {
+                atom_vals.insert(range.base.0 + i as u64, v);
             }
+        }
 
+        // Compare each intermediate (simple + segmented).
+        let mut first_bad: Option<(GlobalId, String, f64)> = None;
+        let mut num_perfect = 0u64;
+        let mut num_close = 0u64;
+        let mut num_bad = 0u64;
+        let mut error_map: HashMap<GlobalId, f64> = HashMap::new();
+
+        // Helper: compare a tensor using atom_vals lookup.
+        let compare_tensor = |tid: GlobalId,
+                              tam: &whisper_tensor::nano_graph::lower::TensorAtomMapInfo,
+                              milli_vals: &[f32],
+                              atom_vals: &HashMap<u64, f32>|
+         -> f64 {
             let mut local_max = 0.0f64;
-            for (m, n) in milli_vals.iter().zip(nano_f32.iter()) {
-                let diff = (m - n).abs() as f64;
-                local_max = local_max.max(diff);
+            for (i, &m) in milli_vals.iter().enumerate() {
+                let atom = tam.atom_id_for_element(i as u64);
+                if let Some(&n) = atom_vals.get(&atom.0) {
+                    let diff = (m - n).abs() as f64;
+                    local_max = local_max.max(diff);
+                }
             }
+            local_max
+        };
+
+        // Compare simple (non-segmented) tensors.
+        let all_check_ids: Vec<GlobalId> = check_ids
+            .iter()
+            .copied()
+            .chain(seg_tensor_ids.iter().copied())
+            .collect();
+
+        for &tid in &all_check_ids {
+            let tam = &result.tensor_map[&tid];
+            let milli_tensor = &intermediates[&tid];
+
+            let Ok(f32_t) = milli_tensor.cast(DType::F32, &mut backend) else { continue };
+            let flat = f32_t.flatten().unwrap();
+            let nd = flat.to_ndarray().unwrap();
+            let milli_vals: Vec<f32> = nd.try_into().unwrap();
+
+            let local_max = compare_tensor(tid, tam, &milli_vals, &atom_vals);
 
             error_map.insert(tid, local_max);
             if local_max == 0.0 {
@@ -442,17 +502,12 @@ fn main() {
                     // Check whether each input is itself bad.
                     let mut input_status = Vec::new();
                     for (inp_id, inp_shape) in &input_info {
-                        let status = if let Some(tam) = result.tensor_map.get(inp_id) {
-                            if tam.segments.is_empty() && tam.count <= 1_000_000 {
-                                // We checked this tensor — see if it's in error_map.
-                                error_map.get(inp_id).map(|e| {
-                                    if *e == 0.0 { "perfect".to_string() }
-                                    else if *e < 1e-3 { format!("close({:.1e})", e) }
-                                    else { format!("BAD({:.1e})", e) }
-                                }).unwrap_or_else(|| "not-checked".to_string())
-                            } else {
-                                format!("skipped(count={},segs={})", tam.count, tam.segments.len())
-                            }
+                        let status = if let Some(_tam) = result.tensor_map.get(inp_id) {
+                            error_map.get(inp_id).map(|e| {
+                                if *e == 0.0 { "perfect".to_string() }
+                                else if *e < 1e-3 { format!("close({:.1e})", e) }
+                                else { format!("BAD({:.1e})", e) }
+                            }).unwrap_or_else(|| "not-checked".to_string())
                         } else {
                             "no-tensor-map".to_string()
                         };
@@ -465,14 +520,17 @@ fn main() {
                     for (inp_id, inp_shape, status) in &input_status {
                         println!("    input {:?} {:?}: {}", inp_id, inp_shape, status);
                     }
-                    if num_bad == 1 {
-                        // Print first few mismatched elements for the first bad tensor.
+                    if num_bad <= 3 {
+                        // Print first few mismatched elements.
                         let mut shown = 0;
-                        for (i, (m, n)) in milli_vals.iter().zip(nano_f32.iter()).enumerate() {
-                            let diff = (m - n).abs();
-                            if diff > 1e-3 && shown < 5 {
-                                println!("    elem {}: milli={:.6} nano={:.6} diff={:.6}", i, m, n, diff);
-                                shown += 1;
+                        for (i, &m) in milli_vals.iter().enumerate() {
+                            let atom = tam.atom_id_for_element(i as u64);
+                            if let Some(&n) = atom_vals.get(&atom.0) {
+                                let diff = (m - n).abs();
+                                if diff > 1e-3 && shown < 5 {
+                                    println!("    elem {}: milli={:.6} nano={:.6} diff={:.6}", i, m, n, diff);
+                                    shown += 1;
+                                }
                             }
                         }
                     }

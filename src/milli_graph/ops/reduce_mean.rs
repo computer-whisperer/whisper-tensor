@@ -147,21 +147,20 @@ impl ReduceMean {
             return; // ReduceSum failed, already boundaried.
         };
 
-        // Create literal for 1/extent.
-        let recip = 1.0 / extent as f64;
-        let lit_id = ctx.nano.push_atom(
+        // Divide by extent (not multiply by reciprocal — they differ in f32 rounding).
+        let extent_lit = ctx.nano.push_atom(
             compute_dt,
-            ScalarOp::Literal(NumericScalar::F32(recip as f32)),
+            ScalarOp::Literal(NumericScalar::F32(extent as f32)),
             vec![],
             vec![],
         );
 
-        // Multiply by 1/extent in compute_dt, then cast to output dtype.
+        // Divide sum by extent in compute_dt, then cast to output dtype.
         let base_id = ctx.nano.push_group(
             sum_map.count,
             out_dt,
             ScalarOp::Binary {
-                op: ScalarBinOp::Mul,
+                op: ScalarBinOp::Div,
                 compute_dtype: compute_dt,
             },
             sum_map.sym_dims.clone(),
@@ -170,7 +169,7 @@ impl ReduceMean {
                     base: sum_map.base_id,
                     stride: 1,
                 },
-                InputRef::Broadcast(lit_id),
+                InputRef::Broadcast(extent_lit),
             ],
         );
 
