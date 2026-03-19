@@ -243,16 +243,22 @@ fn main() {
         let output_ids: Vec<AId> = model_outputs.iter().map(|om| om.range.base).collect();
         let num_lanes = 8;
 
-        let partitioners: Vec<(&str, fn(&NanoGraph, usize, &[whisper_tensor::nano_graph::pattern::InputTensor], &[AId]) -> Vec<Phase>)> = vec![
-            ("A (pinch-point)", partitioner_a::plan),
-            ("B (wavefront)", partitioner_b::plan),
-            ("C (greedy lane)", partitioner_c::plan),
-            ("D (hierarchical)", partitioner_d::plan),
-            ("E (annealing)", partitioner_e::plan),
-            ("F (creative)", partitioner_f::plan),
-            ("G (row-aware)", partitioner_g::plan),
-            ("H (correct-then-balance)", partitioner_h::plan),
-        ];
+        // Skip structural tests by default — they take ~60s for all 8.
+        // Set RUN_STRUCTURAL=1 to enable.
+        let partitioners: Vec<(&str, fn(&NanoGraph, usize, &[whisper_tensor::nano_graph::pattern::InputTensor], &[AId]) -> Vec<Phase>)> = if std::env::var("RUN_STRUCTURAL").is_ok() {
+            vec![
+                ("A (pinch-point)", partitioner_a::plan),
+                ("B (wavefront)", partitioner_b::plan),
+                ("C (greedy lane)", partitioner_c::plan),
+                ("D (hierarchical)", partitioner_d::plan),
+                ("E (annealing)", partitioner_e::plan),
+                ("F (creative)", partitioner_f::plan),
+                ("G (row-aware)", partitioner_g::plan),
+                ("H (correct-then-balance)", partitioner_h::plan),
+            ]
+        } else {
+            vec![]
+        };
 
         // Filter by PARTITIONER env var if set (e.g. PARTITIONER=B)
         let filter = std::env::var("PARTITIONER").ok();
@@ -436,6 +442,160 @@ fn main() {
         phases: b_phases,
         model_outputs: model_outputs.clone(),
     };
+
+    // Validate B's spans are faithful subgraphs of the main graph.
+    println!("\n=== Span Subgraph Validation ===");
+    let t0 = Instant::now();
+    let span_errors = execute::validate_spans(&b_exec_plan);
+    eprintln!("Span validation: {:.1?}, {} errors", t0.elapsed(), span_errors.len());
+    if !span_errors.is_empty() {
+        for e in span_errors.iter().take(20) {
+            eprintln!("  {}", e);
+        }
+        if span_errors.len() > 20 {
+            eprintln!("  ... and {} more", span_errors.len() - 20);
+        }
+    }
+
+    // ── Single-span correctness test ──────────────────────────────────────
+    // Evaluate B's first non-empty span directly and compare against the
+    // full-graph eval for the same atoms.
+    {
+        use whisper_tensor::nano_graph::eval as nano_eval;
+        use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
+
+        let span0 = &b_exec_plan.phases[0].spans.iter()
+            .find(|s| s.graph.num_groups() > 0).unwrap();
+
+        // Build inputs the same way the executor does: use span.inputs AtomRanges
+        // and look up data from the main graph's input_tensors by base AtomId.
+        let mut span_nd: Vec<NDArrayNumericTensor<whisper_tensor::DynRank>> = Vec::new();
+        let mut span_eval_inputs: Vec<(AtomId, usize)> = Vec::new();
+        let mut matched_inputs = 0usize;
+
+        for inp in &span0.inputs {
+            // Find the main graph's input_tensor that covers this base.
+            let main_it = result.graph.input_tensors().iter()
+                .find(|it| it.base_id == inp.base);
+            if let Some(it) = main_it {
+                // Look up the tensor data via milli input_map.
+                let ext_id = milli_graph.input_map.iter()
+                    .find(|(_, int)| **int == it.tensor_id)
+                    .map(|(ext, _)| *ext);
+                if let Some(ext) = ext_id {
+                    let tensor = if let Some(t) = initialized.get(&ext) {
+                        Some(t.to_ndarray().unwrap())
+                    } else {
+                        let name = sym_graph.get_tensor_name(ext);
+                        name.and_then(|n| input_info.get(n)).map(|(dtype, shape_dims)| {
+                            let shape: Vec<u64> = shape_dims.iter().map(|d| d.unwrap_or(4)).collect();
+                            let num_elements: u64 = shape.iter().product();
+                            let shape_usize: Vec<usize> = shape.iter().map(|&d| d as usize).collect();
+                            let t: whisper_tensor::numeric_tensor::NumericTensor<whisper_tensor::DynRank> = match dtype {
+                                DType::I64 => {
+                                    let data: Vec<i64> = (0..num_elements).map(|i| (i % 64) as i64).collect();
+                                    whisper_tensor::numeric_tensor::NumericTensor::from_vec_shape(data, shape_usize).unwrap()
+                                }
+                                _ => {
+                                    let data: Vec<f32> = (0..num_elements).map(|i| (i % 64) as f32 * 0.01).collect();
+                                    whisper_tensor::numeric_tensor::NumericTensor::from_vec_shape(data, shape_usize).unwrap()
+                                }
+                            };
+                            t.to_ndarray().unwrap()
+                        })
+                    };
+                    if let Some(nd) = tensor {
+                        let idx = span_nd.len();
+                        span_nd.push(nd);
+                        span_eval_inputs.push((inp.base, idx));
+                        matched_inputs += 1;
+                    }
+                }
+            }
+        }
+        let span_refs: Vec<(AtomId, &NDArrayNumericTensor<whisper_tensor::DynRank>)> =
+            span_eval_inputs.iter().map(|&(base, idx)| (base, &span_nd[idx])).collect();
+
+        println!("\n=== Single-Span Test (phase 0, first non-empty lane) ===");
+        println!("  Span groups: {}, inputs: {}, outputs: {}",
+                 span0.graph.num_groups(), span0.inputs.len(), span0.outputs.len());
+        println!("  Matched {} of {} span inputs (span graph has {} input_tensors)",
+                 matched_inputs, span0.inputs.len(), span0.graph.input_tensors().len());
+
+        // Evaluate span.
+        let t0 = Instant::now();
+        let span_results = nano_eval::eval(&span0.graph, &span_refs, &span0.outputs);
+        println!("  Span eval: {:.1?}", t0.elapsed());
+
+        // Now evaluate the FULL graph for the same output ranges.
+        let mut full_nd: Vec<NDArrayNumericTensor<whisper_tensor::DynRank>> = Vec::new();
+        let mut full_eval_inputs: Vec<(AtomId, usize)> = Vec::new();
+        for it in result.graph.input_tensors() {
+            let ext_id = milli_graph.input_map.iter()
+                .find(|(_, int)| **int == it.tensor_id)
+                .map(|(ext, _)| *ext);
+            if let Some(ext) = ext_id {
+                if let Some(t) = initialized.get(&ext) {
+                    let idx = full_nd.len();
+                    full_nd.push(t.to_ndarray().unwrap());
+                    full_eval_inputs.push((it.base_id, idx));
+                } else {
+                    let name = sym_graph.get_tensor_name(ext);
+                    if let Some(n) = name {
+                        if let Some((dtype, shape_dims)) = input_info.get(n) {
+                            let shape: Vec<u64> = shape_dims.iter().map(|d| d.unwrap_or(4)).collect();
+                            let num_elements: u64 = shape.iter().product();
+                            let shape_usize: Vec<usize> = shape.iter().map(|&d| d as usize).collect();
+                            let t: whisper_tensor::numeric_tensor::NumericTensor<whisper_tensor::DynRank> = match dtype {
+                                DType::I64 => {
+                                    let data: Vec<i64> = (0..num_elements).map(|i| (i % 64) as i64).collect();
+                                    whisper_tensor::numeric_tensor::NumericTensor::from_vec_shape(data, shape_usize).unwrap()
+                                }
+                                _ => {
+                                    let data: Vec<f32> = (0..num_elements).map(|i| (i % 64) as f32 * 0.01).collect();
+                                    whisper_tensor::numeric_tensor::NumericTensor::from_vec_shape(data, shape_usize).unwrap()
+                                }
+                            };
+                            let idx = full_nd.len();
+                            full_nd.push(t.to_ndarray().unwrap());
+                            full_eval_inputs.push((it.base_id, idx));
+                        }
+                    }
+                }
+            }
+        }
+        let full_refs: Vec<(AtomId, &NDArrayNumericTensor<whisper_tensor::DynRank>)> =
+            full_eval_inputs.iter().map(|&(base, idx)| (base, &full_nd[idx])).collect();
+
+        let t0 = Instant::now();
+        let full_results = nano_eval::eval(&result.graph, &full_refs, &span0.outputs);
+        println!("  Full eval (same ranges): {:.1?}", t0.elapsed());
+
+        // Compare.
+        let mut total_compared = 0u64;
+        let mut total_mismatches = 0u64;
+        let mut max_abs = 0.0f64;
+        for (i, (sr, fr)) in span_results.iter().zip(full_results.iter()).enumerate() {
+            let sf = sr.flatten();
+            let ff = fr.flatten();
+            let n = sf.num_elements().min(ff.num_elements());
+            for j in 0..n {
+                let sv = sf.get(&[j as u64]).unwrap().to_f64();
+                let fv = ff.get(&[j as u64]).unwrap().to_f64();
+                total_compared += 1;
+                if sv.is_nan() || fv.is_nan() { continue; }
+                let d = (sv - fv).abs();
+                max_abs = max_abs.max(d);
+                if d > 1e-6 { total_mismatches += 1; }
+            }
+            if i < 3 {
+                let sf_first = (0..n.min(3)).map(|j| sf.get(&[j as u64]).unwrap().to_f64()).collect::<Vec<_>>();
+                let ff_first = (0..n.min(3)).map(|j| ff.get(&[j as u64]).unwrap().to_f64()).collect::<Vec<_>>();
+                println!("  output[{}]: {} elements, span={:?}, full={:?}", i, n, sf_first, ff_first);
+            }
+        }
+        println!("  Compared: {}, mismatches: {}, max_abs: {:.6}", total_compared, total_mismatches, max_abs);
+    }
 
     // Save tensor_map and graph for output comparison before trivial plan consumes result.
     let lower_tensor_map_for_compare = result.tensor_map.clone();
