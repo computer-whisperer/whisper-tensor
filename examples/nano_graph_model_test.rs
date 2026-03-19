@@ -99,10 +99,13 @@ fn main() {
                 NumericTensor::from_vec_shape(data, shape_usize).unwrap()
             }
             _ => {
-                // Fallback: fill with f32 zeros, then cast
+                // Fallback: fill with f32 zeros, then cast to expected dtype
                 let data: Vec<f32> = vec![0.0; num_elements as usize];
                 let shape_usize: Vec<usize> = shape.iter().map(|&d| d as usize).collect();
-                NumericTensor::from_vec_shape(data, shape_usize).unwrap()
+                let t: NumericTensor<DynRank> =
+                    NumericTensor::from_vec_shape(data, shape_usize).unwrap();
+                let mut be = whisper_tensor::backends::eval_backend::EvalBackend::NDArray;
+                t.cast(*dtype, &mut be).unwrap()
             }
         };
 
