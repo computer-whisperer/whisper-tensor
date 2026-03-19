@@ -80,6 +80,7 @@ pub struct ExecutionPlan {
 /// shapes) and the NanoGraph world (anonymous atom IDs). The executor
 /// uses this to load weight data into the right atom ranges and to
 /// extract output tensors from atom ranges after execution.
+#[derive(Clone)]
 pub struct TensorMapping {
     /// Atom range for this tensor's data.
     pub range: AtomRange,
@@ -102,6 +103,7 @@ pub enum TensorKind {
 }
 
 /// A model output to return to the caller after execution.
+#[derive(Clone)]
 pub struct OutputMapping {
     pub tensor_id: GlobalId,
     pub range: AtomRange,

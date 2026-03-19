@@ -62,26 +62,46 @@ fn main() {
 
     let mut all_infos: HashMap<GlobalId, TensorInfo> = HashMap::new();
 
-    // User inputs: fill unknown dims with concrete values.
+    // User inputs: build concrete tensors and insert as full-data TensorInfo.
+    // The lowering's infer_all needs data for user inputs so that downstream
+    // ops (Gather/embedding) can propagate shapes correctly.
     for (name, (dtype, shape_dims)) in &input_info {
         let shape: Vec<u64> = shape_dims.iter().map(|d| d.unwrap_or(4)).collect();
+        let num_elements: u64 = shape.iter().product();
+        let shape_usize: Vec<usize> = shape.iter().map(|&d| d as usize).collect();
         println!("Input '{}': {:?} {:?}", name, dtype, shape);
+        let tensor: whisper_tensor::numeric_tensor::NumericTensor<whisper_tensor::DynRank> = match dtype {
+            DType::I64 => {
+                let data: Vec<i64> = (0..num_elements).map(|i| (i % 64) as i64).collect();
+                whisper_tensor::numeric_tensor::NumericTensor::from_vec_shape(data, shape_usize).unwrap()
+            }
+            DType::F32 => {
+                let data: Vec<f32> = (0..num_elements).map(|i| (i % 64) as f32 * 0.01).collect();
+                whisper_tensor::numeric_tensor::NumericTensor::from_vec_shape(data, shape_usize).unwrap()
+            }
+            _ => {
+                let data: Vec<f32> = vec![0.0; num_elements as usize];
+                whisper_tensor::numeric_tensor::NumericTensor::from_vec_shape(data, shape_usize).unwrap()
+            }
+        };
         if let Some(id) = tensors_by_name.get(name) {
-            all_infos.insert(*id, TensorInfo::from_dtype_and_shape(*dtype, &shape));
+            all_infos.insert(*id, TensorInfo::from(tensor));
         }
     }
 
-    // Small constants (axes, indices, shape values): keep full data so
-    // infer_all can resolve Shape/Gather/Reshape ops.
-    // Large weight matrices: shape+dtype only.
+    // All initialized tensors: pass full data so lowering can inline
+    // constants and resolve Shape/Gather/Reshape ops correctly.
+    // When LOWER_SHAPE_ONLY=1 is set, use shape+dtype only for large weights
+    // to test the shape-only lowering path.
+    let shape_only = std::env::var("LOWER_SHAPE_ONLY").is_ok();
     let initialized = sym_graph.get_initialized_tensors(tensor_store);
     for (id, tensor) in &initialized {
-        if tensor.num_elements() <= 1024 {
-            all_infos.insert(*id, TensorInfo::from(tensor.clone()));
-        } else {
+        if shape_only && tensor.num_elements() > 1024 {
             let shape: Vec<u64> = tensor.shape().to_vec();
             let dtype = tensor.dtype();
             all_infos.insert(*id, TensorInfo::from_dtype_and_shape(dtype, &shape));
+        } else {
+            all_infos.insert(*id, TensorInfo::from(tensor.clone()));
         }
     }
     eprintln!(
@@ -370,6 +390,32 @@ fn main() {
         }
     }
 
+    // ── Build partitioner B plan before trivial plan consumes result ─────
+
+    use whisper_tensor::compiler::attempts::v14::partitioner_b;
+    use whisper_tensor::nano_graph::AtomId;
+
+    let b_output_ids: Vec<AtomId> = model_outputs.iter().map(|om| om.range.base).collect();
+    let t0 = Instant::now();
+    let b_phases = partitioner_b::plan(
+        &result.graph,
+        8,
+        result.graph.input_tensors(),
+        &b_output_ids,
+    );
+    eprintln!("Partitioner B: {:.1?}, {} phases", t0.elapsed(), b_phases.len());
+
+    let b_exec_plan = ExecutionPlan {
+        graph: result.graph.clone(),
+        tensor_map: tensor_map.clone(),
+        phases: b_phases,
+        model_outputs: model_outputs.clone(),
+    };
+
+    // Save tensor_map and graph for output comparison before trivial plan consumes result.
+    let lower_tensor_map_for_compare = result.tensor_map.clone();
+    let graph_for_compare = result.graph.clone();
+
     // ── Step 8: Build trivial execution plan (1 phase, 1 lane) ─────────────
 
     use whisper_tensor::compiler::attempts::v14::plan;
@@ -388,7 +434,6 @@ fn main() {
     use whisper_tensor::backends::eval_backend::EvalBackend;
     use whisper_tensor::backends::ndarray_backend::numeric_tensor::NDArrayNumericTensor;
     use whisper_tensor::compiler::attempts::v14::execute;
-    use whisper_tensor::nano_graph::AtomId;
     use whisper_tensor::numeric_tensor::NumericTensor;
 
     // Build user input tensors with valid token IDs.
@@ -398,18 +443,17 @@ fn main() {
         let shape: Vec<u64> = shape_dims.iter().map(|d| d.unwrap_or(4)).collect();
         let num_elements: u64 = shape.iter().product();
         let shape_usize: Vec<usize> = shape.iter().map(|&d| d as usize).collect();
-        // Valid GPT-2 token IDs, cycled to fill the input shape.
-        let token_ids: Vec<i64> = vec![15496, 11, 995, 0, 464, 1917, 318, 1049];
+        // Use same values as lowering (i % 64) so nano and milli see the same data.
         let tensor = match dtype {
             DType::I64 => {
                 let data: Vec<i64> = (0..num_elements as usize)
-                    .map(|i| token_ids[i % token_ids.len()])
+                    .map(|i| (i % 64) as i64)
                     .collect();
                 NumericTensor::from_vec_shape(data, shape_usize).unwrap()
             }
             DType::F32 => {
                 let data: Vec<f32> = (0..num_elements as usize)
-                    .map(|i| token_ids[i % token_ids.len()] as f32)
+                    .map(|i| (i % 64) as f32 * 0.01)
                     .collect();
                 NumericTensor::from_vec_shape(data, shape_usize).unwrap()
             }
@@ -467,6 +511,9 @@ fn main() {
 
     // Build nano executor inputs from the same data.
     let mut exec_inputs: Vec<(AtomId, NDArrayNumericTensor<whisper_tensor::DynRank>)> = Vec::new();
+    let mut matched = 0usize;
+    let mut unmatched = 0usize;
+    let mut unmatched_atoms = 0u64;
 
     for it in exec_plan.graph.input_tensors() {
         let milli_id = it.tensor_id;
@@ -487,6 +534,19 @@ fn main() {
             None
         };
 
+        if tensor.is_none() {
+            unmatched += 1;
+            unmatched_atoms += it.count;
+            if unmatched <= 5 {
+                eprintln!(
+                    "  UNMATCHED input_tensor: milli_id={:?} base={} count={} {:?} ext_id={:?}",
+                    milli_id, it.base_id.0, it.count, it.dtype, ext_id
+                );
+            }
+        } else {
+            matched += 1;
+        }
+
         if let Some(t) = tensor {
             let nd = match t {
                 NumericTensor::NDArray(nd) => nd,
@@ -497,9 +557,120 @@ fn main() {
     }
 
     println!(
-        "\n=== NanoGraph Eval ({} input tensors) ===",
-        exec_inputs.len()
+        "\n=== NanoGraph Eval ({} input tensors, {} matched, {} unmatched ({} atoms)) ===",
+        exec_plan.graph.input_tensors().len(), matched, unmatched, unmatched_atoms
     );
+
+    // Build output atom ranges for eval — handle segmented (Concat) tensors
+    // by collecting all underlying atom ranges, not just a single contiguous range.
+    let reverse_output_map: HashMap<GlobalId, GlobalId> = milli_graph
+        .output_map
+        .as_ref()
+        .map(|m| m.iter().map(|(&int, &ext)| (ext, int)).collect())
+        .unwrap_or_default();
+
+    let mut output_ranges: Vec<whisper_tensor::nano_graph::AtomRange> = Vec::new();
+    let mut output_range_mapping: Vec<(GlobalId, usize, usize)> = Vec::new(); // (ext_id, start_idx, end_idx)
+
+    for om in &exec_plan.model_outputs {
+        let int_id = reverse_output_map.get(&om.tensor_id).copied().unwrap_or(om.tensor_id);
+        let tam = &lower_tensor_map_for_compare[&int_id];
+        let start = output_ranges.len();
+
+        if tam.segments.is_empty() {
+            // Simple tensor: single contiguous range.
+            output_ranges.push(whisper_tensor::nano_graph::AtomRange {
+                base: whisper_tensor::nano_graph::AtomId(tam.base_id.0),
+                count: tam.count,
+                dtype: tam.dtype,
+            });
+        } else {
+            // Segmented tensor (Concat): collect each segment's underlying ranges.
+            let mut seen = std::collections::HashSet::new();
+            for i in 0..tam.count {
+                let atom = tam.atom_id_for_element(i);
+                if let Some(gi) = graph_for_compare.find_group_idx(atom) {
+                    if seen.insert(("g", gi)) {
+                        let g = &graph_for_compare.groups()[gi];
+                        output_ranges.push(whisper_tensor::nano_graph::AtomRange {
+                            base: g.base_id,
+                            count: g.count,
+                            dtype: g.output_dtype,
+                        });
+                    }
+                } else if let Some((ti, _)) = graph_for_compare.find_input_idx(atom) {
+                    if seen.insert(("i", ti)) {
+                        let it = &graph_for_compare.input_tensors()[ti];
+                        output_ranges.push(whisper_tensor::nano_graph::AtomRange {
+                            base: it.base_id,
+                            count: it.count,
+                            dtype: it.dtype,
+                        });
+                    }
+                }
+            }
+        }
+        let end = output_ranges.len();
+        output_range_mapping.push((om.tensor_id, start, end));
+    }
+
+    // Direct eval with all output ranges.
+    let eval_input_refs: Vec<(AtomId, &NDArrayNumericTensor<whisper_tensor::DynRank>)> =
+        exec_inputs.iter().map(|(base, tensor)| (*base, tensor)).collect();
+    let t0 = Instant::now();
+    let direct_results = whisper_tensor::nano_graph::eval::eval(
+        &exec_plan.graph, &eval_input_refs, &output_ranges
+    );
+    println!("  Direct eval: {:.1}s, {} output ranges", t0.elapsed().as_secs_f64(), direct_results.len());
+
+    // Build atom lookup from eval results.
+    let mut atom_vals: HashMap<u64, f64> = HashMap::new();
+    for (range, tensor) in output_ranges.iter().zip(direct_results.iter()) {
+        let flat = tensor.flatten();
+        for i in 0..flat.num_elements() {
+            atom_vals.insert(range.base.0 + i as u64, flat.get(&[i as u64]).unwrap().to_f64());
+        }
+    }
+
+    // Compare against milli reference using atom_id_for_element for correct mapping.
+    println!("\n=== Direct NanoEval vs Milli Reference ===");
+    let mut direct_all_match = true;
+    for &(ext_id, _, _) in &output_range_mapping {
+        let int_id = reverse_output_map.get(&ext_id).copied().unwrap_or(ext_id);
+        let tam = &lower_tensor_map_for_compare[&int_id];
+        if let Some(milli_tensor) = milli_outputs.get(&ext_id) {
+            let milli_nd = milli_tensor.to_ndarray().unwrap();
+            let n = milli_nd.num_elements().min(tam.count as usize);
+            let milli_flat = milli_nd.flatten();
+            let mut max_abs_diff = 0.0f64;
+            let mut mismatches = 0usize;
+            for j in 0..n {
+                let m = milli_flat.get(&[j as u64]).unwrap().to_f64();
+                let atom = tam.atom_id_for_element(j as u64);
+                let nv = atom_vals.get(&atom.0).copied().unwrap_or(0.0);
+                if m.is_nan() || nv.is_nan() { continue; }
+                let abs_diff = (m - nv).abs();
+                max_abs_diff = max_abs_diff.max(abs_diff);
+                let denom = m.abs().max(1e-10);
+                if abs_diff > 1e-3 && abs_diff / denom > 1e-3 { mismatches += 1; }
+            }
+            let status = if mismatches == 0 { "MATCH" } else { "MISMATCH" };
+            let seg_info = if tam.segments.is_empty() { "" } else { " [segmented]" };
+            println!("  {:?}: {} ({} elements, max_abs={:.6}, mismatches={}){}",
+                     ext_id, status, n, max_abs_diff, mismatches, seg_info);
+            if mismatches > 0 { direct_all_match = false; }
+        } else {
+            println!("  {:?}: MISSING from milli outputs", ext_id);
+            direct_all_match = false;
+        }
+    }
+    if direct_all_match {
+        println!("\nDirect NanoEval: All outputs MATCH!");
+    } else {
+        println!("\nDirect NanoEval: Some outputs MISMATCHED.");
+    }
+
+    // Run v14 executor for comparison.
     let t0 = Instant::now();
     let nano_outputs = execute::execute(&exec_plan, exec_inputs);
     println!(
@@ -580,9 +751,111 @@ fn main() {
     }
 
     if all_match {
-        println!("\nAll outputs MATCH!");
+        println!("\nTrivial plan: All outputs MATCH!");
     } else {
-        println!("\nSome outputs MISMATCHED.");
+        println!("\nTrivial plan: Some outputs MISMATCHED.");
+    }
+
+    // ── Step 12: Run partitioner B through executor ─────────────────────────
+
+    println!("\n=== Partitioner B Eval ({} phases, {} lanes) ===", b_exec_plan.phases.len(),
+             b_exec_plan.phases.first().map_or(0, |p| p.spans.len()));
+
+    // Build B's executor inputs from the same data.
+    let mut b_exec_inputs: Vec<(AtomId, NDArrayNumericTensor<whisper_tensor::DynRank>)> = Vec::new();
+    for it in b_exec_plan.graph.input_tensors() {
+        let milli_id = it.tensor_id;
+        let ext_id = milli_graph
+            .input_map
+            .iter()
+            .find(|(_, int)| **int == milli_id)
+            .map(|(ext, _)| *ext);
+
+        let tensor = if let Some(ext) = ext_id {
+            if let Some(t) = initialized.get(&ext) {
+                Some(t.clone())
+            } else {
+                let name = sym_graph.get_tensor_name(ext);
+                name.and_then(|n| user_inputs.get(n).cloned())
+            }
+        } else {
+            None
+        };
+
+        if let Some(t) = tensor {
+            let nd = match t {
+                NumericTensor::NDArray(nd) => nd,
+                _ => t.to_ndarray().unwrap(),
+            };
+            b_exec_inputs.push((it.base_id, nd));
+        }
+    }
+
+    let t0 = Instant::now();
+    let b_outputs = execute::execute(&b_exec_plan, b_exec_inputs);
+    println!(
+        "  Executed in {:.1}s, {} outputs",
+        t0.elapsed().as_secs_f64(),
+        b_outputs.len()
+    );
+
+    // Compare B outputs against milli reference
+    println!("\n=== Partitioner B vs Milli Reference ===");
+    let mut b_all_match = true;
+    for (ext_id, milli_tensor) in &milli_outputs {
+        let milli_nd = milli_tensor.to_ndarray().unwrap();
+        if let Some(b_tensor) = b_outputs.get(ext_id) {
+            let n = milli_nd.num_elements().min(b_tensor.num_elements());
+            let milli_flat = milli_nd.flatten();
+            let b_flat = b_tensor.flatten();
+
+            let mut max_abs_diff = 0.0f64;
+            let mut mismatches = 0usize;
+
+            for i in 0..n {
+                let m = milli_flat.get(&[i as u64]).unwrap().to_f64();
+                let b_val = b_flat.get(&[i as u64]).unwrap().to_f64();
+
+                if m.is_nan() || b_val.is_nan() {
+                    if m.is_nan() != b_val.is_nan() {
+                        mismatches += 1;
+                    }
+                    continue;
+                }
+
+                let abs_diff = (m - b_val).abs();
+                max_abs_diff = max_abs_diff.max(abs_diff);
+                let denom = m.abs().max(1e-10);
+                if abs_diff > 1e-3 && abs_diff / denom > 1e-3 {
+                    mismatches += 1;
+                    if mismatches <= 3 {
+                        eprintln!(
+                            "  B mismatch at element {}: milli={} B={} diff={}",
+                            i, m, b_val, abs_diff
+                        );
+                    }
+                }
+            }
+
+            let status = if mismatches == 0 { "MATCH" } else { "MISMATCH" };
+            println!(
+                "  {:?}: {} ({} elements, max_abs={:.6}, mismatches={})",
+                ext_id, status, n, max_abs_diff, mismatches
+            );
+
+            if mismatches > 0 {
+                b_all_match = false;
+            }
+        } else {
+            println!("  {:?}: MISSING from B outputs", ext_id);
+            b_all_match = false;
+        }
+    }
+
+    if b_all_match {
+        println!("\nPartitioner B: All outputs MATCH!");
+    } else {
+        println!("\nPartitioner B: Some outputs MISMATCHED.");
     }
 }
 
