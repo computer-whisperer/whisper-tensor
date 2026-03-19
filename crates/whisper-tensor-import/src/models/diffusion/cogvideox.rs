@@ -3,7 +3,7 @@ use crate::onnx_graph::Error;
 use crate::onnx_graph::WeightStorageStrategy;
 use crate::onnx_graph::operators::{
     Add, Concat, Constant, Conv, GroupNormalization, LayerNormalization, MatMul, Mul, Resize,
-    Softmax, Transpose,
+    RotaryEmbedding, Softmax, Transpose,
 };
 use crate::onnx_graph::pytorch::{
     cast, conv2d, div_scalar, gelu_pytorch_tanh, group_norm, linear, reshape, silu, unsqueeze,
@@ -176,6 +176,81 @@ fn adaln_modulate(
     Ok(Add::new(None, scaled, shift)?)
 }
 
+// --- CogVideoX 3D RoPE ---
+
+/// Precompute 3D axial RoPE cos/sin caches for the combined text+video sequence.
+///
+/// Returns (cos_cache, sin_cache) each of shape [total_seq_len, head_dim/2].
+///
+/// CogVideoX 5B splits head_dim=64 as:
+///   temporal: 16 dims (1/4), height: 24 dims (3/8), width: 24 dims (3/8)
+/// Half-dims for cos/sin: [8, 12, 12] = 32 total.
+///
+/// Text tokens get cos=1, sin=0 (identity rotation).
+/// Video tokens get 3D positional encoding from (t, y, x) coordinates.
+fn precompute_cogvideox_3d_rope(
+    config: &CogVideoXTransformerConfig,
+) -> (Vec<f32>, Vec<f32>) {
+    let text_seq = config.max_text_seq_length;
+    let video_seq = config.video_seq_len();
+    let total_seq = text_seq + video_seq;
+    let head_dim = config.attention_head_dim;
+    let half_head = head_dim / 2; // 32
+
+    // Axis dim allocation: temporal=head_dim/4, height=3*head_dim/8, width=3*head_dim/8
+    let temporal_dim = head_dim / 4; // 16
+    let spatial_dim = 3 * head_dim / 8; // 24
+    let axes_dim = [temporal_dim, spatial_dim, spatial_dim]; // [16, 24, 24]
+    let half_dims = [axes_dim[0] / 2, axes_dim[1] / 2, axes_dim[2] / 2]; // [8, 12, 12]
+
+    let theta = 10000.0f64;
+
+    // Precompute inverse frequencies for each axis
+    let inv_freqs: Vec<Vec<f64>> = axes_dim
+        .iter()
+        .map(|&axis_dim| {
+            (0..axis_dim / 2)
+                .map(|i| 1.0 / theta.powf(2.0 * i as f64 / axis_dim as f64))
+                .collect()
+        })
+        .collect();
+
+    let latent_frames = config.latent_frames();
+    let patch_h = config.patch_h();
+    let patch_w = config.patch_w();
+
+    let mut cos_cache = vec![0.0f32; total_seq * half_head];
+    let mut sin_cache = vec![0.0f32; total_seq * half_head];
+
+    for pos in 0..total_seq {
+        let (t_pos, y_pos, x_pos) = if pos < text_seq {
+            // Text tokens: identity (all zeros -> cos=1, sin=0)
+            (0.0f64, 0.0, 0.0)
+        } else {
+            // Video tokens: 3D grid position
+            let vid_idx = pos - text_seq;
+            let t = (vid_idx / (patch_h * patch_w)) as f64;
+            let spatial_idx = vid_idx % (patch_h * patch_w);
+            let y = (spatial_idx / patch_w) as f64;
+            let x = (spatial_idx % patch_w) as f64;
+            (t, y, x)
+        };
+
+        let positions = [t_pos, y_pos, x_pos];
+        let mut offset = 0;
+        for (axis, &pos_val) in positions.iter().enumerate() {
+            for (i, &freq) in inv_freqs[axis].iter().enumerate() {
+                let angle = pos_val * freq;
+                cos_cache[pos * half_head + offset + i] = angle.cos() as f32;
+                sin_cache[pos * half_head + offset + i] = angle.sin() as f32;
+            }
+            offset += half_dims[axis];
+        }
+    }
+
+    (cos_cache, sin_cache)
+}
+
 // --- CogVideoX Timestep Embedding ---
 
 fn cogvideox_timestep_embedding(
@@ -273,6 +348,8 @@ fn cogvideox_attention(
     hidden_states: Arc<dyn Tensor>,
     encoder_hidden_states: Arc<dyn Tensor>,
     config: &CogVideoXTransformerConfig,
+    rope_cos: Option<Arc<dyn Tensor>>,
+    rope_sin: Option<Arc<dyn Tensor>>,
 ) -> Result<(Arc<dyn Tensor>, Arc<dyn Tensor>), Error> {
     let nh = config.num_attention_heads as i64;
     let hd = config.attention_head_dim as i64;
@@ -292,10 +369,25 @@ fn cogvideox_attention(
     let v = Transpose::new(None, reshape(v, vec![0, 0, nh, hd])?, Some(vec![0, 2, 1, 3]));
 
     // QK normalization (LayerNorm per head, applied to the head_dim axis)
-    let q = layer_norm_bare(q, config.attention_head_dim, 1e-6)?;
-    let k = layer_norm_bare(k, config.attention_head_dim, 1e-6)?;
+    let q: Arc<dyn Tensor> = layer_norm_bare(q, config.attention_head_dim, 1e-6)?;
+    let k: Arc<dyn Tensor> = layer_norm_bare(k, config.attention_head_dim, 1e-6)?;
 
-    // TODO: 3D RoPE for 5B variant (applied to video tokens only)
+    // 3D RoPE for 5B variant
+    let (q, k) = if let (Some(cos_cache), Some(sin_cache)) = (rope_cos, rope_sin) {
+        // Apply RoPE to full sequence (text tokens have cos=1/sin=0 = identity)
+        // interleaved=0: CogVideoX uses non-interleaved (half-split) rotation
+        let q = RotaryEmbedding::new(
+            None, q, cos_cache.clone(), sin_cache.clone(),
+            None, Some(0), None, None,
+        )? as Arc<dyn Tensor>;
+        let k = RotaryEmbedding::new(
+            None, k, cos_cache, sin_cache,
+            None, Some(0), None, None,
+        )? as Arc<dyn Tensor>;
+        (q, k)
+    } else {
+        (q, k)
+    };
 
     // Scaled dot-product attention
     let scores = MatMul::new(None, q, Transpose::new(None, k, Some(vec![0, 1, 3, 2])))?;
@@ -349,6 +441,8 @@ fn cogvideox_block(
     encoder_hidden_states: Arc<dyn Tensor>,
     emb: Arc<dyn Tensor>,
     config: &CogVideoXTransformerConfig,
+    rope_cos: Option<Arc<dyn Tensor>>,
+    rope_sin: Option<Arc<dyn Tensor>>,
 ) -> Result<(Arc<dyn Tensor>, Arc<dyn Tensor>), Error> {
     let inner_dim = config.inner_dim();
     let eps = config.norm_eps;
@@ -375,7 +469,8 @@ fn cogvideox_block(
     )?;
 
     // Joint attention
-    let (attn_vid, attn_enc) = cogvideox_attention(wm, norm_hidden, norm_enc, config)?;
+    let (attn_vid, attn_enc) =
+        cogvideox_attention(wm, norm_hidden, norm_enc, config, rope_cos, rope_sin)?;
 
     // Residual with gating
     let hidden_states = Add::new(
@@ -547,6 +642,31 @@ pub fn load_cogvideox_transformer_with_origin(
         hidden_states = Add::new(None, hidden_states, video_pos)?;
     }
 
+    // 3b. Precompute 3D RoPE caches (5B only)
+    let (rope_cos, rope_sin) = if config.use_rotary_positional_embeddings {
+        let (cos_vals, sin_vals) = precompute_cogvideox_3d_rope(&config);
+        let total_seq = config.max_text_seq_length + config.video_seq_len();
+        let half_head = config.attention_head_dim / 2;
+        let rope_shape = Shape::new(vec![
+            Dimension::new(Some(total_seq), None, None),
+            Dimension::new(Some(half_head), None, None),
+        ]);
+        let cos_cache: Arc<dyn Tensor> = InputTensorInitialized::new(
+            "rope_cos_cache".to_string(),
+            TensorData::new(TensorDataValue::F32(cos_vals), rope_shape.clone())?,
+        );
+        let sin_cache: Arc<dyn Tensor> = InputTensorInitialized::new(
+            "rope_sin_cache".to_string(),
+            TensorData::new(TensorDataValue::F32(sin_vals), rope_shape)?,
+        );
+        // Cast to model dtype
+        let cos_cache = cast(cos_cache, model_dtype);
+        let sin_cache = cast(sin_cache, model_dtype);
+        (Some(cos_cache), Some(sin_cache))
+    } else {
+        (None, None)
+    };
+
     // 4. Transformer blocks
     println!(
         "Building CogVideoX transformer: {} blocks, inner_dim={}...",
@@ -560,6 +680,8 @@ pub fn load_cogvideox_transformer_with_origin(
             encoder_hidden_states,
             emb.clone(),
             &config,
+            rope_cos.clone(),
+            rope_sin.clone(),
         )?;
         hidden_states = next_hidden;
         encoder_hidden_states = next_enc;
