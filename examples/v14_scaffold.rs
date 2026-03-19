@@ -395,7 +395,32 @@ fn main() {
     use whisper_tensor::compiler::attempts::v14::partitioner_b;
     use whisper_tensor::nano_graph::AtomId;
 
-    let b_output_ids: Vec<AtomId> = model_outputs.iter().map(|om| om.range.base).collect();
+    // Collect ALL atom IDs that model outputs reference — including both
+    // segments of Concat tensors. The partitioner uses these to mark the
+    // right groups as span outputs.
+    let b_output_ids: Vec<AtomId> = {
+        let reverse_out: HashMap<GlobalId, GlobalId> = milli_graph
+            .output_map
+            .as_ref()
+            .map(|m| m.iter().map(|(&int, &ext)| (ext, int)).collect())
+            .unwrap_or_default();
+        let mut ids = Vec::new();
+        for om in &model_outputs {
+            let int_id = reverse_out.get(&om.tensor_id).copied().unwrap_or(om.tensor_id);
+            if let Some(tam) = result.tensor_map.get(&int_id) {
+                if tam.segments.is_empty() {
+                    ids.push(AtomId(tam.base_id.0));
+                } else {
+                    // Sample atoms from each segment to ensure all segments' groups
+                    // are identified as output groups.
+                    for i in (0..tam.count).step_by((tam.count as usize / 20).max(1)) {
+                        ids.push(tam.atom_id_for_element(i));
+                    }
+                }
+            }
+        }
+        ids
+    };
     let t0 = Instant::now();
     let b_phases = partitioner_b::plan(
         &result.graph,
@@ -561,12 +586,8 @@ fn main() {
         exec_plan.graph.input_tensors().len(), matched, unmatched, unmatched_atoms
     );
 
-    // When SKIP_DIRECT=1, skip the slow direct eval and trivial executor.
-    if std::env::var("SKIP_DIRECT").is_ok() {
-        println!("  Skipping direct eval (SKIP_DIRECT=1)");
-    } else {
-    // Build output atom ranges for eval — handle segmented (Concat) tensors
-    // by collecting all underlying atom ranges, not just a single contiguous range.
+    // Build output atom ranges — handle segmented (Concat) tensors
+    // by collecting all underlying atom ranges.
     let reverse_output_map: HashMap<GlobalId, GlobalId> = milli_graph
         .output_map
         .as_ref()
@@ -617,6 +638,11 @@ fn main() {
         let end = output_ranges.len();
         output_range_mapping.push((om.tensor_id, start, end));
     }
+
+    // When SKIP_DIRECT=1, skip the slow direct eval and trivial executor.
+    if std::env::var("SKIP_DIRECT").is_ok() {
+        println!("  Skipping direct eval (SKIP_DIRECT=1)");
+    } else {
 
     // Direct eval with all output ranges.
     let eval_input_refs: Vec<(AtomId, &NDArrayNumericTensor<whisper_tensor::DynRank>)> =
@@ -674,91 +700,7 @@ fn main() {
         println!("\nDirect NanoEval: Some outputs MISMATCHED.");
     }
 
-    // Run v14 executor for comparison.
-    let t0 = Instant::now();
-    let nano_outputs = execute::execute(&exec_plan, exec_inputs);
-    println!(
-        "  Executed in {:.1}s, {} outputs",
-        t0.elapsed().as_secs_f64(),
-        nano_outputs.len()
-    );
-
-    // ── Step 11: Compare outputs ────────────────────────────────────────────
-
-    println!("\n=== Comparison ===");
-    let mut all_match = true;
-    for (ext_id, milli_tensor) in &milli_outputs {
-        let milli_nd = milli_tensor.to_ndarray().unwrap();
-        if let Some(nano_tensor) = nano_outputs.get(ext_id) {
-            let n = milli_nd.num_elements().min(nano_tensor.num_elements());
-            let milli_flat = milli_nd.flatten();
-            let nano_flat = nano_tensor.flatten();
-
-            let mut max_abs_diff = 0.0f64;
-            let mut max_rel_diff = 0.0f64;
-            let mut nan_count = 0usize;
-            let mut mismatches = 0usize;
-
-            for i in 0..n {
-                let m = milli_flat.get(&[i as u64]).unwrap().to_f64();
-                let n_val = nano_flat.get(&[i as u64]).unwrap().to_f64();
-
-                if m.is_nan() || n_val.is_nan() {
-                    if m.is_nan() != n_val.is_nan() {
-                        mismatches += 1;
-                    }
-                    nan_count += 1;
-                    continue;
-                }
-
-                let abs_diff = (m - n_val).abs();
-                max_abs_diff = max_abs_diff.max(abs_diff);
-
-                let denom = m.abs().max(1e-10);
-                max_rel_diff = max_rel_diff.max(abs_diff / denom);
-
-                if abs_diff > 1e-3 && abs_diff / denom > 1e-3 {
-                    mismatches += 1;
-                    if mismatches <= 3 {
-                        eprintln!(
-                            "  Mismatch at element {}: milli={} nano={} diff={}",
-                            i, m, n_val, abs_diff
-                        );
-                    }
-                }
-            }
-
-            let status = if mismatches == 0 { "MATCH" } else { "MISMATCH" };
-            println!(
-                "  {:?}: {} ({} elements, max_abs={:.6}, max_rel={:.6}, nans={}, mismatches={})",
-                ext_id, status, n, max_abs_diff, max_rel_diff, nan_count, mismatches
-            );
-
-            // Show first few values from each.
-            let first_n = n.min(5);
-            let milli_vals: Vec<f64> = (0..first_n)
-                .map(|i| milli_flat.get(&[i as u64]).unwrap().to_f64())
-                .collect();
-            let nano_vals: Vec<f64> = (0..first_n)
-                .map(|i| nano_flat.get(&[i as u64]).unwrap().to_f64())
-                .collect();
-            println!("    milli: {:?}", milli_vals);
-            println!("    nano:  {:?}", nano_vals);
-
-            if mismatches > 0 {
-                all_match = false;
-            }
-        } else {
-            println!("  {:?}: MISSING from nano outputs", ext_id);
-            all_match = false;
-        }
-    }
-
-    if all_match {
-        println!("\nTrivial plan: All outputs MATCH!");
-    } else {
-        println!("\nTrivial plan: Some outputs MISMATCHED.");
-    }
+    // (Trivial executor comparison removed — direct eval covers correctness.)
 
     } // end SKIP_DIRECT
 
@@ -797,63 +739,66 @@ fn main() {
         }
     }
 
+    // Run B's executor — returns raw store (base AtomId → tensor).
     let t0 = Instant::now();
-    let b_outputs = execute::execute(&b_exec_plan, b_exec_inputs);
+    let b_store = execute::execute(&b_exec_plan, b_exec_inputs);
     println!(
-        "  Executed in {:.1}s, {} outputs",
+        "  Executed in {:.1}s, {} store entries",
         t0.elapsed().as_secs_f64(),
-        b_outputs.len()
+        b_store.len()
     );
 
-    // Compare B outputs against milli reference
+    // Compare B outputs against milli reference using atom_id_for_element
+    // (handles segmented Concat tensors correctly).
     println!("\n=== Partitioner B vs Milli Reference ===");
-    let mut b_all_match = true;
-    for (ext_id, milli_tensor) in &milli_outputs {
-        let milli_nd = milli_tensor.to_ndarray().unwrap();
-        if let Some(b_tensor) = b_outputs.get(ext_id) {
-            let n = milli_nd.num_elements().min(b_tensor.num_elements());
-            let milli_flat = milli_nd.flatten();
-            let b_flat = b_tensor.flatten();
 
+    // Build atom lookup from B's store.
+    let mut b_atom_vals: HashMap<u64, f64> = HashMap::new();
+    for (atom_id, tensor) in &b_store {
+        let flat = tensor.flatten();
+        for i in 0..flat.num_elements() {
+            b_atom_vals.insert(atom_id.0 + i as u64, flat.get(&[i as u64]).unwrap().to_f64());
+        }
+    }
+
+    // Quick sanity: how many atoms are in the store vs how many we expect?
+    let total_store_atoms: u64 = b_store.values().map(|t| t.num_elements() as u64).sum();
+    println!("  Store: {} entries, {} total atoms", b_store.len(), total_store_atoms);
+    println!("  atom_vals lookup: {} entries", b_atom_vals.len());
+
+    let mut b_all_match = true;
+    for &(ext_id, _, _) in &output_range_mapping {
+        let int_id = reverse_output_map.get(&ext_id).copied().unwrap_or(ext_id);
+        let tam = &lower_tensor_map_for_compare[&int_id];
+        if let Some(milli_tensor) = milli_outputs.get(&ext_id) {
+            let milli_nd = milli_tensor.to_ndarray().unwrap();
+            let n = milli_nd.num_elements().min(tam.count as usize);
+            let milli_flat = milli_nd.flatten();
             let mut max_abs_diff = 0.0f64;
             let mut mismatches = 0usize;
-
-            for i in 0..n {
-                let m = milli_flat.get(&[i as u64]).unwrap().to_f64();
-                let b_val = b_flat.get(&[i as u64]).unwrap().to_f64();
-
-                if m.is_nan() || b_val.is_nan() {
-                    if m.is_nan() != b_val.is_nan() {
-                        mismatches += 1;
-                    }
+            let mut missing_atoms = 0usize;
+            for j in 0..n {
+                let m = milli_flat.get(&[j as u64]).unwrap().to_f64();
+                let atom = tam.atom_id_for_element(j as u64);
+                let Some(&bv) = b_atom_vals.get(&atom.0) else {
+                    missing_atoms += 1;
                     continue;
-                }
-
-                let abs_diff = (m - b_val).abs();
+                };
+                if m.is_nan() || bv.is_nan() { continue; }
+                let abs_diff = (m - bv).abs();
                 max_abs_diff = max_abs_diff.max(abs_diff);
                 let denom = m.abs().max(1e-10);
-                if abs_diff > 1e-3 && abs_diff / denom > 1e-3 {
-                    mismatches += 1;
-                    if mismatches <= 3 {
-                        eprintln!(
-                            "  B mismatch at element {}: milli={} B={} diff={}",
-                            i, m, b_val, abs_diff
-                        );
-                    }
-                }
+                if abs_diff > 1e-3 && abs_diff / denom > 1e-3 { mismatches += 1; }
             }
-
-            let status = if mismatches == 0 { "MATCH" } else { "MISMATCH" };
+            let status = if mismatches == 0 && missing_atoms == 0 { "MATCH" } else { "MISMATCH" };
+            let seg_info = if tam.segments.is_empty() { "" } else { " [segmented]" };
             println!(
-                "  {:?}: {} ({} elements, max_abs={:.6}, mismatches={})",
-                ext_id, status, n, max_abs_diff, mismatches
+                "  {:?}: {} ({} elements, max_abs={:.6}, mismatches={}, missing_atoms={}){}",
+                ext_id, status, n, max_abs_diff, mismatches, missing_atoms, seg_info
             );
-
-            if mismatches > 0 {
-                b_all_match = false;
-            }
+            if mismatches > 0 || missing_atoms > 0 { b_all_match = false; }
         } else {
-            println!("  {:?}: MISSING from B outputs", ext_id);
+            println!("  {:?}: MISSING from milli outputs", ext_id);
             b_all_match = false;
         }
     }

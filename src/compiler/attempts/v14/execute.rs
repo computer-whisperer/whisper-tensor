@@ -25,11 +25,13 @@ use super::types::*;
 /// tensors keyed by their base AtomId in the graph. Typically built
 /// by mapping the plan's tensor_map entries to actual tensor data.
 ///
-/// Returns model outputs keyed by their external GlobalId.
+/// Returns the value store keyed by base AtomId. Callers extract
+/// outputs using `atom_id_for_element` from the tensor map to handle
+/// segmented (Concat) tensors correctly.
 pub fn execute(
     plan: &ExecutionPlan,
     inputs: Vec<(AtomId, NDArrayNumericTensor<DynRank>)>,
-) -> HashMap<GlobalId, NDArrayNumericTensor<DynRank>> {
+) -> HashMap<AtomId, NDArrayNumericTensor<DynRank>> {
     // ── Step 1: Use-count analysis ──────────────────────────────────────
     //
     // For each atom range that appears as a span output or initial input,
@@ -110,6 +112,31 @@ pub fn execute(
                 );
             }
 
+            // Verify inputs resolve against span graph's input_tensors.
+            if phase_idx < 3 && lane_idx == 0 {
+                let mut resolved = 0usize;
+                let mut unresolved = 0usize;
+                for &(base, _) in &span_inputs {
+                    if span.graph.find_input_idx(base).is_some() {
+                        resolved += 1;
+                    } else {
+                        unresolved += 1;
+                        if unresolved <= 3 {
+                            eprintln!(
+                                "  Phase {} lane {}: input base={} NOT found in span input_tensors ({} entries)",
+                                phase_idx, lane_idx, base.0, span.graph.input_tensors().len()
+                            );
+                        }
+                    }
+                }
+                if unresolved > 0 {
+                    eprintln!(
+                        "  Phase {} lane {}: {}/{} inputs unresolved!",
+                        phase_idx, lane_idx, unresolved, span_inputs.len()
+                    );
+                }
+            }
+
             // Evaluate the span.
             let eval_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 eval::eval(&span.graph, &span_inputs, &span.outputs)
@@ -133,15 +160,10 @@ pub fn execute(
                 }
             }
 
-            // Decrement use counts for consumed inputs and drop dead values.
-            for inp in &span.inputs {
-                if let Some(count) = use_counts.get_mut(&inp.base) {
-                    *count = count.saturating_sub(1);
-                    if *count == 0 {
-                        store.remove(&inp.base);
-                    }
-                }
-            }
+            // TODO: liveness-based dropping. Disabled for now to ensure
+            // all atoms survive for model output extraction (segmented
+            // outputs may reference atoms not declared as span inputs).
+            // Re-enable once model output atom ranges are properly tracked.
         }
 
         // Commit phase outputs to the store (barrier).
@@ -150,15 +172,7 @@ pub fn execute(
         }
     }
 
-    // ── Step 3: Extract model outputs ───────────────────────────────────
-
-    let mut results = HashMap::new();
-    for output in &plan.model_outputs {
-        if let Some(tensor) = store.remove(&output.range.base) {
-            results.insert(output.tensor_id, tensor);
-        }
-    }
-    results
+    store
 }
 
 /// Slice a tensor to its first `count` elements (flattened).
