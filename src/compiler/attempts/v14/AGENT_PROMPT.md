@@ -167,7 +167,7 @@ impl NanoGraph {
     );
     pub fn validate(&self) -> Vec<String>;
 
-    // Construction
+    // Construction (sequential ID allocation)
     pub fn new() -> Self;
     pub fn push_group(&mut self, count: u64, output_dtype: DType, op: ScalarOp,
                        sym_dims: Vec<SymDim>, inputs: Vec<InputRef>) -> AtomId;
@@ -178,6 +178,13 @@ impl NanoGraph {
                              output_dtype: DType, op: ScalarOp,
                              sym_dims: Vec<SymDim>, inputs: Vec<InputRef>);
 
+    // Construction (specific ID placement — for building span NanoGraphs)
+    pub fn insert_group_at(&mut self, base_id: AtomId, count: u64,
+                            atom_offset: u64, output_dtype: DType, op: ScalarOp,
+                            sym_dims: Vec<SymDim>, inputs: Vec<InputRef>);
+    pub fn insert_input_tensor_at(&mut self, base_id: AtomId, tensor_id: GlobalId,
+                                   count: u64, dtype: DType);
+
     // Fields
     pub sym_dim_names: HashMap<String, SymDim>,
     pub sym_dim_bounds: HashMap<SymDim, u64>,
@@ -185,12 +192,10 @@ impl NanoGraph {
 }
 ```
 
-**Important construction detail:** `push_group` allocates new sequential
-atom IDs — it doesn't let you specify the base_id. Since span NanoGraphs
-must preserve the main graph's atom IDs, you'll need a strategy for this.
-Options include adding a construction helper to NanoGraph, or using
-`alloc_placeholder`/`fill_placeholder` creatively. Read the NanoGraph
-source in `src/nano_graph/pattern.rs` to understand the internals.
+**Span NanoGraph construction:** Use `insert_group_at` and
+`insert_input_tensor_at` to place groups and input ranges at specific
+atom IDs in span NanoGraphs. These insert into the internal RangeMap
+at arbitrary positions without requiring sequential allocation.
 
 ## Output Types
 
@@ -267,6 +272,30 @@ v14 types module. Build your solution from scratch.
 The only imports from the compiler module should be `super::types::{Phase, Span}`.
 Everything else comes from `crate::nano_graph::*`, `crate::graph::*`,
 and `crate::dtype::*`.
+
+## Gen-1 Results on GPT-2 (47,887 groups, 8 lanes)
+
+Four prior attempts were tested. Here are their results:
+
+| Attempt | Phases | Validation | Cross-lane violations | Imbalance | Time |
+|---------|--------|------------|----------------------|-----------|------|
+| A (pinch-point liveness) | 27 | 0 errors | 0 | 694M x | <5min |
+| B (wavefront/depth) | 173 | 0 errors | 0 | 11.3x | <5min |
+| C (greedy lane sim) | 175 | 0 errors | 0 | 76M x | 250ms |
+| D (hierarchical super-groups) | 2 | 0 errors | 24 | 37K x | <5min |
+
+Key observations:
+- **B had the best overall result**: 0 violations with 11.3x imbalance.
+  Its depth-based wavefront approach gives provable independence for free.
+  Too many phases (173) — could be reduced by more aggressive merging.
+- **A and C achieved 0 violations but catastrophic imbalance** — most work
+  ended up on lane 0. The lane assignment heuristics failed to distribute
+  matmul rows across lanes.
+- **D had only 2 phases** (not enough barriers) and 24 cross-lane violations.
+- **The dependency DAG build** (using `collect_all_producer_indices`) takes
+  ~140ms for 48K groups — fast and not a bottleneck.
+- **Span NanoGraph construction** takes ~80ms per partitioner — also fast.
+- **The hard problem is lane assignment + balance**, not phase detection.
 
 ## Creative Direction
 
