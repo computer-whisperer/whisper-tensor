@@ -55,7 +55,11 @@ pub fn interpret_milli_graph_all_intermediates(
         let Some(op) = graph.get_node_by_id(&op_id) else {
             continue;
         };
-        if let Ok(iter) = op.eval(&intermediates, &crate::milli_graph::ops::MilliEvalConfig::default(), &mut backend) {
+        if let Ok(iter) = op.eval(
+            &intermediates,
+            &crate::milli_graph::ops::MilliEvalConfig::default(),
+            &mut backend,
+        ) {
             for (tid, val) in iter {
                 intermediates.insert(tid, val);
             }
@@ -70,17 +74,20 @@ pub fn interpret_milli_graph_all_intermediates(
 pub fn tensor_producers(
     graph: &MilliOpGraph,
     intermediates: &std::collections::HashMap<GlobalId, NumericTensor<DynRank>>,
-) -> std::collections::HashMap<GlobalId, (String, Vec<(GlobalId, Vec<u64>)>)>
-{
+) -> std::collections::HashMap<GlobalId, (String, Vec<(GlobalId, Vec<u64>)>)> {
     #![allow(clippy::type_complexity)]
     use crate::graph::{Graph, Node};
     let mut result = std::collections::HashMap::new();
     for &op_id in graph.op_ordering() {
-        let Some(op) = graph.get_node_by_id(&op_id) else { continue };
+        let Some(op) = graph.get_node_by_id(&op_id) else {
+            continue;
+        };
         let kind = op.op_kind();
-        let input_shapes: Vec<(GlobalId, Vec<u64>)> = op.inputs()
+        let input_shapes: Vec<(GlobalId, Vec<u64>)> = op
+            .inputs()
             .map(|id| {
-                let shape = intermediates.get(&id)
+                let shape = intermediates
+                    .get(&id)
                     .map(|t| t.shape().to_vec())
                     .unwrap_or_default();
                 (id, shape)

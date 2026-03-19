@@ -107,10 +107,7 @@ impl InputRef {
                 modulus,
             } => {
                 let wrapped = i % modulus;
-                AtomId(
-                    base.0
-                        .wrapping_add((*stride * wrapped as i64) as u64),
-                )
+                AtomId(base.0.wrapping_add((*stride * wrapped as i64) as u64))
             }
         }
     }
@@ -483,8 +480,14 @@ impl NanoGraph {
                 ScalarOp::Identity => "Identity",
                 ScalarOp::Literal(_) => "Literal",
                 ScalarOp::Select => "Select",
-                ScalarOp::Reduce { kind: ReduceKind::Sum, .. } => "ReduceSum",
-                ScalarOp::Reduce { kind: ReduceKind::Max, .. } => "ReduceMax",
+                ScalarOp::Reduce {
+                    kind: ReduceKind::Sum,
+                    ..
+                } => "ReduceSum",
+                ScalarOp::Reduce {
+                    kind: ReduceKind::Max,
+                    ..
+                } => "ReduceMax",
                 ScalarOp::IndirectLoad { .. } => "IndirectLoad",
             };
             *groups_by_op.entry(op_name).or_default() += 1;
@@ -596,8 +599,7 @@ impl NanoGraph {
                     out.insert(gi);
                 }
             }
-            InputRef::Affine { .. }
-            | InputRef::StridedBroadcast { .. } => {
+            InputRef::Affine { .. } | InputRef::StridedBroadcast { .. } => {
                 let first = input.resolve(atom_offset);
                 let last = input.resolve(atom_offset + count - 1);
                 let lo = first.0.min(last.0);
@@ -766,9 +768,7 @@ impl NanoGraph {
             // Input count check.
             let expected_inputs = match &group.op {
                 ScalarOp::Literal(_) => 0,
-                ScalarOp::Unary { .. }
-                | ScalarOp::Identity
-                | ScalarOp::IndirectLoad { .. } => 1,
+                ScalarOp::Unary { .. } | ScalarOp::Identity | ScalarOp::IndirectLoad { .. } => 1,
                 ScalarOp::Binary { .. } => 2,
                 ScalarOp::Select => 3,
                 ScalarOp::Reduce { .. } => 1,

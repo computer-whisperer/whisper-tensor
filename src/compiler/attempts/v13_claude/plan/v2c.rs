@@ -1242,7 +1242,9 @@ impl ExecutionPlan {
 mod tests {
     use super::*;
     use crate::dtype::DType;
-    use crate::nano_graph::{InputRef, NanoGraph, ReduceKind, ScalarBinOp, ScalarOp, ScalarUnaryOp};
+    use crate::nano_graph::{
+        InputRef, NanoGraph, ReduceKind, ScalarBinOp, ScalarOp, ScalarUnaryOp,
+    };
     use crate::numeric_scalar::NumericScalar;
 
     // ─── Test graph builders ──────────────────────────────────────────────
@@ -1298,7 +1300,8 @@ mod tests {
             let red = g.push_group(
                 n,
                 DType::F32,
-                ScalarOp::Reduce { kind: ReduceKind::Sum,
+                ScalarOp::Reduce {
+                    kind: ReduceKind::Sum,
                     reduce_count: k,
                     reduce_stride: n as i64,
                     compute_dtype: DType::F32,
@@ -1375,7 +1378,8 @@ mod tests {
             let red = g.push_group(
                 n1,
                 DType::F32,
-                ScalarOp::Reduce { kind: ReduceKind::Sum,
+                ScalarOp::Reduce {
+                    kind: ReduceKind::Sum,
                     reduce_count: k1,
                     reduce_stride: n1 as i64,
                     compute_dtype: DType::F32,
@@ -1446,7 +1450,8 @@ mod tests {
             let red = g.push_group(
                 n2,
                 DType::F32,
-                ScalarOp::Reduce { kind: ReduceKind::Sum,
+                ScalarOp::Reduce {
+                    kind: ReduceKind::Sum,
                     reduce_count: n1,
                     reduce_stride: n2 as i64,
                     compute_dtype: DType::F32,
@@ -1520,7 +1525,8 @@ mod tests {
             let red = g.push_group(
                 n1,
                 DType::F32,
-                ScalarOp::Reduce { kind: ReduceKind::Sum,
+                ScalarOp::Reduce {
+                    kind: ReduceKind::Sum,
                     reduce_count: k1,
                     reduce_stride: n1 as i64,
                     compute_dtype: DType::F32,
@@ -1591,7 +1597,8 @@ mod tests {
             let red = g.push_group(
                 n2,
                 DType::F32,
-                ScalarOp::Reduce { kind: ReduceKind::Sum,
+                ScalarOp::Reduce {
+                    kind: ReduceKind::Sum,
                     reduce_count: n1,
                     reduce_stride: n2 as i64,
                     compute_dtype: DType::F32,
@@ -1668,7 +1675,8 @@ mod tests {
             let red = g.push_group(
                 n,
                 DType::F32,
-                ScalarOp::Reduce { kind: ReduceKind::Sum,
+                ScalarOp::Reduce {
+                    kind: ReduceKind::Sum,
                     reduce_count: k,
                     reduce_stride: n as i64,
                     compute_dtype: DType::F32,
@@ -1708,7 +1716,8 @@ mod tests {
             let red = g.push_group(
                 n,
                 DType::F32,
-                ScalarOp::Reduce { kind: ReduceKind::Sum,
+                ScalarOp::Reduce {
+                    kind: ReduceKind::Sum,
                     reduce_count: k,
                     reduce_stride: n as i64,
                     compute_dtype: DType::F32,
@@ -2442,7 +2451,8 @@ mod tests {
             let red = g.push_group(
                 n,
                 DType::F32,
-                ScalarOp::Reduce { kind: ReduceKind::Sum,
+                ScalarOp::Reduce {
+                    kind: ReduceKind::Sum,
                     reduce_count: k,
                     reduce_stride: n as i64,
                     compute_dtype: DType::F32,
@@ -2508,7 +2518,8 @@ mod tests {
                 let red = g.push_group(
                     n,
                     DType::F32,
-                    ScalarOp::Reduce { kind: ReduceKind::Sum,
+                    ScalarOp::Reduce {
+                        kind: ReduceKind::Sum,
                         reduce_count: n,
                         reduce_stride: n as i64,
                         compute_dtype: DType::F32,
@@ -2786,7 +2797,8 @@ mod tests {
         let mean = g.push_group(
             small_count,
             DType::F32,
-            ScalarOp::Reduce { kind: ReduceKind::Sum,
+            ScalarOp::Reduce {
+                kind: ReduceKind::Sum,
                 reduce_count: count / small_count,
                 reduce_stride: small_count as i64,
                 compute_dtype: DType::F32,
@@ -2954,7 +2966,8 @@ mod tests {
         let red0 = g.push_group(
             4,
             DType::F32,
-            ScalarOp::Reduce { kind: ReduceKind::Sum,
+            ScalarOp::Reduce {
+                kind: ReduceKind::Sum,
                 reduce_count: 2,
                 reduce_stride: 4,
                 compute_dtype: DType::F32,
@@ -2968,7 +2981,8 @@ mod tests {
         let red1 = g.push_group(
             4,
             DType::F32,
-            ScalarOp::Reduce { kind: ReduceKind::Sum,
+            ScalarOp::Reduce {
+                kind: ReduceKind::Sum,
                 reduce_count: 2,
                 reduce_stride: 4,
                 compute_dtype: DType::F32,
@@ -3028,7 +3042,8 @@ mod tests {
         let reduce_cross = g.push_group(
             4,
             DType::F32,
-            ScalarOp::Reduce { kind: ReduceKind::Sum,
+            ScalarOp::Reduce {
+                kind: ReduceKind::Sum,
                 reduce_count: 2,
                 reduce_stride: 8,
                 compute_dtype: DType::F32,

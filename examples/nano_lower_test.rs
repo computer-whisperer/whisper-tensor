@@ -239,7 +239,7 @@ fn main() {
                 for (gi, group) in span_groups.iter().enumerate() {
                     for input in &group.inputs {
                         // Resolve the first atom of this input
-                        let src = input.resolve(0, 0);
+                        let src = input.resolve(0);
                         // Find which span group it belongs to
                         let src_gi = match span_bases.binary_search(&src.0) {
                             Ok(i) => Some(i),
@@ -395,7 +395,7 @@ fn validate_span_topology_raw(
                     continue;
                 }
                 for input in &group.inputs {
-                    let resolved = input.resolve(0, 0);
+                    let resolved = input.resolve(0);
                     if resolved.0 >= sg.num_atoms() {
                         resolve_errors += 1;
                         if resolve_errors <= 3 {
@@ -418,18 +418,13 @@ fn validate_span_topology_raw(
                 }
                 // Check ReduceSum stride
                 match &group.op {
-                    ScalarOp::ReduceSum {
-                        reduce_count,
-                        reduce_stride,
-                        ..
-                    }
-                    | ScalarOp::ReduceMax {
+                    ScalarOp::Reduce {
                         reduce_count,
                         reduce_stride,
                         ..
                     } => {
                         if *reduce_count > 0 && *reduce_stride != 0 {
-                            let base = group.inputs[0].resolve(0, 0);
+                            let base = group.inputs[0].resolve(0);
                             let last =
                                 (base.0 as i64 + (*reduce_count as i64 - 1) * reduce_stride) as u64;
                             if last >= sg.num_atoms() {

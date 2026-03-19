@@ -538,7 +538,10 @@ fn emit_group_body(
             Ok(())
         }
 
-        ScalarOp::Reduce { kind: ReduceKind::Sum, .. } => emit_reduce(
+        ScalarOp::Reduce {
+            kind: ReduceKind::Sum,
+            ..
+        } => emit_reduce(
             builder,
             module,
             group,
@@ -553,7 +556,10 @@ fn emit_group_body(
             output_dtype,
         ),
 
-        ScalarOp::Reduce { kind: ReduceKind::Max, .. } => emit_reduce(
+        ScalarOp::Reduce {
+            kind: ReduceKind::Max,
+            ..
+        } => emit_reduce(
             builder,
             module,
             group,
@@ -568,9 +574,7 @@ fn emit_group_body(
             output_dtype,
         ),
 
-        ScalarOp::IndirectLoad {
-            table_base,
-        } => {
+        ScalarOp::IndirectLoad { table_base } => {
             let idx_f32 = load_input_ref(
                 builder,
                 module,
@@ -1073,7 +1077,7 @@ fn emit_unop(
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     use crate::nano_graph::{AtomId, InputRef, NanoGraph, ReduceKind, ScalarOp};
     use crate::numeric_scalar::NumericScalar;
 
@@ -1106,6 +1110,170 @@ mod tests {
         overrides
     }
 
+    /// Simple scalar evaluator for NanoGraph with per-atom f32 overrides.
+    /// Processes groups in order, computing each atom using f64 arithmetic.
+    /// Used by compiler tests where graphs are built manually with Literal+overrides.
+    fn eval_nano_graph(graph: &NanoGraph, overrides_f32: &HashMap<u64, f32>) -> Vec<f64> {
+        use crate::nano_graph::ops::{ReduceKind, ScalarBinOp, ScalarOp, ScalarUnaryOp};
+
+        let n = graph.num_atoms() as usize;
+        let mut values = vec![0.0f64; n];
+
+        // Apply overrides first (these override literal values).
+        for (&idx, &val) in overrides_f32 {
+            if (idx as usize) < n {
+                values[idx as usize] = val as f64;
+            }
+        }
+
+        // Process groups in order.
+        for group in graph.groups() {
+            let base = group.base_id.0 as usize;
+            match &group.op {
+                ScalarOp::Literal(scalar) => {
+                    let val = scalar.to_f64();
+                    for i in 0..group.count as usize {
+                        let idx = base + i;
+                        // Don't overwrite if an override was set.
+                        if !overrides_f32.contains_key(&(idx as u64)) {
+                            values[idx] = val;
+                        }
+                    }
+                }
+                ScalarOp::Identity => {
+                    for i in 0..group.count as usize {
+                        let src = group.inputs[0].resolve(i as u64);
+                        values[base + i] = values[src.0 as usize];
+                    }
+                }
+                ScalarOp::Binary { op, .. } => {
+                    for i in 0..group.count as usize {
+                        let a = values[group.inputs[0].resolve(i as u64).0 as usize];
+                        let b = values[group.inputs[1].resolve(i as u64).0 as usize];
+                        values[base + i] = match op {
+                            ScalarBinOp::Add => a + b,
+                            ScalarBinOp::Sub => a - b,
+                            ScalarBinOp::Mul => a * b,
+                            ScalarBinOp::Div => a / b,
+                            ScalarBinOp::Min => a.min(b),
+                            ScalarBinOp::Max => a.max(b),
+                            ScalarBinOp::Pow => a.powf(b),
+                            ScalarBinOp::Less => {
+                                if a < b {
+                                    1.0
+                                } else {
+                                    0.0
+                                }
+                            }
+                            ScalarBinOp::Greater => {
+                                if a > b {
+                                    1.0
+                                } else {
+                                    0.0
+                                }
+                            }
+                            ScalarBinOp::Equal => {
+                                if (a - b).abs() < f64::EPSILON {
+                                    1.0
+                                } else {
+                                    0.0
+                                }
+                            }
+                            ScalarBinOp::Mod => a % b,
+                            ScalarBinOp::GreaterOrEqual => {
+                                if a >= b {
+                                    1.0
+                                } else {
+                                    0.0
+                                }
+                            }
+                            ScalarBinOp::LessOrEqual => {
+                                if a <= b {
+                                    1.0
+                                } else {
+                                    0.0
+                                }
+                            }
+                            ScalarBinOp::And => {
+                                if a != 0.0 && b != 0.0 {
+                                    1.0
+                                } else {
+                                    0.0
+                                }
+                            }
+                            ScalarBinOp::Or => {
+                                if a != 0.0 || b != 0.0 {
+                                    1.0
+                                } else {
+                                    0.0
+                                }
+                            }
+                            ScalarBinOp::Xor => {
+                                if (a != 0.0) ^ (b != 0.0) {
+                                    1.0
+                                } else {
+                                    0.0
+                                }
+                            }
+                        };
+                    }
+                }
+                ScalarOp::Unary { op, .. } => {
+                    for i in 0..group.count as usize {
+                        let x = values[group.inputs[0].resolve(i as u64).0 as usize];
+                        values[base + i] = match op {
+                            ScalarUnaryOp::Neg => -x,
+                            ScalarUnaryOp::Abs => x.abs(),
+                            ScalarUnaryOp::Exp => x.exp(),
+                            ScalarUnaryOp::Ln => x.ln(),
+                            ScalarUnaryOp::Sqrt => x.sqrt(),
+                            ScalarUnaryOp::Reciprocal => 1.0 / x,
+                            ScalarUnaryOp::Tanh => x.tanh(),
+                            ScalarUnaryOp::Floor => x.floor(),
+                            ScalarUnaryOp::Ceil => x.ceil(),
+                        };
+                    }
+                }
+                ScalarOp::Select => {
+                    for i in 0..group.count as usize {
+                        let cond = values[group.inputs[0].resolve(i as u64).0 as usize];
+                        let a = values[group.inputs[1].resolve(i as u64).0 as usize];
+                        let b = values[group.inputs[2].resolve(i as u64).0 as usize];
+                        values[base + i] = if cond != 0.0 { a } else { b };
+                    }
+                }
+                ScalarOp::Reduce {
+                    kind,
+                    reduce_count,
+                    reduce_stride,
+                    ..
+                } => {
+                    for i in 0..group.count as usize {
+                        let start = group.inputs[0].resolve(i as u64).0 as i64;
+                        let mut acc = match kind {
+                            ReduceKind::Sum => 0.0f64,
+                            ReduceKind::Max => f64::NEG_INFINITY,
+                        };
+                        for r in 0..*reduce_count {
+                            let src_idx = (start + r as i64 * reduce_stride) as usize;
+                            let v = values[src_idx];
+                            acc = match kind {
+                                ReduceKind::Sum => acc + v,
+                                ReduceKind::Max => acc.max(v),
+                            };
+                        }
+                        values[base + i] = acc;
+                    }
+                }
+                ScalarOp::IndirectLoad { .. } => {
+                    // Not commonly used in compiler tests.
+                }
+            }
+        }
+
+        values
+    }
+
     /// Compare CompiledPlan output against the NanoEval interpreter.
     fn compare_plan_vs_interp(
         graph: &NanoGraph,
@@ -1114,12 +1282,8 @@ mod tests {
         label: &str,
     ) {
         // Interpreter reference.
-        let overrides_ns: HashMap<u64, NumericScalar> = overrides_f32
-            .iter()
-            .map(|(&k, &v)| (k, NumericScalar::F32(v)))
-            .collect();
         let t0 = std::time::Instant::now();
-        let interp_values: Vec<f64> = vec![0.0; graph.num_atoms() as usize]; // TODO: adapt to new eval API
+        let interp_values = eval_nano_graph(graph, overrides_f32);
         let interp_time = t0.elapsed();
 
         // Compile the plan.
@@ -1756,7 +1920,8 @@ mod tests {
                     values[group.inputs[2].resolve(i).0 as usize]
                 }
             }
-            ScalarOp::Reduce { kind: ReduceKind::Sum,
+            ScalarOp::Reduce {
+                kind: ReduceKind::Sum,
                 reduce_count,
                 reduce_stride,
                 ..
@@ -1769,7 +1934,8 @@ mod tests {
                 }
                 acc
             }
-            ScalarOp::Reduce { kind: ReduceKind::Max,
+            ScalarOp::Reduce {
+                kind: ReduceKind::Max,
                 reduce_count,
                 reduce_stride,
                 ..
@@ -1890,11 +2056,7 @@ mod tests {
         }
 
         // --- Step 3: Run trusted NanoGraph evaluator ---
-        let overrides_ns: HashMap<u64, NumericScalar> = overrides_f32
-            .iter()
-            .map(|(&k, &v)| (k, NumericScalar::F32(v)))
-            .collect();
-        let reference_values: Vec<f64> = vec![0.0; graph.num_atoms() as usize]; // TODO: adapt to new eval API
+        let reference_values = eval_nano_graph(graph, &overrides_f32);
 
         // --- Step 4: Generate v2c plan with 4 lanes ---
         let plan = plan_execution(graph, 4);
@@ -2126,7 +2288,7 @@ mod tests {
                     }
                     for i in work.atom_offset..(work.atom_offset + work.atom_count) {
                         let atom_idx = g.base_id.0 + i;
-                        copy_values[atom_idx as usize] = reference.get(AtomId(atom_idx)) as f32;
+                        copy_values[atom_idx as usize] = reference_values[atom_idx as usize] as f32;
                     }
                 }
             }
@@ -2136,7 +2298,7 @@ mod tests {
         let mut copy_max_err: f64 = 0.0;
         let mut copy_err_atom: u64 = 0;
         for i in 0..num_atoms {
-            let ref_val = reference.get(AtomId(i as u64));
+            let ref_val = reference_values[i];
             let copy_val = copy_values[i] as f64;
             let diff = (ref_val - copy_val).abs();
             if diff > copy_max_err {
@@ -2194,7 +2356,7 @@ mod tests {
         let mut sim_err_atom: u64 = 0;
         let mut sim_large_err_count = 0usize;
         for i in 0..num_atoms {
-            let ref_val = reference.get(AtomId(i as u64));
+            let ref_val = reference_values[i];
             let sim_val = sim_values[i] as f64;
             let diff = (ref_val - sim_val).abs();
             if diff > sim_max_err {
@@ -2286,7 +2448,7 @@ mod tests {
         // Differences > 1e-3 suggest a codegen bug.
         if jit_vs_sim_max_err > 1e-3 {
             // Get reference value for context
-            let ref_val = reference.get(AtomId(jit_vs_sim_err_atom));
+            let ref_val = reference_values[jit_vs_sim_err_atom as usize];
             panic!(
                 "JIT vs f32-sim max_err={:.2e} at atom {} (ref={}) -- likely a CODEGEN bug. \
                  {} atoms differ by > 1e-4",
@@ -2562,7 +2724,8 @@ mod tests {
         let c = g.push_group(
             1,
             DType::F32,
-            ScalarOp::Reduce { kind: ReduceKind::Sum,
+            ScalarOp::Reduce {
+                kind: ReduceKind::Sum,
                 reduce_count: 8,
                 reduce_stride: 1,
                 compute_dtype: DType::F32,
@@ -2725,7 +2888,8 @@ mod tests {
         let c = g.push_group(
             1,
             DType::F32,
-            ScalarOp::Reduce { kind: ReduceKind::Max,
+            ScalarOp::Reduce {
+                kind: ReduceKind::Max,
                 reduce_count: 8,
                 reduce_stride: 1,
                 compute_dtype: DType::F32,

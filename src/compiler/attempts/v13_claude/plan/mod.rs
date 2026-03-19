@@ -1,4 +1,10 @@
-#![allow(clippy::all, dead_code, unreachable_patterns, unused_variables, unused_imports)]
+#![allow(
+    clippy::all,
+    dead_code,
+    unreachable_patterns,
+    unused_variables,
+    unused_imports
+)]
 //! Span-based execution plan types and planner implementations.
 //!
 //! A `SpanPlan` splits a NanoGraph into phases (separated by barriers) and

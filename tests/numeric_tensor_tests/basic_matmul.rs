@@ -17,7 +17,14 @@ pub fn test_matmul_2_3_bf16(backend: &mut EvalBackend) {
         .unwrap()
         .cast(DType::BF16, backend)
         .unwrap();
-    let result = NumericTensor::matmul(&tensor_a, &tensor_b, Some(DType::F32), AccumulationMode::default(), backend).unwrap();
+    let result = NumericTensor::matmul(
+        &tensor_a,
+        &tensor_b,
+        Some(DType::F32),
+        AccumulationMode::default(),
+        backend,
+    )
+    .unwrap();
     let correct = NumericTensor::from_vec(vec![10.875, 3.875, 0.625, 7.625])
         .to_dyn_rank()
         .reshape(vec![2, 2], backend)
@@ -40,7 +47,14 @@ pub fn test_matmul_2_3_f16(backend: &mut EvalBackend) {
         .unwrap()
         .cast(DType::F16, backend)
         .unwrap();
-    let result = NumericTensor::matmul(&tensor_a, &tensor_b, Some(DType::F32), AccumulationMode::default(), backend).unwrap();
+    let result = NumericTensor::matmul(
+        &tensor_a,
+        &tensor_b,
+        Some(DType::F32),
+        AccumulationMode::default(),
+        backend,
+    )
+    .unwrap();
     let correct = NumericTensor::from_vec(vec![10.875, 3.875, 0.625, 7.625])
         .to_dyn_rank()
         .reshape(vec![2, 2], backend)
@@ -63,7 +77,14 @@ pub fn test_matmul_2_3_fp32(backend: &mut EvalBackend) {
         .unwrap()
         .cast(DType::F32, backend)
         .unwrap();
-    let result = NumericTensor::matmul(&tensor_a, &tensor_b, Some(DType::F32), AccumulationMode::default(), backend).unwrap();
+    let result = NumericTensor::matmul(
+        &tensor_a,
+        &tensor_b,
+        Some(DType::F32),
+        AccumulationMode::default(),
+        backend,
+    )
+    .unwrap();
     let correct = NumericTensor::from_vec(vec![10.875, 3.875, 0.625, 7.625])
         .to_dyn_rank()
         .reshape(vec![2, 2], backend)
@@ -98,7 +119,14 @@ pub fn test_matmul_3_3_bf16(backend: &mut EvalBackend) {
             .unwrap()
             .cast(DType::BF16, backend)
             .unwrap();
-    let result = NumericTensor::matmul(&tensor_a, &tensor_b, Some(DType::F32), AccumulationMode::default(), backend).unwrap();
+    let result = NumericTensor::matmul(
+        &tensor_a,
+        &tensor_b,
+        Some(DType::F32),
+        AccumulationMode::default(),
+        backend,
+    )
+    .unwrap();
     let correct = NumericTensor::from_vec(vec![
         -20.87609863,
         40.37561035,
@@ -143,7 +171,14 @@ pub fn test_matmul_3_3_f16(backend: &mut EvalBackend) {
             .unwrap()
             .cast(DType::F16, backend)
             .unwrap();
-    let result = NumericTensor::matmul(&tensor_a, &tensor_b, Some(DType::F32), AccumulationMode::default(), backend).unwrap();
+    let result = NumericTensor::matmul(
+        &tensor_a,
+        &tensor_b,
+        Some(DType::F32),
+        AccumulationMode::default(),
+        backend,
+    )
+    .unwrap();
     let correct = NumericTensor::from_vec(vec![
         -20.87609863,
         40.37561035,
@@ -188,7 +223,14 @@ pub fn test_matmul_3_3_fp32(backend: &mut EvalBackend) {
             .unwrap()
             .cast(DType::F32, backend)
             .unwrap();
-    let result = NumericTensor::matmul(&tensor_a, &tensor_b, Some(DType::F32), AccumulationMode::default(), backend).unwrap();
+    let result = NumericTensor::matmul(
+        &tensor_a,
+        &tensor_b,
+        Some(DType::F32),
+        AccumulationMode::default(),
+        backend,
+    )
+    .unwrap();
     let correct = NumericTensor::from_vec(vec![
         -20.87609863,
         40.37561035,
@@ -221,7 +263,14 @@ pub fn test_matmul_1_4_4_1_fp32(backend: &mut EvalBackend) {
         .unwrap()
         .cast(DType::F32, backend)
         .unwrap();
-    let result = NumericTensor::matmul(&tensor_a, &tensor_b, Some(DType::F32), AccumulationMode::default(), backend).unwrap();
+    let result = NumericTensor::matmul(
+        &tensor_a,
+        &tensor_b,
+        Some(DType::F32),
+        AccumulationMode::default(),
+        backend,
+    )
+    .unwrap();
     let correct = NumericTensor::from_vec(vec![-28.0])
         .to_dyn_rank()
         .reshape(vec![1, 1], backend)
@@ -244,7 +293,14 @@ pub fn test_matmul_1_4_4_1_f16(backend: &mut EvalBackend) {
         .unwrap()
         .cast(DType::F16, backend)
         .unwrap();
-    let result = NumericTensor::matmul(&tensor_a, &tensor_b, Some(DType::F32), AccumulationMode::default(), backend).unwrap();
+    let result = NumericTensor::matmul(
+        &tensor_a,
+        &tensor_b,
+        Some(DType::F32),
+        AccumulationMode::default(),
+        backend,
+    )
+    .unwrap();
     let correct = NumericTensor::from_vec(vec![-28.0])
         .to_dyn_rank()
         .reshape(vec![1, 1], backend)
@@ -267,7 +323,14 @@ pub fn test_matmul_1_4_4_1_bf16(backend: &mut EvalBackend) {
         .unwrap()
         .cast(DType::BF16, backend)
         .unwrap();
-    let result = NumericTensor::matmul(&tensor_a, &tensor_b, Some(DType::F32), AccumulationMode::default(), backend).unwrap();
+    let result = NumericTensor::matmul(
+        &tensor_a,
+        &tensor_b,
+        Some(DType::F32),
+        AccumulationMode::default(),
+        backend,
+    )
+    .unwrap();
     let correct = NumericTensor::from_vec(vec![-28.0])
         .to_dyn_rank()
         .reshape(vec![1, 1], backend)
@@ -290,7 +353,14 @@ pub fn test_matmul_4_1_1_4_fp32(backend: &mut EvalBackend) {
         .unwrap()
         .cast(DType::F32, backend)
         .unwrap();
-    let result = NumericTensor::matmul(&tensor_a, &tensor_b, Some(DType::F32), AccumulationMode::default(), backend).unwrap();
+    let result = NumericTensor::matmul(
+        &tensor_a,
+        &tensor_b,
+        Some(DType::F32),
+        AccumulationMode::default(),
+        backend,
+    )
+    .unwrap();
     let correct = NumericTensor::from_vec(vec![
         -0.75,
         3.0,
@@ -330,7 +400,14 @@ pub fn test_matmul_4_1_1_4_f16(backend: &mut EvalBackend) {
         .unwrap()
         .cast(DType::F16, backend)
         .unwrap();
-    let result = NumericTensor::matmul(&tensor_a, &tensor_b, Some(DType::F32), AccumulationMode::default(), backend).unwrap();
+    let result = NumericTensor::matmul(
+        &tensor_a,
+        &tensor_b,
+        Some(DType::F32),
+        AccumulationMode::default(),
+        backend,
+    )
+    .unwrap();
     let correct = NumericTensor::from_vec(vec![
         -0.75,
         3.0,
@@ -370,7 +447,14 @@ pub fn test_matmul_4_1_1_4_bf16(backend: &mut EvalBackend) {
         .unwrap()
         .cast(DType::BF16, backend)
         .unwrap();
-    let result = NumericTensor::matmul(&tensor_a, &tensor_b, Some(DType::F32), AccumulationMode::default(), backend).unwrap();
+    let result = NumericTensor::matmul(
+        &tensor_a,
+        &tensor_b,
+        Some(DType::F32),
+        AccumulationMode::default(),
+        backend,
+    )
+    .unwrap();
     let correct = NumericTensor::from_vec(vec![
         -0.75,
         3.0,
@@ -410,7 +494,14 @@ pub fn test_matmul_2_2_2_2_fp32(backend: &mut EvalBackend) {
         .unwrap()
         .cast(DType::F32, backend)
         .unwrap();
-    let result = NumericTensor::matmul(&tensor_a, &tensor_b, Some(DType::F32), AccumulationMode::default(), backend).unwrap();
+    let result = NumericTensor::matmul(
+        &tensor_a,
+        &tensor_b,
+        Some(DType::F32),
+        AccumulationMode::default(),
+        backend,
+    )
+    .unwrap();
     let correct = NumericTensor::from_vec(vec![0.2880000174, -16384.0, -4096.0, -0.01919999905])
         .to_dyn_rank()
         .reshape(vec![2, 2], backend)
@@ -433,7 +524,14 @@ pub fn test_matmul_2_2_2_2_bf16(backend: &mut EvalBackend) {
         .unwrap()
         .cast(DType::BF16, backend)
         .unwrap();
-    let result = NumericTensor::matmul(&tensor_a, &tensor_b, Some(DType::F32), AccumulationMode::default(), backend).unwrap();
+    let result = NumericTensor::matmul(
+        &tensor_a,
+        &tensor_b,
+        Some(DType::F32),
+        AccumulationMode::default(),
+        backend,
+    )
+    .unwrap();
     let correct = NumericTensor::from_vec(vec![0.2880000174, -16384.0, -4096.0, -0.01919999905])
         .to_dyn_rank()
         .reshape(vec![2, 2], backend)
@@ -456,7 +554,14 @@ pub fn test_matmul_2_2_2_2_f16(backend: &mut EvalBackend) {
         .unwrap()
         .cast(DType::F16, backend)
         .unwrap();
-    let result = NumericTensor::matmul(&tensor_a, &tensor_b, Some(DType::F32), AccumulationMode::default(), backend).unwrap();
+    let result = NumericTensor::matmul(
+        &tensor_a,
+        &tensor_b,
+        Some(DType::F32),
+        AccumulationMode::default(),
+        backend,
+    )
+    .unwrap();
     let correct = NumericTensor::from_vec(vec![0.2880000174, -16384.0, -4096.0, -0.01919999905])
         .to_dyn_rank()
         .reshape(vec![2, 2], backend)

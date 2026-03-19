@@ -12,8 +12,7 @@ pub mod ops;
 pub mod pattern;
 
 pub use lower::{
-    ConcatSegment, DimClassification, DimKind, NanoLoweringContext, ReduceAccessors,
-    TensorAtomMap,
+    ConcatSegment, DimClassification, DimKind, NanoLoweringContext, ReduceAccessors, TensorAtomMap,
 };
 pub use ops::{ReduceKind, ScalarBinOp, ScalarOp, ScalarUnaryOp};
 pub use pattern::{

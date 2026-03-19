@@ -1069,7 +1069,6 @@ impl<'a> NanoLoweringContext<'a> {
         }
     }
 
-
     /// Build an InputRef for a pointwise (element-by-element) read of a tensor.
     ///
     /// For row-major tensors this returns `Affine { base, stride: 1 }`.
@@ -1093,16 +1092,11 @@ impl<'a> NanoLoweringContext<'a> {
         }
     }
 
-
-
     /// Cast / CastLike / other shape-preserving identity ops.
     ///
     /// If input and output dtypes match, this is a zero-cost view (no atoms created).
     /// Otherwise, emits an Identity group that performs the dtype cast.
-    pub fn lower_identity_passthrough<T: Node>(
-        &mut self,
-        op: &T,
-    ) {
+    pub fn lower_identity_passthrough<T: Node>(&mut self, op: &T) {
         let all_infos = self.all_infos;
         let in_id = Node::inputs(op).next().unwrap();
         let out_id = Node::outputs(op).next().unwrap();
@@ -1150,7 +1144,6 @@ impl<'a> NanoLoweringContext<'a> {
             ),
         );
     }
-
 
     /// View op: no compute, just re-register with the new shape.
     pub fn lower_view_op<T: Node>(&mut self, op: &T) {
@@ -1226,15 +1219,11 @@ impl<'a> NanoLoweringContext<'a> {
         }
     }
 
-
-
-
-
-
-
-
     /// Extract concrete i64 values from a tensor in all_infos.
-    pub fn extract_i64(all_infos: &HashMap<GlobalId, TensorInfo>, id: &GlobalId) -> Option<Vec<i64>> {
+    pub fn extract_i64(
+        all_infos: &HashMap<GlobalId, TensorInfo>,
+        id: &GlobalId,
+    ) -> Option<Vec<i64>> {
         let info = all_infos.get(id)?;
         let tensor = info.as_numeric()?;
         let as_i64 = tensor
@@ -1247,13 +1236,9 @@ impl<'a> NanoLoweringContext<'a> {
         Vec::<i64>::try_from(rank1.to_ndarray().ok()?).ok()
     }
 
-
     /// Lower ReduceSum or ReduceMax over known axes.
-    pub fn lower_reduce<R, F>(
-        &mut self,
-        reduce: &R,
-        make_reduce_op: F,
-    ) where
+    pub fn lower_reduce<R, F>(&mut self, reduce: &R, make_reduce_op: F)
+    where
         R: Node,
         R: ReduceAccessors,
         F: Fn(DType, u64, i64) -> ScalarOp,
@@ -1519,15 +1504,9 @@ impl<'a> NanoLoweringContext<'a> {
         );
     }
 
-
-
     /// Generic boundary fallback. Always registers outputs in tensor_map
     /// so downstream ops can reference them.
-    pub fn lower_as_boundary_named<T: Node>(
-        &mut self,
-        op: &T,
-        name: &str,
-    ) {
+    pub fn lower_as_boundary_named<T: Node>(&mut self, op: &T, name: &str) {
         let all_infos = self.all_infos;
         let _op_id = op.global_id();
         for out_id in op.outputs() {
@@ -1542,11 +1521,7 @@ impl<'a> NanoLoweringContext<'a> {
         self.push_unsupported(op, name);
     }
 
-    pub fn push_unsupported<T: Node>(
-        &mut self,
-        op: &T,
-        name: &str,
-    ) {
+    pub fn push_unsupported<T: Node>(&mut self, op: &T, name: &str) {
         let all_infos = self.all_infos;
         let in_shapes: Vec<String> = op
             .inputs()
@@ -1609,10 +1584,10 @@ mod tests {
     use super::*;
     use crate::DynRank;
     use crate::backends::eval_backend::EvalBackend;
+    use crate::backends::ndarray_backend::NDArrayNumericTensor;
     use crate::graph::Graph;
     use crate::milli_graph::MilliOpGraph;
     use crate::milli_graph::ops::MilliOp;
-    use crate::backends::ndarray_backend::NDArrayNumericTensor;
     use crate::nano_graph::eval;
     use crate::nano_graph::pattern::AtomRange;
     use crate::numeric_tensor::NumericTensor;
@@ -1625,7 +1600,7 @@ mod tests {
             let nd = t.to_ndarray().unwrap();
             match nd {
                 NDArrayNumericTensor::BOOL(a) => {
-                    return a.iter().map(|&v| if v { 1.0 } else { 0.0 }).collect()
+                    return a.iter().map(|&v| if v { 1.0 } else { 0.0 }).collect();
                 }
                 _ => unreachable!(),
             }
@@ -1667,7 +1642,14 @@ mod tests {
         let mut backend = EvalBackend::NDArray;
         for &op_id in milli.op_ordering() {
             let op = milli.get_node_by_id(&op_id).unwrap();
-            for (tid, val) in op.eval(&intermediates, &crate::milli_graph::ops::MilliEvalConfig::default(), &mut backend).unwrap() {
+            for (tid, val) in op
+                .eval(
+                    &intermediates,
+                    &crate::milli_graph::ops::MilliEvalConfig::default(),
+                    &mut backend,
+                )
+                .unwrap()
+            {
                 intermediates.insert(tid, val);
             }
         }
@@ -1701,7 +1683,10 @@ mod tests {
         let mut all_output_ranges: Vec<AtomRange> = Vec::new();
         for out_id in &output_ids {
             let tam = result.tensor_map.get(out_id).unwrap();
-            assert!(tam.sym_dims.is_empty(), "Sym dims not yet supported in test");
+            assert!(
+                tam.sym_dims.is_empty(),
+                "Sym dims not yet supported in test"
+            );
             // For segmented tensors, we need all groups that contain atoms.
             // Collect unique groups by walking atom_id_for_element.
             let mut seen_groups = std::collections::HashSet::new();
@@ -1762,9 +1747,9 @@ mod tests {
             let nano_flat: Vec<f64> = (0..tam.count)
                 .map(|i| {
                     let atom = tam.atom_id_for_element(i);
-                    *atom_vals.get(&atom.0).unwrap_or_else(|| {
-                        panic!("atom {} not found in eval results", atom)
-                    })
+                    *atom_vals
+                        .get(&atom.0)
+                        .unwrap_or_else(|| panic!("atom {} not found in eval results", atom))
                 })
                 .collect();
 
@@ -1788,7 +1773,11 @@ mod tests {
                 } else {
                     (m - n).abs()
                 };
-                let tol = if is_bool { 0.0 } else { 1e-4 * m.abs().max(1.0) };
+                let tol = if is_bool {
+                    0.0
+                } else {
+                    1e-4 * m.abs().max(1.0)
+                };
                 assert!(
                     diff <= tol,
                     "Output {:?} element {}: milli={} nano={} diff={}",
@@ -2363,7 +2352,6 @@ mod tests {
         );
     }
 
-
     /// Large MatMul to check for accumulation or addressing bugs.
     #[test]
     fn test_three_way_matmul() {
@@ -2378,7 +2366,14 @@ mod tests {
                 let a = graph.add_input(rng);
                 let b = graph.add_input(rng);
                 let c = crate::milli_graph::ops::MatMul::push_new(
-                    graph, a, b, DType::F32, DType::F32, DType::F32, DType::F32, rng,
+                    graph,
+                    a,
+                    b,
+                    DType::F32,
+                    DType::F32,
+                    DType::F32,
+                    DType::F32,
+                    rng,
                 );
                 (vec![a, b], vec![c])
             },
@@ -2402,18 +2397,56 @@ mod tests {
                 let w2 = graph.add_input(rng);
                 let b2 = graph.add_input(rng);
 
-                let mm1 = MatMul::push_new(graph, x, w1, DType::F32, DType::F32, DType::F32, DType::F32, rng);
+                let mm1 = MatMul::push_new(
+                    graph,
+                    x,
+                    w1,
+                    DType::F32,
+                    DType::F32,
+                    DType::F32,
+                    DType::F32,
+                    rng,
+                );
                 let h = SimpleBinary::add(graph, mm1, b1, rng);
-                let mm2 = MatMul::push_new(graph, h, w2, DType::F32, DType::F32, DType::F32, DType::F32, rng);
+                let mm2 = MatMul::push_new(
+                    graph,
+                    h,
+                    w2,
+                    DType::F32,
+                    DType::F32,
+                    DType::F32,
+                    DType::F32,
+                    rng,
+                );
                 let out = SimpleBinary::add(graph, mm2, b2, rng);
                 (vec![x, w1, b1, w2, b2], vec![out])
             },
             vec![
-                NumericTensor::from_vec_shape((0..256).map(|i| (i as f32) * 0.01 - 1.28).collect(), vec![4, 64]).unwrap(),
-                NumericTensor::from_vec_shape((0..4096).map(|i| (i as f32) * 0.002 - 4.0).collect(), vec![64, 64]).unwrap(),
-                NumericTensor::from_vec_shape((0..64).map(|i| (i as f32) * 0.1 - 3.2).collect(), vec![64]).unwrap(),
-                NumericTensor::from_vec_shape((0..2048).map(|i| (i as f32) * 0.003 - 3.0).collect(), vec![64, 32]).unwrap(),
-                NumericTensor::from_vec_shape((0..32).map(|i| (i as f32) * 0.05 - 0.8).collect(), vec![32]).unwrap(),
+                NumericTensor::from_vec_shape(
+                    (0..256).map(|i| (i as f32) * 0.01 - 1.28).collect(),
+                    vec![4, 64],
+                )
+                .unwrap(),
+                NumericTensor::from_vec_shape(
+                    (0..4096).map(|i| (i as f32) * 0.002 - 4.0).collect(),
+                    vec![64, 64],
+                )
+                .unwrap(),
+                NumericTensor::from_vec_shape(
+                    (0..64).map(|i| (i as f32) * 0.1 - 3.2).collect(),
+                    vec![64],
+                )
+                .unwrap(),
+                NumericTensor::from_vec_shape(
+                    (0..2048).map(|i| (i as f32) * 0.003 - 3.0).collect(),
+                    vec![64, 32],
+                )
+                .unwrap(),
+                NumericTensor::from_vec_shape(
+                    (0..32).map(|i| (i as f32) * 0.05 - 0.8).collect(),
+                    vec![32],
+                )
+                .unwrap(),
             ],
         );
     }
@@ -2434,22 +2467,43 @@ mod tests {
                 let gamma = graph.add_input(rng);
                 let beta = graph.add_input(rng);
 
-                let mm = MatMul::push_new(graph, x, w, DType::F32, DType::F32, DType::F32, DType::F32, rng);
+                let mm = MatMul::push_new(
+                    graph,
+                    x,
+                    w,
+                    DType::F32,
+                    DType::F32,
+                    DType::F32,
+                    DType::F32,
+                    rng,
+                );
                 let transposed = Transpose::push_new(graph, mm, Some(vec![0, 2, 1]), rng);
 
-                let axes_tensor = NDArrayNumericTensor::I64(ArcArray::from_shape_vec(IxDyn(&[1]), vec![-1i64]).unwrap());
+                let axes_tensor = NDArrayNumericTensor::I64(
+                    ArcArray::from_shape_vec(IxDyn(&[1]), vec![-1i64]).unwrap(),
+                );
                 let axes_id = Constant::push_new(graph, axes_tensor, rng);
                 let mean = ReduceMean::push_new(graph, transposed, Some(axes_id), true, false, rng);
                 let centered = SimpleBinary::sub(graph, transposed, mean, rng);
 
-                let pow2_tensor = NDArrayNumericTensor::F32(ArcArray::from_shape_vec(IxDyn(&[1]), vec![2.0f32]).unwrap());
+                let pow2_tensor = NDArrayNumericTensor::F32(
+                    ArcArray::from_shape_vec(IxDyn(&[1]), vec![2.0f32]).unwrap(),
+                );
                 let pow2_id = Constant::push_new(graph, pow2_tensor, rng);
                 let squared = Pow::push_new(graph, centered, pow2_id, rng);
 
-                let axes_id2 = Constant::push_new(graph, NDArrayNumericTensor::I64(ArcArray::from_shape_vec(IxDyn(&[1]), vec![-1i64]).unwrap()), rng);
+                let axes_id2 = Constant::push_new(
+                    graph,
+                    NDArrayNumericTensor::I64(
+                        ArcArray::from_shape_vec(IxDyn(&[1]), vec![-1i64]).unwrap(),
+                    ),
+                    rng,
+                );
                 let var = ReduceMean::push_new(graph, squared, Some(axes_id2), true, false, rng);
 
-                let eps_tensor = NDArrayNumericTensor::F32(ArcArray::from_shape_vec(IxDyn(&[1]), vec![1e-5f32]).unwrap());
+                let eps_tensor = NDArrayNumericTensor::F32(
+                    ArcArray::from_shape_vec(IxDyn(&[1]), vec![1e-5f32]).unwrap(),
+                );
                 let eps_id = Constant::push_new(graph, eps_tensor, rng);
                 let var_eps = SimpleBinary::add(graph, var, eps_id, rng);
                 let std_dev = SimpleUnaryOp::sqrt(graph, var_eps, rng);
@@ -2460,8 +2514,16 @@ mod tests {
                 (vec![x, w, gamma, beta], vec![out])
             },
             vec![
-                NumericTensor::from_vec_shape((0..64).map(|i| (i as f32) * 0.1 - 3.2).collect(), vec![2, 4, 8]).unwrap(),
-                NumericTensor::from_vec_shape((0..64).map(|i| (i as f32) * 0.02 - 0.64).collect(), vec![8, 8]).unwrap(),
+                NumericTensor::from_vec_shape(
+                    (0..64).map(|i| (i as f32) * 0.1 - 3.2).collect(),
+                    vec![2, 4, 8],
+                )
+                .unwrap(),
+                NumericTensor::from_vec_shape(
+                    (0..64).map(|i| (i as f32) * 0.02 - 0.64).collect(),
+                    vec![8, 8],
+                )
+                .unwrap(),
                 NumericTensor::from_vec_shape(vec![1.0f32, 1.1, 0.9, 1.05], vec![4]).unwrap(),
                 NumericTensor::from_vec_shape(vec![0.0f32, 0.1, -0.1, 0.05], vec![4]).unwrap(),
             ],
@@ -2612,11 +2674,8 @@ mod tests {
                 (vec![a, b], vec![c])
             },
             vec![
-                NumericTensor::from_vec_shape(
-                    (0..12).map(|i| i as f32).collect(),
-                    vec![3, 4],
-                )
-                .unwrap(),
+                NumericTensor::from_vec_shape((0..12).map(|i| i as f32).collect(), vec![3, 4])
+                    .unwrap(),
                 NumericTensor::from_vec_shape(vec![100.0f32, 200.0, 300.0, 400.0], vec![4])
                     .unwrap(),
             ],
@@ -2680,7 +2739,8 @@ mod tests {
         check_integrity(
             |g, rng| {
                 let a = g.add_input(rng);
-                let b = crate::milli_graph::ops::SimpleUnaryOp::trig(g, a, crate::TrigOp::Tanh, rng);
+                let b =
+                    crate::milli_graph::ops::SimpleUnaryOp::trig(g, a, crate::TrigOp::Tanh, rng);
                 (vec![a], vec![b])
             },
             vec![NumericTensor::from_vec_shape(vec![0.0f32, 1.0, -1.0, 2.0], vec![4]).unwrap()],
@@ -2740,8 +2800,9 @@ mod tests {
                 let b = crate::milli_graph::ops::ClampMin::push_new(g, a, 0.0, rng);
                 (vec![a], vec![b])
             },
-            vec![NumericTensor::from_vec_shape(vec![-2.0f32, -0.5, 0.0, 1.0, 3.0], vec![5])
-                .unwrap()],
+            vec![
+                NumericTensor::from_vec_shape(vec![-2.0f32, -0.5, 0.0, 1.0, 3.0], vec![5]).unwrap(),
+            ],
         );
     }
 
@@ -2782,11 +2843,8 @@ mod tests {
                 (vec![a, shape], vec![b])
             },
             vec![
-                NumericTensor::from_vec_shape(
-                    (0..12).map(|i| i as f32).collect(),
-                    vec![3, 4],
-                )
-                .unwrap(),
+                NumericTensor::from_vec_shape((0..12).map(|i| i as f32).collect(), vec![3, 4])
+                    .unwrap(),
                 NumericTensor::from_vec_shape(vec![2i64, 6], vec![2]).unwrap(),
             ],
         );
@@ -2850,11 +2908,10 @@ mod tests {
                 let b = crate::milli_graph::ops::Transpose::push_new(g, a, Some(vec![1, 0]), rng);
                 (vec![a], vec![b])
             },
-            vec![NumericTensor::from_vec_shape(
-                (0..12).map(|i| i as f32).collect(),
-                vec![3, 4],
-            )
-            .unwrap()],
+            vec![
+                NumericTensor::from_vec_shape((0..12).map(|i| i as f32).collect(), vec![3, 4])
+                    .unwrap(),
+            ],
         );
     }
 
@@ -2868,11 +2925,10 @@ mod tests {
                     crate::milli_graph::ops::Transpose::push_new(g, a, Some(vec![0, 2, 1]), rng);
                 (vec![a], vec![b])
             },
-            vec![NumericTensor::from_vec_shape(
-                (0..24).map(|i| i as f32).collect(),
-                vec![2, 3, 4],
-            )
-            .unwrap()],
+            vec![
+                NumericTensor::from_vec_shape((0..24).map(|i| i as f32).collect(), vec![2, 3, 4])
+                    .unwrap(),
+            ],
         );
     }
 
@@ -2885,12 +2941,8 @@ mod tests {
         check_integrity(
             |g, rng| {
                 let a = g.add_input(rng);
-                let b = crate::milli_graph::ops::Cast::push_new(
-                    g,
-                    a,
-                    crate::dtype::DType::F64,
-                    rng,
-                );
+                let b =
+                    crate::milli_graph::ops::Cast::push_new(g, a, crate::dtype::DType::F64, rng);
                 (vec![a], vec![b])
             },
             vec![NumericTensor::from_vec_shape(vec![1.5f32, -2.5, 0.0, 3.14], vec![4]).unwrap()],
@@ -2909,17 +2961,24 @@ mod tests {
                 use crate::backends::ndarray_backend::NDArrayNumericTensor;
                 use ndarray::{ArcArray, IxDyn};
                 let a = g.add_input(rng);
-                let axes_tensor =
-                    NDArrayNumericTensor::I64(ArcArray::from_shape_vec(IxDyn(&[1]), vec![0i64]).unwrap());
+                let axes_tensor = NDArrayNumericTensor::I64(
+                    ArcArray::from_shape_vec(IxDyn(&[1]), vec![0i64]).unwrap(),
+                );
                 let axes = crate::milli_graph::ops::Constant::push_new(g, axes_tensor, rng);
-                let b = crate::milli_graph::ops::ReduceSum::push_new(g, a, Some(axes), false, false, rng);
+                let b = crate::milli_graph::ops::ReduceSum::push_new(
+                    g,
+                    a,
+                    Some(axes),
+                    false,
+                    false,
+                    rng,
+                );
                 (vec![a], vec![b])
             },
-            vec![NumericTensor::from_vec_shape(
-                (1..=12).map(|i| i as f32).collect(),
-                vec![3, 4],
-            )
-            .unwrap()],
+            vec![
+                NumericTensor::from_vec_shape((1..=12).map(|i| i as f32).collect(), vec![3, 4])
+                    .unwrap(),
+            ],
         );
     }
 
@@ -2931,17 +2990,24 @@ mod tests {
                 use crate::backends::ndarray_backend::NDArrayNumericTensor;
                 use ndarray::{ArcArray, IxDyn};
                 let a = g.add_input(rng);
-                let axes_tensor =
-                    NDArrayNumericTensor::I64(ArcArray::from_shape_vec(IxDyn(&[1]), vec![1i64]).unwrap());
+                let axes_tensor = NDArrayNumericTensor::I64(
+                    ArcArray::from_shape_vec(IxDyn(&[1]), vec![1i64]).unwrap(),
+                );
                 let axes = crate::milli_graph::ops::Constant::push_new(g, axes_tensor, rng);
-                let b = crate::milli_graph::ops::ReduceSum::push_new(g, a, Some(axes), false, false, rng);
+                let b = crate::milli_graph::ops::ReduceSum::push_new(
+                    g,
+                    a,
+                    Some(axes),
+                    false,
+                    false,
+                    rng,
+                );
                 (vec![a], vec![b])
             },
-            vec![NumericTensor::from_vec_shape(
-                (1..=12).map(|i| i as f32).collect(),
-                vec![3, 4],
-            )
-            .unwrap()],
+            vec![
+                NumericTensor::from_vec_shape((1..=12).map(|i| i as f32).collect(), vec![3, 4])
+                    .unwrap(),
+            ],
         );
     }
 
@@ -2953,17 +3019,29 @@ mod tests {
                 use crate::backends::ndarray_backend::NDArrayNumericTensor;
                 use ndarray::{ArcArray, IxDyn};
                 let a = g.add_input(rng);
-                let axes_tensor =
-                    NDArrayNumericTensor::I64(ArcArray::from_shape_vec(IxDyn(&[1]), vec![1i64]).unwrap());
+                let axes_tensor = NDArrayNumericTensor::I64(
+                    ArcArray::from_shape_vec(IxDyn(&[1]), vec![1i64]).unwrap(),
+                );
                 let axes = crate::milli_graph::ops::Constant::push_new(g, axes_tensor, rng);
-                let b = crate::milli_graph::ops::ReduceMax::push_new(g, a, Some(axes), false, false, rng);
+                let b = crate::milli_graph::ops::ReduceMax::push_new(
+                    g,
+                    a,
+                    Some(axes),
+                    false,
+                    false,
+                    rng,
+                );
                 (vec![a], vec![b])
             },
-            vec![NumericTensor::from_vec_shape(
-                vec![3.0f32, 1.0, 4.0, 1.5, 9.0, 2.6, 5.3, 5.8, 9.7, 9.3, 2.3, 8.4],
-                vec![3, 4],
-            )
-            .unwrap()],
+            vec![
+                NumericTensor::from_vec_shape(
+                    vec![
+                        3.0f32, 1.0, 4.0, 1.5, 9.0, 2.6, 5.3, 5.8, 9.7, 9.3, 2.3, 8.4,
+                    ],
+                    vec![3, 4],
+                )
+                .unwrap(),
+            ],
         );
     }
 
@@ -2975,17 +3053,24 @@ mod tests {
                 use crate::backends::ndarray_backend::NDArrayNumericTensor;
                 use ndarray::{ArcArray, IxDyn};
                 let a = g.add_input(rng);
-                let axes_tensor =
-                    NDArrayNumericTensor::I64(ArcArray::from_shape_vec(IxDyn(&[1]), vec![1i64]).unwrap());
+                let axes_tensor = NDArrayNumericTensor::I64(
+                    ArcArray::from_shape_vec(IxDyn(&[1]), vec![1i64]).unwrap(),
+                );
                 let axes = crate::milli_graph::ops::Constant::push_new(g, axes_tensor, rng);
-                let b = crate::milli_graph::ops::ReduceMean::push_new(g, a, Some(axes), false, false, rng);
+                let b = crate::milli_graph::ops::ReduceMean::push_new(
+                    g,
+                    a,
+                    Some(axes),
+                    false,
+                    false,
+                    rng,
+                );
                 (vec![a], vec![b])
             },
-            vec![NumericTensor::from_vec_shape(
-                (1..=12).map(|i| i as f32).collect(),
-                vec![3, 4],
-            )
-            .unwrap()],
+            vec![
+                NumericTensor::from_vec_shape((1..=12).map(|i| i as f32).collect(), vec![3, 4])
+                    .unwrap(),
+            ],
         );
     }
 
@@ -3001,7 +3086,11 @@ mod tests {
                 let a = g.add_input(rng);
                 let b = g.add_input(rng);
                 let c = crate::milli_graph::ops::MatMul::push_new_default_precision(
-                    g, a, b, DType::F32, rng,
+                    g,
+                    a,
+                    b,
+                    DType::F32,
+                    rng,
                 );
                 (vec![a, b], vec![c])
             },
@@ -3036,11 +3125,8 @@ mod tests {
                 (vec![a, bias], vec![out])
             },
             vec![
-                NumericTensor::from_vec_shape(
-                    (0..12).map(|i| i as f32).collect(),
-                    vec![3, 4],
-                )
-                .unwrap(),
+                NumericTensor::from_vec_shape((0..12).map(|i| i as f32).collect(), vec![3, 4])
+                    .unwrap(),
                 NumericTensor::from_vec_shape(vec![100.0f32, 200.0, 300.0], vec![3]).unwrap(),
             ],
         );
@@ -3055,7 +3141,11 @@ mod tests {
                 let b = g.add_input(rng);
                 let at = crate::milli_graph::ops::Transpose::push_new(g, a, Some(vec![1, 0]), rng);
                 let c = crate::milli_graph::ops::MatMul::push_new_default_precision(
-                    g, at, b, DType::F32, rng,
+                    g,
+                    at,
+                    b,
+                    DType::F32,
+                    rng,
                 );
                 (vec![a, b], vec![c])
             },
@@ -3094,7 +3184,12 @@ mod tests {
                     shape,
                     rng,
                 );
-                let constant = g.get_node_by_id(&cos_op_id).unwrap().outputs().next().unwrap();
+                let constant = g
+                    .get_node_by_id(&cos_op_id)
+                    .unwrap()
+                    .outputs()
+                    .next()
+                    .unwrap();
                 let out = crate::milli_graph::ops::SimpleBinary::add(g, x, constant, rng);
                 (vec![shape, x], vec![out])
             },
@@ -3121,16 +3216,19 @@ mod tests {
                 let axes = g.add_input(rng);
                 let steps = g.add_input(rng);
                 let b = crate::milli_graph::ops::Slice::push_new(
-                    g, a, starts, ends, Some(steps), Some(axes), rng,
+                    g,
+                    a,
+                    starts,
+                    ends,
+                    Some(steps),
+                    Some(axes),
+                    rng,
                 );
                 (vec![a, starts, ends, axes, steps], vec![b])
             },
             vec![
-                NumericTensor::from_vec_shape(
-                    (0..8).map(|i| (i as f32) * 10.0).collect(),
-                    vec![8],
-                )
-                .unwrap(),
+                NumericTensor::from_vec_shape((0..8).map(|i| (i as f32) * 10.0).collect(), vec![8])
+                    .unwrap(),
                 NumericTensor::from_vec_shape(vec![0i64], vec![1]).unwrap(),
                 NumericTensor::from_vec_shape(vec![8i64], vec![1]).unwrap(),
                 NumericTensor::from_vec_shape(vec![0i64], vec![1]).unwrap(),
@@ -3153,7 +3251,11 @@ mod tests {
                 let w = g.add_input(rng);
                 let cat = crate::milli_graph::ops::Concat::push_new(g, vec![a, b], 0, rng);
                 let out = crate::milli_graph::ops::MatMul::push_new_default_precision(
-                    g, cat, w, DType::F32, rng,
+                    g,
+                    cat,
+                    w,
+                    DType::F32,
+                    rng,
                 );
                 (vec![a, b, w], vec![out])
             },
@@ -3212,7 +3314,8 @@ mod tests {
                 let tok_data = g.add_input(rng);
                 let pos_data = g.add_input(rng);
                 let indices = g.add_input(rng);
-                let tok_emb = crate::milli_graph::ops::Gather::push_new(g, tok_data, indices, 0, rng);
+                let tok_emb =
+                    crate::milli_graph::ops::Gather::push_new(g, tok_data, indices, 0, rng);
                 let out = crate::milli_graph::ops::SimpleBinary::add(g, tok_emb, pos_data, rng);
                 (vec![tok_data, pos_data, indices], vec![out])
             },
@@ -3260,16 +3363,17 @@ mod tests {
         check_integrity(
             |g, rng| {
                 let a = g.add_input(rng);
-                let b = crate::milli_graph::ops::Transpose::push_new(
-                    g, a, Some(vec![0, 2, 1, 3]), rng,
-                );
+                let b =
+                    crate::milli_graph::ops::Transpose::push_new(g, a, Some(vec![0, 2, 1, 3]), rng);
                 (vec![a], vec![b])
             },
-            vec![NumericTensor::from_vec_shape(
-                (0..48).map(|i| (i as f32) * 0.1).collect(),
-                vec![2, 3, 2, 4], // [B=2, S=3, H=2, D=4]
-            )
-            .unwrap()],
+            vec![
+                NumericTensor::from_vec_shape(
+                    (0..48).map(|i| (i as f32) * 0.1).collect(),
+                    vec![2, 3, 2, 4], // [B=2, S=3, H=2, D=4]
+                )
+                .unwrap(),
+            ],
         );
     }
 
@@ -3282,7 +3386,11 @@ mod tests {
                 let q = g.add_input(rng);
                 let k = g.add_input(rng);
                 let c = crate::milli_graph::ops::MatMul::push_new_default_precision(
-                    g, q, k, DType::F32, rng,
+                    g,
+                    q,
+                    k,
+                    DType::F32,
+                    rng,
                 );
                 (vec![q, k], vec![c])
             },
@@ -3310,14 +3418,20 @@ mod tests {
                 let q_flat = g.add_input(rng);
                 let q_shape = g.add_input(rng);
                 let k_t = g.add_input(rng);
-                let q_4d = crate::milli_graph::ops::Reshape::push_new(
-                    g, q_flat, q_shape, false, rng,
-                );
+                let q_4d =
+                    crate::milli_graph::ops::Reshape::push_new(g, q_flat, q_shape, false, rng);
                 let q_perm = crate::milli_graph::ops::Transpose::push_new(
-                    g, q_4d, Some(vec![0, 2, 1, 3]), rng,
+                    g,
+                    q_4d,
+                    Some(vec![0, 2, 1, 3]),
+                    rng,
                 );
                 let scores = crate::milli_graph::ops::MatMul::push_new_default_precision(
-                    g, q_perm, k_t, DType::F32, rng,
+                    g,
+                    q_perm,
+                    k_t,
+                    DType::F32,
+                    rng,
                 );
                 (vec![q_flat, q_shape, k_t], vec![scores])
             },
@@ -3360,26 +3474,39 @@ mod tests {
                 );
 
                 // max_val = ReduceMax(x, axis=1, keepdims=true)
-                let max_val =
-                    crate::milli_graph::ops::ReduceMax::push_new(g, x, Some(axes), true, false, rng);
+                let max_val = crate::milli_graph::ops::ReduceMax::push_new(
+                    g,
+                    x,
+                    Some(axes),
+                    true,
+                    false,
+                    rng,
+                );
                 // shifted = x - max_val
                 let shifted = crate::milli_graph::ops::SimpleBinary::sub(g, x, max_val, rng);
                 // exp_val = Exp(shifted)
                 let exp_val = crate::milli_graph::ops::SimpleUnaryOp::exp(g, shifted, rng);
                 // sum_exp = ReduceSum(exp_val, axis=1, keepdims=true)
                 let sum_exp = crate::milli_graph::ops::ReduceSum::push_new(
-                    g, exp_val, Some(axes2), true, false, rng,
+                    g,
+                    exp_val,
+                    Some(axes2),
+                    true,
+                    false,
+                    rng,
                 );
                 // result = exp_val / sum_exp
                 let result = crate::milli_graph::ops::SimpleBinary::div(g, exp_val, sum_exp, rng);
 
                 (vec![x], vec![result])
             },
-            vec![NumericTensor::from_vec_shape(
-                vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 1.0, 0.5, 2.0],
-                vec![2, 4],
-            )
-            .unwrap()],
+            vec![
+                NumericTensor::from_vec_shape(
+                    vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 1.0, 0.5, 2.0],
+                    vec![2, 4],
+                )
+                .unwrap(),
+            ],
         );
     }
 
@@ -3426,12 +3553,22 @@ mod tests {
                 );
 
                 let mean = crate::milli_graph::ops::ReduceMean::push_new(
-                    g, x, Some(axes1), true, false, rng,
+                    g,
+                    x,
+                    Some(axes1),
+                    true,
+                    false,
+                    rng,
                 );
                 let centered = crate::milli_graph::ops::SimpleBinary::sub(g, x, mean, rng);
                 let squared = crate::milli_graph::ops::Pow::push_new(g, centered, pow2, rng);
                 let var = crate::milli_graph::ops::ReduceMean::push_new(
-                    g, squared, Some(axes2), true, false, rng,
+                    g,
+                    squared,
+                    Some(axes2),
+                    true,
+                    false,
+                    rng,
                 );
                 let var_eps = crate::milli_graph::ops::SimpleBinary::add(g, var, eps, rng);
                 let std_dev = crate::milli_graph::ops::SimpleUnaryOp::sqrt(g, var_eps, rng);
@@ -3467,17 +3604,25 @@ mod tests {
                 let k_shape = g.add_input(rng);
                 let q = g.add_input(rng);
 
-                let k4 = crate::milli_graph::ops::Reshape::push_new(
-                    g, k_flat, k_shape, false, rng,
-                );
+                let k4 = crate::milli_graph::ops::Reshape::push_new(g, k_flat, k_shape, false, rng);
                 let kt1 = crate::milli_graph::ops::Transpose::push_new(
-                    g, k4, Some(vec![0, 2, 1, 3]), rng,
+                    g,
+                    k4,
+                    Some(vec![0, 2, 1, 3]),
+                    rng,
                 );
                 let kt2 = crate::milli_graph::ops::Transpose::push_new(
-                    g, kt1, Some(vec![0, 1, 3, 2]), rng,
+                    g,
+                    kt1,
+                    Some(vec![0, 1, 3, 2]),
+                    rng,
                 );
                 let scores = crate::milli_graph::ops::MatMul::push_new_default_precision(
-                    g, q, kt2, DType::F32, rng,
+                    g,
+                    q,
+                    kt2,
+                    DType::F32,
+                    rng,
                 );
 
                 (vec![k_flat, k_shape, q], vec![scores])
@@ -3507,20 +3652,32 @@ mod tests {
         // B=1, S=3, D=4, H=2, D_h=2
         check_integrity(
             |g, rng| {
-                let x = g.add_input(rng);     // [1, 3, 4]
-                let wq = g.add_input(rng);    // [4, 4]
-                let wk = g.add_input(rng);    // [4, 4]
-                let wv = g.add_input(rng);    // [4, 4]
+                let x = g.add_input(rng); // [1, 3, 4]
+                let wq = g.add_input(rng); // [4, 4]
+                let wk = g.add_input(rng); // [4, 4]
+                let wv = g.add_input(rng); // [4, 4]
 
                 // Q = x @ Wq, K = x @ Wk, V = x @ Wv  → all [1, 3, 4]
                 let q = crate::milli_graph::ops::MatMul::push_new_default_precision(
-                    g, x, wq, DType::F32, rng,
+                    g,
+                    x,
+                    wq,
+                    DType::F32,
+                    rng,
                 );
                 let k = crate::milli_graph::ops::MatMul::push_new_default_precision(
-                    g, x, wk, DType::F32, rng,
+                    g,
+                    x,
+                    wk,
+                    DType::F32,
+                    rng,
                 );
                 let v = crate::milli_graph::ops::MatMul::push_new_default_precision(
-                    g, x, wv, DType::F32, rng,
+                    g,
+                    x,
+                    wv,
+                    DType::F32,
+                    rng,
                 );
 
                 // Reshape to [1, 3, 2, 2] for head split
@@ -3536,28 +3693,48 @@ mod tests {
 
                 // Transpose to [1, 2, 3, 2]  (B, H, S, D_h)
                 let qt = crate::milli_graph::ops::Transpose::push_new(
-                    g, q4, Some(vec![0, 2, 1, 3]), rng,
+                    g,
+                    q4,
+                    Some(vec![0, 2, 1, 3]),
+                    rng,
                 );
                 let kt = crate::milli_graph::ops::Transpose::push_new(
-                    g, k4, Some(vec![0, 2, 1, 3]), rng,
+                    g,
+                    k4,
+                    Some(vec![0, 2, 1, 3]),
+                    rng,
                 );
                 let vt = crate::milli_graph::ops::Transpose::push_new(
-                    g, v4, Some(vec![0, 2, 1, 3]), rng,
+                    g,
+                    v4,
+                    Some(vec![0, 2, 1, 3]),
+                    rng,
                 );
 
                 // K^T: [1, 2, 3, 2] → [1, 2, 2, 3]
                 let kt_t = crate::milli_graph::ops::Transpose::push_new(
-                    g, kt, Some(vec![0, 1, 3, 2]), rng,
+                    g,
+                    kt,
+                    Some(vec![0, 1, 3, 2]),
+                    rng,
                 );
 
                 // Attention scores: Q @ K^T = [1, 2, 3, 2] @ [1, 2, 2, 3] → [1, 2, 3, 3]
                 let scores = crate::milli_graph::ops::MatMul::push_new_default_precision(
-                    g, qt, kt_t, DType::F32, rng,
+                    g,
+                    qt,
+                    kt_t,
+                    DType::F32,
+                    rng,
                 );
 
                 // Attention output: scores @ V = [1, 2, 3, 3] @ [1, 2, 3, 2] → [1, 2, 3, 2]
                 let attn_out = crate::milli_graph::ops::MatMul::push_new_default_precision(
-                    g, scores, vt, DType::F32, rng,
+                    g,
+                    scores,
+                    vt,
+                    DType::F32,
+                    rng,
                 );
 
                 (
@@ -3616,15 +3793,24 @@ mod tests {
                 );
                 let axes = crate::milli_graph::ops::Constant::push_new(g, axes_tensor, rng);
                 let b = crate::milli_graph::ops::ReduceMean::push_new(
-                    g, a, Some(axes), true, false, rng,
+                    g,
+                    a,
+                    Some(axes),
+                    true,
+                    false,
+                    rng,
                 );
                 (vec![a], vec![b])
             },
-            vec![NumericTensor::from_vec_shape(
-                (0..3072).map(|i| ((i as f32) * 7.3 - 1500.0).sin() * 5000.0).collect(),
-                vec![4, 768],
-            )
-            .unwrap()],
+            vec![
+                NumericTensor::from_vec_shape(
+                    (0..3072)
+                        .map(|i| ((i as f32) * 7.3 - 1500.0).sin() * 5000.0)
+                        .collect(),
+                    vec![4, 768],
+                )
+                .unwrap(),
+            ],
         );
     }
 
@@ -3641,15 +3827,22 @@ mod tests {
                 );
                 let axes = crate::milli_graph::ops::Constant::push_new(g, axes_tensor, rng);
                 let b = crate::milli_graph::ops::ReduceMean::push_new(
-                    g, a, Some(axes), true, false, rng,
+                    g,
+                    a,
+                    Some(axes),
+                    true,
+                    false,
+                    rng,
                 );
                 (vec![a], vec![b])
             },
-            vec![NumericTensor::from_vec_shape(
-                (0..512).map(|i| (i as f32) * 0.01 - 2.56).collect(),
-                vec![2, 4, 64],
-            )
-            .unwrap()],
+            vec![
+                NumericTensor::from_vec_shape(
+                    (0..512).map(|i| (i as f32) * 0.01 - 2.56).collect(),
+                    vec![2, 4, 64],
+                )
+                .unwrap(),
+            ],
         );
     }
 
@@ -3661,7 +3854,11 @@ mod tests {
                 let a = g.add_input(rng);
                 let b = g.add_input(rng);
                 let c = crate::milli_graph::ops::MatMul::push_new_default_precision(
-                    g, a, b, DType::F32, rng,
+                    g,
+                    a,
+                    b,
+                    DType::F32,
+                    rng,
                 );
                 (vec![a, b], vec![c])
             },
@@ -3693,30 +3890,41 @@ mod tests {
                 let k_shape = g.add_input(rng);
 
                 // Reshape Q: [2, 4, 64] → [2, 4, 4, 16]
-                let q_4d = crate::milli_graph::ops::Reshape::push_new(
-                    g, q_flat, q_shape, false, rng,
-                );
+                let q_4d =
+                    crate::milli_graph::ops::Reshape::push_new(g, q_flat, q_shape, false, rng);
                 // Transpose Q: [2, 4, 4, 16] → [2, 4, 4, 16] perm=[0,2,1,3]
                 let q_t = crate::milli_graph::ops::Transpose::push_new(
-                    g, q_4d, Some(vec![0, 2, 1, 3]), rng,
+                    g,
+                    q_4d,
+                    Some(vec![0, 2, 1, 3]),
+                    rng,
                 );
 
                 // Reshape K: [2, 4, 64] → [2, 4, 4, 16]
-                let k_4d = crate::milli_graph::ops::Reshape::push_new(
-                    g, k_flat, k_shape, false, rng,
-                );
+                let k_4d =
+                    crate::milli_graph::ops::Reshape::push_new(g, k_flat, k_shape, false, rng);
                 // Transpose K: → [2, 4, 4, 16] perm=[0,2,1,3]
                 let k_t1 = crate::milli_graph::ops::Transpose::push_new(
-                    g, k_4d, Some(vec![0, 2, 1, 3]), rng,
+                    g,
+                    k_4d,
+                    Some(vec![0, 2, 1, 3]),
+                    rng,
                 );
                 // Transpose K^T: [2, 4, 4, 16] → [2, 4, 16, 4] perm=[0,1,3,2]
                 let k_t2 = crate::milli_graph::ops::Transpose::push_new(
-                    g, k_t1, Some(vec![0, 1, 3, 2]), rng,
+                    g,
+                    k_t1,
+                    Some(vec![0, 1, 3, 2]),
+                    rng,
                 );
 
                 // Attention scores: Q @ K^T = [2, 4, 4, 16] @ [2, 4, 16, 4] → [2, 4, 4, 4]
                 let scores = crate::milli_graph::ops::MatMul::push_new_default_precision(
-                    g, q_t, k_t2, DType::F32, rng,
+                    g,
+                    q_t,
+                    k_t2,
+                    DType::F32,
+                    rng,
                 );
 
                 (vec![q_flat, q_shape, k_flat, k_shape], vec![scores])
@@ -3757,15 +3965,48 @@ mod tests {
                 );
                 let split_sizes = crate::milli_graph::ops::Constant::push_new(g, split_tensor, rng);
 
-                let q = crate::milli_graph::ops::Split::push_new(g, x, Some(crate::milli_graph::ops::MilliOpTensorIDOrLiteral::TensorID(split_sizes)), 2, Some(3), 0, rng);
-                let k = crate::milli_graph::ops::Split::push_new(g, x, Some(crate::milli_graph::ops::MilliOpTensorIDOrLiteral::TensorID(split_sizes)), 2, Some(3), 1, rng);
-                let v = crate::milli_graph::ops::Split::push_new(g, x, Some(crate::milli_graph::ops::MilliOpTensorIDOrLiteral::TensorID(split_sizes)), 2, Some(3), 2, rng);
+                let q = crate::milli_graph::ops::Split::push_new(
+                    g,
+                    x,
+                    Some(crate::milli_graph::ops::MilliOpTensorIDOrLiteral::TensorID(
+                        split_sizes,
+                    )),
+                    2,
+                    Some(3),
+                    0,
+                    rng,
+                );
+                let k = crate::milli_graph::ops::Split::push_new(
+                    g,
+                    x,
+                    Some(crate::milli_graph::ops::MilliOpTensorIDOrLiteral::TensorID(
+                        split_sizes,
+                    )),
+                    2,
+                    Some(3),
+                    1,
+                    rng,
+                );
+                let v = crate::milli_graph::ops::Split::push_new(
+                    g,
+                    x,
+                    Some(crate::milli_graph::ops::MilliOpTensorIDOrLiteral::TensorID(
+                        split_sizes,
+                    )),
+                    2,
+                    Some(3),
+                    2,
+                    rng,
+                );
 
                 let q_biased = crate::milli_graph::ops::SimpleBinary::add(g, q, bias_q, rng);
                 let k_biased = crate::milli_graph::ops::SimpleBinary::add(g, k, bias_k, rng);
                 let v_biased = crate::milli_graph::ops::SimpleBinary::add(g, v, bias_v, rng);
 
-                (vec![x, bias_q, bias_k, bias_v], vec![q_biased, k_biased, v_biased])
+                (
+                    vec![x, bias_q, bias_k, bias_v],
+                    vec![q_biased, k_biased, v_biased],
+                )
             },
             vec![
                 NumericTensor::from_vec_shape(
@@ -3792,7 +4033,11 @@ mod tests {
                 let x = g.add_input(rng);
                 let w = g.add_input(rng);
                 let proj = crate::milli_graph::ops::MatMul::push_new_default_precision(
-                    g, x, w, DType::F32, rng,
+                    g,
+                    x,
+                    w,
+                    DType::F32,
+                    rng,
                 );
 
                 let split_tensor = NDArrayNumericTensor::I64(
@@ -3800,9 +4045,39 @@ mod tests {
                 );
                 let split_sizes = crate::milli_graph::ops::Constant::push_new(g, split_tensor, rng);
 
-                let q = crate::milli_graph::ops::Split::push_new(g, proj, Some(crate::milli_graph::ops::MilliOpTensorIDOrLiteral::TensorID(split_sizes)), 2, Some(3), 0, rng);
-                let k = crate::milli_graph::ops::Split::push_new(g, proj, Some(crate::milli_graph::ops::MilliOpTensorIDOrLiteral::TensorID(split_sizes)), 2, Some(3), 1, rng);
-                let v = crate::milli_graph::ops::Split::push_new(g, proj, Some(crate::milli_graph::ops::MilliOpTensorIDOrLiteral::TensorID(split_sizes)), 2, Some(3), 2, rng);
+                let q = crate::milli_graph::ops::Split::push_new(
+                    g,
+                    proj,
+                    Some(crate::milli_graph::ops::MilliOpTensorIDOrLiteral::TensorID(
+                        split_sizes,
+                    )),
+                    2,
+                    Some(3),
+                    0,
+                    rng,
+                );
+                let k = crate::milli_graph::ops::Split::push_new(
+                    g,
+                    proj,
+                    Some(crate::milli_graph::ops::MilliOpTensorIDOrLiteral::TensorID(
+                        split_sizes,
+                    )),
+                    2,
+                    Some(3),
+                    1,
+                    rng,
+                );
+                let v = crate::milli_graph::ops::Split::push_new(
+                    g,
+                    proj,
+                    Some(crate::milli_graph::ops::MilliOpTensorIDOrLiteral::TensorID(
+                        split_sizes,
+                    )),
+                    2,
+                    Some(3),
+                    2,
+                    rng,
+                );
 
                 (vec![x, w], vec![q, k, v])
             },
@@ -3839,7 +4114,11 @@ mod tests {
 
                 // QKV projection: [1, 4, 8] @ [8, 24] → [1, 4, 24]
                 let proj = crate::milli_graph::ops::MatMul::push_new_default_precision(
-                    g, x, wqkv, DType::F32, rng,
+                    g,
+                    x,
+                    wqkv,
+                    DType::F32,
+                    rng,
                 );
 
                 // Split into Q, K, V each [1, 4, 8]
@@ -3848,34 +4127,95 @@ mod tests {
                 );
                 let split_sizes = crate::milli_graph::ops::Constant::push_new(g, split_tensor, rng);
 
-                let q_raw = crate::milli_graph::ops::Split::push_new(g, proj, Some(crate::milli_graph::ops::MilliOpTensorIDOrLiteral::TensorID(split_sizes)), 2, Some(3), 0, rng);
-                let k_raw = crate::milli_graph::ops::Split::push_new(g, proj, Some(crate::milli_graph::ops::MilliOpTensorIDOrLiteral::TensorID(split_sizes)), 2, Some(3), 1, rng);
-                let v_raw = crate::milli_graph::ops::Split::push_new(g, proj, Some(crate::milli_graph::ops::MilliOpTensorIDOrLiteral::TensorID(split_sizes)), 2, Some(3), 2, rng);
+                let q_raw = crate::milli_graph::ops::Split::push_new(
+                    g,
+                    proj,
+                    Some(crate::milli_graph::ops::MilliOpTensorIDOrLiteral::TensorID(
+                        split_sizes,
+                    )),
+                    2,
+                    Some(3),
+                    0,
+                    rng,
+                );
+                let k_raw = crate::milli_graph::ops::Split::push_new(
+                    g,
+                    proj,
+                    Some(crate::milli_graph::ops::MilliOpTensorIDOrLiteral::TensorID(
+                        split_sizes,
+                    )),
+                    2,
+                    Some(3),
+                    1,
+                    rng,
+                );
+                let v_raw = crate::milli_graph::ops::Split::push_new(
+                    g,
+                    proj,
+                    Some(crate::milli_graph::ops::MilliOpTensorIDOrLiteral::TensorID(
+                        split_sizes,
+                    )),
+                    2,
+                    Some(3),
+                    2,
+                    rng,
+                );
 
                 // Reshape to [1, 4, 2, 4] for head split
                 let shape4d_q = g.add_input(rng);
                 let shape4d_k = g.add_input(rng);
                 let shape4d_v = g.add_input(rng);
-                let q4 = crate::milli_graph::ops::Reshape::push_new(g, q_raw, shape4d_q, false, rng);
-                let k4 = crate::milli_graph::ops::Reshape::push_new(g, k_raw, shape4d_k, false, rng);
-                let v4 = crate::milli_graph::ops::Reshape::push_new(g, v_raw, shape4d_v, false, rng);
+                let q4 =
+                    crate::milli_graph::ops::Reshape::push_new(g, q_raw, shape4d_q, false, rng);
+                let k4 =
+                    crate::milli_graph::ops::Reshape::push_new(g, k_raw, shape4d_k, false, rng);
+                let v4 =
+                    crate::milli_graph::ops::Reshape::push_new(g, v_raw, shape4d_v, false, rng);
 
                 // Transpose to [1, 2, 4, 4] (B, H, S, D)
-                let qt = crate::milli_graph::ops::Transpose::push_new(g, q4, Some(vec![0, 2, 1, 3]), rng);
-                let kt = crate::milli_graph::ops::Transpose::push_new(g, k4, Some(vec![0, 2, 1, 3]), rng);
-                let vt = crate::milli_graph::ops::Transpose::push_new(g, v4, Some(vec![0, 2, 1, 3]), rng);
+                let qt = crate::milli_graph::ops::Transpose::push_new(
+                    g,
+                    q4,
+                    Some(vec![0, 2, 1, 3]),
+                    rng,
+                );
+                let kt = crate::milli_graph::ops::Transpose::push_new(
+                    g,
+                    k4,
+                    Some(vec![0, 2, 1, 3]),
+                    rng,
+                );
+                let vt = crate::milli_graph::ops::Transpose::push_new(
+                    g,
+                    v4,
+                    Some(vec![0, 2, 1, 3]),
+                    rng,
+                );
 
                 // K^T: [1, 2, 4, 4] → [1, 2, 4, 4] (transpose last 2 dims)
-                let kt_t = crate::milli_graph::ops::Transpose::push_new(g, kt, Some(vec![0, 1, 3, 2]), rng);
+                let kt_t = crate::milli_graph::ops::Transpose::push_new(
+                    g,
+                    kt,
+                    Some(vec![0, 1, 3, 2]),
+                    rng,
+                );
 
                 // Attention scores: Q @ K^T
                 let scores = crate::milli_graph::ops::MatMul::push_new_default_precision(
-                    g, qt, kt_t, DType::F32, rng,
+                    g,
+                    qt,
+                    kt_t,
+                    DType::F32,
+                    rng,
                 );
 
                 // Attention output: scores @ V
                 let attn_out = crate::milli_graph::ops::MatMul::push_new_default_precision(
-                    g, scores, vt, DType::F32, rng,
+                    g,
+                    scores,
+                    vt,
+                    DType::F32,
+                    rng,
                 );
 
                 (

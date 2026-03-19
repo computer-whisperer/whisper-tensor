@@ -87,9 +87,7 @@ pub enum ScalarOp {
     /// Indirect load: given a runtime-computed index (one input), read a value
     /// from a known table of atoms at `table_base + index`. Used for Gather
     /// (embedding lookups). No computation, just a runtime-dependent load.
-    IndirectLoad {
-        table_base: super::pattern::AtomId,
-    },
+    IndirectLoad { table_base: super::pattern::AtomId },
 }
 
 impl ScalarOp {

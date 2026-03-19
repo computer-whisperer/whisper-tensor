@@ -1054,7 +1054,13 @@ impl MilliOpGraph {
                 MilliOpGraphError::InvalidGraph(format!("missing op {op_id} in op_ordering"))
             })?;
             let start_instant = Instant::now();
-            let out_vec: Vec<_> = op.eval(&intermediate_values, &crate::milli_graph::ops::MilliEvalConfig::default(), backend)?.collect();
+            let out_vec: Vec<_> = op
+                .eval(
+                    &intermediate_values,
+                    &crate::milli_graph::ops::MilliEvalConfig::default(),
+                    backend,
+                )?
+                .collect();
             let end_instant = Instant::now();
             observer.on_node_executed(&[op.global_id()], start_instant, end_instant, backend);
             for (tensor_id, value) in out_vec {
@@ -1115,7 +1121,13 @@ impl MilliOpGraph {
             let op = self.ops.get(op_id).ok_or_else(|| {
                 MilliOpGraphError::InvalidGraph(format!("missing op {op_id} in op_ordering"))
             })?;
-            let out_vec: Vec<_> = op.eval(&intermediate_values, &crate::milli_graph::ops::MilliEvalConfig::default(), &mut backend)?.collect();
+            let out_vec: Vec<_> = op
+                .eval(
+                    &intermediate_values,
+                    &crate::milli_graph::ops::MilliEvalConfig::default(),
+                    &mut backend,
+                )?
+                .collect();
             for (tensor_id, value) in out_vec {
                 shapes.insert(
                     tensor_id,
@@ -1164,7 +1176,13 @@ impl MilliOpGraph {
             let op = self.ops.get(op_id).ok_or_else(|| {
                 MilliOpGraphError::InvalidGraph(format!("missing op {op_id} in op_ordering"))
             })?;
-            let out_vec: Vec<_> = op.eval(&intermediate_values, &crate::milli_graph::ops::MilliEvalConfig::default(), &mut backend)?.collect();
+            let out_vec: Vec<_> = op
+                .eval(
+                    &intermediate_values,
+                    &crate::milli_graph::ops::MilliEvalConfig::default(),
+                    &mut backend,
+                )?
+                .collect();
             for (tensor_id, value) in out_vec {
                 shapes.insert(
                     tensor_id,
@@ -1199,7 +1217,13 @@ impl MilliOpGraph {
             let op = self.ops.get(op_id).ok_or_else(|| {
                 MilliOpGraphError::InvalidGraph(format!("missing op {op_id} in op_ordering"))
             })?;
-            let out_vec: Vec<_> = op.eval(&intermediate_values, &crate::milli_graph::ops::MilliEvalConfig::default(), &mut backend)?.collect();
+            let out_vec: Vec<_> = op
+                .eval(
+                    &intermediate_values,
+                    &crate::milli_graph::ops::MilliEvalConfig::default(),
+                    &mut backend,
+                )?
+                .collect();
             for (tensor_id, value) in out_vec {
                 intermediate_values.insert(tensor_id, value);
             }

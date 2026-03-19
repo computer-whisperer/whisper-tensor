@@ -252,7 +252,7 @@ fn rwkv01b_model_loads_with_origin_reference() {
 fn rwkv01b_nano_graph_integrity() {
     use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
     use whisper_tensor::graph::GlobalId;
-    use whisper_tensor::nano_graph::{eval::NanoEval, lower};
+    use whisper_tensor::nano_graph::{eval, lower, pattern::AtomRange};
     use whisper_tensor::numeric_tensor::NumericTensor;
     use whisper_tensor::tensor_info::TensorInfo;
     use whisper_tensor::{DynRank, dtype::DType};
@@ -418,48 +418,44 @@ fn rwkv01b_nano_graph_integrity() {
         eprintln!("  Unsupported ops: {:?}", result.unsupported_details);
     }
 
-    // ---- Build NanoGraph overrides ----
-    // Extract numeric values from all tensors (weights + inputs) via tensor_map.
+    // ---- Build NanoGraph inputs (tensor-based API) ----
     let t0 = std::time::Instant::now();
-    use whisper_tensor::numeric_scalar::NumericScalar;
-    let tensor_to_scalars = |t: &NumericTensor<DynRank>| -> Vec<NumericScalar> {
-        let mut be = EvalBackend::NDArray;
-        let dtype = t.dtype();
-        let f32t = t.cast(DType::F32, &mut be).unwrap();
-        let flat = f32t.flatten().unwrap();
-        let v: Vec<f32> = flat.to_ndarray().unwrap().try_into().unwrap();
-        v.into_iter()
-            .map(|x| NumericScalar::F32(x).cast_to(dtype))
-            .collect()
-    };
 
-    let mut overrides: HashMap<u64, NumericScalar> = HashMap::new();
-    // All tensors (weights + inputs) keyed by external ID.
-    let all_tensors: Vec<(&GlobalId, &NumericTensor<DynRank>)> =
-        weight_tensors.iter().chain(input_tensors.iter()).collect();
-    for (ext_id, tensor) in all_tensors {
-        let Some(&int_id) = milli.input_map.get(ext_id) else {
-            continue;
-        };
-        let Some(tam) = result.tensor_map.get(&int_id) else {
-            continue;
-        };
-        let scalars = tensor_to_scalars(tensor);
-        assert_eq!(
-            scalars.len(),
-            tam.count as usize,
-            "Tensor {:?} count mismatch: {} vs {}",
-            ext_id,
-            scalars.len(),
-            tam.count
-        );
-        for (i, val) in scalars.into_iter().enumerate() {
-            overrides.insert(tam.base_id.0 + i as u64, val);
+    let mut nd_tensors: Vec<NDArrayNumericTensor<DynRank>> = Vec::new();
+    let mut eval_input_indices: Vec<(whisper_tensor::nano_graph::AtomId, usize)> = Vec::new();
+
+    for it in result.graph.input_tensors() {
+        // Find external ID for this input tensor's internal tensor_id.
+        let ext_id = milli
+            .input_map
+            .iter()
+            .find(|(_, int)| **int == it.tensor_id)
+            .map(|(ext, _)| *ext);
+
+        if let Some(ext_id) = ext_id {
+            // User inputs override weights.
+            let tensor = input_tensors
+                .get(&ext_id)
+                .or_else(|| weight_tensors.get(&ext_id));
+            if let Some(tensor) = tensor {
+                let nd = tensor.to_ndarray().unwrap();
+                let idx = nd_tensors.len();
+                nd_tensors.push(nd);
+                eval_input_indices.push((it.base_id, idx));
+            }
         }
     }
+
+    let eval_input_refs: Vec<(
+        whisper_tensor::nano_graph::AtomId,
+        &NDArrayNumericTensor<DynRank>,
+    )> = eval_input_indices
+        .iter()
+        .map(|&(base, idx)| (base, &nd_tensors[idx]))
+        .collect();
     eprintln!(
-        "  Total {} overrides in {:.1}ms",
-        overrides.len(),
+        "  Built {} input tensors in {:.1}ms",
+        eval_input_refs.len(),
         t0.elapsed().as_secs_f64() * 1e3
     );
 
@@ -514,100 +510,121 @@ fn rwkv01b_nano_graph_integrity() {
         }
     }
 
-    // ---- Eval NanoGraph ----
-    let t0 = std::time::Instant::now();
-    let nano_eval = NanoEval::eval_with_overrides_debug(&result.graph, &overrides);
-    eprintln!("  Nano eval done in {:.1}s", t0.elapsed().as_secs_f64());
-
-    // ---- Compare ALL intermediate tensors ----
-    // The observer captured intermediates keyed by internal GlobalId.
-    // tensor_map also uses internal GlobalIds.
-    // Walk milli op ordering to compare tensors in topological order.
-    let tensor_to_f64 = |t: &NumericTensor<DynRank>| -> Vec<f64> {
+    // ---- Build check ranges for all intermediate + output tensors ----
+    let tensor_to_f32 = |t: &NumericTensor<DynRank>| -> Vec<f32> {
         let mut be = EvalBackend::NDArray;
         let f32t = t.cast(DType::F32, &mut be).unwrap();
         let flat = f32t.flatten().unwrap();
-        let v: Vec<f32> = flat.to_ndarray().unwrap().try_into().unwrap();
-        v.into_iter().map(|x| x as f64).collect()
+        flat.to_ndarray().unwrap().try_into().unwrap()
     };
 
-    let mut total_tensors = 0usize;
-    let mut total_elements = 0usize;
-    let mut max_rel_err = 0.0f64;
-    let mut first_divergent: Option<(GlobalId, usize, f64, f64)> = None;
-    let mut first_any_diff_printed = false;
+    let mut check_ids: Vec<GlobalId> = Vec::new();
+    let mut check_ranges: Vec<AtomRange> = Vec::new();
 
-    // Sort tensor_map entries by base_id (topological order in nano graph).
     let mut sorted_tensors: Vec<_> = result.tensor_map.iter().collect();
     sorted_tensors.sort_by_key(|(_, tam)| tam.base_id.0);
     for (int_id, tam) in &sorted_tensors {
         if !tam.sym_dims.is_empty() {
-            continue; // Skip symbolic-dim tensors
+            continue;
         }
-        let Some(milli_tensor) = milli_intermediates.get(int_id) else {
-            continue; // Input tensor or not captured
-        };
+        if !milli_intermediates.contains_key(int_id) {
+            continue;
+        }
+        check_ids.push(**int_id);
+        check_ranges.push(AtomRange {
+            base: tam.base_id,
+            count: tam.count,
+            dtype: tam.dtype,
+        });
+    }
 
-        let milli_flat = tensor_to_f64(milli_tensor);
-        if milli_flat.len() != tam.count as usize {
+    // Also add final outputs.
+    let output_map_rev: HashMap<GlobalId, GlobalId> = milli
+        .output_map
+        .as_ref()
+        .expect("milli has output_map")
+        .iter()
+        .map(|(&int, &ext)| (ext, int))
+        .collect();
+    let output_check_start = check_ids.len();
+    let mut output_ext_ids: Vec<GlobalId> = Vec::new();
+    for (ext_id, _) in &milli_outputs {
+        let int_id = output_map_rev.get(ext_id).unwrap_or(ext_id);
+        let Some(tam) = result.tensor_map.get(int_id) else {
+            continue;
+        };
+        if !tam.sym_dims.is_empty() {
+            continue;
+        }
+        output_ext_ids.push(*ext_id);
+        check_ranges.push(AtomRange {
+            base: tam.base_id,
+            count: tam.count,
+            dtype: tam.dtype,
+        });
+    }
+
+    eprintln!(
+        "  Checking {} intermediates + {} outputs",
+        check_ids.len(),
+        output_ext_ids.len()
+    );
+
+    // ---- Eval NanoGraph ----
+    let t0 = std::time::Instant::now();
+    let nano_results = eval::eval(&result.graph, &eval_input_refs, &check_ranges);
+    eprintln!("  Nano eval done in {:.1}s", t0.elapsed().as_secs_f64());
+
+    // ---- Compare intermediate tensors ----
+    let mut total_tensors = 0usize;
+    let mut total_elements = 0usize;
+    let mut max_rel_err = 0.0f64;
+    let mut first_divergent: Option<(GlobalId, usize, f32, f32)> = None;
+
+    for (ci, int_id) in check_ids.iter().enumerate() {
+        let milli_tensor = &milli_intermediates[int_id];
+        let milli_flat = tensor_to_f32(milli_tensor);
+        let nano_tensor = &nano_results[ci];
+        let nano_flat: Vec<f32> = nano_tensor
+            .cast(DType::F32)
+            .unwrap()
+            .flatten()
+            .try_into()
+            .unwrap();
+
+        if milli_flat.len() != nano_flat.len() {
             eprintln!(
                 "  SIZE MISMATCH: {:?} milli={} nano={}",
                 int_id,
                 milli_flat.len(),
-                tam.count
+                nano_flat.len()
             );
             continue;
         }
 
         total_tensors += 1;
-        for (i, &m) in milli_flat.iter().enumerate() {
-            let n = nano_eval.get(tam.base_id.offset(i as u64));
+        for (i, (&m, &n)) in milli_flat.iter().zip(nano_flat.iter()).enumerate() {
             let diff = (m - n).abs();
-            let rel = diff / m.abs().max(1e-10);
+            let rel = diff as f64 / (m.abs().max(1e-10) as f64);
             if rel > max_rel_err {
                 max_rel_err = rel;
             }
             total_elements += 1;
 
-            // Track first tensor with ANY diff to find precision root.
-            if !first_any_diff_printed && diff > 1e-10 {
-                first_any_diff_printed = true;
-                use whisper_tensor::graph::{Graph as _, Node as _};
-                let prod_op = milli.node_ids().find_map(|op_id| {
-                    let node = milli.get_node_by_id(&op_id).unwrap();
-                    if node.outputs().any(|o| o == **int_id) {
-                        Some(format!("{}", node.op_kind()))
-                    } else {
-                        None
-                    }
-                });
-                eprintln!(
-                    "  FIRST ANY DIFF: tensor {:?} (base_id={}) elem {} diff={:.15} milli={:.15} nano={:.15} op={:?}",
-                    int_id,
-                    tam.base_id.0,
-                    i,
-                    diff,
-                    m,
-                    n,
-                    prod_op.as_deref()
-                );
-            }
-
-            // Report first significant divergence.
             let tol = 1e-2 * m.abs().max(1.0);
             if first_divergent.is_none() && diff > tol {
-                first_divergent = Some((**int_id, i, m, n));
+                first_divergent = Some((*int_id, i, m, n));
                 use whisper_tensor::graph::{Graph, Node};
                 let producing_op = milli.node_ids().find_map(|op_id| {
                     let node = milli.get_node_by_id(&op_id).unwrap();
-                    if node.outputs().any(|o| o == **int_id) {
+                    if node.outputs().any(|o| o == *int_id) {
                         Some(format!("{}", node.op_kind()))
                     } else {
                         None
                     }
                 });
                 eprintln!(
-                    "  FIRST DIVERGENCE (after {} clean tensors): tensor {:?} element {} op={:?} milli={} nano={} diff={:.6}",
+                    "  FIRST DIVERGENCE (after {} clean tensors): {:?} elem {} op={:?} milli={} nano={} diff={:.6}",
                     total_tensors - 1,
                     int_id,
                     i,
@@ -632,28 +649,19 @@ fn rwkv01b_nano_graph_integrity() {
         );
     }
 
-    // Also check final outputs.
-    let output_map_rev: HashMap<GlobalId, GlobalId> = milli
-        .output_map
-        .as_ref()
-        .expect("milli has output_map")
-        .iter()
-        .map(|(&int, &ext)| (ext, int))
-        .collect();
-    for (ext_id, milli_tensor) in &milli_outputs {
-        let Some(&int_id) = output_map_rev.get(ext_id) else {
-            continue;
-        };
-        let Some(tam) = result.tensor_map.get(&int_id) else {
-            continue;
-        };
-        if !tam.sym_dims.is_empty() {
-            continue;
-        }
+    // ---- Check final outputs ----
+    for (oi, ext_id) in output_ext_ids.iter().enumerate() {
+        let milli_tensor = &milli_outputs[ext_id];
+        let milli_flat = tensor_to_f32(milli_tensor);
+        let nano_tensor = &nano_results[output_check_start + oi];
+        let nano_flat: Vec<f32> = nano_tensor
+            .cast(DType::F32)
+            .unwrap()
+            .flatten()
+            .try_into()
+            .unwrap();
 
-        let milli_flat = tensor_to_f64(milli_tensor);
-        for (i, &m) in milli_flat.iter().enumerate() {
-            let n = nano_eval.get(tam.base_id.offset(i as u64));
+        for (i, (&m, &n)) in milli_flat.iter().zip(nano_flat.iter()).enumerate() {
             let diff = (m - n).abs();
             let tol = 1e-3 * m.abs().max(1.0);
             assert!(

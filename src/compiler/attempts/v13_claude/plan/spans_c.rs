@@ -238,7 +238,7 @@ fn fix_cross_lane_deps(
                     reduce_count,
                     reduce_stride,
                     ..
-                    } if *reduce_count > 1 && *reduce_stride != 0 => {
+                } if *reduce_count > 1 && *reduce_stride != 0 => {
                     for input in &group.inputs {
                         let referenced = resolve_input_to_group_ranges(
                             input,
@@ -307,7 +307,7 @@ fn fix_cross_lane_deps(
                     reduce_count,
                     reduce_stride,
                     ..
-                    } if *reduce_count > 1 && *reduce_stride != 0 => {
+                } if *reduce_count > 1 && *reduce_stride != 0 => {
                     for input in &group.inputs {
                         let referenced = resolve_input_to_group_ranges(
                             input,
@@ -697,7 +697,7 @@ fn collect_external_ranges_c(
             reduce_count,
             reduce_stride,
             ..
-            } if *reduce_count > 1 && *reduce_stride != 0 => (true, *reduce_count, *reduce_stride),
+        } if *reduce_count > 1 && *reduce_stride != 0 => (true, *reduce_count, *reduce_stride),
         _ => (false, 0, 0),
     };
 
@@ -1137,9 +1137,7 @@ fn remap_single_input_range(
 /// Remap ScalarOp using RangeAtomMap.
 fn remap_op_range(op: &ScalarOp, atom_map: &RangeAtomMap) -> ScalarOp {
     match op {
-        ScalarOp::IndirectLoad {
-            table_base,
-        } => ScalarOp::IndirectLoad {
+        ScalarOp::IndirectLoad { table_base } => ScalarOp::IndirectLoad {
             table_base: atom_map.get(*table_base).unwrap_or(*table_base),
         },
         other => other.clone(),
@@ -1306,7 +1304,7 @@ fn collect_read_atoms(
             reduce_count,
             reduce_stride,
             ..
-            } if *reduce_count > 1 && *reduce_stride != 0 => {
+        } if *reduce_count > 1 && *reduce_stride != 0 => {
             for input in &group.inputs {
                 collect_input_atoms_with_reduce(
                     input,
@@ -1639,9 +1637,7 @@ fn remap_single_input(
 /// Currently only IndirectLoad has a table_base AtomId.
 fn remap_op(op: &ScalarOp, main_to_local: &HashMap<AtomId, AtomId>) -> ScalarOp {
     match op {
-        ScalarOp::IndirectLoad {
-            table_base,
-        } => {
+        ScalarOp::IndirectLoad { table_base } => {
             let local_table = main_to_local
                 .get(table_base)
                 .copied()
@@ -1844,7 +1840,8 @@ mod tests {
             let red = g.push_group(
                 n,
                 DType::F32,
-                ScalarOp::Reduce { kind: ReduceKind::Sum,
+                ScalarOp::Reduce {
+                    kind: ReduceKind::Sum,
                     reduce_count: k,
                     reduce_stride: n as i64,
                     compute_dtype: DType::F32,
@@ -1912,7 +1909,8 @@ mod tests {
             let red = g.push_group(
                 n1,
                 DType::F32,
-                ScalarOp::Reduce { kind: ReduceKind::Sum,
+                ScalarOp::Reduce {
+                    kind: ReduceKind::Sum,
                     reduce_count: k1,
                     reduce_stride: n1 as i64,
                     compute_dtype: DType::F32,
@@ -1977,7 +1975,8 @@ mod tests {
             let red = g.push_group(
                 n2,
                 DType::F32,
-                ScalarOp::Reduce { kind: ReduceKind::Sum,
+                ScalarOp::Reduce {
+                    kind: ReduceKind::Sum,
                     reduce_count: n1,
                     reduce_stride: n2 as i64,
                     compute_dtype: DType::F32,
@@ -2132,7 +2131,8 @@ mod tests {
                 let red = g.push_group(
                     n,
                     DType::F32,
-                    ScalarOp::Reduce { kind: ReduceKind::Sum,
+                    ScalarOp::Reduce {
+                        kind: ReduceKind::Sum,
                         reduce_count: k,
                         reduce_stride: n as i64,
                         compute_dtype: DType::F32,
@@ -2611,7 +2611,8 @@ mod tests {
         let red = g.push_group(
             out_count.max(1),
             DType::F32,
-            ScalarOp::Reduce { kind: ReduceKind::Sum,
+            ScalarOp::Reduce {
+                kind: ReduceKind::Sum,
                 reduce_count,
                 reduce_stride,
                 compute_dtype: DType::F32,

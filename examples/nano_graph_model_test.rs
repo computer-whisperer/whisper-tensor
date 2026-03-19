@@ -14,9 +14,9 @@ use whisper_tensor::compiler::op_census;
 use whisper_tensor::dtype::DType;
 use whisper_tensor::graph::GlobalId;
 use whisper_tensor::model::Model;
+use whisper_tensor::nano_graph::AtomId;
 use whisper_tensor::nano_graph::lower;
 use whisper_tensor::nano_graph::pattern::AtomRange;
-use whisper_tensor::nano_graph::AtomId;
 use whisper_tensor::numeric_scalar::NumericScalar;
 use whisper_tensor::numeric_tensor::NumericTensor;
 use whisper_tensor::tensor_info::TensorInfo;
@@ -293,10 +293,7 @@ fn main() {
             .map(|&(base, idx)| (base, &nd_tensors[idx]))
             .collect();
 
-        println!(
-            "  Input tensors for eval: {} ranges",
-            eval_input_refs.len()
-        );
+        println!("  Input tensors for eval: {} ranges", eval_input_refs.len());
 
         // Build output ranges from milli_outputs via tensor_map.
         let reverse_output_map: HashMap<GlobalId, GlobalId> = milli_graph
@@ -333,7 +330,8 @@ fn main() {
 
         // Collect all milli intermediate tensors.
         let intermediates = whisper_tensor::compiler::interpret_milli_graph_all_intermediates(
-            &milli_graph, &milli_inputs,
+            &milli_graph,
+            &milli_inputs,
         )
         .unwrap();
         let producers = whisper_tensor::compiler::tensor_producers(&milli_graph, &intermediates);
@@ -357,7 +355,8 @@ fn main() {
             if intermediates.get(&tid).is_none() {
                 skipped_no_milli += 1;
                 if skipped_no_milli <= 5 {
-                    let (op_kind, _) = producers.get(&tid)
+                    let (op_kind, _) = producers
+                        .get(&tid)
                         .map(|(k, i)| (k.as_str(), i.as_slice()))
                         .unwrap_or(("?", &[]));
                     println!(
@@ -413,7 +412,10 @@ fn main() {
         skipped_segmented = 0; // We're checking them now
         println!(
             "  Checking {} intermediate tensors (skipped: {} no-milli, {} segmented, {} large)",
-            check_ids.len(), skipped_no_milli, skipped_segmented, skipped_large
+            check_ids.len(),
+            skipped_no_milli,
+            skipped_segmented,
+            skipped_large
         );
 
         let t_check = Instant::now();
@@ -478,7 +480,9 @@ fn main() {
             let tam = &result.tensor_map[&tid];
             let milli_tensor = &intermediates[&tid];
 
-            let Ok(f32_t) = milli_tensor.cast(DType::F32, &mut backend) else { continue };
+            let Ok(f32_t) = milli_tensor.cast(DType::F32, &mut backend) else {
+                continue;
+            };
             let flat = f32_t.flatten().unwrap();
             let nd = flat.to_ndarray().unwrap();
             let milli_vals: Vec<f32> = nd.try_into().unwrap();
@@ -493,24 +497,33 @@ fn main() {
             } else {
                 num_bad += 1;
                 if num_bad <= 10 {
-                    let (op_kind, input_info) = producers.get(&tid)
+                    let (op_kind, input_info) = producers
+                        .get(&tid)
                         .map(|(k, inputs)| (k.clone(), inputs.clone()))
                         .unwrap_or_else(|| ("input".to_string(), vec![]));
                     if first_bad.is_none() {
                         first_bad = Some((tid, op_kind.clone(), local_max));
                     }
-                    let milli_shape = intermediates.get(&tid)
+                    let milli_shape = intermediates
+                        .get(&tid)
                         .map(|t| format!("{:?} {:?}", t.dtype(), t.shape()))
                         .unwrap_or_default();
                     // Check whether each input is itself bad.
                     let mut input_status = Vec::new();
                     for (inp_id, inp_shape) in &input_info {
                         let status = if let Some(_tam) = result.tensor_map.get(inp_id) {
-                            error_map.get(inp_id).map(|e| {
-                                if *e == 0.0 { "perfect".to_string() }
-                                else if *e < 1e-3 { format!("close({:.1e})", e) }
-                                else { format!("BAD({:.1e})", e) }
-                            }).unwrap_or_else(|| "not-checked".to_string())
+                            error_map
+                                .get(inp_id)
+                                .map(|e| {
+                                    if *e == 0.0 {
+                                        "perfect".to_string()
+                                    } else if *e < 1e-3 {
+                                        format!("close({:.1e})", e)
+                                    } else {
+                                        format!("BAD({:.1e})", e)
+                                    }
+                                })
+                                .unwrap_or_else(|| "not-checked".to_string())
                         } else {
                             "no-tensor-map".to_string()
                         };
@@ -518,7 +531,12 @@ fn main() {
                     }
                     println!(
                         "  BAD #{}: {:?} (op: {}, shape: {}, {} elems, err={:.2e})",
-                        num_bad, tid, op_kind, milli_shape, milli_vals.len(), local_max
+                        num_bad,
+                        tid,
+                        op_kind,
+                        milli_shape,
+                        milli_vals.len(),
+                        local_max
                     );
                     for (inp_id, inp_shape, status) in &input_status {
                         println!("    input {:?} {:?}: {}", inp_id, inp_shape, status);
@@ -531,7 +549,10 @@ fn main() {
                             if let Some(&n) = atom_vals.get(&atom.0) {
                                 let diff = (m - n).abs();
                                 if diff > 1e-3 && shown < 5 {
-                                    println!("    elem {}: milli={:.6} nano={:.6} diff={:.6}", i, m, n, diff);
+                                    println!(
+                                        "    elem {}: milli={:.6} nano={:.6} diff={:.6}",
+                                        i, m, n, diff
+                                    );
                                     shown += 1;
                                 }
                             }
@@ -552,6 +573,9 @@ fn main() {
         println!("\n=== Timing Summary ===");
         println!("  Milli interpreter: {:.3}s", milli_elapsed.as_secs_f64());
         println!("  NanoGraph lowering: {:.3}s", lower_elapsed.as_secs_f64());
-        println!("  Nano intermediate check: {:.3}s", t_check.elapsed().as_secs_f64());
+        println!(
+            "  Nano intermediate check: {:.3}s",
+            t_check.elapsed().as_secs_f64()
+        );
     }
 }

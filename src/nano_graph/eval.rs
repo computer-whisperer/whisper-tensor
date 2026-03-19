@@ -125,10 +125,7 @@ pub fn eval(
                         lookup_atom(src, graph, &group_buffers, &input_buffers)
                             .cast_to(output_dtype)
                     }
-                    ScalarOp::Binary {
-                        op,
-                        compute_dtype,
-                    } => {
+                    ScalarOp::Binary { op, compute_dtype } => {
                         let a = lookup_atom(
                             group.inputs[0].resolve(ri),
                             graph,
@@ -145,10 +142,7 @@ pub fn eval(
                         .cast_to(*compute_dtype);
                         eval_binop(op, &a, &b).cast_to(output_dtype)
                     }
-                    ScalarOp::Unary {
-                        op,
-                        compute_dtype,
-                    } => {
+                    ScalarOp::Unary { op, compute_dtype } => {
                         let x = lookup_atom(
                             group.inputs[0].resolve(ri),
                             graph,
@@ -186,8 +180,7 @@ pub fn eval(
                     ScalarOp::IndirectLoad { table_base } => {
                         let src = group.inputs[0].resolve(ri);
                         let index =
-                            lookup_atom(src, graph, &group_buffers, &input_buffers).to_f64()
-                                as u64;
+                            lookup_atom(src, graph, &group_buffers, &input_buffers).to_f64() as u64;
                         let table_atom = AtomId(table_base.0 + index);
                         lookup_atom(table_atom, graph, &group_buffers, &input_buffers)
                             .cast_to(output_dtype)
@@ -258,42 +251,30 @@ fn eval_binop(op: &ScalarBinOp, a: &NumericScalar, b: &NumericScalar) -> Numeric
         ScalarBinOp::Min => a.scalar_min(b),
         ScalarBinOp::Mod => a.modulo(b),
         ScalarBinOp::Pow => a.pow(b),
-        ScalarBinOp::Equal => {
-            NumericScalar::F32(if a.to_f64() == b.to_f64() { 1.0 } else { 0.0 })
-        }
-        ScalarBinOp::Greater => {
-            NumericScalar::F32(if a.to_f64() > b.to_f64() { 1.0 } else { 0.0 })
-        }
+        ScalarBinOp::Equal => NumericScalar::F32(if a.to_f64() == b.to_f64() { 1.0 } else { 0.0 }),
+        ScalarBinOp::Greater => NumericScalar::F32(if a.to_f64() > b.to_f64() { 1.0 } else { 0.0 }),
         ScalarBinOp::GreaterOrEqual => {
             NumericScalar::F32(if a.to_f64() >= b.to_f64() { 1.0 } else { 0.0 })
         }
-        ScalarBinOp::Less => {
-            NumericScalar::F32(if a.to_f64() < b.to_f64() { 1.0 } else { 0.0 })
-        }
+        ScalarBinOp::Less => NumericScalar::F32(if a.to_f64() < b.to_f64() { 1.0 } else { 0.0 }),
         ScalarBinOp::LessOrEqual => {
             NumericScalar::F32(if a.to_f64() <= b.to_f64() { 1.0 } else { 0.0 })
         }
-        ScalarBinOp::And => NumericScalar::F32(
-            if a.to_f64() != 0.0 && b.to_f64() != 0.0 {
-                1.0
-            } else {
-                0.0
-            },
-        ),
-        ScalarBinOp::Or => NumericScalar::F32(
-            if a.to_f64() != 0.0 || b.to_f64() != 0.0 {
-                1.0
-            } else {
-                0.0
-            },
-        ),
-        ScalarBinOp::Xor => NumericScalar::F32(
-            if (a.to_f64() != 0.0) ^ (b.to_f64() != 0.0) {
-                1.0
-            } else {
-                0.0
-            },
-        ),
+        ScalarBinOp::And => NumericScalar::F32(if a.to_f64() != 0.0 && b.to_f64() != 0.0 {
+            1.0
+        } else {
+            0.0
+        }),
+        ScalarBinOp::Or => NumericScalar::F32(if a.to_f64() != 0.0 || b.to_f64() != 0.0 {
+            1.0
+        } else {
+            0.0
+        }),
+        ScalarBinOp::Xor => NumericScalar::F32(if (a.to_f64() != 0.0) ^ (b.to_f64() != 0.0) {
+            1.0
+        } else {
+            0.0
+        }),
     }
 }
 

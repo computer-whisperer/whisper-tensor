@@ -5,7 +5,7 @@ use crate::graph::{GlobalId, Node};
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
 use crate::nano_graph::lower::{NanoLoweringContext, TensorAtomMap};
-use crate::nano_graph::ops::{ScalarBinOp, ScalarOp, ReduceKind};
+use crate::nano_graph::ops::{ReduceKind, ScalarBinOp, ScalarOp};
 use crate::nano_graph::pattern::InputRef;
 use crate::numeric_scalar::NumericScalar;
 use crate::numeric_tensor::NumericTensor;
@@ -133,13 +133,11 @@ impl ReduceMean {
         };
 
         // Lower as ReduceSum, keeping output in compute_dt (not out_dt).
-        ctx.lower_reduce(self, |cd, count, stride| {
-            ScalarOp::Reduce {
-                kind: ReduceKind::Sum,
-                reduce_count: count,
-                reduce_stride: stride,
-                compute_dtype: cd,
-            }
+        ctx.lower_reduce(self, |cd, count, stride| ScalarOp::Reduce {
+            kind: ReduceKind::Sum,
+            reduce_count: count,
+            reduce_stride: stride,
+            compute_dtype: cd,
         });
 
         // If ReduceSum succeeded (output is in tensor_map), divide by extent.

@@ -111,15 +111,27 @@ fn main() {
     //warmup
     let n = 200;
     for _ in 0..n {
-        live_vec = NumericTensor::matmul(&tensor_a_tgt, &live_vec, Some(DType::F32), &mut backend)
-            .unwrap();
+        live_vec = NumericTensor::matmul(
+            &tensor_a_tgt,
+            &live_vec,
+            Some(DType::F32),
+            Default::default(),
+            &mut backend,
+        )
+        .unwrap();
     }
 
     let start_instant = Instant::now();
     let n = 1000;
     for _ in 0..n {
-        live_vec = NumericTensor::matmul(&tensor_a_tgt, &live_vec, Some(DType::F32), &mut backend)
-            .unwrap();
+        live_vec = NumericTensor::matmul(
+            &tensor_a_tgt,
+            &live_vec,
+            Some(DType::F32),
+            Default::default(),
+            &mut backend,
+        )
+        .unwrap();
     }
     println!("Time per matmul: {:?}", start_instant.elapsed() / n);
 }

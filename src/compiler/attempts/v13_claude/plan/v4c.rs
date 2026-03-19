@@ -141,7 +141,7 @@ fn build_group_producers(groups: &[AtomGroup], is_literal: &[bool]) -> Vec<Vec<u
                 reduce_count,
                 reduce_stride,
                 ..
-                } if *reduce_count > 1 && *reduce_stride != 0 => {
+            } if *reduce_count > 1 && *reduce_stride != 0 => {
                 for input in &group.inputs {
                     for pi in resolve_producer_groups_with_reduce(
                         input,
@@ -394,7 +394,7 @@ fn input_ref_range(input: &InputRef, count: u64, op: &ScalarOp) -> (u64, u64) {
             reduce_count,
             reduce_stride,
             ..
-            } if *reduce_count > 1 && *reduce_stride != 0 => (*reduce_count, *reduce_stride),
+        } if *reduce_count > 1 && *reduce_stride != 0 => (*reduce_count, *reduce_stride),
         _ => (1, 0i64),
     };
 
@@ -838,7 +838,7 @@ fn build_single_span(
                 reduce_count,
                 reduce_stride,
                 ..
-                } if *reduce_count > 1 && *reduce_stride != 0 => {
+            } if *reduce_count > 1 && *reduce_stride != 0 => {
                 for input in &group.inputs {
                     let lit_groups = resolve_literal_producer_groups_with_reduce(
                         input,
@@ -1068,7 +1068,7 @@ fn collect_external_ranges_for_group(
             reduce_count,
             reduce_stride,
             ..
-            } if *reduce_count > 1 && *reduce_stride != 0 => (true, *reduce_count, *reduce_stride),
+        } if *reduce_count > 1 && *reduce_stride != 0 => (true, *reduce_count, *reduce_stride),
         _ => (false, 0, 0),
     };
 
@@ -1581,9 +1581,7 @@ fn remap_single_input(
 
 fn remap_op(op: &ScalarOp, atom_map: &RangeAtomMap) -> ScalarOp {
     match op {
-        ScalarOp::IndirectLoad {
-            table_base,
-        } => ScalarOp::IndirectLoad {
+        ScalarOp::IndirectLoad { table_base } => ScalarOp::IndirectLoad {
             table_base: atom_map.get(*table_base).unwrap_or(*table_base),
         },
         other => other.clone(),
@@ -1999,7 +1997,8 @@ mod tests {
             let red = g.push_group(
                 8,
                 DType::F32,
-                ScalarOp::Reduce { kind: ReduceKind::Sum,
+                ScalarOp::Reduce {
+                    kind: ReduceKind::Sum,
                     reduce_count: 4,
                     reduce_stride: 8,
                     compute_dtype: DType::F32,

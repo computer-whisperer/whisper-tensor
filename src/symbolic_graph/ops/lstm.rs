@@ -220,8 +220,20 @@ impl Operation for LstmOperation {
                 let x_t = x_t.squeeze(0)?;
 
                 // gates = x_t @ W^T + h_{t-1} @ R^T [+ bias]
-                let xw = NumericTensor::matmul(&x_t, &w_t, None, crate::milli_graph::ops::AccumulationMode::default(), backend)?;
-                let hr = NumericTensor::matmul(&h_t, &r_t, None, crate::milli_graph::ops::AccumulationMode::default(), backend)?;
+                let xw = NumericTensor::matmul(
+                    &x_t,
+                    &w_t,
+                    None,
+                    crate::milli_graph::ops::AccumulationMode::default(),
+                    backend,
+                )?;
+                let hr = NumericTensor::matmul(
+                    &h_t,
+                    &r_t,
+                    None,
+                    crate::milli_graph::ops::AccumulationMode::default(),
+                    backend,
+                )?;
                 let mut gates = NumericTensor::add(&xw, &hr, backend)?;
                 if let Some(ref bias) = bias {
                     gates = NumericTensor::add(&gates, bias, backend)?;

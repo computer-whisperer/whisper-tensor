@@ -97,10 +97,8 @@ impl Where {
         let y_info = all_infos.get(&y_id);
         let input_cond =
             ctx.compute_input_ref(&out_tmp, &cond_map, out_info, cond_info.unwrap_or(out_info));
-        let input_x =
-            ctx.compute_input_ref(&out_tmp, &x_map, out_info, x_info.unwrap_or(out_info));
-        let input_y =
-            ctx.compute_input_ref(&out_tmp, &y_map, out_info, y_info.unwrap_or(out_info));
+        let input_x = ctx.compute_input_ref(&out_tmp, &x_map, out_info, x_info.unwrap_or(out_info));
+        let input_y = ctx.compute_input_ref(&out_tmp, &y_map, out_info, y_info.unwrap_or(out_info));
 
         let base_id = ctx.nano.push_group(
             count,

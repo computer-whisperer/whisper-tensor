@@ -1,8 +1,8 @@
+use super::AccumulationMode;
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
 use crate::dtype::DType;
 use crate::milli_graph::MilliOpGraphError;
-use super::AccumulationMode;
 use crate::milli_graph::ops::MilliOp;
 use crate::numeric_tensor::NumericTensor;
 use crate::scalar_info::ScalarInfoTyped;
@@ -216,10 +216,7 @@ impl SimpleBinary {
         let out_dt = out_info.dtype();
         // Comparison ops output BOOL but compute in input precision.
         // Use input dtype for compute_dtype when output is BOOL.
-        let input_dt = all_infos
-            .get(&a_id)
-            .map(|i| i.dtype())
-            .unwrap_or(out_dt);
+        let input_dt = all_infos.get(&a_id).map(|i| i.dtype()).unwrap_or(out_dt);
         let compute_dt = if out_dt == crate::dtype::DType::BOOL {
             input_dt
         } else {
@@ -314,10 +311,8 @@ impl SimpleBinary {
 
         let a_info = all_infos.get(&a_id);
         let b_info = all_infos.get(&b_id);
-        let input_a =
-            ctx.compute_input_ref(&out_tmp, &a_map, out_info, a_info.unwrap_or(out_info));
-        let input_b =
-            ctx.compute_input_ref(&out_tmp, &b_map, out_info, b_info.unwrap_or(out_info));
+        let input_a = ctx.compute_input_ref(&out_tmp, &a_map, out_info, a_info.unwrap_or(out_info));
+        let input_b = ctx.compute_input_ref(&out_tmp, &b_map, out_info, b_info.unwrap_or(out_info));
 
         let base_id = ctx.nano.push_group(
             count,
@@ -608,10 +603,8 @@ impl Pow {
 
         let a_info = all_infos.get(&a_id);
         let b_info = all_infos.get(&b_id);
-        let input_a =
-            ctx.compute_input_ref(&out_tmp, &a_map, out_info, a_info.unwrap_or(out_info));
-        let input_b =
-            ctx.compute_input_ref(&out_tmp, &b_map, out_info, b_info.unwrap_or(out_info));
+        let input_a = ctx.compute_input_ref(&out_tmp, &a_map, out_info, a_info.unwrap_or(out_info));
+        let input_b = ctx.compute_input_ref(&out_tmp, &b_map, out_info, b_info.unwrap_or(out_info));
 
         let base_id = ctx.nano.push_group(
             count,

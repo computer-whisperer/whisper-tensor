@@ -5,7 +5,9 @@
 
 use crate::dtype::DType;
 #[allow(unused_imports)]
-use crate::nano_graph::{AtomId, InputRef, NanoGraph, ReduceKind, ScalarBinOp, ScalarOp, ScalarUnaryOp};
+use crate::nano_graph::{
+    AtomId, InputRef, NanoGraph, ReduceKind, ScalarBinOp, ScalarOp, ScalarUnaryOp,
+};
 use crate::numeric_scalar::NumericScalar;
 
 /// Elementwise binary op: C[N] = A[N] op B[N].

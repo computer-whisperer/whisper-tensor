@@ -154,8 +154,7 @@ impl Split {
         // Since we might not have the split tensor values, estimate from output_id * output_size.
         // This is only correct for equal splits. For unequal splits we need the actual sizes.
         // Try to get them from the split tensor.
-        let offset_along_axis =
-            self.compute_split_offset(ctx, output_id_idx, out_split_size);
+        let offset_along_axis = self.compute_split_offset(ctx, output_id_idx, out_split_size);
 
         if out_known_dims.len() != in_known.len() {
             ctx.lower_as_boundary_named(self, "Split");

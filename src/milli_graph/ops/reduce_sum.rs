@@ -79,14 +79,12 @@ impl ReduceSum {
 
 impl ReduceSum {
     pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
-        use crate::nano_graph::{ScalarOp, ReduceKind};
-        ctx.lower_reduce(self, |compute_dt, count, stride| {
-            ScalarOp::Reduce {
-                kind: ReduceKind::Sum,
-                reduce_count: count,
-                reduce_stride: stride,
-                compute_dtype: compute_dt,
-            }
+        use crate::nano_graph::{ReduceKind, ScalarOp};
+        ctx.lower_reduce(self, |compute_dt, count, stride| ScalarOp::Reduce {
+            kind: ReduceKind::Sum,
+            reduce_count: count,
+            reduce_stride: stride,
+            compute_dtype: compute_dt,
         });
     }
 
