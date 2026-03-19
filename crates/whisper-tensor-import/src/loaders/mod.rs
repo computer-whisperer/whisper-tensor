@@ -1,4 +1,5 @@
 mod auto;
+mod cogvideox;
 mod f5_tts;
 mod flux;
 mod gguf;
@@ -15,6 +16,7 @@ mod transformers;
 mod whisper;
 
 pub use self::auto::AutoLoader;
+pub use self::cogvideox::CogVideoXLoader;
 pub use self::f5_tts::F5TtsLoader;
 pub use self::flux::FluxLoader;
 pub use self::gguf::GgufLoader;

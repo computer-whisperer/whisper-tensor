@@ -324,6 +324,8 @@ pub enum SchedulerType {
     /// Rectified flow scheduler (Flux).
     /// No noise scaling.
     RectifiedFlow,
+    /// DDIM with v-prediction (CogVideoX).
+    DDIMVPrediction,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -374,6 +376,190 @@ pub struct VideoGenerationInterface {
     pub fps: f32,
     /// Number of output frames.
     pub num_frames: usize,
+}
+
+impl VideoGenerationInterface {
+    pub fn to_any(self) -> AnyInterface {
+        AnyInterface::VideoGenerationInterface(self)
+    }
+
+    /// Build interface for CogVideoX text-to-video.
+    ///
+    /// Model weights order: [t5_xxl, dit, vae_decoder]
+    pub fn new_cogvideox(
+        rng: &mut impl Rng,
+        t5_tokenizer: TokenizerInfo,
+        model_dtype: DType,
+    ) -> Self {
+        use crate::super_graph::nodes::{
+            SuperGraphNodeModelExecution, SuperGraphNodeTensorToVideoClip,
+            SuperGraphNodeTokenizerEncode, SuperGraphNodeTokenizerEncodeMode,
+            SuperGraphNodeTokenizerLoad,
+        };
+
+        let mut builder = SuperGraphBuilder::new();
+
+        // Input links
+        let positive_prompt_input = builder.new_string_link(rng);
+        let initial_latent_input = builder.new_tensor_link(rng);
+        let timesteps_input = builder.new_tensor_link(rng);
+        let dt_input = builder.new_tensor_link(rng);
+        let sigmas_input = builder.new_tensor_link(rng);
+        let iteration_count_input = builder.new_tensor_link(rng);
+        let guidance_scale_input = builder.new_tensor_link(rng);
+        let t5_weights = builder.new_model_link(rng);
+        let dit_weights = builder.new_model_link(rng);
+        let vae_weights = builder.new_model_link(rng);
+
+        builder.set_link_label(positive_prompt_input, "prompt_positive");
+        builder.set_link_label(initial_latent_input, "latent_initial");
+        builder.set_link_label(timesteps_input, "timesteps");
+        builder.set_link_label(dt_input, "dt");
+        builder.set_link_label(sigmas_input, "sigmas");
+        builder.set_link_label(iteration_count_input, "iteration_count");
+        builder.set_link_label(guidance_scale_input, "guidance_scale");
+        builder.set_link_label(t5_weights, "t5_weights");
+        builder.set_link_label(dit_weights, "dit_weights");
+        builder.set_link_label(vae_weights, "vae_decoder_weights");
+
+        // T5 tokenization
+        let t5_tokenizer_link =
+            SuperGraphNodeTokenizerLoad::new_and_add(&mut builder, t5_tokenizer, rng);
+        let t5_ids_input = SuperGraphNodeTokenizerEncode::new_with_mode_and_add(
+            &mut builder,
+            t5_tokenizer_link,
+            positive_prompt_input,
+            SuperGraphNodeTokenizerEncodeMode::RawPad {
+                seq_len: 226,
+                pad: 0,
+            },
+            rng,
+        );
+
+        // T5-XXL encode: input_ids -> hidden_states [1, 226, 4096]
+        let t5_hidden_f32 = builder.new_tensor_link(rng);
+        let mut t5_node = SuperGraphNodeModelExecution::new(
+            rng,
+            t5_weights,
+            0, // model index 0
+            vec![(t5_ids_input, "input_ids".to_string())],
+            vec![("hidden_states".to_string(), t5_hidden_f32)],
+        );
+        t5_node.label = Some("t5_encode".to_string());
+        builder.add_node(t5_node.to_any());
+        let t5_hidden = build_cast_node(&mut builder, rng, t5_hidden_f32, model_dtype);
+
+        // Denoising loop (v-prediction DDIM)
+        let final_latent = build_cogvideox_denoising_loop(
+            &mut builder,
+            rng,
+            dit_weights,
+            t5_hidden,
+            initial_latent_input,
+            timesteps_input,
+            dt_input,
+            sigmas_input,
+            iteration_count_input,
+            guidance_scale_input,
+            model_dtype,
+            1, // dit model index
+        );
+
+        // VAE decode: latent -> video frames
+        let decoded_video_tensor =
+            build_cogvideox_vae_decode(&mut builder, rng, final_latent, vae_weights, 2);
+        let video_output = SuperGraphNodeTensorToVideoClip::new_and_add(
+            &mut builder,
+            decoded_video_tensor,
+            8.0, // CogVideoX default: 8 fps
+            rng,
+        );
+        builder.set_link_label(video_output, "video_output");
+
+        // Assemble graph
+        let model_weights = vec![t5_weights, dit_weights, vae_weights];
+        let input_links: Vec<_> = vec![
+            positive_prompt_input.to_any(),
+            initial_latent_input.to_any(),
+            timesteps_input.to_any(),
+            dt_input.to_any(),
+            sigmas_input.to_any(),
+            iteration_count_input.to_any(),
+            guidance_scale_input.to_any(),
+            t5_weights.to_any(),
+            dit_weights.to_any(),
+            vae_weights.to_any(),
+        ];
+        let output_links: Vec<_> = vec![video_output.to_any()];
+        let super_graph = builder.build(rng, &input_links, &output_links);
+
+        Self {
+            super_graph,
+            positive_prompt_input,
+            negative_prompt_input: None,
+            initial_latent_input,
+            timesteps_input,
+            dt_input,
+            sigmas_input,
+            iteration_count_input,
+            guidance_scale_input: Some(guidance_scale_input),
+            model_weights,
+            video_output,
+            scheduler: SchedulerType::DDIMVPrediction,
+            latent_channels: 16,
+            fps: 8.0,
+            num_frames: 49,
+        }
+    }
+}
+
+/// CogVideoX denoising loop (v-prediction DDIM).
+///
+/// Returns the final denoised latent link.
+#[allow(clippy::too_many_arguments)]
+fn build_cogvideox_denoising_loop(
+    _builder: &mut SuperGraphBuilder,
+    _rng: &mut impl Rng,
+    _dit_weights: SuperGraphLink,
+    _t5_hidden: SuperGraphLink,
+    initial_latent_input: SuperGraphLink,
+    _timesteps_input: SuperGraphLink,
+    _dt_input: SuperGraphLink,
+    _sigmas_input: SuperGraphLink,
+    _iteration_count_input: SuperGraphLink,
+    _guidance_scale_input: SuperGraphLink,
+    _model_dtype: DType,
+    _dit_model_index: usize,
+) -> SuperGraphLink {
+    // TODO: implement the denoising Scan loop (v-prediction DDIM step).
+    // For now, return the initial latent unchanged — this allows the graph
+    // to be structurally valid for testing the loader and VAE decode path.
+    initial_latent_input
+}
+
+/// CogVideoX VAE decode node.
+///
+/// Returns the decoded video tensor link.
+fn build_cogvideox_vae_decode(
+    builder: &mut SuperGraphBuilder,
+    rng: &mut impl Rng,
+    latent: SuperGraphLink,
+    vae_weights: SuperGraphLink,
+    vae_model_index: usize,
+) -> SuperGraphLink {
+    use crate::super_graph::nodes::SuperGraphNodeModelExecution;
+
+    let decoded_tensor = builder.new_tensor_link(rng);
+    let mut vae_node = SuperGraphNodeModelExecution::new(
+        rng,
+        vae_weights,
+        vae_model_index,
+        vec![(latent, "latent".to_string())],
+        vec![("video_out".to_string(), decoded_tensor)],
+    );
+    vae_node.label = Some("vae_decode".to_string());
+    builder.add_node(vae_node.to_any());
+    decoded_tensor
 }
 
 /// Helper: build a MilliOpGraph node that casts a tensor to a target dtype.
@@ -2663,6 +2849,7 @@ impl ImageGenerationInterface {
                     NumericTensor::<DynRank>::from_vec_shape(initial_noise, latent_shape).unwrap();
                 (ts, dt, sigmas, lat)
             }
+            _ => unreachable!("ImageGenerationInterface only uses EulerDiscrete or RectifiedFlow"),
         };
 
         let timesteps_tensor =
