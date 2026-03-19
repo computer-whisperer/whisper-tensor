@@ -345,6 +345,70 @@ impl NanoGraph {
         g.inputs = inputs;
     }
 
+    /// Insert an input tensor at a specific base AtomId.
+    ///
+    /// Unlike `add_input_tensor`, this does NOT allocate sequential IDs.
+    /// Used for constructing span NanoGraphs that preserve the main graph's
+    /// atom ID space. The RangeMap handles out-of-order insertion.
+    pub fn insert_input_tensor_at(
+        &mut self,
+        base_id: AtomId,
+        tensor_id: GlobalId,
+        count: u64,
+        dtype: DType,
+    ) {
+        self.input_ranges.insert(
+            base_id.0,
+            count,
+            InputTensor {
+                tensor_id,
+                base_id,
+                count,
+                dtype,
+            },
+        );
+        // Ensure next_atom_id stays past this range.
+        let end = base_id.0 + count;
+        if end > self.next_atom_id {
+            self.next_atom_id = end;
+        }
+    }
+
+    /// Insert a group at a specific base AtomId.
+    ///
+    /// Unlike `push_group`, this does NOT allocate sequential IDs.
+    /// Used for constructing span NanoGraphs that preserve the main graph's
+    /// atom ID space. The RangeMap handles out-of-order insertion.
+    pub fn insert_group_at(
+        &mut self,
+        base_id: AtomId,
+        count: u64,
+        atom_offset: u64,
+        output_dtype: DType,
+        op: ScalarOp,
+        sym_dims: Vec<SymDim>,
+        inputs: Vec<InputRef>,
+    ) {
+        self.groups.insert(
+            base_id.0,
+            count,
+            AtomGroup {
+                base_id,
+                count,
+                atom_offset,
+                output_dtype,
+                op,
+                sym_dims,
+                inputs,
+            },
+        );
+        // Ensure next_atom_id stays past this range.
+        let end = base_id.0 + count;
+        if end > self.next_atom_id {
+            self.next_atom_id = end;
+        }
+    }
+
     /// Add an atom group to the graph. Returns the base AtomId.
     pub fn push_group(
         &mut self,

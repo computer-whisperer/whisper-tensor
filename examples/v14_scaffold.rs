@@ -3,7 +3,7 @@
 //! Usage:
 //!   cargo run --release --example v14_scaffold -- test_models/gpt2-lm-head-10.onnx
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::Instant;
 
@@ -209,6 +209,161 @@ fn main() {
     println!("  Multi-use (use_count>1): {} groups", multi_use);
     println!("  Max use count: {}", max_use);
     println!("  Total compute atoms: {}", total_atoms);
+
+    // ── Partitioner tests ──────────────────────────────────────────────────
+
+    {
+        use whisper_tensor::compiler::attempts::v14::{
+            partitioner_a, partitioner_b, partitioner_c, partitioner_d,
+        };
+        use whisper_tensor::nano_graph::AtomId as AId;
+
+        let input_ts = result.graph.input_tensors();
+        let output_ids: Vec<AId> = model_outputs.iter().map(|om| om.range.base).collect();
+        let num_lanes = 8;
+
+        let partitioners: Vec<(&str, fn(&NanoGraph, usize, &[whisper_tensor::nano_graph::pattern::InputTensor], &[AId]) -> Vec<Phase>)> = vec![
+            ("A (pinch-point)", partitioner_a::plan),
+            ("B (wavefront)", partitioner_b::plan),
+            ("C (greedy lane)", partitioner_c::plan),
+            ("D (hierarchical)", partitioner_d::plan),
+        ];
+
+        // Filter by PARTITIONER env var if set (e.g. PARTITIONER=B)
+        let filter = std::env::var("PARTITIONER").ok();
+
+        println!("\n=== Partitioner Tests ({} lanes) ===", num_lanes);
+        for (name, plan_fn) in &partitioners {
+            if let Some(ref f) = filter {
+                if !name.starts_with(&format!("{} ", f)) && !name.contains(f.as_str()) {
+                    continue;
+                }
+            }
+
+            let t0 = Instant::now();
+            let result_phases = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                plan_fn(&result.graph, num_lanes, input_ts, &output_ids)
+            }));
+            let elapsed = t0.elapsed();
+
+            match result_phases {
+                Ok(phases) => {
+                    let num_phases = phases.len();
+                    let total_spans: usize = phases.iter().map(|p| p.spans.len()).sum();
+                    let total_groups: usize = phases.iter()
+                        .flat_map(|p| p.spans.iter())
+                        .map(|s| s.graph.num_groups())
+                        .sum();
+                    let total_atoms: u64 = phases.iter()
+                        .flat_map(|p| p.spans.iter())
+                        .map(|s| s.graph.num_atoms())
+                        .sum();
+                    let total_inputs: usize = phases.iter()
+                        .flat_map(|p| p.spans.iter())
+                        .map(|s| s.inputs.len())
+                        .sum();
+                    let total_outputs: usize = phases.iter()
+                        .flat_map(|p| p.spans.iter())
+                        .map(|s| s.outputs.len())
+                        .sum();
+
+                    // Check lane counts
+                    let lane_ok = phases.iter().all(|p| p.spans.len() == num_lanes);
+
+                    // Check span NanoGraph validation
+                    let mut validation_errors = 0usize;
+                    for (pi, phase) in phases.iter().enumerate() {
+                        for (li, span) in phase.spans.iter().enumerate() {
+                            let errs = span.graph.validate();
+                            if !errs.is_empty() {
+                                if validation_errors < 5 {
+                                    eprintln!("  {} phase {} lane {}: {} validation errors", name, pi, li, errs.len());
+                                    for e in errs.iter().take(3) {
+                                        eprintln!("    {}", e);
+                                    }
+                                }
+                                validation_errors += errs.len();
+                            }
+                        }
+                    }
+
+                    // Check cross-span independence within each phase (group-level)
+                    let mut cross_lane_violations = 0usize;
+                    for phase in &phases {
+                        // Collect what each span produces as (base, end) ranges
+                        let produced_by_span: Vec<Vec<(u64, u64)>> = phase.spans.iter()
+                            .map(|span| {
+                                span.graph.groups().iter()
+                                    .map(|g| (g.base_id.0, g.base_id.0 + g.count))
+                                    .collect()
+                            })
+                            .collect();
+                        // Check that no span's inputs overlap another span's produced ranges
+                        for (si, span) in phase.spans.iter().enumerate() {
+                            for inp in &span.inputs {
+                                let inp_lo = inp.base.0;
+                                let inp_hi = inp.base.0 + inp.count;
+                                for (oi, other_ranges) in produced_by_span.iter().enumerate() {
+                                    if oi != si {
+                                        for &(lo, hi) in other_ranges {
+                                            if inp_lo < hi && inp_hi > lo {
+                                                cross_lane_violations += 1;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Work balance per phase
+                    let mut max_imbalance = 0.0f64;
+                    for phase in &phases {
+                        let loads: Vec<u64> = phase.spans.iter()
+                            .map(|s| s.graph.groups().iter().map(|g| g.count).sum::<u64>())
+                            .collect();
+                        let max_load = *loads.iter().max().unwrap_or(&0) as f64;
+                        let min_load = *loads.iter().filter(|&&l| l > 0).min().unwrap_or(&1) as f64;
+                        if min_load > 0.0 {
+                            max_imbalance = max_imbalance.max(max_load / min_load);
+                        }
+                    }
+
+                    println!(
+                        "\n  {} — {:.1?}",
+                        name, elapsed,
+                    );
+                    println!(
+                        "    {} phases, {} total span groups, {} total span atoms",
+                        num_phases, total_groups, total_atoms,
+                    );
+                    println!(
+                        "    {} input ranges, {} output ranges",
+                        total_inputs, total_outputs,
+                    );
+                    println!(
+                        "    lanes_ok={}, validation_errors={}, cross_lane_violations={}, max_imbalance={:.1}x",
+                        lane_ok, validation_errors, cross_lane_violations, max_imbalance,
+                    );
+                }
+                Err(e) => {
+                    let msg = if let Some(s) = e.downcast_ref::<String>() {
+                        s.clone()
+                    } else if let Some(s) = e.downcast_ref::<&str>() {
+                        s.to_string()
+                    } else {
+                        "unknown panic".to_string()
+                    };
+                    println!("\n  {} — PANICKED in {:.1?}: {}", name, elapsed, msg);
+                }
+            }
+        }
+
+        // Early exit when running partitioner tests only
+        if filter.is_some() {
+            std::process::exit(0);
+        }
+    }
 
     // ── Step 8: Build trivial execution plan (1 phase, 1 lane) ─────────────
 
