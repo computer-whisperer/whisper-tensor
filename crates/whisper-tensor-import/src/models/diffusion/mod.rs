@@ -1,3 +1,4 @@
+pub mod cogvideox;
 pub mod flux;
 pub mod sd15;
 pub mod sd2;
