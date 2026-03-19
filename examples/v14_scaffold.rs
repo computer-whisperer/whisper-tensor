@@ -215,6 +215,7 @@ fn main() {
     {
         use whisper_tensor::compiler::attempts::v14::{
             partitioner_a, partitioner_b, partitioner_c, partitioner_d,
+            partitioner_e, partitioner_f, partitioner_g, partitioner_h,
         };
         use whisper_tensor::nano_graph::AtomId as AId;
 
@@ -227,6 +228,10 @@ fn main() {
             ("B (wavefront)", partitioner_b::plan),
             ("C (greedy lane)", partitioner_c::plan),
             ("D (hierarchical)", partitioner_d::plan),
+            ("E (annealing)", partitioner_e::plan),
+            ("F (creative)", partitioner_f::plan),
+            ("G (row-aware)", partitioner_g::plan),
+            ("H (correct-then-balance)", partitioner_h::plan),
         ];
 
         // Filter by PARTITIONER env var if set (e.g. PARTITIONER=B)
