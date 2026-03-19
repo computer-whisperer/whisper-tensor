@@ -561,6 +561,10 @@ fn main() {
         exec_plan.graph.input_tensors().len(), matched, unmatched, unmatched_atoms
     );
 
+    // When SKIP_DIRECT=1, skip the slow direct eval and trivial executor.
+    if std::env::var("SKIP_DIRECT").is_ok() {
+        println!("  Skipping direct eval (SKIP_DIRECT=1)");
+    } else {
     // Build output atom ranges for eval — handle segmented (Concat) tensors
     // by collecting all underlying atom ranges, not just a single contiguous range.
     let reverse_output_map: HashMap<GlobalId, GlobalId> = milli_graph
@@ -755,6 +759,8 @@ fn main() {
     } else {
         println!("\nTrivial plan: Some outputs MISMATCHED.");
     }
+
+    } // end SKIP_DIRECT
 
     // ── Step 12: Run partitioner B through executor ─────────────────────────
 

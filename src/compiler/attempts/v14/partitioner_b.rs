@@ -88,6 +88,7 @@ pub fn plan(
             &phase_groups[phase_idx],
             &phase_assignments,
             &producers,
+            &successors,
             num_lanes,
             input_tensors,
             &output_group_set,
@@ -333,6 +334,7 @@ fn build_phase(
     phase_group_indices: &[usize],
     phase_assignments: &[usize],
     producers: &[Vec<usize>],
+    successors: &[Vec<usize>],
     num_lanes: usize,
     input_tensors: &[InputTensor],
     output_group_set: &HashSet<usize>,
@@ -418,6 +420,7 @@ fn build_phase(
                 &lane_work[lane_idx],
                 phase_assignments,
                 producers,
+                successors,
                 input_tensors,
                 output_group_set,
                 phase_idx,
@@ -443,6 +446,7 @@ fn build_span(
     lane_work: &[WorkItem],
     phase_assignments: &[usize],
     producers: &[Vec<usize>],
+    successors: &[Vec<usize>],
     input_tensors: &[InputTensor],
     output_group_set: &HashSet<usize>,
     phase_idx: usize,
@@ -723,6 +727,7 @@ fn build_span(
                     producers,
                     phase_group_set,
                     &span_compute_set,
+                    successors,
                 ) {
                     span_outputs.push(AtomRange {
                         base,
@@ -748,31 +753,33 @@ fn build_span(
 /// by a group in this phase that's on a different lane (i.e., not in span_compute_set).
 fn needs_output(
     gi: usize,
-    atom_offset: u64,
-    atom_count: u64,
+    _atom_offset: u64,
+    _atom_count: u64,
     group: &AtomGroup,
     phase_assignments: &[usize],
-    producers: &[Vec<usize>],
-    phase_group_set: &HashSet<usize>,
+    _producers: &[Vec<usize>],
+    _phase_group_set: &HashSet<usize>,
     span_compute_set: &HashSet<usize>,
+    successors: &[Vec<usize>],
 ) -> bool {
-    let _my_phase = phase_assignments[gi];
+    if is_literal_op(&group.op) {
+        return false;
+    }
 
-    // Check all groups that list us as a producer.
-    // Since we don't have the successors list here, we'll use a different approach:
-    // conservatively output everything that other phases or lanes might need.
+    let my_phase = phase_assignments[gi];
 
-    // Actually, for correctness we should output if any group in a later phase
-    // or any group in this phase but on a different lane depends on us.
-    // Since we're building per-span, we don't have other lanes' work lists.
-    //
-    // Conservative approach: output if this group has any consumer in a later
-    // phase, or if it has a consumer in this phase that's NOT in our span.
-    // We approximate this by checking if any group outside our span depends on this group.
-
-    // For now, let's be conservative and always output non-literal compute groups.
-    // This wastes some memory but is correct.
-    !is_literal_op(&group.op)
+    // Output if any successor is in a later phase, or in this phase but
+    // on a different lane (not in our span's compute set).
+    for &si in &successors[gi] {
+        let succ_phase = phase_assignments[si];
+        if succ_phase > my_phase {
+            return true; // consumed by a later phase
+        }
+        if succ_phase == my_phase && !span_compute_set.contains(&si) {
+            return true; // consumed by a different lane in the same phase
+        }
+    }
+    false
 }
 
 /// Check if a ScalarOp is a literal (no computation needed).
