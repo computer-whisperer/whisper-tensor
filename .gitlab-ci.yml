@@ -110,3 +110,16 @@ validate-gpt2:
         --features "${CI_FEATURES}"
         --test accuracy accuracy_gpt2
         -- --nocapture
+
+validate-qwen2-05b:
+  extends: .validate-model
+  variables:
+    MODEL_NAME: qwen2_05b
+  script:
+    - python3 ci/accuracy/references/hf_causal_lm.py
+        --model /models/llms/Qwen2-0.5B
+        --output ${GOLDEN_DIR}/qwen2_05b
+    - cargo test --release -p whisper-tensor
+        --features "${CI_FEATURES}"
+        --test accuracy accuracy_qwen2_05b
+        -- --nocapture
