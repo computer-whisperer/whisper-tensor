@@ -630,8 +630,241 @@ impl Operation for ReduceProdOperation {
     }
 }
 
-/// ONNX ReduceL2 operator.
-/// Computes sqrt(sum(x^2, axes)) with optional keepdims.
+/// Macro to generate reduce-variant operations that share the same parsing/Node impl
+/// but differ in their milli-graph decomposition.
+macro_rules! define_reduce_variant {
+    ($name:ident, $op_name:expr) => {
+        #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+        pub struct $name {
+            global_id: GlobalId,
+            keepdims: Option<bool>,
+            noop_with_empty_axes: Option<bool>,
+            input_data: GlobalId,
+            input_axes: Option<GlobalId>,
+            axes_attr: Option<Vec<i64>>,
+            output: GlobalId,
+        }
+
+        impl $name {
+            pub(crate) fn from_onnx(
+                inputs: &[Option<GlobalId>],
+                outputs: &[Option<GlobalId>],
+                attributes: &[onnx::AttributeProto],
+                rng: &mut impl Rng,
+            ) -> Result<Self, ONNXDecodingError> {
+                if inputs.is_empty() || inputs.len() > 2 {
+                    return Err(ONNXDecodingError::InvalidOperatorInputs($op_name));
+                }
+                if outputs.len() != 1 {
+                    return Err(ONNXDecodingError::InvalidOperatorOutputs($op_name));
+                }
+                let axes_attr = query_attribute_ints(attributes, "axes");
+                let keepdims = query_attribute_int(attributes, "keepdims").map(|x| x != 0);
+                let noop_with_empty_axes =
+                    query_attribute_int(attributes, "noop_with_empty_axes").map(|x| x != 0);
+                Ok(Self {
+                    global_id: GlobalId::new(rng),
+                    keepdims,
+                    noop_with_empty_axes,
+                    input_data: inputs[0]
+                        .ok_or(ONNXDecodingError::InvalidOperatorInputs($op_name))?,
+                    input_axes: if inputs.len() > 1 {
+                        Some(
+                            inputs[1]
+                                .ok_or(ONNXDecodingError::InvalidOperatorInputs($op_name))?,
+                        )
+                    } else {
+                        None
+                    },
+                    output: outputs[0]
+                        .ok_or(ONNXDecodingError::InvalidOperatorOutputs($op_name))?,
+                    axes_attr,
+                })
+            }
+
+            fn resolve_axes(
+                &self,
+                graph: &mut MilliOpGraph,
+                input_map: &HashMap<GlobalId, GlobalId>,
+                rng: &mut impl Rng,
+            ) -> Option<GlobalId> {
+                if let Some(input_axes) = &self.input_axes {
+                    Some(input_map[input_axes])
+                } else if let Some(axes) = &self.axes_attr {
+                    let tensor = NDArrayNumericTensor::from(axes.clone());
+                    let tid =
+                        milli_graph::ops::Constant::push_new(graph, tensor.to_dyn(), rng);
+                    Some(tid)
+                } else {
+                    None
+                }
+            }
+        }
+
+        impl Node for $name {
+            type OpKind = String;
+            fn global_id(&self) -> GlobalId {
+                self.global_id
+            }
+            fn op_kind(&self) -> Self::OpKind {
+                $op_name.to_string()
+            }
+            fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
+                if let Some(input_axes) = self.input_axes {
+                    Box::new([self.input_data, input_axes].into_iter())
+                } else {
+                    Box::new(std::iter::once(self.input_data))
+                }
+            }
+            fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
+                Box::new(std::iter::once(self.output))
+            }
+        }
+    };
+}
+
+define_reduce_variant!(ReduceL1Operation, "ReduceL1");
+impl Operation for ReduceL1Operation {
+    fn parameters(&self) -> Vec<Property> {
+        reduce_params(self.keepdims, &self.axes_attr, self.noop_with_empty_axes)
+    }
+    fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, rng: &mut impl Rng) -> MilliOpGraph {
+        // ReduceL1(x) = ReduceSum(Abs(x))
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
+        let x = input_map[&self.input_data];
+        let abs_x = milli_graph::ops::SimpleUnaryOp::abs(&mut graph, x, rng);
+        let axes = self.resolve_axes(&mut graph, &input_map, rng);
+        let out = milli_graph::ops::ReduceSum::push_new(
+            &mut graph,
+            abs_x,
+            axes,
+            self.keepdims.unwrap_or(true),
+            self.noop_with_empty_axes.unwrap_or(false),
+            rng,
+        );
+        let mut output_map = HashMap::new();
+        output_map.insert(out, self.output);
+        graph.set_output_map(output_map);
+        graph
+    }
+}
+
+define_reduce_variant!(ReduceSumSquareOperation, "ReduceSumSquare");
+impl Operation for ReduceSumSquareOperation {
+    fn parameters(&self) -> Vec<Property> {
+        reduce_params(self.keepdims, &self.axes_attr, self.noop_with_empty_axes)
+    }
+    fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, rng: &mut impl Rng) -> MilliOpGraph {
+        // ReduceSumSquare(x) = ReduceSum(x * x)
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
+        let x = input_map[&self.input_data];
+        let x_sq = milli_graph::ops::SimpleBinary::mul(&mut graph, x, x, rng);
+        let axes = self.resolve_axes(&mut graph, &input_map, rng);
+        let out = milli_graph::ops::ReduceSum::push_new(
+            &mut graph,
+            x_sq,
+            axes,
+            self.keepdims.unwrap_or(true),
+            self.noop_with_empty_axes.unwrap_or(false),
+            rng,
+        );
+        let mut output_map = HashMap::new();
+        output_map.insert(out, self.output);
+        graph.set_output_map(output_map);
+        graph
+    }
+}
+
+define_reduce_variant!(ReduceLogSumOperation, "ReduceLogSum");
+impl Operation for ReduceLogSumOperation {
+    fn parameters(&self) -> Vec<Property> {
+        reduce_params(self.keepdims, &self.axes_attr, self.noop_with_empty_axes)
+    }
+    fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, rng: &mut impl Rng) -> MilliOpGraph {
+        // ReduceLogSum(x) = Log(ReduceSum(x))
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
+        let x = input_map[&self.input_data];
+        let axes = self.resolve_axes(&mut graph, &input_map, rng);
+        let sum = milli_graph::ops::ReduceSum::push_new(
+            &mut graph,
+            x,
+            axes,
+            self.keepdims.unwrap_or(true),
+            self.noop_with_empty_axes.unwrap_or(false),
+            rng,
+        );
+        let out = milli_graph::ops::SimpleUnaryOp::ln(&mut graph, sum, rng);
+        let mut output_map = HashMap::new();
+        output_map.insert(out, self.output);
+        graph.set_output_map(output_map);
+        graph
+    }
+}
+
+define_reduce_variant!(ReduceLogSumExpOperation, "ReduceLogSumExp");
+impl Operation for ReduceLogSumExpOperation {
+    fn parameters(&self) -> Vec<Property> {
+        reduce_params(self.keepdims, &self.axes_attr, self.noop_with_empty_axes)
+    }
+    fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, rng: &mut impl Rng) -> MilliOpGraph {
+        // ReduceLogSumExp(x) = Log(ReduceSum(Exp(x)))
+        // Numerically stable: subtract max first
+        // max is always computed with keepdims=true so subtraction broadcasts.
+        // The final result uses the requested keepdims setting.
+        let keepdims = self.keepdims.unwrap_or(true);
+        let noop = self.noop_with_empty_axes.unwrap_or(false);
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
+        let x = input_map[&self.input_data];
+        let axes = self.resolve_axes(&mut graph, &input_map, rng);
+        // ReduceMax with keepdims=true for broadcasting
+        let row_max_kd = milli_graph::ops::ReduceMax::push_new(
+            &mut graph, x, axes, true, noop, rng,
+        );
+        let shifted = milli_graph::ops::SimpleBinary::sub(&mut graph, x, row_max_kd, rng);
+        let exp_shifted = milli_graph::ops::SimpleUnaryOp::exp(&mut graph, shifted, rng);
+        let axes2 = self.resolve_axes(&mut graph, &input_map, rng);
+        let sum = milli_graph::ops::ReduceSum::push_new(
+            &mut graph, exp_shifted, axes2, keepdims, noop, rng,
+        );
+        let log_sum = milli_graph::ops::SimpleUnaryOp::ln(&mut graph, sum, rng);
+        // Get row_max in the final shape (may need to drop keepdims)
+        let row_max_final = if keepdims {
+            row_max_kd
+        } else {
+            let axes3 = self.resolve_axes(&mut graph, &input_map, rng);
+            milli_graph::ops::ReduceMax::push_new(
+                &mut graph, x, axes3, false, noop, rng,
+            )
+        };
+        let out = milli_graph::ops::SimpleBinary::add(&mut graph, log_sum, row_max_final, rng);
+        let mut output_map = HashMap::new();
+        output_map.insert(out, self.output);
+        graph.set_output_map(output_map);
+        graph
+    }
+}
+
+fn reduce_params(
+    keepdims: Option<bool>,
+    axes_attr: &Option<Vec<i64>>,
+    noop_with_empty_axes: Option<bool>,
+) -> Vec<Property> {
+    let mut params = Vec::new();
+    if let Some(keepdims) = keepdims {
+        params.push(Property::new("keepdims", PropertyValue::Bool(keepdims)));
+    }
+    if let Some(axes) = axes_attr {
+        params.push(Property::new("axes", PropertyValue::IntList(axes.clone())));
+    }
+    if let Some(noop) = noop_with_empty_axes {
+        params.push(Property::new(
+            "noop_with_empty_axes",
+            PropertyValue::Bool(noop),
+        ));
+    }
+    params
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ReduceL2Operation {
     global_id: GlobalId,

@@ -644,6 +644,665 @@ fn push_gelu(graph: &mut MilliOpGraph, x: GlobalId, rng: &mut impl Rng) -> Globa
     milli_graph::ops::SimpleBinary::mul(graph, half_x, one_plus_erf, rng)
 }
 
+/// ONNX Elu: max(0,x) + min(0, alpha*(exp(x)-1))
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct EluOperation {
+    global_id: GlobalId,
+    input: GlobalId,
+    output: GlobalId,
+    alpha: f32,
+}
+
+impl EluOperation {
+    pub(crate) fn from_onnx(
+        inputs: &[Option<GlobalId>],
+        outputs: &[Option<GlobalId>],
+        attributes: &[onnx::AttributeProto],
+        rng: &mut impl Rng,
+    ) -> Result<Self, ONNXDecodingError> {
+        if inputs.len() != 1 {
+            return Err(ONNXDecodingError::InvalidOperatorInputs("Elu"));
+        }
+        if outputs.len() != 1 {
+            return Err(ONNXDecodingError::InvalidOperatorOutputs("Elu"));
+        }
+        Ok(Self {
+            global_id: GlobalId::new(rng),
+            input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("Elu"))?,
+            output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("Elu"))?,
+            alpha: query_attribute_float(attributes, "alpha").unwrap_or(1.0),
+        })
+    }
+}
+
+impl Node for EluOperation {
+    type OpKind = String;
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
+    fn op_kind(&self) -> Self::OpKind {
+        "Elu".to_string()
+    }
+    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
+        Box::new(std::iter::once(self.input))
+    }
+    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
+        Box::new(std::iter::once(self.output))
+    }
+}
+
+impl Operation for EluOperation {
+    fn parameters(&self) -> Vec<Property> {
+        vec![Property::new(
+            "alpha",
+            PropertyValue::Float(self.alpha.into()),
+        )]
+    }
+
+    fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, rng: &mut impl Rng) -> MilliOpGraph {
+        // Elu(x) = max(0, x) + min(0, alpha * (exp(x) - 1))
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
+        let x = input_map[&self.input];
+        let zero = milli_graph::ops::Constant::new_scalar(&mut graph, 0.0f32, rng);
+        let zero = milli_graph::ops::CastLike::push_new(&mut graph, zero, x, rng);
+        let pos = milli_graph::ops::SimpleBinary::max(&mut graph, zero, x, rng);
+        let alpha = milli_graph::ops::Constant::new_scalar(&mut graph, self.alpha, rng);
+        let alpha = milli_graph::ops::CastLike::push_new(&mut graph, alpha, x, rng);
+        let one = milli_graph::ops::Constant::new_scalar(&mut graph, 1.0f32, rng);
+        let one = milli_graph::ops::CastLike::push_new(&mut graph, one, x, rng);
+        let exp_x = milli_graph::ops::SimpleUnaryOp::exp(&mut graph, x, rng);
+        let exp_m1 = milli_graph::ops::SimpleBinary::sub(&mut graph, exp_x, one, rng);
+        let alpha_exp_m1 = milli_graph::ops::SimpleBinary::mul(&mut graph, alpha, exp_m1, rng);
+        let neg = milli_graph::ops::SimpleBinary::min(&mut graph, zero, alpha_exp_m1, rng);
+        let out_tid = milli_graph::ops::SimpleBinary::add(&mut graph, pos, neg, rng);
+        let mut output_map = HashMap::new();
+        output_map.insert(out_tid, self.output);
+        graph.set_output_map(output_map);
+        graph
+    }
+}
+
+/// ONNX Selu: gamma * (alpha * exp(x) - alpha) for x <= 0, gamma * x for x > 0
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SeluOperation {
+    global_id: GlobalId,
+    input: GlobalId,
+    output: GlobalId,
+    alpha: f32,
+    gamma: f32,
+}
+
+impl SeluOperation {
+    pub(crate) fn from_onnx(
+        inputs: &[Option<GlobalId>],
+        outputs: &[Option<GlobalId>],
+        attributes: &[onnx::AttributeProto],
+        rng: &mut impl Rng,
+    ) -> Result<Self, ONNXDecodingError> {
+        if inputs.len() != 1 {
+            return Err(ONNXDecodingError::InvalidOperatorInputs("Selu"));
+        }
+        if outputs.len() != 1 {
+            return Err(ONNXDecodingError::InvalidOperatorOutputs("Selu"));
+        }
+        Ok(Self {
+            global_id: GlobalId::new(rng),
+            input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("Selu"))?,
+            output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("Selu"))?,
+            alpha: query_attribute_float(attributes, "alpha")
+                .unwrap_or(1.6732632423543772),
+            gamma: query_attribute_float(attributes, "gamma")
+                .unwrap_or(1.0507009873554805),
+        })
+    }
+}
+
+impl Node for SeluOperation {
+    type OpKind = String;
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
+    fn op_kind(&self) -> Self::OpKind {
+        "Selu".to_string()
+    }
+    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
+        Box::new(std::iter::once(self.input))
+    }
+    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
+        Box::new(std::iter::once(self.output))
+    }
+}
+
+impl Operation for SeluOperation {
+    fn parameters(&self) -> Vec<Property> {
+        vec![
+            Property::new("alpha", PropertyValue::Float(self.alpha.into())),
+            Property::new("gamma", PropertyValue::Float(self.gamma.into())),
+        ]
+    }
+
+    fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, rng: &mut impl Rng) -> MilliOpGraph {
+        // Selu(x) = gamma * (alpha * exp(x) - alpha) for x <= 0, gamma * x for x > 0
+        // = gamma * elu(x, alpha)
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
+        let x = input_map[&self.input];
+        let zero = milli_graph::ops::Constant::new_scalar(&mut graph, 0.0f32, rng);
+        let zero = milli_graph::ops::CastLike::push_new(&mut graph, zero, x, rng);
+        let pos = milli_graph::ops::SimpleBinary::max(&mut graph, zero, x, rng);
+        let alpha = milli_graph::ops::Constant::new_scalar(&mut graph, self.alpha, rng);
+        let alpha = milli_graph::ops::CastLike::push_new(&mut graph, alpha, x, rng);
+        let one = milli_graph::ops::Constant::new_scalar(&mut graph, 1.0f32, rng);
+        let one = milli_graph::ops::CastLike::push_new(&mut graph, one, x, rng);
+        let exp_x = milli_graph::ops::SimpleUnaryOp::exp(&mut graph, x, rng);
+        let exp_m1 = milli_graph::ops::SimpleBinary::sub(&mut graph, exp_x, one, rng);
+        let alpha_exp_m1 = milli_graph::ops::SimpleBinary::mul(&mut graph, alpha, exp_m1, rng);
+        let neg = milli_graph::ops::SimpleBinary::min(&mut graph, zero, alpha_exp_m1, rng);
+        let elu = milli_graph::ops::SimpleBinary::add(&mut graph, pos, neg, rng);
+        let gamma = milli_graph::ops::Constant::new_scalar(&mut graph, self.gamma, rng);
+        let gamma = milli_graph::ops::CastLike::push_new(&mut graph, gamma, x, rng);
+        let out_tid = milli_graph::ops::SimpleBinary::mul(&mut graph, gamma, elu, rng);
+        let mut output_map = HashMap::new();
+        output_map.insert(out_tid, self.output);
+        graph.set_output_map(output_map);
+        graph
+    }
+}
+
+/// ONNX Celu: max(0, x) + min(0, alpha * (exp(x/alpha) - 1))
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CeluOperation {
+    global_id: GlobalId,
+    input: GlobalId,
+    output: GlobalId,
+    alpha: f32,
+}
+
+impl CeluOperation {
+    pub(crate) fn from_onnx(
+        inputs: &[Option<GlobalId>],
+        outputs: &[Option<GlobalId>],
+        attributes: &[onnx::AttributeProto],
+        rng: &mut impl Rng,
+    ) -> Result<Self, ONNXDecodingError> {
+        if inputs.len() != 1 {
+            return Err(ONNXDecodingError::InvalidOperatorInputs("Celu"));
+        }
+        if outputs.len() != 1 {
+            return Err(ONNXDecodingError::InvalidOperatorOutputs("Celu"));
+        }
+        Ok(Self {
+            global_id: GlobalId::new(rng),
+            input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("Celu"))?,
+            output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("Celu"))?,
+            alpha: query_attribute_float(attributes, "alpha").unwrap_or(1.0),
+        })
+    }
+}
+
+impl Node for CeluOperation {
+    type OpKind = String;
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
+    fn op_kind(&self) -> Self::OpKind {
+        "Celu".to_string()
+    }
+    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
+        Box::new(std::iter::once(self.input))
+    }
+    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
+        Box::new(std::iter::once(self.output))
+    }
+}
+
+impl Operation for CeluOperation {
+    fn parameters(&self) -> Vec<Property> {
+        vec![Property::new(
+            "alpha",
+            PropertyValue::Float(self.alpha.into()),
+        )]
+    }
+
+    fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, rng: &mut impl Rng) -> MilliOpGraph {
+        // Celu(x) = max(0, x) + min(0, alpha * (exp(x/alpha) - 1))
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
+        let x = input_map[&self.input];
+        let zero = milli_graph::ops::Constant::new_scalar(&mut graph, 0.0f32, rng);
+        let zero = milli_graph::ops::CastLike::push_new(&mut graph, zero, x, rng);
+        let pos = milli_graph::ops::SimpleBinary::max(&mut graph, zero, x, rng);
+        let alpha = milli_graph::ops::Constant::new_scalar(&mut graph, self.alpha, rng);
+        let alpha = milli_graph::ops::CastLike::push_new(&mut graph, alpha, x, rng);
+        let one = milli_graph::ops::Constant::new_scalar(&mut graph, 1.0f32, rng);
+        let one = milli_graph::ops::CastLike::push_new(&mut graph, one, x, rng);
+        let x_over_alpha = milli_graph::ops::SimpleBinary::div(&mut graph, x, alpha, rng);
+        let exp_val = milli_graph::ops::SimpleUnaryOp::exp(&mut graph, x_over_alpha, rng);
+        let exp_m1 = milli_graph::ops::SimpleBinary::sub(&mut graph, exp_val, one, rng);
+        let alpha_exp_m1 = milli_graph::ops::SimpleBinary::mul(&mut graph, alpha, exp_m1, rng);
+        let neg = milli_graph::ops::SimpleBinary::min(&mut graph, zero, alpha_exp_m1, rng);
+        let out_tid = milli_graph::ops::SimpleBinary::add(&mut graph, pos, neg, rng);
+        let mut output_map = HashMap::new();
+        output_map.insert(out_tid, self.output);
+        graph.set_output_map(output_map);
+        graph
+    }
+}
+
+/// ONNX HardSigmoid: max(0, min(1, alpha * x + beta))
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct HardSigmoidOperation {
+    global_id: GlobalId,
+    input: GlobalId,
+    output: GlobalId,
+    alpha: f32,
+    beta: f32,
+}
+
+impl HardSigmoidOperation {
+    pub(crate) fn from_onnx(
+        inputs: &[Option<GlobalId>],
+        outputs: &[Option<GlobalId>],
+        attributes: &[onnx::AttributeProto],
+        rng: &mut impl Rng,
+    ) -> Result<Self, ONNXDecodingError> {
+        if inputs.len() != 1 {
+            return Err(ONNXDecodingError::InvalidOperatorInputs("HardSigmoid"));
+        }
+        if outputs.len() != 1 {
+            return Err(ONNXDecodingError::InvalidOperatorOutputs("HardSigmoid"));
+        }
+        Ok(Self {
+            global_id: GlobalId::new(rng),
+            input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("HardSigmoid"))?,
+            output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("HardSigmoid"))?,
+            alpha: query_attribute_float(attributes, "alpha").unwrap_or(0.2),
+            beta: query_attribute_float(attributes, "beta").unwrap_or(0.5),
+        })
+    }
+}
+
+impl Node for HardSigmoidOperation {
+    type OpKind = String;
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
+    fn op_kind(&self) -> Self::OpKind {
+        "HardSigmoid".to_string()
+    }
+    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
+        Box::new(std::iter::once(self.input))
+    }
+    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
+        Box::new(std::iter::once(self.output))
+    }
+}
+
+impl Operation for HardSigmoidOperation {
+    fn parameters(&self) -> Vec<Property> {
+        vec![
+            Property::new("alpha", PropertyValue::Float(self.alpha.into())),
+            Property::new("beta", PropertyValue::Float(self.beta.into())),
+        ]
+    }
+
+    fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, rng: &mut impl Rng) -> MilliOpGraph {
+        // HardSigmoid(x) = max(0, min(1, alpha * x + beta))
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
+        let x = input_map[&self.input];
+        let alpha = milli_graph::ops::Constant::new_scalar(&mut graph, self.alpha, rng);
+        let alpha = milli_graph::ops::CastLike::push_new(&mut graph, alpha, x, rng);
+        let beta = milli_graph::ops::Constant::new_scalar(&mut graph, self.beta, rng);
+        let beta = milli_graph::ops::CastLike::push_new(&mut graph, beta, x, rng);
+        let zero = milli_graph::ops::Constant::new_scalar(&mut graph, 0.0f32, rng);
+        let zero = milli_graph::ops::CastLike::push_new(&mut graph, zero, x, rng);
+        let one = milli_graph::ops::Constant::new_scalar(&mut graph, 1.0f32, rng);
+        let one = milli_graph::ops::CastLike::push_new(&mut graph, one, x, rng);
+        let ax = milli_graph::ops::SimpleBinary::mul(&mut graph, alpha, x, rng);
+        let axb = milli_graph::ops::SimpleBinary::add(&mut graph, ax, beta, rng);
+        let clamped_low = milli_graph::ops::SimpleBinary::max(&mut graph, axb, zero, rng);
+        let out_tid = milli_graph::ops::SimpleBinary::min(&mut graph, clamped_low, one, rng);
+        let mut output_map = HashMap::new();
+        output_map.insert(out_tid, self.output);
+        graph.set_output_map(output_map);
+        graph
+    }
+}
+
+/// ONNX HardSwish: x * max(0, min(1, x/6 + 0.5))
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct HardSwishOperation {
+    global_id: GlobalId,
+    input: GlobalId,
+    output: GlobalId,
+}
+
+impl HardSwishOperation {
+    pub(crate) fn from_onnx(
+        inputs: &[Option<GlobalId>],
+        outputs: &[Option<GlobalId>],
+        _attributes: &[onnx::AttributeProto],
+        rng: &mut impl Rng,
+    ) -> Result<Self, ONNXDecodingError> {
+        if inputs.len() != 1 {
+            return Err(ONNXDecodingError::InvalidOperatorInputs("HardSwish"));
+        }
+        if outputs.len() != 1 {
+            return Err(ONNXDecodingError::InvalidOperatorOutputs("HardSwish"));
+        }
+        Ok(Self {
+            global_id: GlobalId::new(rng),
+            input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("HardSwish"))?,
+            output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("HardSwish"))?,
+        })
+    }
+}
+
+impl Node for HardSwishOperation {
+    type OpKind = String;
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
+    fn op_kind(&self) -> Self::OpKind {
+        "HardSwish".to_string()
+    }
+    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
+        Box::new(std::iter::once(self.input))
+    }
+    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
+        Box::new(std::iter::once(self.output))
+    }
+}
+
+impl Operation for HardSwishOperation {
+    fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, rng: &mut impl Rng) -> MilliOpGraph {
+        // HardSwish(x) = x * HardSigmoid(x, alpha=1/6, beta=0.5)
+        //              = x * max(0, min(1, x/6 + 0.5))
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
+        let x = input_map[&self.input];
+        let sixth = milli_graph::ops::Constant::new_scalar(&mut graph, 1.0f32 / 6.0, rng);
+        let sixth = milli_graph::ops::CastLike::push_new(&mut graph, sixth, x, rng);
+        let half = milli_graph::ops::Constant::new_scalar(&mut graph, 0.5f32, rng);
+        let half = milli_graph::ops::CastLike::push_new(&mut graph, half, x, rng);
+        let zero = milli_graph::ops::Constant::new_scalar(&mut graph, 0.0f32, rng);
+        let zero = milli_graph::ops::CastLike::push_new(&mut graph, zero, x, rng);
+        let one = milli_graph::ops::Constant::new_scalar(&mut graph, 1.0f32, rng);
+        let one = milli_graph::ops::CastLike::push_new(&mut graph, one, x, rng);
+        let x6 = milli_graph::ops::SimpleBinary::mul(&mut graph, x, sixth, rng);
+        let x6h = milli_graph::ops::SimpleBinary::add(&mut graph, x6, half, rng);
+        let clamped_low = milli_graph::ops::SimpleBinary::max(&mut graph, x6h, zero, rng);
+        let hard_sig = milli_graph::ops::SimpleBinary::min(&mut graph, clamped_low, one, rng);
+        let out_tid = milli_graph::ops::SimpleBinary::mul(&mut graph, x, hard_sig, rng);
+        let mut output_map = HashMap::new();
+        output_map.insert(out_tid, self.output);
+        graph.set_output_map(output_map);
+        graph
+    }
+}
+
+/// ONNX Mish: x * tanh(softplus(x)) = x * tanh(ln(1 + exp(x)))
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MishOperation {
+    global_id: GlobalId,
+    input: GlobalId,
+    output: GlobalId,
+}
+
+impl MishOperation {
+    pub(crate) fn from_onnx(
+        inputs: &[Option<GlobalId>],
+        outputs: &[Option<GlobalId>],
+        _attributes: &[onnx::AttributeProto],
+        rng: &mut impl Rng,
+    ) -> Result<Self, ONNXDecodingError> {
+        if inputs.len() != 1 {
+            return Err(ONNXDecodingError::InvalidOperatorInputs("Mish"));
+        }
+        if outputs.len() != 1 {
+            return Err(ONNXDecodingError::InvalidOperatorOutputs("Mish"));
+        }
+        Ok(Self {
+            global_id: GlobalId::new(rng),
+            input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("Mish"))?,
+            output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("Mish"))?,
+        })
+    }
+}
+
+impl Node for MishOperation {
+    type OpKind = String;
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
+    fn op_kind(&self) -> Self::OpKind {
+        "Mish".to_string()
+    }
+    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
+        Box::new(std::iter::once(self.input))
+    }
+    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
+        Box::new(std::iter::once(self.output))
+    }
+}
+
+impl Operation for MishOperation {
+    fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, rng: &mut impl Rng) -> MilliOpGraph {
+        // Mish(x) = x * tanh(softplus(x)) = x * tanh(ln(1 + exp(x)))
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
+        let x = input_map[&self.input];
+        let exp_x = milli_graph::ops::SimpleUnaryOp::exp(&mut graph, x, rng);
+        let one = milli_graph::ops::Constant::new_scalar(&mut graph, 1.0f32, rng);
+        let one = milli_graph::ops::CastLike::push_new(&mut graph, one, x, rng);
+        let one_plus_exp = milli_graph::ops::SimpleBinary::add(&mut graph, exp_x, one, rng);
+        let softplus = milli_graph::ops::SimpleUnaryOp::ln(&mut graph, one_plus_exp, rng);
+        let tanh_sp =
+            milli_graph::ops::SimpleUnaryOp::trig(&mut graph, softplus, TrigOp::Tanh, rng);
+        let out_tid = milli_graph::ops::SimpleBinary::mul(&mut graph, x, tanh_sp, rng);
+        let mut output_map = HashMap::new();
+        output_map.insert(out_tid, self.output);
+        graph.set_output_map(output_map);
+        graph
+    }
+}
+
+/// ONNX Softsign: x / (1 + |x|)
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SoftsignOperation {
+    global_id: GlobalId,
+    input: GlobalId,
+    output: GlobalId,
+}
+
+impl SoftsignOperation {
+    pub(crate) fn from_onnx(
+        inputs: &[Option<GlobalId>],
+        outputs: &[Option<GlobalId>],
+        _attributes: &[onnx::AttributeProto],
+        rng: &mut impl Rng,
+    ) -> Result<Self, ONNXDecodingError> {
+        if inputs.len() != 1 {
+            return Err(ONNXDecodingError::InvalidOperatorInputs("Softsign"));
+        }
+        if outputs.len() != 1 {
+            return Err(ONNXDecodingError::InvalidOperatorOutputs("Softsign"));
+        }
+        Ok(Self {
+            global_id: GlobalId::new(rng),
+            input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("Softsign"))?,
+            output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("Softsign"))?,
+        })
+    }
+}
+
+impl Node for SoftsignOperation {
+    type OpKind = String;
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
+    fn op_kind(&self) -> Self::OpKind {
+        "Softsign".to_string()
+    }
+    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
+        Box::new(std::iter::once(self.input))
+    }
+    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
+        Box::new(std::iter::once(self.output))
+    }
+}
+
+impl Operation for SoftsignOperation {
+    fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, rng: &mut impl Rng) -> MilliOpGraph {
+        // Softsign(x) = x / (1 + |x|)
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
+        let x = input_map[&self.input];
+        let abs_x = milli_graph::ops::SimpleUnaryOp::abs(&mut graph, x, rng);
+        let one = milli_graph::ops::Constant::new_scalar(&mut graph, 1.0f32, rng);
+        let one = milli_graph::ops::CastLike::push_new(&mut graph, one, x, rng);
+        let denom = milli_graph::ops::SimpleBinary::add(&mut graph, one, abs_x, rng);
+        let out_tid = milli_graph::ops::SimpleBinary::div(&mut graph, x, denom, rng);
+        let mut output_map = HashMap::new();
+        output_map.insert(out_tid, self.output);
+        graph.set_output_map(output_map);
+        graph
+    }
+}
+
+/// ONNX ThresholdedRelu: x if x > alpha else 0
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ThresholdedReluOperation {
+    global_id: GlobalId,
+    input: GlobalId,
+    output: GlobalId,
+    alpha: f32,
+}
+
+impl ThresholdedReluOperation {
+    pub(crate) fn from_onnx(
+        inputs: &[Option<GlobalId>],
+        outputs: &[Option<GlobalId>],
+        attributes: &[onnx::AttributeProto],
+        rng: &mut impl Rng,
+    ) -> Result<Self, ONNXDecodingError> {
+        if inputs.len() != 1 {
+            return Err(ONNXDecodingError::InvalidOperatorInputs("ThresholdedRelu"));
+        }
+        if outputs.len() != 1 {
+            return Err(ONNXDecodingError::InvalidOperatorOutputs("ThresholdedRelu"));
+        }
+        Ok(Self {
+            global_id: GlobalId::new(rng),
+            input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("ThresholdedRelu"))?,
+            output: outputs[0]
+                .ok_or(ONNXDecodingError::InvalidOperatorOutputs("ThresholdedRelu"))?,
+            alpha: query_attribute_float(attributes, "alpha").unwrap_or(1.0),
+        })
+    }
+}
+
+impl Node for ThresholdedReluOperation {
+    type OpKind = String;
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
+    fn op_kind(&self) -> Self::OpKind {
+        "ThresholdedRelu".to_string()
+    }
+    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
+        Box::new(std::iter::once(self.input))
+    }
+    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
+        Box::new(std::iter::once(self.output))
+    }
+}
+
+impl Operation for ThresholdedReluOperation {
+    fn parameters(&self) -> Vec<Property> {
+        vec![Property::new(
+            "alpha",
+            PropertyValue::Float(self.alpha.into()),
+        )]
+    }
+
+    fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, rng: &mut impl Rng) -> MilliOpGraph {
+        // ThresholdedRelu(x) = x if x > alpha else 0
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
+        let x = input_map[&self.input];
+        let alpha = milli_graph::ops::Constant::new_scalar(&mut graph, self.alpha, rng);
+        let alpha = milli_graph::ops::CastLike::push_new(&mut graph, alpha, x, rng);
+        let zero = milli_graph::ops::Constant::new_scalar(&mut graph, 0.0f32, rng);
+        let zero = milli_graph::ops::CastLike::push_new(&mut graph, zero, x, rng);
+        let cond = milli_graph::ops::SimpleBinary::greater(&mut graph, x, alpha, rng);
+        let out_tid = milli_graph::ops::Where::push_new(&mut graph, cond, x, zero, rng);
+        let mut output_map = HashMap::new();
+        output_map.insert(out_tid, self.output);
+        graph.set_output_map(output_map);
+        graph
+    }
+}
+
+/// ONNX PRelu: slope * x for x < 0, x for x >= 0
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PReluOperation {
+    global_id: GlobalId,
+    input: GlobalId,
+    slope: GlobalId,
+    output: GlobalId,
+}
+
+impl PReluOperation {
+    pub(crate) fn from_onnx(
+        inputs: &[Option<GlobalId>],
+        outputs: &[Option<GlobalId>],
+        _attributes: &[onnx::AttributeProto],
+        rng: &mut impl Rng,
+    ) -> Result<Self, ONNXDecodingError> {
+        if inputs.len() != 2 {
+            return Err(ONNXDecodingError::InvalidOperatorInputs("PRelu"));
+        }
+        if outputs.len() != 1 {
+            return Err(ONNXDecodingError::InvalidOperatorOutputs("PRelu"));
+        }
+        Ok(Self {
+            global_id: GlobalId::new(rng),
+            input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("PRelu"))?,
+            slope: inputs[1].ok_or(ONNXDecodingError::InvalidOperatorInputs("PRelu"))?,
+            output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("PRelu"))?,
+        })
+    }
+}
+
+impl Node for PReluOperation {
+    type OpKind = String;
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
+    fn op_kind(&self) -> Self::OpKind {
+        "PRelu".to_string()
+    }
+    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
+        Box::new([self.input, self.slope].into_iter())
+    }
+    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
+        Box::new(std::iter::once(self.output))
+    }
+}
+
+impl Operation for PReluOperation {
+    fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, rng: &mut impl Rng) -> MilliOpGraph {
+        // PRelu(x, slope) = x if x >= 0, slope * x if x < 0
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
+        let x = input_map[&self.input];
+        let slope = input_map[&self.slope];
+        let zero = milli_graph::ops::Constant::new_scalar(&mut graph, 0.0f32, rng);
+        let zero = milli_graph::ops::CastLike::push_new(&mut graph, zero, x, rng);
+        let cond = milli_graph::ops::SimpleBinary::greater_or_equal(&mut graph, x, zero, rng);
+        let slope_x = milli_graph::ops::SimpleBinary::mul(&mut graph, slope, x, rng);
+        let out_tid = milli_graph::ops::Where::push_new(&mut graph, cond, x, slope_x, rng);
+        let mut output_map = HashMap::new();
+        output_map.insert(out_tid, self.output);
+        graph.set_output_map(output_map);
+        graph
+    }
+}
+
 /// ONNX Runtime contrib op: BiasGelu(x, bias) = Gelu(x + bias).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BiasGeluOperation {

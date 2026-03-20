@@ -905,3 +905,166 @@ impl Operation for InstanceNormalizationOperation {
         params
     }
 }
+
+/// ONNX BatchNormalization (inference mode only).
+/// output = scale * (x - mean) / sqrt(var + epsilon) + bias
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct BatchNormalizationOperation {
+    global_id: GlobalId,
+    x: GlobalId,
+    scale: GlobalId,
+    bias: GlobalId,
+    input_mean: GlobalId,
+    input_var: GlobalId,
+    output: GlobalId,
+    epsilon: f32,
+}
+
+impl BatchNormalizationOperation {
+    pub(crate) fn from_onnx(
+        inputs: &[Option<GlobalId>],
+        outputs: &[Option<GlobalId>],
+        attributes: &[onnx::AttributeProto],
+        rng: &mut impl Rng,
+    ) -> Result<Self, ONNXDecodingError> {
+        if inputs.len() != 5 {
+            return Err(ONNXDecodingError::InvalidOperatorInputs(
+                "BatchNormalization",
+            ));
+        }
+        if outputs.is_empty() {
+            return Err(ONNXDecodingError::InvalidOperatorOutputs(
+                "BatchNormalization",
+            ));
+        }
+        Ok(Self {
+            global_id: GlobalId::new(rng),
+            x: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs(
+                "BatchNormalization",
+            ))?,
+            scale: inputs[1].ok_or(ONNXDecodingError::InvalidOperatorInputs(
+                "BatchNormalization",
+            ))?,
+            bias: inputs[2].ok_or(ONNXDecodingError::InvalidOperatorInputs(
+                "BatchNormalization",
+            ))?,
+            input_mean: inputs[3].ok_or(ONNXDecodingError::InvalidOperatorInputs(
+                "BatchNormalization",
+            ))?,
+            input_var: inputs[4].ok_or(ONNXDecodingError::InvalidOperatorInputs(
+                "BatchNormalization",
+            ))?,
+            output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs(
+                "BatchNormalization",
+            ))?,
+            epsilon: query_attribute_float(attributes, "epsilon").unwrap_or(1e-5),
+        })
+    }
+}
+
+impl Node for BatchNormalizationOperation {
+    type OpKind = String;
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
+    fn op_kind(&self) -> Self::OpKind {
+        "BatchNormalization".to_string()
+    }
+    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
+        Box::new(
+            [
+                self.x,
+                self.scale,
+                self.bias,
+                self.input_mean,
+                self.input_var,
+            ]
+            .into_iter(),
+        )
+    }
+    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
+        Box::new(std::iter::once(self.output))
+    }
+}
+
+impl Operation for BatchNormalizationOperation {
+    fn parameters(&self) -> Vec<Property> {
+        vec![Property::new(
+            "epsilon",
+            PropertyValue::Float(self.epsilon as f64),
+        )]
+    }
+
+    fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, rng: &mut impl Rng) -> MilliOpGraph {
+        // BN(x) = scale * (x - mean) / sqrt(var + epsilon) + bias
+        // scale, bias, mean, var are 1-D [C], x is [N, C, D1, D2, ...].
+        //
+        // PyTorch always computes BN in F32 regardless of input dtype,
+        // matching the InstanceNorm pattern in this codebase.
+        //
+        // Strategy: cast to F32, reshape x to [N, C, -1], unsqueeze params
+        // to [C, 1], do the math in 3D, reshape back, cast to original dtype.
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
+        let original_x = input_map[&self.x];
+
+        // Cast input and params to F32 for numerical stability
+        let x = milli_graph::ops::Cast::push_new(&mut graph, original_x, DType::F32, rng);
+
+        // Save original shape for reshaping back
+        let orig_shape = milli_graph::ops::Shape::push_new(&mut graph, x, rng);
+
+        // Reshape [N, C, D1, D2, ...] → [N, C, -1]
+        let new_shape_tensor = NDArrayNumericTensor::from(vec![0i64, 0i64, -1]);
+        let new_shape =
+            milli_graph::ops::Constant::push_new(&mut graph, new_shape_tensor.to_dyn(), rng);
+        let x3d = milli_graph::ops::Reshape::push_new(&mut graph, x, new_shape, false, rng);
+
+        // Unsqueeze 1-D params [C] → [C, 1] so they broadcast over the spatial dim,
+        // casting each to F32.
+        let axis1 = milli_graph::ops::Constant::new_scalar(&mut graph, 1i64, rng);
+        let scale = milli_graph::ops::Cast::push_new(
+            &mut graph,
+            input_map[&self.scale],
+            DType::F32,
+            rng,
+        );
+        let scale = milli_graph::ops::Unsqueeze::push_new(&mut graph, scale, axis1, rng);
+        let bias = milli_graph::ops::Cast::push_new(
+            &mut graph,
+            input_map[&self.bias],
+            DType::F32,
+            rng,
+        );
+        let bias = milli_graph::ops::Unsqueeze::push_new(&mut graph, bias, axis1, rng);
+        let mean = milli_graph::ops::Cast::push_new(
+            &mut graph,
+            input_map[&self.input_mean],
+            DType::F32,
+            rng,
+        );
+        let mean = milli_graph::ops::Unsqueeze::push_new(&mut graph, mean, axis1, rng);
+        let var = milli_graph::ops::Cast::push_new(
+            &mut graph,
+            input_map[&self.input_var],
+            DType::F32,
+            rng,
+        );
+        let var = milli_graph::ops::Unsqueeze::push_new(&mut graph, var, axis1, rng);
+
+        let eps = milli_graph::ops::Constant::new_scalar(&mut graph, self.epsilon, rng);
+        let var_eps = milli_graph::ops::SimpleBinary::add(&mut graph, var, eps, rng);
+        let std_dev = milli_graph::ops::SimpleUnaryOp::sqrt(&mut graph, var_eps, rng);
+        let x_norm = milli_graph::ops::SimpleBinary::sub(&mut graph, x3d, mean, rng);
+        let x_norm = milli_graph::ops::SimpleBinary::div(&mut graph, x_norm, std_dev, rng);
+        let scaled = milli_graph::ops::SimpleBinary::mul(&mut graph, scale, x_norm, rng);
+        let y3d = milli_graph::ops::SimpleBinary::add(&mut graph, scaled, bias, rng);
+
+        // Reshape back to original shape, cast back to original dtype
+        let y = milli_graph::ops::Reshape::push_new(&mut graph, y3d, orig_shape, false, rng);
+        let out_tid = milli_graph::ops::CastLike::push_new(&mut graph, y, original_x, rng);
+        let mut output_map = HashMap::new();
+        output_map.insert(out_tid, self.output);
+        graph.set_output_map(output_map);
+        graph
+    }
+}

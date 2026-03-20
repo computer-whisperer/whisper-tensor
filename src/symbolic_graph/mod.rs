@@ -2528,6 +2528,102 @@ impl SymbolicGraphMutator {
                 &onnx_node.attribute,
                 rng,
             )?)),
+            "ReduceL1" => Some(AnyOperation::ReduceL1(ops::ReduceL1Operation::from_onnx(
+                &input_tensors,
+                &output_tensors,
+                &onnx_node.attribute,
+                rng,
+            )?)),
+            "ReduceSumSquare" => Some(AnyOperation::ReduceSumSquare(
+                ops::ReduceSumSquareOperation::from_onnx(
+                    &input_tensors,
+                    &output_tensors,
+                    &onnx_node.attribute,
+                    rng,
+                )?,
+            )),
+            "ReduceLogSum" => Some(AnyOperation::ReduceLogSum(
+                ops::ReduceLogSumOperation::from_onnx(
+                    &input_tensors,
+                    &output_tensors,
+                    &onnx_node.attribute,
+                    rng,
+                )?,
+            )),
+            "ReduceLogSumExp" => Some(AnyOperation::ReduceLogSumExp(
+                ops::ReduceLogSumExpOperation::from_onnx(
+                    &input_tensors,
+                    &output_tensors,
+                    &onnx_node.attribute,
+                    rng,
+                )?,
+            )),
+            "Elu" => Some(AnyOperation::Elu(ops::EluOperation::from_onnx(
+                &input_tensors,
+                &output_tensors,
+                &onnx_node.attribute,
+                rng,
+            )?)),
+            "Selu" => Some(AnyOperation::Selu(ops::SeluOperation::from_onnx(
+                &input_tensors,
+                &output_tensors,
+                &onnx_node.attribute,
+                rng,
+            )?)),
+            "Celu" => Some(AnyOperation::Celu(ops::CeluOperation::from_onnx(
+                &input_tensors,
+                &output_tensors,
+                &onnx_node.attribute,
+                rng,
+            )?)),
+            "HardSigmoid" => Some(AnyOperation::HardSigmoid(
+                ops::HardSigmoidOperation::from_onnx(
+                    &input_tensors,
+                    &output_tensors,
+                    &onnx_node.attribute,
+                    rng,
+                )?,
+            )),
+            "HardSwish" => Some(AnyOperation::HardSwish(ops::HardSwishOperation::from_onnx(
+                &input_tensors,
+                &output_tensors,
+                &onnx_node.attribute,
+                rng,
+            )?)),
+            "Mish" => Some(AnyOperation::Mish(ops::MishOperation::from_onnx(
+                &input_tensors,
+                &output_tensors,
+                &onnx_node.attribute,
+                rng,
+            )?)),
+            "Softsign" => Some(AnyOperation::Softsign(ops::SoftsignOperation::from_onnx(
+                &input_tensors,
+                &output_tensors,
+                &onnx_node.attribute,
+                rng,
+            )?)),
+            "ThresholdedRelu" => Some(AnyOperation::ThresholdedRelu(
+                ops::ThresholdedReluOperation::from_onnx(
+                    &input_tensors,
+                    &output_tensors,
+                    &onnx_node.attribute,
+                    rng,
+                )?,
+            )),
+            "PRelu" => Some(AnyOperation::PRelu(ops::PReluOperation::from_onnx(
+                &input_tensors,
+                &output_tensors,
+                &onnx_node.attribute,
+                rng,
+            )?)),
+            "BatchNormalization" => Some(AnyOperation::BatchNormalization(
+                ops::BatchNormalizationOperation::from_onnx(
+                    &input_tensors,
+                    &output_tensors,
+                    &onnx_node.attribute,
+                    rng,
+                )?,
+            )),
             x => Err(ONNXDecodingError::UnsupportedONNXType(x.to_string()))?,
         };
 

@@ -43,13 +43,14 @@ pub use misc::{
 };
 pub use pool::AveragePoolOperation;
 pub use normalization::{
-    GroupNormalizationOperation, InstanceNormalizationOperation, LayerNormalizationOperation,
-    LpNormalizationOperation, RMSNormalizationOperation,
+    BatchNormalizationOperation, GroupNormalizationOperation, InstanceNormalizationOperation,
+    LayerNormalizationOperation, LpNormalizationOperation, RMSNormalizationOperation,
 };
 pub use quant_matmul::QuantMatMulOperation;
 pub use reduce::{
-    CumSumOperation, ReduceL2Operation, ReduceMaxOperation, ReduceMeanOperation,
-    ReduceMinOperation, ReduceProdOperation, ReduceSumOperation,
+    CumSumOperation, ReduceL1Operation, ReduceL2Operation, ReduceLogSumExpOperation,
+    ReduceLogSumOperation, ReduceMaxOperation, ReduceMeanOperation, ReduceMinOperation,
+    ReduceProdOperation, ReduceSumOperation, ReduceSumSquareOperation,
 };
 pub use reshape::{FlattenOperation, ReshapeOperation, SqueezeOperation, UnsqueezeOperation};
 pub use resize::ResizeOperation;
@@ -63,8 +64,10 @@ pub use stft::StftOperation;
 pub use topk::TopKOperation;
 pub use transpose::TransposeOperation;
 pub use unary::{
-    BiasGeluOperation, GeluOperation, IdentityOperation, IsInfOperation, LeakyReluOperation,
-    LogSoftmaxOperation, SoftmaxOperation, UnaryOperation, WhichUnaryOperation,
+    BiasGeluOperation, CeluOperation, EluOperation, GeluOperation, HardSigmoidOperation,
+    HardSwishOperation, IdentityOperation, IsInfOperation, LeakyReluOperation,
+    LogSoftmaxOperation, MishOperation, PReluOperation, SeluOperation, SoftsignOperation,
+    SoftmaxOperation, ThresholdedReluOperation, UnaryOperation, WhichUnaryOperation,
 };
 
 use crate::backends::eval_backend::EvalBackend;
@@ -285,7 +288,21 @@ pub enum AnyOperation {
     Gelu(GeluOperation),
     BiasGelu(BiasGeluOperation),
     ReduceL2(ReduceL2Operation),
+    ReduceL1(ReduceL1Operation),
+    ReduceSumSquare(ReduceSumSquareOperation),
+    ReduceLogSum(ReduceLogSumOperation),
+    ReduceLogSumExp(ReduceLogSumExpOperation),
     TopK(TopKOperation),
+    Elu(EluOperation),
+    Selu(SeluOperation),
+    Celu(CeluOperation),
+    HardSigmoid(HardSigmoidOperation),
+    HardSwish(HardSwishOperation),
+    Mish(MishOperation),
+    Softsign(SoftsignOperation),
+    ThresholdedRelu(ThresholdedReluOperation),
+    PRelu(PReluOperation),
+    BatchNormalization(BatchNormalizationOperation),
 }
 
 macro_rules! delegate {
@@ -354,7 +371,21 @@ macro_rules! delegate {
             AnyOperation::Gelu(x) => x.$name($($arg),*),
             AnyOperation::BiasGelu(x) => x.$name($($arg),*),
             AnyOperation::ReduceL2(x) => x.$name($($arg),*),
-            AnyOperation::TopK(x) => x.$name($($arg),*)
+            AnyOperation::ReduceL1(x) => x.$name($($arg),*),
+            AnyOperation::ReduceSumSquare(x) => x.$name($($arg),*),
+            AnyOperation::ReduceLogSum(x) => x.$name($($arg),*),
+            AnyOperation::ReduceLogSumExp(x) => x.$name($($arg),*),
+            AnyOperation::TopK(x) => x.$name($($arg),*),
+            AnyOperation::Elu(x) => x.$name($($arg),*),
+            AnyOperation::Selu(x) => x.$name($($arg),*),
+            AnyOperation::Celu(x) => x.$name($($arg),*),
+            AnyOperation::HardSigmoid(x) => x.$name($($arg),*),
+            AnyOperation::HardSwish(x) => x.$name($($arg),*),
+            AnyOperation::Mish(x) => x.$name($($arg),*),
+            AnyOperation::Softsign(x) => x.$name($($arg),*),
+            AnyOperation::ThresholdedRelu(x) => x.$name($($arg),*),
+            AnyOperation::PRelu(x) => x.$name($($arg),*),
+            AnyOperation::BatchNormalization(x) => x.$name($($arg),*)
                     }
         }
     }
