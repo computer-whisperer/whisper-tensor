@@ -46,6 +46,8 @@ ONNX / Safetensors / GGUF / PyTorch
 
 ## Supported models
 
+See [docs/model_roster.md](docs/model_roster.md) for detailed architecture notes and verification status.
+
 ### Text generation (LLMs)
 
 | Model | Format | Loader |
