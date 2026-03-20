@@ -415,15 +415,11 @@ impl<R: Rank> NumericTensor<R> {
     }
 
     /// Apply a trigonometric operation element-wise (sin, cos, tan, etc.), as specified by op.
-    pub fn trig(&self, op: TrigOp, backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
-        if backend.supports_dtype(self.dtype()) {
-            #[cfg(feature = "vulkan")]
-            if let EvalBackend::Vulkan(executor) = backend {
-                return Ok(NumericTensor::Vulkan(
-                    self.to_vulkan(executor)?.trig(op, executor)?,
-                ));
-            }
-        }
+    ///
+    /// Always uses NDArray (libm) — SPIR-V trig precision is implementation-defined
+    /// and diverges from libm for transcendentals (tanh, sin, cos) by enough to
+    /// cause accumulated error in compound ops like Mish to exceed tolerance.
+    pub fn trig(&self, op: TrigOp, _backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
         Ok(NumericTensor::NDArray(self.to_ndarray()?.trig(op)?))
     }
 
