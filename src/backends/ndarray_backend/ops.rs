@@ -304,9 +304,7 @@ impl ReduceOp {
             ReduceOp::Mean => reduce_mean(tensor, axes, keepdims, mode)?,
             ReduceOp::Prod => reduce_prod(tensor, axes, keepdims, mode)?,
             // Min/Max are order-independent; mode doesn't affect the result.
-            ReduceOp::Min => Err(NDArrayOperationError::UnimplementedOp(
-                "ReduceMin".to_string(),
-            ))?,
+            ReduceOp::Min => reduce_min(tensor, axes, keepdims)?,
             ReduceOp::Max => reduce_max(tensor, axes, keepdims)?,
         })
     }
@@ -526,6 +524,46 @@ where
     }
 
     // 4) Wrap in ArcArray and return
+    Ok(ArcArray::from(result))
+}
+
+pub fn reduce_min<T>(
+    tensor: ArcArray<T, IxDyn>,
+    axes: Vec<usize>,
+    keepdims: bool,
+) -> Result<ArcArray<T, IxDyn>, NDArrayOperationError>
+where
+    T: Clone + Copy + PartialOrd,
+{
+    let mut ax = axes;
+    {
+        let mut sorted = ax.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        if sorted.len() != ax.len() {
+            return Err(NDArrayOperationError::IncompatibleShape);
+        }
+        sorted.reverse();
+        ax = sorted;
+    }
+
+    let mut result: ArrayD<T> = tensor.view().to_owned().into_dyn();
+
+    for &axis in &ax {
+        let mined = result.map_axis(Axis(axis), |lane| {
+            lane.iter()
+                .copied()
+                .reduce(|a, b| if b < a { b } else { a })
+                .unwrap()
+        });
+
+        result = if keepdims {
+            mined.insert_axis(Axis(axis)).into_dyn()
+        } else {
+            mined.into_dyn()
+        };
+    }
+
     Ok(ArcArray::from(result))
 }
 

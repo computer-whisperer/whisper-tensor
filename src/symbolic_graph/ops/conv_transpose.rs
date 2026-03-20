@@ -141,49 +141,118 @@ impl Operation for ConvTransposeOperation {
 
         let x_shape: Vec<usize> = x.shape().iter().map(|&v| v as usize).collect();
         let w_shape: Vec<usize> = w.shape().iter().map(|&v| v as usize).collect();
-        let spatial_dims = x_shape.len() - 2;
-
-        assert_eq!(
-            spatial_dims, 1,
-            "ConvTranspose currently only supports 1D (got {spatial_dims}D)"
-        );
+        let nd = x_shape.len() - 2; // number of spatial dimensions
 
         let batch = x_shape[0];
         let c_in = x_shape[1];
-        let l_in = x_shape[2];
-        // W shape: [C_in, C_out/group, kernel]
-        let c_out_per_group = w_shape[1];
-        let kernel = if self.kernel_shape.is_empty() {
-            w_shape[2]
-        } else {
-            self.kernel_shape[0] as usize
-        };
         let groups = self.group as usize;
+        // W shape: [C_in, C_out/group, K0, K1, ...]
+        let c_out_per_group = w_shape[1];
         let c_out = c_out_per_group * groups;
-        let stride = if self.strides.is_empty() {
-            1
+        let c_in_per_group = c_in / groups;
+
+        // Per-axis parameters with defaults
+        let kernel: Vec<usize> = (0..nd)
+            .map(|i| {
+                if i < self.kernel_shape.len() { self.kernel_shape[i] as usize }
+                else { w_shape[2 + i] }
+            })
+            .collect();
+        let stride: Vec<usize> = (0..nd)
+            .map(|i| if i < self.strides.len() { self.strides[i] as usize } else { 1 })
+            .collect();
+        let dilation: Vec<usize> = (0..nd)
+            .map(|i| if i < self.dilations.len() { self.dilations[i] as usize } else { 1 })
+            .collect();
+        let output_pad: Vec<usize> = (0..nd)
+            .map(|i| if i < self.output_padding.len() { self.output_padding[i] as usize } else { 0 })
+            .collect();
+        let in_spatial: Vec<usize> = (0..nd).map(|i| x_shape[2 + i]).collect();
+
+        // Compute pads: either explicit, derived from output_shape, or from auto_pad.
+        let (pad_begin, pad_end, output_pad) = if !self.output_shape.is_empty() {
+            // output_shape given: compute pads and output_padding to achieve it.
+            // ONNX formula: output_shape[i] = stride[i]*(in-1) + output_padding[i] + ek - pbegin - pend
+            // First compute no-pad output, then derive what adjustments are needed.
+            let mut pb = vec![0usize; nd];
+            let mut pe = vec![0usize; nd];
+            let mut op = output_pad.clone();
+            for i in 0..nd {
+                let ek = (kernel[i] - 1) * dilation[i] + 1;
+                let no_pad_out = (in_spatial[i] - 1) * stride[i] + ek;
+                let target = self.output_shape[i] as usize;
+                if no_pad_out >= target {
+                    let total_pad = no_pad_out - target;
+                    pb[i] = total_pad / 2;
+                    pe[i] = total_pad - pb[i];
+                } else {
+                    // Need output_padding to reach target
+                    op[i] = target - no_pad_out;
+                }
+            }
+            (pb, pe, op)
         } else {
-            self.strides[0] as usize
-        };
-        let dilation = if self.dilations.is_empty() {
-            1
-        } else {
-            self.dilations[0] as usize
-        };
-        let (pad_begin, pad_end) = if self.pads.len() >= 2 {
-            (self.pads[0] as usize, self.pads[1] as usize)
-        } else {
-            (0, 0)
-        };
-        let output_pad = if self.output_padding.is_empty() {
-            0
-        } else {
-            self.output_padding[0] as usize
+            match self.auto_pad {
+                AutoPad::SameUpper | AutoPad::SameLower => {
+                    let mut pb = vec![0usize; nd];
+                    let mut pe = vec![0usize; nd];
+                    for i in 0..nd {
+                        let out_i = in_spatial[i] * stride[i];
+                        let ek = (kernel[i] - 1) * dilation[i] + 1;
+                        let total_pad =
+                            stride[i] * (in_spatial[i] - 1) + output_pad[i] + ek - out_i;
+                        if matches!(self.auto_pad, AutoPad::SameLower) {
+                            pe[i] = total_pad / 2;
+                            pb[i] = total_pad - pe[i];
+                        } else {
+                            pb[i] = total_pad / 2;
+                            pe[i] = total_pad - pb[i];
+                        }
+                    }
+                    (pb, pe, output_pad)
+                }
+                _ => {
+                    let pb = (0..nd)
+                        .map(|i| if i < self.pads.len() { self.pads[i] as usize } else { 0 })
+                        .collect();
+                    let pe = (0..nd)
+                        .map(|i| {
+                            if nd + i < self.pads.len() { self.pads[nd + i] as usize } else { 0 }
+                        })
+                        .collect();
+                    (pb, pe, output_pad)
+                }
+            }
         };
 
-        let effective_kernel = (kernel - 1) * dilation + 1;
-        let l_out = (l_in - 1) * stride - pad_begin - pad_end + effective_kernel + output_pad;
-        let c_in_per_group = c_in / groups;
+        // Compute spatial output sizes
+        let out_spatial: Vec<usize> = (0..nd)
+            .map(|i| {
+                let ek = (kernel[i] - 1) * dilation[i] + 1;
+                (in_spatial[i] - 1) * stride[i] - pad_begin[i] - pad_end[i] + ek + output_pad[i]
+            })
+            .collect();
+
+        // Compute strides for flat indexing
+        let in_spatial_stride = {
+            let mut s = vec![1usize; nd];
+            for i in (0..nd - 1).rev() { s[i] = s[i + 1] * in_spatial[i + 1]; }
+            s
+        };
+        let out_spatial_stride = {
+            let mut s = vec![1usize; nd];
+            for i in (0..nd - 1).rev() { s[i] = s[i + 1] * out_spatial[i + 1]; }
+            s
+        };
+        let kernel_stride = {
+            let mut s = vec![1usize; nd];
+            for i in (0..nd - 1).rev() { s[i] = s[i + 1] * kernel[i + 1]; }
+            s
+        };
+
+        let in_spatial_total: usize = in_spatial.iter().product();
+        let out_spatial_total: usize = out_spatial.iter().product();
+        let kernel_total: usize = kernel.iter().product();
 
         // Cast to f32 for computation
         let x_f32 = x.cast(DType::F32, backend)?;
@@ -191,7 +260,7 @@ impl Operation for ConvTransposeOperation {
         let x_data: Vec<f32> = x_f32.to_ndarray()?.flatten().try_into()?;
         let w_data: Vec<f32> = w_f32.to_ndarray()?.flatten().try_into()?;
 
-        let mut out_data = vec![0.0f32; batch * c_out * l_out];
+        let mut out_data = vec![0.0f32; batch * c_out * out_spatial_total];
 
         for b in 0..batch {
             for g in 0..groups {
@@ -199,22 +268,47 @@ impl Operation for ConvTransposeOperation {
                     let in_ch = g * c_in_per_group + c_i;
                     for c_o in 0..c_out_per_group {
                         let out_ch = g * c_out_per_group + c_o;
-                        for i in 0..l_in {
-                            let x_val = x_data[b * c_in * l_in + in_ch * l_in + i];
+                        for in_flat in 0..in_spatial_total {
+                            let x_val = x_data
+                                [b * c_in * in_spatial_total + in_ch * in_spatial_total + in_flat];
                             if x_val == 0.0 {
                                 continue;
                             }
-                            for k in 0..kernel {
-                                let o_pos = i as isize * stride as isize
-                                    + k as isize * dilation as isize
-                                    - pad_begin as isize;
-                                if o_pos >= 0 && (o_pos as usize) < l_out {
-                                    out_data
-                                        [b * c_out * l_out + out_ch * l_out + o_pos as usize] +=
-                                        x_val
-                                            * w_data[in_ch * c_out_per_group * kernel
-                                                + c_o * kernel
-                                                + k];
+                            // Decompose in_flat into per-axis indices
+                            let mut in_idx = vec![0usize; nd];
+                            {
+                                let mut rem = in_flat;
+                                for d in 0..nd {
+                                    in_idx[d] = rem / in_spatial_stride[d];
+                                    rem %= in_spatial_stride[d];
+                                }
+                            }
+                            for k_flat in 0..kernel_total {
+                                // Decompose k_flat into per-axis kernel indices
+                                let mut valid = true;
+                                let mut out_flat = 0usize;
+                                {
+                                    let mut rem = k_flat;
+                                    for d in 0..nd {
+                                        let kd = rem / kernel_stride[d];
+                                        rem %= kernel_stride[d];
+                                        let o = in_idx[d] as isize * stride[d] as isize
+                                            + kd as isize * dilation[d] as isize
+                                            - pad_begin[d] as isize;
+                                        if o < 0 || o as usize >= out_spatial[d] {
+                                            valid = false;
+                                            break;
+                                        }
+                                        out_flat += o as usize * out_spatial_stride[d];
+                                    }
+                                }
+                                if valid {
+                                    out_data[b * c_out * out_spatial_total
+                                        + out_ch * out_spatial_total
+                                        + out_flat] += x_val
+                                        * w_data[in_ch * c_out_per_group * kernel_total
+                                            + c_o * kernel_total
+                                            + k_flat];
                                 }
                             }
                         }
@@ -231,16 +325,20 @@ impl Operation for ConvTransposeOperation {
             for b in 0..batch {
                 for c in 0..c_out {
                     let bias_val = bias_data[c];
-                    for l in 0..l_out {
-                        out_data[b * c_out * l_out + c * l_out + l] += bias_val;
+                    for s in 0..out_spatial_total {
+                        out_data[b * c_out * out_spatial_total + c * out_spatial_total + s] +=
+                            bias_val;
                     }
                 }
             }
         }
 
+        let mut out_shape_full = vec![batch as u64, c_out as u64];
+        out_shape_full.extend(out_spatial.iter().map(|&s| s as u64));
+
         let mut out = NumericTensor::NDArray(NDArrayNumericTensor::from_vec_shape(
             out_data,
-            &vec![batch as u64, c_out as u64, l_out as u64],
+            &out_shape_full,
         )?);
 
         // Cast back to original dtype if needed

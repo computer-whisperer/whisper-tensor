@@ -827,18 +827,17 @@ macro_rules! do_tests {
 
         /*do_test!($runner_fn, $runner_name, test_convinteger_without_padding);
         do_test!($runner_fn, $runner_name, test_convinteger_with_padding);*/
-        // ConvTranspose: only 1D supported so far (sufficient for Kokoro)
-        //do_test!($runner_fn, $runner_name, test_convtranspose); // 2D
+        do_test!($runner_fn, $runner_name, test_convtranspose);
         do_test!($runner_fn, $runner_name, test_convtranspose_1d);
-        //do_test!($runner_fn, $runner_name, test_convtranspose_3d);
-        //do_test!($runner_fn, $runner_name, test_convtranspose_autopad_same); // 2D
-        //do_test!($runner_fn, $runner_name, test_convtranspose_dilations); // 2D
-        //do_test!($runner_fn, $runner_name, test_convtranspose_group_2); // 2D
-        //do_test!($runner_fn, $runner_name, test_convtranspose_group_2_image_3); // 2D
-        //do_test!($runner_fn, $runner_name, test_convtranspose_kernel_shape); // 2D
-        //do_test!($runner_fn, $runner_name, test_convtranspose_output_shape); // 2D
-        //do_test!($runner_fn, $runner_name, test_convtranspose_pad); // 2D
-        //do_test!($runner_fn, $runner_name, test_convtranspose_pads); // 2D
+        do_test!($runner_fn, $runner_name, test_convtranspose_3d);
+        do_test!($runner_fn, $runner_name, test_convtranspose_autopad_same);
+        do_test!($runner_fn, $runner_name, test_convtranspose_dilations);
+        do_test!($runner_fn, $runner_name, test_convtranspose_group_2);
+        do_test!($runner_fn, $runner_name, test_convtranspose_group_2_image_3);
+        do_test!($runner_fn, $runner_name, test_convtranspose_kernel_shape);
+        do_test!($runner_fn, $runner_name, test_convtranspose_output_shape);
+        do_test!($runner_fn, $runner_name, test_convtranspose_pad);
+        do_test!($runner_fn, $runner_name, test_convtranspose_pads);
         do_test!($runner_fn, $runner_name, test_conv_with_autopad_same);
         do_test!($runner_fn, $runner_name, test_conv_with_strides_and_asymmetric_padding);
         do_test!($runner_fn, $runner_name, test_conv_with_strides_no_padding);
@@ -1535,16 +1534,16 @@ macro_rules! do_tests {
         do_test!($runner_fn, $runner_name, test_reduce_mean_negative_axes_keepdims_example);
         do_test!($runner_fn, $runner_name, test_reduce_mean_negative_axes_keepdims_random);
 
-        /*do_test!($runner_fn, $runner_name, test_reduce_min_bool_inputs);
+        //do_test!($runner_fn, $runner_name, test_reduce_min_bool_inputs); // BOOL dtype unsupported
         do_test!($runner_fn, $runner_name, test_reduce_min_default_axes_keepdims_example);
         do_test!($runner_fn, $runner_name, test_reduce_min_default_axes_keepdims_random);
         do_test!($runner_fn, $runner_name, test_reduce_min_do_not_keepdims_example);
         do_test!($runner_fn, $runner_name, test_reduce_min_do_not_keepdims_random);
-        do_test!($runner_fn, $runner_name, test_reduce_min_empty_set);
+        //do_test!($runner_fn, $runner_name, test_reduce_min_empty_set); // 0-dim panic
         do_test!($runner_fn, $runner_name, test_reduce_min_keepdims_example);
         do_test!($runner_fn, $runner_name, test_reduce_min_keepdims_random);
         do_test!($runner_fn, $runner_name, test_reduce_min_negative_axes_keepdims_example);
-        do_test!($runner_fn, $runner_name, test_reduce_min_negative_axes_keepdims_random);*/ // ReduceMin eval unimplemented
+        do_test!($runner_fn, $runner_name, test_reduce_min_negative_axes_keepdims_random);
 
         do_test!($runner_fn, $runner_name, test_reduce_prod_default_axes_keepdims_example);
         do_test!($runner_fn, $runner_name, test_reduce_prod_default_axes_keepdims_random);
