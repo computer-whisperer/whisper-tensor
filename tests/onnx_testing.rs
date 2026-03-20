@@ -103,7 +103,7 @@ impl OnnxNodeTest {
         let model_bytes =
             fs::read(&self.model_path).map_err(|e| format!("Failed to read model file: {e}"))?;
 
-        let mut rng = wyrand::WyRand::new(0);
+        let mut rng = rand::rng();
         let model = Model::new_from_onnx(&model_bytes, &mut rng, self.model_path.parent())
             .map_err(|e| format!("Failed to load model: {e:?}"))?;
 
