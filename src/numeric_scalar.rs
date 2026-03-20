@@ -3,6 +3,18 @@ use crate::dtype::{DType, DTypeOfPrimitive};
 use arbitrary_int::{i4, u4};
 use arbitrary_int::traits::Integer;
 use float8::{F8E4M3, F8E5M2};
+
+/// Clamp and construct a u4, saturating to [0, 15].
+#[inline]
+fn u4_saturating(v: i64) -> u4 {
+    u4::new(v.clamp(0, 15) as u8)
+}
+
+/// Clamp and construct an i4, saturating to [-8, 7].
+#[inline]
+fn i4_saturating(v: i64) -> i4 {
+    i4::new(v.clamp(-8, 7) as i8)
+}
 use half::{bf16, f16};
 use num_traits::Float;
 use serde::{Deserialize, Serialize};
@@ -118,7 +130,7 @@ impl NumericScalar {
             NumericScalar::I32(x) => Self::I32(-x),
             NumericScalar::I16(x) => Self::I16(-x),
             NumericScalar::I8(x) => Self::I8(-x),
-            NumericScalar::I4(x) => Self::I4(i4::masked_new(-x.value())),
+            NumericScalar::I4(x) => Self::I4(i4_saturating(-(x.value() as i64))),
             _ => panic!("Cannot negate this type"),
         }
     }
@@ -160,7 +172,7 @@ impl NumericScalar {
             NumericScalar::U16(x) => Self::U16(*x),
             NumericScalar::I8(x) => Self::I8(-x),
             NumericScalar::U8(x) => Self::U8(*x),
-            NumericScalar::I4(x) => Self::I4(i4::masked_new(x.value().abs())),
+            NumericScalar::I4(x) => Self::I4(i4_saturating((x.value() as i64).abs())),
             NumericScalar::U4(x) => Self::U4(*x),
             _ => panic!("Cannot abs this type"),
         }
@@ -250,7 +262,7 @@ impl NumericScalar {
             NumericScalar::I4(x) => Self::I4(if x.value() == 0 {
                 i4::new(0)
             } else {
-                i4::masked_new(x.value().signum())
+                i4_saturating(x.value().signum() as i64)
             }),
             _ => panic!("Cannot sign this type"),
         }
@@ -1049,22 +1061,22 @@ impl NumericScalarType for u4 {
     }
     fn cast_from_numeric_scalar(value: &NumericScalar) -> Self {
         match value {
-            NumericScalar::F64(v) => u4::masked_new(*v as u8),
-            NumericScalar::F32(v) => u4::masked_new(*v as u8),
-            NumericScalar::BF16(v) => u4::masked_new(v.to_f32() as u8),
-            NumericScalar::F16(v) => u4::masked_new(v.to_f32() as u8),
-            NumericScalar::F8E4M3FN(v) => u4::masked_new(v.to_f32() as u8),
-            NumericScalar::F8E5M2(v) => u4::masked_new(v.to_f32() as u8),
-            NumericScalar::U64(v) => u4::masked_new(*v as u8),
-            NumericScalar::I64(v) => u4::masked_new(*v as u8),
-            NumericScalar::U32(v) => u4::masked_new(*v as u8),
-            NumericScalar::I32(v) => u4::masked_new(*v as u8),
-            NumericScalar::U16(v) => u4::masked_new(*v as u8),
-            NumericScalar::I16(v) => u4::masked_new(*v as u8),
-            NumericScalar::U8(v) => u4::masked_new(*v),
-            NumericScalar::I8(v) => u4::masked_new(*v as u8),
+            NumericScalar::F64(v) => u4_saturating(*v as i64),
+            NumericScalar::F32(v) => u4_saturating(*v as i64),
+            NumericScalar::BF16(v) => u4_saturating(v.to_f32() as i64),
+            NumericScalar::F16(v) => u4_saturating(v.to_f32() as i64),
+            NumericScalar::F8E4M3FN(v) => u4_saturating(v.to_f32() as i64),
+            NumericScalar::F8E5M2(v) => u4_saturating(v.to_f32() as i64),
+            NumericScalar::U64(v) => u4_saturating(*v as i64),
+            NumericScalar::I64(v) => u4_saturating(*v),
+            NumericScalar::U32(v) => u4_saturating(*v as i64),
+            NumericScalar::I32(v) => u4_saturating(*v as i64),
+            NumericScalar::U16(v) => u4_saturating(*v as i64),
+            NumericScalar::I16(v) => u4_saturating(*v as i64),
+            NumericScalar::U8(v) => u4_saturating(*v as i64),
+            NumericScalar::I8(v) => u4_saturating(*v as i64),
             NumericScalar::U4(v) => *v,
-            NumericScalar::I4(v) => u4::masked_new(v.value() as u8),
+            NumericScalar::I4(v) => u4_saturating(v.value() as i64),
             NumericScalar::BOOL(v) => {
                 if *v {
                     u4::new(1)
@@ -1083,21 +1095,21 @@ impl NumericScalarType for i4 {
     }
     fn cast_from_numeric_scalar(value: &NumericScalar) -> Self {
         match value {
-            NumericScalar::F64(v) => i4::masked_new(*v as i8),
-            NumericScalar::F32(v) => i4::masked_new(*v as i8),
-            NumericScalar::BF16(v) => i4::masked_new(v.to_f32() as i8),
-            NumericScalar::F16(v) => i4::masked_new(v.to_f32() as i8),
-            NumericScalar::F8E4M3FN(v) => i4::masked_new(v.to_f32() as i8),
-            NumericScalar::F8E5M2(v) => i4::masked_new(v.to_f32() as i8),
-            NumericScalar::U64(v) => i4::masked_new(*v as i8),
-            NumericScalar::I64(v) => i4::masked_new(*v as i8),
-            NumericScalar::U32(v) => i4::masked_new(*v as i8),
-            NumericScalar::I32(v) => i4::masked_new(*v as i8),
-            NumericScalar::U16(v) => i4::masked_new(*v as i8),
-            NumericScalar::I16(v) => i4::masked_new(*v as i8),
-            NumericScalar::U8(v) => i4::masked_new(*v as i8),
-            NumericScalar::I8(v) => i4::masked_new(*v),
-            NumericScalar::U4(v) => i4::masked_new(v.value() as i8),
+            NumericScalar::F64(v) => i4_saturating(*v as i64),
+            NumericScalar::F32(v) => i4_saturating(*v as i64),
+            NumericScalar::BF16(v) => i4_saturating(v.to_f32() as i64),
+            NumericScalar::F16(v) => i4_saturating(v.to_f32() as i64),
+            NumericScalar::F8E4M3FN(v) => i4_saturating(v.to_f32() as i64),
+            NumericScalar::F8E5M2(v) => i4_saturating(v.to_f32() as i64),
+            NumericScalar::U64(v) => i4_saturating(*v as i64),
+            NumericScalar::I64(v) => i4_saturating(*v),
+            NumericScalar::U32(v) => i4_saturating(*v as i64),
+            NumericScalar::I32(v) => i4_saturating(*v as i64),
+            NumericScalar::U16(v) => i4_saturating(*v as i64),
+            NumericScalar::I16(v) => i4_saturating(*v as i64),
+            NumericScalar::U8(v) => i4_saturating(*v as i64),
+            NumericScalar::I8(v) => i4_saturating(*v as i64),
+            NumericScalar::U4(v) => i4_saturating(v.value() as i64),
             NumericScalar::I4(v) => *v,
             NumericScalar::BOOL(v) => {
                 if *v {

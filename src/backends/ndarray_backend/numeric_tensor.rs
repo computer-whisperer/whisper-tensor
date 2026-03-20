@@ -11,6 +11,18 @@ use crate::tensor_rank::{DimContainer, DimProduct, DynRank, Rank, RankError};
 use arbitrary_int::{i4, u4};
 use arbitrary_int::traits::Integer;
 use float8::{F8E4M3, F8E5M2};
+
+/// Clamp and construct a u4, saturating to [0, 15].
+#[inline]
+fn u4_saturating(v: i64) -> u4 {
+    u4::new(v.clamp(0, 15) as u8)
+}
+
+/// Clamp and construct an i4, saturating to [-8, 7].
+#[inline]
+fn i4_saturating(v: i64) -> i4 {
+    i4::new(v.clamp(-8, 7) as i8)
+}
 use half::{bf16, f16};
 use ndarray::{ArcArray, IxDyn, RemoveAxis, SliceInfo, SliceInfoElem};
 use serde::{Deserialize, Serialize};
@@ -783,10 +795,10 @@ impl<R: Rank> NDArrayNumericTensor<R> {
                 DType::I8 => Ok(NDArrayNumericTensor::I8(x.map(|x| *x as i8).to_shared())),
                 DType::U8 => Ok(NDArrayNumericTensor::U8(x.map(|x| *x as u8).to_shared())),
                 DType::U4 => Ok(NDArrayNumericTensor::U4(
-                    x.map(|x| u4::masked_new(*x as u8)).to_shared(),
+                    x.map(|x| u4_saturating(*x as i64)).to_shared(),
                 )),
                 DType::I4 => Ok(NDArrayNumericTensor::I4(
-                    x.map(|x| i4::masked_new(*x as i8)).to_shared(),
+                    x.map(|x| i4_saturating(*x as i64)).to_shared(),
                 )),
                 DType::BOOL => Ok(NDArrayNumericTensor::BOOL(x.map(|x| *x != 0.0).to_shared())),
                 _ => Err(NDArrayNumericTensorError::InvalidCastOperation(
@@ -818,10 +830,10 @@ impl<R: Rank> NDArrayNumericTensor<R> {
                 DType::I8 => Ok(NDArrayNumericTensor::I8(x.map(|x| *x as i8).to_shared())),
                 DType::U8 => Ok(NDArrayNumericTensor::U8(x.map(|x| *x as u8).to_shared())),
                 DType::U4 => Ok(NDArrayNumericTensor::U4(
-                    x.map(|x| u4::masked_new(*x as u8)).to_shared(),
+                    x.map(|x| u4_saturating(*x as i64)).to_shared(),
                 )),
                 DType::I4 => Ok(NDArrayNumericTensor::I4(
-                    x.map(|x| i4::masked_new(*x as i8)).to_shared(),
+                    x.map(|x| i4_saturating(*x as i64)).to_shared(),
                 )),
                 DType::BOOL => Ok(NDArrayNumericTensor::BOOL(x.map(|x| *x != 0.0).to_shared())),
                 _ => Err(NDArrayNumericTensorError::InvalidCastOperation(
@@ -867,10 +879,10 @@ impl<R: Rank> NDArrayNumericTensor<R> {
                     x.map(|x| x.to_f32() as u8).to_shared(),
                 )),
                 DType::U4 => Ok(NDArrayNumericTensor::U4(
-                    x.map(|x| u4::masked_new(x.to_f32() as u8)).to_shared(),
+                    x.map(|x| u4_saturating(x.to_f32() as i64)).to_shared(),
                 )),
                 DType::I4 => Ok(NDArrayNumericTensor::I4(
-                    x.map(|x| i4::masked_new(x.to_f32() as i8)).to_shared(),
+                    x.map(|x| i4_saturating(x.to_f32() as i64)).to_shared(),
                 )),
                 DType::BOOL => Ok(NDArrayNumericTensor::BOOL(
                     x.map(|x| x.to_f32() != 0.0).to_shared(),
@@ -918,10 +930,10 @@ impl<R: Rank> NDArrayNumericTensor<R> {
                     x.map(|x| x.to_f32() as u8).to_shared(),
                 )),
                 DType::U4 => Ok(NDArrayNumericTensor::U4(
-                    x.map(|x| u4::masked_new(x.to_f32() as u8)).to_shared(),
+                    x.map(|x| u4_saturating(x.to_f32() as i64)).to_shared(),
                 )),
                 DType::I4 => Ok(NDArrayNumericTensor::I4(
-                    x.map(|x| i4::masked_new(x.to_f32() as i8)).to_shared(),
+                    x.map(|x| i4_saturating(x.to_f32() as i64)).to_shared(),
                 )),
                 DType::BOOL => Ok(NDArrayNumericTensor::BOOL(
                     x.map(|x| x.to_f32() != 0.0).to_shared(),
@@ -955,10 +967,10 @@ impl<R: Rank> NDArrayNumericTensor<R> {
                 DType::I8 => Ok(NDArrayNumericTensor::I8(x.map(|x| *x as i8).to_shared())),
                 DType::U8 => Ok(NDArrayNumericTensor::U8(x.map(|x| *x as u8).to_shared())),
                 DType::U4 => Ok(NDArrayNumericTensor::U4(
-                    x.map(|x| u4::masked_new(*x as u8)).to_shared(),
+                    x.map(|x| u4_saturating(*x as i64)).to_shared(),
                 )),
                 DType::I4 => Ok(NDArrayNumericTensor::I4(
-                    x.map(|x| i4::masked_new(*x as i8)).to_shared(),
+                    x.map(|x| i4_saturating(*x as i64)).to_shared(),
                 )),
                 DType::BOOL => Ok(NDArrayNumericTensor::BOOL(x.map(|x| *x != 0).to_shared())),
                 _ => Err(NDArrayNumericTensorError::UnsupportedOperationForDTypes(
@@ -990,10 +1002,10 @@ impl<R: Rank> NDArrayNumericTensor<R> {
                 DType::I8 => Ok(NDArrayNumericTensor::I8(x.map(|x| *x as i8).to_shared())),
                 DType::U8 => Ok(NDArrayNumericTensor::U8(x.map(|x| *x as u8).to_shared())),
                 DType::U4 => Ok(NDArrayNumericTensor::U4(
-                    x.map(|x| u4::masked_new(*x as u8)).to_shared(),
+                    x.map(|x| u4_saturating(*x as i64)).to_shared(),
                 )),
                 DType::I4 => Ok(NDArrayNumericTensor::I4(
-                    x.map(|x| i4::masked_new(*x as i8)).to_shared(),
+                    x.map(|x| i4_saturating(*x as i64)).to_shared(),
                 )),
                 DType::BOOL => Ok(NDArrayNumericTensor::BOOL(x.map(|x| *x != 0).to_shared())),
                 _ => Err(NDArrayNumericTensorError::UnsupportedOperationForDTypes(
@@ -1025,10 +1037,10 @@ impl<R: Rank> NDArrayNumericTensor<R> {
                 DType::I8 => Ok(NDArrayNumericTensor::I8(x.map(|x| *x as i8).to_shared())),
                 DType::U8 => Ok(NDArrayNumericTensor::U8(x.map(|x| *x as u8).to_shared())),
                 DType::U4 => Ok(NDArrayNumericTensor::U4(
-                    x.map(|x| u4::masked_new(*x as u8)).to_shared(),
+                    x.map(|x| u4_saturating(*x as i64)).to_shared(),
                 )),
                 DType::I4 => Ok(NDArrayNumericTensor::I4(
-                    x.map(|x| i4::masked_new(*x as i8)).to_shared(),
+                    x.map(|x| i4_saturating(*x as i64)).to_shared(),
                 )),
                 DType::BOOL => Ok(NDArrayNumericTensor::BOOL(x.map(|x| *x != 0).to_shared())),
                 _ => Err(NDArrayNumericTensorError::UnsupportedOperationForDTypes(
@@ -1060,10 +1072,10 @@ impl<R: Rank> NDArrayNumericTensor<R> {
                 DType::I8 => Ok(NDArrayNumericTensor::I8(x.map(|x| *x as i8).to_shared())),
                 DType::U8 => Ok(NDArrayNumericTensor::U8(x.map(|x| *x as u8).to_shared())),
                 DType::U4 => Ok(NDArrayNumericTensor::U4(
-                    x.map(|x| u4::masked_new(*x as u8)).to_shared(),
+                    x.map(|x| u4_saturating(*x as i64)).to_shared(),
                 )),
                 DType::I4 => Ok(NDArrayNumericTensor::I4(
-                    x.map(|x| i4::masked_new(*x as i8)).to_shared(),
+                    x.map(|x| i4_saturating(*x as i64)).to_shared(),
                 )),
                 DType::BOOL => Ok(NDArrayNumericTensor::BOOL(x.map(|x| *x != 0).to_shared())),
                 _ => Err(NDArrayNumericTensorError::UnsupportedOperationForDTypes(
@@ -1095,10 +1107,10 @@ impl<R: Rank> NDArrayNumericTensor<R> {
                 DType::I16 => Ok(NDArrayNumericTensor::I16(x.map(|x| *x as i16).to_shared())),
                 DType::U8 => Ok(NDArrayNumericTensor::U8(x.map(|x| *x as u8).to_shared())),
                 DType::U4 => Ok(NDArrayNumericTensor::U4(
-                    x.map(|x| u4::masked_new(*x as u8)).to_shared(),
+                    x.map(|x| u4_saturating(*x as i64)).to_shared(),
                 )),
                 DType::I4 => Ok(NDArrayNumericTensor::I4(
-                    x.map(|x| i4::masked_new(*x as i8)).to_shared(),
+                    x.map(|x| i4_saturating(*x as i64)).to_shared(),
                 )),
                 DType::BOOL => Ok(NDArrayNumericTensor::BOOL(x.map(|x| *x != 0).to_shared())),
                 _ => Err(NDArrayNumericTensorError::UnsupportedOperationForDTypes(
@@ -1130,10 +1142,10 @@ impl<R: Rank> NDArrayNumericTensor<R> {
                 DType::I16 => Ok(NDArrayNumericTensor::I16(x.clone())),
                 DType::U8 => Ok(NDArrayNumericTensor::U8(x.map(|x| *x as u8).to_shared())),
                 DType::U4 => Ok(NDArrayNumericTensor::U4(
-                    x.map(|x| u4::masked_new(*x as u8)).to_shared(),
+                    x.map(|x| u4_saturating(*x as i64)).to_shared(),
                 )),
                 DType::I4 => Ok(NDArrayNumericTensor::I4(
-                    x.map(|x| i4::masked_new(*x as i8)).to_shared(),
+                    x.map(|x| i4_saturating(*x as i64)).to_shared(),
                 )),
                 DType::BOOL => Ok(NDArrayNumericTensor::BOOL(x.map(|x| *x != 0).to_shared())),
                 _ => Err(NDArrayNumericTensorError::UnsupportedOperationForDTypes(
@@ -1165,10 +1177,10 @@ impl<R: Rank> NDArrayNumericTensor<R> {
                 DType::U8 => Ok(NDArrayNumericTensor::I8(x.clone())),
                 DType::I8 => Ok(NDArrayNumericTensor::U8(x.map(|x| *x as u8).to_shared())),
                 DType::U4 => Ok(NDArrayNumericTensor::U4(
-                    x.map(|x| u4::masked_new(*x as u8)).to_shared(),
+                    x.map(|x| u4_saturating(*x as i64)).to_shared(),
                 )),
                 DType::I4 => Ok(NDArrayNumericTensor::I4(
-                    x.map(|x| i4::masked_new(*x)).to_shared(),
+                    x.map(|x| i4_saturating(*x as i64)).to_shared(),
                 )),
                 DType::BOOL => Ok(NDArrayNumericTensor::BOOL(x.map(|x| *x != 0).to_shared())),
                 _ => Err(NDArrayNumericTensorError::UnsupportedOperationForDTypes(
@@ -1200,10 +1212,10 @@ impl<R: Rank> NDArrayNumericTensor<R> {
                 DType::I8 => Ok(NDArrayNumericTensor::I8(x.map(|x| *x as i8).to_shared())),
                 DType::U8 => Ok(NDArrayNumericTensor::U8(x.clone())),
                 DType::U4 => Ok(NDArrayNumericTensor::U4(
-                    x.map(|x| u4::masked_new(*x)).to_shared(),
+                    x.map(|x| u4_saturating(*x as i64)).to_shared(),
                 )),
                 DType::I4 => Ok(NDArrayNumericTensor::I4(
-                    x.map(|x| i4::masked_new(*x as i8)).to_shared(),
+                    x.map(|x| i4_saturating(*x as i64)).to_shared(),
                 )),
                 DType::BOOL => Ok(NDArrayNumericTensor::BOOL(x.map(|x| *x != 0).to_shared())),
                 _ => Err(NDArrayNumericTensorError::UnsupportedOperationForDTypes(
@@ -1249,10 +1261,10 @@ impl<R: Rank> NDArrayNumericTensor<R> {
                     x.map(|x| x.to_f32() as i8).to_shared(),
                 )),
                 DType::U4 => Ok(NDArrayNumericTensor::U4(
-                    x.map(|x| u4::masked_new(x.to_f32() as u8)).to_shared(),
+                    x.map(|x| u4_saturating(x.to_f32() as i64)).to_shared(),
                 )),
                 DType::I4 => Ok(NDArrayNumericTensor::I4(
-                    x.map(|x| i4::masked_new(x.to_f32() as i8)).to_shared(),
+                    x.map(|x| i4_saturating(x.to_f32() as i64)).to_shared(),
                 )),
                 _ => Err(NDArrayNumericTensorError::InvalidCastOperation(
                     self.dtype(),
@@ -1297,10 +1309,10 @@ impl<R: Rank> NDArrayNumericTensor<R> {
                     x.map(|x| x.to_f32() as i8).to_shared(),
                 )),
                 DType::U4 => Ok(NDArrayNumericTensor::U4(
-                    x.map(|x| u4::masked_new(x.to_f32() as u8)).to_shared(),
+                    x.map(|x| u4_saturating(x.to_f32() as i64)).to_shared(),
                 )),
                 DType::I4 => Ok(NDArrayNumericTensor::I4(
-                    x.map(|x| i4::masked_new(x.to_f32() as i8)).to_shared(),
+                    x.map(|x| i4_saturating(x.to_f32() as i64)).to_shared(),
                 )),
                 _ => Err(NDArrayNumericTensorError::InvalidCastOperation(
                     self.dtype(),
@@ -1395,7 +1407,7 @@ impl<R: Rank> NDArrayNumericTensor<R> {
                     x.map(|x| x.value() as i8).to_shared(),
                 )),
                 DType::I4 => Ok(NDArrayNumericTensor::I4(
-                    x.map(|x| i4::masked_new(x.value() as i8)).to_shared(),
+                    x.map(|x| i4_saturating(x.value() as i64)).to_shared(),
                 )),
                 DType::BOOL => Ok(NDArrayNumericTensor::BOOL(
                     x.map(|x| x.value() != 0).to_shared(),
@@ -1450,7 +1462,7 @@ impl<R: Rank> NDArrayNumericTensor<R> {
                     x.map(|x| x.value()).to_shared(),
                 )),
                 DType::U4 => Ok(NDArrayNumericTensor::U4(
-                    x.map(|x| u4::masked_new(x.value() as u8)).to_shared(),
+                    x.map(|x| u4_saturating(x.value() as i64)).to_shared(),
                 )),
                 DType::BOOL => Ok(NDArrayNumericTensor::BOOL(
                     x.map(|x| x.value() != 0).to_shared(),

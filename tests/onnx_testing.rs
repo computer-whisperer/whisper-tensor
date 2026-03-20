@@ -368,6 +368,10 @@ fn onnx_dtype_code(dtype: DType) -> i32 {
         DType::U32 => DataType::Uint32 as i32,
         DType::U64 => DataType::Uint64 as i32,
         DType::BOOL => DataType::Bool as i32,
+        DType::U4 => DataType::Uint4 as i32,
+        DType::I4 => DataType::Int4 as i32,
+        DType::F8E4M3FN => DataType::Float8e4m3fn as i32,
+        DType::F8E5M2 => DataType::Float8e5m2 as i32,
         _ => DataType::Undefined as i32,
     }
 }
@@ -790,8 +794,8 @@ macro_rules! do_tests {
         //do_test!($runner_fn, $runner_name, test_cast_FLOAT16_to_FLOAT8E4M3FNUZ);
         do_test!($runner_fn, $runner_name, test_cast_FLOAT16_to_FLOAT8E5M2);
         //do_test!($runner_fn, $runner_name, test_cast_FLOAT16_to_FLOAT8E5M2FNUZ);
-        //do_test!($runner_fn, $runner_name, test_cast_FLOAT16_to_INT4);
-        //do_test!($runner_fn, $runner_name, test_cast_FLOAT16_to_UINT4);
+        do_test!($runner_fn, $runner_name, test_cast_FLOAT16_to_INT4);
+        do_test!($runner_fn, $runner_name, test_cast_FLOAT16_to_UINT4);
         //do_test!($runner_fn, $runner_name, test_cast_FLOAT4E2M1_to_FLOAT);
         //do_test!($runner_fn, $runner_name, test_cast_FLOAT4E2M1_to_FLOAT16);
         do_test!($runner_fn, $runner_name, test_cast_FLOAT8E4M3FN_to_FLOAT);
@@ -810,12 +814,12 @@ macro_rules! do_tests {
         //do_test!($runner_fn, $runner_name, test_cast_FLOAT_to_FLOAT8E4M3FNUZ);
         do_test!($runner_fn, $runner_name, test_cast_FLOAT_to_FLOAT8E5M2);
         //do_test!($runner_fn, $runner_name, test_cast_FLOAT_to_FLOAT8E5M2FNUZ);
-        //do_test!($runner_fn, $runner_name, test_cast_FLOAT_to_INT4);
+        do_test!($runner_fn, $runner_name, test_cast_FLOAT_to_INT4);
         //do_test!($runner_fn, $runner_name, test_cast_FLOAT_to_STRING);
-        //do_test!($runner_fn, $runner_name, test_cast_FLOAT_to_UINT4);
-        //do_test!($runner_fn, $runner_name, test_cast_INT4_to_FLOAT);
-        //do_test!($runner_fn, $runner_name, test_cast_INT4_to_FLOAT16);
-        //do_test!($runner_fn, $runner_name, test_cast_INT4_to_INT8);
+        do_test!($runner_fn, $runner_name, test_cast_FLOAT_to_UINT4);
+        do_test!($runner_fn, $runner_name, test_cast_INT4_to_FLOAT);
+        do_test!($runner_fn, $runner_name, test_cast_INT4_to_FLOAT16);
+        do_test!($runner_fn, $runner_name, test_cast_INT4_to_INT8);
         do_test!($runner_fn, $runner_name, test_castlike_BFLOAT16_to_FLOAT);
         do_test!(
             $runner_fn,
@@ -921,9 +925,9 @@ macro_rules! do_tests {
         );
         //do_test!($runner_fn, $runner_name, test_cast_no_saturate_FLOAT_to_FLOAT8E5M2FNUZ);
         //do_test!($runner_fn, $runner_name, test_cast_STRING_to_FLOAT);
-        //do_test!($runner_fn, $runner_name, test_cast_UINT4_to_FLOAT);
-        //do_test!($runner_fn, $runner_name, test_cast_UINT4_to_FLOAT16);
-        //do_test!($runner_fn, $runner_name, test_cast_UINT4_to_UINT8);
+        do_test!($runner_fn, $runner_name, test_cast_UINT4_to_FLOAT);
+        do_test!($runner_fn, $runner_name, test_cast_UINT4_to_FLOAT16);
+        do_test!($runner_fn, $runner_name, test_cast_UINT4_to_UINT8);
 
         do_test!($runner_fn, $runner_name, test_ceil);
         do_test!($runner_fn, $runner_name, test_ceil_example);
