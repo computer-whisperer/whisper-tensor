@@ -936,10 +936,10 @@ macro_rules! do_tests {
         do_test!($runner_fn, $runner_name, test_gelu_default_1_expanded);
         do_test!($runner_fn, $runner_name, test_gelu_default_2);
         do_test!($runner_fn, $runner_name, test_gelu_default_2_expanded);
-        //do_test!($runner_fn, $runner_name, test_gelu_tanh_1); // needs approximate="tanh"
-        //do_test!($runner_fn, $runner_name, test_gelu_tanh_1_expanded);
-        //do_test!($runner_fn, $runner_name, test_gelu_tanh_2);
-        //do_test!($runner_fn, $runner_name, test_gelu_tanh_2_expanded);
+        do_test!($runner_fn, $runner_name, test_gelu_tanh_1);
+        do_test!($runner_fn, $runner_name, test_gelu_tanh_1_expanded);
+        do_test!($runner_fn, $runner_name, test_gelu_tanh_2);
+        do_test!($runner_fn, $runner_name, test_gelu_tanh_2_expanded);
 
         do_test!($runner_fn, $runner_name, test_gemm_all_attributes);
         do_test!($runner_fn, $runner_name, test_gemm_alpha);

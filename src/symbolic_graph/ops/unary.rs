@@ -569,6 +569,7 @@ pub struct GeluOperation {
     global_id: GlobalId,
     input: GlobalId,
     output: GlobalId,
+    approximate: String,
 }
 
 impl GeluOperation {
@@ -577,13 +578,14 @@ impl GeluOperation {
             global_id: GlobalId::new(rng),
             input,
             output,
+            approximate: "none".to_string(),
         }
     }
 
     pub(crate) fn from_onnx(
         inputs: &[Option<GlobalId>],
         outputs: &[Option<GlobalId>],
-        _attributes: &[onnx::AttributeProto],
+        attributes: &[onnx::AttributeProto],
         rng: &mut impl Rng,
     ) -> Result<Self, ONNXDecodingError> {
         if inputs.len() != 1 {
@@ -592,10 +594,13 @@ impl GeluOperation {
         if outputs.len() != 1 {
             return Err(ONNXDecodingError::InvalidOperatorOutputs("Gelu"));
         }
+        let approximate = crate::symbolic_graph::query_attribute_string(attributes, "approximate")
+            .unwrap_or_else(|| "none".to_string());
         Ok(Self {
             global_id: GlobalId::new(rng),
             input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("Gelu"))?,
             output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("Gelu"))?,
+            approximate,
         })
     }
 }
@@ -620,7 +625,11 @@ impl Operation for GeluOperation {
     fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let x = input_map[&self.input];
-        let out_tid = push_gelu(&mut graph, x, rng);
+        let out_tid = if self.approximate == "tanh" {
+            push_gelu_tanh(&mut graph, x, rng)
+        } else {
+            push_gelu(&mut graph, x, rng)
+        };
         let mut output_map = HashMap::new();
         output_map.insert(out_tid, self.output);
         graph.set_output_map(output_map);
@@ -642,6 +651,32 @@ fn push_gelu(graph: &mut MilliOpGraph, x: GlobalId, rng: &mut impl Rng) -> Globa
     let one_plus_erf = milli_graph::ops::SimpleBinary::add(graph, one, erf_val, rng);
     let half_x = milli_graph::ops::SimpleBinary::mul(graph, x, half, rng);
     milli_graph::ops::SimpleBinary::mul(graph, half_x, one_plus_erf, rng)
+}
+
+/// Build GELU_tanh(x) = 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
+fn push_gelu_tanh(graph: &mut MilliOpGraph, x: GlobalId, rng: &mut impl Rng) -> GlobalId {
+    let half = milli_graph::ops::Constant::new_scalar(graph, 0.5f32, rng);
+    let half = milli_graph::ops::CastLike::push_new(graph, half, x, rng);
+    let one = milli_graph::ops::Constant::new_scalar(graph, 1.0f32, rng);
+    let one = milli_graph::ops::CastLike::push_new(graph, one, x, rng);
+    let c = milli_graph::ops::Constant::new_scalar(graph, 0.044715f32, rng);
+    let c = milli_graph::ops::CastLike::push_new(graph, c, x, rng);
+    // sqrt(2/pi)
+    let sqrt_2_pi =
+        milli_graph::ops::Constant::new_scalar(graph, (2.0f32 / std::f32::consts::PI).sqrt(), rng);
+    let sqrt_2_pi = milli_graph::ops::CastLike::push_new(graph, sqrt_2_pi, x, rng);
+
+    let x_cubed = {
+        let x2 = milli_graph::ops::SimpleBinary::mul(graph, x, x, rng);
+        milli_graph::ops::SimpleBinary::mul(graph, x2, x, rng)
+    };
+    let inner = milli_graph::ops::SimpleBinary::mul(graph, c, x_cubed, rng);
+    let inner = milli_graph::ops::SimpleBinary::add(graph, x, inner, rng);
+    let inner = milli_graph::ops::SimpleBinary::mul(graph, sqrt_2_pi, inner, rng);
+    let tanh_val = milli_graph::ops::SimpleUnaryOp::trig(graph, inner, TrigOp::Tanh, rng);
+    let one_plus_tanh = milli_graph::ops::SimpleBinary::add(graph, one, tanh_val, rng);
+    let half_x = milli_graph::ops::SimpleBinary::mul(graph, half, x, rng);
+    milli_graph::ops::SimpleBinary::mul(graph, half_x, one_plus_tanh, rng)
 }
 
 /// ONNX Elu: max(0,x) + min(0, alpha*(exp(x)-1))
