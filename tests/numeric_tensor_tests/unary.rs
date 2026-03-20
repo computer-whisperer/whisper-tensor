@@ -252,6 +252,31 @@ pub fn test_mish_via_model_eval_fp32(backend: &mut EvalBackend) {
 
     let result_y = &result["Y"];
     let reference_y = &reference["Y"];
+
+    // Print element [1] (x=-9.998) to see exact values on CI
+    let result_f64: Vec<f64> = result_y
+        .cast(whisper_tensor::dtype::DType::F64, &mut EvalBackend::NDArray)
+        .unwrap()
+        .to_ndarray()
+        .unwrap()
+        .flatten()
+        .try_to_vec()
+        .unwrap();
+    let ref_f64: Vec<f64> = reference_y
+        .cast(whisper_tensor::dtype::DType::F64, &mut EvalBackend::NDArray)
+        .unwrap()
+        .to_ndarray()
+        .unwrap()
+        .flatten()
+        .try_to_vec()
+        .unwrap();
+    eprintln!(
+        "Mish model eval element[1]: backend={:.20e} ndarray={:.20e} match={}",
+        result_f64[1],
+        ref_f64[1],
+        result_f64[1] == ref_f64[1]
+    );
+
     test_eq_f32(result_y.clone(), reference_y.clone());
 }
 
