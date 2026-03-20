@@ -912,6 +912,34 @@ impl NativeNumericTensorBitwiseBinaryOperation {
     }
 }
 
+pub fn bitshift_left<T>(
+    a: ArcArray<T, IxDyn>,
+    b: ArcArray<T, IxDyn>,
+) -> Result<ArcArray<T, IxDyn>, NDArrayOperationError>
+where
+    T: Clone + Copy + std::ops::Shl<Output = T>,
+{
+    let out_shape = broadcast_shape(a.shape(), b.shape());
+    let a = a.broadcast(IxDyn(&out_shape)).unwrap();
+    let b = b.broadcast(IxDyn(&out_shape)).unwrap();
+    let o: Array<T, IxDyn> = ndarray::Zip::from(a).and(b).map_collect(|a, b| *a << *b);
+    Ok(o.to_shared())
+}
+
+pub fn bitshift_right<T>(
+    a: ArcArray<T, IxDyn>,
+    b: ArcArray<T, IxDyn>,
+) -> Result<ArcArray<T, IxDyn>, NDArrayOperationError>
+where
+    T: Clone + Copy + std::ops::Shr<Output = T>,
+{
+    let out_shape = broadcast_shape(a.shape(), b.shape());
+    let a = a.broadcast(IxDyn(&out_shape)).unwrap();
+    let b = b.broadcast(IxDyn(&out_shape)).unwrap();
+    let o: Array<T, IxDyn> = ndarray::Zip::from(a).and(b).map_collect(|a, b| *a >> *b);
+    Ok(o.to_shared())
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum NativeNumericTensorUnaryOperation {
     Sigmoid,

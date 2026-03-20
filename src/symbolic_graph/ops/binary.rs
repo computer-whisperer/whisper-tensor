@@ -4,6 +4,7 @@ use crate::milli_graph::{MilliLoweringContext, MilliOpGraph};
 use crate::symbolic_graph::ops::Operation;
 use crate::symbolic_graph::{
     ONNXDecodingError, query_attribute_bool, query_attribute_float, query_attribute_int,
+    query_attribute_string,
 };
 use crate::{milli_graph, onnx};
 use rand::Rng;
@@ -761,6 +762,88 @@ impl Operation for ModuloOperation {
         let b = input_map[&self.b];
 
         let output = milli_graph::ops::SimpleBinary::modulo(&mut graph, a, b, self.fmod, rng);
+        let mut output_map = HashMap::new();
+        output_map.insert(output, self.output);
+        graph.set_output_map(output_map);
+        graph
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct BitShiftOperation {
+    global_id: GlobalId,
+    a: GlobalId,
+    b: GlobalId,
+    output: GlobalId,
+    direction: String,
+}
+
+impl BitShiftOperation {
+    pub(crate) fn from_onnx(
+        inputs: &[Option<GlobalId>],
+        outputs: &[Option<GlobalId>],
+        attributes: &[onnx::AttributeProto],
+        rng: &mut impl Rng,
+    ) -> Result<Self, ONNXDecodingError> {
+        if inputs.len() != 2 {
+            return Err(ONNXDecodingError::InvalidOperatorInputs("BitShift"));
+        }
+        if outputs.len() != 1 {
+            return Err(ONNXDecodingError::InvalidOperatorOutputs("BitShift"));
+        }
+        let direction = query_attribute_string(attributes, "direction")
+            .ok_or(ONNXDecodingError::InvalidOperatorInputs("BitShift"))?;
+        if direction != "LEFT" && direction != "RIGHT" {
+            return Err(ONNXDecodingError::InvalidOperatorInputs("BitShift"));
+        }
+        Ok(Self {
+            global_id: GlobalId::new(rng),
+            a: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("BitShift"))?,
+            b: inputs[1].ok_or(ONNXDecodingError::InvalidOperatorInputs("BitShift"))?,
+            output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("BitShift"))?,
+            direction,
+        })
+    }
+}
+
+impl Node for BitShiftOperation {
+    type OpKind = String;
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
+    fn op_kind(&self) -> Self::OpKind {
+        "BitShift".to_string()
+    }
+    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
+        Box::new([self.a, self.b].into_iter())
+    }
+    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
+        Box::new([self.output].into_iter())
+    }
+}
+
+impl Operation for BitShiftOperation {
+    fn parameters(&self) -> Vec<Property> {
+        vec![Property::new(
+            "direction",
+            PropertyValue::String(self.direction.clone()),
+        )]
+    }
+
+    fn is_differentiable(&self) -> bool {
+        false
+    }
+
+    fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, rng: &mut impl Rng) -> MilliOpGraph {
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
+        let a = input_map[&self.a];
+        let b = input_map[&self.b];
+
+        let output = if self.direction == "LEFT" {
+            milli_graph::ops::SimpleBinary::bitshift_left(&mut graph, a, b, rng)
+        } else {
+            milli_graph::ops::SimpleBinary::bitshift_right(&mut graph, a, b, rng)
+        };
         let mut output_map = HashMap::new();
         output_map.insert(output, self.output);
         graph.set_output_map(output_map);

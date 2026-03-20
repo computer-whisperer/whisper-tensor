@@ -1020,6 +1020,29 @@ impl NumericTensor<DynRank> {
         )?))
     }
 
+    /// Element-wise bitwise left shift on unsigned integer tensors with broadcasting.
+    pub fn bitshift_left(
+        a: &Self,
+        b: &Self,
+        _backend: &mut EvalBackend,
+    ) -> Result<Self, NumericTensorError> {
+        Ok(NumericTensor::NDArray(NDArrayNumericTensor::bitshift_left(
+            &a.try_into()?,
+            &b.try_into()?,
+        )?))
+    }
+
+    /// Element-wise bitwise right shift on unsigned integer tensors with broadcasting.
+    pub fn bitshift_right(
+        a: &Self,
+        b: &Self,
+        _backend: &mut EvalBackend,
+    ) -> Result<Self, NumericTensorError> {
+        Ok(NumericTensor::NDArray(
+            NDArrayNumericTensor::bitshift_right(&a.try_into()?, &b.try_into()?)?,
+        ))
+    }
+
     /// Element-wise maximum with broadcasting.
     ///
     /// ONNX semantics:

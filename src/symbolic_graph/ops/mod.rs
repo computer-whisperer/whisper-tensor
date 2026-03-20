@@ -16,6 +16,7 @@ mod reshape;
 mod resize;
 mod rotary_embedding;
 mod scan;
+mod scatter_elements;
 mod scatter_nd;
 mod shape;
 mod slice;
@@ -26,8 +27,8 @@ mod transpose;
 mod unary;
 
 pub use binary::{
-    ArgMaxOperation, ArgMinOperation, BinaryOperation, GemmOperation, MaxOperation, MinOperation,
-    ModuloOperation, PowOperation, WhichBinaryOperation,
+    ArgMaxOperation, ArgMinOperation, BinaryOperation, BitShiftOperation, GemmOperation,
+    MaxOperation, MinOperation, ModuloOperation, PowOperation, WhichBinaryOperation,
 };
 pub use cast::{CastLikeOperation, CastOperation};
 pub use concat::ConcatOperation;
@@ -38,12 +39,13 @@ pub use gather::GatherOperation;
 pub use gather_elements::{GatherElementsOperation, GatherNDOperation};
 pub use lstm::LstmOperation;
 pub use misc::{
-    ClipOperation, DepthToSpaceOperation, DropoutOperation, ExpandOperation,
-    GlobalAveragePoolOperation, GlobalMaxPoolOperation, IfOperation, MeanOperation,
-    PadOperation, RandomNormalLikeOperation, RangeOperation, SpaceToDepthOperation,
+    ClipOperation, CompressOperation, DepthToSpaceOperation, DropoutOperation, ExpandOperation,
+    EyeLikeOperation, GlobalAveragePoolOperation, GlobalMaxPoolOperation, HardmaxOperation,
+    IfOperation, MeanOperation, MeanVarianceNormalizationOperation, PadOperation,
+    RandomNormalLikeOperation, RangeOperation, ShrinkOperation, SpaceToDepthOperation,
     SumOperation, TileOperation, TriluOperation, WhereOperation,
 };
-pub use pool::AveragePoolOperation;
+pub use pool::{AveragePoolOperation, MaxPoolOperation};
 pub use normalization::{
     BatchNormalizationOperation, GroupNormalizationOperation, InstanceNormalizationOperation,
     LayerNormalizationOperation, LpNormalizationOperation, RMSNormalizationOperation,
@@ -58,6 +60,7 @@ pub use reshape::{FlattenOperation, ReshapeOperation, SqueezeOperation, Unsqueez
 pub use resize::ResizeOperation;
 pub use rotary_embedding::RotaryEmbeddingOperation;
 pub use scan::ScanOperation;
+pub use scatter_elements::ScatterElementsOperation;
 pub use scatter_nd::ScatterNDOperation;
 pub use shape::{ShapeOperation, SizeOperation};
 pub use slice::SliceOperation;
@@ -268,6 +271,7 @@ pub enum AnyOperation {
     Expand(ExpandOperation),
     Conv(ConvOperation),
     AveragePool(AveragePoolOperation),
+    MaxPool(MaxPoolOperation),
     InstanceNormalization(InstanceNormalizationOperation),
     Resize(ResizeOperation),
     Pad(PadOperation),
@@ -314,6 +318,13 @@ pub enum AnyOperation {
     SpaceToDepth(SpaceToDepthOperation),
     DepthToSpace(DepthToSpaceOperation),
     Trilu(TriluOperation),
+    BitShift(BitShiftOperation),
+    EyeLike(EyeLikeOperation),
+    Shrink(ShrinkOperation),
+    Hardmax(HardmaxOperation),
+    Compress(CompressOperation),
+    ScatterElements(ScatterElementsOperation),
+    MeanVarianceNormalization(MeanVarianceNormalizationOperation),
 }
 
 macro_rules! delegate {
@@ -360,6 +371,7 @@ macro_rules! delegate {
             AnyOperation::Expand(x) => x.$name($($arg),*),
             AnyOperation::Conv(x) => x.$name($($arg),*),
             AnyOperation::AveragePool(x) => x.$name($($arg),*),
+            AnyOperation::MaxPool(x) => x.$name($($arg),*),
             AnyOperation::InstanceNormalization(x) => x.$name($($arg),*),
             AnyOperation::Resize(x) => x.$name($($arg),*),
             AnyOperation::Pad(x) => x.$name($($arg),*),
@@ -405,7 +417,14 @@ macro_rules! delegate {
             AnyOperation::SumOp(x) => x.$name($($arg),*),
             AnyOperation::SpaceToDepth(x) => x.$name($($arg),*),
             AnyOperation::DepthToSpace(x) => x.$name($($arg),*),
-            AnyOperation::Trilu(x) => x.$name($($arg),*)
+            AnyOperation::Trilu(x) => x.$name($($arg),*),
+            AnyOperation::BitShift(x) => x.$name($($arg),*),
+            AnyOperation::EyeLike(x) => x.$name($($arg),*),
+            AnyOperation::Shrink(x) => x.$name($($arg),*),
+            AnyOperation::Hardmax(x) => x.$name($($arg),*),
+            AnyOperation::Compress(x) => x.$name($($arg),*),
+            AnyOperation::ScatterElements(x) => x.$name($($arg),*),
+            AnyOperation::MeanVarianceNormalization(x) => x.$name($($arg),*)
                     }
         }
     }

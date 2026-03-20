@@ -81,7 +81,7 @@ fn query_attribute_int(attributes: &[onnx::AttributeProto], name: &str) -> Optio
     None
 }
 
-fn query_attribute_ints(attributes: &[onnx::AttributeProto], name: &str) -> Option<Vec<i64>> {
+pub(crate) fn query_attribute_ints(attributes: &[onnx::AttributeProto], name: &str) -> Option<Vec<i64>> {
     for attr in attributes {
         if attr.name == name && attr.r#type == onnx::attribute_proto::AttributeType::Ints as i32 {
             return Some(attr.ints.clone());
@@ -2432,6 +2432,14 @@ impl SymbolicGraphMutator {
                     rng,
                 )?,
             )),
+            "MaxPool" => Some(AnyOperation::MaxPool(
+                ops::MaxPoolOperation::from_onnx(
+                    &input_tensors,
+                    &output_tensors,
+                    &onnx_node.attribute,
+                    rng,
+                )?,
+            )),
             "InstanceNormalization" => Some(AnyOperation::InstanceNormalization(
                 ops::InstanceNormalizationOperation::from_onnx(
                     &input_tensors,
@@ -2718,6 +2726,52 @@ impl SymbolicGraphMutator {
                 &onnx_node.attribute,
                 rng,
             )?)),
+            "BitShift" => Some(AnyOperation::BitShift(ops::BitShiftOperation::from_onnx(
+                &input_tensors,
+                &output_tensors,
+                &onnx_node.attribute,
+                rng,
+            )?)),
+            "EyeLike" => Some(AnyOperation::EyeLike(ops::EyeLikeOperation::from_onnx(
+                &input_tensors,
+                &output_tensors,
+                &onnx_node.attribute,
+                rng,
+            )?)),
+            "Shrink" => Some(AnyOperation::Shrink(ops::ShrinkOperation::from_onnx(
+                &input_tensors,
+                &output_tensors,
+                &onnx_node.attribute,
+                rng,
+            )?)),
+            "Hardmax" => Some(AnyOperation::Hardmax(ops::HardmaxOperation::from_onnx(
+                &input_tensors,
+                &output_tensors,
+                &onnx_node.attribute,
+                rng,
+            )?)),
+            "Compress" => Some(AnyOperation::Compress(ops::CompressOperation::from_onnx(
+                &input_tensors,
+                &output_tensors,
+                &onnx_node.attribute,
+                rng,
+            )?)),
+            "ScatterElements" => Some(AnyOperation::ScatterElements(
+                ops::ScatterElementsOperation::from_onnx(
+                    &input_tensors,
+                    &output_tensors,
+                    &onnx_node.attribute,
+                    rng,
+                )?,
+            )),
+            "MeanVarianceNormalization" => Some(AnyOperation::MeanVarianceNormalization(
+                ops::MeanVarianceNormalizationOperation::from_onnx(
+                    &input_tensors,
+                    &output_tensors,
+                    &onnx_node.attribute,
+                    rng,
+                )?,
+            )),
             x => Err(ONNXDecodingError::UnsupportedONNXType(x.to_string()))?,
         };
 

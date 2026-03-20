@@ -8,7 +8,7 @@ use crate::symbolic_graph::ops::{EvalError, Operation};
 use crate::backends::ndarray_backend::NDArrayNumericTensor;
 use crate::symbolic_graph::{
     ONNXDecodingError, SymbolicGraph, SymbolicGraphMutator, query_attribute_float,
-    query_attribute_graph, query_attribute_int, query_attribute_string,
+    query_attribute_graph, query_attribute_int, query_attribute_ints, query_attribute_string,
 };
 use crate::{DynRank, onnx};
 use rand::Rng;
@@ -1196,6 +1196,611 @@ impl Operation for TriluOperation {
 
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);
+        graph.set_output_map(output_map);
+        graph
+    }
+}
+
+// ─── EyeLike ──────────────────────────────────────────────────────────
+
+/// ONNX EyeLike: generates an identity-like matrix.
+/// Input: a 2D tensor (used only for shape). Output: identity-like matrix.
+/// Attributes: dtype (optional), k (diagonal offset, default 0).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct EyeLikeOperation {
+    global_id: GlobalId,
+    input: GlobalId,
+    output: GlobalId,
+    dtype: Option<i64>,
+    k: i64,
+}
+
+impl EyeLikeOperation {
+    pub(crate) fn from_onnx(
+        inputs: &[Option<GlobalId>],
+        outputs: &[Option<GlobalId>],
+        attributes: &[onnx::AttributeProto],
+        rng: &mut impl Rng,
+    ) -> Result<Self, ONNXDecodingError> {
+        if inputs.len() != 1 {
+            return Err(ONNXDecodingError::InvalidOperatorInputs("EyeLike"));
+        }
+        if outputs.len() != 1 {
+            return Err(ONNXDecodingError::InvalidOperatorOutputs("EyeLike"));
+        }
+        let dtype = query_attribute_int(attributes, "dtype");
+        let k = query_attribute_int(attributes, "k").unwrap_or(0);
+        Ok(Self {
+            global_id: GlobalId::new(rng),
+            input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("EyeLike"))?,
+            output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("EyeLike"))?,
+            dtype,
+            k,
+        })
+    }
+}
+
+impl Node for EyeLikeOperation {
+    type OpKind = String;
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
+    fn op_kind(&self) -> Self::OpKind {
+        "EyeLike".to_string()
+    }
+    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
+        Box::new(std::iter::once(self.input))
+    }
+    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
+        Box::new(std::iter::once(self.output))
+    }
+}
+
+impl Operation for EyeLikeOperation {
+    fn parameters(&self) -> Vec<Property> {
+        let mut params = Vec::new();
+        if let Some(dtype) = self.dtype {
+            params.push(Property::new("dtype", PropertyValue::Int(dtype)));
+        }
+        params.push(Property::new("k", PropertyValue::Int(self.k)));
+        params
+    }
+
+    fn is_differentiable(&self) -> bool {
+        false
+    }
+
+    fn eval(
+        &self,
+        backend: &mut EvalBackend,
+        inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
+    ) -> Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, EvalError> {
+        let input = &inputs[&self.input];
+        let shape: Vec<usize> = input.shape().iter().map(|&v| v as usize).collect();
+        if shape.len() != 2 {
+            return Err(EvalError::InvalidInput(
+                "EyeLike requires 2D input".to_string(),
+            ));
+        }
+        let rows = shape[0];
+        let cols = shape[1];
+
+        // Determine output dtype
+        let out_dtype = if let Some(dtype_int) = self.dtype {
+            let onnx_dt = onnx::tensor_proto::DataType::try_from(dtype_int as i32)
+                .map_err(|_| EvalError::InvalidInput("Invalid dtype".to_string()))?;
+            DType::try_from(onnx_dt)?
+        } else {
+            input.dtype()
+        };
+
+        // Create zeros and fill diagonal
+        let mut data = vec![0.0f32; rows * cols];
+        let k = self.k;
+        for i in 0..rows {
+            let j = i as i64 + k;
+            if j >= 0 && (j as usize) < cols {
+                data[i * cols + j as usize] = 1.0;
+            }
+        }
+
+        let out_shape: Vec<u64> = shape.iter().map(|&v| v as u64).collect();
+        let mut out =
+            NumericTensor::NDArray(NDArrayNumericTensor::from_vec_shape(data, &out_shape)?);
+        if out_dtype != DType::F32 {
+            out = out.cast(out_dtype, backend)?;
+        }
+
+        Ok(Box::new(std::iter::once((self.output, out))))
+    }
+
+    fn get_milli_op_graph(
+        &self,
+        _ctx: &MilliLoweringContext,
+        _rng: &mut impl Rng,
+    ) -> MilliOpGraph {
+        panic!("EyeLike uses custom eval")
+    }
+}
+
+// ─── Shrink ───────────────────────────────────────────────────────────
+
+/// ONNX Shrink: if x < -lambd: y = x + bias; elif x > lambd: y = x - bias; else: y = 0
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ShrinkOperation {
+    global_id: GlobalId,
+    input: GlobalId,
+    output: GlobalId,
+    lambd: f32,
+    bias: f32,
+}
+
+impl ShrinkOperation {
+    pub(crate) fn from_onnx(
+        inputs: &[Option<GlobalId>],
+        outputs: &[Option<GlobalId>],
+        attributes: &[onnx::AttributeProto],
+        rng: &mut impl Rng,
+    ) -> Result<Self, ONNXDecodingError> {
+        if inputs.len() != 1 {
+            return Err(ONNXDecodingError::InvalidOperatorInputs("Shrink"));
+        }
+        if outputs.len() != 1 {
+            return Err(ONNXDecodingError::InvalidOperatorOutputs("Shrink"));
+        }
+        Ok(Self {
+            global_id: GlobalId::new(rng),
+            input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("Shrink"))?,
+            output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("Shrink"))?,
+            lambd: query_attribute_float(attributes, "lambd").unwrap_or(0.5),
+            bias: query_attribute_float(attributes, "bias").unwrap_or(0.0),
+        })
+    }
+}
+
+impl Node for ShrinkOperation {
+    type OpKind = String;
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
+    fn op_kind(&self) -> Self::OpKind {
+        "Shrink".to_string()
+    }
+    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
+        Box::new(std::iter::once(self.input))
+    }
+    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
+        Box::new(std::iter::once(self.output))
+    }
+}
+
+impl Operation for ShrinkOperation {
+    fn parameters(&self) -> Vec<Property> {
+        vec![
+            Property::new("lambd", PropertyValue::Float(self.lambd.into())),
+            Property::new("bias", PropertyValue::Float(self.bias.into())),
+        ]
+    }
+
+    fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, rng: &mut impl Rng) -> MilliOpGraph {
+        // Shrink(x) = x + bias if x < -lambd
+        //           = x - bias if x > lambd
+        //           = 0 otherwise
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
+        let x = input_map[&self.input];
+
+        let neg_lambd = Constant::new_scalar(&mut graph, -self.lambd, rng);
+        let neg_lambd = CastLike::push_new(&mut graph, neg_lambd, x, rng);
+        let lambd = Constant::new_scalar(&mut graph, self.lambd, rng);
+        let lambd = CastLike::push_new(&mut graph, lambd, x, rng);
+        let bias = Constant::new_scalar(&mut graph, self.bias, rng);
+        let bias = CastLike::push_new(&mut graph, bias, x, rng);
+        let zero = Constant::new_scalar(&mut graph, 0.0f32, rng);
+        let zero = CastLike::push_new(&mut graph, zero, x, rng);
+
+        let cond_neg = SimpleBinary::less(&mut graph, x, neg_lambd, rng);
+        let cond_pos = SimpleBinary::greater(&mut graph, x, lambd, rng);
+        let x_plus_bias = SimpleBinary::add(&mut graph, x, bias, rng);
+        let x_minus_bias = SimpleBinary::sub(&mut graph, x, bias, rng);
+
+        // result = Where(cond_neg, x+bias, Where(cond_pos, x-bias, 0))
+        let inner = Where::push_new(&mut graph, cond_pos, x_minus_bias, zero, rng);
+        let out_tid = Where::push_new(&mut graph, cond_neg, x_plus_bias, inner, rng);
+
+        let mut output_map = HashMap::new();
+        output_map.insert(out_tid, self.output);
+        graph.set_output_map(output_map);
+        graph
+    }
+}
+
+// ─── Hardmax ──────────────────────────────────────────────────────────
+
+/// ONNX Hardmax: one-hot output where the position of the max value gets 1.0, all others 0.0.
+/// Operates along the specified axis (default -1).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct HardmaxOperation {
+    global_id: GlobalId,
+    input: GlobalId,
+    output: GlobalId,
+    axis: i64,
+}
+
+impl HardmaxOperation {
+    pub(crate) fn from_onnx(
+        inputs: &[Option<GlobalId>],
+        outputs: &[Option<GlobalId>],
+        attributes: &[onnx::AttributeProto],
+        rng: &mut impl Rng,
+    ) -> Result<Self, ONNXDecodingError> {
+        if inputs.len() != 1 {
+            return Err(ONNXDecodingError::InvalidOperatorInputs("Hardmax"));
+        }
+        if outputs.len() != 1 {
+            return Err(ONNXDecodingError::InvalidOperatorOutputs("Hardmax"));
+        }
+        let axis = query_attribute_int(attributes, "axis").unwrap_or(-1);
+        Ok(Self {
+            global_id: GlobalId::new(rng),
+            input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("Hardmax"))?,
+            output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("Hardmax"))?,
+            axis,
+        })
+    }
+}
+
+impl Node for HardmaxOperation {
+    type OpKind = String;
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
+    fn op_kind(&self) -> Self::OpKind {
+        "Hardmax".to_string()
+    }
+    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
+        Box::new(std::iter::once(self.input))
+    }
+    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
+        Box::new(std::iter::once(self.output))
+    }
+}
+
+impl Operation for HardmaxOperation {
+    fn parameters(&self) -> Vec<Property> {
+        vec![Property::new("axis", PropertyValue::Int(self.axis))]
+    }
+
+    fn is_differentiable(&self) -> bool {
+        false
+    }
+
+    fn eval(
+        &self,
+        backend: &mut EvalBackend,
+        inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
+    ) -> Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, EvalError> {
+        let input = &inputs[&self.input];
+        let shape: Vec<usize> = input.shape().iter().map(|&v| v as usize).collect();
+        let rank = shape.len();
+
+        // Normalize axis
+        let axis = if self.axis < 0 {
+            (self.axis + rank as i64) as usize
+        } else {
+            self.axis as usize
+        };
+
+        let input_f32 = input.cast(DType::F32, backend)?;
+        let flat_data: Vec<f32> = input_f32.to_ndarray()?.flatten().try_into()?;
+
+        let total: usize = shape.iter().product();
+        let mut out_data = vec![0.0f32; total];
+
+        // Compute sizes: outer dimensions before axis, axis dim, inner dimensions after axis
+        let outer_size: usize = shape[..axis].iter().product();
+        let axis_size = shape[axis];
+        let inner_size: usize = shape[axis + 1..].iter().product();
+
+        for outer in 0..outer_size {
+            for inner in 0..inner_size {
+                // Find argmax along the axis
+                let mut max_val = f32::NEG_INFINITY;
+                let mut max_idx = 0usize;
+                for a in 0..axis_size {
+                    let idx = outer * axis_size * inner_size + a * inner_size + inner;
+                    let val = flat_data[idx];
+                    if val > max_val {
+                        max_val = val;
+                        max_idx = a;
+                    }
+                }
+                let out_idx = outer * axis_size * inner_size + max_idx * inner_size + inner;
+                out_data[out_idx] = 1.0;
+            }
+        }
+
+        let out_shape: Vec<u64> = shape.iter().map(|&v| v as u64).collect();
+        let mut out =
+            NumericTensor::NDArray(NDArrayNumericTensor::from_vec_shape(out_data, &out_shape)?);
+
+        let original_dtype = input.dtype();
+        if original_dtype != DType::F32 {
+            out = out.cast(original_dtype, backend)?;
+        }
+
+        Ok(Box::new(std::iter::once((self.output, out))))
+    }
+
+    fn get_milli_op_graph(
+        &self,
+        _ctx: &MilliLoweringContext,
+        _rng: &mut impl Rng,
+    ) -> MilliOpGraph {
+        panic!("Hardmax uses custom eval")
+    }
+}
+
+// ─── Compress ─────────────────────────────────────────────────────────
+
+/// ONNX Compress: select elements from input using a boolean condition tensor along an axis.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CompressOperation {
+    global_id: GlobalId,
+    input: GlobalId,
+    condition: GlobalId,
+    output: GlobalId,
+    axis: Option<i64>,
+}
+
+impl CompressOperation {
+    pub(crate) fn from_onnx(
+        inputs: &[Option<GlobalId>],
+        outputs: &[Option<GlobalId>],
+        attributes: &[onnx::AttributeProto],
+        rng: &mut impl Rng,
+    ) -> Result<Self, ONNXDecodingError> {
+        if inputs.len() != 2 {
+            return Err(ONNXDecodingError::InvalidOperatorInputs("Compress"));
+        }
+        if outputs.len() != 1 {
+            return Err(ONNXDecodingError::InvalidOperatorOutputs("Compress"));
+        }
+        let axis = query_attribute_int(attributes, "axis");
+        Ok(Self {
+            global_id: GlobalId::new(rng),
+            input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("Compress"))?,
+            condition: inputs[1].ok_or(ONNXDecodingError::InvalidOperatorInputs("Compress"))?,
+            output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("Compress"))?,
+            axis,
+        })
+    }
+}
+
+impl Node for CompressOperation {
+    type OpKind = String;
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
+    fn op_kind(&self) -> Self::OpKind {
+        "Compress".to_string()
+    }
+    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
+        Box::new(vec![self.input, self.condition].into_iter())
+    }
+    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
+        Box::new(std::iter::once(self.output))
+    }
+}
+
+impl Operation for CompressOperation {
+    fn parameters(&self) -> Vec<Property> {
+        let mut params = Vec::new();
+        if let Some(axis) = self.axis {
+            params.push(Property::new("axis", PropertyValue::Int(axis)));
+        }
+        params
+    }
+
+    fn is_differentiable(&self) -> bool {
+        false
+    }
+
+    fn eval(
+        &self,
+        backend: &mut EvalBackend,
+        inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
+    ) -> Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, EvalError> {
+        let input = &inputs[&self.input];
+        let condition = &inputs[&self.condition];
+
+        // Get condition as boolean values (nonzero = true)
+        let cond_cast = condition.cast(DType::I64, backend)?;
+        let cond_i64: Vec<i64> = cond_cast.to_ndarray()?.flatten().try_into()?;
+        let cond_bool: Vec<bool> = cond_i64.iter().map(|&v| v != 0).collect();
+
+        let input_shape: Vec<usize> = input.shape().iter().map(|&v| v as usize).collect();
+
+        let input_f32 = input.cast(DType::F32, backend)?;
+
+        let out = if let Some(axis_val) = self.axis {
+            let rank = input_shape.len();
+            let axis = if axis_val < 0 {
+                (axis_val + rank as i64) as usize
+            } else {
+                axis_val as usize
+            };
+
+            // Select slices along axis where condition is true
+            let axis_size = input_shape[axis];
+            let selected_indices: Vec<usize> = cond_bool
+                .iter()
+                .take(axis_size)
+                .enumerate()
+                .filter(|&(_, &v)| v)
+                .map(|(i, _)| i)
+                .collect();
+
+            let flat_data: Vec<f32> = input_f32.to_ndarray()?.flatten().try_into()?;
+
+            // Compute sizes
+            let outer_size: usize = input_shape[..axis].iter().product();
+            let inner_size: usize = input_shape[axis + 1..].iter().product();
+            let axis_stride = inner_size;
+            let outer_stride = axis_size * inner_size;
+
+            let mut out_data = Vec::new();
+            for outer in 0..outer_size {
+                for &sel_idx in &selected_indices {
+                    let base = outer * outer_stride + sel_idx * axis_stride;
+                    for inner in 0..inner_size {
+                        out_data.push(flat_data[base + inner]);
+                    }
+                }
+            }
+
+            let mut out_shape: Vec<u64> = input_shape.iter().map(|&v| v as u64).collect();
+            out_shape[axis] = selected_indices.len() as u64;
+            NumericTensor::NDArray(NDArrayNumericTensor::from_vec_shape(out_data, &out_shape)?)
+        } else {
+            // No axis: flatten input, select elements where condition is true
+            let flat_data: Vec<f32> = input_f32.to_ndarray()?.flatten().try_into()?;
+            let mut out_data: Vec<f32> = Vec::new();
+            for (i, &val) in flat_data.iter().enumerate() {
+                let c = if i < cond_bool.len() {
+                    cond_bool[i]
+                } else {
+                    false
+                };
+                if c {
+                    out_data.push(val);
+                }
+            }
+            let out_shape = vec![out_data.len() as u64];
+            NumericTensor::NDArray(NDArrayNumericTensor::from_vec_shape(out_data, &out_shape)?)
+        };
+
+        let original_dtype = input.dtype();
+        let out = if original_dtype != DType::F32 {
+            out.cast(original_dtype, backend)?
+        } else {
+            out
+        };
+
+        Ok(Box::new(std::iter::once((self.output, out))))
+    }
+
+    fn get_milli_op_graph(
+        &self,
+        _ctx: &MilliLoweringContext,
+        _rng: &mut impl Rng,
+    ) -> MilliOpGraph {
+        panic!("Compress uses custom eval")
+    }
+}
+
+// ─── MeanVarianceNormalization ────────────────────────────────────────
+
+/// ONNX MeanVarianceNormalization: (x - mean(x, axes)) / sqrt(variance(x, axes) + epsilon)
+/// Default axes: [0, 2, 3]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MeanVarianceNormalizationOperation {
+    global_id: GlobalId,
+    input: GlobalId,
+    output: GlobalId,
+    axes: Vec<i64>,
+}
+
+impl MeanVarianceNormalizationOperation {
+    pub(crate) fn from_onnx(
+        inputs: &[Option<GlobalId>],
+        outputs: &[Option<GlobalId>],
+        attributes: &[onnx::AttributeProto],
+        rng: &mut impl Rng,
+    ) -> Result<Self, ONNXDecodingError> {
+        if inputs.len() != 1 {
+            return Err(ONNXDecodingError::InvalidOperatorInputs(
+                "MeanVarianceNormalization",
+            ));
+        }
+        if outputs.len() != 1 {
+            return Err(ONNXDecodingError::InvalidOperatorOutputs(
+                "MeanVarianceNormalization",
+            ));
+        }
+        let axes = query_attribute_ints(attributes, "axes").unwrap_or_else(|| vec![0, 2, 3]);
+        Ok(Self {
+            global_id: GlobalId::new(rng),
+            input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs(
+                "MeanVarianceNormalization",
+            ))?,
+            output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs(
+                "MeanVarianceNormalization",
+            ))?,
+            axes,
+        })
+    }
+}
+
+impl Node for MeanVarianceNormalizationOperation {
+    type OpKind = String;
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
+    fn op_kind(&self) -> Self::OpKind {
+        "MeanVarianceNormalization".to_string()
+    }
+    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
+        Box::new(std::iter::once(self.input))
+    }
+    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
+        Box::new(std::iter::once(self.output))
+    }
+}
+
+impl Operation for MeanVarianceNormalizationOperation {
+    fn parameters(&self) -> Vec<Property> {
+        vec![Property::new(
+            "axes",
+            PropertyValue::IntList(self.axes.clone()),
+        )]
+    }
+
+    fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, rng: &mut impl Rng) -> MilliOpGraph {
+        // MVN(x) = (x - mean) / sqrt(variance + epsilon)
+        // where variance = mean((x - mean)^2)
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
+        let x = input_map[&self.input];
+
+        // Create axes constant
+        let axes_tensor = NDArrayNumericTensor::from(self.axes.clone());
+        let axes_tid = Constant::push_new(&mut graph, axes_tensor.to_dyn(), rng);
+
+        // mean = ReduceMean(x, axes, keepdims=true)
+        let mean = ReduceMean::push_new(&mut graph, x, Some(axes_tid), true, false, rng);
+
+        // x_centered = x - mean
+        let x_centered = SimpleBinary::sub(&mut graph, x, mean, rng);
+
+        // variance = ReduceMean(x_centered * x_centered, axes, keepdims=true)
+        let x_sq = SimpleBinary::mul(&mut graph, x_centered, x_centered, rng);
+        // Need a separate axes constant for the second reduce
+        let axes_tensor2 = NDArrayNumericTensor::from(self.axes.clone());
+        let axes_tid2 = Constant::push_new(&mut graph, axes_tensor2.to_dyn(), rng);
+        let variance = ReduceMean::push_new(&mut graph, x_sq, Some(axes_tid2), true, false, rng);
+
+        // epsilon = 1e-9
+        let epsilon = Constant::new_scalar(&mut graph, 1e-9f32, rng);
+        let epsilon = CastLike::push_new(&mut graph, epsilon, x, rng);
+
+        // sqrt(variance + epsilon)
+        let var_eps = SimpleBinary::add(&mut graph, variance, epsilon, rng);
+        let std_dev = SimpleUnaryOp::sqrt(&mut graph, var_eps, rng);
+
+        // result = x_centered / std_dev
+        let out_tid = SimpleBinary::div(&mut graph, x_centered, std_dev, rng);
+
+        let mut output_map = HashMap::new();
+        output_map.insert(out_tid, self.output);
         graph.set_output_map(output_map);
         graph
     }

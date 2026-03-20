@@ -30,6 +30,8 @@ pub(crate) enum WhichSimpleBinaryOp {
     LessOrEqual,
     Max,
     Min,
+    BitShiftLeft,
+    BitShiftRight,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -187,6 +189,24 @@ impl SimpleBinary {
     pub fn min(graph: &mut MilliOpGraph, a: GlobalId, b: GlobalId, rng: &mut impl Rng) -> GlobalId {
         Self::push_new(graph, a, b, WhichSimpleBinaryOp::Min, None, rng)
     }
+
+    pub fn bitshift_left(
+        graph: &mut MilliOpGraph,
+        a: GlobalId,
+        b: GlobalId,
+        rng: &mut impl Rng,
+    ) -> GlobalId {
+        Self::push_new(graph, a, b, WhichSimpleBinaryOp::BitShiftLeft, None, rng)
+    }
+
+    pub fn bitshift_right(
+        graph: &mut MilliOpGraph,
+        a: GlobalId,
+        b: GlobalId,
+        rng: &mut impl Rng,
+    ) -> GlobalId {
+        Self::push_new(graph, a, b, WhichSimpleBinaryOp::BitShiftRight, None, rng)
+    }
 }
 
 impl SimpleBinary {
@@ -291,6 +311,10 @@ impl SimpleBinary {
                 op: ScalarBinOp::Or,
                 compute_dtype: compute_dt,
             },
+            WhichSimpleBinaryOp::BitShiftLeft | WhichSimpleBinaryOp::BitShiftRight => {
+                ctx.lower_as_boundary_named(self, "SimpleBinary");
+                return;
+            }
         };
 
         let Some((layout, known_dims, sym_dims, count)) = ctx.classify_dims(out_info) else {
@@ -461,6 +485,12 @@ impl MilliOp for SimpleBinary {
             }
             WhichSimpleBinaryOp::Max => NumericTensor::<DynRank>::max(a, b, backend)?,
             WhichSimpleBinaryOp::Min => NumericTensor::<DynRank>::min(a, b, backend)?,
+            WhichSimpleBinaryOp::BitShiftLeft => {
+                NumericTensor::<DynRank>::bitshift_left(a, b, backend)?
+            }
+            WhichSimpleBinaryOp::BitShiftRight => {
+                NumericTensor::<DynRank>::bitshift_right(a, b, backend)?
+            }
         };
         Ok(Box::new([(self.output, out)].into_iter()))
     }
@@ -1401,6 +1431,8 @@ impl Node for SimpleBinary {
             WhichSimpleBinaryOp::LessOrEqual => "Less or Equal",
             WhichSimpleBinaryOp::Max => "Max",
             WhichSimpleBinaryOp::Min => "Min",
+            WhichSimpleBinaryOp::BitShiftLeft => "BitShiftLeft",
+            WhichSimpleBinaryOp::BitShiftRight => "BitShiftRight",
         }
         .to_string()
     }

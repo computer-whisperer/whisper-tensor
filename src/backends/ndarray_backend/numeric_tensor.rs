@@ -3452,6 +3452,36 @@ impl NDArrayNumericTensor<DynRank> {
         Self::bitwise_op(a, b, NativeNumericTensorBitwiseBinaryOperation::Xor)
     }
 
+    pub fn bitshift_left(a: &Self, b: &Self) -> Result<Self, NDArrayNumericTensorError> {
+        Ok(match (a, b) {
+            (Self::U64(a), Self::U64(b)) => Self::U64(ops::bitshift_left(a.clone(), b.clone())?),
+            (Self::U32(a), Self::U32(b)) => Self::U32(ops::bitshift_left(a.clone(), b.clone())?),
+            (Self::U16(a), Self::U16(b)) => Self::U16(ops::bitshift_left(a.clone(), b.clone())?),
+            (Self::U8(a), Self::U8(b)) => Self::U8(ops::bitshift_left(a.clone(), b.clone())?),
+            _ => {
+                return Err(NDArrayNumericTensorError::UnsupportedOperationForDTypes(
+                    "bitshift_left".to_string(),
+                    vec![a.dtype(), b.dtype()],
+                ));
+            }
+        })
+    }
+
+    pub fn bitshift_right(a: &Self, b: &Self) -> Result<Self, NDArrayNumericTensorError> {
+        Ok(match (a, b) {
+            (Self::U64(a), Self::U64(b)) => Self::U64(ops::bitshift_right(a.clone(), b.clone())?),
+            (Self::U32(a), Self::U32(b)) => Self::U32(ops::bitshift_right(a.clone(), b.clone())?),
+            (Self::U16(a), Self::U16(b)) => Self::U16(ops::bitshift_right(a.clone(), b.clone())?),
+            (Self::U8(a), Self::U8(b)) => Self::U8(ops::bitshift_right(a.clone(), b.clone())?),
+            _ => {
+                return Err(NDArrayNumericTensorError::UnsupportedOperationForDTypes(
+                    "bitshift_right".to_string(),
+                    vec![a.dtype(), b.dtype()],
+                ));
+            }
+        })
+    }
+
     pub fn add_f32(a: &Self, b: f32) -> Result<Self, NDArrayNumericTensorError> {
         Ok(match a {
             NDArrayNumericTensor::F64(x) => {

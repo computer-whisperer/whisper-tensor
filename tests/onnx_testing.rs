@@ -629,14 +629,14 @@ macro_rules! do_tests {
         do_test!($runner_fn, $runner_name, test_bernoulli_seed);
         do_test!($runner_fn, $runner_name, test_bernoulli_seed_expanded);*/
 
-       /* do_test!($runner_fn, $runner_name, test_bitshift_left_uint16);
+        do_test!($runner_fn, $runner_name, test_bitshift_left_uint16);
         do_test!($runner_fn, $runner_name, test_bitshift_left_uint32);
         do_test!($runner_fn, $runner_name, test_bitshift_left_uint64);
         do_test!($runner_fn, $runner_name, test_bitshift_left_uint8);
         do_test!($runner_fn, $runner_name, test_bitshift_right_uint16);
         do_test!($runner_fn, $runner_name, test_bitshift_right_uint32);
         do_test!($runner_fn, $runner_name, test_bitshift_right_uint64);
-        do_test!($runner_fn, $runner_name, test_bitshift_right_uint8);*/
+        do_test!($runner_fn, $runner_name, test_bitshift_right_uint8);
 
         do_test!($runner_fn, $runner_name, test_bitwise_and_i16_3d);
         do_test!($runner_fn, $runner_name, test_bitwise_and_i32_2d);
@@ -797,10 +797,10 @@ macro_rules! do_tests {
         do_test!($runner_fn, $runner_name, test_col2im_pads);
         do_test!($runner_fn, $runner_name, test_col2im_strides);*/
 
-        /*do_test!($runner_fn, $runner_name, test_compress_0);
+        do_test!($runner_fn, $runner_name, test_compress_0);
         do_test!($runner_fn, $runner_name, test_compress_1);
         do_test!($runner_fn, $runner_name, test_compress_default_axis);
-        do_test!($runner_fn, $runner_name, test_compress_negative_axis);*/
+        do_test!($runner_fn, $runner_name, test_compress_negative_axis);
 
         do_test!($runner_fn, $runner_name, test_concat_1d_axis_0);
         do_test!($runner_fn, $runner_name, test_concat_1d_axis_negative_1);
@@ -935,10 +935,9 @@ macro_rules! do_tests {
         do_test!($runner_fn, $runner_name, test_expand_dim_unchanged);
         do_test!($runner_fn, $runner_name, test_exp_example);
 
-        /*
         do_test!($runner_fn, $runner_name, test_eyelike_populate_off_main_diagonal);
         do_test!($runner_fn, $runner_name, test_eyelike_with_dtype);
-        do_test!($runner_fn, $runner_name, test_eyelike_without_dtype);*/
+        do_test!($runner_fn, $runner_name, test_eyelike_without_dtype);
 
         do_test!($runner_fn, $runner_name, test_flatten_axis0);
         do_test!($runner_fn, $runner_name, test_flatten_axis1);
@@ -1037,7 +1036,6 @@ macro_rules! do_tests {
         //do_test!($runner_fn, $runner_name, test_hannwindow_symmetric);
         do_test!($runner_fn, $runner_name, test_hannwindow_symmetric_expanded);
 
-        /*
         do_test!($runner_fn, $runner_name, test_hardmax_axis_0);
         do_test!($runner_fn, $runner_name, test_hardmax_axis_1);
         do_test!($runner_fn, $runner_name, test_hardmax_axis_2);
@@ -1045,7 +1043,6 @@ macro_rules! do_tests {
         do_test!($runner_fn, $runner_name, test_hardmax_example);
         do_test!($runner_fn, $runner_name, test_hardmax_negative_axis);
         do_test!($runner_fn, $runner_name, test_hardmax_one_hot);
-         */
 
         do_test!($runner_fn, $runner_name, test_hardsigmoid);
         do_test!($runner_fn, $runner_name, test_hardsigmoid_default);
@@ -1221,7 +1218,6 @@ macro_rules! do_tests {
         do_test!($runner_fn, $runner_name, test_max_int8);
         do_test!($runner_fn, $runner_name, test_max_one_input);
 
-        /*
         do_test!($runner_fn, $runner_name, test_maxpool_1d_default);
         do_test!($runner_fn, $runner_name, test_maxpool_2d_ceil);
         do_test!($runner_fn, $runner_name, test_maxpool_2d_ceil_output_size_reduce_by_one);
@@ -1239,8 +1235,8 @@ macro_rules! do_tests {
         do_test!($runner_fn, $runner_name, test_maxpool_3d_dilations);
         do_test!($runner_fn, $runner_name, test_maxpool_3d_dilations_use_ref_impl);
         do_test!($runner_fn, $runner_name, test_maxpool_3d_dilations_use_ref_impl_large);
-        do_test!($runner_fn, $runner_name, test_maxpool_with_argmax_2d_precomputed_pads);
-        do_test!($runner_fn, $runner_name, test_maxpool_with_argmax_2d_precomputed_strides);*/
+        //do_test!($runner_fn, $runner_name, test_maxpool_with_argmax_2d_precomputed_pads);
+        //do_test!($runner_fn, $runner_name, test_maxpool_with_argmax_2d_precomputed_strides);
 
         do_test!($runner_fn, $runner_name, test_max_two_inputs);
         do_test!($runner_fn, $runner_name, test_max_uint16);
@@ -1280,10 +1276,10 @@ macro_rules! do_tests {
         do_test!($runner_fn, $runner_name, test_mod_mixed_sign_float16);
         do_test!($runner_fn, $runner_name, test_mod_mixed_sign_float32);
         do_test!($runner_fn, $runner_name, test_mod_mixed_sign_float64);
-        //do_test!($runner_fn, $runner_name, test_mod_mixed_sign_int16);
-        //do_test!($runner_fn, $runner_name, test_mod_mixed_sign_int32);
-        //do_test!($runner_fn, $runner_name, test_mod_mixed_sign_int64);
-        //do_test!($runner_fn, $runner_name, test_mod_mixed_sign_int8);
+        do_test!($runner_fn, $runner_name, test_mod_mixed_sign_int16);
+        do_test!($runner_fn, $runner_name, test_mod_mixed_sign_int32);
+        do_test!($runner_fn, $runner_name, test_mod_mixed_sign_int64);
+        do_test!($runner_fn, $runner_name, test_mod_mixed_sign_int8);
         do_test!($runner_fn, $runner_name, test_mod_uint16);
         do_test!($runner_fn, $runner_name, test_mod_uint32);
         do_test!($runner_fn, $runner_name, test_mod_uint64);
@@ -1298,11 +1294,9 @@ macro_rules! do_tests {
         do_test!($runner_fn, $runner_name, test_mul_example);
         do_test!($runner_fn, $runner_name, test_mul_uint8);
 
-        /*
         do_test!($runner_fn, $runner_name, test_mvn);
         do_test!($runner_fn, $runner_name, test_mvn_expanded);
         do_test!($runner_fn, $runner_name, test_mvn_expanded_ver18);
-        */
 
         do_test!($runner_fn, $runner_name, test_neg);
         do_test!($runner_fn, $runner_name, test_neg_example);
@@ -1719,13 +1713,12 @@ macro_rules! do_tests {
         do_test!($runner_fn, $runner_name, test_scan9_sum);
         //do_test!($runner_fn, $runner_name, test_scan_sum);
 
-        /*
         do_test!($runner_fn, $runner_name, test_scatter_elements_with_axis);
         do_test!($runner_fn, $runner_name, test_scatter_elements_with_duplicate_indices);
         do_test!($runner_fn, $runner_name, test_scatter_elements_with_negative_indices);
         do_test!($runner_fn, $runner_name, test_scatter_elements_without_axis);
         do_test!($runner_fn, $runner_name, test_scatter_elements_with_reduction_max);
-        do_test!($runner_fn, $runner_name, test_scatter_elements_with_reduction_min);*/
+        do_test!($runner_fn, $runner_name, test_scatter_elements_with_reduction_min);
 
         do_test!($runner_fn, $runner_name, test_scatternd);
         do_test!($runner_fn, $runner_name, test_scatternd_add);
@@ -1840,11 +1833,10 @@ macro_rules! do_tests {
         do_test!($runner_fn, $runner_name, test_shape_start_1_end_negative_1);
         do_test!($runner_fn, $runner_name, test_shape_start_negative_1);
 
-        /*
         do_test!($runner_fn, $runner_name, test_shrink_hard);
         do_test!($runner_fn, $runner_name, test_shrink_hard_expanded_ver18);
         do_test!($runner_fn, $runner_name, test_shrink_soft);
-        do_test!($runner_fn, $runner_name, test_shrink_soft_expanded_ver18);*/
+        do_test!($runner_fn, $runner_name, test_shrink_soft_expanded_ver18);
 
         do_test!($runner_fn, $runner_name, test_sigmoid);
         do_test!($runner_fn, $runner_name, test_sigmoid_example);
