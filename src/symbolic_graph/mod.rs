@@ -2624,6 +2624,68 @@ impl SymbolicGraphMutator {
                     rng,
                 )?,
             )),
+            "Tile" => Some(AnyOperation::Tile(ops::TileOperation::from_onnx(
+                &input_tensors,
+                &output_tensors,
+                &onnx_node.attribute,
+                rng,
+            )?)),
+            "Dropout" => Some(AnyOperation::Dropout(ops::DropoutOperation::from_onnx(
+                &input_tensors,
+                &output_tensors,
+                &onnx_node.attribute,
+                rng,
+            )?)),
+            "GlobalAveragePool" => Some(AnyOperation::GlobalAveragePool(
+                ops::GlobalAveragePoolOperation::from_onnx(
+                    &input_tensors,
+                    &output_tensors,
+                    &onnx_node.attribute,
+                    rng,
+                )?,
+            )),
+            "GlobalMaxPool" => Some(AnyOperation::GlobalMaxPool(
+                ops::GlobalMaxPoolOperation::from_onnx(
+                    &input_tensors,
+                    &output_tensors,
+                    &onnx_node.attribute,
+                    rng,
+                )?,
+            )),
+            "Mean" => Some(AnyOperation::MeanOp(ops::MeanOperation::from_onnx(
+                &input_tensors,
+                &output_tensors,
+                &onnx_node.attribute,
+                rng,
+            )?)),
+            "Sum" => Some(AnyOperation::SumOp(ops::SumOperation::from_onnx(
+                &input_tensors,
+                &output_tensors,
+                &onnx_node.attribute,
+                rng,
+            )?)),
+            "SpaceToDepth" => Some(AnyOperation::SpaceToDepth(
+                ops::SpaceToDepthOperation::from_onnx(
+                    &input_tensors,
+                    &output_tensors,
+                    &onnx_node.attribute,
+                    rng,
+                )?,
+            )),
+            "DepthToSpace" => Some(AnyOperation::DepthToSpace(
+                ops::DepthToSpaceOperation::from_onnx(
+                    &input_tensors,
+                    &output_tensors,
+                    &onnx_node.attribute,
+                    rng,
+                )?,
+            )),
+            "Trilu" => Some(AnyOperation::Trilu(ops::TriluOperation::from_onnx(
+                &input_tensors,
+                &output_tensors,
+                &onnx_node.attribute,
+                rng,
+            )?)),
             x => Err(ONNXDecodingError::UnsupportedONNXType(x.to_string()))?,
         };
 

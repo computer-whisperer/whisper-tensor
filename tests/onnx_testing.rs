@@ -749,11 +749,10 @@ macro_rules! do_tests {
         do_test!($runner_fn, $runner_name, test_cumsum_2d_axis_1);
         do_test!($runner_fn, $runner_name, test_cumsum_2d_negative_axis);
 
-        /*
-        do_test!($runner_fn, $runner_name, test_deform_conv_with_mask_bias);
-        do_test!($runner_fn, $runner_name, test_deform_conv_with_multiple_offset_groups);
+        /*do_test!($runner_fn, $runner_name, test_deform_conv_with_mask_bias);
+        do_test!($runner_fn, $runner_name, test_deform_conv_with_multiple_offset_groups);*/
         do_test!($runner_fn, $runner_name, test_depthtospace_crd_mode_example);
-        do_test!($runner_fn, $runner_name, test_depthtospace_example);*/
+        do_test!($runner_fn, $runner_name, test_depthtospace_example);
 
         /*
         do_test!($runner_fn, $runner_name, test_dequantizelinear);
@@ -786,13 +785,12 @@ macro_rules! do_tests {
         do_test!($runner_fn, $runner_name, test_div_example);
         do_test!($runner_fn, $runner_name, test_div_uint8);
 
-        /*
         do_test!($runner_fn, $runner_name, test_dropout_default);
-        do_test!($runner_fn, $runner_name, test_dropout_default_mask);
-        do_test!($runner_fn, $runner_name, test_dropout_default_mask_ratio);
+        //do_test!($runner_fn, $runner_name, test_dropout_default_mask); // mask output
+        //do_test!($runner_fn, $runner_name, test_dropout_default_mask_ratio); // mask output
         do_test!($runner_fn, $runner_name, test_dropout_default_old);
         do_test!($runner_fn, $runner_name, test_dropout_default_ratio);
-        do_test!($runner_fn, $runner_name, test_dropout_random_old);*/
+        //do_test!($runner_fn, $runner_name, test_dropout_random_old); // random
 
         /*
         do_test!($runner_fn, $runner_name, test_dynamicquantizelinear);
@@ -863,15 +861,14 @@ macro_rules! do_tests {
 
         do_test!($runner_fn, $runner_name, test_gather_negative_indices);
 
-        /*
         do_test!($runner_fn, $runner_name, test_gelu_default_1);
         do_test!($runner_fn, $runner_name, test_gelu_default_1_expanded);
         do_test!($runner_fn, $runner_name, test_gelu_default_2);
         do_test!($runner_fn, $runner_name, test_gelu_default_2_expanded);
-        do_test!($runner_fn, $runner_name, test_gelu_tanh_1);
-        do_test!($runner_fn, $runner_name, test_gelu_tanh_1_expanded);
-        do_test!($runner_fn, $runner_name, test_gelu_tanh_2);
-        do_test!($runner_fn, $runner_name, test_gelu_tanh_2_expanded);*/
+        //do_test!($runner_fn, $runner_name, test_gelu_tanh_1); // needs approximate="tanh"
+        //do_test!($runner_fn, $runner_name, test_gelu_tanh_1_expanded);
+        //do_test!($runner_fn, $runner_name, test_gelu_tanh_2);
+        //do_test!($runner_fn, $runner_name, test_gelu_tanh_2_expanded);
 
         do_test!($runner_fn, $runner_name, test_gemm_all_attributes);
         do_test!($runner_fn, $runner_name, test_gemm_alpha);
@@ -885,11 +882,10 @@ macro_rules! do_tests {
         do_test!($runner_fn, $runner_name, test_gemm_transposeA);
         do_test!($runner_fn, $runner_name, test_gemm_transposeB);
 
-        /*
         do_test!($runner_fn, $runner_name, test_globalaveragepool);
         do_test!($runner_fn, $runner_name, test_globalaveragepool_precomputed);
         do_test!($runner_fn, $runner_name, test_globalmaxpool);
-        do_test!($runner_fn, $runner_name, test_globalmaxpool_precomputed);*/
+        do_test!($runner_fn, $runner_name, test_globalmaxpool_precomputed);
 
         do_test!($runner_fn, $runner_name, test_greater);
         do_test!($runner_fn, $runner_name, test_greater_bcast);
@@ -1152,10 +1148,9 @@ macro_rules! do_tests {
         //do_test!($runner_fn, $runner_name, test_maxunpool_export_without_output_shape);
         //do_test!($runner_fn, $runner_name, test_maxunpool_export_with_output_shape);
 
-        /*
         do_test!($runner_fn, $runner_name, test_mean_example);
         do_test!($runner_fn, $runner_name, test_mean_one_input);
-        do_test!($runner_fn, $runner_name, test_mean_two_inputs);*/
+        do_test!($runner_fn, $runner_name, test_mean_two_inputs);
 
         // do_test!($runner_fn, $runner_name, test_melweightmatrix);
 
@@ -1805,8 +1800,8 @@ macro_rules! do_tests {
         do_test!($runner_fn, $runner_name, test_softsign_expanded_ver18);
 
 
-        //do_test!($runner_fn, $runner_name, test_spacetodepth);
-        //test_do!($runner_fn, $runner_name, test_spacetodepth_example);
+        do_test!($runner_fn, $runner_name, test_spacetodepth);
+        do_test!($runner_fn, $runner_name, test_spacetodepth_example);
 
 
         do_test!($runner_fn, $runner_name, test_split_1d_uneven_split_opset18);
@@ -1863,10 +1858,9 @@ macro_rules! do_tests {
         do_test!($runner_fn, $runner_name, test_sub_bcast);
         do_test!($runner_fn, $runner_name, test_sub_example);
         do_test!($runner_fn, $runner_name, test_sub_uint8);
-        /*
         do_test!($runner_fn, $runner_name, test_sum_example);
         do_test!($runner_fn, $runner_name, test_sum_one_input);
-        do_test!($runner_fn, $runner_name, test_sum_two_inputs);*/
+        do_test!($runner_fn, $runner_name, test_sum_two_inputs);
 
         do_test!($runner_fn, $runner_name, test_tan);
         do_test!($runner_fn, $runner_name, test_tan_example);
@@ -1889,8 +1883,8 @@ macro_rules! do_tests {
         do_test!($runner_fn, $runner_name, test_thresholdedrelu_example_expanded_ver18);
         do_test!($runner_fn, $runner_name, test_thresholdedrelu_expanded_ver18);
 
-        //do_test!($runner_fn, $runner_name, test_tile);
-        //do_test!($runner_fn, $runner_name, test_tile_precomputed);
+        do_test!($runner_fn, $runner_name, test_tile);
+        do_test!($runner_fn, $runner_name, test_tile_precomputed);
 
         /*
         do_test!($runner_fn, $runner_name, test_top_k);
@@ -1917,7 +1911,6 @@ macro_rules! do_tests {
         do_test!($runner_fn, $runner_name, test_transpose_all_permutations_5);
         do_test!($runner_fn, $runner_name, test_transpose_default);
 
-        /*
         do_test!($runner_fn, $runner_name, test_tril);
         do_test!($runner_fn, $runner_name, test_tril_neg);
         do_test!($runner_fn, $runner_name, test_tril_one_row_neg);
@@ -1926,7 +1919,7 @@ macro_rules! do_tests {
         do_test!($runner_fn, $runner_name, test_tril_pos);
         do_test!($runner_fn, $runner_name, test_tril_square);
         do_test!($runner_fn, $runner_name, test_tril_square_neg);
-        do_test!($runner_fn, $runner_name, test_tril_zero);
+        //do_test!($runner_fn, $runner_name, test_tril_zero); // 0-dim input edge case
         do_test!($runner_fn, $runner_name, test_triu);
         do_test!($runner_fn, $runner_name, test_triu_neg);
         do_test!($runner_fn, $runner_name, test_triu_one_row);
@@ -1935,7 +1928,7 @@ macro_rules! do_tests {
         do_test!($runner_fn, $runner_name, test_triu_pos);
         do_test!($runner_fn, $runner_name, test_triu_square);
         do_test!($runner_fn, $runner_name, test_triu_square_neg);
-        do_test!($runner_fn, $runner_name, test_triu_zero);*/
+        //do_test!($runner_fn, $runner_name, test_triu_zero); // 0-dim input edge case
 
         /*
         do_test!($runner_fn, $runner_name, test_unique_length_1);

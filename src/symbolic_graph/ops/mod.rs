@@ -38,8 +38,10 @@ pub use gather::GatherOperation;
 pub use gather_elements::{GatherElementsOperation, GatherNDOperation};
 pub use lstm::LstmOperation;
 pub use misc::{
-    ClipOperation, ExpandOperation, IfOperation, PadOperation, RandomNormalLikeOperation,
-    RangeOperation, WhereOperation,
+    ClipOperation, DepthToSpaceOperation, DropoutOperation, ExpandOperation,
+    GlobalAveragePoolOperation, GlobalMaxPoolOperation, IfOperation, MeanOperation,
+    PadOperation, RandomNormalLikeOperation, RangeOperation, SpaceToDepthOperation,
+    SumOperation, TileOperation, TriluOperation, WhereOperation,
 };
 pub use pool::AveragePoolOperation;
 pub use normalization::{
@@ -303,6 +305,15 @@ pub enum AnyOperation {
     ThresholdedRelu(ThresholdedReluOperation),
     PRelu(PReluOperation),
     BatchNormalization(BatchNormalizationOperation),
+    Tile(TileOperation),
+    Dropout(DropoutOperation),
+    GlobalAveragePool(GlobalAveragePoolOperation),
+    GlobalMaxPool(GlobalMaxPoolOperation),
+    MeanOp(MeanOperation),
+    SumOp(SumOperation),
+    SpaceToDepth(SpaceToDepthOperation),
+    DepthToSpace(DepthToSpaceOperation),
+    Trilu(TriluOperation),
 }
 
 macro_rules! delegate {
@@ -385,7 +396,16 @@ macro_rules! delegate {
             AnyOperation::Softsign(x) => x.$name($($arg),*),
             AnyOperation::ThresholdedRelu(x) => x.$name($($arg),*),
             AnyOperation::PRelu(x) => x.$name($($arg),*),
-            AnyOperation::BatchNormalization(x) => x.$name($($arg),*)
+            AnyOperation::BatchNormalization(x) => x.$name($($arg),*),
+            AnyOperation::Tile(x) => x.$name($($arg),*),
+            AnyOperation::Dropout(x) => x.$name($($arg),*),
+            AnyOperation::GlobalAveragePool(x) => x.$name($($arg),*),
+            AnyOperation::GlobalMaxPool(x) => x.$name($($arg),*),
+            AnyOperation::MeanOp(x) => x.$name($($arg),*),
+            AnyOperation::SumOp(x) => x.$name($($arg),*),
+            AnyOperation::SpaceToDepth(x) => x.$name($($arg),*),
+            AnyOperation::DepthToSpace(x) => x.$name($($arg),*),
+            AnyOperation::Trilu(x) => x.$name($($arg),*)
                     }
         }
     }
