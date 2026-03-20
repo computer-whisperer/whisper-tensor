@@ -1,0 +1,119 @@
+# Model accuracy validation registry.
+#
+# Each model entry defines:
+#   - reference_script: Python script in ci/accuracy/references/ to generate golden outputs
+#   - model_path: Path to model file (relative to repo root, or absolute for Ceph)
+#   - tier: 1 (quick, <5min), 2 (moderate, <1hr), 3 (full, hours)
+#   - rtol/atol: Tolerance for accuracy comparison
+#   - reference: What first-party implementation is used as ground truth
+
+[gpt2]
+reference_script = "gpt2_onnxrt.py"
+model_path = "test_models/gpt2-lm-head-10.onnx"
+tier = 1
+rtol = 1e-5
+atol = 1e-5
+reference = "onnxruntime (same ONNX graph)"
+notes = "Pre-exported ONNX model, reference is ORT on identical graph"
+
+[rwkv7]
+reference_script = "rwkv7_reference.py"
+model_path = "test_models/RWKV-x070-World-0.1B-v2.8-20241210-ctx4096.pth"
+tier = 1
+rtol = 1e-4
+atol = 1e-4
+reference = "official RWKV-7 implementation"
+notes = "Loaded via identify_and_load (.pth -> ONNX); reference is official RWKV7 inference"
+
+# --- Tier 2: HuggingFace Transformers LLMs (Ceph or HF download) ---
+
+[qwen2_05b]
+reference_script = "hf_causal_lm.py"
+model_path = "/models/llms/Qwen2-0.5B"
+tier = 2
+rtol = 1e-3
+atol = 1e-4
+reference = "transformers AutoModelForCausalLM"
+notes = "Smallest Qwen2 variant"
+
+[gemma_2b]
+reference_script = "hf_causal_lm.py"
+model_path = "/models/llms/gemma-2b-it"
+tier = 2
+rtol = 1e-3
+atol = 1e-4
+reference = "transformers AutoModelForCausalLM"
+notes = "Gemma 1 2B instruction-tuned"
+
+[gemma2_2b]
+reference_script = "hf_causal_lm.py"
+model_path = "/models/llms/gemma-2-2b-it"
+tier = 2
+rtol = 1e-3
+atol = 1e-4
+reference = "transformers AutoModelForCausalLM"
+notes = "Gemma 2 2B instruction-tuned"
+
+[gemma3_1b]
+reference_script = "hf_causal_lm.py"
+model_path = "/models/llms/gemma-3-1b-it"
+tier = 2
+rtol = 1e-3
+atol = 1e-4
+reference = "transformers AutoModelForCausalLM"
+notes = "Gemma 3 1B instruction-tuned"
+
+[whisper_small]
+reference_script = "whisper_reference.py"
+model_path = "/models/speech_to_text/whisper-small.en"
+tier = 2
+rtol = 1e-3
+atol = 1e-4
+reference = "openai-whisper / transformers WhisperForConditionalGeneration"
+notes = "Encoder-decoder architecture"
+
+# --- Tier 2: Larger LLMs ---
+
+[llama3_8b]
+reference_script = "hf_causal_lm.py"
+model_path = "/models/llms/Llama-3-8B"
+tier = 2
+rtol = 1e-3
+atol = 1e-4
+reference = "transformers AutoModelForCausalLM"
+
+[mistral_7b]
+reference_script = "hf_causal_lm.py"
+model_path = "/models/llms/mistralai_Mistral-7B-v0.1"
+tier = 2
+rtol = 1e-3
+atol = 1e-4
+reference = "transformers AutoModelForCausalLM"
+
+[phi3_mini]
+reference_script = "hf_causal_lm.py"
+model_path = "/models/llms/Phi-3-mini-4k-instruct"
+tier = 2
+rtol = 1e-3
+atol = 1e-4
+reference = "transformers AutoModelForCausalLM"
+
+# --- Tier 2: Speech ---
+
+[kokoro]
+reference_script = "kokoro_reference.py"
+model_path = "/models/text_to_speech/kokoro-82m-onnx"
+tier = 2
+rtol = 1e-4
+atol = 1e-4
+reference = "onnxruntime (ONNX model)"
+
+# --- Tier 3: Large models, hours to run ---
+
+[qwen3_06b]
+reference_script = "hf_causal_lm.py"
+model_path = "/models/llms/Qwen3-0.6B"
+tier = 2
+rtol = 1e-3
+atol = 1e-4
+reference = "transformers AutoModelForCausalLM"
