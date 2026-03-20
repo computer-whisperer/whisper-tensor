@@ -395,13 +395,11 @@ impl<R: Rank> NumericTensor<R> {
     }
 
     /// Apply a trigonometric operation element-wise (sin, cos, tan, etc.), as specified by op.
-    pub fn trig(&self, op: TrigOp, backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
-        if backend.supports_dtype(self.dtype()) {
-            #[cfg(feature = "vulkan")]
-            if let EvalBackend::Vulkan(executor) = backend {
-                try_vulkan!(executor, self.to_vulkan(executor)?.trig(op, executor)?);
-            }
-        }
+    /// Trigonometric/hyperbolic functions (sin, cos, tan, sinh, cosh, tanh, etc.)
+    ///
+    /// Always uses NDArray (libm) — SPIR-V trig precision is implementation-defined.
+    /// See `exp()` for rationale.
+    pub fn trig(&self, op: TrigOp, _backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
         Ok(NumericTensor::NDArray(self.to_ndarray()?.trig(op)?))
     }
 
