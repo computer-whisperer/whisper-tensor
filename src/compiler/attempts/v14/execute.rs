@@ -311,6 +311,37 @@ pub fn execute(
             }
         }
 
+        // Diagnostic: for mismatched inputs, show all overlapping store entries.
+        if phase_idx < 2 {
+            if let Some(next_phase) = plan.phases.get(phase_idx + 1) {
+                for span in &next_phase.spans {
+                    for inp in &span.inputs {
+                        if let Some(tensor) = store.get(&inp.base) {
+                            let stored = tensor.num_elements() as u64;
+                            if stored != inp.count {
+                                // Find all store entries overlapping this range.
+                                let range_lo = inp.base.0;
+                                let range_hi = range_lo + inp.count;
+                                let overlapping: Vec<_> = store.iter()
+                                    .filter(|(base, t)| {
+                                        let t_lo = base.0;
+                                        let t_hi = t_lo + t.num_elements() as u64;
+                                        t_lo < range_hi && t_hi > range_lo
+                                    })
+                                    .map(|(base, t)| (base.0, t.num_elements()))
+                                    .collect();
+                                eprintln!(
+                                    "  Phase {}→{}: input base={} expects {} atoms, exact match has {}, {} overlapping entries: {:?}",
+                                    phase_idx, phase_idx + 1, inp.base, inp.count, stored,
+                                    overlapping.len(), &overlapping[..overlapping.len().min(5)]
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // Diagnostic: check count mismatches between store and next phase inputs.
         if phase_idx < 5 {
             if let Some(next_phase) = plan.phases.get(phase_idx + 1) {
