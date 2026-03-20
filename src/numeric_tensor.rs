@@ -299,19 +299,36 @@ impl<R: Rank> NumericTensor<R> {
     }
 
     /// Element-wise natural exponential.
-    ///
-    /// Always uses NDArray (libm) — SPIR-V Exp precision is implementation-defined
-    /// and diverges from libm by more than 1 ULP on some drivers (e.g. lavapipe),
-    /// which compounds through op chains like softplus = ln(1 + exp(x)).
-    pub fn exp(&self, _backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
+    pub fn exp(&self, backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
+        if backend.supports_dtype(self.dtype()) {
+            #[cfg(feature = "candle")]
+            if let EvalBackend::Candle(device) = backend {
+                return Ok(NumericTensor::Candle(self.to_candle(device)?.exp()?));
+            }
+            #[cfg(feature = "vulkan")]
+            if let EvalBackend::Vulkan(executor) = backend {
+                try_vulkan!(executor, self.to_vulkan(executor)?.exp(executor)?);
+            }
+            #[cfg(feature = "tch")]
+            if let EvalBackend::TCH = backend {
+                return Ok(NumericTensor::TCH(self.to_tch().exp()?));
+            }
+        }
         Ok(NumericTensor::NDArray(self.to_ndarray()?.exp()?))
     }
 
     /// Element-wise natural logarithm.
-    ///
-    /// Always uses NDArray (libm) — SPIR-V Log precision is implementation-defined.
-    /// See `exp()` for rationale.
-    pub fn ln(&self, _backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
+    pub fn ln(&self, backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
+        if backend.supports_dtype(self.dtype()) {
+            #[cfg(feature = "vulkan")]
+            if let EvalBackend::Vulkan(executor) = backend {
+                try_vulkan!(executor, self.to_vulkan(executor)?.ln(executor)?);
+            }
+            #[cfg(feature = "tch")]
+            if let EvalBackend::TCH = backend {
+                return Ok(NumericTensor::TCH(self.to_tch().ln()?));
+            }
+        }
         Ok(NumericTensor::NDArray(self.to_ndarray()?.ln()?))
     }
 
@@ -395,11 +412,13 @@ impl<R: Rank> NumericTensor<R> {
     }
 
     /// Apply a trigonometric operation element-wise (sin, cos, tan, etc.), as specified by op.
-    /// Trigonometric/hyperbolic functions (sin, cos, tan, sinh, cosh, tanh, etc.)
-    ///
-    /// Always uses NDArray (libm) — SPIR-V trig precision is implementation-defined.
-    /// See `exp()` for rationale.
-    pub fn trig(&self, op: TrigOp, _backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
+    pub fn trig(&self, op: TrigOp, backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
+        if backend.supports_dtype(self.dtype()) {
+            #[cfg(feature = "vulkan")]
+            if let EvalBackend::Vulkan(executor) = backend {
+                try_vulkan!(executor, self.to_vulkan(executor)?.trig(op, executor)?);
+            }
+        }
         Ok(NumericTensor::NDArray(self.to_ndarray()?.trig(op)?))
     }
 

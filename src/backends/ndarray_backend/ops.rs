@@ -974,7 +974,9 @@ impl NativeNumericTensorUnaryOperation {
                 a.mapv(|x| T::one() / (T::one() + T::exp(-x))).to_shared()
             }
             NativeNumericTensorUnaryOperation::Softplus => {
-                a.mapv(|x| T::ln(T::exp(x) + T::one())).to_shared()
+                // Numerically stable: softplus(x) = max(x, 0) + ln(1 + exp(-|x|))
+                a.mapv(|x| x.max(T::zero()) + T::ln(T::one() + T::exp(-x.abs())))
+                    .to_shared()
             }
             NativeNumericTensorUnaryOperation::Log => a.mapv(|x| x.ln()).to_shared(),
             NativeNumericTensorUnaryOperation::Floor => a.mapv(|x| x.floor()).to_shared(),
