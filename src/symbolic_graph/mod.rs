@@ -2892,6 +2892,43 @@ impl SymbolicGraphMutator {
                 &onnx_node.attribute,
                 rng,
             )?)),
+            "MelWeightMatrix" => Some(AnyOperation::MelWeightMatrix(
+                ops::MelWeightMatrixOperation::from_onnx(
+                    &input_tensors,
+                    &output_tensors,
+                    &onnx_node.attribute,
+                    rng,
+                )?,
+            )),
+            "MatMulInteger" => Some(AnyOperation::MatMulInteger(
+                ops::MatMulIntegerOperation::from_onnx(
+                    &input_tensors,
+                    &output_tensors,
+                    &onnx_node.attribute,
+                    rng,
+                )?,
+            )),
+            "BlackmanWindow" => Some(AnyOperation::Window(ops::WindowOperation::from_onnx(
+                ops::WindowKind::Blackman,
+                &input_tensors,
+                &output_tensors,
+                &onnx_node.attribute,
+                rng,
+            )?)),
+            "HammingWindow" => Some(AnyOperation::Window(ops::WindowOperation::from_onnx(
+                ops::WindowKind::Hamming,
+                &input_tensors,
+                &output_tensors,
+                &onnx_node.attribute,
+                rng,
+            )?)),
+            "HannWindow" => Some(AnyOperation::Window(ops::WindowOperation::from_onnx(
+                ops::WindowKind::Hann,
+                &input_tensors,
+                &output_tensors,
+                &onnx_node.attribute,
+                rng,
+            )?)),
             x => Err(ONNXDecodingError::UnsupportedONNXType(x.to_string()))?,
         };
 

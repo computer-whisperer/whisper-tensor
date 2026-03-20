@@ -31,7 +31,10 @@ mod split;
 mod stft;
 mod topk;
 mod transpose;
+mod matmul_integer;
+mod mel_weight_matrix;
 mod unary;
+mod window;
 
 pub use binary::{
     ArgMaxOperation, ArgMinOperation, BinaryOperation, BitShiftOperation, GemmOperation,
@@ -82,6 +85,9 @@ pub use split::SplitOperation;
 pub use stft::StftOperation;
 pub use topk::TopKOperation;
 pub use transpose::TransposeOperation;
+pub use matmul_integer::MatMulIntegerOperation;
+pub use mel_weight_matrix::MelWeightMatrixOperation;
+pub use window::{WindowKind, WindowOperation};
 pub use unary::{
     BiasGeluOperation, CeluOperation, EluOperation, GeluOperation, HardSigmoidOperation,
     HardSwishOperation, IdentityOperation, IsInfOperation, LeakyReluOperation, LogSoftmaxOperation,
@@ -348,6 +354,9 @@ pub enum AnyOperation {
     Lrn(LrnOperation),
     SimpleRnn(SimpleRnnOperation),
     Gru(GruOperation),
+    Window(WindowOperation),
+    MatMulInteger(MatMulIntegerOperation),
+    MelWeightMatrix(MelWeightMatrixOperation),
 }
 
 macro_rules! delegate {
@@ -456,7 +465,10 @@ macro_rules! delegate {
             AnyOperation::LpPool(x) => x.$name($($arg),*),
             AnyOperation::Lrn(x) => x.$name($($arg),*),
             AnyOperation::SimpleRnn(x) => x.$name($($arg),*),
-            AnyOperation::Gru(x) => x.$name($($arg),*)
+            AnyOperation::Gru(x) => x.$name($($arg),*),
+            AnyOperation::Window(x) => x.$name($($arg),*),
+            AnyOperation::MatMulInteger(x) => x.$name($($arg),*),
+            AnyOperation::MelWeightMatrix(x) => x.$name($($arg),*)
                     }
         }
     }

@@ -776,9 +776,9 @@ macro_rules! do_tests {
         do_test!($runner_fn, $runner_name, test_bitwise_xor_ui64_bcast_3v1d);
         do_test!($runner_fn, $runner_name, test_bitwise_xor_ui8_bcast_4v3d);
 
-        //do_test!($runner_fn, $runner_name, test_blackmanwindow);
+        do_test!($runner_fn, $runner_name, test_blackmanwindow);
         do_test!($runner_fn, $runner_name, test_blackmanwindow_expanded);
-        //do_test!($runner_fn, $runner_name, test_blackmanwindow_symmetric);
+        do_test!($runner_fn, $runner_name, test_blackmanwindow_symmetric);
         do_test!(
             $runner_fn,
             $runner_name,
@@ -1259,17 +1259,17 @@ macro_rules! do_tests {
         do_test!($runner_fn, $runner_name, test_gru_seq_length);
         do_test!($runner_fn, $runner_name, test_gru_with_initial_bias);
 
-        //do_test!($runner_fn, $runner_name, test_hammingwindow);
+        do_test!($runner_fn, $runner_name, test_hammingwindow);
         do_test!($runner_fn, $runner_name, test_hammingwindow_expanded);
-        //do_test!($runner_fn, $runner_name, test_hammingwindow_symmetric);
+        do_test!($runner_fn, $runner_name, test_hammingwindow_symmetric);
         do_test!(
             $runner_fn,
             $runner_name,
             test_hammingwindow_symmetric_expanded
         );
-        //do_test!($runner_fn, $runner_name, test_hannwindow);
+        do_test!($runner_fn, $runner_name, test_hannwindow);
         do_test!($runner_fn, $runner_name, test_hannwindow_expanded);
-        //do_test!($runner_fn, $runner_name, test_hannwindow_symmetric);
+        do_test!($runner_fn, $runner_name, test_hannwindow_symmetric);
         do_test!($runner_fn, $runner_name, test_hannwindow_symmetric_expanded);
 
         do_test!($runner_fn, $runner_name, test_hardmax_axis_0);
@@ -1687,7 +1687,7 @@ macro_rules! do_tests {
         do_test!($runner_fn, $runner_name, test_matmul_2d);
         do_test!($runner_fn, $runner_name, test_matmul_3d);
         do_test!($runner_fn, $runner_name, test_matmul_4d);
-        //do_test!($runner_fn, $runner_name, test_matmulinteger);
+        do_test!($runner_fn, $runner_name, test_matmulinteger);
         do_test!($runner_fn, $runner_name, test_max_example);
         do_test!($runner_fn, $runner_name, test_max_float16);
         do_test!($runner_fn, $runner_name, test_max_float32);
@@ -1751,7 +1751,7 @@ macro_rules! do_tests {
         do_test!($runner_fn, $runner_name, test_mean_one_input);
         do_test!($runner_fn, $runner_name, test_mean_two_inputs);
 
-        // do_test!($runner_fn, $runner_name, test_melweightmatrix);
+        do_test!($runner_fn, $runner_name, test_melweightmatrix);
 
         do_test!($runner_fn, $runner_name, test_min_example);
         do_test!($runner_fn, $runner_name, test_min_float16);
@@ -2847,7 +2847,7 @@ macro_rules! do_tests {
             test_rms_normalization_default_axis_expanded
         );
 
-        //do_test!($runner_fn, $runner_name, test_rnn_seq_length);
+        do_test!($runner_fn, $runner_name, test_rnn_seq_length);
 
         /*
         do_test!($runner_fn, $runner_name, test_roialign_aligned_false);
