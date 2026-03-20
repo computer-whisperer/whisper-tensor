@@ -1,7 +1,10 @@
+use crate::DynRank;
+use crate::backends::eval_backend::EvalBackend;
 use crate::dtype::DType;
 use crate::graph::{GlobalId, Node, Property, PropertyValue};
 use crate::milli_graph::{MilliLoweringContext, MilliOpGraph};
-use crate::symbolic_graph::ops::Operation;
+use crate::numeric_tensor::NumericTensor;
+use crate::symbolic_graph::ops::{Operation, OperationEvalRet};
 use crate::symbolic_graph::{ONNXDecodingError, query_attribute_float, query_attribute_int};
 use crate::{TrigOp, milli_graph, onnx};
 use rand::Rng;
@@ -1125,6 +1128,17 @@ impl Node for MishOperation {
 }
 
 impl Operation for MishOperation {
+    fn eval(
+        &self,
+        backend: &mut EvalBackend,
+        inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
+    ) -> OperationEvalRet {
+        panic!(
+            "DEBUG: MishOperation::eval IS being called. Backend: {:?}",
+            backend
+        );
+    }
+
     fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, rng: &mut impl Rng) -> MilliOpGraph {
         // Mish(x) = x * tanh(softplus(x))
         // Using numerically stable softplus: max(x, 0) + log1p(exp(-|x|))
