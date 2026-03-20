@@ -560,49 +560,91 @@ fn accuracy_rwkv7() {
 }
 
 // ---------------------------------------------------------------------------
-// Qwen2 0.5B accuracy test
+// HuggingFace transformers model accuracy tests
 // ---------------------------------------------------------------------------
+// All HF models follow the same pattern: find model dir on Ceph,
+// import via identify_and_load(), compare logits to golden snapshot.
 
-#[test]
-fn accuracy_qwen2_05b() {
-    let golden_path = golden_dir().join("qwen2_05b");
-    if !golden_path.join("manifest.json").exists() {
-        eprintln!(
-            "Skipping accuracy_qwen2_05b: no golden snapshot at {}",
-            golden_path.display()
-        );
-        eprintln!(
-            "Generate with: python ci/accuracy/references/hf_causal_lm.py --model /path/to/Qwen2-0.5B --output {}",
-            golden_path.display()
-        );
-        return;
-    }
+/// Generate an accuracy test for a HuggingFace transformers model on Ceph.
+macro_rules! hf_accuracy_test {
+    ($test_name:ident, $model_name:expr, $ceph_subpath:expr, $rtol:expr, $atol:expr) => {
+        #[test]
+        fn $test_name() {
+            let golden_path = golden_dir().join($model_name);
+            if !golden_path.join("manifest.json").exists() {
+                eprintln!(
+                    "Skipping {}: no golden snapshot at {}",
+                    stringify!($test_name),
+                    golden_path.display()
+                );
+                eprintln!(
+                    "Generate with: python ci/accuracy/references/hf_causal_lm.py --model /path/to/{} --output {}",
+                    $ceph_subpath, golden_path.display()
+                );
+                return;
+            }
 
-    // Try multiple paths: CI Ceph mount, then local Ceph
-    let model_dir = ["/models/llms/Qwen2-0.5B", "/ceph/public/neural_models/llms/Qwen2-0.5B"]
-        .iter()
-        .map(PathBuf::from)
-        .find(|p| p.join("config.json").exists());
+            let model_dir = [
+                format!("/models/llms/{}", $ceph_subpath),
+                format!("/ceph/public/neural_models/llms/{}", $ceph_subpath),
+            ]
+            .iter()
+            .map(PathBuf::from)
+            .find(|p| p.join("config.json").exists());
 
-    let Some(model_dir) = model_dir else {
-        eprintln!("Skipping accuracy_qwen2_05b: Qwen2-0.5B not found on Ceph");
-        return;
+            let Some(model_dir) = model_dir else {
+                eprintln!(
+                    "Skipping {}: {} not found on Ceph",
+                    stringify!($test_name),
+                    $ceph_subpath
+                );
+                return;
+            };
+
+            let onnx_data = whisper_tensor_import::identify_and_load(
+                &model_dir,
+                WeightStorageStrategy::EmbeddedData,
+            )
+            .unwrap_or_else(|e| panic!("import {} to ONNX failed: {e}", $ceph_subpath));
+
+            validate_onnx_model(
+                $model_name,
+                &onnx_data,
+                &golden_path,
+                $rtol,
+                $atol,
+                Some(&model_dir),
+            );
+        }
     };
-
-    // Convert HF transformers dir → ONNX via the importer
-    let onnx_data =
-        whisper_tensor_import::identify_and_load(&model_dir, WeightStorageStrategy::EmbeddedData)
-            .expect("import Qwen2-0.5B to ONNX");
-
-    // Qwen2 via HF transformers reference.
-    // Wider tolerance: comparing our ONNX graph builder (BF16 weights, custom RoPE,
-    // GQA attention) against HF transformers running in FP32.
-    validate_onnx_model(
-        "qwen2_05b",
-        &onnx_data,
-        &golden_path,
-        1e-2, // rtol — wider due to BF16→FP32 precision differences
-        1e-3, // atol
-        Some(&model_dir),
-    );
 }
+
+// Qwen2 0.5B — smallest Qwen2, BF16
+hf_accuracy_test!(accuracy_qwen2_05b, "qwen2_05b", "Qwen2-0.5B", 1e-2, 1e-3);
+
+// Qwen3 0.6B — smallest Qwen3
+hf_accuracy_test!(accuracy_qwen3_06b, "qwen3_06b", "Qwen3-0.6B", 1e-2, 1e-3);
+
+// Gemma 2 2B
+hf_accuracy_test!(accuracy_gemma2_2b, "gemma2_2b", "gemma-2-2b-it", 1e-2, 1e-3);
+
+// Llama 3 8B
+hf_accuracy_test!(accuracy_llama3_8b, "llama3_8b", "Llama-3-8B", 1e-2, 1e-3);
+
+// Mistral 7B v0.1
+hf_accuracy_test!(
+    accuracy_mistral_7b,
+    "mistral_7b",
+    "mistralai_Mistral-7B-v0.1",
+    1e-2,
+    1e-3
+);
+
+// Phi-3 mini 4k
+hf_accuracy_test!(
+    accuracy_phi3_mini,
+    "phi3_mini",
+    "Phi-3-mini-4k-instruct-model",
+    1e-2,
+    1e-3
+);

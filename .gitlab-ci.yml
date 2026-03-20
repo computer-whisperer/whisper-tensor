@@ -111,15 +111,52 @@ validate-gpt2:
         --test accuracy accuracy_gpt2
         -- --nocapture
 
-validate-qwen2-05b:
+# --- HuggingFace transformers models (Ceph) ---
+# Template for HF causal LM validation jobs
+.validate-hf-causal-lm:
   extends: .validate-model
-  variables:
-    MODEL_NAME: qwen2_05b
   script:
     - python3 ci/accuracy/references/hf_causal_lm.py
-        --model /models/llms/Qwen2-0.5B
-        --output ${GOLDEN_DIR}/qwen2_05b
+        --model /models/llms/${MODEL_SUBPATH}
+        --output ${GOLDEN_DIR}/${MODEL_NAME}
+        --dtype ${MODEL_DTYPE:-bfloat16}
     - cargo test --release -p whisper-tensor
         --features "${CI_FEATURES}"
-        --test accuracy accuracy_qwen2_05b
+        --test accuracy accuracy_${MODEL_NAME}
         -- --nocapture
+
+validate-qwen2-05b:
+  extends: .validate-hf-causal-lm
+  variables:
+    MODEL_NAME: qwen2_05b
+    MODEL_SUBPATH: Qwen2-0.5B
+
+validate-qwen3-06b:
+  extends: .validate-hf-causal-lm
+  variables:
+    MODEL_NAME: qwen3_06b
+    MODEL_SUBPATH: Qwen3-0.6B
+
+validate-gemma2-2b:
+  extends: .validate-hf-causal-lm
+  variables:
+    MODEL_NAME: gemma2_2b
+    MODEL_SUBPATH: gemma-2-2b-it
+
+validate-llama3-8b:
+  extends: .validate-hf-causal-lm
+  variables:
+    MODEL_NAME: llama3_8b
+    MODEL_SUBPATH: Llama-3-8B
+
+validate-mistral-7b:
+  extends: .validate-hf-causal-lm
+  variables:
+    MODEL_NAME: mistral_7b
+    MODEL_SUBPATH: mistralai_Mistral-7B-v0.1
+
+validate-phi3-mini:
+  extends: .validate-hf-causal-lm
+  variables:
+    MODEL_NAME: phi3_mini
+    MODEL_SUBPATH: Phi-3-mini-4k-instruct-model
