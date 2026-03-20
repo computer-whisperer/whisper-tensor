@@ -122,11 +122,18 @@ pub fn test_tanh_small_fp32(backend: &mut EvalBackend) {
 
 // Mish chain: x * tanh(ln(1 + exp(x))) — each step on the given backend.
 // This reproduces the exact computation that fails in the ONNX Mish test.
+// Uses 10K elements (matching the ONNX test size) because Vulkan kernels
+// may behave differently at scale due to work group scheduling.
 // Each intermediate result is compared against NDArray to isolate where
 // divergence first appears.
 pub fn test_mish_chain_fp32(backend: &mut EvalBackend) {
-    let one_f32 = NumericTensor::from_vec(vec![1.0f32; 5]).to_dyn_rank();
-    let x = NumericTensor::from_vec(vec![-9.998f32, -5.0, 0.0, 1.0, 10.0]).to_dyn_rank();
+    // 10K elements, linearly spaced from -10 to 10 (matches ONNX test_mish input range)
+    let n = 10000;
+    let vals: Vec<f32> = (0..n)
+        .map(|i| -10.0 + 20.0 * (i as f32) / (n as f32 - 1.0))
+        .collect();
+    let one_f32 = NumericTensor::from_vec(vec![1.0f32; n]).to_dyn_rank();
+    let x = NumericTensor::from_vec(vals).to_dyn_rank();
 
     let mut nda = EvalBackend::NDArray;
 
