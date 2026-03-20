@@ -5,7 +5,7 @@ use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
 use whisper_tensor::dtype::DType;
 use whisper_tensor::milli_graph::MilliOpGraph;
 use whisper_tensor::milli_graph::ops::{
-    ArgMax, Cast, Constant, Pad, PadMode, SimpleBinary, SimpleUnaryOp, Unsqueeze,
+    ArgMax, Cast, Constant, SimpleBinary, SimpleUnaryOp, Unsqueeze,
 };
 use whisper_tensor::super_graph::links::{SuperGraphLinkDouble, SuperGraphLinkTriple};
 use whisper_tensor::super_graph::nodes::{
@@ -76,6 +76,7 @@ pub fn build_progress_init(
 }
 
 /// Build the input prep node: cast latent to model_dtype, reshape timestep to [1].
+#[allow(clippy::too_many_arguments)]
 pub fn build_input_prep(
     builder: &mut SuperGraphBuilder,
     rng: &mut impl Rng,

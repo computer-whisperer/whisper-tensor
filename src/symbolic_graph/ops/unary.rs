@@ -784,7 +784,9 @@ impl SeluOperation {
             global_id: GlobalId::new(rng),
             input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("Selu"))?,
             output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("Selu"))?,
+            #[allow(clippy::excessive_precision)]
             alpha: query_attribute_float(attributes, "alpha").unwrap_or(1.6732632423543772),
+            #[allow(clippy::excessive_precision)]
             gamma: query_attribute_float(attributes, "gamma").unwrap_or(1.0507009873554805),
         })
     }

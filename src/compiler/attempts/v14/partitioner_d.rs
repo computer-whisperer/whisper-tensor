@@ -1,4 +1,11 @@
-#![allow(clippy::all, dead_code, unreachable_patterns, unused_imports)]
+#![allow(
+    clippy::all,
+    dead_code,
+    unreachable_patterns,
+    unused_imports,
+    unused_variables,
+    unused_assignments
+)]
 
 //! Hierarchical Decomposition Partitioner (variant D).
 //!

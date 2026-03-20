@@ -4,7 +4,7 @@ use whisper_tensor::metadata::TokenizerInfo;
 use whisper_tensor::model::Model;
 
 use super::shared::interface_helpers::{
-    build_cast_node, build_denoising_loop, build_eos_indices_node, build_vae_decode,
+    build_denoising_loop, build_eos_indices_node, build_vae_decode,
 };
 
 /// Loader for Stable Diffusion XL checkpoints (.safetensors).

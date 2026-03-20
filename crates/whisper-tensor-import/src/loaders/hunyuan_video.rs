@@ -10,9 +10,9 @@ use whisper_tensor::milli_graph::ops::Cast;
 use whisper_tensor::model::Model;
 use whisper_tensor::super_graph::links::{SuperGraphLinkDouble, SuperGraphLinkTriple};
 use whisper_tensor::super_graph::nodes::{
-    SuperGraphNode, SuperGraphNodeMilliOpGraph, SuperGraphNodeModelExecution,
-    SuperGraphNodeReportProgress, SuperGraphNodeScan, SuperGraphNodeTensorToVideoClip,
-    SuperGraphNodeTokenizerEncode, SuperGraphNodeTokenizerEncodeMode, SuperGraphNodeTokenizerLoad,
+    SuperGraphNode, SuperGraphNodeModelExecution, SuperGraphNodeReportProgress, SuperGraphNodeScan,
+    SuperGraphNodeTensorToVideoClip, SuperGraphNodeTokenizerEncode,
+    SuperGraphNodeTokenizerEncodeMode, SuperGraphNodeTokenizerLoad,
 };
 use whisper_tensor::super_graph::{SuperGraphBuilder, SuperGraphLink};
 
@@ -132,7 +132,7 @@ fn load_hunyuan_video(base_path: PathBuf) -> Result<LoaderOutput, LoaderError> {
     };
     let clip_onnx = crate::models::diffusion::sd_clip::build_clip_text_model_with_projection(
         clip_wm,
-        DType::F32,
+        crate::onnx_graph::tensor::DType::F32, // onnx_graph DType, not whisper_tensor DType
         storage.clone(),
         &text_encoder_2_dir,
         "text_model",

@@ -178,7 +178,7 @@ fn hunyuan_condition_embedding(
     config: &HunyuanVideoTransformerConfig,
     model_dtype: DType,
 ) -> Result<Arc<dyn Tensor>, Error> {
-    let inner_dim = config.inner_dim();
+    let _inner_dim = config.inner_dim();
 
     // Sinusoidal timestep embedding (256 channels)
     let timestep = cast(timestep, DType::F32);
@@ -394,7 +394,7 @@ impl HunyuanVideoTransformerConfig {
 }
 
 /// Dual-stream block: separate video/text modulation, joint attention, separate FFN.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn hunyuan_dual_stream_block(
     wm: &impl WeightManager,
     hidden_states: Arc<dyn Tensor>,
@@ -492,6 +492,7 @@ fn hunyuan_dual_stream_block(
 }
 
 /// Dual-stream joint attention with separate video/text Q/K/V projections.
+#[allow(clippy::type_complexity)]
 fn hunyuan_dual_attention(
     wm: &impl WeightManager,
     norm_hidden: Arc<dyn Tensor>,
@@ -596,7 +597,7 @@ fn hunyuan_dual_attention(
 }
 
 /// Single-stream block: concatenated video+text, parallel attention + MLP.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn hunyuan_single_stream_block(
     wm: &impl WeightManager,
     hidden_states: Arc<dyn Tensor>,
@@ -655,6 +656,7 @@ fn hunyuan_single_stream_block(
 }
 
 /// Single-stream attention: unified Q/K/V, RoPE on video portion only.
+#[allow(clippy::type_complexity)]
 fn hunyuan_single_attention(
     wm: &impl WeightManager,
     norm_vid: Arc<dyn Tensor>,
@@ -1139,7 +1141,7 @@ pub fn load_llama3_encoder_with_origin(
             let expand_kv = |x: Arc<dyn Tensor>| -> Result<Arc<dyn Tensor>, Error> {
                 let x = unsqueeze(x, 2)?;
                 let x: Arc<dyn Tensor> = Concat::new(None, vec![x.clone(); n_rep], 2)?;
-                reshape(x, vec![0, num_heads as i64, -1, head_dim as i64])
+                Ok(reshape(x, vec![0, num_heads as i64, -1, head_dim as i64])?)
             };
             (expand_kv(k)?, expand_kv(v)?)
         } else {
@@ -1263,6 +1265,7 @@ fn hunyuan_vae_resnet(
 }
 
 /// Spatial-only attention for VAE mid block (per-frame, using Linear Q/K/V).
+#[allow(clippy::too_many_arguments)]
 fn hunyuan_vae_attention(
     wm: &impl WeightManager,
     input: Arc<dyn Tensor>,

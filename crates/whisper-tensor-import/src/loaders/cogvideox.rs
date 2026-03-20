@@ -151,6 +151,7 @@ fn load_cogvideox(base_path: PathBuf) -> Result<LoaderOutput, LoaderError> {
 
     // Build DiT transformer
     println!("Building CogVideoX DiT transformer...");
+    let num_frames = dit_config.sample_frames;
     let dit_wm = load_safetensors_dir(&transformer_dir)?;
     let dit_onnx = crate::models::diffusion::cogvideox::load_cogvideox_transformer(
         dit_wm,
@@ -187,7 +188,6 @@ fn load_cogvideox(base_path: PathBuf) -> Result<LoaderOutput, LoaderError> {
     }
 
     // Build VideoGenerationInterface
-    let num_frames = dit_config.sample_frames;
     let interface = {
         let mut rng = rand::rng();
         build_cogvideox_interface(

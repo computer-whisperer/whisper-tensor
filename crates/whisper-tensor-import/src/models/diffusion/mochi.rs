@@ -106,7 +106,7 @@ impl MochiVaeConfig {
 /// `pos_frequencies` shape: [3, num_heads, head_dim/2]
 /// Positions are a 3D grid (t, h, w) with area normalization.
 /// Returns (cos_cache, sin_cache) each [video_seq, num_heads * head_dim/2].
-fn precompute_mochi_rope(
+fn _precompute_mochi_rope(
     config: &MochiTransformerConfig,
     pos_frequencies: &[f32],
     latent_frames: usize,
@@ -289,6 +289,7 @@ fn swiglu_ff(
 ///
 /// Video tokens (3072-dim) and text tokens (1536-dim) are projected to 3072-dim,
 /// concatenated for joint attention, then split back with separate output projections.
+#[allow(clippy::type_complexity)]
 fn mochi_joint_attention(
     wm: &impl WeightManager,
     hidden_states: Arc<dyn Tensor>,
@@ -436,7 +437,7 @@ fn modulated_rms_norm(
 }
 
 /// Mochi transformer block (blocks 0-46: full, block 47: context_pre_only).
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn mochi_block(
     wm: &impl WeightManager,
     hidden_states: Arc<dyn Tensor>,
@@ -833,6 +834,7 @@ fn mochi_causal_conv3d(
 }
 
 /// GroupNorm applied per-frame: reshape [B,C,T,H,W] -> [B*T,C,H,W], GroupNorm, reshape back.
+#[allow(clippy::too_many_arguments)]
 fn mochi_group_norm_5d(
     wm: &impl WeightManager,
     input: Arc<dyn Tensor>,

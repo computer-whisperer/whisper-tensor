@@ -1216,6 +1216,10 @@ impl GraphExplorerApp {
                                                             generate_normal_noise(latent_n, sd_data.seed);
                                                         (ts, dt, sigmas, noise)
                                                     }
+                                                    whisper_tensor::interfaces::SchedulerType::DDIMVPrediction => {
+                                                        // Video-only scheduler; not supported in image UI
+                                                        return;
+                                                    }
                                                 };
 
                                                 let latent_tensor =

@@ -296,8 +296,7 @@ pub(super) fn build_sd3_interface(
     latent_channels: usize,
 ) -> whisper_tensor::interfaces::ImageGenerationInterface {
     use super::shared::interface_helpers::{
-        build_cast_node, build_eos_indices_node, build_sd3_denoising_loop,
-        build_vae_decode_with_shift,
+        build_eos_indices_node, build_sd3_denoising_loop, build_vae_decode_with_shift,
     };
     use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
     use whisper_tensor::interfaces::{ImageGenerationInterface, SchedulerType};

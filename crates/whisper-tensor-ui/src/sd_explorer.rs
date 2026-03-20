@@ -231,6 +231,10 @@ impl SDExplorerApp {
                 let noise = generate_normal_noise(latent_n, state.seed);
                 (ts, dt, sigmas, noise)
             }
+            whisper_tensor::interfaces::SchedulerType::DDIMVPrediction => {
+                // Video-only scheduler; UI doesn't support video generation yet
+                return;
+            }
         };
 
         let latent_tensor = NDArrayNumericTensor::from_vec_shape(

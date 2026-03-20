@@ -1,3 +1,12 @@
+#![allow(
+    clippy::all,
+    dead_code,
+    unreachable_patterns,
+    unused_imports,
+    unused_variables,
+    unused_assignments
+)]
+
 //! Span-by-span executor for an ExecutionPlan.
 //!
 //! Evaluates each span's NanoGraph using the memory-efficient evaluator,

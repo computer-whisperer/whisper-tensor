@@ -77,7 +77,7 @@ fn parse_equation(eq: &str) -> Result<(Vec<Vec<char>>, Vec<char>), EvalError> {
         (eq.as_str(), None)
     };
 
-    let input_subs: Vec<Vec<char>> = lhs.split(',').map(|s| parse_subscript(s)).collect();
+    let input_subs: Vec<Vec<char>> = lhs.split(',').map(parse_subscript).collect();
 
     let output_sub = if let Some(r) = rhs {
         parse_subscript(r)

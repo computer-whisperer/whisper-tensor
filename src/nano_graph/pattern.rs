@@ -379,6 +379,7 @@ impl NanoGraph {
     /// Unlike `push_group`, this does NOT allocate sequential IDs.
     /// Used for constructing span NanoGraphs that preserve the main graph's
     /// atom ID space. The RangeMap handles out-of-order insertion.
+    #[allow(clippy::too_many_arguments)]
     pub fn insert_group_at(
         &mut self,
         base_id: AtomId,

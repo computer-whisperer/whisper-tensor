@@ -1,6 +1,5 @@
 use crate::models::diffusion::sd_common::{
-    CastingWeightManager, adaln_modulate, cos_op, layer_norm_bare, ones_constant, sin_op,
-    slice_axis, split_chunks,
+    CastingWeightManager, adaln_modulate, cos_op, sin_op, slice_axis, split_chunks,
 };
 use crate::onnx_graph::Error;
 use crate::onnx_graph::WeightStorageStrategy;
@@ -223,13 +222,14 @@ fn precompute_ltxv_3d_rope(
 /// Returns (temb_6x, embedded_timestep):
 /// - temb_6x: [B, 1, 6 * inner_dim] — global modulation for all blocks
 /// - embedded_timestep: [B, 1, inner_dim] — raw embedding for output norm
+#[allow(clippy::type_complexity)]
 fn ltxv_timestep_embedding(
     wm: &impl WeightManager,
     timestep: Arc<dyn Tensor>,
     config: &LtxVideoTransformerConfig,
     model_dtype: DType,
 ) -> Result<(Arc<dyn Tensor>, Arc<dyn Tensor>), Error> {
-    let inner_dim = config.inner_dim();
+    let _inner_dim = config.inner_dim();
 
     // Sinusoidal embedding (256 channels, flip_sin_to_cos=true)
     let timestep = cast(timestep, DType::F32);

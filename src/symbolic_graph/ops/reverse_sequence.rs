@@ -118,6 +118,7 @@ impl Operation for ReverseSequenceOperation {
         let total: usize = shape.iter().map(|&s| s as usize).product();
         let mut out_flat = vec![0.0f32; total];
 
+        #[allow(clippy::needless_range_loop)]
         for flat_idx in 0..total {
             // Decompose flat index into coordinates
             let mut remaining = flat_idx;

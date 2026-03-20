@@ -1,12 +1,10 @@
 use crate::models::diffusion::sd_common::{
-    CastingWeightManager, adaln_modulate, cos_op, layer_norm_bare, ones_constant, sin_op,
-    slice_axis, split_chunks,
+    CastingWeightManager, adaln_modulate, cos_op, sin_op, slice_axis, split_chunks,
 };
 use crate::onnx_graph::Error;
 use crate::onnx_graph::WeightStorageStrategy;
 use crate::onnx_graph::operators::{
-    Add, Concat, Constant, Conv, LayerNormalization, MatMul, Mul, Resize, RotaryEmbedding, Softmax,
-    Transpose,
+    Add, Concat, Constant, Conv, MatMul, Mul, Resize, RotaryEmbedding, Softmax, Transpose,
 };
 use crate::onnx_graph::pytorch::{
     cast, div_scalar, gelu_pytorch_tanh, linear, reshape, rms_norm, silu, unsqueeze,
@@ -180,6 +178,7 @@ fn precompute_wan_3d_rope(
 /// - temb: [B, dim] — raw time embedding for output norm
 /// - timestep_proj: [B, 1, 6, dim] — per-block modulation
 /// - text_embeds: [B, seq, dim] — projected text
+#[allow(clippy::type_complexity)]
 fn wan_condition_embedding(
     wm: &impl WeightManager,
     timestep: Arc<dyn Tensor>,
@@ -665,7 +664,7 @@ fn wan_causal_conv3d(
 fn wan_rms_norm_5d(
     wm: &impl WeightManager,
     input: Arc<dyn Tensor>,
-    channels: usize,
+    _channels: usize,
     eps: f32,
 ) -> Result<Arc<dyn Tensor>, Error> {
     // Transpose C to last so RMSNorm (axis=-1) operates on channels
@@ -746,6 +745,7 @@ fn wan_vae_spatial_attention(
 }
 
 /// Upsample: nearest-neighbor 3D resize + Conv2d per frame.
+#[allow(clippy::too_many_arguments)]
 fn wan_vae_upsample(
     wm: &impl WeightManager,
     input: Arc<dyn Tensor>,

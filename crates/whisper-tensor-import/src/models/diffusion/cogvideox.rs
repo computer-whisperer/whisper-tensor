@@ -1,12 +1,11 @@
 use crate::models::diffusion::sd_common::{
-    self, CastingWeightManager, adaln_modulate, cos_op, layer_norm_bare, ones_constant, sin_op,
+    CastingWeightManager, adaln_modulate, cos_op, layer_norm_bare, ones_constant, sin_op,
     slice_axis, split_chunks,
 };
 use crate::onnx_graph::Error;
 use crate::onnx_graph::WeightStorageStrategy;
 use crate::onnx_graph::operators::{
-    Add, Concat, Constant, Conv, LayerNormalization, MatMul, Mul, Resize, RotaryEmbedding, Softmax,
-    Transpose,
+    Add, Concat, Constant, Conv, MatMul, Mul, Resize, RotaryEmbedding, Softmax, Transpose,
 };
 use crate::onnx_graph::pytorch::{
     cast, conv2d, div_scalar, gelu_pytorch_tanh, group_norm, linear, reshape, silu, unsqueeze,
@@ -236,6 +235,7 @@ fn cogvideox_timestep_embedding(
 
 // --- CogVideoX Patch Embedding ---
 
+#[allow(clippy::type_complexity)]
 fn cogvideox_patch_embed(
     wm: &impl WeightManager,
     hidden_states: Arc<dyn Tensor>,
@@ -286,6 +286,7 @@ fn cogvideox_patch_embed(
 
 // --- CogVideoX Joint Attention ---
 
+#[allow(clippy::type_complexity)]
 fn cogvideox_attention(
     wm: &impl WeightManager,
     hidden_states: Arc<dyn Tensor>,
@@ -372,6 +373,7 @@ fn cogvideox_attention(
 
 // --- CogVideoX Feed-Forward ---
 
+#[allow(clippy::type_complexity)]
 fn cogvideox_feed_forward(
     wm: &impl WeightManager,
     hidden_states: Arc<dyn Tensor>,
@@ -394,6 +396,7 @@ fn cogvideox_feed_forward(
 
 // --- CogVideoX Transformer Block ---
 
+#[allow(clippy::type_complexity)]
 fn cogvideox_block(
     wm: &impl WeightManager,
     hidden_states: Arc<dyn Tensor>,
@@ -693,6 +696,7 @@ pub struct CogVideoXVaeConfig {
 }
 
 impl CogVideoXVaeConfig {
+    #[allow(clippy::excessive_precision)]
     pub fn cogvideox_2b() -> Self {
         Self {
             in_channels: 3,
@@ -817,6 +821,7 @@ fn resize_nearest_3d(
 
 /// SpatialNorm3D: GroupNorm conditioned on interpolated latent input.
 /// output = GroupNorm(x) * conv_y(interpolate(zq)) + conv_b(interpolate(zq))
+#[allow(clippy::too_many_arguments)]
 fn spatial_norm_3d(
     wm: &impl WeightManager,
     input: Arc<dyn Tensor>,
@@ -844,6 +849,7 @@ fn spatial_norm_3d(
 }
 
 /// VAE ResNet block with SpatialNorm3D.
+#[allow(clippy::too_many_arguments)]
 fn vae_resnet_block(
     wm: &impl WeightManager,
     input: Arc<dyn Tensor>,
@@ -906,6 +912,7 @@ fn vae_resnet_block(
 /// Upsample: spatial-only or spatial+temporal.
 /// Spatial: F.interpolate(scale=2) per spatial dims + Conv2d(k=3,s=1,pad=1)
 /// Temporal: also doubles the temporal dim.
+#[allow(clippy::too_many_arguments)]
 fn vae_upsample(
     wm: &impl WeightManager,
     input: Arc<dyn Tensor>,

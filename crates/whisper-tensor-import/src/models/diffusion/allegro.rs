@@ -1,6 +1,5 @@
 use crate::models::diffusion::sd_common::{
-    CastingWeightManager, adaln_modulate, cos_op, layer_norm_bare, ones_constant, sin_op,
-    slice_axis, split_chunks,
+    CastingWeightManager, adaln_modulate, cos_op, sin_op, slice_axis, split_chunks,
 };
 use crate::onnx_graph::Error;
 use crate::onnx_graph::WeightStorageStrategy;
@@ -178,13 +177,14 @@ fn precompute_allegro_3d_rope(
 /// Returns (temb_6x, embedded_timestep):
 /// - temb_6x: [B, 1, 6 * inner_dim] — global modulation for all blocks
 /// - embedded_timestep: [B, 1, inner_dim] — raw embedding for output norm
+#[allow(clippy::type_complexity)]
 fn allegro_timestep_embedding(
     wm: &impl WeightManager,
     timestep: Arc<dyn Tensor>,
     config: &AllegroTransformerConfig,
     model_dtype: DType,
 ) -> Result<(Arc<dyn Tensor>, Arc<dyn Tensor>), Error> {
-    let inner_dim = config.inner_dim();
+    let _inner_dim = config.inner_dim();
 
     // Sinusoidal embedding (256 channels)
     let timestep = cast(timestep, DType::F32);
@@ -246,6 +246,7 @@ fn allegro_caption_projection(
 ///
 /// RoPE is applied by splitting Q/K into 3 chunks of 32 dims, applying
 /// non-interleaved rotation per axis, then concatenating.
+#[allow(clippy::type_complexity, clippy::needless_range_loop)]
 fn allegro_self_attention(
     wm: &impl WeightManager,
     hidden_states: Arc<dyn Tensor>,
@@ -374,6 +375,7 @@ fn allegro_cross_attention(
 /// 2. Self-attention with per-axis 3D RoPE + gating
 /// 3. Cross-attention (ungated residual, no query pre-norm)
 /// 4. FFN with AdaLN + gating
+#[allow(clippy::type_complexity)]
 fn allegro_block(
     wm: &impl WeightManager,
     hidden_states: Arc<dyn Tensor>,
@@ -606,6 +608,7 @@ pub fn load_allegro_vae_decoder(
     load_allegro_vae_decoder_with_origin(weight_manager, config, output_method, None)
 }
 
+#[allow(clippy::needless_range_loop)]
 pub fn load_allegro_vae_decoder_with_origin(
     weight_manager: impl WeightManager,
     config: AllegroVaeConfig,
@@ -822,6 +825,7 @@ pub fn load_allegro_vae_decoder_with_origin(
 }
 
 /// Apply Conv2d per frame: [B, C, T, H, W] -> per-frame -> [B, C_out, T, H_out, W_out]
+#[allow(clippy::too_many_arguments)]
 fn allegro_per_frame_conv2d(
     wm: &impl WeightManager,
     input: Arc<dyn Tensor>,
@@ -849,6 +853,7 @@ fn allegro_per_frame_conv2d(
 }
 
 /// GroupNorm per frame.
+#[allow(clippy::too_many_arguments)]
 fn allegro_per_frame_group_norm(
     wm: &impl WeightManager,
     input: Arc<dyn Tensor>,
@@ -1028,7 +1033,7 @@ fn allegro_vae_spatial_upsample(
 fn allegro_vae_temporal_upsample(
     wm: &impl WeightManager,
     input: Arc<dyn Tensor>,
-    channels: usize,
+    _channels: usize,
     cur_t: usize,
     cur_h: usize,
     cur_w: usize,
