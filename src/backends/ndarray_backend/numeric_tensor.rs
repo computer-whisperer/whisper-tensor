@@ -42,7 +42,7 @@ pub enum NDArrayNumericTensor<R: Rank> {
     F32(ArcArray<f32, R::NDArrayDim>),
     BF16(ArcArray<bf16, R::NDArrayDim>),
     F16(ArcArray<f16, R::NDArrayDim>),
-    F8E4M3(ArcArray<F8E4M3, R::NDArrayDim>),
+    F8E4M3FN(ArcArray<F8E4M3, R::NDArrayDim>),
     F8E5M2(ArcArray<F8E5M2, R::NDArrayDim>),
     U64(ArcArray<u64, R::NDArrayDim>),
     I64(ArcArray<i64, R::NDArrayDim>),
@@ -63,7 +63,7 @@ impl<R: Rank> Display for NDArrayNumericTensor<R> {
             NDArrayNumericTensor::F32(x) => x.fmt(f),
             NDArrayNumericTensor::BF16(x) => x.fmt(f),
             NDArrayNumericTensor::F16(x) => x.fmt(f),
-            NDArrayNumericTensor::F8E4M3(x) => x.fmt(f),
+            NDArrayNumericTensor::F8E4M3FN(x) => x.fmt(f),
             NDArrayNumericTensor::F8E5M2(x) => x.fmt(f),
             NDArrayNumericTensor::U64(x) => x.fmt(f),
             NDArrayNumericTensor::I64(x) => x.fmt(f),
@@ -96,8 +96,8 @@ impl<R: Rank> NDArrayNumericTensor<R> {
             NDArrayNumericTensor::<R>::F16(x) => {
                 NDArrayNumericTensor::<R1>::F16(x.to_owned().into_dimensionality()?.to_shared())
             }
-            NDArrayNumericTensor::<R>::F8E4M3(x) => {
-                NDArrayNumericTensor::<R1>::F8E4M3(x.to_owned().into_dimensionality()?.to_shared())
+            NDArrayNumericTensor::<R>::F8E4M3FN(x) => {
+                NDArrayNumericTensor::<R1>::F8E4M3FN(x.to_owned().into_dimensionality()?.to_shared())
             }
             NDArrayNumericTensor::<R>::F8E5M2(x) => {
                 NDArrayNumericTensor::<R1>::F8E5M2(x.to_owned().into_dimensionality()?.to_shared())
@@ -149,7 +149,7 @@ impl<R: Rank> NDArrayNumericTensor<R> {
             NDArrayNumericTensor::F32(_) => DType::F32,
             NDArrayNumericTensor::BF16(_) => DType::BF16,
             NDArrayNumericTensor::F16(_) => DType::F16,
-            NDArrayNumericTensor::F8E4M3(_) => DType::F8E4M3,
+            NDArrayNumericTensor::F8E4M3FN(_) => DType::F8E4M3FN,
             NDArrayNumericTensor::F8E5M2(_) => DType::F8E5M2,
             NDArrayNumericTensor::U64(_) => DType::U64,
             NDArrayNumericTensor::I64(_) => DType::I64,
@@ -170,7 +170,7 @@ impl<R: Rank> NDArrayNumericTensor<R> {
             NDArrayNumericTensor::F64(x) => x.shape(),
             NDArrayNumericTensor::F16(x) => x.shape(),
             NDArrayNumericTensor::BF16(x) => x.shape(),
-            NDArrayNumericTensor::F8E4M3(x) => x.shape(),
+            NDArrayNumericTensor::F8E4M3FN(x) => x.shape(),
             NDArrayNumericTensor::F8E5M2(x) => x.shape(),
             NDArrayNumericTensor::U32(x) => x.shape(),
             NDArrayNumericTensor::I32(x) => x.shape(),
@@ -193,7 +193,7 @@ impl<R: Rank> NDArrayNumericTensor<R> {
             NDArrayNumericTensor::F64(x) => x.len(),
             NDArrayNumericTensor::F16(x) => x.len(),
             NDArrayNumericTensor::BF16(x) => x.len(),
-            NDArrayNumericTensor::F8E4M3(x) => x.len(),
+            NDArrayNumericTensor::F8E4M3FN(x) => x.len(),
             NDArrayNumericTensor::F8E5M2(x) => x.len(),
             NDArrayNumericTensor::U32(x) => x.len(),
             NDArrayNumericTensor::I32(x) => x.len(),
@@ -215,7 +215,7 @@ impl<R: Rank> NDArrayNumericTensor<R> {
             NDArrayNumericTensor::F32(x) => NumericScalar::F32(*x.get(index)?),
             NDArrayNumericTensor::BF16(x) => NumericScalar::BF16(*x.get(index)?),
             NDArrayNumericTensor::F16(x) => NumericScalar::F16(*x.get(index)?),
-            NDArrayNumericTensor::F8E4M3(x) => NumericScalar::F8E4M3(*x.get(index)?),
+            NDArrayNumericTensor::F8E4M3FN(x) => NumericScalar::F8E4M3FN(*x.get(index)?),
             NDArrayNumericTensor::F8E5M2(x) => NumericScalar::F8E5M2(*x.get(index)?),
             NDArrayNumericTensor::I64(x) => NumericScalar::I64(*x.get(index)?),
             NDArrayNumericTensor::U64(x) => NumericScalar::U64(*x.get(index)?),
@@ -238,8 +238,8 @@ impl<R: Rank> NDArrayNumericTensor<R> {
                 NumericScalar::BF16(x.to_owned().as_slice().unwrap()[0])
             }
             NDArrayNumericTensor::F16(x) => NumericScalar::F16(x.to_owned().as_slice().unwrap()[0]),
-            NDArrayNumericTensor::F8E4M3(x) => {
-                NumericScalar::F8E4M3(x.to_owned().as_slice().unwrap()[0])
+            NDArrayNumericTensor::F8E4M3FN(x) => {
+                NumericScalar::F8E4M3FN(x.to_owned().as_slice().unwrap()[0])
             }
             NDArrayNumericTensor::F8E5M2(x) => {
                 NumericScalar::F8E5M2(x.to_owned().as_slice().unwrap()[0])
@@ -307,7 +307,7 @@ impl<R: Rank> NDArrayNumericTensor<R> {
                 }
                 Self::from_slice_shape_stride(v, shape, stride)?
             }
-            DType::F8E4M3 => {
+            DType::F8E4M3FN => {
                 let v: Vec<_> = bytes
                     .iter()
                     .take(shape.dim_product() as usize)
@@ -422,8 +422,8 @@ impl<R: Rank> NDArrayNumericTensor<R> {
             NDArrayNumericTensor::F64(a) => Some(NDArrayNumericTensor::F64(op.apply(a.clone())?)),
             NDArrayNumericTensor::F16(a) => Some(NDArrayNumericTensor::F16(op.apply(a.clone())?)),
             NDArrayNumericTensor::BF16(a) => Some(NDArrayNumericTensor::BF16(op.apply(a.clone())?)),
-            NDArrayNumericTensor::F8E4M3(a) => {
-                Some(NDArrayNumericTensor::F8E4M3(op.apply(a.clone())?))
+            NDArrayNumericTensor::F8E4M3FN(a) => {
+                Some(NDArrayNumericTensor::F8E4M3FN(op.apply(a.clone())?))
             }
             NDArrayNumericTensor::F8E5M2(a) => {
                 Some(NDArrayNumericTensor::F8E5M2(op.apply(a.clone())?))
@@ -452,7 +452,7 @@ impl<R: Rank> NDArrayNumericTensor<R> {
                 x.map(|x| f16::from_f32(x.to_f32().round_ties_even()))
                     .to_shared(),
             ),
-            NDArrayNumericTensor::F8E4M3(x) => NDArrayNumericTensor::F8E4M3(
+            NDArrayNumericTensor::F8E4M3FN(x) => NDArrayNumericTensor::F8E4M3FN(
                 x.map(|x| F8E4M3::from_f32(x.to_f32().round_ties_even()))
                     .to_shared(),
             ),
@@ -506,7 +506,7 @@ impl<R: Rank> NDArrayNumericTensor<R> {
                 x.map(|&v| half::f16::from_f32(erf_f32(v.to_f32())))
                     .to_shared(),
             ),
-            NDArrayNumericTensor::F8E4M3(x) => NDArrayNumericTensor::F8E4M3(
+            NDArrayNumericTensor::F8E4M3FN(x) => NDArrayNumericTensor::F8E4M3FN(
                 x.map(|&v| F8E4M3::from_f32(erf_f32(v.to_f32())))
                     .to_shared(),
             ),
@@ -527,7 +527,7 @@ impl<R: Rank> NDArrayNumericTensor<R> {
             NDArrayNumericTensor::F64(x) => NDArrayNumericTensor::F64(x.abs().to_shared()),
             NDArrayNumericTensor::BF16(x) => NDArrayNumericTensor::BF16(x.abs().to_shared()),
             NDArrayNumericTensor::F16(x) => NDArrayNumericTensor::F16(x.abs().to_shared()),
-            NDArrayNumericTensor::F8E4M3(x) => NDArrayNumericTensor::F8E4M3(x.abs().to_shared()),
+            NDArrayNumericTensor::F8E4M3FN(x) => NDArrayNumericTensor::F8E4M3FN(x.abs().to_shared()),
             NDArrayNumericTensor::F8E5M2(x) => NDArrayNumericTensor::F8E5M2(x.abs().to_shared()),
             NDArrayNumericTensor::I64(x) => {
                 NDArrayNumericTensor::I64(x.map(|x| x.abs()).to_shared())
@@ -566,8 +566,8 @@ impl<R: Rank> NDArrayNumericTensor<R> {
             NDArrayNumericTensor::F16(x) => {
                 NDArrayNumericTensor::F16(x.map(|x| x.max(f16::from_f32(min))).to_shared())
             }
-            NDArrayNumericTensor::F8E4M3(x) => {
-                NDArrayNumericTensor::F8E4M3(x.map(|x| x.max(F8E4M3::from_f32(min))).to_shared())
+            NDArrayNumericTensor::F8E4M3FN(x) => {
+                NDArrayNumericTensor::F8E4M3FN(x.map(|x| x.max(F8E4M3::from_f32(min))).to_shared())
             }
             NDArrayNumericTensor::F8E5M2(x) => {
                 NDArrayNumericTensor::F8E5M2(x.map(|x| x.max(F8E5M2::from_f32(min))).to_shared())
@@ -611,8 +611,8 @@ impl<R: Rank> NDArrayNumericTensor<R> {
             NDArrayNumericTensor::F16(x) => {
                 NDArrayNumericTensor::F16(x.map(|x| x.max(f16::ZERO)).to_shared())
             }
-            NDArrayNumericTensor::F8E4M3(x) => {
-                NDArrayNumericTensor::F8E4M3(x.map(|x| x.max(F8E4M3::from_f32(0.0))).to_shared())
+            NDArrayNumericTensor::F8E4M3FN(x) => {
+                NDArrayNumericTensor::F8E4M3FN(x.map(|x| x.max(F8E4M3::from_f32(0.0))).to_shared())
             }
             NDArrayNumericTensor::F8E5M2(x) => {
                 NDArrayNumericTensor::F8E5M2(x.map(|x| x.max(F8E5M2::from_f32(0.0))).to_shared())
@@ -668,7 +668,7 @@ impl<R: Rank> NDArrayNumericTensor<R> {
             NDArrayNumericTensor::F64(x) => NDArrayNumericTensor::F64(x.sqrt().to_shared()),
             NDArrayNumericTensor::BF16(x) => NDArrayNumericTensor::BF16(x.sqrt().to_shared()),
             NDArrayNumericTensor::F16(x) => NDArrayNumericTensor::F16(x.sqrt().to_shared()),
-            NDArrayNumericTensor::F8E4M3(x) => NDArrayNumericTensor::F8E4M3(x.sqrt().to_shared()),
+            NDArrayNumericTensor::F8E4M3FN(x) => NDArrayNumericTensor::F8E4M3FN(x.sqrt().to_shared()),
             NDArrayNumericTensor::F8E5M2(x) => NDArrayNumericTensor::F8E5M2(x.sqrt().to_shared()),
             _ => Err(NDArrayNumericTensorError::UnsupportedOperationForDTypes(
                 "sqrt".to_string(),
@@ -710,7 +710,7 @@ impl<R: Rank> NDArrayNumericTensor<R> {
             NDArrayNumericTensor::F64(x) => NDArrayNumericTensor::F64(x.recip().to_shared()),
             NDArrayNumericTensor::BF16(x) => NDArrayNumericTensor::BF16(x.recip().to_shared()),
             NDArrayNumericTensor::F16(x) => NDArrayNumericTensor::F16(x.recip().to_shared()),
-            NDArrayNumericTensor::F8E4M3(x) => NDArrayNumericTensor::F8E4M3(x.recip().to_shared()),
+            NDArrayNumericTensor::F8E4M3FN(x) => NDArrayNumericTensor::F8E4M3FN(x.recip().to_shared()),
             NDArrayNumericTensor::F8E5M2(x) => NDArrayNumericTensor::F8E5M2(x.recip().to_shared()),
             _ => Err(NDArrayNumericTensorError::UnsupportedOperationForDTypes(
                 "recip".to_string(),
@@ -730,7 +730,7 @@ impl<R: Rank> NDArrayNumericTensor<R> {
                 DType::BF16 => Ok(NDArrayNumericTensor::BF16(
                     x.map(|x| bf16::from_f32(*x)).to_shared(),
                 )),
-                DType::F8E4M3 => Ok(NDArrayNumericTensor::F8E4M3(
+                DType::F8E4M3FN => Ok(NDArrayNumericTensor::F8E4M3FN(
                     x.map(|x| F8E4M3::from_f32(*x)).to_shared(),
                 )),
                 DType::F8E5M2 => Ok(NDArrayNumericTensor::F8E5M2(
@@ -759,7 +759,7 @@ impl<R: Rank> NDArrayNumericTensor<R> {
                 DType::BF16 => Ok(NDArrayNumericTensor::BF16(
                     x.map(|x| bf16::from_f64(*x)).to_shared(),
                 )),
-                DType::F8E4M3 => Ok(NDArrayNumericTensor::F8E4M3(
+                DType::F8E4M3FN => Ok(NDArrayNumericTensor::F8E4M3FN(
                     x.map(|x| F8E4M3::from_f64(*x)).to_shared(),
                 )),
                 DType::F8E5M2 => Ok(NDArrayNumericTensor::F8E5M2(
@@ -786,7 +786,7 @@ impl<R: Rank> NDArrayNumericTensor<R> {
                 DType::BF16 => Ok(NDArrayNumericTensor::BF16(
                     x.map(|x| bf16::from_f32(x.to_f32())).to_shared(),
                 )),
-                DType::F8E4M3 => Ok(NDArrayNumericTensor::F8E4M3(
+                DType::F8E4M3FN => Ok(NDArrayNumericTensor::F8E4M3FN(
                     x.map(|x| F8E4M3::from_f32(x.to_f32())).to_shared(),
                 )),
                 DType::F8E5M2 => Ok(NDArrayNumericTensor::F8E5M2(
@@ -831,7 +831,7 @@ impl<R: Rank> NDArrayNumericTensor<R> {
                     x.map(|x| f16::from_f32(x.to_f32())).to_shared(),
                 )),
                 DType::BF16 => Ok(NDArrayNumericTensor::BF16(x.clone())),
-                DType::F8E4M3 => Ok(NDArrayNumericTensor::F8E4M3(
+                DType::F8E4M3FN => Ok(NDArrayNumericTensor::F8E4M3FN(
                     x.map(|x| F8E4M3::from_f32(x.to_f32())).to_shared(),
                 )),
                 DType::F8E5M2 => Ok(NDArrayNumericTensor::F8E5M2(
@@ -878,7 +878,7 @@ impl<R: Rank> NDArrayNumericTensor<R> {
                 DType::BF16 => Ok(NDArrayNumericTensor::BF16(
                     x.map(|x| bf16::from_f32(*x as f32)).to_shared(),
                 )),
-                DType::F8E4M3 => Ok(NDArrayNumericTensor::F8E4M3(
+                DType::F8E4M3FN => Ok(NDArrayNumericTensor::F8E4M3FN(
                     x.map(|x| F8E4M3::from_f32(*x as f32)).to_shared(),
                 )),
                 DType::F8E5M2 => Ok(NDArrayNumericTensor::F8E5M2(
@@ -907,7 +907,7 @@ impl<R: Rank> NDArrayNumericTensor<R> {
                 DType::BF16 => Ok(NDArrayNumericTensor::BF16(
                     x.map(|x| bf16::from_f32(*x as f32)).to_shared(),
                 )),
-                DType::F8E4M3 => Ok(NDArrayNumericTensor::F8E4M3(
+                DType::F8E4M3FN => Ok(NDArrayNumericTensor::F8E4M3FN(
                     x.map(|x| F8E4M3::from_f32(*x as f32)).to_shared(),
                 )),
                 DType::F8E5M2 => Ok(NDArrayNumericTensor::F8E5M2(
@@ -936,7 +936,7 @@ impl<R: Rank> NDArrayNumericTensor<R> {
                 DType::BF16 => Ok(NDArrayNumericTensor::BF16(
                     x.map(|x| bf16::from_f32(*x as f32)).to_shared(),
                 )),
-                DType::F8E4M3 => Ok(NDArrayNumericTensor::F8E4M3(
+                DType::F8E4M3FN => Ok(NDArrayNumericTensor::F8E4M3FN(
                     x.map(|x| F8E4M3::from_f32(*x as f32)).to_shared(),
                 )),
                 DType::F8E5M2 => Ok(NDArrayNumericTensor::F8E5M2(
@@ -965,7 +965,7 @@ impl<R: Rank> NDArrayNumericTensor<R> {
                 DType::BF16 => Ok(NDArrayNumericTensor::BF16(
                     x.map(|x| bf16::from_f32(*x as f32)).to_shared(),
                 )),
-                DType::F8E4M3 => Ok(NDArrayNumericTensor::F8E4M3(
+                DType::F8E4M3FN => Ok(NDArrayNumericTensor::F8E4M3FN(
                     x.map(|x| F8E4M3::from_f32(*x as f32)).to_shared(),
                 )),
                 DType::F8E5M2 => Ok(NDArrayNumericTensor::F8E5M2(
@@ -994,7 +994,7 @@ impl<R: Rank> NDArrayNumericTensor<R> {
                 DType::BF16 => Ok(NDArrayNumericTensor::BF16(
                     x.map(|x| bf16::from_f32(*x as f32)).to_shared(),
                 )),
-                DType::F8E4M3 => Ok(NDArrayNumericTensor::F8E4M3(
+                DType::F8E4M3FN => Ok(NDArrayNumericTensor::F8E4M3FN(
                     x.map(|x| F8E4M3::from_f32(*x as f32)).to_shared(),
                 )),
                 DType::F8E5M2 => Ok(NDArrayNumericTensor::F8E5M2(
@@ -1023,7 +1023,7 @@ impl<R: Rank> NDArrayNumericTensor<R> {
                 DType::BF16 => Ok(NDArrayNumericTensor::BF16(
                     x.map(|x| bf16::from_f32(*x as f32)).to_shared(),
                 )),
-                DType::F8E4M3 => Ok(NDArrayNumericTensor::F8E4M3(
+                DType::F8E4M3FN => Ok(NDArrayNumericTensor::F8E4M3FN(
                     x.map(|x| F8E4M3::from_f32(*x as f32)).to_shared(),
                 )),
                 DType::F8E5M2 => Ok(NDArrayNumericTensor::F8E5M2(
@@ -1052,7 +1052,7 @@ impl<R: Rank> NDArrayNumericTensor<R> {
                 DType::BF16 => Ok(NDArrayNumericTensor::BF16(
                     x.map(|x| bf16::from_f32(*x as f32)).to_shared(),
                 )),
-                DType::F8E4M3 => Ok(NDArrayNumericTensor::F8E4M3(
+                DType::F8E4M3FN => Ok(NDArrayNumericTensor::F8E4M3FN(
                     x.map(|x| F8E4M3::from_f32(*x as f32)).to_shared(),
                 )),
                 DType::F8E5M2 => Ok(NDArrayNumericTensor::F8E5M2(
@@ -1081,7 +1081,7 @@ impl<R: Rank> NDArrayNumericTensor<R> {
                 DType::BF16 => Ok(NDArrayNumericTensor::BF16(
                     x.map(|x| bf16::from_f32(*x as f32)).to_shared(),
                 )),
-                DType::F8E4M3 => Ok(NDArrayNumericTensor::F8E4M3(
+                DType::F8E4M3FN => Ok(NDArrayNumericTensor::F8E4M3FN(
                     x.map(|x| F8E4M3::from_f32(*x as f32)).to_shared(),
                 )),
                 DType::F8E5M2 => Ok(NDArrayNumericTensor::F8E5M2(
@@ -1101,7 +1101,7 @@ impl<R: Rank> NDArrayNumericTensor<R> {
                     vec![dtype],
                 ))?,
             },
-            NDArrayNumericTensor::F8E4M3(x) => match dtype {
+            NDArrayNumericTensor::F8E4M3FN(x) => match dtype {
                 DType::F32 => Ok(NDArrayNumericTensor::F32(x.map(|x| x.to_f32()).to_shared())),
                 DType::F64 => Ok(NDArrayNumericTensor::F64(x.map(|x| x.to_f64()).to_shared())),
                 DType::F16 => Ok(NDArrayNumericTensor::F16(
@@ -1110,7 +1110,7 @@ impl<R: Rank> NDArrayNumericTensor<R> {
                 DType::BF16 => Ok(NDArrayNumericTensor::BF16(
                     x.map(|x| bf16::from_f32(x.to_f32())).to_shared(),
                 )),
-                DType::F8E4M3 => Ok(NDArrayNumericTensor::F8E4M3(x.clone())),
+                DType::F8E4M3FN => Ok(NDArrayNumericTensor::F8E4M3FN(x.clone())),
                 DType::F8E5M2 => Ok(NDArrayNumericTensor::F8E5M2(
                     x.map(|x| F8E5M2::from_f32(x.to_f32())).to_shared(),
                 )),
@@ -1152,7 +1152,7 @@ impl<R: Rank> NDArrayNumericTensor<R> {
                 DType::BF16 => Ok(NDArrayNumericTensor::BF16(
                     x.map(|x| bf16::from_f32(x.to_f32())).to_shared(),
                 )),
-                DType::F8E4M3 => Ok(NDArrayNumericTensor::F8E4M3(
+                DType::F8E4M3FN => Ok(NDArrayNumericTensor::F8E4M3FN(
                     x.map(|x| F8E4M3::from_f32(x.to_f32())).to_shared(),
                 )),
                 DType::F8E5M2 => Ok(NDArrayNumericTensor::F8E5M2(x.clone())),
@@ -1200,7 +1200,7 @@ impl<R: Rank> NDArrayNumericTensor<R> {
                     x.map(|x| f16::from_f32(if *x { 1.0 } else { 0.0 }))
                         .to_shared(),
                 )),
-                DType::F8E4M3 => Ok(NDArrayNumericTensor::F8E4M3(
+                DType::F8E4M3FN => Ok(NDArrayNumericTensor::F8E4M3FN(
                     x.map(|x| F8E4M3::from_f32(if *x { 1.0 } else { 0.0 }))
                         .to_shared(),
                 )),
@@ -1243,8 +1243,8 @@ impl<R: Rank> NDArrayNumericTensor<R> {
             NDArrayNumericTensor::F16(x) => {
                 NDArrayNumericTensor::<P1>::F16(x.flatten().to_shared())
             }
-            NDArrayNumericTensor::F8E4M3(x) => {
-                NDArrayNumericTensor::<P1>::F8E4M3(x.flatten().to_shared())
+            NDArrayNumericTensor::F8E4M3FN(x) => {
+                NDArrayNumericTensor::<P1>::F8E4M3FN(x.flatten().to_shared())
             }
             NDArrayNumericTensor::F8E5M2(x) => {
                 NDArrayNumericTensor::<P1>::F8E5M2(x.flatten().to_shared())
@@ -1297,7 +1297,7 @@ impl<R: Rank> NDArrayNumericTensor<R> {
                 x.clone(),
                 new_shape,
             )?)),
-            NDArrayNumericTensor::F8E4M3(x) => Ok(NDArrayNumericTensor::F8E4M3(ops::reshape(
+            NDArrayNumericTensor::F8E4M3FN(x) => Ok(NDArrayNumericTensor::F8E4M3FN(ops::reshape(
                 x.clone(),
                 new_shape,
             )?)),
@@ -1362,7 +1362,7 @@ impl<R: Rank> NDArrayNumericTensor<R> {
             NDArrayNumericTensor::F16(x) => {
                 NDArrayNumericTensor::BOOL(x.map(|x| x.is_nan()).to_shared())
             }
-            NDArrayNumericTensor::F8E4M3(x) => {
+            NDArrayNumericTensor::F8E4M3FN(x) => {
                 NDArrayNumericTensor::BOOL(x.map(|x| x.is_nan()).to_shared())
             }
             NDArrayNumericTensor::F8E5M2(x) => {
@@ -1413,7 +1413,7 @@ impl<R: Rank> NDArrayNumericTensor<R> {
                 })
                 .to_shared(),
             ),
-            NDArrayNumericTensor::F8E4M3(x) => NDArrayNumericTensor::BOOL(
+            NDArrayNumericTensor::F8E4M3FN(x) => NDArrayNumericTensor::BOOL(
                 x.map(|x| {
                     x.is_infinite()
                         && ((detect_positive && x.is_sign_positive())
@@ -1466,7 +1466,7 @@ impl<R: Rank> NDArrayNumericTensor<R> {
                 })
                 .to_shared(),
             ),
-            NDArrayNumericTensor::F8E4M3(x) => NDArrayNumericTensor::F8E4M3(
+            NDArrayNumericTensor::F8E4M3FN(x) => NDArrayNumericTensor::F8E4M3FN(
                 x.map(|x| {
                     if x.to_f32() == 0.0 {
                         F8E4M3::from_f32(0.0)
@@ -1527,7 +1527,7 @@ impl<R: Rank> NDArrayNumericTensor<R> {
             NumericScalar::F32(x) => Self::F32(ArcArray::from_elem(shape, x)),
             NumericScalar::BF16(x) => Self::BF16(ArcArray::from_elem(shape, x)),
             NumericScalar::F16(x) => Self::F16(ArcArray::from_elem(shape, x)),
-            NumericScalar::F8E4M3(x) => Self::F8E4M3(ArcArray::from_elem(shape, x)),
+            NumericScalar::F8E4M3FN(x) => Self::F8E4M3FN(ArcArray::from_elem(shape, x)),
             NumericScalar::F8E5M2(x) => Self::F8E5M2(ArcArray::from_elem(shape, x)),
             NumericScalar::U64(x) => Self::U64(ArcArray::from_elem(shape, x)),
             NumericScalar::I64(x) => Self::I64(ArcArray::from_elem(shape, x)),
@@ -1552,8 +1552,8 @@ impl<R: Rank> NDArrayNumericTensor<R> {
             NDArrayNumericTensor::F16(x) => {
                 Self::F16(ArcArray::from_elem(x.dim(), f16::from_f32(1.0)))
             }
-            NDArrayNumericTensor::F8E4M3(x) => {
-                Self::F8E4M3(ArcArray::from_elem(x.dim(), F8E4M3::from_f32(1.0)))
+            NDArrayNumericTensor::F8E4M3FN(x) => {
+                Self::F8E4M3FN(ArcArray::from_elem(x.dim(), F8E4M3::from_f32(1.0)))
             }
             NDArrayNumericTensor::F8E5M2(x) => {
                 Self::F8E5M2(ArcArray::from_elem(x.dim(), F8E5M2::from_f32(1.0)))
@@ -1599,8 +1599,8 @@ where
             NDArrayNumericTensor::F16(x) => {
                 Self::F16(ops::cumsum_nd(x.clone(), axis, exclusive, reverse)?)
             }
-            NDArrayNumericTensor::F8E4M3(x) => {
-                Self::F8E4M3(ops::cumsum_nd(x.clone(), axis, exclusive, reverse)?)
+            NDArrayNumericTensor::F8E4M3FN(x) => {
+                Self::F8E4M3FN(ops::cumsum_nd(x.clone(), axis, exclusive, reverse)?)
             }
             NDArrayNumericTensor::F8E5M2(x) => {
                 Self::F8E5M2(ops::cumsum_nd(x.clone(), axis, exclusive, reverse)?)
@@ -1647,8 +1647,8 @@ impl<R: Rank> core::ops::Neg for NDArrayNumericTensor<R> {
             NDArrayNumericTensor::F64(x) => NDArrayNumericTensor::F64(x.map(|x| -x).to_shared()),
             NDArrayNumericTensor::BF16(x) => NDArrayNumericTensor::BF16(x.map(|x| -x).to_shared()),
             NDArrayNumericTensor::F16(x) => NDArrayNumericTensor::F16(x.map(|x| -x).to_shared()),
-            NDArrayNumericTensor::F8E4M3(x) => {
-                NDArrayNumericTensor::F8E4M3(x.map(|x| F8E4M3::from_f32(-x.to_f32())).to_shared())
+            NDArrayNumericTensor::F8E4M3FN(x) => {
+                NDArrayNumericTensor::F8E4M3FN(x.map(|x| F8E4M3::from_f32(-x.to_f32())).to_shared())
             }
             NDArrayNumericTensor::F8E5M2(x) => {
                 NDArrayNumericTensor::F8E5M2(x.map(|x| F8E5M2::from_f32(-x.to_f32())).to_shared())
@@ -2062,7 +2062,7 @@ impl NDArrayNumericTensor<DynRank> {
             NDArrayNumericTensor::F64(x) => NDArrayNumericTensor::I64(ops::nonzero(x.clone())?),
             NDArrayNumericTensor::F16(x) => NDArrayNumericTensor::I64(ops::nonzero(x.clone())?),
             NDArrayNumericTensor::BF16(x) => NDArrayNumericTensor::I64(ops::nonzero(x.clone())?),
-            NDArrayNumericTensor::F8E4M3(x) => NDArrayNumericTensor::I64(ops::nonzero(x.clone())?),
+            NDArrayNumericTensor::F8E4M3FN(x) => NDArrayNumericTensor::I64(ops::nonzero(x.clone())?),
             NDArrayNumericTensor::F8E5M2(x) => NDArrayNumericTensor::I64(ops::nonzero(x.clone())?),
             NDArrayNumericTensor::U32(x) => NDArrayNumericTensor::I64(ops::nonzero(x.clone())?),
             NDArrayNumericTensor::I32(x) => NDArrayNumericTensor::I64(ops::nonzero(x.clone())?),
@@ -2097,7 +2097,7 @@ impl NDArrayNumericTensor<DynRank> {
                 NDArrayNumericTensor::BF16(a) => {
                     Some(NDArrayNumericTensor::BF16(ops::transpose(a.clone(), axes)?))
                 }
-                NDArrayNumericTensor::F8E4M3(a) => Some(NDArrayNumericTensor::F8E4M3(
+                NDArrayNumericTensor::F8E4M3FN(a) => Some(NDArrayNumericTensor::F8E4M3FN(
                     ops::transpose(a.clone(), axes)?,
                 )),
                 NDArrayNumericTensor::F8E5M2(a) => Some(NDArrayNumericTensor::F8E5M2(
@@ -2168,8 +2168,8 @@ impl NDArrayNumericTensor<DynRank> {
             NDArrayNumericTensor::BF16(x) => {
                 NDArrayNumericTensor::BF16(ops::gather(axis, x.clone(), indices)?)
             }
-            NDArrayNumericTensor::F8E4M3(x) => {
-                NDArrayNumericTensor::F8E4M3(ops::gather(axis, x.clone(), indices)?)
+            NDArrayNumericTensor::F8E4M3FN(x) => {
+                NDArrayNumericTensor::F8E4M3FN(ops::gather(axis, x.clone(), indices)?)
             }
             NDArrayNumericTensor::F8E5M2(x) => {
                 NDArrayNumericTensor::F8E5M2(ops::gather(axis, x.clone(), indices)?)
@@ -2406,19 +2406,19 @@ impl NDArrayNumericTensor<DynRank> {
                     &selected_arrays,
                 )?))
             }
-            NDArrayNumericTensor::F8E4M3(_) => {
+            NDArrayNumericTensor::F8E4M3FN(_) => {
                 let mut selected_arrays = vec![];
                 for t in tensors {
-                    if let NDArrayNumericTensor::F8E4M3(x) = t {
+                    if let NDArrayNumericTensor::F8E4M3FN(x) = t {
                         selected_arrays.push(x.clone());
                     } else {
                         return Err(NDArrayNumericTensorError::InvalidCastOperation(
                             t.dtype(),
-                            DType::F8E4M3,
+                            DType::F8E4M3FN,
                         ));
                     }
                 }
-                Ok(NDArrayNumericTensor::F8E4M3(ops::concat(
+                Ok(NDArrayNumericTensor::F8E4M3FN(ops::concat(
                     axis,
                     &selected_arrays,
                 )?))
@@ -2630,7 +2630,7 @@ impl NDArrayNumericTensor<DynRank> {
             NDArrayNumericTensor::F32(x) => as_raw!(x),
             NDArrayNumericTensor::BF16(x) => as_raw!(x),
             NDArrayNumericTensor::F16(x) => as_raw!(x),
-            NDArrayNumericTensor::F8E4M3(x) => {
+            NDArrayNumericTensor::F8E4M3FN(x) => {
                 let owned = x.as_standard_layout();
                 let slice = owned.as_slice().expect("contiguous");
                 slice.iter().map(|v| v.to_bits()).collect()
@@ -2689,7 +2689,7 @@ impl NDArrayNumericTensor<DynRank> {
                     .collect();
                 NDArrayNumericTensor::from_vec_shape(data, &shape)?
             }
-            DType::F8E4M3 => {
+            DType::F8E4M3FN => {
                 let data = data.iter().map(|x| F8E4M3::from_bits(*x)).collect();
                 NDArrayNumericTensor::from_vec_shape(data, &shape)?
             }
@@ -2817,9 +2817,9 @@ impl NDArrayNumericTensor<DynRank> {
                 .into_iter()
                 .map(NDArrayNumericTensor::BF16)
                 .collect(),
-            NDArrayNumericTensor::F8E4M3(x) => ops::split(x.clone(), axis, split)?
+            NDArrayNumericTensor::F8E4M3FN(x) => ops::split(x.clone(), axis, split)?
                 .into_iter()
-                .map(NDArrayNumericTensor::F8E4M3)
+                .map(NDArrayNumericTensor::F8E4M3FN)
                 .collect(),
             NDArrayNumericTensor::F8E5M2(x) => ops::split(x.clone(), axis, split)?
                 .into_iter()
@@ -3112,11 +3112,11 @@ impl NDArrayNumericTensor<DynRank> {
                 let reduced = op.apply(f32_arr, axes, keepdims, mode)?;
                 NDArrayNumericTensor::BF16(reduced.map(|v| bf16::from_f32(*v)).to_shared())
             }
-            NDArrayNumericTensor::F8E4M3(x) => {
+            NDArrayNumericTensor::F8E4M3FN(x) => {
                 // Accumulate in F32 (matching PyTorch and v9 codegen), cast back
                 let f32_arr = x.map(|v| v.to_f32()).to_shared();
                 let reduced = op.apply(f32_arr, axes, keepdims, mode)?;
-                NDArrayNumericTensor::F8E4M3(reduced.map(|v| F8E4M3::from_f32(*v)).to_shared())
+                NDArrayNumericTensor::F8E4M3FN(reduced.map(|v| F8E4M3::from_f32(*v)).to_shared())
             }
             NDArrayNumericTensor::F8E5M2(x) => {
                 // Accumulate in F32 (matching PyTorch and v9 codegen), cast back
@@ -3234,9 +3234,9 @@ impl NDArrayNumericTensor<DynRank> {
                     None
                 }
             }
-            NDArrayNumericTensor::F8E4M3(a) => {
-                if let NDArrayNumericTensor::F8E4M3(b) = b {
-                    Some(NDArrayNumericTensor::F8E4M3(
+            NDArrayNumericTensor::F8E4M3FN(a) => {
+                if let NDArrayNumericTensor::F8E4M3FN(b) = b {
+                    Some(NDArrayNumericTensor::F8E4M3FN(
                         op.applyf(a.clone(), b.clone())?,
                     ))
                 } else {
@@ -3365,7 +3365,7 @@ impl NDArrayNumericTensor<DynRank> {
             (Self::F32(a), Self::F32(b)) => Ok(Self::BOOL(op.apply(a.clone(), b.clone())?)),
             (Self::BF16(a), Self::BF16(b)) => Ok(Self::BOOL(op.apply(a.clone(), b.clone())?)),
             (Self::F16(a), Self::F16(b)) => Ok(Self::BOOL(op.apply(a.clone(), b.clone())?)),
-            (Self::F8E4M3(a), Self::F8E4M3(b)) => Ok(Self::BOOL(op.apply(a.clone(), b.clone())?)),
+            (Self::F8E4M3FN(a), Self::F8E4M3FN(b)) => Ok(Self::BOOL(op.apply(a.clone(), b.clone())?)),
             (Self::F8E5M2(a), Self::F8E5M2(b)) => Ok(Self::BOOL(op.apply(a.clone(), b.clone())?)),
             (Self::I64(a), Self::I64(b)) => Ok(Self::BOOL(op.apply(a.clone(), b.clone())?)),
             (Self::U64(a), Self::U64(b)) => Ok(Self::BOOL(op.apply(a.clone(), b.clone())?)),
@@ -3389,7 +3389,7 @@ impl NDArrayNumericTensor<DynRank> {
             (Self::F32(a), Self::F32(b)) => Ok(Self::BOOL(ops::equal(a.clone(), b.clone())?)),
             (Self::BF16(a), Self::BF16(b)) => Ok(Self::BOOL(ops::equal(a.clone(), b.clone())?)),
             (Self::F16(a), Self::F16(b)) => Ok(Self::BOOL(ops::equal(a.clone(), b.clone())?)),
-            (Self::F8E4M3(a), Self::F8E4M3(b)) => Ok(Self::BOOL(ops::equal(a.clone(), b.clone())?)),
+            (Self::F8E4M3FN(a), Self::F8E4M3FN(b)) => Ok(Self::BOOL(ops::equal(a.clone(), b.clone())?)),
             (Self::F8E5M2(a), Self::F8E5M2(b)) => Ok(Self::BOOL(ops::equal(a.clone(), b.clone())?)),
             (Self::I64(a), Self::I64(b)) => Ok(Self::BOOL(ops::equal(a.clone(), b.clone())?)),
             (Self::U64(a), Self::U64(b)) => Ok(Self::BOOL(ops::equal(a.clone(), b.clone())?)),
@@ -3496,7 +3496,7 @@ impl NDArrayNumericTensor<DynRank> {
             NDArrayNumericTensor::F16(x) => {
                 NDArrayNumericTensor::F16(x.map(|x| f16::from_f32(x.to_f32() + b)).to_shared())
             }
-            NDArrayNumericTensor::F8E4M3(x) => NDArrayNumericTensor::F8E4M3(
+            NDArrayNumericTensor::F8E4M3FN(x) => NDArrayNumericTensor::F8E4M3FN(
                 x.map(|x| F8E4M3::from_f32(x.to_f32() + b)).to_shared(),
             ),
             NDArrayNumericTensor::F8E5M2(x) => NDArrayNumericTensor::F8E5M2(
@@ -3525,7 +3525,7 @@ impl NDArrayNumericTensor<DynRank> {
             NDArrayNumericTensor::F16(x) => {
                 NDArrayNumericTensor::F16(x.map(|x| f16::from_f32(x.to_f32() * b)).to_shared())
             }
-            NDArrayNumericTensor::F8E4M3(x) => NDArrayNumericTensor::F8E4M3(
+            NDArrayNumericTensor::F8E4M3FN(x) => NDArrayNumericTensor::F8E4M3FN(
                 x.map(|x| F8E4M3::from_f32(x.to_f32() * b)).to_shared(),
             ),
             NDArrayNumericTensor::F8E5M2(x) => NDArrayNumericTensor::F8E5M2(
@@ -3554,7 +3554,7 @@ impl NDArrayNumericTensor<DynRank> {
             NDArrayNumericTensor::F16(x) => {
                 NDArrayNumericTensor::F16(x.map(|x| f16::from_f32(x.to_f32() / b)).to_shared())
             }
-            NDArrayNumericTensor::F8E4M3(x) => NDArrayNumericTensor::F8E4M3(
+            NDArrayNumericTensor::F8E4M3FN(x) => NDArrayNumericTensor::F8E4M3FN(
                 x.map(|x| F8E4M3::from_f32(x.to_f32() / b)).to_shared(),
             ),
             NDArrayNumericTensor::F8E5M2(x) => NDArrayNumericTensor::F8E5M2(
@@ -3644,7 +3644,7 @@ impl NDArrayNumericTensor<DynRank> {
             NDArrayNumericTensor::F64(x) => NDArrayNumericTensor::F64(x.slice(s).to_shared()),
             NDArrayNumericTensor::F16(x) => NDArrayNumericTensor::F16(x.slice(s).to_shared()),
             NDArrayNumericTensor::BF16(x) => NDArrayNumericTensor::BF16(x.slice(s).to_shared()),
-            NDArrayNumericTensor::F8E4M3(x) => NDArrayNumericTensor::F8E4M3(x.slice(s).to_shared()),
+            NDArrayNumericTensor::F8E4M3FN(x) => NDArrayNumericTensor::F8E4M3FN(x.slice(s).to_shared()),
             NDArrayNumericTensor::F8E5M2(x) => NDArrayNumericTensor::F8E5M2(x.slice(s).to_shared()),
             NDArrayNumericTensor::U32(x) => NDArrayNumericTensor::U32(x.slice(s).to_shared()),
             NDArrayNumericTensor::I32(x) => NDArrayNumericTensor::I32(x.slice(s).to_shared()),
@@ -3724,7 +3724,7 @@ impl NDArrayNumericTensor<DynRank> {
             NDArrayNumericTensor::F64(x) => NDArrayNumericTensor::F64(do_slice!(x)),
             NDArrayNumericTensor::F16(x) => NDArrayNumericTensor::F16(do_slice!(x)),
             NDArrayNumericTensor::BF16(x) => NDArrayNumericTensor::BF16(do_slice!(x)),
-            NDArrayNumericTensor::F8E4M3(x) => NDArrayNumericTensor::F8E4M3(do_slice!(x)),
+            NDArrayNumericTensor::F8E4M3FN(x) => NDArrayNumericTensor::F8E4M3FN(do_slice!(x)),
             NDArrayNumericTensor::F8E5M2(x) => NDArrayNumericTensor::F8E5M2(do_slice!(x)),
             NDArrayNumericTensor::U32(x) => NDArrayNumericTensor::U32(do_slice!(x)),
             NDArrayNumericTensor::I32(x) => NDArrayNumericTensor::I32(do_slice!(x)),
@@ -3746,8 +3746,8 @@ impl NDArrayNumericTensor<DynRank> {
             NDArrayNumericTensor::F32(x) => NDArrayNumericTensor::F32(ops::expand(x, &shape)?),
             NDArrayNumericTensor::BF16(x) => NDArrayNumericTensor::BF16(ops::expand(x, &shape)?),
             NDArrayNumericTensor::F16(x) => NDArrayNumericTensor::F16(ops::expand(x, &shape)?),
-            NDArrayNumericTensor::F8E4M3(x) => {
-                NDArrayNumericTensor::F8E4M3(ops::expand(x, &shape)?)
+            NDArrayNumericTensor::F8E4M3FN(x) => {
+                NDArrayNumericTensor::F8E4M3FN(ops::expand(x, &shape)?)
             }
             NDArrayNumericTensor::F8E5M2(x) => {
                 NDArrayNumericTensor::F8E5M2(ops::expand(x, &shape)?)
@@ -3778,7 +3778,7 @@ impl NDArrayNumericTensor<DynRank> {
             NDArrayNumericTensor::F32(x) => ops::argmax(x, axis, keepdims, select_last_index)?,
             NDArrayNumericTensor::BF16(x) => ops::argmax(x, axis, keepdims, select_last_index)?,
             NDArrayNumericTensor::F16(x) => ops::argmax(x, axis, keepdims, select_last_index)?,
-            NDArrayNumericTensor::F8E4M3(x) => ops::argmax(x, axis, keepdims, select_last_index)?,
+            NDArrayNumericTensor::F8E4M3FN(x) => ops::argmax(x, axis, keepdims, select_last_index)?,
             NDArrayNumericTensor::F8E5M2(x) => ops::argmax(x, axis, keepdims, select_last_index)?,
             NDArrayNumericTensor::U64(x) => ops::argmax(x, axis, keepdims, select_last_index)?,
             NDArrayNumericTensor::I64(x) => ops::argmax(x, axis, keepdims, select_last_index)?,
@@ -3806,7 +3806,7 @@ impl NDArrayNumericTensor<DynRank> {
             NDArrayNumericTensor::F32(x) => ops::argmin(x, axis, keepdims, select_last_index)?,
             NDArrayNumericTensor::BF16(x) => ops::argmin(x, axis, keepdims, select_last_index)?,
             NDArrayNumericTensor::F16(x) => ops::argmin(x, axis, keepdims, select_last_index)?,
-            NDArrayNumericTensor::F8E4M3(x) => ops::argmin(x, axis, keepdims, select_last_index)?,
+            NDArrayNumericTensor::F8E4M3FN(x) => ops::argmin(x, axis, keepdims, select_last_index)?,
             NDArrayNumericTensor::F8E5M2(x) => ops::argmin(x, axis, keepdims, select_last_index)?,
             NDArrayNumericTensor::U64(x) => ops::argmin(x, axis, keepdims, select_last_index)?,
             NDArrayNumericTensor::I64(x) => ops::argmin(x, axis, keepdims, select_last_index)?,

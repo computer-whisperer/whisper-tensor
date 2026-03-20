@@ -11,7 +11,7 @@ use crate::onnx_graph::weights::{SafetensorsWeightManager, WeightManager};
 ///
 /// **Single-file mode** (`path`): ComfyUI-format checkpoint with prefixed tensors
 /// (`model.diffusion_model.*`, `text_encoders.clip_l.*`, `text_encoders.t5xxl.*`, `vae.*`).
-/// Handles any weight dtype (F8E4M3, BF16, F16, F32).
+/// Handles any weight dtype (F8E4M3FN, BF16, F16, F32).
 ///
 /// **Multi-file mode** (`dit_path`, `vae_path`, `clip_path`, `t5_path`): Separate safetensors
 /// files for each component.
@@ -150,7 +150,7 @@ fn load_single_file(path: PathBuf, img_size: usize) -> Result<LoaderOutput, Load
         .map_err(LoaderError::LoadFailed)?
     };
 
-    // Build Flux DiT (cast F8E4M3→BF16 if needed)
+    // Build Flux DiT (cast F8E4M3FN→BF16 if needed)
     println!("Building Flux DiT...");
     let dit_wm = wm.prefix("model").prefix("diffusion_model");
     let flux_config = make_flux_config(img_size, has_guidance);
@@ -306,7 +306,7 @@ fn detect_compute_dtype(
         crate::models::diffusion::sd_common::detect_model_dtype_with_canary(wm, canary);
     println!("Detected DiT storage dtype: {storage_dtype:?}");
     match storage_dtype {
-        crate::onnx_graph::tensor::DType::F8E4M3 => Ok((whisper_tensor::dtype::DType::BF16, true)),
+        crate::onnx_graph::tensor::DType::F8E4M3FN => Ok((whisper_tensor::dtype::DType::BF16, true)),
         crate::onnx_graph::tensor::DType::BF16 => Ok((whisper_tensor::dtype::DType::BF16, false)),
         crate::onnx_graph::tensor::DType::F16 => Ok((whisper_tensor::dtype::DType::F16, false)),
         crate::onnx_graph::tensor::DType::F32 => Ok((whisper_tensor::dtype::DType::F32, false)),

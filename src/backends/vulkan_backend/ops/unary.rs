@@ -62,7 +62,7 @@ fn build_unary_pipeline(
     b.decorate(
         input_data_type_array,
         Decoration::ArrayStride,
-        [Operand::LiteralBit32(input_dtype.size().unwrap() as u32)],
+        [Operand::LiteralBit32(input_dtype.bytes_per_element().unwrap() as u32)],
     );
     let input_data_type_array_struct = b.type_struct([input_data_type_array]);
     b.decorate(input_data_type_array_struct, Decoration::Block, []);
@@ -86,7 +86,7 @@ fn build_unary_pipeline(
         b.decorate(
             output_data_type_array,
             Decoration::ArrayStride,
-            [Operand::LiteralBit32(output_dtype.size().unwrap() as u32)],
+            [Operand::LiteralBit32(output_dtype.bytes_per_element().unwrap() as u32)],
         );
     }
     let output_data_type_array_struct = b.type_struct([output_data_type_array]);
@@ -391,11 +391,11 @@ impl<R: Rank> VulkanTensor<R> {
             let mut v = vec![];
             v.push(
                 (self.offset as u32 + self.suballocation.offset as u32)
-                    / self.dtype().size().unwrap() as u32,
+                    / self.dtype().bytes_per_element().unwrap() as u32,
             );
             v.push(
                 (output_tensor.offset as u32 + output_tensor.suballocation.offset as u32)
-                    / output_dtype.size().unwrap() as u32,
+                    / output_dtype.bytes_per_element().unwrap() as u32,
             );
             v.push(self.shape().dim_product() as u32);
             for dim in self.shape().as_slice() {

@@ -1280,7 +1280,7 @@ impl TryFrom<&onnx::TensorProto> for NDArrayNumericTensor<DynRank> {
                         .collect::<Vec<_>>(),
                     &shape,
                 )?,
-                DType::F8E4M3 => NDArrayNumericTensor::from_vec_shape(
+                DType::F8E4M3FN => NDArrayNumericTensor::from_vec_shape(
                     tensor
                         .int32_data
                         .iter()

@@ -71,7 +71,7 @@ fn build_binary_pipeline(
     b.decorate(
         input_0_data_type_array,
         Decoration::ArrayStride,
-        [Operand::LiteralBit32(input_0_dtype.size().unwrap() as u32)],
+        [Operand::LiteralBit32(input_0_dtype.bytes_per_element().unwrap() as u32)],
     );
     let input_0_data_type_array_struct = b.type_struct([input_0_data_type_array]);
     b.decorate(input_0_data_type_array_struct, Decoration::Block, []);
@@ -96,7 +96,7 @@ fn build_binary_pipeline(
         b.decorate(
             input_1_data_type_array,
             Decoration::ArrayStride,
-            [Operand::LiteralBit32(input_1_dtype.size().unwrap() as u32)],
+            [Operand::LiteralBit32(input_1_dtype.bytes_per_element().unwrap() as u32)],
         );
     }
     let input_1_data_type_array_struct = b.type_struct([input_1_data_type_array]);
@@ -126,7 +126,7 @@ fn build_binary_pipeline(
         b.decorate(
             output_data_type_array,
             Decoration::ArrayStride,
-            [Operand::LiteralBit32(output_dtype.size().unwrap() as u32)],
+            [Operand::LiteralBit32(output_dtype.bytes_per_element().unwrap() as u32)],
         );
     }
     let output_data_type_array_struct = b.type_struct([output_data_type_array]);
@@ -497,11 +497,11 @@ impl<R: Rank> VulkanTensor<R> {
         let op_metadata_vec = {
             let mut v = vec![
                 (a.offset as u32 + a.suballocation.offset as u32)
-                    / a.dtype().size().unwrap() as u32,
+                    / a.dtype().bytes_per_element().unwrap() as u32,
                 (b.offset as u32 + b.suballocation.offset as u32)
-                    / b.dtype().size().unwrap() as u32,
+                    / b.dtype().bytes_per_element().unwrap() as u32,
                 (output_tensor.offset as u32 + output_tensor.suballocation.offset as u32)
-                    / output_dtype.size().unwrap() as u32,
+                    / output_dtype.bytes_per_element().unwrap() as u32,
                 output_shape.dim_product() as u32,
             ];
             for dim in output_shape.as_slice() {

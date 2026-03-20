@@ -337,10 +337,10 @@ fn parse_tensors_with_dtype_fixup(
                     .unwrap(),
             )
             .ok()
-            .and_then(|d| d.size());
+            .and_then(|d| d.bytes_per_element());
             if tensor_proto.data_type != expected_onnx
-                && expected_dtype.size().is_some()
-                && expected_dtype.size() == proto_size
+                && expected_dtype.bytes_per_element().is_some()
+                && expected_dtype.bytes_per_element() == proto_size
             {
                 tensor_proto.data_type = expected_onnx;
             }
