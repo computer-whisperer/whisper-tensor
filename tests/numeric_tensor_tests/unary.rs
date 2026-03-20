@@ -120,6 +120,44 @@ pub fn test_tanh_small_fp32(backend: &mut EvalBackend) {
     test_eq_f32(y, correct);
 }
 
+// Mish chain: x * tanh(ln(1 + exp(x))) — each step on the given backend.
+// This reproduces the exact computation that fails in the ONNX Mish test.
+// Each intermediate result is compared against NDArray to isolate where
+// divergence first appears.
+pub fn test_mish_chain_fp32(backend: &mut EvalBackend) {
+    let one_f32 = NumericTensor::from_vec(vec![1.0f32; 5]).to_dyn_rank();
+    let x = NumericTensor::from_vec(vec![-9.998f32, -5.0, 0.0, 1.0, 10.0]).to_dyn_rank();
+
+    let mut nda = EvalBackend::NDArray;
+
+    // Step 1: exp(x)
+    let exp_x = x.exp(backend).unwrap();
+    let exp_x_ref = x.exp(&mut nda).unwrap();
+    test_eq_f32(exp_x.clone(), exp_x_ref.clone());
+
+    // Step 2: 1 + exp(x)
+    let one_plus_exp = NumericTensor::add(&one_f32, &exp_x, backend).unwrap();
+    let one_plus_ref = NumericTensor::add(&one_f32, &exp_x_ref, &mut nda).unwrap();
+    test_eq_f32(one_plus_exp.clone(), one_plus_ref.clone());
+
+    // Step 3: ln(1 + exp(x))  — softplus
+    let softplus = one_plus_exp.ln(backend).unwrap();
+    let sp_ref = one_plus_ref.ln(&mut nda).unwrap();
+    test_eq_f32(softplus.clone(), sp_ref.clone());
+
+    // Step 4: tanh(softplus)
+    let tanh_sp = softplus
+        .trig(whisper_tensor::TrigOp::Tanh, backend)
+        .unwrap();
+    let tanh_ref = sp_ref.trig(whisper_tensor::TrigOp::Tanh, &mut nda).unwrap();
+    test_eq_f32(tanh_sp.clone(), tanh_ref.clone());
+
+    // Step 5: x * tanh(softplus)  — final mish
+    let mish = NumericTensor::mul(&x, &tanh_sp, backend).unwrap();
+    let mish_ref = NumericTensor::mul(&x, &tanh_ref, &mut nda).unwrap();
+    test_eq_f32(mish, mish_ref);
+}
+
 pub fn test_ln_bf16(backend: &mut EvalBackend) {
     let x = NumericTensor::from_vec(vec![
         bf16::from_f32(1.0),
