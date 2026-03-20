@@ -595,9 +595,17 @@ fn build_span(
     }
 
     // Merge overlapping/adjacent external ranges for efficiency.
-    // External ranges (from non-literal, non-computed groups) never overlap
-    // with inlined literals because they come from separate group categories.
     let merged_external = merge_external_ranges(&needed_external_atoms);
+
+    if phase_idx < 3 {
+        eprintln!(
+            "  [build_span] phase={} lane: {} compute groups, {} external ranges, {} inlined literals",
+            phase_idx,
+            span_compute_set.len(),
+            merged_external.len(),
+            needed_internal_literals.len(),
+        );
+    }
 
     // Now build the span graph, inserting everything in atom ID order.
     // We need to insert: (1) external inputs, (2) inlined literals, (3) compute groups.

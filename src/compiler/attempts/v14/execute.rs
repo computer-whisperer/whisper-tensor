@@ -127,28 +127,38 @@ pub fn execute(
                 }
             }
 
-            // Verify inputs resolve against span graph's input_tensors.
-            if phase_idx < 3 && lane_idx == 0 {
-                let mut resolved = 0usize;
-                let mut unresolved = 0usize;
-                for &(base, _) in &span_inputs {
-                    if span.graph.find_input_idx(base).is_some() {
-                        resolved += 1;
-                    } else {
-                        unresolved += 1;
-                        if unresolved <= 3 {
+            // For panicking spans, check what atom is missing.
+            if phase_idx < 3 && span.graph.num_groups() > 0 {
+                // Pre-check: for each compute group, verify all InputRef sources exist.
+                for g in span.graph.groups() {
+                    if matches!(g.op, crate::nano_graph::ScalarOp::Literal(_)) { continue; }
+                    for input in &g.inputs {
+                        let test_atom = input.resolve(g.atom_offset);
+                        if !span.graph.contains_atom(test_atom) {
+                            // Where is this atom in the MAIN graph?
+                            let main_gi = plan.graph.find_group_idx(test_atom);
+                            let main_ii = plan.graph.find_input_idx(test_atom);
                             eprintln!(
-                                "  Phase {} lane {}: input base={} NOT found in span input_tensors ({} entries)",
-                                phase_idx, lane_idx, base.0, span.graph.input_tensors().len()
+                                "  Phase {} lane {}: span group base={} references atom {} which is NOT in span. \
+                                 Main graph: group_idx={:?}, input_idx={:?}",
+                                phase_idx, lane_idx, g.base_id, test_atom,
+                                main_gi, main_ii.map(|(i,o)| (i, o)),
                             );
+                            break;
                         }
                     }
                 }
-                if unresolved > 0 {
-                    eprintln!(
-                        "  Phase {} lane {}: {}/{} inputs unresolved!",
-                        phase_idx, lane_idx, unresolved, span_inputs.len()
-                    );
+            }
+
+            // Dump first span's input/output values for first 2 phases.
+            if phase_idx < 2 && lane_idx == 0 && span.graph.num_groups() > 0 {
+                eprintln!("  Phase {} lane 0: {} inputs, {} outputs, {} groups",
+                         phase_idx, span_inputs.len(), span.outputs.len(), span.graph.num_groups());
+                for (i, &(base, tensor)) in span_inputs.iter().enumerate().take(3) {
+                    let f = tensor.flatten();
+                    let n = f.num_elements().min(3);
+                    let vals: Vec<f64> = (0..n).map(|j| f.get(&[j as u64]).unwrap().to_f64()).collect();
+                    eprintln!("    input[{}] base={} count={}: {:?}", i, base, tensor.num_elements(), vals);
                 }
             }
 
@@ -159,7 +169,22 @@ pub fn execute(
 
             match eval_result {
                 Ok(output_tensors) => {
+                    if phase_idx < 2 && lane_idx == 0 {
+                        for (i, (range, tensor)) in span.outputs.iter().zip(output_tensors.iter()).enumerate().take(3) {
+                            let f = tensor.flatten();
+                            let n = f.num_elements().min(5);
+                            let vals: Vec<f64> = (0..n).map(|j| f.get(&[j as u64]).unwrap().to_f64()).collect();
+                            eprintln!("    output[{}] base={} count={}: {:?}", i, range.base, range.count, vals);
+                        }
+                    }
                     for (output_range, tensor) in span.outputs.iter().zip(output_tensors) {
+                        let actual = tensor.num_elements() as u64;
+                        if actual != output_range.count && phase_idx < 5 {
+                            eprintln!(
+                                "  Phase {} lane {}: output base={} expected {} atoms but eval returned {}",
+                                phase_idx, lane_idx, output_range.base, output_range.count, actual
+                            );
+                        }
                         phase_outputs.push((output_range.base, tensor));
                     }
                 }
@@ -182,8 +207,82 @@ pub fn execute(
         }
 
         // Commit phase outputs to the store (barrier).
+        // Check for duplicate keys — multiple spans outputting the same base.
+        let n_outputs = phase_outputs.len();
+        if phase_idx < 5 {
+            let mut seen = std::collections::HashSet::new();
+            for (base, _) in &phase_outputs {
+                if !seen.insert(base.0) {
+                    eprintln!(
+                        "  Phase {}: DUPLICATE output base={} (overwrite!)",
+                        phase_idx, base
+                    );
+                }
+            }
+        }
         for (base, tensor) in phase_outputs {
             store.insert(base, tensor);
+        }
+
+        // Diagnostic: for next phase, check if any input is reading stale
+        // initial data when it should be reading a computed result.
+        if phase_idx < 5 {
+            if let Some(next_phase) = plan.phases.get(phase_idx + 1) {
+                for (lane_idx, span) in next_phase.spans.iter().enumerate() {
+                    for inp in &span.inputs {
+                        // Is this input a computed group in the main graph?
+                        if let Some(gi) = plan.graph.find_group_idx(inp.base) {
+                            let g = &plan.graph.groups()[gi];
+                            if !matches!(g.op, crate::nano_graph::ScalarOp::Literal(_)) {
+                                // This is a computed group. Was it output by some span?
+                                let was_output = plan.phases[..=phase_idx].iter()
+                                    .flat_map(|p| p.spans.iter())
+                                    .any(|s| s.outputs.iter().any(|o| o.base == inp.base));
+                                if !was_output {
+                                    eprintln!(
+                                        "  BUG: Phase {} lane {} reads computed group base={} count={} ({:?}) \
+                                         but NO prior span output it! Store has stale initial data.",
+                                        phase_idx + 1, lane_idx, inp.base, inp.count,
+                                        crate::nano_graph::ScalarOp::Identity, // placeholder
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Diagnostic: check count mismatches between store and next phase inputs.
+        if phase_idx < 5 {
+            if let Some(next_phase) = plan.phases.get(phase_idx + 1) {
+                let mut count_mismatches = 0usize;
+                let mut missing = 0usize;
+                for span in &next_phase.spans {
+                    for inp in &span.inputs {
+                        if let Some(tensor) = store.get(&inp.base) {
+                            let stored = tensor.num_elements() as u64;
+                            if stored != inp.count {
+                                count_mismatches += 1;
+                                if count_mismatches <= 5 {
+                                    eprintln!(
+                                        "  Phase {} → {}: input base={} expects {} atoms but store has {}",
+                                        phase_idx, phase_idx + 1, inp.base, inp.count, stored
+                                    );
+                                }
+                            }
+                        } else {
+                            missing += 1;
+                        }
+                    }
+                }
+                if count_mismatches > 0 || missing > 0 {
+                    eprintln!(
+                        "  Phase {} → {}: {} count mismatches, {} missing",
+                        phase_idx, phase_idx + 1, count_mismatches, missing
+                    );
+                }
+            }
         }
     }
 

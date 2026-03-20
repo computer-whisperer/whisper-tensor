@@ -443,6 +443,28 @@ fn main() {
         model_outputs: model_outputs.clone(),
     };
 
+    // Quick stats on B's plan.
+    {
+        let total_output_atoms: u64 = b_exec_plan.phases.iter()
+            .flat_map(|p| p.spans.iter())
+            .flat_map(|s| s.outputs.iter())
+            .map(|o| o.count)
+            .sum();
+        let total_compute_atoms: u64 = b_exec_plan.phases.iter()
+            .flat_map(|p| p.spans.iter())
+            .flat_map(|s| s.graph.groups().iter())
+            .map(|g| g.count)
+            .sum();
+        let total_output_ranges: usize = b_exec_plan.phases.iter()
+            .flat_map(|p| p.spans.iter())
+            .map(|s| s.outputs.len())
+            .sum();
+        println!("\n=== B Plan Stats ===");
+        println!("  Total compute atoms in spans: {}", total_compute_atoms);
+        println!("  Total output atoms declared: {} ({} ranges)", total_output_atoms, total_output_ranges);
+        println!("  Output ratio: {:.1}%", total_output_atoms as f64 / total_compute_atoms as f64 * 100.0);
+    }
+
     // Validate B's spans are faithful subgraphs of the main graph.
     println!("\n=== Span Subgraph Validation ===");
     let t0 = Instant::now();
@@ -457,7 +479,8 @@ fn main() {
         }
     }
 
-    // ── Single-span correctness test ──────────────────────────────────────
+    // ── Single-span correctness test (skip unless SINGLE_SPAN=1) ─────────
+    if std::env::var("SINGLE_SPAN").is_ok() {
     // Evaluate B's first non-empty span directly and compare against the
     // full-graph eval for the same atoms.
     {
@@ -595,6 +618,124 @@ fn main() {
             }
         }
         println!("  Compared: {}, mismatches: {}, max_abs: {:.6}", total_compared, total_mismatches, max_abs);
+    }
+    } // end SINGLE_SPAN
+
+    // ── Phase-by-phase correctness check ─────────────────────────────────
+    // Run B's executor phase by phase, after each phase compare a sample
+    // of store values against the full-graph direct eval.
+    if std::env::var("CHECK_PHASES").is_ok() {
+        use whisper_tensor::nano_graph::eval as nano_eval;
+        use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
+
+        println!("\n=== Phase-by-Phase Correctness Check ===");
+
+        // Build full-graph eval inputs.
+        let mut full_nd: Vec<NDArrayNumericTensor<whisper_tensor::DynRank>> = Vec::new();
+        let mut full_inputs: Vec<(AtomId, usize)> = Vec::new();
+        for it in result.graph.input_tensors() {
+            let ext_id = milli_graph.input_map.iter()
+                .find(|(_, int)| **int == it.tensor_id)
+                .map(|(ext, _)| *ext);
+            if let Some(ext) = ext_id {
+                let tensor = initialized.get(&ext).map(|t| t.to_ndarray().unwrap())
+                    .or_else(|| {
+                        let name = sym_graph.get_tensor_name(ext)?;
+                        input_info.get(name).map(|(dtype, shape_dims)| {
+                            let shape: Vec<u64> = shape_dims.iter().map(|d| d.unwrap_or(4)).collect();
+                            let n: u64 = shape.iter().product();
+                            let su: Vec<usize> = shape.iter().map(|&d| d as usize).collect();
+                            let t: whisper_tensor::numeric_tensor::NumericTensor<whisper_tensor::DynRank> = match dtype {
+                                DType::I64 => { let d: Vec<i64> = (0..n).map(|i| (i%64) as i64).collect(); whisper_tensor::numeric_tensor::NumericTensor::from_vec_shape(d, su).unwrap() }
+                                _ => { let d: Vec<f32> = (0..n).map(|i| (i%64) as f32 * 0.01).collect(); whisper_tensor::numeric_tensor::NumericTensor::from_vec_shape(d, su).unwrap() }
+                            };
+                            t.to_ndarray().unwrap()
+                        })
+                    });
+                if let Some(nd) = tensor {
+                    let idx = full_nd.len();
+                    full_nd.push(nd);
+                    full_inputs.push((it.base_id, idx));
+                }
+            }
+        }
+        let full_refs: Vec<(AtomId, &NDArrayNumericTensor<whisper_tensor::DynRank>)> =
+            full_inputs.iter().map(|&(base, idx)| (base, &full_nd[idx])).collect();
+
+        // Run executor manually, checking after each phase.
+        let mut store: HashMap<AtomId, NDArrayNumericTensor<whisper_tensor::DynRank>> = HashMap::new();
+        for &(base, idx) in &full_inputs {
+            store.insert(base, full_nd[idx].clone());
+        }
+
+        for (phase_idx, phase) in b_exec_plan.phases.iter().enumerate() {
+            let mut phase_outputs: Vec<(AtomId, NDArrayNumericTensor<whisper_tensor::DynRank>)> = Vec::new();
+
+            for span in &phase.spans {
+                if span.graph.num_groups() == 0 { continue; }
+
+                let sliced: Vec<_> = span.inputs.iter()
+                    .filter_map(|range| {
+                        let tensor = store.get(&range.base)?;
+                        Some((range.base, tensor.clone()))
+                    })
+                    .collect();
+                let refs: Vec<_> =
+                    sliced.iter().map(|(b, t): &(AtomId, whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor<whisper_tensor::DynRank>)| (*b, t)).collect();
+
+                let results = nano_eval::eval(&span.graph, &refs, &span.outputs);
+                for (range, tensor) in span.outputs.iter().zip(results) {
+                    phase_outputs.push((range.base, tensor));
+                }
+            }
+
+            for (base, tensor) in &phase_outputs {
+                store.insert(*base, tensor.clone());
+            }
+
+            // Sample a few phase outputs and compare against full-graph eval.
+            if phase_idx < 5 && !phase_outputs.is_empty() {
+                let sample: Vec<_> = phase_outputs.iter().take(3).collect();
+                let check_ranges: Vec<whisper_tensor::nano_graph::AtomRange> = sample.iter()
+                    .map(|(base, t)| whisper_tensor::nano_graph::AtomRange {
+                        base: *base,
+                        count: t.num_elements() as u64,
+                        dtype: whisper_tensor::dtype::DType::F32,
+                    })
+                    .collect();
+                let full_results = nano_eval::eval(&result.graph, &full_refs, &check_ranges);
+
+                let mut phase_ok = true;
+                for (i, ((base, span_t), full_t)) in sample.iter().zip(full_results.iter()).enumerate() {
+                    let sf = span_t.flatten();
+                    let ff = full_t.flatten();
+                    let n = sf.num_elements().min(ff.num_elements());
+                    let mut max_diff = 0.0f64;
+                    for j in 0..n.min(1000) {
+                        let sv = sf.get(&[j as u64]).unwrap().to_f64();
+                        let fv = ff.get(&[j as u64]).unwrap().to_f64();
+                        if !sv.is_nan() && !fv.is_nan() {
+                            max_diff = max_diff.max((sv - fv).abs());
+                        }
+                    }
+                    if max_diff > 1e-6 {
+                        phase_ok = false;
+                        let s3: Vec<f64> = (0..n.min(3)).map(|j| sf.get(&[j as u64]).unwrap().to_f64()).collect();
+                        let f3: Vec<f64> = (0..n.min(3)).map(|j| ff.get(&[j as u64]).unwrap().to_f64()).collect();
+                        eprintln!(
+                            "  Phase {} output[{}] base={}: DIVERGED (max_diff={:.6}, span={:?}, full={:?})",
+                            phase_idx, i, base, max_diff, s3, f3
+                        );
+                    }
+                }
+                if phase_ok {
+                    println!("  Phase {}: {} outputs checked, all match", phase_idx, sample.len());
+                } else {
+                    println!("  Phase {}: DIVERGED — stopping check", phase_idx);
+                    break;
+                }
+            }
+        }
     }
 
     // Save tensor_map and graph for output comparison before trivial plan consumes result.
