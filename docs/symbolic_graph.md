@@ -536,19 +536,27 @@ pub trait SymbolicGraphObserver {
         end_instant: Instant,
         backend: &mut EvalBackend,
     );
-    
+
     fn on_tensor_assigned(
         &mut self,
         tensor_path: &[GlobalId],
         tensor: &NumericTensor<DynRank>,
         backend: &mut EvalBackend,
     );
+
+    fn on_loading_weight(&mut self, path: &[GlobalId], weight_name: Option<String>);
+
+    fn should_cancel(&mut self) -> bool {
+        false
+    }
 }
 
 // No-op implementation for when observation is not needed
 impl SymbolicGraphObserver for () {
     fn on_op_executed(...) {}
     fn on_tensor_assigned(...) {}
+    fn on_loading_weight(...) {}
+    fn should_cancel() { false }
 }
 ```
 

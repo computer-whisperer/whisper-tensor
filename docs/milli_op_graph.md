@@ -246,13 +246,32 @@ pub trait MilliOp: Node {
         symbolic_resolver: &mut SymbolicResolver,
         backend: &mut EvalBackend,
     ) -> Result<Box<dyn Iterator<Item = (GlobalId, TensorInfo)>>, MilliOpGraphError>;
-    
+
     /// Execute the operation
     fn eval(
         &self,
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
+        config: &MilliEvalConfig,
         backend: &mut EvalBackend,
     ) -> EvalResult;
+}
+```
+
+### MilliEvalConfig
+
+Configuration for milli-op evaluation (`src/milli_graph/ops/mod.rs`):
+
+```rust
+/// Configuration for milli-op evaluation.
+#[derive(Debug, Clone, Default)]
+pub struct MilliEvalConfig {
+    /// When true, reductions and matmuls may use BLAS or other fast paths
+    /// that don't guarantee a specific accumulation order. Results may
+    /// differ from the op's `AccumulationMode` but will be faster.
+    ///
+    /// When false (default), all ops respect their specified `AccumulationMode`
+    /// exactly, producing deterministic, bit-reproducible results.
+    pub relaxed_accumulation: bool,
 }
 ```
 
@@ -617,6 +636,7 @@ impl MilliOp for SomeOp {
     fn eval(
         &self,
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
+        config: &MilliEvalConfig,
         backend: &mut EvalBackend,
     ) -> EvalResult {
         let input = &inputs[&self.input];

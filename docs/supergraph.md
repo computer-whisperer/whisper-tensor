@@ -386,29 +386,36 @@ The `SuperGraphObserver` trait enables execution monitoring:
 pub trait SuperGraphObserver {
     fn on_node_executed(
         &mut self,
-        node_path: &[GlobalId],
+        path: &[GlobalId],
+        op_kind: &str,
         start_instant: Instant,
         end_instant: Instant,
+        backend: &mut EvalBackend,
     );
-    
+
     fn on_tensor_assigned(
         &mut self,
-        tensor_link: &SuperGraphLinkTensor,
+        path: &[GlobalId],
         tensor: &NumericTensor<DynRank>,
+        backend: &mut EvalBackend,
     );
-    
-    fn on_string_assigned(
-        &mut self,
-        string_link: &SuperGraphLinkString,
-        value: &str,
-    );
+
+    fn on_loading_weight(&mut self, path: &[GlobalId], weight_name: Option<String>);
+
+    fn on_progress(&mut self, path: &[GlobalId], tier: i64, numerator: f64, denominator: f64);
+
+    fn should_cancel(&mut self) -> bool {
+        false
+    }
 }
 
 // No-op implementation for when observation is not needed
 impl SuperGraphObserver for () {
     fn on_node_executed(...) {}
     fn on_tensor_assigned(...) {}
-    fn on_string_assigned(...) {}
+    fn on_loading_weight(...) {}
+    fn on_progress(...) {}
+    fn should_cancel() { false }
 }
 ```
 
