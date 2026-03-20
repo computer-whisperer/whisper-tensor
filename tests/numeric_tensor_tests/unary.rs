@@ -105,11 +105,19 @@ pub fn test_exp_large_negative_fp32(backend: &mut EvalBackend) {
     test_eq_f32(y, correct);
 }
 
-// tanh of small values — exercises tanh(~0) precision
+// tanh of small values — exercises tanh(~0) precision.
+// Includes the exact softplus(-9.998) intermediate (4.5536912e-5) that
+// causes the Mish ONNX test failure when tanh precision diverges.
 pub fn test_tanh_small_fp32(backend: &mut EvalBackend) {
     let x = NumericTensor::from_vec(vec![
-        4.55e-5f32, // tanh(softplus(-9.998))
-        1e-4f32, 1e-6f32, 0.5f32, -0.5f32,
+        4.5536912e-5f32, // exact softplus(-9.998) in F32 — the Mish failure value
+        4.55e-5f32,
+        1e-4f32,
+        1e-5f32,
+        1e-6f32,
+        1e-7f32,
+        0.5f32,
+        -0.5f32,
     ])
     .to_dyn_rank();
     let y = x.trig(whisper_tensor::TrigOp::Tanh, backend).unwrap();
