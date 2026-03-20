@@ -335,11 +335,7 @@ impl MilliOp for SimpleUnaryOp {
             WhichSimpleUnaryOp::Neg => input.neg(backend)?,
             WhichSimpleUnaryOp::Abs => input.abs(backend)?,
             WhichSimpleUnaryOp::Exp => {
-                assert!(
-                    matches!(input.exp(backend)?, NumericTensor::NDArray(_)),
-                    "BUG: exp should return NDArray but returned something else"
-                );
-                input.exp(backend)?
+                panic!("DEBUG: SimpleUnaryOp::Exp::eval reached");
             }
             WhichSimpleUnaryOp::Ln => input.ln(backend)?,
             WhichSimpleUnaryOp::Sqrt => input.sqrt(backend)?,
