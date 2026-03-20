@@ -659,15 +659,15 @@ macro_rules! do_tests {
         do_test!($runner_fn, $runner_name, test_center_crop_pad_pad_expanded);*/
 
         do_test!($runner_fn, $runner_name, test_clip);
-        //do_test!($runner_fn, $runner_name, test_clip_default_inbounds);
+        do_test!($runner_fn, $runner_name, test_clip_default_inbounds);
         do_test!($runner_fn, $runner_name, test_clip_default_inbounds_expanded);
-        //do_test!($runner_fn, $runner_name, test_clip_default_int8_inbounds);
+        do_test!($runner_fn, $runner_name, test_clip_default_int8_inbounds);
         do_test!($runner_fn, $runner_name, test_clip_default_int8_inbounds_expanded);
-        //do_test!($runner_fn, $runner_name, test_clip_default_int8_max);
+        do_test!($runner_fn, $runner_name, test_clip_default_int8_max);
         do_test!($runner_fn, $runner_name, test_clip_default_int8_max_expanded);
         do_test!($runner_fn, $runner_name, test_clip_default_int8_min);
         do_test!($runner_fn, $runner_name, test_clip_default_int8_min_expanded);
-        //do_test!($runner_fn, $runner_name, test_clip_default_max);
+        do_test!($runner_fn, $runner_name, test_clip_default_max);
         do_test!($runner_fn, $runner_name, test_clip_default_max_expanded);
         do_test!($runner_fn, $runner_name, test_clip_default_min);
         do_test!($runner_fn, $runner_name, test_clip_default_min_expanded);
@@ -707,7 +707,7 @@ macro_rules! do_tests {
         do_test!($runner_fn, $runner_name, test_concat_3d_axis_negative_2);
         do_test!($runner_fn, $runner_name, test_concat_3d_axis_negative_3);
 
-        //do_test!($runner_fn, $runner_name, test_constant);
+        //do_test!($runner_fn, $runner_name, test_constant); // no inputs, test framework can't handle
         do_test!($runner_fn, $runner_name, test_constantofshape_float_ones);
         do_test!($runner_fn, $runner_name, test_constantofshape_int_shape_zero);
         do_test!($runner_fn, $runner_name, test_constantofshape_int_zeros);
@@ -955,7 +955,7 @@ macro_rules! do_tests {
         do_test!($runner_fn, $runner_name, test_hardswish_expanded);
 
         do_test!($runner_fn, $runner_name, test_identity);
-        //do_test!($runner_fn, $runner_name, test_identity_opt);
+        //do_test!($runner_fn, $runner_name, test_identity_opt); // Optional/Sequence types unsupported
         //do_test!($runner_fn, $runner_name, test_identity_sequence);
 
 
@@ -1059,26 +1059,26 @@ macro_rules! do_tests {
         do_test!($runner_fn, $runner_name, test_log);
         do_test!($runner_fn, $runner_name, test_log_example);
         do_test!($runner_fn, $runner_name, test_logsoftmax_axis_0);
-        //do_test!($runner_fn, $runner_name, test_logsoftmax_axis_0_expanded);
-        //do_test!($runner_fn, $runner_name, test_logsoftmax_axis_0_expanded_ver18);
+        do_test!($runner_fn, $runner_name, test_logsoftmax_axis_0_expanded);
+        do_test!($runner_fn, $runner_name, test_logsoftmax_axis_0_expanded_ver18);
         do_test!($runner_fn, $runner_name, test_logsoftmax_axis_1);
-        //do_test!($runner_fn, $runner_name, test_logsoftmax_axis_1_expanded);
-        //do_test!($runner_fn, $runner_name, test_logsoftmax_axis_1_expanded_ver18);
+        do_test!($runner_fn, $runner_name, test_logsoftmax_axis_1_expanded);
+        do_test!($runner_fn, $runner_name, test_logsoftmax_axis_1_expanded_ver18);
         do_test!($runner_fn, $runner_name, test_logsoftmax_axis_2);
-        //do_test!($runner_fn, $runner_name, test_logsoftmax_axis_2_expanded);
-        //do_test!($runner_fn, $runner_name, test_logsoftmax_axis_2_expanded_ver18);
+        do_test!($runner_fn, $runner_name, test_logsoftmax_axis_2_expanded);
+        do_test!($runner_fn, $runner_name, test_logsoftmax_axis_2_expanded_ver18);
         do_test!($runner_fn, $runner_name, test_logsoftmax_default_axis);
-        //do_test!($runner_fn, $runner_name, test_logsoftmax_default_axis_expanded);
-        //do_test!($runner_fn, $runner_name, test_logsoftmax_default_axis_expanded_ver18);
+        do_test!($runner_fn, $runner_name, test_logsoftmax_default_axis_expanded);
+        do_test!($runner_fn, $runner_name, test_logsoftmax_default_axis_expanded_ver18);
         do_test!($runner_fn, $runner_name, test_logsoftmax_example_1);
-        //do_test!($runner_fn, $runner_name, test_logsoftmax_example_1_expanded);
-        //do_test!($runner_fn, $runner_name, test_logsoftmax_example_1_expanded_ver18);
+        do_test!($runner_fn, $runner_name, test_logsoftmax_example_1_expanded);
+        do_test!($runner_fn, $runner_name, test_logsoftmax_example_1_expanded_ver18);
         do_test!($runner_fn, $runner_name, test_logsoftmax_large_number);
-        //do_test!($runner_fn, $runner_name, test_logsoftmax_large_number_expanded);
-        //do_test!($runner_fn, $runner_name, test_logsoftmax_large_number_expanded_ver18);
+        //do_test!($runner_fn, $runner_name, test_logsoftmax_large_number_expanded); // pre-ver18 expanded lacks max-subtraction, overflows
+        do_test!($runner_fn, $runner_name, test_logsoftmax_large_number_expanded_ver18);
         do_test!($runner_fn, $runner_name, test_logsoftmax_negative_axis);
-        //do_test!($runner_fn, $runner_name, test_logsoftmax_negative_axis_expanded);
-        //do_test!($runner_fn, $runner_name, test_logsoftmax_negative_axis_expanded_ver18);
+        do_test!($runner_fn, $runner_name, test_logsoftmax_negative_axis_expanded);
+        do_test!($runner_fn, $runner_name, test_logsoftmax_negative_axis_expanded_ver18);
 
         /*
         do_test!($runner_fn, $runner_name, test_loop11);
@@ -1495,7 +1495,7 @@ macro_rules! do_tests {
 
         do_test!($runner_fn, $runner_name, test_relu);
         do_test!($runner_fn, $runner_name, test_relu_expanded_ver18);
-        //do_test!($runner_fn, $runner_name, test_reshape_allowzero_reordered);
+        //do_test!($runner_fn, $runner_name, test_reshape_allowzero_reordered); // allowzero=true unsupported
         do_test!($runner_fn, $runner_name, test_reshape_extended_dims);
         do_test!($runner_fn, $runner_name, test_reshape_negative_dim);
         do_test!($runner_fn, $runner_name, test_reshape_negative_extended_dims);
@@ -1769,30 +1769,30 @@ macro_rules! do_tests {
         do_test!($runner_fn, $runner_name, test_slice_neg_steps);
         do_test!($runner_fn, $runner_name, test_slice_start_out_of_bounds);
         do_test!($runner_fn, $runner_name, test_softmax_axis_0);
-        //do_test!($runner_fn, $runner_name, test_softmax_axis_0_expanded);
-        //do_test!($runner_fn, $runner_name, test_softmax_axis_0_expanded_ver18);
+        do_test!($runner_fn, $runner_name, test_softmax_axis_0_expanded);
+        do_test!($runner_fn, $runner_name, test_softmax_axis_0_expanded_ver18);
         do_test!($runner_fn, $runner_name, test_softmax_axis_1);
-        //do_test!($runner_fn, $runner_name, test_softmax_axis_1_expanded);
-        //do_test!($runner_fn, $runner_name, test_softmax_axis_1_expanded_ver18);
+        do_test!($runner_fn, $runner_name, test_softmax_axis_1_expanded);
+        do_test!($runner_fn, $runner_name, test_softmax_axis_1_expanded_ver18);
         do_test!($runner_fn, $runner_name, test_softmax_axis_2);
-        //do_test!($runner_fn, $runner_name, test_softmax_axis_2_expanded);
-        //do_test!($runner_fn, $runner_name, test_softmax_axis_2_expanded_ver18);
+        do_test!($runner_fn, $runner_name, test_softmax_axis_2_expanded);
+        do_test!($runner_fn, $runner_name, test_softmax_axis_2_expanded_ver18);
         do_test!($runner_fn, $runner_name, test_softmax_default_axis);
-        //do_test!($runner_fn, $runner_name, test_softmax_default_axis_expanded);
-        //do_test!($runner_fn, $runner_name, test_softmax_default_axis_expanded_ver18);
+        do_test!($runner_fn, $runner_name, test_softmax_default_axis_expanded);
+        do_test!($runner_fn, $runner_name, test_softmax_default_axis_expanded_ver18);
         do_test!($runner_fn, $runner_name, test_softmax_example);
-        //do_test!($runner_fn, $runner_name, test_softmax_example_expanded);
-        //do_test!($runner_fn, $runner_name, test_softmax_example_expanded_ver18);
+        do_test!($runner_fn, $runner_name, test_softmax_example_expanded);
+        do_test!($runner_fn, $runner_name, test_softmax_example_expanded_ver18);
         do_test!($runner_fn, $runner_name, test_softmax_large_number);
-        //do_test!($runner_fn, $runner_name, test_softmax_large_number_expanded);
-        //do_test!($runner_fn, $runner_name, test_softmax_large_number_expanded_ver18);
+        do_test!($runner_fn, $runner_name, test_softmax_large_number_expanded);
+        do_test!($runner_fn, $runner_name, test_softmax_large_number_expanded_ver18);
         do_test!($runner_fn, $runner_name, test_softmax_negative_axis);
-        //do_test!($runner_fn, $runner_name, test_softmax_negative_axis_expanded);
-        //do_test!($runner_fn, $runner_name, test_softmax_negative_axis_expanded_ver18);
+        do_test!($runner_fn, $runner_name, test_softmax_negative_axis_expanded);
+        do_test!($runner_fn, $runner_name, test_softmax_negative_axis_expanded_ver18);
         do_test!($runner_fn, $runner_name, test_softplus);
         do_test!($runner_fn, $runner_name, test_softplus_example);
-        //do_test!($runner_fn, $runner_name, test_softplus_example_expanded_ver18);
-        //do_test!($runner_fn, $runner_name, test_softplus_expanded_ver18);
+        do_test!($runner_fn, $runner_name, test_softplus_example_expanded_ver18);
+        do_test!($runner_fn, $runner_name, test_softplus_expanded_ver18);
 
         do_test!($runner_fn, $runner_name, test_softsign);
         do_test!($runner_fn, $runner_name, test_softsign_example);
@@ -1806,7 +1806,7 @@ macro_rules! do_tests {
 
         do_test!($runner_fn, $runner_name, test_split_1d_uneven_split_opset18);
         do_test!($runner_fn, $runner_name, test_split_2d_uneven_split_opset18);
-        //do_test!($runner_fn, $runner_name, test_split_equal_parts_1d_opset13);
+        //do_test!($runner_fn, $runner_name, test_split_equal_parts_1d_opset13); // opset13 Split lacks num_outputs
         do_test!($runner_fn, $runner_name, test_split_equal_parts_1d_opset18);
         do_test!($runner_fn, $runner_name, test_split_equal_parts_2d);
         //do_test!($runner_fn, $runner_name, test_split_equal_parts_2d_opset13);
@@ -1946,7 +1946,7 @@ macro_rules! do_tests {
         do_test!($runner_fn, $runner_name, test_unsqueeze_two_axes);
         do_test!($runner_fn, $runner_name, test_unsqueeze_unsorted_axes);
 
-        //do_test!($runner_fn, $runner_name, test_upsample_nearest);
+        //do_test!($runner_fn, $runner_name, test_upsample_nearest); // Upsample op not implemented (use Resize)
 
         do_test!($runner_fn, $runner_name, test_where_example);
         do_test!($runner_fn, $runner_name, test_where_long_example);
