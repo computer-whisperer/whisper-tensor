@@ -6,6 +6,8 @@ pub mod tensor_store;
 use crate::backends::ModelLoadedTensorCache;
 use crate::backends::eval_backend::EvalBackend;
 use crate::backends::ndarray_backend::{NDArrayNumericTensor, NDArrayNumericTensorError};
+use arbitrary_int::{i4, u4};
+use arbitrary_int::traits::Integer;
 use crate::dtype::DType;
 use crate::graph::{
     GlobalId, Graph, Link, LinkCategory, LinkMetadata, Node, NodeMetadata, Property,
@@ -1212,6 +1214,23 @@ impl SymbolicGraph {
     }
 }
 
+/// Unpack ONNX 4-bit packed data: each byte holds two elements,
+/// first in the low nibble (bits 0-3), second in the high nibble (bits 4-7).
+/// Returns exactly `numel` unpacked values (each as a u8 in 0..=15).
+fn unpack_4bit_pairs(packed: &[u8], numel: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(numel);
+    for &byte in packed {
+        if out.len() >= numel {
+            break;
+        }
+        out.push(byte & 0x0F);
+        if out.len() < numel {
+            out.push((byte >> 4) & 0x0F);
+        }
+    }
+    out
+}
+
 impl TryFrom<&onnx::TensorProto> for NDArrayNumericTensor<DynRank> {
     type Error = ONNXDecodingError;
 
@@ -1221,10 +1240,29 @@ impl TryFrom<&onnx::TensorProto> for NDArrayNumericTensor<DynRank> {
                 .map_err(|x| ONNXDecodingError::ProtobufDecodeError(anyhow::Error::from(x)))?,
         )?;
 
-        let shape = tensor.dims.iter().map(|x| *x as u64).collect();
+        let shape: Vec<u64> = tensor.dims.iter().map(|x| *x as u64).collect();
 
         let out = if !tensor.raw_data.is_empty() {
-            NDArrayNumericTensor::from_raw_data(&tensor.raw_data, dtype, shape)?
+            match dtype {
+                // ONNX packs two 4-bit elements per byte: first in low nibble, second in high nibble.
+                DType::U4 => {
+                    let numel: u64 = shape.iter().product();
+                    let data: Vec<u4> = unpack_4bit_pairs(&tensor.raw_data, numel as usize)
+                        .iter()
+                        .map(|&b| u4::masked_new(b))
+                        .collect();
+                    NDArrayNumericTensor::from_vec_shape(data, &shape)?
+                }
+                DType::I4 => {
+                    let numel: u64 = shape.iter().product();
+                    let data: Vec<i4> = unpack_4bit_pairs(&tensor.raw_data, numel as usize)
+                        .iter()
+                        .map(|&b| i4::masked_new(b as i8))
+                        .collect();
+                    NDArrayNumericTensor::from_vec_shape(data, &shape)?
+                }
+                _ => NDArrayNumericTensor::from_raw_data(&tensor.raw_data, dtype, shape)?,
+            }
         } else if !tensor.float_data.is_empty() {
             match dtype {
                 DType::F32 => {
@@ -1312,6 +1350,27 @@ impl TryFrom<&onnx::TensorProto> for NDArrayNumericTensor<DynRank> {
                         .collect::<Vec<_>>(),
                     &shape,
                 )?,
+                // ONNX packs two 4-bit elements per int32: first in low nibble, second in high nibble.
+                DType::U4 => {
+                    let numel: u64 = shape.iter().product();
+                    let bytes: Vec<u8> =
+                        tensor.int32_data.iter().map(|x| *x as u8).collect();
+                    let data: Vec<u4> = unpack_4bit_pairs(&bytes, numel as usize)
+                        .iter()
+                        .map(|&b| u4::masked_new(b))
+                        .collect();
+                    NDArrayNumericTensor::from_vec_shape(data, &shape)?
+                }
+                DType::I4 => {
+                    let numel: u64 = shape.iter().product();
+                    let bytes: Vec<u8> =
+                        tensor.int32_data.iter().map(|x| *x as u8).collect();
+                    let data: Vec<i4> = unpack_4bit_pairs(&bytes, numel as usize)
+                        .iter()
+                        .map(|&b| i4::masked_new(b as i8))
+                        .collect();
+                    NDArrayNumericTensor::from_vec_shape(data, &shape)?
+                }
                 _ => Err(ONNXDecodingError::UnsupportedONNX(
                     "Unsupported dtype in int32_data field!".to_string(),
                 ))?,
@@ -3506,5 +3565,62 @@ mod tests {
         for v in &values {
             assert!((*v - 3.6).abs() < 0.01, "Expected output ≈ 3.6, got {v}");
         }
+    }
+
+    #[test]
+    fn test_unpack_4bit_pairs() {
+        // Two elements packed per byte: low nibble first, high nibble second
+        // Byte 0x31 = low=1, high=3; Byte 0xA5 = low=5, high=10
+        assert_eq!(unpack_4bit_pairs(&[0x31, 0xA5], 4), vec![1, 3, 5, 10]);
+
+        // Odd element count: last high nibble is padding
+        assert_eq!(unpack_4bit_pairs(&[0x42, 0xF0], 3), vec![2, 4, 0]);
+
+        // Single element
+        assert_eq!(unpack_4bit_pairs(&[0xB7], 1), vec![7]);
+
+        // Empty
+        assert_eq!(unpack_4bit_pairs(&[], 0), Vec::<u8>::new());
+
+        // Full range: 0x0F = low=15, high=0
+        assert_eq!(unpack_4bit_pairs(&[0x0F], 2), vec![15u8, 0]);
+    }
+
+    #[test]
+    fn test_onnx_u4_tensor_from_raw_data() {
+        use crate::onnx;
+        let mut tensor = onnx::TensorProto::default();
+        tensor.data_type = onnx::tensor_proto::DataType::Uint4 as i32;
+        tensor.dims = vec![4];
+        // Pack [3, 7, 1, 15]: byte0 = 3 | (7<<4) = 0x73, byte1 = 1 | (15<<4) = 0xF1
+        tensor.raw_data = vec![0x73, 0xF1];
+
+        let nd: NDArrayNumericTensor<DynRank> = (&tensor).try_into().unwrap();
+        assert_eq!(nd.dtype(), DType::U4);
+        assert_eq!(nd.num_elements(), 4);
+        assert_eq!(nd.get(&vec![0]).unwrap(), NumericScalar::U4(u4::new(3)));
+        assert_eq!(nd.get(&vec![1]).unwrap(), NumericScalar::U4(u4::new(7)));
+        assert_eq!(nd.get(&vec![2]).unwrap(), NumericScalar::U4(u4::new(1)));
+        assert_eq!(nd.get(&vec![3]).unwrap(), NumericScalar::U4(u4::new(15)));
+    }
+
+    #[test]
+    fn test_onnx_i4_tensor_from_int32_data() {
+        use crate::onnx;
+        let mut tensor = onnx::TensorProto::default();
+        tensor.data_type = onnx::tensor_proto::DataType::Int4 as i32;
+        tensor.dims = vec![4];
+        // Pack [-1, 3, -8, 7]: each int32 holds two elements
+        // -1 in 4-bit = 0xF, 3 = 0x3 → byte = 0xF | (0x3 << 4) = 0x3F
+        // -8 in 4-bit = 0x8, 7 = 0x7 → byte = 0x8 | (0x7 << 4) = 0x78
+        tensor.int32_data = vec![0x3F, 0x78];
+
+        let nd: NDArrayNumericTensor<DynRank> = (&tensor).try_into().unwrap();
+        assert_eq!(nd.dtype(), DType::I4);
+        assert_eq!(nd.num_elements(), 4);
+        assert_eq!(nd.get(&vec![0]).unwrap(), NumericScalar::I4(i4::new(-1)));
+        assert_eq!(nd.get(&vec![1]).unwrap(), NumericScalar::I4(i4::new(3)));
+        assert_eq!(nd.get(&vec![2]).unwrap(), NumericScalar::I4(i4::new(-8)));
+        assert_eq!(nd.get(&vec![3]).unwrap(), NumericScalar::I4(i4::new(7)));
     }
 }
