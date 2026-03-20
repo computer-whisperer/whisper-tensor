@@ -1130,13 +1130,10 @@ impl Node for MishOperation {
 impl Operation for MishOperation {
     fn eval(
         &self,
-        backend: &mut EvalBackend,
-        inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
+        _backend: &mut EvalBackend,
+        _inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
     ) -> OperationEvalRet {
-        panic!(
-            "DEBUG: MishOperation::eval IS being called. Backend: {:?}",
-            backend
-        );
+        panic!("DEBUG: MishOperation::eval IS being called");
     }
 
     fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, rng: &mut impl Rng) -> MilliOpGraph {
