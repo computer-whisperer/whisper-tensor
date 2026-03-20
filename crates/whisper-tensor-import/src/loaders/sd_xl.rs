@@ -116,12 +116,12 @@ fn build_sdxl_interface(
     use whisper_tensor::interfaces::{ImageGenerationInterface, SchedulerType};
     use whisper_tensor::milli_graph::MilliOpGraph;
     use whisper_tensor::milli_graph::ops::{Cast, Concat as MilliConcat, Constant, Pad, PadMode};
+    use whisper_tensor::super_graph::SuperGraphBuilder;
     use whisper_tensor::super_graph::nodes::{
         SuperGraphNode, SuperGraphNodeMilliOpGraph, SuperGraphNodeModelExecution,
         SuperGraphNodeTensorToImage, SuperGraphNodeTokenizerEncode,
         SuperGraphNodeTokenizerEncodeMode, SuperGraphNodeTokenizerLoad,
     };
-    use whisper_tensor::super_graph::SuperGraphBuilder;
 
     let mut builder = SuperGraphBuilder::new();
 
@@ -152,8 +152,7 @@ fn build_sdxl_interface(
     builder.set_link_label(vae_weights, "vae_decoder_weights");
 
     // Prompt tokenization inside the supergraph.
-    let tokenizer_link =
-        SuperGraphNodeTokenizerLoad::new_and_add(&mut builder, tokenizer, rng);
+    let tokenizer_link = SuperGraphNodeTokenizerLoad::new_and_add(&mut builder, tokenizer, rng);
     let cond_ids_input = SuperGraphNodeTokenizerEncode::new_with_mode_and_add(
         &mut builder,
         tokenizer_link,

@@ -225,10 +225,7 @@ fn wan_condition_embedding(
 
     // Project to 6*dim for modulation: Linear(dim -> 6*dim), reshape to [B, 6, dim]
     let timestep_proj = linear(&wm.prefix("condition_embedder.time_proj"), temb)?;
-    let timestep_proj = reshape(
-        timestep_proj,
-        vec![0, 6, config.dim as i64],
-    )?;
+    let timestep_proj = reshape(timestep_proj, vec![0, 6, config.dim as i64])?;
     let timestep_proj = unsqueeze(timestep_proj, 1)?; // [B, 1, 6, dim]
 
     // Text projection: Linear -> GELU_tanh -> Linear
@@ -261,9 +258,21 @@ fn wan_self_attention(
     let v = linear(&wm.prefix("to_v"), hidden_states)?;
 
     // Reshape: [B, seq, D] -> [B, seq, nh, hd] -> [B, nh, seq, hd]
-    let q = Transpose::new(None, reshape(q, vec![0, 0, nh, hd])?, Some(vec![0, 2, 1, 3]));
-    let k = Transpose::new(None, reshape(k, vec![0, 0, nh, hd])?, Some(vec![0, 2, 1, 3]));
-    let v = Transpose::new(None, reshape(v, vec![0, 0, nh, hd])?, Some(vec![0, 2, 1, 3]));
+    let q = Transpose::new(
+        None,
+        reshape(q, vec![0, 0, nh, hd])?,
+        Some(vec![0, 2, 1, 3]),
+    );
+    let k = Transpose::new(
+        None,
+        reshape(k, vec![0, 0, nh, hd])?,
+        Some(vec![0, 2, 1, 3]),
+    );
+    let v = Transpose::new(
+        None,
+        reshape(v, vec![0, 0, nh, hd])?,
+        Some(vec![0, 2, 1, 3]),
+    );
 
     // RMSNorm on Q/K (learned affine)
     let q = rms_norm(&wm.prefix("norm_q"), q, Some(config.eps))?;
@@ -271,13 +280,16 @@ fn wan_self_attention(
 
     // Apply 3D RoPE (interleaved=1, like Flux)
     let q = RotaryEmbedding::new(
-        None, q, rope_cos.clone(), rope_sin.clone(),
-        None, Some(1), None, None,
+        None,
+        q,
+        rope_cos.clone(),
+        rope_sin.clone(),
+        None,
+        Some(1),
+        None,
+        None,
     )?;
-    let k = RotaryEmbedding::new(
-        None, k, rope_cos, rope_sin,
-        None, Some(1), None, None,
-    )?;
+    let k = RotaryEmbedding::new(None, k, rope_cos, rope_sin, None, Some(1), None, None)?;
 
     // Scaled dot-product attention
     let scores = MatMul::new(None, q, Transpose::new(None, k, Some(vec![0, 1, 3, 2])))?;
@@ -307,9 +319,21 @@ fn wan_cross_attention(
     let k = linear(&wm.prefix("to_k"), encoder_hidden_states.clone())?;
     let v = linear(&wm.prefix("to_v"), encoder_hidden_states)?;
 
-    let q = Transpose::new(None, reshape(q, vec![0, 0, nh, hd])?, Some(vec![0, 2, 1, 3]));
-    let k = Transpose::new(None, reshape(k, vec![0, 0, nh, hd])?, Some(vec![0, 2, 1, 3]));
-    let v = Transpose::new(None, reshape(v, vec![0, 0, nh, hd])?, Some(vec![0, 2, 1, 3]));
+    let q = Transpose::new(
+        None,
+        reshape(q, vec![0, 0, nh, hd])?,
+        Some(vec![0, 2, 1, 3]),
+    );
+    let k = Transpose::new(
+        None,
+        reshape(k, vec![0, 0, nh, hd])?,
+        Some(vec![0, 2, 1, 3]),
+    );
+    let v = Transpose::new(
+        None,
+        reshape(v, vec![0, 0, nh, hd])?,
+        Some(vec![0, 2, 1, 3]),
+    );
 
     // RMSNorm on Q/K
     let q = rms_norm(&wm.prefix("norm_q"), q, Some(config.eps))?;
@@ -367,25 +391,12 @@ fn wan_block(
 
     // 1. Self-attention with AdaLN
     let normed = adaln_modulate(hidden_states.clone(), shift_msa, scale_msa, dim, eps)?;
-    let attn_out = wan_self_attention(
-        &wm.prefix("attn1"),
-        normed,
-        config,
-        rope_cos,
-        rope_sin,
-    )?;
-    let hidden_states = Add::new(
-        None,
-        hidden_states,
-        Mul::new(None, gate_msa, attn_out)?,
-    )?;
+    let attn_out = wan_self_attention(&wm.prefix("attn1"), normed, config, rope_cos, rope_sin)?;
+    let hidden_states = Add::new(None, hidden_states, Mul::new(None, gate_msa, attn_out)?)?;
 
     // 2. Cross-attention with LayerNorm (cross_attn_norm=true -> learned LN)
-    let normed_cross = crate::onnx_graph::pytorch::layer_norm(
-        &wm.prefix("norm2"),
-        hidden_states.clone(),
-        eps,
-    )?;
+    let normed_cross =
+        crate::onnx_graph::pytorch::layer_norm(&wm.prefix("norm2"), hidden_states.clone(), eps)?;
     let cross_out = wan_cross_attention(
         &wm.prefix("attn2"),
         normed_cross,
@@ -428,11 +439,7 @@ fn wan_unpatchify(
     // -> [B, C, F, pt, pH, ps_h, pW, ps_w]
     let x = Transpose::new(None, x, Some(vec![0, 7, 1, 4, 2, 5, 3, 6]));
     // -> [B, C, F*pt, pH*ps_h, pW*ps_w]
-    reshape(
-        x,
-        vec![0, c, f * pt, ph * ps_h, pw * ps_w],
-    )
-    .map(|x| x as Arc<dyn Tensor>)
+    reshape(x, vec![0, c, f * pt, ph * ps_h, pw * ps_w]).map(|x| x as Arc<dyn Tensor>)
 }
 
 // =============================================================================
@@ -590,8 +597,7 @@ pub fn load_wan_transformer_with_origin(
     // 6. Unpatchify
     let output = wan_unpatchify(hidden_states, &config, latent_frames, patch_h, patch_w)?;
 
-    let output_tensors: Vec<(String, Arc<dyn Tensor>)> =
-        vec![("out_sample".to_string(), output)];
+    let output_tensors: Vec<(String, Arc<dyn Tensor>)> = vec![("out_sample".to_string(), output)];
 
     println!("Built Wan2.1 transformer graph, exporting...");
     let onnx_model = if let Some(origin) = origin_path {
@@ -711,10 +717,7 @@ fn wan_vae_spatial_attention(
 
     // [B, C, T, H, W] -> [B*T, H*W, C]
     let x = Transpose::new(None, normed, Some(vec![0, 2, 1, 3, 4])); // [B, T, C, H, W]
-    let x = reshape(
-        x,
-        vec![-1, channels as i64, h as i64, w as i64],
-    )?; // [B*T, C, H, W]
+    let x = reshape(x, vec![-1, channels as i64, h as i64, w as i64])?; // [B*T, C, H, W]
     let x = reshape(x, vec![0, channels as i64, -1])?; // [B*T, C, H*W]
     let x = Transpose::new(None, x, Some(vec![0, 2, 1])); // [B*T, H*W, C]
 
@@ -736,10 +739,7 @@ fn wan_vae_spatial_attention(
     // [B*T, H*W, C] -> [B*T, C, H, W] -> [B, T, C, H, W] -> [B, C, T, H, W]
     let out = Transpose::new(None, out, Some(vec![0, 2, 1])); // [B*T, C, H*W]
     let out = reshape(out, vec![0, channels as i64, h as i64, w as i64])?;
-    let out = reshape(
-        out,
-        vec![-1, t as i64, channels as i64, h as i64, w as i64],
-    )?;
+    let out = reshape(out, vec![-1, t as i64, channels as i64, h as i64, w as i64])?;
     let out = Transpose::new(None, out, Some(vec![0, 2, 1, 3, 4])); // [B, C, T, H, W]
 
     Ok(Add::new(None, input, out)?)
@@ -775,7 +775,11 @@ fn wan_vae_upsample(
         Dimension::new(Some(target_w), None, None),
     ];
     let x = Resize::new_with_scales(
-        None, input, scales, "nearest".to_string(), Shape::new(output_dims),
+        None,
+        input,
+        scales,
+        "nearest".to_string(),
+        Shape::new(output_dims),
     )?;
 
     // Conv3d 3x3x3 after upsample (Wan uses CausalConv3d k=3)
@@ -861,7 +865,8 @@ pub fn load_wan_vae_decoder_with_origin(
     for stage in 0..num_stages {
         let out_ch = rev_channels[stage];
         let has_upsample = stage < num_stages - 1;
-        let do_temporal = has_upsample && stage < temporal_upsample.len() && temporal_upsample[stage];
+        let do_temporal =
+            has_upsample && stage < temporal_upsample.len() && temporal_upsample[stage];
 
         let num_res = config.num_res_blocks;
         for r in 0..num_res {
@@ -888,8 +893,12 @@ pub fn load_wan_vae_decoder_with_origin(
             x = wan_vae_upsample(
                 &dec.prefix(&format!("decoder_blocks.{stage}.{num_res}")),
                 x,
-                cur_t, cur_h, cur_w,
-                next_t, next_h, next_w,
+                cur_t,
+                cur_h,
+                cur_w,
+                next_t,
+                next_h,
+                next_w,
             )?;
             cur_t = next_t;
             cur_h = next_h;
@@ -898,7 +907,12 @@ pub fn load_wan_vae_decoder_with_origin(
 
         println!(
             "  Stage {}/{}: {}ch, [T={}, H={}, W={}]",
-            stage + 1, num_stages, out_ch, cur_t, cur_h, cur_w
+            stage + 1,
+            num_stages,
+            out_ch,
+            cur_t,
+            cur_h,
+            cur_w
         );
     }
 
@@ -907,8 +921,7 @@ pub fn load_wan_vae_decoder_with_origin(
     x = silu(x)?;
     let output = wan_causal_conv3d(&dec.prefix("conv_out"), x, 3, 3, 1, 1)?;
 
-    let output_tensors: Vec<(String, Arc<dyn Tensor>)> =
-        vec![("video_out".to_string(), output)];
+    let output_tensors: Vec<(String, Arc<dyn Tensor>)> = vec![("video_out".to_string(), output)];
 
     println!("Built Wan2.1 VAE decoder graph, exporting...");
     let onnx_model = if let Some(origin) = origin_path {

@@ -5,8 +5,8 @@ use crate::models::diffusion::sd_common::{
 use crate::onnx_graph::Error;
 use crate::onnx_graph::WeightStorageStrategy;
 use crate::onnx_graph::operators::{
-    Add, Concat, Constant, Conv, LayerNormalization, MatMul, Mul, Resize, RotaryEmbedding,
-    Softmax, Transpose,
+    Add, Concat, Constant, Conv, LayerNormalization, MatMul, Mul, Resize, RotaryEmbedding, Softmax,
+    Transpose,
 };
 use crate::onnx_graph::pytorch::{
     cast, conv2d, div_scalar, gelu_pytorch_tanh, group_norm, linear, reshape, silu, unsqueeze,
@@ -112,8 +112,8 @@ impl CogVideoXTransformerConfig {
             time_embed_dim: 512,
             patch_size: 2,
             sample_frames: 81,
-            sample_height: 96,  // 768 / 8
-            sample_width: 170,  // 1360 / 8
+            sample_height: 96, // 768 / 8
+            sample_width: 170, // 1360 / 8
             max_text_seq_length: 226,
             use_rotary_positional_embeddings: true,
             norm_eps: 1e-5,

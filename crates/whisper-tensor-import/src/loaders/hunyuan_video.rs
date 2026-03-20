@@ -83,11 +83,7 @@ fn load_hunyuan_video(base_path: PathBuf) -> Result<LoaderOutput, LoaderError> {
             let mut entries: Vec<_> = std::fs::read_dir(dir)
                 .map_err(|e| LoaderError::LoadFailed(e.into()))?
                 .filter_map(|e| e.ok())
-                .filter(|e| {
-                    e.path()
-                        .extension()
-                        .is_some_and(|ext| ext == "safetensors")
-                })
+                .filter(|e| e.path().extension().is_some_and(|ext| ext == "safetensors"))
                 .collect();
             entries.sort_by_key(|e| e.path());
             for entry in entries {
@@ -113,7 +109,11 @@ fn load_hunyuan_video(base_path: PathBuf) -> Result<LoaderOutput, LoaderError> {
     println!("Building LLaMA 3 text encoder...");
     let llama_wm = load_safetensors_dir(&text_encoder_dir)?;
     let llama_onnx = crate::models::diffusion::hunyuan_video::load_llama3_encoder(
-        llama_wm, 32, 2, 256, storage.clone(),
+        llama_wm,
+        32,
+        2,
+        256,
+        storage.clone(),
     )
     .map_err(LoaderError::LoadFailed)?;
 
@@ -143,20 +143,22 @@ fn load_hunyuan_video(base_path: PathBuf) -> Result<LoaderOutput, LoaderError> {
     // Build DiT transformer
     println!("Building HunyuanVideo DiT transformer...");
     let dit_wm = load_safetensors_dir(&transformer_dir)?;
-    let dit_onnx =
-        crate::models::diffusion::hunyuan_video::load_hunyuan_video_transformer(
-            dit_wm, dit_config, storage.clone(),
-        )
-        .map_err(LoaderError::LoadFailed)?;
+    let dit_onnx = crate::models::diffusion::hunyuan_video::load_hunyuan_video_transformer(
+        dit_wm,
+        dit_config,
+        storage.clone(),
+    )
+    .map_err(LoaderError::LoadFailed)?;
 
     // Build VAE decoder
     println!("Building HunyuanVideo VAE decoder...");
     let vae_wm = load_safetensors_dir(&vae_dir)?;
-    let vae_onnx =
-        crate::models::diffusion::hunyuan_video::load_hunyuan_video_vae_decoder(
-            vae_wm, vae_config, storage.clone(),
-        )
-        .map_err(LoaderError::LoadFailed)?;
+    let vae_onnx = crate::models::diffusion::hunyuan_video::load_hunyuan_video_vae_decoder(
+        vae_wm,
+        vae_config,
+        storage.clone(),
+    )
+    .map_err(LoaderError::LoadFailed)?;
 
     // Create Model objects
     let base_dir = Some(base_path.as_path());
@@ -241,7 +243,9 @@ fn build_hunyuan_video_interface(
 
     let llama_hidden_f32 = builder.new_tensor_link(rng);
     let mut llama_node = SuperGraphNodeModelExecution::new(
-        rng, llama_weights, 0,
+        rng,
+        llama_weights,
+        0,
         vec![(llama_ids, "input_ids".to_string())],
         vec![("hidden_states".to_string(), llama_hidden_f32)],
     );
@@ -250,8 +254,7 @@ fn build_hunyuan_video_interface(
     let llama_hidden = build_cast_node(&mut builder, rng, llama_hidden_f32, model_dtype);
 
     // CLIP tokenization + encoding
-    let clip_tokenizer =
-        TokenizerInfo::HFTokenizer("openai/clip-vit-large-patch14".to_string());
+    let clip_tokenizer = TokenizerInfo::HFTokenizer("openai/clip-vit-large-patch14".to_string());
     let clip_tokenizer_link =
         SuperGraphNodeTokenizerLoad::new_and_add(&mut builder, clip_tokenizer, rng);
     let clip_ids = SuperGraphNodeTokenizerEncode::new_with_mode_and_add(
@@ -271,7 +274,9 @@ fn build_hunyuan_video_interface(
     let clip_hidden_f32 = builder.new_tensor_link(rng);
     let clip_pooled_f32 = builder.new_tensor_link(rng);
     let mut clip_node = SuperGraphNodeModelExecution::new(
-        rng, clip_weights, 1,
+        rng,
+        clip_weights,
+        1,
         vec![
             (clip_ids, "input_ids".to_string()),
             (clip_eos_indices, "eos_indices".to_string()),
@@ -287,17 +292,26 @@ fn build_hunyuan_video_interface(
 
     // Denoising loop (embedded guidance, single pass — like Flux)
     let final_latent = build_hunyuan_denoising_loop(
-        &mut builder, rng,
-        dit_weights, llama_hidden, clip_pooled,
-        initial_latent_input, timesteps_input, dt_input,
-        iteration_count_input, guidance_scale_input,
-        model_dtype, 2,
+        &mut builder,
+        rng,
+        dit_weights,
+        llama_hidden,
+        clip_pooled,
+        initial_latent_input,
+        timesteps_input,
+        dt_input,
+        iteration_count_input,
+        guidance_scale_input,
+        model_dtype,
+        2,
     );
 
     // VAE decode
     let decoded_tensor = builder.new_tensor_link(rng);
     let mut vae_node = SuperGraphNodeModelExecution::new(
-        rng, vae_weights, 3,
+        rng,
+        vae_weights,
+        3,
         vec![(final_latent, "latent".to_string())],
         vec![("video_out".to_string(), decoded_tensor)],
     );
@@ -310,11 +324,17 @@ fn build_hunyuan_video_interface(
 
     let model_weights = vec![llama_weights, clip_weights, dit_weights, vae_weights];
     let input_links: Vec<_> = vec![
-        positive_prompt_input.to_any(), initial_latent_input.to_any(),
-        timesteps_input.to_any(), dt_input.to_any(), sigmas_input.to_any(),
-        iteration_count_input.to_any(), guidance_scale_input.to_any(),
-        llama_weights.to_any(), clip_weights.to_any(),
-        dit_weights.to_any(), vae_weights.to_any(),
+        positive_prompt_input.to_any(),
+        initial_latent_input.to_any(),
+        timesteps_input.to_any(),
+        dt_input.to_any(),
+        sigmas_input.to_any(),
+        iteration_count_input.to_any(),
+        guidance_scale_input.to_any(),
+        llama_weights.to_any(),
+        clip_weights.to_any(),
+        dit_weights.to_any(),
+        vae_weights.to_any(),
     ];
     let output_links: Vec<_> = vec![video_output.to_any()];
     let super_graph = builder.build(rng, &input_links, &output_links);
@@ -385,9 +405,14 @@ fn build_hunyuan_denoising_loop(
     let cast_latent = inner_builder.new_tensor_link(rng);
     let cast_timestep = inner_builder.new_tensor_link(rng);
     super::shared::interface_helpers::build_input_prep(
-        &mut inner_builder, rng,
-        inner_latent_in, inner_timestep, cast_latent, cast_timestep,
-        model_dtype, "hunyuan_input_prep",
+        &mut inner_builder,
+        rng,
+        inner_latent_in,
+        inner_timestep,
+        cast_latent,
+        cast_timestep,
+        model_dtype,
+        "hunyuan_input_prep",
     );
 
     // Scale guidance: guidance_scale * 1000.0, reshape to [1]
@@ -410,8 +435,7 @@ fn build_hunyuan_denoising_loop(
         let reshaped =
             whisper_tensor::milli_graph::ops::Reshape::push_new(&mut mg, scaled, shape, false, rng);
         mg.set_output_map(std::iter::once((reshaped, cast_guidance.global_id())));
-        let mut node =
-            whisper_tensor::super_graph::nodes::SuperGraphNodeMilliOpGraph::new(mg, rng);
+        let mut node = whisper_tensor::super_graph::nodes::SuperGraphNodeMilliOpGraph::new(mg, rng);
         node.label = Some("guidance_scale_prep".to_string());
         inner_builder.add_node(node.to_any());
     }
@@ -420,7 +444,9 @@ fn build_hunyuan_denoising_loop(
     let dit_output = inner_builder.new_tensor_link(rng);
     {
         let mut node = SuperGraphNodeModelExecution::new(
-            rng, inner_dit_weights, dit_model_index,
+            rng,
+            inner_dit_weights,
+            dit_model_index,
             vec![
                 (cast_latent, "hidden_states".to_string()),
                 (inner_llama_hidden, "encoder_hidden_states".to_string()),
@@ -453,8 +479,7 @@ fn build_hunyuan_denoising_loop(
         let latent_next = SimpleBinary::add(&mut mg, lat_in, step, rng);
 
         mg.set_output_map(std::iter::once((latent_next, inner_latent_out.global_id())));
-        let mut node =
-            whisper_tensor::super_graph::nodes::SuperGraphNodeMilliOpGraph::new(mg, rng);
+        let mut node = whisper_tensor::super_graph::nodes::SuperGraphNodeMilliOpGraph::new(mg, rng);
         node.label = Some("euler_step".to_string());
         inner_builder.add_node(node.to_any());
     }
@@ -462,23 +487,32 @@ fn build_hunyuan_denoising_loop(
     build_step_increment(&mut inner_builder, rng, inner_step_in, inner_step_out);
 
     let mut report = SuperGraphNodeReportProgress::new(
-        inner_progress_tier, inner_step_out, inner_total_steps, rng,
+        inner_progress_tier,
+        inner_step_out,
+        inner_total_steps,
+        rng,
     );
     report.label = Some("hunyuan_progress".to_string());
     inner_builder.add_node(report.to_any());
 
     let inner_inputs: Vec<_> = vec![
-        inner_dit_weights.to_any(), inner_llama_hidden.to_any(),
-        inner_clip_pooled.to_any(), inner_guidance.to_any(),
-        inner_progress_tier.to_any(), inner_total_steps.to_any(),
-        inner_latent_in.to_any(), inner_step_in.to_any(),
-        inner_timestep.to_any(), inner_dt.to_any(),
+        inner_dit_weights.to_any(),
+        inner_llama_hidden.to_any(),
+        inner_clip_pooled.to_any(),
+        inner_guidance.to_any(),
+        inner_progress_tier.to_any(),
+        inner_total_steps.to_any(),
+        inner_latent_in.to_any(),
+        inner_step_in.to_any(),
+        inner_timestep.to_any(),
+        inner_dt.to_any(),
     ];
     let inner_outputs: Vec<_> = vec![inner_latent_out.to_any(), inner_step_out.to_any()];
     let inner_graph = inner_builder.build(rng, &inner_inputs, &inner_outputs);
 
     let mut scan_node = SuperGraphNodeScan::new(
-        inner_graph, iteration_count_input,
+        inner_graph,
+        iteration_count_input,
         vec![
             SuperGraphLinkDouble::new(dit_weights, inner_dit_weights),
             SuperGraphLinkDouble::new(llama_hidden, inner_llama_hidden),
@@ -496,7 +530,10 @@ fn build_hunyuan_denoising_loop(
             (dt_input, inner_dt, 0),
         ],
         vec![],
-        vec![SuperGraphLinkDouble::new(inner_latent_out, outer_final_latent)],
+        vec![SuperGraphLinkDouble::new(
+            inner_latent_out,
+            outer_final_latent,
+        )],
         rng,
     );
     scan_node.label = Some("hunyuan_denoise_scan".to_string());

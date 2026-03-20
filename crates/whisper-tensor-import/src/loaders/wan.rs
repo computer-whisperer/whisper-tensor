@@ -77,9 +77,15 @@ fn load_wan(base_path: PathBuf) -> Result<LoaderOutput, LoaderError> {
     let dim = transformer_config_json["dim"].as_u64().unwrap_or(1536) as usize;
 
     let (variant, dit_config) = if dim >= 5120 {
-        ("14b", crate::models::diffusion::wan::WanTransformerConfig::wan_14b())
+        (
+            "14b",
+            crate::models::diffusion::wan::WanTransformerConfig::wan_14b(),
+        )
     } else {
-        ("1.3b", crate::models::diffusion::wan::WanTransformerConfig::wan_1_3b())
+        (
+            "1.3b",
+            crate::models::diffusion::wan::WanTransformerConfig::wan_1_3b(),
+        )
     };
     println!("Detected Wan2.1-T2V-{variant}");
 
@@ -93,11 +99,7 @@ fn load_wan(base_path: PathBuf) -> Result<LoaderOutput, LoaderError> {
             let mut entries: Vec<_> = std::fs::read_dir(dir)
                 .map_err(|e| LoaderError::LoadFailed(e.into()))?
                 .filter_map(|e| e.ok())
-                .filter(|e| {
-                    e.path()
-                        .extension()
-                        .is_some_and(|ext| ext == "safetensors")
-                })
+                .filter(|e| e.path().extension().is_some_and(|ext| ext == "safetensors"))
                 .collect();
             entries.sort_by_key(|e| e.path());
             for entry in entries {
@@ -225,7 +227,9 @@ fn build_wan_interface(
     // T5 encode
     let t5_hidden_f32 = builder.new_tensor_link(rng);
     let mut t5_node = SuperGraphNodeModelExecution::new(
-        rng, t5_weights, 0,
+        rng,
+        t5_weights,
+        0,
         vec![(t5_ids_input, "input_ids".to_string())],
         vec![("hidden_states".to_string(), t5_hidden_f32)],
     );
@@ -235,17 +239,25 @@ fn build_wan_interface(
 
     // Denoising loop (flow matching / Euler)
     let final_latent = build_wan_denoising_loop(
-        &mut builder, rng,
-        dit_weights, t5_hidden,
-        initial_latent_input, timesteps_input, dt_input,
-        iteration_count_input, guidance_scale_input,
-        model_dtype, 1,
+        &mut builder,
+        rng,
+        dit_weights,
+        t5_hidden,
+        initial_latent_input,
+        timesteps_input,
+        dt_input,
+        iteration_count_input,
+        guidance_scale_input,
+        model_dtype,
+        1,
     );
 
     // VAE decode
     let decoded_tensor = builder.new_tensor_link(rng);
     let mut vae_node = SuperGraphNodeModelExecution::new(
-        rng, vae_weights, 2,
+        rng,
+        vae_weights,
+        2,
         vec![(final_latent, "latent".to_string())],
         vec![("video_out".to_string(), decoded_tensor)],
     );
@@ -258,10 +270,16 @@ fn build_wan_interface(
 
     let model_weights = vec![t5_weights, dit_weights, vae_weights];
     let input_links: Vec<_> = vec![
-        positive_prompt_input.to_any(), initial_latent_input.to_any(),
-        timesteps_input.to_any(), dt_input.to_any(), sigmas_input.to_any(),
-        iteration_count_input.to_any(), guidance_scale_input.to_any(),
-        t5_weights.to_any(), dit_weights.to_any(), vae_weights.to_any(),
+        positive_prompt_input.to_any(),
+        initial_latent_input.to_any(),
+        timesteps_input.to_any(),
+        dt_input.to_any(),
+        sigmas_input.to_any(),
+        iteration_count_input.to_any(),
+        guidance_scale_input.to_any(),
+        t5_weights.to_any(),
+        dit_weights.to_any(),
+        vae_weights.to_any(),
     ];
     let output_links: Vec<_> = vec![video_output.to_any()];
     let super_graph = builder.build(rng, &input_links, &output_links);
@@ -326,9 +344,14 @@ fn build_wan_denoising_loop(
     let cast_latent = inner_builder.new_tensor_link(rng);
     let cast_timestep = inner_builder.new_tensor_link(rng);
     build_input_prep(
-        &mut inner_builder, rng,
-        inner_latent_in, inner_timestep, cast_latent, cast_timestep,
-        model_dtype, "wan_input_prep",
+        &mut inner_builder,
+        rng,
+        inner_latent_in,
+        inner_timestep,
+        cast_latent,
+        cast_timestep,
+        model_dtype,
+        "wan_input_prep",
     );
 
     let zero_t5_hidden = inner_builder.new_tensor_link(rng);
@@ -338,7 +361,9 @@ fn build_wan_denoising_loop(
     let uncond_output = inner_builder.new_tensor_link(rng);
     {
         let mut node = SuperGraphNodeModelExecution::new(
-            rng, inner_dit_weights, dit_model_index,
+            rng,
+            inner_dit_weights,
+            dit_model_index,
             vec![
                 (cast_latent, "hidden_states".to_string()),
                 (zero_t5_hidden, "encoder_hidden_states".to_string()),
@@ -354,7 +379,9 @@ fn build_wan_denoising_loop(
     let cond_output = inner_builder.new_tensor_link(rng);
     {
         let mut node = SuperGraphNodeModelExecution::new(
-            rng, inner_dit_weights, dit_model_index,
+            rng,
+            inner_dit_weights,
+            dit_model_index,
             vec![
                 (cast_latent, "hidden_states".to_string()),
                 (inner_t5_hidden, "encoder_hidden_states".to_string()),
@@ -370,8 +397,10 @@ fn build_wan_denoising_loop(
     {
         let (mut mg, input_map) = MilliOpGraph::new(
             [
-                uncond_output.global_id(), cond_output.global_id(),
-                inner_latent_in.global_id(), inner_guidance_scale.global_id(),
+                uncond_output.global_id(),
+                cond_output.global_id(),
+                inner_latent_in.global_id(),
+                inner_guidance_scale.global_id(),
                 inner_dt.global_id(),
             ],
             rng,
@@ -401,22 +430,31 @@ fn build_wan_denoising_loop(
     build_step_increment(&mut inner_builder, rng, inner_step_in, inner_step_out);
 
     let mut report = SuperGraphNodeReportProgress::new(
-        inner_progress_tier, inner_step_out, inner_total_steps, rng,
+        inner_progress_tier,
+        inner_step_out,
+        inner_total_steps,
+        rng,
     );
     report.label = Some("wan_progress".to_string());
     inner_builder.add_node(report.to_any());
 
     let inner_inputs: Vec<_> = vec![
-        inner_dit_weights.to_any(), inner_t5_hidden.to_any(),
-        inner_guidance_scale.to_any(), inner_progress_tier.to_any(),
-        inner_total_steps.to_any(), inner_latent_in.to_any(),
-        inner_step_in.to_any(), inner_timestep.to_any(), inner_dt.to_any(),
+        inner_dit_weights.to_any(),
+        inner_t5_hidden.to_any(),
+        inner_guidance_scale.to_any(),
+        inner_progress_tier.to_any(),
+        inner_total_steps.to_any(),
+        inner_latent_in.to_any(),
+        inner_step_in.to_any(),
+        inner_timestep.to_any(),
+        inner_dt.to_any(),
     ];
     let inner_outputs: Vec<_> = vec![inner_latent_out.to_any(), inner_step_out.to_any()];
     let inner_graph = inner_builder.build(rng, &inner_inputs, &inner_outputs);
 
     let mut scan_node = SuperGraphNodeScan::new(
-        inner_graph, iteration_count_input,
+        inner_graph,
+        iteration_count_input,
         vec![
             SuperGraphLinkDouble::new(dit_weights, inner_dit_weights),
             SuperGraphLinkDouble::new(t5_hidden, inner_t5_hidden),
@@ -433,7 +471,10 @@ fn build_wan_denoising_loop(
             (dt_input, inner_dt, 0),
         ],
         vec![],
-        vec![SuperGraphLinkDouble::new(inner_latent_out, outer_final_latent)],
+        vec![SuperGraphLinkDouble::new(
+            inner_latent_out,
+            outer_final_latent,
+        )],
         rng,
     );
     scan_node.label = Some("wan_denoise_scan".to_string());

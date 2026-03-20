@@ -234,7 +234,10 @@ fn allegro_caption_projection(
     wm: &impl WeightManager,
     encoder_hidden_states: Arc<dyn Tensor>,
 ) -> Result<Arc<dyn Tensor>, Error> {
-    let x = linear(&wm.prefix("caption_projection.linear_1"), encoder_hidden_states)?;
+    let x = linear(
+        &wm.prefix("caption_projection.linear_1"),
+        encoder_hidden_states,
+    )?;
     let x = gelu_pytorch_tanh(x)?;
     linear(&wm.prefix("caption_projection.linear_2"), x)
 }
@@ -259,9 +262,21 @@ fn allegro_self_attention(
     let v = linear(&wm.prefix("attn1.to_v"), hidden_states)?;
 
     // [B, seq, D] -> [B, nh, seq, hd]
-    let q = Transpose::new(None, reshape(q, vec![0, 0, nh, hd])?, Some(vec![0, 2, 1, 3]));
-    let k = Transpose::new(None, reshape(k, vec![0, 0, nh, hd])?, Some(vec![0, 2, 1, 3]));
-    let v = Transpose::new(None, reshape(v, vec![0, 0, nh, hd])?, Some(vec![0, 2, 1, 3]));
+    let q = Transpose::new(
+        None,
+        reshape(q, vec![0, 0, nh, hd])?,
+        Some(vec![0, 2, 1, 3]),
+    );
+    let k = Transpose::new(
+        None,
+        reshape(k, vec![0, 0, nh, hd])?,
+        Some(vec![0, 2, 1, 3]),
+    );
+    let v = Transpose::new(
+        None,
+        reshape(v, vec![0, 0, nh, hd])?,
+        Some(vec![0, 2, 1, 3]),
+    );
 
     // Per-axis RoPE: split head_dim=96 into 3 chunks of 32, apply RoPE to each
     let mut q_parts = Vec::with_capacity(3);
@@ -275,10 +290,24 @@ fn allegro_self_attention(
         let (ref cos, ref sin) = rope_caches[axis];
         // Non-interleaved rotation (interleaved=None/0)
         let q_rotated = RotaryEmbedding::new(
-            None, q_chunk, cos.clone(), sin.clone(), None, None, None, None,
+            None,
+            q_chunk,
+            cos.clone(),
+            sin.clone(),
+            None,
+            None,
+            None,
+            None,
         )?;
         let k_rotated = RotaryEmbedding::new(
-            None, k_chunk, cos.clone(), sin.clone(), None, None, None, None,
+            None,
+            k_chunk,
+            cos.clone(),
+            sin.clone(),
+            None,
+            None,
+            None,
+            None,
         )?;
         q_parts.push(q_rotated as Arc<dyn Tensor>);
         k_parts.push(k_rotated as Arc<dyn Tensor>);
@@ -313,9 +342,21 @@ fn allegro_cross_attention(
     let k = linear(&wm.prefix("attn2.to_k"), encoder_hidden_states.clone())?;
     let v = linear(&wm.prefix("attn2.to_v"), encoder_hidden_states)?;
 
-    let q = Transpose::new(None, reshape(q, vec![0, 0, nh, hd])?, Some(vec![0, 2, 1, 3]));
-    let k = Transpose::new(None, reshape(k, vec![0, 0, nh, hd])?, Some(vec![0, 2, 1, 3]));
-    let v = Transpose::new(None, reshape(v, vec![0, 0, nh, hd])?, Some(vec![0, 2, 1, 3]));
+    let q = Transpose::new(
+        None,
+        reshape(q, vec![0, 0, nh, hd])?,
+        Some(vec![0, 2, 1, 3]),
+    );
+    let k = Transpose::new(
+        None,
+        reshape(k, vec![0, 0, nh, hd])?,
+        Some(vec![0, 2, 1, 3]),
+    );
+    let v = Transpose::new(
+        None,
+        reshape(v, vec![0, 0, nh, hd])?,
+        Some(vec![0, 2, 1, 3]),
+    );
 
     let scores = MatMul::new(None, q, Transpose::new(None, k, Some(vec![0, 1, 3, 2])))?;
     let scores = div_scalar(scores, (config.attention_head_dim as f32).sqrt())?;
@@ -357,16 +398,11 @@ fn allegro_block(
     // 1. Self-attention with AdaLN + RoPE + gating
     let normed = adaln_modulate(hidden_states.clone(), shift_msa, scale_msa, inner_dim, eps)?;
     let attn_out = allegro_self_attention(wm, normed, config, rope_caches)?;
-    let hidden_states = Add::new(
-        None,
-        hidden_states,
-        Mul::new(None, gate_msa, attn_out)?,
-    )?;
+    let hidden_states = Add::new(None, hidden_states, Mul::new(None, gate_msa, attn_out)?)?;
 
     // 2. Cross-attention (ungated residual, no pre-norm on query)
-    let cross_out = allegro_cross_attention(
-        wm, hidden_states.clone(), encoder_hidden_states, config,
-    )?;
+    let cross_out =
+        allegro_cross_attention(wm, hidden_states.clone(), encoder_hidden_states, config)?;
     let hidden_states = Add::new(None, hidden_states, cross_out)?;
 
     // 3. FFN with AdaLN + gating (uses norm2, not norm3)
@@ -520,8 +556,13 @@ pub fn load_allegro_transformer_with_origin(
     let final_mod = Add::new(None, final_sst, embedded_timestep)?;
     let shift_out = slice_axis(final_mod.clone(), 1, 0, 1)?;
     let scale_out = slice_axis(final_mod, 1, 1, 2)?;
-    let hidden_states =
-        adaln_modulate(hidden_states, shift_out, scale_out, inner_dim, config.norm_eps)?;
+    let hidden_states = adaln_modulate(
+        hidden_states,
+        shift_out,
+        scale_out,
+        inner_dim,
+        config.norm_eps,
+    )?;
     let hidden_states = linear(&wm.prefix("proj_out"), hidden_states)?;
 
     // 7. Unpatchify: [B, F*pH*pW, p*p*C] -> [B, C, F, H, W]
@@ -534,8 +575,7 @@ pub fn load_allegro_transformer_with_origin(
     let x = Transpose::new(None, x, Some(vec![0, 7, 1, 4, 2, 5, 3, 6]));
     let output = reshape(x, vec![0, c, f, ph * p, pw * p])?;
 
-    let output_tensors: Vec<(String, Arc<dyn Tensor>)> =
-        vec![("out_sample".to_string(), output)];
+    let output_tensors: Vec<(String, Arc<dyn Tensor>)> = vec![("out_sample".to_string(), output)];
 
     println!("Built Allegro transformer graph, exporting...");
     let onnx_model = if let Some(origin) = origin_path {
@@ -610,25 +650,74 @@ pub fn load_allegro_vae_decoder_with_origin(
     // post_quant_conv: Conv2d(4, 4, 1) applied per frame
     // [B, C, T, H, W] -> [B, T, C, H, W] -> [B*T, C, H, W]
     let x = Transpose::new(None, latent_input, Some(vec![0, 2, 1, 3, 4]));
-    let x = reshape(x, vec![-1, config.latent_channels as i64, cur_h as i64, cur_w as i64])?;
+    let x = reshape(
+        x,
+        vec![
+            -1,
+            config.latent_channels as i64,
+            cur_h as i64,
+            cur_w as i64,
+        ],
+    )?;
     let x = conv2d(&wm.prefix("post_quant_conv"), x, 1, 1, 0)?;
     // -> [B, T, C, H, W] -> [B, C, T, H, W]
-    let x = reshape(x, vec![-1, cur_t as i64, config.latent_channels as i64, cur_h as i64, cur_w as i64])?;
+    let x = reshape(
+        x,
+        vec![
+            -1,
+            cur_t as i64,
+            config.latent_channels as i64,
+            cur_h as i64,
+            cur_w as i64,
+        ],
+    )?;
     let mut x: Arc<dyn Tensor> = Transpose::new(None, x, Some(vec![0, 2, 1, 3, 4]));
 
     // conv_in: Conv2d(4, 512, 3) per frame
-    x = allegro_per_frame_conv2d(&wm.prefix("decoder.conv_in"), x, cur_t, cur_h, cur_w, 3, 1, 1)?;
+    x = allegro_per_frame_conv2d(
+        &wm.prefix("decoder.conv_in"),
+        x,
+        cur_t,
+        cur_h,
+        cur_w,
+        3,
+        1,
+        1,
+    )?;
 
     // Mid block: ResBlock -> Attention -> ResBlock (spatial only, per frame)
     x = allegro_vae_resnet_per_frame(
-        &wm.prefix("decoder.mid_block.resnets.0"), x, last_ch, last_ch, eps, ng, cur_t, cur_h, cur_w,
+        &wm.prefix("decoder.mid_block.resnets.0"),
+        x,
+        last_ch,
+        last_ch,
+        eps,
+        ng,
+        cur_t,
+        cur_h,
+        cur_w,
     )?;
     // Attention: spatial-only per frame
     x = allegro_vae_spatial_attention(
-        &wm.prefix("decoder.mid_block.attentions.0"), x, last_ch, ng, eps, cur_t, cur_h, cur_w,
+        &wm.prefix("decoder.mid_block.attentions.0"),
+        x,
+        last_ch,
+        ng,
+        eps,
+        cur_t,
+        cur_h,
+        cur_w,
     )?;
     x = allegro_vae_resnet_per_frame(
-        &wm.prefix("decoder.mid_block.resnets.1"), x, last_ch, last_ch, eps, ng, cur_t, cur_h, cur_w,
+        &wm.prefix("decoder.mid_block.resnets.1"),
+        x,
+        last_ch,
+        last_ch,
+        eps,
+        ng,
+        cur_t,
+        cur_h,
+        cur_w,
     )?;
 
     println!("Building Allegro VAE decoder: {} up stages...", num_stages);
@@ -644,7 +733,14 @@ pub fn load_allegro_vae_decoder_with_origin(
             let in_ch = if r == 0 { current_ch } else { out_ch };
             x = allegro_vae_resnet_per_frame(
                 &wm.prefix(&format!("decoder.up_blocks.{stage}.resnets.{r}")),
-                x, in_ch, out_ch, eps, ng, cur_t, cur_h, cur_w,
+                x,
+                in_ch,
+                out_ch,
+                eps,
+                ng,
+                cur_t,
+                cur_h,
+                cur_w,
             )?;
         }
         current_ch = out_ch;
@@ -653,7 +749,10 @@ pub fn load_allegro_vae_decoder_with_origin(
             // Nearest-neighbor 2x spatial upsample + conv per frame
             x = allegro_vae_spatial_upsample(
                 &wm.prefix(&format!("decoder.up_blocks.{stage}.upsamplers.0")),
-                x, cur_t, cur_h, cur_w,
+                x,
+                cur_t,
+                cur_h,
+                cur_w,
             )?;
             cur_h *= 2;
             cur_w *= 2;
@@ -663,29 +762,58 @@ pub fn load_allegro_vae_decoder_with_origin(
             // Temporal upsample: simple 2x (Allegro uses non-causal temporal compression)
             x = allegro_vae_temporal_upsample(
                 &wm.prefix(&format!("decoder.up_blocks.{stage}.temp_upsamplers.0")),
-                x, out_ch, cur_t, cur_h, cur_w,
+                x,
+                out_ch,
+                cur_t,
+                cur_h,
+                cur_w,
             )?;
             cur_t *= 2;
         }
 
         println!(
             "  Up stage {}/{}: {}ch, [T={}, H={}, W={}]",
-            stage + 1, num_stages, out_ch, cur_t, cur_h, cur_w
+            stage + 1,
+            num_stages,
+            out_ch,
+            cur_t,
+            cur_h,
+            cur_w
         );
     }
 
     // Final: GroupNorm -> SiLU -> Conv2d per frame
-    x = allegro_per_frame_group_norm(&wm.prefix("decoder.conv_norm_out"), x, eps, ng, current_ch, cur_t, cur_h, cur_w)?;
+    x = allegro_per_frame_group_norm(
+        &wm.prefix("decoder.conv_norm_out"),
+        x,
+        eps,
+        ng,
+        current_ch,
+        cur_t,
+        cur_h,
+        cur_w,
+    )?;
     x = silu(x)?;
-    x = allegro_per_frame_conv2d(&wm.prefix("decoder.conv_out"), x, cur_t, cur_h, cur_w, 3, 1, 1)?;
+    x = allegro_per_frame_conv2d(
+        &wm.prefix("decoder.conv_out"),
+        x,
+        cur_t,
+        cur_h,
+        cur_w,
+        3,
+        1,
+        1,
+    )?;
 
-    let output_tensors: Vec<(String, Arc<dyn Tensor>)> =
-        vec![("video_out".to_string(), x)];
+    let output_tensors: Vec<(String, Arc<dyn Tensor>)> = vec![("video_out".to_string(), x)];
 
     println!("Built Allegro VAE decoder graph, exporting...");
     let onnx_model = if let Some(origin) = origin_path {
         crate::onnx_graph::build_proto_with_origin_path(
-            &input_tensors, &output_tensors, output_method, Some(origin),
+            &input_tensors,
+            &output_tensors,
+            output_method,
+            Some(origin),
         )?
     } else {
         crate::onnx_graph::build_proto(&input_tensors, &output_tensors, output_method)?
@@ -713,7 +841,10 @@ fn allegro_per_frame_conv2d(
     let out_h = x.shape()[2].resolve()?;
     let out_w = x.shape()[3].resolve()?;
     // [B*T, C_out, H_out, W_out] -> [B, T, C_out, H_out, W_out] -> [B, C_out, T, H_out, W_out]
-    let x = reshape(x, vec![-1, cur_t as i64, out_ch as i64, out_h as i64, out_w as i64])?;
+    let x = reshape(
+        x,
+        vec![-1, cur_t as i64, out_ch as i64, out_h as i64, out_w as i64],
+    )?;
     Ok(Transpose::new(None, x, Some(vec![0, 2, 1, 3, 4])) as Arc<dyn Tensor>)
 }
 
@@ -731,7 +862,16 @@ fn allegro_per_frame_group_norm(
     let x = Transpose::new(None, input, Some(vec![0, 2, 1, 3, 4]));
     let x = reshape(x, vec![-1, channels as i64, cur_h as i64, cur_w as i64])?;
     let x = group_norm(wm, x, eps, num_groups)?;
-    let x = reshape(x, vec![-1, cur_t as i64, channels as i64, cur_h as i64, cur_w as i64])?;
+    let x = reshape(
+        x,
+        vec![
+            -1,
+            cur_t as i64,
+            channels as i64,
+            cur_h as i64,
+            cur_w as i64,
+        ],
+    )?;
     Ok(Transpose::new(None, x, Some(vec![0, 2, 1, 3, 4])) as Arc<dyn Tensor>)
 }
 
@@ -748,16 +888,43 @@ fn allegro_vae_resnet_per_frame(
     cur_h: usize,
     cur_w: usize,
 ) -> Result<Arc<dyn Tensor>, Error> {
-    let h = allegro_per_frame_group_norm(&wm.prefix("norm1"), input.clone(), eps, num_groups, in_channels, cur_t, cur_h, cur_w)?;
+    let h = allegro_per_frame_group_norm(
+        &wm.prefix("norm1"),
+        input.clone(),
+        eps,
+        num_groups,
+        in_channels,
+        cur_t,
+        cur_h,
+        cur_w,
+    )?;
     let h = silu(h)?;
     let h = allegro_per_frame_conv2d(&wm.prefix("conv1"), h, cur_t, cur_h, cur_w, 3, 1, 1)?;
 
-    let h = allegro_per_frame_group_norm(&wm.prefix("norm2"), h, eps, num_groups, out_channels, cur_t, cur_h, cur_w)?;
+    let h = allegro_per_frame_group_norm(
+        &wm.prefix("norm2"),
+        h,
+        eps,
+        num_groups,
+        out_channels,
+        cur_t,
+        cur_h,
+        cur_w,
+    )?;
     let h = silu(h)?;
     let h = allegro_per_frame_conv2d(&wm.prefix("conv2"), h, cur_t, cur_h, cur_w, 3, 1, 1)?;
 
     let residual = if in_channels != out_channels {
-        allegro_per_frame_conv2d(&wm.prefix("conv_shortcut"), input, cur_t, cur_h, cur_w, 1, 1, 0)?
+        allegro_per_frame_conv2d(
+            &wm.prefix("conv_shortcut"),
+            input,
+            cur_t,
+            cur_h,
+            cur_w,
+            1,
+            1,
+            0,
+        )?
     } else {
         input
     };
@@ -778,7 +945,16 @@ fn allegro_vae_spatial_attention(
     cur_w: usize,
 ) -> Result<Arc<dyn Tensor>, Error> {
     let residual = input.clone();
-    let h = allegro_per_frame_group_norm(&wm.prefix("group_norm"), input, eps, num_groups, channels, cur_t, cur_h, cur_w)?;
+    let h = allegro_per_frame_group_norm(
+        &wm.prefix("group_norm"),
+        input,
+        eps,
+        num_groups,
+        channels,
+        cur_t,
+        cur_h,
+        cur_w,
+    )?;
 
     // [B, C, T, H, W] -> [B, T, C, H, W] -> [B*T, C, H, W] -> [B*T, C, H*W] -> [B*T, H*W, C]
     let x = Transpose::new(None, h, Some(vec![0, 2, 1, 3, 4]));
@@ -804,7 +980,16 @@ fn allegro_vae_spatial_attention(
     // [B*T, H*W, C] -> [B*T, C, H*W] -> [B*T, C, H, W] -> [B, T, C, H, W] -> [B, C, T, H, W]
     let out = Transpose::new(None, out, Some(vec![0, 2, 1]));
     let out = reshape(out, vec![0, channels as i64, cur_h as i64, cur_w as i64])?;
-    let out = reshape(out, vec![-1, cur_t as i64, channels as i64, cur_h as i64, cur_w as i64])?;
+    let out = reshape(
+        out,
+        vec![
+            -1,
+            cur_t as i64,
+            channels as i64,
+            cur_h as i64,
+            cur_w as i64,
+        ],
+    )?;
     let out = Transpose::new(None, out, Some(vec![0, 2, 1, 3, 4]));
 
     Ok(Add::new(None, residual, out)?)
@@ -826,7 +1011,16 @@ fn allegro_vae_spatial_upsample(
     let x = conv2d(&wm.prefix("conv"), x, 3, 1, 1)?;
     let out_h = cur_h * 2;
     let out_w = cur_w * 2;
-    let x = reshape(x, vec![-1, cur_t as i64, channels as i64, out_h as i64, out_w as i64])?;
+    let x = reshape(
+        x,
+        vec![
+            -1,
+            cur_t as i64,
+            channels as i64,
+            out_h as i64,
+            out_w as i64,
+        ],
+    )?;
     Ok(Transpose::new(None, x, Some(vec![0, 2, 1, 3, 4])) as Arc<dyn Tensor>)
 }
 
@@ -857,7 +1051,11 @@ fn allegro_vae_temporal_upsample(
         Dimension::new(Some(cur_w), None, None),
     ];
     let x = Resize::new_with_scales(
-        None, input, scales, "nearest".to_string(), Shape::new(output_dims),
+        None,
+        input,
+        scales,
+        "nearest".to_string(),
+        Shape::new(output_dims),
     )?;
 
     // Temporal conv: Conv3d with temporal kernel
@@ -865,7 +1063,9 @@ fn allegro_vae_temporal_upsample(
     let bias = wm.get_tensor("conv.bias").ok();
     let conv = Conv::new(
         wm.get_prefix().map(|p| p.to_string()),
-        x, weight, bias,
+        x,
+        weight,
+        bias,
         vec![3, 1, 1],
         vec![1, 1, 1],
         vec![1, 0, 0, 1, 0, 0],

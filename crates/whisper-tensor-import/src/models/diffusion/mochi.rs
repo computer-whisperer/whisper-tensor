@@ -193,15 +193,9 @@ fn mochi_timestep_embedding(
     let t_emb = cast(t_emb, model_dtype);
 
     // TimestepEmbedding: Linear(256 -> 3072) -> SiLU -> Linear(3072 -> 3072)
-    let temb = linear(
-        &wm.prefix("time_embed.timestep_embedder.linear_1"),
-        t_emb,
-    )?;
+    let temb = linear(&wm.prefix("time_embed.timestep_embedder.linear_1"), t_emb)?;
     let temb = silu(temb)?;
-    let temb = linear(
-        &wm.prefix("time_embed.timestep_embedder.linear_2"),
-        temb,
-    )?;
+    let temb = linear(&wm.prefix("time_embed.timestep_embedder.linear_2"), temb)?;
 
     // 2. Attention pool: pool T5 output into a single vector
     // Simplified: mean-pool text tokens, then cross-attend
@@ -278,7 +272,12 @@ fn swiglu_ff(
     let projected = linear(&wm.prefix("net.0.proj"), input)?;
     // Split into gate and value
     let gate = slice_axis(projected.clone(), -1, 0, ff_inner_dim as i64)?;
-    let value = slice_axis(projected, -1, ff_inner_dim as i64, (ff_inner_dim * 2) as i64)?;
+    let value = slice_axis(
+        projected,
+        -1,
+        ff_inner_dim as i64,
+        (ff_inner_dim * 2) as i64,
+    )?;
     // SwiGLU: value * SiLU(gate)
     let gate = silu(gate)?;
     let h = Mul::new(None, value, gate)?;
@@ -310,14 +309,32 @@ fn mochi_joint_attention(
     let v = linear(&wm.prefix("attn1.to_v"), hidden_states)?;
 
     // Text Q/K/V: Linear(1536 -> 3072)
-    let add_q = linear(&wm.prefix("attn1.add_q_proj"), encoder_hidden_states.clone())?;
-    let add_k = linear(&wm.prefix("attn1.add_k_proj"), encoder_hidden_states.clone())?;
+    let add_q = linear(
+        &wm.prefix("attn1.add_q_proj"),
+        encoder_hidden_states.clone(),
+    )?;
+    let add_k = linear(
+        &wm.prefix("attn1.add_k_proj"),
+        encoder_hidden_states.clone(),
+    )?;
     let add_v = linear(&wm.prefix("attn1.add_v_proj"), encoder_hidden_states)?;
 
     // Reshape to multi-head: [B, seq, D] -> [B, nh, seq, hd]
-    let q = Transpose::new(None, reshape(q, vec![0, 0, nh, hd])?, Some(vec![0, 2, 1, 3]));
-    let k = Transpose::new(None, reshape(k, vec![0, 0, nh, hd])?, Some(vec![0, 2, 1, 3]));
-    let v = Transpose::new(None, reshape(v, vec![0, 0, nh, hd])?, Some(vec![0, 2, 1, 3]));
+    let q = Transpose::new(
+        None,
+        reshape(q, vec![0, 0, nh, hd])?,
+        Some(vec![0, 2, 1, 3]),
+    );
+    let k = Transpose::new(
+        None,
+        reshape(k, vec![0, 0, nh, hd])?,
+        Some(vec![0, 2, 1, 3]),
+    );
+    let v = Transpose::new(
+        None,
+        reshape(v, vec![0, 0, nh, hd])?,
+        Some(vec![0, 2, 1, 3]),
+    );
 
     let add_q = Transpose::new(
         None,
@@ -351,13 +368,16 @@ fn mochi_joint_attention(
     let k = Transpose::new(None, k, Some(vec![0, 2, 1, 3]));
 
     let q = RotaryEmbedding::new(
-        None, q, rope_cos.clone(), rope_sin.clone(),
-        None, Some(1), None, None,
+        None,
+        q,
+        rope_cos.clone(),
+        rope_sin.clone(),
+        None,
+        Some(1),
+        None,
+        None,
     )?;
-    let k = RotaryEmbedding::new(
-        None, k, rope_cos, rope_sin,
-        None, Some(1), None, None,
-    )?;
+    let k = RotaryEmbedding::new(None, k, rope_cos, rope_sin, None, Some(1), None, None)?;
 
     // Reshape back: [B, 1, seq, nh*hd] -> [B, nh, seq, hd]
     let q = Transpose::new(None, q, Some(vec![0, 2, 1, 3])); // [B, seq, 1, nh*hd]
@@ -454,8 +474,7 @@ fn mochi_block(
         let enc_chunks = split_chunks(enc_mod, text_dim, 4)?;
         let one_txt = ones_constant(text_dim, encoder_hidden_states.dtype());
         let enc_scale = Add::new(None, one_txt, enc_chunks[0].clone())?;
-        let norm_enc =
-            modulated_rms_norm(encoder_hidden_states.clone(), enc_scale, text_dim, eps)?;
+        let norm_enc = modulated_rms_norm(encoder_hidden_states.clone(), enc_scale, text_dim, eps)?;
         (
             norm_enc,
             Some(enc_chunks[1].clone()),
@@ -469,14 +488,19 @@ fn mochi_block(
         let enc_scale = unsqueeze(enc_scale, 1)?;
         let one_txt = ones_constant(text_dim, encoder_hidden_states.dtype());
         let enc_scale = Add::new(None, one_txt, enc_scale)?;
-        let norm_enc =
-            modulated_rms_norm(encoder_hidden_states.clone(), enc_scale, text_dim, eps)?;
+        let norm_enc = modulated_rms_norm(encoder_hidden_states.clone(), enc_scale, text_dim, eps)?;
         (norm_enc, None, None, None)
     };
 
     // 3. Joint attention
     let (attn_vid, attn_enc) = mochi_joint_attention(
-        wm, norm_hidden, norm_enc, config, rope_cos, rope_sin, context_pre_only,
+        wm,
+        norm_hidden,
+        norm_enc,
+        config,
+        rope_cos,
+        rope_sin,
+        context_pre_only,
     )?;
 
     // 4. Post-attention residuals with tanh gating
@@ -503,21 +527,23 @@ fn mochi_block(
     let hidden_states = Add::new(None, hidden_states, ff_gated)?;
 
     // 6. Text FFN (only for non-context_pre_only blocks)
-    let encoder_hidden_states = if let (Some(enc_s_mlp), Some(enc_g_mlp)) =
-        (enc_scale_mlp, enc_gate_mlp)
-    {
-        let one_txt2 = ones_constant(text_dim, encoder_hidden_states.dtype());
-        let enc_ff_scale = Add::new(None, one_txt2, enc_s_mlp)?;
-        let norm_enc_ff =
-            modulated_rms_norm(encoder_hidden_states.clone(), enc_ff_scale, text_dim, eps)?;
-        let enc_ff =
-            swiglu_ff(&wm.prefix("ff_context"), norm_enc_ff, config.ff_context_inner_dim())?;
-        let tanh_enc_gate_mlp = tanh_op(enc_g_mlp)?;
-        let enc_ff_gated = modulated_rms_norm(enc_ff, tanh_enc_gate_mlp, text_dim, eps)?;
-        Add::new(None, encoder_hidden_states, enc_ff_gated)? as Arc<dyn Tensor>
-    } else {
-        encoder_hidden_states
-    };
+    let encoder_hidden_states =
+        if let (Some(enc_s_mlp), Some(enc_g_mlp)) = (enc_scale_mlp, enc_gate_mlp) {
+            let one_txt2 = ones_constant(text_dim, encoder_hidden_states.dtype());
+            let enc_ff_scale = Add::new(None, one_txt2, enc_s_mlp)?;
+            let norm_enc_ff =
+                modulated_rms_norm(encoder_hidden_states.clone(), enc_ff_scale, text_dim, eps)?;
+            let enc_ff = swiglu_ff(
+                &wm.prefix("ff_context"),
+                norm_enc_ff,
+                config.ff_context_inner_dim(),
+            )?;
+            let tanh_enc_gate_mlp = tanh_op(enc_g_mlp)?;
+            let enc_ff_gated = modulated_rms_norm(enc_ff, tanh_enc_gate_mlp, text_dim, eps)?;
+            Add::new(None, encoder_hidden_states, enc_ff_gated)? as Arc<dyn Tensor>
+        } else {
+            encoder_hidden_states
+        };
 
     Ok((hidden_states, encoder_hidden_states))
 }
@@ -746,8 +772,7 @@ pub fn load_mochi_transformer_with_origin(
     let hidden_states = linear(&wm.prefix("proj_out"), hidden_states)?;
     let output = mochi_unpatchify(hidden_states, &config, latent_frames, patch_h, patch_w)?;
 
-    let output_tensors: Vec<(String, Arc<dyn Tensor>)> =
-        vec![("out_sample".to_string(), output)];
+    let output_tensors: Vec<(String, Arc<dyn Tensor>)> = vec![("out_sample".to_string(), output)];
 
     println!("Built Mochi transformer graph, exporting...");
     let onnx_model = if let Some(origin) = origin_path {
@@ -826,7 +851,16 @@ fn mochi_group_norm_5d(
     // GroupNorm operates on [B*T, C, H, W]
     let x = group_norm(&wm.prefix("norm_layer"), x, eps, num_groups)?;
     // [B*T, C, H, W] -> [B, T, C, H, W] -> [B, C, T, H, W]
-    let x = reshape(x, vec![-1, cur_t as i64, channels as i64, cur_h as i64, cur_w as i64])?;
+    let x = reshape(
+        x,
+        vec![
+            -1,
+            cur_t as i64,
+            channels as i64,
+            cur_h as i64,
+            cur_w as i64,
+        ],
+    )?;
     let x = Transpose::new(None, x, Some(vec![0, 2, 1, 3, 4]));
     Ok(x as Arc<dyn Tensor>)
 }
@@ -845,15 +879,27 @@ fn mochi_vae_resnet(
     cur_w: usize,
 ) -> Result<Arc<dyn Tensor>, Error> {
     let h = mochi_group_norm_5d(
-        &wm.prefix("norm1"), input.clone(), eps, num_groups,
-        in_channels, cur_t, cur_h, cur_w,
+        &wm.prefix("norm1"),
+        input.clone(),
+        eps,
+        num_groups,
+        in_channels,
+        cur_t,
+        cur_h,
+        cur_w,
     )?;
     let h = silu(h)?;
     let h = mochi_causal_conv3d(&wm.prefix("conv1.conv"), h, 3, 3, 1, 1)?;
 
     let h = mochi_group_norm_5d(
-        &wm.prefix("norm2"), h, eps, num_groups,
-        out_channels, cur_t, cur_h, cur_w,
+        &wm.prefix("norm2"),
+        h,
+        eps,
+        num_groups,
+        out_channels,
+        cur_t,
+        cur_h,
+        cur_w,
     )?;
     let h = silu(h)?;
     let h = mochi_causal_conv3d(&wm.prefix("conv2.conv"), h, 3, 3, 1, 1)?;
@@ -898,7 +944,12 @@ pub fn load_mochi_vae_decoder_with_origin(
     let mut cur_w = 106usize;
 
     // Decoder channel order (reversed): [768, 512, 256, 128]
-    let rev_channels: Vec<usize> = config.decoder_block_out_channels.iter().copied().rev().collect();
+    let rev_channels: Vec<usize> = config
+        .decoder_block_out_channels
+        .iter()
+        .copied()
+        .rev()
+        .collect();
     let last_ch = *rev_channels.first().unwrap(); // 768
 
     let batch_dim = Dimension::new(Some(1), Some("batch".to_string()), None);
@@ -937,11 +988,21 @@ pub fn load_mochi_vae_decoder_with_origin(
     for r in 0..block_in_layers {
         x = mochi_vae_resnet(
             &dec.prefix(&format!("block_in.resnets.{r}")),
-            x, last_ch, last_ch, eps, ng, cur_t, cur_h, cur_w,
+            x,
+            last_ch,
+            last_ch,
+            eps,
+            ng,
+            cur_t,
+            cur_h,
+            cur_w,
         )?;
     }
 
-    println!("Building Mochi VAE decoder: {} up stages...", config.temporal_expansions.len());
+    println!(
+        "Building Mochi VAE decoder: {} up stages...",
+        config.temporal_expansions.len()
+    );
 
     // Up blocks (3 stages, reversed order)
     let num_up_stages = config.temporal_expansions.len(); // 3
@@ -962,7 +1023,14 @@ pub fn load_mochi_vae_decoder_with_origin(
             let in_ch = if r == 0 { current_ch } else { out_ch };
             x = mochi_vae_resnet(
                 &dec.prefix(&format!("up_blocks.{stage}.resnets.{r}")),
-                x, in_ch, out_ch, eps, ng, cur_t, cur_h, cur_w,
+                x,
+                in_ch,
+                out_ch,
+                eps,
+                ng,
+                cur_t,
+                cur_h,
+                cur_w,
             )?;
         }
         current_ch = out_ch;
@@ -972,10 +1040,7 @@ pub fn load_mochi_vae_decoder_with_origin(
             // [B, C, T, H, W] -> [B, T, H, W, C]
             let proj_in = Transpose::new(None, x, Some(vec![0, 2, 3, 4, 1]));
             // Linear(C -> C * t_exp * s_exp^2)
-            let proj_out = linear(
-                &dec.prefix(&format!("up_blocks.{stage}.proj")),
-                proj_in,
-            )?;
+            let proj_out = linear(&dec.prefix(&format!("up_blocks.{stage}.proj")), proj_in)?;
             // [B, T, H, W, C*t*s*s] -> [B, T, H, W, C, t, s, s]
             let proj_out = reshape(
                 proj_out,
@@ -1020,7 +1085,14 @@ pub fn load_mochi_vae_decoder_with_origin(
     for r in 0..block_out_layers {
         x = mochi_vae_resnet(
             &dec.prefix(&format!("block_out.resnets.{r}")),
-            x, current_ch, current_ch, eps, ng, cur_t, cur_h, cur_w,
+            x,
+            current_ch,
+            current_ch,
+            eps,
+            ng,
+            cur_t,
+            cur_h,
+            cur_w,
         )?;
     }
 
@@ -1036,8 +1108,7 @@ pub fn load_mochi_vae_decoder_with_origin(
     let drop_frames = temporal_compression - 1;
     let output = slice_axis(x, 2, drop_frames as i64, cur_t as i64)?;
 
-    let output_tensors: Vec<(String, Arc<dyn Tensor>)> =
-        vec![("video_out".to_string(), output)];
+    let output_tensors: Vec<(String, Arc<dyn Tensor>)> = vec![("video_out".to_string(), output)];
 
     println!("Built Mochi VAE decoder graph, exporting...");
     let onnx_model = if let Some(origin) = origin_path {

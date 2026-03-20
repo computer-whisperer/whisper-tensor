@@ -378,9 +378,14 @@ fn build_cogvideox_denoising_loop(
     let cast_latent = inner_builder.new_tensor_link(rng);
     let cast_timestep = inner_builder.new_tensor_link(rng);
     build_input_prep(
-        &mut inner_builder, rng,
-        inner_latent_in, inner_timestep, cast_latent, cast_timestep,
-        model_dtype, "cogvideo_input_prep",
+        &mut inner_builder,
+        rng,
+        inner_latent_in,
+        inner_timestep,
+        cast_latent,
+        cast_timestep,
+        model_dtype,
+        "cogvideo_input_prep",
     );
 
     // Zero text embeddings
@@ -391,7 +396,9 @@ fn build_cogvideox_denoising_loop(
     let uncond_output = inner_builder.new_tensor_link(rng);
     {
         let mut node = SuperGraphNodeModelExecution::new(
-            rng, inner_dit_weights, dit_model_index,
+            rng,
+            inner_dit_weights,
+            dit_model_index,
             vec![
                 (cast_latent, "hidden_states".to_string()),
                 (zero_t5_hidden, "encoder_hidden_states".to_string()),
@@ -407,7 +414,9 @@ fn build_cogvideox_denoising_loop(
     let cond_output = inner_builder.new_tensor_link(rng);
     {
         let mut node = SuperGraphNodeModelExecution::new(
-            rng, inner_dit_weights, dit_model_index,
+            rng,
+            inner_dit_weights,
+            dit_model_index,
             vec![
                 (cast_latent, "hidden_states".to_string()),
                 (inner_t5_hidden, "encoder_hidden_states".to_string()),
@@ -447,15 +456,23 @@ fn build_cogvideox_denoising_loop(
         let v_pred = SimpleBinary::add(&mut mg, uncond_f32, scaled, rng);
 
         let idx_0 = Constant::push_new(
-            &mut mg, NDArrayNumericTensor::from_vec_shape(vec![0i64], &vec![1]).unwrap(), rng,
+            &mut mg,
+            NDArrayNumericTensor::from_vec_shape(vec![0i64], &vec![1]).unwrap(),
+            rng,
         );
         let idx_1 = Constant::push_new(
-            &mut mg, NDArrayNumericTensor::from_vec_shape(vec![1i64], &vec![1]).unwrap(), rng,
+            &mut mg,
+            NDArrayNumericTensor::from_vec_shape(vec![1i64], &vec![1]).unwrap(),
+            rng,
         );
-        let alpha_t = whisper_tensor::milli_graph::ops::Gather::push_new(&mut mg, as_in, idx_0, 0, rng);
-        let sigma_t = whisper_tensor::milli_graph::ops::Gather::push_new(&mut mg, as_in, idx_1, 0, rng);
-        let alpha_prev = whisper_tensor::milli_graph::ops::Gather::push_new(&mut mg, as_prev_in, idx_0, 0, rng);
-        let sigma_prev = whisper_tensor::milli_graph::ops::Gather::push_new(&mut mg, as_prev_in, idx_1, 0, rng);
+        let alpha_t =
+            whisper_tensor::milli_graph::ops::Gather::push_new(&mut mg, as_in, idx_0, 0, rng);
+        let sigma_t =
+            whisper_tensor::milli_graph::ops::Gather::push_new(&mut mg, as_in, idx_1, 0, rng);
+        let alpha_prev =
+            whisper_tensor::milli_graph::ops::Gather::push_new(&mut mg, as_prev_in, idx_0, 0, rng);
+        let sigma_prev =
+            whisper_tensor::milli_graph::ops::Gather::push_new(&mut mg, as_prev_in, idx_1, 0, rng);
 
         let ax = SimpleBinary::mul(&mut mg, alpha_t, lat_in, rng);
         let sv = SimpleBinary::mul(&mut mg, sigma_t, v_pred, rng);
@@ -478,23 +495,32 @@ fn build_cogvideox_denoising_loop(
     build_step_increment(&mut inner_builder, rng, inner_step_in, inner_step_out);
 
     let mut report = SuperGraphNodeReportProgress::new(
-        inner_progress_tier, inner_step_out, inner_total_steps, rng,
+        inner_progress_tier,
+        inner_step_out,
+        inner_total_steps,
+        rng,
     );
     report.label = Some("cogvideo_progress".to_string());
     inner_builder.add_node(report.to_any());
 
     let inner_inputs: Vec<_> = vec![
-        inner_dit_weights.to_any(), inner_t5_hidden.to_any(),
-        inner_guidance_scale.to_any(), inner_progress_tier.to_any(),
-        inner_total_steps.to_any(), inner_latent_in.to_any(),
-        inner_step_in.to_any(), inner_timestep.to_any(),
-        inner_alpha_sigma.to_any(), inner_alpha_sigma_prev.to_any(),
+        inner_dit_weights.to_any(),
+        inner_t5_hidden.to_any(),
+        inner_guidance_scale.to_any(),
+        inner_progress_tier.to_any(),
+        inner_total_steps.to_any(),
+        inner_latent_in.to_any(),
+        inner_step_in.to_any(),
+        inner_timestep.to_any(),
+        inner_alpha_sigma.to_any(),
+        inner_alpha_sigma_prev.to_any(),
     ];
     let inner_outputs: Vec<_> = vec![inner_latent_out.to_any(), inner_step_out.to_any()];
     let inner_graph = inner_builder.build(rng, &inner_inputs, &inner_outputs);
 
     let mut scan_node = SuperGraphNodeScan::new(
-        inner_graph, iteration_count_input,
+        inner_graph,
+        iteration_count_input,
         vec![
             SuperGraphLinkDouble::new(dit_weights, inner_dit_weights),
             SuperGraphLinkDouble::new(t5_hidden, inner_t5_hidden),
@@ -512,7 +538,10 @@ fn build_cogvideox_denoising_loop(
             (dt_input, inner_alpha_sigma_prev, 0),
         ],
         vec![],
-        vec![SuperGraphLinkDouble::new(inner_latent_out, outer_final_latent)],
+        vec![SuperGraphLinkDouble::new(
+            inner_latent_out,
+            outer_final_latent,
+        )],
         rng,
     );
     scan_node.label = Some("cogvideo_denoise_scan".to_string());

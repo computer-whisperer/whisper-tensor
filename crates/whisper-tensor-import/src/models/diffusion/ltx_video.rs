@@ -162,7 +162,11 @@ fn precompute_ltxv_3d_rope(
             let n = axis_dim / 2;
             (0..n)
                 .map(|i| {
-                    let t = if n > 1 { i as f64 / (n - 1) as f64 } else { 0.0 };
+                    let t = if n > 1 {
+                        i as f64 / (n - 1) as f64
+                    } else {
+                        0.0
+                    };
                     // linspace from 0 to log_theta(theta) = 1.0
                     // theta^t gives frequencies from 1.0 to theta
                     // then multiply by pi/2
@@ -278,7 +282,10 @@ fn ltxv_caption_projection(
     encoder_hidden_states: Arc<dyn Tensor>,
 ) -> Result<Arc<dyn Tensor>, Error> {
     // PixArtAlphaTextProjection: Linear -> GELU(tanh) -> Linear
-    let x = linear(&wm.prefix("caption_projection.linear_1"), encoder_hidden_states)?;
+    let x = linear(
+        &wm.prefix("caption_projection.linear_1"),
+        encoder_hidden_states,
+    )?;
     let x = gelu_pytorch_tanh(x)?;
     linear(&wm.prefix("caption_projection.linear_2"), x)
 }
@@ -300,9 +307,21 @@ fn ltxv_self_attention(
     let v = linear(&wm.prefix("attn1.to_v"), hidden_states)?;
 
     // Reshape: [B, seq, D] -> [B, seq, nh, hd] -> [B, nh, seq, hd]
-    let q = Transpose::new(None, reshape(q, vec![0, 0, nh, hd])?, Some(vec![0, 2, 1, 3]));
-    let k = Transpose::new(None, reshape(k, vec![0, 0, nh, hd])?, Some(vec![0, 2, 1, 3]));
-    let v = Transpose::new(None, reshape(v, vec![0, 0, nh, hd])?, Some(vec![0, 2, 1, 3]));
+    let q = Transpose::new(
+        None,
+        reshape(q, vec![0, 0, nh, hd])?,
+        Some(vec![0, 2, 1, 3]),
+    );
+    let k = Transpose::new(
+        None,
+        reshape(k, vec![0, 0, nh, hd])?,
+        Some(vec![0, 2, 1, 3]),
+    );
+    let v = Transpose::new(
+        None,
+        reshape(v, vec![0, 0, nh, hd])?,
+        Some(vec![0, 2, 1, 3]),
+    );
 
     // QK RMSNorm across heads:
     // Reshape [B, nh, seq, hd] -> [B, seq, nh*hd], apply RMSNorm, reshape back
@@ -326,13 +345,16 @@ fn ltxv_self_attention(
 
     // Apply 3D RoPE (interleaved=1 for repeat_interleave-style cos/sin)
     let q = RotaryEmbedding::new(
-        None, q, rope_cos.clone(), rope_sin.clone(),
-        None, Some(1), None, None,
+        None,
+        q,
+        rope_cos.clone(),
+        rope_sin.clone(),
+        None,
+        Some(1),
+        None,
+        None,
     )?;
-    let k = RotaryEmbedding::new(
-        None, k, rope_cos, rope_sin,
-        None, Some(1), None, None,
-    )?;
+    let k = RotaryEmbedding::new(None, k, rope_cos, rope_sin, None, Some(1), None, None)?;
 
     // Scaled dot-product attention
     let scores = MatMul::new(None, q, Transpose::new(None, k, Some(vec![0, 1, 3, 2])))?;
@@ -363,9 +385,21 @@ fn ltxv_cross_attention(
     let k = linear(&wm.prefix("attn2.to_k"), encoder_hidden_states.clone())?;
     let v = linear(&wm.prefix("attn2.to_v"), encoder_hidden_states)?;
 
-    let q = Transpose::new(None, reshape(q, vec![0, 0, nh, hd])?, Some(vec![0, 2, 1, 3]));
-    let k = Transpose::new(None, reshape(k, vec![0, 0, nh, hd])?, Some(vec![0, 2, 1, 3]));
-    let v = Transpose::new(None, reshape(v, vec![0, 0, nh, hd])?, Some(vec![0, 2, 1, 3]));
+    let q = Transpose::new(
+        None,
+        reshape(q, vec![0, 0, nh, hd])?,
+        Some(vec![0, 2, 1, 3]),
+    );
+    let k = Transpose::new(
+        None,
+        reshape(k, vec![0, 0, nh, hd])?,
+        Some(vec![0, 2, 1, 3]),
+    );
+    let v = Transpose::new(
+        None,
+        reshape(v, vec![0, 0, nh, hd])?,
+        Some(vec![0, 2, 1, 3]),
+    );
 
     // No QK norm for cross-attention, no RoPE
 
@@ -413,26 +447,11 @@ fn ltxv_block(
 
     // 1. Self-attention with AdaLN
     let normed = adaln_modulate(hidden_states.clone(), shift_msa, scale_msa, inner_dim, eps)?;
-    let attn_out = ltxv_self_attention(
-        wm,
-        normed,
-        config,
-        rope_cos,
-        rope_sin,
-    )?;
-    let hidden_states = Add::new(
-        None,
-        hidden_states,
-        Mul::new(None, gate_msa, attn_out)?,
-    )?;
+    let attn_out = ltxv_self_attention(wm, normed, config, rope_cos, rope_sin)?;
+    let hidden_states = Add::new(None, hidden_states, Mul::new(None, gate_msa, attn_out)?)?;
 
     // 2. Cross-attention (ungated residual)
-    let cross_out = ltxv_cross_attention(
-        wm,
-        hidden_states.clone(),
-        encoder_hidden_states,
-        config,
-    )?;
+    let cross_out = ltxv_cross_attention(wm, hidden_states.clone(), encoder_hidden_states, config)?;
     let hidden_states = Add::new(None, hidden_states, cross_out)?;
 
     // 3. Feed-forward with AdaLN + gating
@@ -513,9 +532,8 @@ pub fn load_ltxv_transformer_with_origin(
     ];
 
     // 1. Timestep embedding (produces global modulation + embedded_timestep for output)
-    let (temb_6x, embedded_timestep) = ltxv_timestep_embedding(
-        &wm, timestep_input, &config, model_dtype,
-    )?;
+    let (temb_6x, embedded_timestep) =
+        ltxv_timestep_embedding(&wm, timestep_input, &config, model_dtype)?;
 
     // 2. Caption projection: T5 4096-dim -> inner_dim
     let text_embeds = ltxv_caption_projection(&wm, encoder_hidden_states_input)?;
@@ -578,8 +596,13 @@ pub fn load_ltxv_transformer_with_origin(
     let final_mod = Add::new(None, final_sst, embedded_timestep)?;
     let shift_out = slice_axis(final_mod.clone(), 1, 0, 1)?;
     let scale_out = slice_axis(final_mod, 1, 1, 2)?;
-    let hidden_states =
-        adaln_modulate(hidden_states, shift_out, scale_out, inner_dim, config.norm_eps)?;
+    let hidden_states = adaln_modulate(
+        hidden_states,
+        shift_out,
+        scale_out,
+        inner_dim,
+        config.norm_eps,
+    )?;
     let hidden_states = linear(&wm.prefix("proj_out"), hidden_states)?;
 
     // 7. Reshape back to [B, out_channels, T, H, W]
@@ -595,8 +618,7 @@ pub fn load_ltxv_transformer_with_origin(
         ],
     )?;
 
-    let output_tensors: Vec<(String, Arc<dyn Tensor>)> =
-        vec![("out_sample".to_string(), output)];
+    let output_tensors: Vec<(String, Arc<dyn Tensor>)> = vec![("out_sample".to_string(), output)];
 
     println!("Built LTX-Video transformer graph, exporting...");
     let onnx_model = if let Some(origin) = origin_path {
@@ -652,7 +674,14 @@ fn ltxv_conv3d(
         bias,
         vec![kernel_t, kernel_s, kernel_s],
         vec![stride_t, stride_s, stride_s],
-        vec![temporal_pad, spatial_pad, spatial_pad, temporal_pad, spatial_pad, spatial_pad],
+        vec![
+            temporal_pad,
+            spatial_pad,
+            spatial_pad,
+            temporal_pad,
+            spatial_pad,
+            spatial_pad,
+        ],
         vec![1, 1, 1],
         1,
     )?;
@@ -717,7 +746,11 @@ fn ltxv_vae_upsample(
         Dimension::new(Some(target_w), None, None),
     ];
     let x = Resize::new_with_scales(
-        None, input, scales, "nearest".to_string(), Shape::new(output_dims),
+        None,
+        input,
+        scales,
+        "nearest".to_string(),
+        Shape::new(output_dims),
     )?;
 
     ltxv_conv3d(&wm.prefix("conv"), x, 3, 3, 1, 1)
@@ -756,7 +789,12 @@ pub fn load_ltxv_vae_decoder_with_origin(
     let num_stages = rev_channels.len(); // 4
 
     // spatio_temporal_scaling reversed for decoder: [true, true, true, false] -> [false, true, true, true]
-    let upsample_flags: Vec<bool> = config.spatio_temporal_scaling.iter().copied().rev().collect();
+    let upsample_flags: Vec<bool> = config
+        .spatio_temporal_scaling
+        .iter()
+        .copied()
+        .rev()
+        .collect();
 
     // layers_per_block = [4, 3, 3, 3, 4]
     // mid = layers_per_block[last] = 4
@@ -796,11 +834,17 @@ pub fn load_ltxv_vae_decoder_with_origin(
     for r in 0..mid_layers {
         x = ltxv_vae_resnet(
             &dec.prefix(&format!("mid_block.resnets.{r}")),
-            x, last_ch, last_ch, eps,
+            x,
+            last_ch,
+            last_ch,
+            eps,
         )?;
     }
 
-    println!("Building LTX-Video VAE decoder: {} up stages...", num_stages);
+    println!(
+        "Building LTX-Video VAE decoder: {} up stages...",
+        num_stages
+    );
 
     // Up blocks
     let mut current_ch = last_ch;
@@ -813,7 +857,10 @@ pub fn load_ltxv_vae_decoder_with_origin(
             let in_ch = if r == 0 { current_ch } else { out_ch };
             x = ltxv_vae_resnet(
                 &dec.prefix(&format!("up_blocks.{stage}.resnets.{r}")),
-                x, in_ch, out_ch, eps,
+                x,
+                in_ch,
+                out_ch,
+                eps,
             )?;
         }
         current_ch = out_ch;
@@ -821,7 +868,10 @@ pub fn load_ltxv_vae_decoder_with_origin(
         if do_upsample {
             x = ltxv_vae_upsample(
                 &dec.prefix(&format!("up_blocks.{stage}.upsamplers.0")),
-                x, cur_t, cur_h, cur_w,
+                x,
+                cur_t,
+                cur_h,
+                cur_w,
             )?;
             cur_t *= 2;
             cur_h *= 2;
@@ -830,7 +880,12 @@ pub fn load_ltxv_vae_decoder_with_origin(
 
         println!(
             "  Up stage {}/{}: {}ch, [T={}, H={}, W={}]",
-            stage + 1, num_stages, out_ch, cur_t, cur_h, cur_w
+            stage + 1,
+            num_stages,
+            out_ch,
+            cur_t,
+            cur_h,
+            cur_w
         );
     }
 
@@ -856,8 +911,7 @@ pub fn load_ltxv_vae_decoder_with_origin(
         vec![0, c, cur_t as i64, cur_h as i64 * ps, cur_w as i64 * ps],
     )?;
 
-    let output_tensors: Vec<(String, Arc<dyn Tensor>)> =
-        vec![("video_out".to_string(), output)];
+    let output_tensors: Vec<(String, Arc<dyn Tensor>)> = vec![("video_out".to_string(), output)];
 
     println!("Built LTX-Video VAE decoder graph, exporting...");
     let onnx_model = if let Some(origin) = origin_path {

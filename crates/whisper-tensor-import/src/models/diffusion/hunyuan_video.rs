@@ -219,10 +219,7 @@ fn hunyuan_condition_embedding(
         pooled_projections,
     )?;
     let pooled = silu(pooled)?;
-    let pooled = linear(
-        &wm.prefix("time_text_embed.text_embedder.linear_2"),
-        pooled,
-    )?;
+    let pooled = linear(&wm.prefix("time_text_embed.text_embedder.linear_2"), pooled)?;
 
     let mut temb: Arc<dyn Tensor> = Add::new(None, temb, pooled)?;
 
@@ -250,10 +247,7 @@ fn hunyuan_condition_embedding(
             g_emb,
         )?;
         let g = silu(g)?;
-        let g = linear(
-            &wm.prefix("time_text_embed.guidance_embedder.linear_2"),
-            g,
-        )?;
+        let g = linear(&wm.prefix("time_text_embed.guidance_embedder.linear_2"), g)?;
         temb = Add::new(None, temb, g)?;
     }
 
@@ -312,7 +306,10 @@ fn hunyuan_context_embedder(
     let t_emb = cast(t_emb, model_dtype);
     let ref_temb = linear(&ce.prefix("t_embedder.timestep_embedder.linear_1"), t_emb)?;
     let ref_temb = silu(ref_temb)?;
-    let ref_temb = linear(&ce.prefix("t_embedder.timestep_embedder.linear_2"), ref_temb)?;
+    let ref_temb = linear(
+        &ce.prefix("t_embedder.timestep_embedder.linear_2"),
+        ref_temb,
+    )?;
 
     let ref_pooled = linear(&ce.prefix("t_embedder.pooler.linear_1"), pooled)?;
     let ref_pooled = silu(ref_pooled)?;
@@ -364,9 +361,21 @@ fn hunyuan_refiner_attention(
     let k = linear(&wm.prefix("attn.to_k"), input.clone())?;
     let v = linear(&wm.prefix("attn.to_v"), input)?;
 
-    let q = Transpose::new(None, reshape(q, vec![0, 0, nh, hd])?, Some(vec![0, 2, 1, 3]));
-    let k = Transpose::new(None, reshape(k, vec![0, 0, nh, hd])?, Some(vec![0, 2, 1, 3]));
-    let v = Transpose::new(None, reshape(v, vec![0, 0, nh, hd])?, Some(vec![0, 2, 1, 3]));
+    let q = Transpose::new(
+        None,
+        reshape(q, vec![0, 0, nh, hd])?,
+        Some(vec![0, 2, 1, 3]),
+    );
+    let k = Transpose::new(
+        None,
+        reshape(k, vec![0, 0, nh, hd])?,
+        Some(vec![0, 2, 1, 3]),
+    );
+    let v = Transpose::new(
+        None,
+        reshape(v, vec![0, 0, nh, hd])?,
+        Some(vec![0, 2, 1, 3]),
+    );
 
     let scores = MatMul::new(None, q, Transpose::new(None, k, Some(vec![0, 1, 3, 2])))?;
     let scores = div_scalar(scores, (config.attention_head_dim as f32).sqrt())?;
@@ -403,41 +412,54 @@ fn hunyuan_dual_stream_block(
     let vid_mod = linear(&wm.prefix("norm1.linear"), vid_mod)?;
     let vid_mod = unsqueeze(vid_mod, 1)?;
     let vid_chunks = split_chunks(vid_mod, inner_dim, 6)?;
-    let (shift_msa, scale_msa, gate_msa) =
-        (vid_chunks[0].clone(), vid_chunks[1].clone(), vid_chunks[2].clone());
-    let (shift_mlp, scale_mlp, gate_mlp) =
-        (vid_chunks[3].clone(), vid_chunks[4].clone(), vid_chunks[5].clone());
+    let (shift_msa, scale_msa, gate_msa) = (
+        vid_chunks[0].clone(),
+        vid_chunks[1].clone(),
+        vid_chunks[2].clone(),
+    );
+    let (shift_mlp, scale_mlp, gate_mlp) = (
+        vid_chunks[3].clone(),
+        vid_chunks[4].clone(),
+        vid_chunks[5].clone(),
+    );
 
     // Text AdaLayerNormZero: same structure
     let enc_mod = silu(temb.clone())?;
     let enc_mod = linear(&wm.prefix("norm1_context.linear"), enc_mod)?;
     let enc_mod = unsqueeze(enc_mod, 1)?;
     let enc_chunks = split_chunks(enc_mod, inner_dim, 6)?;
-    let (c_shift_msa, c_scale_msa, c_gate_msa) =
-        (enc_chunks[0].clone(), enc_chunks[1].clone(), enc_chunks[2].clone());
-    let (c_shift_mlp, c_scale_mlp, c_gate_mlp) =
-        (enc_chunks[3].clone(), enc_chunks[4].clone(), enc_chunks[5].clone());
+    let (c_shift_msa, c_scale_msa, c_gate_msa) = (
+        enc_chunks[0].clone(),
+        enc_chunks[1].clone(),
+        enc_chunks[2].clone(),
+    );
+    let (c_shift_mlp, c_scale_mlp, c_gate_mlp) = (
+        enc_chunks[3].clone(),
+        enc_chunks[4].clone(),
+        enc_chunks[5].clone(),
+    );
 
     // Video pre-attention norm
-    let norm_hidden = adaln_modulate(
-        hidden_states.clone(), shift_msa, scale_msa, inner_dim, eps,
-    )?;
+    let norm_hidden = adaln_modulate(hidden_states.clone(), shift_msa, scale_msa, inner_dim, eps)?;
     // Text pre-attention norm
     let norm_enc = adaln_modulate(
-        encoder_hidden_states.clone(), c_shift_msa, c_scale_msa, inner_dim, eps,
+        encoder_hidden_states.clone(),
+        c_shift_msa,
+        c_scale_msa,
+        inner_dim,
+        eps,
     )?;
 
     // Joint attention with separate projections
-    let (attn_vid, attn_enc) = hunyuan_dual_attention(
-        wm, norm_hidden, norm_enc, config, rope_cos, rope_sin,
-    )?;
+    let (attn_vid, attn_enc) =
+        hunyuan_dual_attention(wm, norm_hidden, norm_enc, config, rope_cos, rope_sin)?;
 
     // Residual with gating
-    let hidden_states = Add::new(
-        None, hidden_states, Mul::new(None, gate_msa, attn_vid)?,
-    )?;
+    let hidden_states = Add::new(None, hidden_states, Mul::new(None, gate_msa, attn_vid)?)?;
     let encoder_hidden_states = Add::new(
-        None, encoder_hidden_states, Mul::new(None, c_gate_msa, attn_enc)?,
+        None,
+        encoder_hidden_states,
+        Mul::new(None, c_gate_msa, attn_enc)?,
     )?;
 
     // Video FFN: norm2 (bare LayerNorm, no affine) -> AdaLN modulate -> GELU FF -> gated residual
@@ -461,7 +483,9 @@ fn hunyuan_dual_stream_block(
     let ff_enc = gelu_pytorch_tanh(ff_enc)?;
     let ff_enc = linear(&wm.prefix("ff_context.net.2"), ff_enc)?;
     let encoder_hidden_states = Add::new(
-        None, encoder_hidden_states, Mul::new(None, c_gate_mlp, ff_enc)?,
+        None,
+        encoder_hidden_states,
+        Mul::new(None, c_gate_mlp, ff_enc)?,
     )?;
 
     Ok((hidden_states, encoder_hidden_states))
@@ -492,12 +516,36 @@ fn hunyuan_dual_attention(
     let ev = linear(&wm.prefix("attn.add_v_proj"), norm_enc)?;
 
     // Reshape to multi-head
-    let q = Transpose::new(None, reshape(q, vec![0, 0, nh, hd])?, Some(vec![0, 2, 1, 3]));
-    let k = Transpose::new(None, reshape(k, vec![0, 0, nh, hd])?, Some(vec![0, 2, 1, 3]));
-    let v = Transpose::new(None, reshape(v, vec![0, 0, nh, hd])?, Some(vec![0, 2, 1, 3]));
-    let eq = Transpose::new(None, reshape(eq, vec![0, 0, nh, hd])?, Some(vec![0, 2, 1, 3]));
-    let ek = Transpose::new(None, reshape(ek, vec![0, 0, nh, hd])?, Some(vec![0, 2, 1, 3]));
-    let ev = Transpose::new(None, reshape(ev, vec![0, 0, nh, hd])?, Some(vec![0, 2, 1, 3]));
+    let q = Transpose::new(
+        None,
+        reshape(q, vec![0, 0, nh, hd])?,
+        Some(vec![0, 2, 1, 3]),
+    );
+    let k = Transpose::new(
+        None,
+        reshape(k, vec![0, 0, nh, hd])?,
+        Some(vec![0, 2, 1, 3]),
+    );
+    let v = Transpose::new(
+        None,
+        reshape(v, vec![0, 0, nh, hd])?,
+        Some(vec![0, 2, 1, 3]),
+    );
+    let eq = Transpose::new(
+        None,
+        reshape(eq, vec![0, 0, nh, hd])?,
+        Some(vec![0, 2, 1, 3]),
+    );
+    let ek = Transpose::new(
+        None,
+        reshape(ek, vec![0, 0, nh, hd])?,
+        Some(vec![0, 2, 1, 3]),
+    );
+    let ev = Transpose::new(
+        None,
+        reshape(ev, vec![0, 0, nh, hd])?,
+        Some(vec![0, 2, 1, 3]),
+    );
 
     // Per-head QK RMSNorm (learned affine)
     let q = rms_norm(&wm.prefix("attn.norm_q"), q, Some(config.norm_eps))?;
@@ -507,11 +555,16 @@ fn hunyuan_dual_attention(
 
     // RoPE on video Q/K only (interleaved=1 for repeat_interleave cos/sin)
     let q = RotaryEmbedding::new(
-        None, q, rope_cos.clone(), rope_sin.clone(), None, Some(1), None, None,
+        None,
+        q,
+        rope_cos.clone(),
+        rope_sin.clone(),
+        None,
+        Some(1),
+        None,
+        None,
     )?;
-    let k = RotaryEmbedding::new(
-        None, k, rope_cos, rope_sin, None, Some(1), None, None,
-    )?;
+    let k = RotaryEmbedding::new(None, k, rope_cos, rope_sin, None, Some(1), None, None)?;
 
     // Concatenate video + text: [B, nh, vid+txt, hd]
     let q_cat = Concat::new(None, vec![q, eq], 2)?;
@@ -520,7 +573,9 @@ fn hunyuan_dual_attention(
 
     // Scaled dot-product attention
     let scores = MatMul::new(
-        None, q_cat, Transpose::new(None, k_cat, Some(vec![0, 1, 3, 2])),
+        None,
+        q_cat,
+        Transpose::new(None, k_cat, Some(vec![0, 1, 3, 2])),
     )?;
     let scores = div_scalar(scores, (config.attention_head_dim as f32).sqrt())?;
     let attn = Softmax::new(None, scores, Some(-1));
@@ -555,7 +610,11 @@ fn hunyuan_single_stream_block(
     let text_seq = config.max_text_seq_len() as i64;
 
     // Concatenate video + text
-    let combined = Concat::new(None, vec![hidden_states.clone(), encoder_hidden_states.clone()], 1)?;
+    let combined = Concat::new(
+        None,
+        vec![hidden_states.clone(), encoder_hidden_states.clone()],
+        1,
+    )?;
     let residual = combined.clone();
 
     // AdaLayerNormZeroSingle: SiLU(temb) -> Linear(3072, 3*3072=9216) -> chunk(3)
@@ -563,8 +622,7 @@ fn hunyuan_single_stream_block(
     let mod_params = linear(&wm.prefix("norm.linear"), mod_params)?;
     let mod_params = unsqueeze(mod_params, 1)?;
     let chunks = split_chunks(mod_params, inner_dim, 3)?;
-    let (shift_msa, scale_msa, gate) =
-        (chunks[0].clone(), chunks[1].clone(), chunks[2].clone());
+    let (shift_msa, scale_msa, gate) = (chunks[0].clone(), chunks[1].clone(), chunks[2].clone());
 
     // Norm + modulate
     let normed = adaln_modulate(combined, shift_msa, scale_msa, inner_dim, config.norm_eps)?;
@@ -579,9 +637,8 @@ fn hunyuan_single_stream_block(
     let norm_vid = slice_axis(normed.clone(), 1, 0, vid_seq)?;
     let norm_txt = slice_axis(normed, 1, vid_seq, total_seq)?;
 
-    let (attn_vid, attn_txt) = hunyuan_single_attention(
-        wm, norm_vid, norm_txt, config, rope_cos, rope_sin,
-    )?;
+    let (attn_vid, attn_txt) =
+        hunyuan_single_attention(wm, norm_vid, norm_txt, config, rope_cos, rope_sin)?;
     let attn_out = Concat::new(None, vec![attn_vid, attn_txt], 1)?;
 
     // Combine: cat([attn_out, mlp_hidden], dim=2) -> proj_out -> gate -> residual
@@ -616,9 +673,21 @@ fn hunyuan_single_attention(
     let k = linear(&wm.prefix("attn.to_k"), combined.clone())?;
     let v = linear(&wm.prefix("attn.to_v"), combined)?;
 
-    let q = Transpose::new(None, reshape(q, vec![0, 0, nh, hd])?, Some(vec![0, 2, 1, 3]));
-    let k = Transpose::new(None, reshape(k, vec![0, 0, nh, hd])?, Some(vec![0, 2, 1, 3]));
-    let v = Transpose::new(None, reshape(v, vec![0, 0, nh, hd])?, Some(vec![0, 2, 1, 3]));
+    let q = Transpose::new(
+        None,
+        reshape(q, vec![0, 0, nh, hd])?,
+        Some(vec![0, 2, 1, 3]),
+    );
+    let k = Transpose::new(
+        None,
+        reshape(k, vec![0, 0, nh, hd])?,
+        Some(vec![0, 2, 1, 3]),
+    );
+    let v = Transpose::new(
+        None,
+        reshape(v, vec![0, 0, nh, hd])?,
+        Some(vec![0, 2, 1, 3]),
+    );
 
     // QK RMSNorm
     let q = rms_norm(&wm.prefix("attn.norm_q"), q, Some(config.norm_eps))?;
@@ -634,19 +703,22 @@ fn hunyuan_single_attention(
     let k_txt = slice_axis(k, 2, vid_seq, total_seq)?;
 
     let q_vid = RotaryEmbedding::new(
-        None, q_vid, rope_cos.clone(), rope_sin.clone(), None, Some(1), None, None,
+        None,
+        q_vid,
+        rope_cos.clone(),
+        rope_sin.clone(),
+        None,
+        Some(1),
+        None,
+        None,
     )?;
-    let k_vid = RotaryEmbedding::new(
-        None, k_vid, rope_cos, rope_sin, None, Some(1), None, None,
-    )?;
+    let k_vid = RotaryEmbedding::new(None, k_vid, rope_cos, rope_sin, None, Some(1), None, None)?;
 
     let q = Concat::new(None, vec![q_vid, q_txt], 2)?;
     let k = Concat::new(None, vec![k_vid, k_txt], 2)?;
 
     // Scaled dot-product attention
-    let scores = MatMul::new(
-        None, q, Transpose::new(None, k, Some(vec![0, 1, 3, 2])),
-    )?;
+    let scores = MatMul::new(None, q, Transpose::new(None, k, Some(vec![0, 1, 3, 2])))?;
     let scores = div_scalar(scores, (config.attention_head_dim as f32).sqrt())?;
     let attn = Softmax::new(None, scores, Some(-1));
     let out = MatMul::new(None, attn, v)?;
@@ -776,13 +848,21 @@ pub fn load_hunyuan_video_transformer_with_origin(
 
     // 1. Condition embedding
     let temb = hunyuan_condition_embedding(
-        &wm, timestep_input.clone(), pooled_projections_input,
-        guidance_input.map(|g| g as Arc<dyn Tensor>), &config, model_dtype,
+        &wm,
+        timestep_input.clone(),
+        pooled_projections_input,
+        guidance_input.map(|g| g as Arc<dyn Tensor>),
+        &config,
+        model_dtype,
     )?;
 
     // 2. Context embedder (LLaMA output -> refiner -> 3072-dim)
     let text_embeds = hunyuan_context_embedder(
-        &wm, encoder_hidden_states_input, timestep_input, &config, model_dtype,
+        &wm,
+        encoder_hidden_states_input,
+        timestep_input,
+        &config,
+        model_dtype,
     )?;
 
     // 3. Patch embed: Conv3d(16, 3072, k=(1,2,2), s=(1,2,2))
@@ -793,8 +873,16 @@ pub fn load_hunyuan_video_transformer_with_origin(
         latent_input,
         patch_weight,
         patch_bias,
-        vec![config.patch_size_t as i64, config.patch_size as i64, config.patch_size as i64],
-        vec![config.patch_size_t as i64, config.patch_size as i64, config.patch_size as i64],
+        vec![
+            config.patch_size_t as i64,
+            config.patch_size as i64,
+            config.patch_size as i64,
+        ],
+        vec![
+            config.patch_size_t as i64,
+            config.patch_size as i64,
+            config.patch_size as i64,
+        ],
         vec![0, 0, 0, 0, 0, 0],
         vec![1, 1, 1],
         1,
@@ -804,8 +892,7 @@ pub fn load_hunyuan_video_transformer_with_origin(
     let hidden_states = Transpose::new(None, hidden_states, Some(vec![0, 2, 1]));
 
     // 4. Precompute 3D RoPE
-    let (cos_vals, sin_vals) =
-        precompute_hunyuan_3d_rope(&config, latent_frames, patch_h, patch_w);
+    let (cos_vals, sin_vals) = precompute_hunyuan_3d_rope(&config, latent_frames, patch_h, patch_w);
     let rope_shape = Shape::new(vec![
         Dimension::new(Some(video_seq), None, None),
         Dimension::new(Some(config.attention_head_dim), None, None),
@@ -832,8 +919,13 @@ pub fn load_hunyuan_video_transformer_with_origin(
     for i in 0..config.num_layers {
         let block_wm = wm.prefix(&format!("transformer_blocks.{i}"));
         let (next_h, next_e) = hunyuan_dual_stream_block(
-            &block_wm, hidden_states, encoder_hidden_states,
-            temb.clone(), &config, rope_cos.clone(), rope_sin.clone(),
+            &block_wm,
+            hidden_states,
+            encoder_hidden_states,
+            temb.clone(),
+            &config,
+            rope_cos.clone(),
+            rope_sin.clone(),
         )?;
         hidden_states = next_h;
         encoder_hidden_states = next_e;
@@ -846,8 +938,13 @@ pub fn load_hunyuan_video_transformer_with_origin(
     for i in 0..config.num_single_layers {
         let block_wm = wm.prefix(&format!("single_transformer_blocks.{i}"));
         let (next_h, next_e) = hunyuan_single_stream_block(
-            &block_wm, hidden_states, encoder_hidden_states,
-            temb.clone(), &config, rope_cos.clone(), rope_sin.clone(),
+            &block_wm,
+            hidden_states,
+            encoder_hidden_states,
+            temb.clone(),
+            &config,
+            rope_cos.clone(),
+            rope_sin.clone(),
         )?;
         hidden_states = next_h;
         encoder_hidden_states = next_e;
@@ -872,13 +969,15 @@ pub fn load_hunyuan_video_transformer_with_origin(
     let hidden_states = linear(&wm.prefix("proj_out"), hidden_states)?;
     let output = hunyuan_unpatchify(hidden_states, &config, latent_frames, patch_h, patch_w)?;
 
-    let output_tensors: Vec<(String, Arc<dyn Tensor>)> =
-        vec![("out_sample".to_string(), output)];
+    let output_tensors: Vec<(String, Arc<dyn Tensor>)> = vec![("out_sample".to_string(), output)];
 
     println!("Built HunyuanVideo transformer graph, exporting...");
     let onnx_model = if let Some(origin) = origin_path {
         crate::onnx_graph::build_proto_with_origin_path(
-            &input_tensors, &output_tensors, output_method, Some(origin),
+            &input_tensors,
+            &output_tensors,
+            output_method,
+            Some(origin),
         )?
     } else {
         crate::onnx_graph::build_proto(&input_tensors, &output_tensors, output_method)?
@@ -900,7 +999,12 @@ pub fn load_llama3_encoder(
     output_method: WeightStorageStrategy,
 ) -> Result<Vec<u8>, anyhow::Error> {
     load_llama3_encoder_with_origin(
-        weight_manager, num_layers, num_skip_layers, max_seq_len, output_method, None,
+        weight_manager,
+        num_layers,
+        num_skip_layers,
+        max_seq_len,
+        output_method,
+        None,
     )
 }
 
@@ -975,7 +1079,10 @@ pub fn load_llama3_encoder_with_origin(
     let rope_sin = cast(rope_sin, model_dtype);
 
     let active_layers = num_layers - num_skip_layers;
-    println!("Building LLaMA 3 encoder: {} of {} layers...", active_layers, num_layers);
+    println!(
+        "Building LLaMA 3 encoder: {} of {} layers...",
+        active_layers, num_layers
+    );
 
     let mut h: Arc<dyn Tensor> = x;
     for i in 0..active_layers {
@@ -1006,10 +1113,24 @@ pub fn load_llama3_encoder_with_origin(
 
         // RoPE (non-interleaved, half-split)
         let q = RotaryEmbedding::new(
-            None, q, rope_cos.clone(), rope_sin.clone(), None, None, None, None,
+            None,
+            q,
+            rope_cos.clone(),
+            rope_sin.clone(),
+            None,
+            None,
+            None,
+            None,
         )?;
         let k = RotaryEmbedding::new(
-            None, k, rope_cos.clone(), rope_sin.clone(), None, None, None, None,
+            None,
+            k,
+            rope_cos.clone(),
+            rope_sin.clone(),
+            None,
+            None,
+            None,
+            None,
         )?;
 
         // GQA: repeat KV heads
@@ -1025,9 +1146,7 @@ pub fn load_llama3_encoder_with_origin(
             (k as Arc<dyn Tensor>, v as Arc<dyn Tensor>)
         };
 
-        let scores = MatMul::new(
-            None, q, Transpose::new(None, k, Some(vec![0, 1, 3, 2])),
-        )?;
+        let scores = MatMul::new(None, q, Transpose::new(None, k, Some(vec![0, 1, 3, 2])))?;
         let scores = div_scalar(scores, (head_dim as f32).sqrt())?;
         let attn = Softmax::new(None, scores, Some(-1));
         let out = MatMul::new(None, attn, v)?;
@@ -1060,7 +1179,10 @@ pub fn load_llama3_encoder_with_origin(
     println!("Built LLaMA 3 encoder graph, exporting...");
     let onnx_model = if let Some(origin) = origin_path {
         crate::onnx_graph::build_proto_with_origin_path(
-            &input_tensors, &output_tensors, output_method, Some(origin),
+            &input_tensors,
+            &output_tensors,
+            output_method,
+            Some(origin),
         )?
     } else {
         crate::onnx_graph::build_proto(&input_tensors, &output_tensors, output_method)?
@@ -1100,7 +1222,9 @@ fn hunyuan_causal_conv3d(
     let spatial_pad = (kernel_s - 1) / 2;
     Conv::new(
         wm.get_prefix().map(|x| x.to_string()),
-        padded, weight, bias,
+        padded,
+        weight,
+        bias,
         vec![kernel_t, kernel_s, kernel_s],
         vec![stride_t, stride_s, stride_s],
         vec![0, spatial_pad, spatial_pad, 0, spatial_pad, spatial_pad],
@@ -1180,7 +1304,16 @@ fn hunyuan_vae_attention(
     // [B*T, H*W, C] -> [B*T, C, H*W] -> [B*T, C, H, W] -> [B, T, C, H, W] -> [B, C, T, H, W]
     let out = Transpose::new(None, out, Some(vec![0, 2, 1]));
     let out = reshape(out, vec![0, channels as i64, cur_h as i64, cur_w as i64])?;
-    let out = reshape(out, vec![-1, cur_t as i64, channels as i64, cur_h as i64, cur_w as i64])?;
+    let out = reshape(
+        out,
+        vec![
+            -1,
+            cur_t as i64,
+            channels as i64,
+            cur_h as i64,
+            cur_w as i64,
+        ],
+    )?;
     let out = Transpose::new(None, out, Some(vec![0, 2, 1, 3, 4]));
 
     Ok(Add::new(None, residual, out)?)
@@ -1217,7 +1350,11 @@ fn hunyuan_vae_upsample(
         Dimension::new(Some(target_w), None, None),
     ];
     let x = Resize::new_with_scales(
-        None, input, scales, "nearest".to_string(), Shape::new(output_dims),
+        None,
+        input,
+        scales,
+        "nearest".to_string(),
+        Shape::new(output_dims),
     )?;
 
     hunyuan_causal_conv3d(&wm.prefix("conv"), x, 3, 3, 1, 1)
@@ -1287,13 +1424,37 @@ pub fn load_hunyuan_video_vae_decoder_with_origin(
     let mut x = hunyuan_causal_conv3d(&dec.prefix("conv_in"), latent_input, 3, 3, 1, 1)?;
 
     // Mid block: ResNet -> Attention -> ResNet
-    x = hunyuan_vae_resnet(&dec.prefix("mid_block.resnets.0"), x, last_ch, last_ch, eps, ng)?;
-    x = hunyuan_vae_attention(
-        &dec.prefix("mid_block.attentions.0"), x, last_ch, ng, eps, cur_t, cur_h, cur_w,
+    x = hunyuan_vae_resnet(
+        &dec.prefix("mid_block.resnets.0"),
+        x,
+        last_ch,
+        last_ch,
+        eps,
+        ng,
     )?;
-    x = hunyuan_vae_resnet(&dec.prefix("mid_block.resnets.1"), x, last_ch, last_ch, eps, ng)?;
+    x = hunyuan_vae_attention(
+        &dec.prefix("mid_block.attentions.0"),
+        x,
+        last_ch,
+        ng,
+        eps,
+        cur_t,
+        cur_h,
+        cur_w,
+    )?;
+    x = hunyuan_vae_resnet(
+        &dec.prefix("mid_block.resnets.1"),
+        x,
+        last_ch,
+        last_ch,
+        eps,
+        ng,
+    )?;
 
-    println!("Building HunyuanVideo VAE decoder: {} up stages...", num_stages);
+    println!(
+        "Building HunyuanVideo VAE decoder: {} up stages...",
+        num_stages
+    );
 
     // Up blocks (reversed)
     let mut current_ch = last_ch;
@@ -1306,7 +1467,11 @@ pub fn load_hunyuan_video_vae_decoder_with_origin(
             let in_ch = if r == 0 { current_ch } else { out_ch };
             x = hunyuan_vae_resnet(
                 &dec.prefix(&format!("up_blocks.{stage}.resnets.{r}")),
-                x, in_ch, out_ch, eps, ng,
+                x,
+                in_ch,
+                out_ch,
+                eps,
+                ng,
             )?;
         }
         current_ch = out_ch;
@@ -1314,7 +1479,11 @@ pub fn load_hunyuan_video_vae_decoder_with_origin(
         if has_upsample {
             x = hunyuan_vae_upsample(
                 &dec.prefix(&format!("up_blocks.{stage}.upsamplers.0")),
-                x, cur_t, cur_h, cur_w, do_temporal,
+                x,
+                cur_t,
+                cur_h,
+                cur_w,
+                do_temporal,
             )?;
             if do_temporal {
                 cur_t = (cur_t - 1) * 2 + 1;
@@ -1325,7 +1494,12 @@ pub fn load_hunyuan_video_vae_decoder_with_origin(
 
         println!(
             "  Up stage {}/{}: {}ch, [T={}, H={}, W={}]",
-            stage + 1, num_stages, out_ch, cur_t, cur_h, cur_w
+            stage + 1,
+            num_stages,
+            out_ch,
+            cur_t,
+            cur_h,
+            cur_w
         );
     }
 
@@ -1337,13 +1511,15 @@ pub fn load_hunyuan_video_vae_decoder_with_origin(
     x = silu(x)?;
     let output = hunyuan_causal_conv3d(&dec.prefix("conv_out"), x, 3, 3, 1, 1)?;
 
-    let output_tensors: Vec<(String, Arc<dyn Tensor>)> =
-        vec![("video_out".to_string(), output)];
+    let output_tensors: Vec<(String, Arc<dyn Tensor>)> = vec![("video_out".to_string(), output)];
 
     println!("Built HunyuanVideo VAE decoder graph, exporting...");
     let onnx_model = if let Some(origin) = origin_path {
         crate::onnx_graph::build_proto_with_origin_path(
-            &input_tensors, &output_tensors, output_method, Some(origin),
+            &input_tensors,
+            &output_tensors,
+            output_method,
+            Some(origin),
         )?
     } else {
         crate::onnx_graph::build_proto(&input_tensors, &output_tensors, output_method)?

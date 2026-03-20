@@ -303,12 +303,12 @@ pub(super) fn build_sd3_interface(
     use whisper_tensor::interfaces::{ImageGenerationInterface, SchedulerType};
     use whisper_tensor::milli_graph::MilliOpGraph;
     use whisper_tensor::milli_graph::ops::{Cast, Concat as MilliConcat, Constant, Pad, PadMode};
+    use whisper_tensor::super_graph::SuperGraphBuilder;
     use whisper_tensor::super_graph::nodes::{
         SuperGraphNode, SuperGraphNodeMilliOpGraph, SuperGraphNodeModelExecution,
         SuperGraphNodeTensorToImage, SuperGraphNodeTokenizerEncode,
         SuperGraphNodeTokenizerEncodeMode, SuperGraphNodeTokenizerLoad,
     };
-    use whisper_tensor::super_graph::SuperGraphBuilder;
 
     let mut builder = SuperGraphBuilder::new();
 
@@ -519,8 +519,7 @@ pub(super) fn build_sd3_interface(
         // Pad feature dim to 4096, then append T5 along sequence dim.
         let pads = Constant::push_new(
             &mut mg,
-            NDArrayNumericTensor::from_vec_shape(vec![0i64, 0, 0, 0, 0, 2048], &vec![6])
-                .unwrap(),
+            NDArrayNumericTensor::from_vec_shape(vec![0i64, 0, 0, 0, 0, 2048], &vec![6]).unwrap(),
             rng,
         );
         let clip_hidden_padded = Pad::push_new(
@@ -572,8 +571,7 @@ pub(super) fn build_sd3_interface(
         let clip_hidden = MilliConcat::push_new(&mut mg, vec![l_hidden, g_hidden], -1, rng);
         let pads = Constant::push_new(
             &mut mg,
-            NDArrayNumericTensor::from_vec_shape(vec![0i64, 0, 0, 0, 0, 2048], &vec![6])
-                .unwrap(),
+            NDArrayNumericTensor::from_vec_shape(vec![0i64, 0, 0, 0, 0, 2048], &vec![6]).unwrap(),
             rng,
         );
         let clip_hidden_padded = Pad::push_new(

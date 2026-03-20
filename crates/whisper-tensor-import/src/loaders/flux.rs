@@ -398,12 +398,12 @@ fn build_flux_interface(
         build_cast_node, build_eos_indices_node, build_flux_denoising_loop, build_flux_vae_decode,
     };
     use whisper_tensor::interfaces::{ImageGenerationInterface, SchedulerType};
+    use whisper_tensor::super_graph::SuperGraphBuilder;
     use whisper_tensor::super_graph::nodes::{
         SuperGraphNode, SuperGraphNodeModelExecution, SuperGraphNodeTensorToImage,
         SuperGraphNodeTokenizerEncode, SuperGraphNodeTokenizerEncodeMode,
         SuperGraphNodeTokenizerLoad,
     };
-    use whisper_tensor::super_graph::SuperGraphBuilder;
 
     let mut builder = SuperGraphBuilder::new();
 

@@ -4,7 +4,9 @@ use rand::Rng;
 use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
 use whisper_tensor::dtype::DType;
 use whisper_tensor::milli_graph::MilliOpGraph;
-use whisper_tensor::milli_graph::ops::{ArgMax, Cast, Constant, Pad, PadMode, SimpleBinary, SimpleUnaryOp, Unsqueeze};
+use whisper_tensor::milli_graph::ops::{
+    ArgMax, Cast, Constant, Pad, PadMode, SimpleBinary, SimpleUnaryOp, Unsqueeze,
+};
 use whisper_tensor::super_graph::links::{SuperGraphLinkDouble, SuperGraphLinkTriple};
 use whisper_tensor::super_graph::nodes::{
     SuperGraphNode, SuperGraphNodeMilliOpGraph, SuperGraphNodeModelExecution,
@@ -116,8 +118,7 @@ pub fn build_step_increment(
     step_in: SuperGraphLink,
     step_out: SuperGraphLink,
 ) {
-    let (mut mg, input_map) =
-        MilliOpGraph::new(std::iter::once(step_in.global_id()), rng);
+    let (mut mg, input_map) = MilliOpGraph::new(std::iter::once(step_in.global_id()), rng);
     let s_in = *input_map.get(&step_in.global_id()).unwrap();
     let one = Constant::push_new(
         &mut mg,
@@ -1310,8 +1311,7 @@ pub(crate) fn build_single_te_cfg_interface(
     builder.set_link_label(vae_weights, "vae_decoder_weights");
 
     // Prompt tokenization inside the supergraph.
-    let tokenizer_link =
-        SuperGraphNodeTokenizerLoad::new_and_add(&mut builder, tokenizer, rng);
+    let tokenizer_link = SuperGraphNodeTokenizerLoad::new_and_add(&mut builder, tokenizer, rng);
     let cond_ids_input = SuperGraphNodeTokenizerEncode::new_with_mode_and_add(
         &mut builder,
         tokenizer_link,
