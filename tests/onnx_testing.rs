@@ -107,24 +107,34 @@ impl OnnxNodeTest {
         let model = Model::new_from_onnx(&model_bytes, &mut rng, self.model_path.parent())
             .map_err(|e| format!("Failed to load model: {e:?}"))?;
 
+        // Get model's declared input dtypes for fixup of old test data
+        let model_input_info = model.get_input_tensor_info().unwrap_or_default();
+
         // Run each test data set
         for (i, test_data_set) in self.test_data_sets.iter().enumerate() {
             log::info!("  Running test data set {i}");
 
-            // Convert protobuf inputs to NumericTensor
-            let inputs = test_data_set
-                .parse_inputs()
-                .map_err(|e| format!("Failed to parse inputs: {e}"))?;
-
-            // Parse expected outputs
-            let expected = test_data_set
-                .parse_outputs()
-                .map_err(|e| format!("Failed to parse expected outputs: {e}"))?;
+            // Convert protobuf inputs to NumericTensor, fixing up dtype
+            // mismatches from old ONNX test data (BF16/F16 stored as UINT16).
+            let inputs =
+                parse_tensors_with_dtype_fixup(&test_data_set.inputs, &model_input_info)
+                    .map_err(|e| format!("Failed to parse inputs: {e}"))?;
 
             // Run the model
             let outputs = model
                 .eval(inputs, &mut (), None, backend)
                 .map_err(|e| format!("Model execution failed: {e:?}"))?;
+
+            // Build output type info from actual model outputs for dtype fixup
+            let output_type_info: HashMap<String, (DType, Vec<Option<u64>>)> = outputs
+                .iter()
+                .map(|(name, tensor)| {
+                    (name.clone(), (tensor.dtype(), vec![]))
+                })
+                .collect();
+            let expected =
+                parse_tensors_with_dtype_fixup(&test_data_set.outputs, &output_type_info)
+                    .map_err(|e| format!("Failed to parse expected outputs: {e}"))?;
 
             // Compare outputs with expected values
             for (name, expected_tensor) in &expected {
@@ -182,9 +192,16 @@ impl OnnxNodeTest {
             .try_to_vec()
             .unwrap();
 
+        // Use wider tolerance for low-precision dtypes
+        let (rtol, atol) = match actual.dtype() {
+            DType::BF16 => (0.01, 1e-3),
+            DType::F16 => (0.005, 1e-4),
+            _ => (self.rtol, self.atol),
+        };
+
         for (actual_value, expected_value) in actual_values.iter().zip(expected_values.iter()) {
             let abs_diff = (actual_value - expected_value).abs();
-            let tolerance = self.atol + self.rtol * expected_value.abs();
+            let tolerance = atol + rtol * expected_value.abs();
             if abs_diff > tolerance {
                 Err(format!(
                     "Value mismatch: actual {actual_value} vs expected {expected_value}"
@@ -267,6 +284,64 @@ impl TestDataSet {
         }
 
         Ok(result)
+    }
+}
+
+/// Reparse tensors from raw protobuf data with corrected dtype.
+/// Old ONNX test data stores BF16/F16 as UINT16 in the protobuf tensor.
+fn parse_tensors_with_dtype_fixup(
+    proto_map: &HashMap<String, Vec<u8>>,
+    type_info: &HashMap<String, (DType, Vec<Option<u64>>)>,
+) -> Result<HashMap<String, NumericTensor<DynRank>>, ONNXDecodingError> {
+    let mut result = HashMap::new();
+    for proto_data in proto_map.values() {
+        let mut tensor_proto = TensorProto::decode(proto_data.as_slice()).unwrap();
+
+        // If the model declares a different dtype for this tensor and
+        // the element sizes match, patch the proto's data_type so the
+        // raw bytes are reinterpreted correctly (e.g. UINT16 → BFLOAT16).
+        if let Some((expected_dtype, _)) = type_info.get(&tensor_proto.name) {
+            let expected_onnx = onnx_dtype_code(*expected_dtype);
+            let proto_size = DType::try_from(
+                whisper_tensor::onnx::tensor_proto::DataType::try_from(
+                    tensor_proto.data_type,
+                )
+                .unwrap(),
+            )
+            .ok()
+            .and_then(|d| d.size());
+            if tensor_proto.data_type != expected_onnx
+                && expected_dtype.size().is_some()
+                && expected_dtype.size() == proto_size
+            {
+                tensor_proto.data_type = expected_onnx;
+            }
+        }
+
+        let tensor: NumericTensor<DynRank> =
+            NDArrayNumericTensor::try_from(&tensor_proto)?.into();
+        result.insert(tensor_proto.name, tensor);
+    }
+    Ok(result)
+}
+
+fn onnx_dtype_code(dtype: DType) -> i32 {
+    use whisper_tensor::onnx::tensor_proto::DataType;
+    match dtype {
+        DType::F32 => DataType::Float as i32,
+        DType::F64 => DataType::Double as i32,
+        DType::F16 => DataType::Float16 as i32,
+        DType::BF16 => DataType::Bfloat16 as i32,
+        DType::I8 => DataType::Int8 as i32,
+        DType::I16 => DataType::Int16 as i32,
+        DType::I32 => DataType::Int32 as i32,
+        DType::I64 => DataType::Int64 as i32,
+        DType::U8 => DataType::Uint8 as i32,
+        DType::U16 => DataType::Uint16 as i32,
+        DType::U32 => DataType::Uint32 as i32,
+        DType::U64 => DataType::Uint64 as i32,
+        DType::BOOL => DataType::Bool as i32,
+        _ => DataType::Undefined as i32,
     }
 }
 
@@ -550,7 +625,7 @@ macro_rules! do_tests {
         do_test!($runner_fn, $runner_name, test_blackmanwindow_expanded);
         //do_test!($runner_fn, $runner_name, test_blackmanwindow_symmetric);
         do_test!($runner_fn, $runner_name, test_blackmanwindow_symmetric_expanded);
-        //do_test!($runner_fn, $runner_name, test_cast_BFLOAT16_to_FLOAT);
+        do_test!($runner_fn, $runner_name, test_cast_BFLOAT16_to_FLOAT);
         do_test!($runner_fn, $runner_name, test_cast_DOUBLE_to_FLOAT);
         do_test!($runner_fn, $runner_name, test_cast_DOUBLE_to_FLOAT16);
         do_test!($runner_fn, $runner_name, test_cast_FLOAT16_to_DOUBLE);
@@ -572,7 +647,7 @@ macro_rules! do_tests {
         //do_test!($runner_fn, $runner_name, test_cast_FLOAT8E5M2FNUZ_to_FLOAT16);
         //do_test!($runner_fn, $runner_name, test_cast_FLOAT8E5M2_to_FLOAT);
         //do_test!($runner_fn, $runner_name, test_cast_FLOAT8E5M2_to_FLOAT16);
-        //do_test!($runner_fn, $runner_name, test_cast_FLOAT_to_BFLOAT16);
+        do_test!($runner_fn, $runner_name, test_cast_FLOAT_to_BFLOAT16);
         do_test!($runner_fn, $runner_name, test_cast_FLOAT_to_DOUBLE);
         do_test!($runner_fn, $runner_name, test_cast_FLOAT_to_FLOAT16);
         //do_test!($runner_fn, $runner_name, test_cast_FLOAT_to_FLOAT4E2M1);
@@ -586,8 +661,8 @@ macro_rules! do_tests {
         //do_test!($runner_fn, $runner_name, test_cast_INT4_to_FLOAT);
         //do_test!($runner_fn, $runner_name, test_cast_INT4_to_FLOAT16);
         //do_test!($runner_fn, $runner_name, test_cast_INT4_to_INT8);
-        //do_test!($runner_fn, $runner_name, test_castlike_BFLOAT16_to_FLOAT);
-        //do_test!($runner_fn, $runner_name, test_castlike_BFLOAT16_to_FLOAT_expanded);
+        do_test!($runner_fn, $runner_name, test_castlike_BFLOAT16_to_FLOAT);
+        do_test!($runner_fn, $runner_name, test_castlike_BFLOAT16_to_FLOAT_expanded);
 
         do_test!($runner_fn, $runner_name, test_castlike_DOUBLE_to_FLOAT);
         do_test!($runner_fn, $runner_name, test_castlike_DOUBLE_to_FLOAT16);
@@ -606,8 +681,8 @@ macro_rules! do_tests {
         //do_test!($runner_fn, $runner_name, test_castlike_FLOAT8E5M2FNUZ_to_FLOAT_expanded);
         //do_test!($runner_fn, $runner_name, test_castlike_FLOAT8E5M2_to_FLOAT);
         //do_test!($runner_fn, $runner_name, test_castlike_FLOAT8E5M2_to_FLOAT_expanded);
-        //do_test!($runner_fn, $runner_name, test_castlike_FLOAT_to_BFLOAT16);
-        //do_test!($runner_fn, $runner_name, test_castlike_FLOAT_to_BFLOAT16_expanded);
+        do_test!($runner_fn, $runner_name, test_castlike_FLOAT_to_BFLOAT16);
+        do_test!($runner_fn, $runner_name, test_castlike_FLOAT_to_BFLOAT16_expanded);
 
         do_test!($runner_fn, $runner_name, test_castlike_FLOAT_to_DOUBLE);
         do_test!($runner_fn, $runner_name, test_castlike_FLOAT_to_DOUBLE_expanded);
