@@ -176,6 +176,15 @@ pub fn sin_op(input: Arc<dyn Tensor>) -> Result<Arc<dyn Tensor>, Error> {
     }))
 }
 
+#[allow(clippy::arc_with_non_send_sync)]
+pub fn tanh_op(input: Arc<dyn Tensor>) -> Result<Arc<dyn Tensor>, Error> {
+    Ok(Arc::new(UnaryOp {
+        name: None,
+        input,
+        op_type: "Tanh",
+    }))
+}
+
 // ============================================================================
 // Causal mask
 // ============================================================================
@@ -529,6 +538,15 @@ pub fn layer_norm_bare(
 ) -> Result<Arc<crate::onnx_graph::operators::LayerNormalization>, Error> {
     let scale = ones_constant(hidden_dim, input.dtype());
     crate::onnx_graph::operators::LayerNormalization::new(None, input, scale, None, -1, epsilon, 1)
+}
+
+pub fn rms_norm_bare(
+    input: Arc<dyn Tensor>,
+    hidden_dim: usize,
+    epsilon: f32,
+) -> Result<Arc<crate::onnx_graph::operators::RMSNormalization>, Error> {
+    let scale = ones_constant(hidden_dim, input.dtype());
+    crate::onnx_graph::operators::RMSNormalization::new(None, input, scale, Some(epsilon), -1)
 }
 
 pub fn adaln_modulate(
