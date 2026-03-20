@@ -410,10 +410,7 @@ fn validate_onnx_model(
             // Build zero tensor for inputs not in golden snapshot.
             // Replace dynamic (None) dims with 0 for cache-like inputs,
             // or 1 for other dims.
-            let concrete_shape: Vec<u64> = shape
-                .iter()
-                .map(|d| d.unwrap_or(0))
-                .collect();
+            let concrete_shape: Vec<u64> = shape.iter().map(|d| d.unwrap_or(0)).collect();
             let numel: usize = concrete_shape.iter().product::<u64>() as usize;
             if let Some(elem_size) = dtype.bytes_per_element() {
                 let zeros = vec![0u8; numel * elem_size];
