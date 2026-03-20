@@ -57,7 +57,8 @@ impl ScanOperation {
         let scan_output_axes = query_attribute_ints(attributes, "scan_output_axes");
         let scan_output_directions = query_attribute_ints(attributes, "scan_output_directions");
 
-        let state_inputs = inputs[scan_inputs_start..scan_inputs_start + num_state_tensors].to_vec();
+        let state_inputs =
+            inputs[scan_inputs_start..scan_inputs_start + num_state_tensors].to_vec();
         let scan_inputs = inputs[scan_inputs_start + num_state_tensors..].to_vec();
 
         let state_outputs = outputs[..num_state_tensors].to_vec();

@@ -113,7 +113,14 @@ fn slice_axis(
     let starts = Constant::new(None, TensorData::new(vec![start].into(), shape.clone())?);
     let ends = Constant::new(None, TensorData::new(vec![end].into(), shape.clone())?);
     let axes = Constant::new(None, TensorData::new(vec![resolved_axis].into(), shape)?);
-    Ok(crate::onnx_graph::operators::Slice::new(None, input, starts, ends, Some(axes), None)?)
+    Ok(crate::onnx_graph::operators::Slice::new(
+        None,
+        input,
+        starts,
+        ends,
+        Some(axes),
+        None,
+    )?)
 }
 
 fn split_chunks(
@@ -188,9 +195,7 @@ fn adaln_modulate(
 ///
 /// Text tokens get cos=1, sin=0 (identity rotation).
 /// Video tokens get 3D positional encoding from (t, y, x) coordinates.
-fn precompute_cogvideox_3d_rope(
-    config: &CogVideoXTransformerConfig,
-) -> (Vec<f32>, Vec<f32>) {
+fn precompute_cogvideox_3d_rope(config: &CogVideoXTransformerConfig) -> (Vec<f32>, Vec<f32>) {
     let text_seq = config.max_text_seq_length;
     let video_seq = config.video_seq_len();
     let total_seq = text_seq + video_seq;
@@ -333,10 +338,7 @@ fn cogvideox_patch_embed(
         ],
     )?;
     let x = Transpose::new(None, x, Some(vec![0, 1, 3, 2])); // [B, F, H/p*W/p, inner_dim]
-    let video_embeds = reshape(
-        x,
-        vec![-1, config.video_seq_len() as i64, inner_dim as i64],
-    )?;
+    let video_embeds = reshape(x, vec![-1, config.video_seq_len() as i64, inner_dim as i64])?;
 
     Ok((text_embeds, video_embeds))
 }
@@ -364,9 +366,21 @@ fn cogvideox_attention(
     let v = linear(&wm.prefix("attn.to_v"), combined)?;
 
     // Reshape to multi-head: [B, seq, D] -> [B, seq, nh, hd] -> [B, nh, seq, hd]
-    let q = Transpose::new(None, reshape(q, vec![0, 0, nh, hd])?, Some(vec![0, 2, 1, 3]));
-    let k = Transpose::new(None, reshape(k, vec![0, 0, nh, hd])?, Some(vec![0, 2, 1, 3]));
-    let v = Transpose::new(None, reshape(v, vec![0, 0, nh, hd])?, Some(vec![0, 2, 1, 3]));
+    let q = Transpose::new(
+        None,
+        reshape(q, vec![0, 0, nh, hd])?,
+        Some(vec![0, 2, 1, 3]),
+    );
+    let k = Transpose::new(
+        None,
+        reshape(k, vec![0, 0, nh, hd])?,
+        Some(vec![0, 2, 1, 3]),
+    );
+    let v = Transpose::new(
+        None,
+        reshape(v, vec![0, 0, nh, hd])?,
+        Some(vec![0, 2, 1, 3]),
+    );
 
     // QK normalization (LayerNorm per head, applied to the head_dim axis)
     let q: Arc<dyn Tensor> = layer_norm_bare(q, config.attention_head_dim, 1e-6)?;
@@ -377,13 +391,17 @@ fn cogvideox_attention(
         // Apply RoPE to full sequence (text tokens have cos=1/sin=0 = identity)
         // interleaved=0: CogVideoX uses non-interleaved (half-split) rotation
         let q = RotaryEmbedding::new(
-            None, q, cos_cache.clone(), sin_cache.clone(),
-            None, Some(0), None, None,
+            None,
+            q,
+            cos_cache.clone(),
+            sin_cache.clone(),
+            None,
+            Some(0),
+            None,
+            None,
         )? as Arc<dyn Tensor>;
-        let k = RotaryEmbedding::new(
-            None, k, cos_cache, sin_cache,
-            None, Some(0), None, None,
-        )? as Arc<dyn Tensor>;
+        let k = RotaryEmbedding::new(None, k, cos_cache, sin_cache, None, Some(0), None, None)?
+            as Arc<dyn Tensor>;
         (q, k)
     } else {
         (q, k)
@@ -458,8 +476,7 @@ fn cogvideox_block(
         (chunks[3].clone(), chunks[4].clone(), chunks[5].clone());
 
     // Apply AdaLN to both streams
-    let norm_hidden =
-        adaln_modulate(hidden_states.clone(), shift_h, scale_h, inner_dim, eps)?;
+    let norm_hidden = adaln_modulate(hidden_states.clone(), shift_h, scale_h, inner_dim, eps)?;
     let norm_enc = adaln_modulate(
         encoder_hidden_states.clone(),
         enc_shift,
@@ -615,23 +632,14 @@ pub fn load_cogvideox_transformer_with_origin(
     let emb = cogvideox_timestep_embedding(&wm, timestep_input, model_dtype, inner_dim)?;
 
     // 2. Patch embedding
-    let (mut encoder_hidden_states, mut hidden_states) = cogvideox_patch_embed(
-        &wm,
-        latent_input,
-        encoder_hidden_states_input,
-        &config,
-    )?;
+    let (mut encoder_hidden_states, mut hidden_states) =
+        cogvideox_patch_embed(&wm, latent_input, encoder_hidden_states_input, &config)?;
 
     // 3. Add positional embedding (2B: sinusoidal, added to concatenated text+video)
     if !config.use_rotary_positional_embeddings {
         // Load precomputed positional embedding
         let pos_embed = wm.get_tensor("patch_embed.pos_embedding")?;
-        let text_pos = slice_axis(
-            pos_embed.clone(),
-            1,
-            0,
-            config.max_text_seq_length as i64,
-        )?;
+        let text_pos = slice_axis(pos_embed.clone(), 1, 0, config.max_text_seq_length as i64)?;
         let video_pos = slice_axis(
             pos_embed,
             1,
@@ -710,8 +718,7 @@ pub fn load_cogvideox_transformer_with_origin(
     // 6. Unpatchify
     let output = cogvideox_unpatchify(hidden_states, &config)?;
 
-    let output_tensors: Vec<(String, Arc<dyn Tensor>)> =
-        vec![("out_sample".to_string(), output)];
+    let output_tensors: Vec<(String, Arc<dyn Tensor>)> = vec![("out_sample".to_string(), output)];
 
     println!("Built CogVideoX transformer graph, exporting...");
     let onnx_model = if let Some(origin) = origin_path {
@@ -812,10 +819,7 @@ fn causal_conv3d(
 }
 
 /// 1x1x1 Conv3d (no padding needed).
-fn conv3d_1x1(
-    wm: &impl WeightManager,
-    input: Arc<dyn Tensor>,
-) -> Result<Arc<dyn Tensor>, Error> {
+fn conv3d_1x1(wm: &impl WeightManager, input: Arc<dyn Tensor>) -> Result<Arc<dyn Tensor>, Error> {
     let weight = wm.get_tensor("weight")?;
     let bias = wm.get_tensor("bias").ok();
     let conv = Conv::new(
@@ -860,8 +864,14 @@ fn resize_nearest_3d(
         Dimension::new(Some(target_h), None, None),
         Dimension::new(Some(target_w), None, None),
     ];
-    Resize::new_with_scales(None, input, scales, "nearest".to_string(), Shape::new(output_dims))
-        .map(|x| x as Arc<dyn Tensor>)
+    Resize::new_with_scales(
+        None,
+        input,
+        scales,
+        "nearest".to_string(),
+        Shape::new(output_dims),
+    )
+    .map(|x| x as Arc<dyn Tensor>)
 }
 
 /// SpatialNorm3D: GroupNorm conditioned on interpolated latent input.
@@ -915,8 +925,12 @@ fn vae_resnet_block(
         zq.clone(),
         num_groups,
         eps,
-        zq_t, zq_h, zq_w,
-        target_t, target_h, target_w,
+        zq_t,
+        zq_h,
+        zq_w,
+        target_t,
+        target_h,
+        target_w,
     )?;
     let h = silu(h)?;
     let h = causal_conv3d(&wm.prefix("conv1"), h, 3, 3, 1)?;
@@ -928,8 +942,12 @@ fn vae_resnet_block(
         zq.clone(),
         num_groups,
         eps,
-        zq_t, zq_h, zq_w,
-        target_t, target_h, target_w,
+        zq_t,
+        zq_h,
+        zq_w,
+        target_t,
+        target_h,
+        target_w,
     )?;
     let h = silu(h)?;
     let h = causal_conv3d(&wm.prefix("conv2"), h, 3, 3, 1)?;
@@ -966,7 +984,10 @@ fn vae_upsample(
     let x = reshape(x, vec![-1, 0, target_h as i64, target_w as i64])?; // [B*T, C, H, W]
     let x = conv2d(&wm.prefix("conv"), x, 3, 1, 1)?;
     let c_out = x.shape()[1].resolve()? as i64;
-    let x = reshape(x, vec![-1, target_t as i64, c_out, target_h as i64, target_w as i64])?;
+    let x = reshape(
+        x,
+        vec![-1, target_t as i64, c_out, target_h as i64, target_w as i64],
+    )?;
     let x = Transpose::new(None, x, Some(vec![0, 2, 1, 3, 4])); // [B,C,T,H,W]
 
     Ok(x as Arc<dyn Tensor>)
@@ -1053,12 +1074,19 @@ pub fn load_cogvideox_vae_decoder_with_origin(
             mid_ch,
             ng,
             eps,
-            base_t, base_h, base_w,
-            cur_t, cur_h, cur_w,
+            base_t,
+            base_h,
+            base_w,
+            cur_t,
+            cur_h,
+            cur_w,
         )?;
     }
 
-    println!("Building CogVideoX VAE decoder: {} up blocks...", num_up_blocks);
+    println!(
+        "Building CogVideoX VAE decoder: {} up blocks...",
+        num_up_blocks
+    );
 
     // Up blocks
     let mut current_channels = last_block_ch;
@@ -1070,7 +1098,11 @@ pub fn load_cogvideox_vae_decoder_with_origin(
         // Decoder uses layers_per_block + 1 resnets per up block
         let num_resnets = config.layers_per_block + 1;
         for resnet_idx in 0..num_resnets {
-            let in_ch = if resnet_idx == 0 { current_channels } else { out_ch };
+            let in_ch = if resnet_idx == 0 {
+                current_channels
+            } else {
+                out_ch
+            };
             x = vae_resnet_block(
                 &dec.prefix(&format!("up_blocks.{block_idx}.resnets.{resnet_idx}")),
                 x,
@@ -1079,8 +1111,12 @@ pub fn load_cogvideox_vae_decoder_with_origin(
                 out_ch,
                 ng,
                 eps,
-                base_t, base_h, base_w,
-                cur_t, cur_h, cur_w,
+                base_t,
+                base_h,
+                base_w,
+                cur_t,
+                cur_h,
+                cur_w,
             )?;
         }
         current_channels = out_ch;
@@ -1100,8 +1136,12 @@ pub fn load_cogvideox_vae_decoder_with_origin(
                 &dec.prefix(&format!("up_blocks.{block_idx}.upsamplers.0")),
                 x,
                 decompress_time,
-                cur_t, cur_h, cur_w,
-                next_t, next_h, next_w,
+                cur_t,
+                cur_h,
+                cur_w,
+                next_t,
+                next_h,
+                next_w,
             )?;
             cur_t = next_t;
             cur_h = next_h;
@@ -1126,14 +1166,17 @@ pub fn load_cogvideox_vae_decoder_with_origin(
         latent_input.clone(),
         ng,
         eps,
-        base_t, base_h, base_w,
-        cur_t, cur_h, cur_w,
+        base_t,
+        base_h,
+        base_w,
+        cur_t,
+        cur_h,
+        cur_w,
     )?;
     let x = silu(x)?;
     let output = causal_conv3d(&dec.prefix("conv_out"), x, 3, 3, 1)?;
 
-    let output_tensors: Vec<(String, Arc<dyn Tensor>)> =
-        vec![("video_out".to_string(), output)];
+    let output_tensors: Vec<(String, Arc<dyn Tensor>)> = vec![("video_out".to_string(), output)];
 
     println!("Built CogVideoX VAE decoder graph, exporting...");
     let onnx_model = if let Some(origin) = origin_path {

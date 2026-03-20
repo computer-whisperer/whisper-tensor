@@ -105,7 +105,8 @@ pub fn execute(
                         if needed as usize > tensor.num_elements() {
                             collected_inputs.push((base, tensor.clone()));
                         } else if (needed as usize) < tensor.num_elements() {
-                            collected_inputs.push((base, slice_tensor_prefix(tensor, needed as usize)));
+                            collected_inputs
+                                .push((base, slice_tensor_prefix(tensor, needed as usize)));
                         } else {
                             collected_inputs.push((base, tensor.clone()));
                         }
@@ -136,7 +137,10 @@ pub fn execute(
                         if it.count != inp.count {
                             eprintln!(
                                 "  Phase 0 lane 0: span.inputs[{}] base={} count={} but span input_tensor count={} (diff={})",
-                                inp_idx, inp.base, inp.count, it.count,
+                                inp_idx,
+                                inp.base,
+                                inp.count,
+                                it.count,
                                 inp.count as i64 - it.count as i64
                             );
                         }
@@ -149,7 +153,9 @@ pub fn execute(
             if phase_idx < 3 && span.graph.num_groups() > 0 {
                 let mut found_missing = false;
                 'groups: for g in span.graph.groups() {
-                    if matches!(g.op, crate::nano_graph::ScalarOp::Literal(_)) { continue; }
+                    if matches!(g.op, crate::nano_graph::ScalarOp::Literal(_)) {
+                        continue;
+                    }
 
                     // Check every InputRef at every position.
                     for (inp_idx, input) in g.inputs.iter().enumerate() {
@@ -160,16 +166,32 @@ pub fn execute(
                                 let main_ii = plan.graph.find_input_idx(source);
                                 let main_info = if let Some(gi) = main_gi {
                                     let mg = &plan.graph.groups()[gi];
-                                    format!("group[{}] base={} count={} {:?}", gi, mg.base_id, mg.count, op_name(&mg.op))
+                                    format!(
+                                        "group[{}] base={} count={} {:?}",
+                                        gi,
+                                        mg.base_id,
+                                        mg.count,
+                                        op_name(&mg.op)
+                                    )
                                 } else if let Some((ti, off)) = main_ii {
                                     let it = &plan.graph.input_tensors()[ti];
-                                    format!("input_tensor[{}] base={} count={} off={}", ti, it.base_id, it.count, off)
+                                    format!(
+                                        "input_tensor[{}] base={} count={} off={}",
+                                        ti, it.base_id, it.count, off
+                                    )
                                 } else {
                                     "NOT IN MAIN GRAPH EITHER".to_string()
                                 };
                                 eprintln!(
                                     "  Phase {} lane {}: group base={} count={} input[{}] at pos={}: atom {} NOT in span. Main: {}",
-                                    phase_idx, lane_idx, g.base_id, g.count, inp_idx, pos, source, main_info,
+                                    phase_idx,
+                                    lane_idx,
+                                    g.base_id,
+                                    g.count,
+                                    inp_idx,
+                                    pos,
+                                    source,
+                                    main_info,
                                 );
                                 found_missing = true;
                                 break 'groups;
@@ -178,24 +200,43 @@ pub fn execute(
                     }
 
                     // For Reduce ops, also check the stride range.
-                    if let crate::nano_graph::ScalarOp::Reduce { reduce_count, reduce_stride, .. } = &g.op {
+                    if let crate::nano_graph::ScalarOp::Reduce {
+                        reduce_count,
+                        reduce_stride,
+                        ..
+                    } = &g.op
+                    {
                         if *reduce_count > 1 && *reduce_stride != 0 {
                             for input in &g.inputs {
                                 for pos in 0..g.count {
                                     let base_atom = input.resolve(pos + g.atom_offset);
                                     for k in 0..*reduce_count {
-                                        let atom = AtomId((base_atom.0 as i64 + k as i64 * reduce_stride) as u64);
+                                        let atom = AtomId(
+                                            (base_atom.0 as i64 + k as i64 * reduce_stride) as u64,
+                                        );
                                         if !span.graph.contains_atom(atom) {
                                             let main_gi = plan.graph.find_group_idx(atom);
                                             let main_info = if let Some(gi) = main_gi {
                                                 let mg = &plan.graph.groups()[gi];
-                                                format!("group[{}] base={} count={} {:?}", gi, mg.base_id, mg.count, op_name(&mg.op))
+                                                format!(
+                                                    "group[{}] base={} count={} {:?}",
+                                                    gi,
+                                                    mg.base_id,
+                                                    mg.count,
+                                                    op_name(&mg.op)
+                                                )
                                             } else {
                                                 "NOT IN MAIN".to_string()
                                             };
                                             eprintln!(
                                                 "  Phase {} lane {}: REDUCE group base={} pos={} stride atom {} (k={}) NOT in span. Main: {}",
-                                                phase_idx, lane_idx, g.base_id, pos, atom, k, main_info,
+                                                phase_idx,
+                                                lane_idx,
+                                                g.base_id,
+                                                pos,
+                                                atom,
+                                                k,
+                                                main_info,
                                             );
                                             found_missing = true;
                                             break 'groups;
@@ -210,13 +251,26 @@ pub fn execute(
 
             // Dump first span's input/output values for first 2 phases.
             if phase_idx < 2 && lane_idx == 0 && span.graph.num_groups() > 0 {
-                eprintln!("  Phase {} lane 0: {} inputs, {} outputs, {} groups",
-                         phase_idx, span_inputs.len(), span.outputs.len(), span.graph.num_groups());
+                eprintln!(
+                    "  Phase {} lane 0: {} inputs, {} outputs, {} groups",
+                    phase_idx,
+                    span_inputs.len(),
+                    span.outputs.len(),
+                    span.graph.num_groups()
+                );
                 for (i, &(base, tensor)) in span_inputs.iter().enumerate().take(3) {
                     let f = tensor.flatten();
                     let n = f.num_elements().min(3);
-                    let vals: Vec<f64> = (0..n).map(|j| f.get(&[j as u64]).unwrap().to_f64()).collect();
-                    eprintln!("    input[{}] base={} count={}: {:?}", i, base, tensor.num_elements(), vals);
+                    let vals: Vec<f64> = (0..n)
+                        .map(|j| f.get(&[j as u64]).unwrap().to_f64())
+                        .collect();
+                    eprintln!(
+                        "    input[{}] base={} count={}: {:?}",
+                        i,
+                        base,
+                        tensor.num_elements(),
+                        vals
+                    );
                 }
             }
 
@@ -228,11 +282,22 @@ pub fn execute(
             match eval_result {
                 Ok(output_tensors) => {
                     if phase_idx < 2 && lane_idx == 0 {
-                        for (i, (range, tensor)) in span.outputs.iter().zip(output_tensors.iter()).enumerate().take(3) {
+                        for (i, (range, tensor)) in span
+                            .outputs
+                            .iter()
+                            .zip(output_tensors.iter())
+                            .enumerate()
+                            .take(3)
+                        {
                             let f = tensor.flatten();
                             let n = f.num_elements().min(5);
-                            let vals: Vec<f64> = (0..n).map(|j| f.get(&[j as u64]).unwrap().to_f64()).collect();
-                            eprintln!("    output[{}] base={} count={}: {:?}", i, range.base, range.count, vals);
+                            let vals: Vec<f64> = (0..n)
+                                .map(|j| f.get(&[j as u64]).unwrap().to_f64())
+                                .collect();
+                            eprintln!(
+                                "    output[{}] base={} count={}: {:?}",
+                                i, range.base, range.count, vals
+                            );
                         }
                     }
                     for (output_range, tensor) in span.outputs.iter().zip(output_tensors) {
@@ -293,14 +358,18 @@ pub fn execute(
                             let g = &plan.graph.groups()[gi];
                             if !matches!(g.op, crate::nano_graph::ScalarOp::Literal(_)) {
                                 // This is a computed group. Was it output by some span?
-                                let was_output = plan.phases[..=phase_idx].iter()
+                                let was_output = plan.phases[..=phase_idx]
+                                    .iter()
                                     .flat_map(|p| p.spans.iter())
                                     .any(|s| s.outputs.iter().any(|o| o.base == inp.base));
                                 if !was_output {
                                     eprintln!(
                                         "  BUG: Phase {} lane {} reads computed group base={} count={} ({:?}) \
                                          but NO prior span output it! Store has stale initial data.",
-                                        phase_idx + 1, lane_idx, inp.base, inp.count,
+                                        phase_idx + 1,
+                                        lane_idx,
+                                        inp.base,
+                                        inp.count,
                                         crate::nano_graph::ScalarOp::Identity, // placeholder
                                     );
                                 }
@@ -325,7 +394,11 @@ pub fn execute(
                                 if count_mismatches <= 5 {
                                     eprintln!(
                                         "  Phase {} → {}: input base={} expects {} atoms but store has {}",
-                                        phase_idx, phase_idx + 1, inp.base, inp.count, stored
+                                        phase_idx,
+                                        phase_idx + 1,
+                                        inp.base,
+                                        inp.count,
+                                        stored
                                     );
                                 }
                             }
@@ -337,7 +410,10 @@ pub fn execute(
                 if count_mismatches > 0 || missing > 0 {
                     eprintln!(
                         "  Phase {} → {}: {} count mismatches, {} missing",
-                        phase_idx, phase_idx + 1, count_mismatches, missing
+                        phase_idx,
+                        phase_idx + 1,
+                        count_mismatches,
+                        missing
                     );
                 }
             }
@@ -398,8 +474,8 @@ fn make_zeros(count: usize, dtype: crate::dtype::DType) -> NDArrayNumericTensor<
 ///    - covered by one of the span's declared input ranges
 /// 3. No span group references atoms that are neither internal nor declared.
 pub fn validate_spans(plan: &ExecutionPlan) -> Vec<String> {
-    use std::collections::HashSet;
     use crate::nano_graph::{InputRef, ScalarOp};
+    use std::collections::HashSet;
 
     let main = &plan.graph;
     let mut errors = Vec::new();
@@ -426,10 +502,14 @@ pub fn validate_spans(plan: &ExecutionPlan) -> Vec<String> {
 
             let atom_covered = |atom: u64| -> bool {
                 for &(lo, hi) in &span_produced {
-                    if atom >= lo && atom < hi { return true; }
+                    if atom >= lo && atom < hi {
+                        return true;
+                    }
                 }
                 for &(lo, hi) in &span_input_ranges {
-                    if atom >= lo && atom < hi { return true; }
+                    if atom >= lo && atom < hi {
+                        return true;
+                    }
                 }
                 false
             };
@@ -446,7 +526,10 @@ pub fn validate_spans(plan: &ExecutionPlan) -> Vec<String> {
                         {
                             errors.push(format!(
                                 "{}: span group {} (base={}, op={:?}) not found in main graph",
-                                prefix, gi, span_group.base_id, op_name(&span_group.op)
+                                prefix,
+                                gi,
+                                span_group.base_id,
+                                op_name(&span_group.op)
                             ));
                         }
                     }
@@ -455,28 +538,34 @@ pub fn validate_spans(plan: &ExecutionPlan) -> Vec<String> {
                         if op_name(&span_group.op) != op_name(&mg.op) {
                             errors.push(format!(
                                 "{}: group base={}: op mismatch: span={:?} main={:?}",
-                                prefix, span_group.base_id,
-                                op_name(&span_group.op), op_name(&mg.op)
+                                prefix,
+                                span_group.base_id,
+                                op_name(&span_group.op),
+                                op_name(&mg.op)
                             ));
                         }
                         // Verify output dtype matches.
                         if span_group.output_dtype != mg.output_dtype {
                             errors.push(format!(
                                 "{}: group base={}: dtype mismatch: span={:?} main={:?}",
-                                prefix, span_group.base_id,
-                                span_group.output_dtype, mg.output_dtype
+                                prefix,
+                                span_group.base_id,
+                                span_group.output_dtype,
+                                mg.output_dtype
                             ));
                         }
                         // Verify InputRefs match.
                         if span_group.inputs.len() != mg.inputs.len() {
                             errors.push(format!(
                                 "{}: group base={}: input count mismatch: span={} main={}",
-                                prefix, span_group.base_id,
-                                span_group.inputs.len(), mg.inputs.len()
+                                prefix,
+                                span_group.base_id,
+                                span_group.inputs.len(),
+                                mg.inputs.len()
                             ));
                         } else {
-                            for (inp_idx, (si, mi)) in span_group.inputs.iter()
-                                .zip(mg.inputs.iter()).enumerate()
+                            for (inp_idx, (si, mi)) in
+                                span_group.inputs.iter().zip(mg.inputs.iter()).enumerate()
                             {
                                 if si != mi {
                                     errors.push(format!(
@@ -501,7 +590,11 @@ pub fn validate_spans(plan: &ExecutionPlan) -> Vec<String> {
                 // Check 2: all InputRef targets are covered.
                 // Sample positions to avoid O(atoms).
                 let sample_count = span_group.count.min(16);
-                let step = if span_group.count > 16 { span_group.count / 16 } else { 1 };
+                let step = if span_group.count > 16 {
+                    span_group.count / 16
+                } else {
+                    1
+                };
                 for input_ref in &span_group.inputs {
                     for s in 0..sample_count {
                         let i = s * step;
@@ -510,18 +603,28 @@ pub fn validate_spans(plan: &ExecutionPlan) -> Vec<String> {
                             errors.push(format!(
                                 "{}: group base={} atom_offset={} input {:?}: \
                                  source atom {} (at i={}) not covered by span groups or inputs",
-                                prefix, span_group.base_id, span_group.atom_offset,
-                                format_input_ref(input_ref), source, i
+                                prefix,
+                                span_group.base_id,
+                                span_group.atom_offset,
+                                format_input_ref(input_ref),
+                                source,
+                                i
                             ));
                             break; // one error per input is enough
                         }
                     }
 
                     // For Reduce ops, also check strided range endpoints.
-                    if let ScalarOp::Reduce { reduce_count, reduce_stride, .. } = &span_group.op {
+                    if let ScalarOp::Reduce {
+                        reduce_count,
+                        reduce_stride,
+                        ..
+                    } = &span_group.op
+                    {
                         if *reduce_count > 1 && *reduce_stride != 0 {
                             let first = input_ref.resolve(span_group.atom_offset);
-                            let last = input_ref.resolve(span_group.atom_offset + span_group.count - 1);
+                            let last =
+                                input_ref.resolve(span_group.atom_offset + span_group.count - 1);
                             let end_off = (*reduce_count as i64 - 1) * reduce_stride;
                             let endpoints = [
                                 first.0,
@@ -556,7 +659,9 @@ pub fn validate_spans(plan: &ExecutionPlan) -> Vec<String> {
             // Check 3: every atom in span.outputs is in the span graph.
             for (out_idx, out) in span.outputs.iter().enumerate() {
                 for offset in [0, out.count / 2, out.count.saturating_sub(1)] {
-                    if offset >= out.count { continue; }
+                    if offset >= out.count {
+                        continue;
+                    }
                     let atom = AtomId(out.base.0 + offset);
                     if !span.graph.contains_atom(atom) {
                         errors.push(format!(
@@ -620,11 +725,30 @@ fn format_input_ref(ir: &crate::nano_graph::InputRef) -> String {
     match ir {
         InputRef::Broadcast(id) => format!("Broadcast({})", id),
         InputRef::Affine { base, stride } => format!("Affine(base={}, stride={})", base, stride),
-        InputRef::StridedBroadcast { base, stride, repeat } =>
-            format!("StridedBroadcast(base={}, stride={}, repeat={})", base, stride, repeat),
-        InputRef::Modular { base, stride, modulus } =>
-            format!("Modular(base={}, stride={}, modulus={})", base, stride, modulus),
-        InputRef::Explicit(ids) =>
-            format!("Explicit([{}; len={}])", if ids.is_empty() { "".into() } else { format!("{}, ...", ids[0]) }, ids.len()),
+        InputRef::StridedBroadcast {
+            base,
+            stride,
+            repeat,
+        } => format!(
+            "StridedBroadcast(base={}, stride={}, repeat={})",
+            base, stride, repeat
+        ),
+        InputRef::Modular {
+            base,
+            stride,
+            modulus,
+        } => format!(
+            "Modular(base={}, stride={}, modulus={})",
+            base, stride, modulus
+        ),
+        InputRef::Explicit(ids) => format!(
+            "Explicit([{}; len={}])",
+            if ids.is_empty() {
+                "".into()
+            } else {
+                format!("{}, ...", ids[0])
+            },
+            ids.len()
+        ),
     }
 }

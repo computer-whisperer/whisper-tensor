@@ -17,11 +17,11 @@ mod reduce;
 mod reshape;
 mod resize;
 mod reverse_sequence;
-mod sce;
 mod rotary_embedding;
 mod scan;
 mod scatter_elements;
 mod scatter_nd;
+mod sce;
 mod shape;
 mod slice;
 mod split;
@@ -35,11 +35,11 @@ pub use binary::{
     MaxOperation, MinOperation, ModuloOperation, PowOperation, WhichBinaryOperation,
 };
 pub use cast::{CastLikeOperation, CastOperation};
-pub use einsum::EinsumOperation;
 pub use concat::ConcatOperation;
 pub use constant::{ConstantOfShapeOperation, ConstantOperation};
 pub use conv::ConvOperation;
 pub use conv_transpose::ConvTransposeOperation;
+pub use einsum::EinsumOperation;
 pub use gather::GatherOperation;
 pub use gather_elements::{GatherElementsOperation, GatherNDOperation};
 pub use lstm::LstmOperation;
@@ -51,11 +51,11 @@ pub use misc::{
     SumOperation, TileOperation, TriluOperation, WhereOperation,
 };
 pub use nlll::NegativeLogLikelihoodLossOperation;
-pub use pool::{AveragePoolOperation, MaxPoolOperation};
 pub use normalization::{
     BatchNormalizationOperation, GroupNormalizationOperation, InstanceNormalizationOperation,
     LayerNormalizationOperation, LpNormalizationOperation, RMSNormalizationOperation,
 };
+pub use pool::{AveragePoolOperation, MaxPoolOperation};
 pub use quant_matmul::QuantMatMulOperation;
 pub use reduce::{
     CumSumOperation, ReduceL1Operation, ReduceL2Operation, ReduceLogSumExpOperation,
@@ -64,12 +64,12 @@ pub use reduce::{
 };
 pub use reshape::{FlattenOperation, ReshapeOperation, SqueezeOperation, UnsqueezeOperation};
 pub use resize::ResizeOperation;
-pub use sce::SoftmaxCrossEntropyLossOperation;
 pub use reverse_sequence::ReverseSequenceOperation;
 pub use rotary_embedding::RotaryEmbeddingOperation;
 pub use scan::ScanOperation;
 pub use scatter_elements::ScatterElementsOperation;
 pub use scatter_nd::ScatterNDOperation;
+pub use sce::SoftmaxCrossEntropyLossOperation;
 pub use shape::{ShapeOperation, SizeOperation};
 pub use slice::SliceOperation;
 pub use split::SplitOperation;
@@ -78,9 +78,9 @@ pub use topk::TopKOperation;
 pub use transpose::TransposeOperation;
 pub use unary::{
     BiasGeluOperation, CeluOperation, EluOperation, GeluOperation, HardSigmoidOperation,
-    HardSwishOperation, IdentityOperation, IsInfOperation, LeakyReluOperation,
-    LogSoftmaxOperation, MishOperation, PReluOperation, SeluOperation, SoftsignOperation,
-    SoftmaxOperation, ThresholdedReluOperation, UnaryOperation, WhichUnaryOperation,
+    HardSwishOperation, IdentityOperation, IsInfOperation, LeakyReluOperation, LogSoftmaxOperation,
+    MishOperation, PReluOperation, SeluOperation, SoftmaxOperation, SoftsignOperation,
+    ThresholdedReluOperation, UnaryOperation, WhichUnaryOperation,
 };
 
 use crate::backends::eval_backend::EvalBackend;

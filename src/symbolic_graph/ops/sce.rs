@@ -1,10 +1,10 @@
 use crate::dtype::DType;
 use crate::graph::{GlobalId, Node, Property, PropertyValue};
 use crate::milli_graph::{self, MilliLoweringContext, MilliOpGraph};
+use crate::onnx::AttributeProto;
 use crate::symbolic_graph::ops::Operation;
 use crate::symbolic_graph::ops::nlll::gather_class_axis;
 use crate::symbolic_graph::{ONNXDecodingError, query_attribute_int, query_attribute_string};
-use crate::onnx::AttributeProto;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -46,8 +46,8 @@ impl SoftmaxCrossEntropyLossOperation {
             ));
         }
 
-        let reduction = query_attribute_string(attributes, "reduction")
-            .unwrap_or_else(|| "mean".to_string());
+        let reduction =
+            query_attribute_string(attributes, "reduction").unwrap_or_else(|| "mean".to_string());
         let ignore_index = query_attribute_int(attributes, "ignore_index");
 
         Ok(Self {
@@ -114,7 +114,12 @@ impl Operation for SoftmaxCrossEntropyLossOperation {
         // --- LogSoftmax along axis=1 (class axis) ---
         let axis1 = milli_graph::ops::Constant::new_scalar(&mut graph, 1i64, rng);
         let row_max = milli_graph::ops::ReduceMax::push_new(
-            &mut graph, scores, Some(axis1), true, false, rng,
+            &mut graph,
+            scores,
+            Some(axis1),
+            true,
+            false,
+            rng,
         );
         let shifted = milli_graph::ops::SimpleBinary::sub(&mut graph, scores, row_max, rng);
         let exp = milli_graph::ops::SimpleUnaryOp::exp(&mut graph, shifted, rng);
@@ -125,11 +130,9 @@ impl Operation for SoftmaxCrossEntropyLossOperation {
 
         // --- NLL: clamp OOB targets before indexing, then zero out later ---
         let (safe_target, is_ignored) = if let Some(ii) = self.ignore_index {
-            let target_i64 =
-                milli_graph::ops::Cast::push_new(&mut graph, target, DType::I64, rng);
+            let target_i64 = milli_graph::ops::Cast::push_new(&mut graph, target, DType::I64, rng);
             let ii_const = milli_graph::ops::Constant::new_scalar(&mut graph, ii, rng);
-            let mask =
-                milli_graph::ops::SimpleBinary::equal(&mut graph, target_i64, ii_const, rng);
+            let mask = milli_graph::ops::SimpleBinary::equal(&mut graph, target_i64, ii_const, rng);
             let zero_i64 = milli_graph::ops::Constant::new_scalar(&mut graph, 0i64, rng);
             let clamped =
                 milli_graph::ops::Where::push_new(&mut graph, mask, zero_i64, target_i64, rng);
@@ -160,8 +163,7 @@ impl Operation for SoftmaxCrossEntropyLossOperation {
             let w = input_map[&w_id];
             let w_flat =
                 milli_graph::ops::Gather::push_new(&mut graph, w, flat_safe_target, 0, rng);
-            let target_shape =
-                milli_graph::ops::Shape::push_new(&mut graph, target, rng);
+            let target_shape = milli_graph::ops::Shape::push_new(&mut graph, target, rng);
             let w_per_sample =
                 milli_graph::ops::Reshape::push_new(&mut graph, w_flat, target_shape, false, rng);
             loss = milli_graph::ops::SimpleBinary::mul(&mut graph, loss, w_per_sample, rng);
@@ -176,13 +178,11 @@ impl Operation for SoftmaxCrossEntropyLossOperation {
             loss = milli_graph::ops::Where::push_new(&mut graph, mask, zero, loss, rng);
 
             if let Some(sw) = sample_weight {
-                let w_masked =
-                    milli_graph::ops::Where::push_new(&mut graph, mask, zero, sw, rng);
+                let w_masked = milli_graph::ops::Where::push_new(&mut graph, mask, zero, sw, rng);
                 sample_weight = Some(w_masked);
             } else {
                 let one = milli_graph::ops::Constant::new_scalar(&mut graph, 1.0f32, rng);
-                let w_masked =
-                    milli_graph::ops::Where::push_new(&mut graph, mask, zero, one, rng);
+                let w_masked = milli_graph::ops::Where::push_new(&mut graph, mask, zero, one, rng);
                 sample_weight = Some(w_masked);
             }
         }

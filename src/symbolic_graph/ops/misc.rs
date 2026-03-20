@@ -1,11 +1,11 @@
 use crate::backends::eval_backend::EvalBackend;
+use crate::backends::ndarray_backend::NDArrayNumericTensor;
 use crate::dtype::DType;
 use crate::graph::{GlobalId, Graph, Node, Property, PropertyValue};
 use crate::milli_graph::ops::*;
 use crate::milli_graph::{MilliLoweringContext, MilliOpGraph};
 use crate::numeric_tensor::NumericTensor;
 use crate::symbolic_graph::ops::{EvalError, Operation};
-use crate::backends::ndarray_backend::NDArrayNumericTensor;
 use crate::symbolic_graph::{
     ONNXDecodingError, SymbolicGraph, SymbolicGraphMutator, query_attribute_float,
     query_attribute_graph, query_attribute_int, query_attribute_ints, query_attribute_string,
@@ -677,8 +677,12 @@ impl TileOperation {
 
 impl Node for TileOperation {
     type OpKind = String;
-    fn global_id(&self) -> GlobalId { self.global_id }
-    fn op_kind(&self) -> Self::OpKind { "Tile".to_string() }
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
+    fn op_kind(&self) -> Self::OpKind {
+        "Tile".to_string()
+    }
     fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         Box::new([self.input, self.repeats].into_iter())
     }
@@ -710,9 +714,17 @@ impl Operation for TileOperation {
         let shape_of_shape = Shape::push_new(&mut graph, input_shape, rng);
         let ones = {
             let op_id = crate::milli_graph::ops::ConstantOfShape::push_new(
-                &mut graph, crate::numeric_scalar::NumericScalar::I64(1), shape_of_shape, rng,
+                &mut graph,
+                crate::numeric_scalar::NumericScalar::I64(1),
+                shape_of_shape,
+                rng,
             );
-            graph.get_node_by_id(&op_id).unwrap().outputs().next().unwrap()
+            graph
+                .get_node_by_id(&op_id)
+                .unwrap()
+                .outputs()
+                .next()
+                .unwrap()
         };
 
         let axis1 = Constant::new_scalar(&mut graph, 1i64, rng);
@@ -722,7 +734,9 @@ impl Operation for TileOperation {
         let shape_us1 = Unsqueeze::push_new(&mut graph, input_shape, axis1, rng);
         let stacked1 = Concat::push_new(&mut graph, vec![ones_us, shape_us1], 1, rng);
         let neg1_shape1 = Constant::push_new(
-            &mut graph, NDArrayNumericTensor::from(vec![-1i64]).to_dyn(), rng,
+            &mut graph,
+            NDArrayNumericTensor::from(vec![-1i64]).to_dyn(),
+            rng,
         );
         let interleaved_shape = Reshape::push_new(&mut graph, stacked1, neg1_shape1, false, rng);
 
@@ -733,7 +747,9 @@ impl Operation for TileOperation {
         let shape_us2 = Unsqueeze::push_new(&mut graph, input_shape, axis1, rng);
         let stacked2 = Concat::push_new(&mut graph, vec![repeats_us, shape_us2], 1, rng);
         let neg1_shape2 = Constant::push_new(
-            &mut graph, NDArrayNumericTensor::from(vec![-1i64]).to_dyn(), rng,
+            &mut graph,
+            NDArrayNumericTensor::from(vec![-1i64]).to_dyn(),
+            rng,
         );
         let expand_shape = Reshape::push_new(&mut graph, stacked2, neg1_shape2, false, rng);
 
@@ -781,8 +797,12 @@ impl DropoutOperation {
 
 impl Node for DropoutOperation {
     type OpKind = String;
-    fn global_id(&self) -> GlobalId { self.global_id }
-    fn op_kind(&self) -> Self::OpKind { "Dropout".to_string() }
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
+    fn op_kind(&self) -> Self::OpKind {
+        "Dropout".to_string()
+    }
     fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         Box::new(std::iter::once(self.input))
     }
@@ -817,23 +837,35 @@ impl GlobalAveragePoolOperation {
         rng: &mut impl Rng,
     ) -> Result<Self, ONNXDecodingError> {
         if inputs.len() != 1 {
-            return Err(ONNXDecodingError::InvalidOperatorInputs("GlobalAveragePool"));
+            return Err(ONNXDecodingError::InvalidOperatorInputs(
+                "GlobalAveragePool",
+            ));
         }
         if outputs.len() != 1 {
-            return Err(ONNXDecodingError::InvalidOperatorOutputs("GlobalAveragePool"));
+            return Err(ONNXDecodingError::InvalidOperatorOutputs(
+                "GlobalAveragePool",
+            ));
         }
         Ok(Self {
             global_id: GlobalId::new(rng),
-            input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("GlobalAveragePool"))?,
-            output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("GlobalAveragePool"))?,
+            input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs(
+                "GlobalAveragePool",
+            ))?,
+            output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs(
+                "GlobalAveragePool",
+            ))?,
         })
     }
 }
 
 impl Node for GlobalAveragePoolOperation {
     type OpKind = String;
-    fn global_id(&self) -> GlobalId { self.global_id }
-    fn op_kind(&self) -> Self::OpKind { "GlobalAveragePool".to_string() }
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
+    fn op_kind(&self) -> Self::OpKind {
+        "GlobalAveragePool".to_string()
+    }
     fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         Box::new(std::iter::once(self.input))
     }
@@ -849,22 +881,55 @@ impl Operation for GlobalAveragePoolOperation {
         let input = input_map[&self.input];
         let input_shape = Shape::push_new(&mut graph, input, rng);
 
-        let shape_3d = Constant::push_new(&mut graph, NDArrayNumericTensor::from(vec![0i64, 0i64, -1]).to_dyn(), rng);
+        let shape_3d = Constant::push_new(
+            &mut graph,
+            NDArrayNumericTensor::from(vec![0i64, 0i64, -1]).to_dyn(),
+            rng,
+        );
         let x3d = Reshape::push_new(&mut graph, input, shape_3d, false, rng);
 
         let axis2 = Constant::new_scalar(&mut graph, 2i64, rng);
-        let pooled = crate::milli_graph::ops::ReduceMean::push_new(&mut graph, x3d, Some(axis2), true, false, rng);
+        let pooled = crate::milli_graph::ops::ReduceMean::push_new(
+            &mut graph,
+            x3d,
+            Some(axis2),
+            true,
+            false,
+            rng,
+        );
 
         // Output shape: replace spatial dims with 1s
-        let c_zero = Constant::push_new(&mut graph, NDArrayNumericTensor::from(vec![0i64]).to_dyn(), rng);
-        let c_two = Constant::push_new(&mut graph, NDArrayNumericTensor::from(vec![2i64]).to_dyn(), rng);
+        let c_zero = Constant::push_new(
+            &mut graph,
+            NDArrayNumericTensor::from(vec![0i64]).to_dyn(),
+            rng,
+        );
+        let c_two = Constant::push_new(
+            &mut graph,
+            NDArrayNumericTensor::from(vec![2i64]).to_dyn(),
+            rng,
+        );
         let bc = Slice::push_new(&mut graph, input_shape, c_zero, c_two, None, None, rng);
         let shape_len = Shape::push_new(&mut graph, input_shape, rng);
-        let two_1d = Constant::push_new(&mut graph, NDArrayNumericTensor::from(vec![2i64]).to_dyn(), rng);
+        let two_1d = Constant::push_new(
+            &mut graph,
+            NDArrayNumericTensor::from(vec![2i64]).to_dyn(),
+            rng,
+        );
         let n_spatial = SimpleBinary::sub(&mut graph, shape_len, two_1d, rng);
         let spatial_ones = {
-            let op_id = crate::milli_graph::ops::ConstantOfShape::push_new(&mut graph, crate::numeric_scalar::NumericScalar::I64(1), n_spatial, rng);
-            graph.get_node_by_id(&op_id).unwrap().outputs().next().unwrap()
+            let op_id = crate::milli_graph::ops::ConstantOfShape::push_new(
+                &mut graph,
+                crate::numeric_scalar::NumericScalar::I64(1),
+                n_spatial,
+                rng,
+            );
+            graph
+                .get_node_by_id(&op_id)
+                .unwrap()
+                .outputs()
+                .next()
+                .unwrap()
         };
         let out_shape = Concat::push_new(&mut graph, vec![bc, spatial_ones], 0, rng);
         let out = Reshape::push_new(&mut graph, pooled, out_shape, false, rng);
@@ -907,10 +972,18 @@ impl GlobalMaxPoolOperation {
 
 impl Node for GlobalMaxPoolOperation {
     type OpKind = String;
-    fn global_id(&self) -> GlobalId { self.global_id }
-    fn op_kind(&self) -> Self::OpKind { "GlobalMaxPool".to_string() }
-    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> { Box::new(std::iter::once(self.input)) }
-    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> { Box::new(std::iter::once(self.output)) }
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
+    fn op_kind(&self) -> Self::OpKind {
+        "GlobalMaxPool".to_string()
+    }
+    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
+        Box::new(std::iter::once(self.input))
+    }
+    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
+        Box::new(std::iter::once(self.output))
+    }
 }
 
 impl Operation for GlobalMaxPoolOperation {
@@ -919,21 +992,54 @@ impl Operation for GlobalMaxPoolOperation {
         let input = input_map[&self.input];
         let input_shape = Shape::push_new(&mut graph, input, rng);
 
-        let shape_3d = Constant::push_new(&mut graph, NDArrayNumericTensor::from(vec![0i64, 0i64, -1]).to_dyn(), rng);
+        let shape_3d = Constant::push_new(
+            &mut graph,
+            NDArrayNumericTensor::from(vec![0i64, 0i64, -1]).to_dyn(),
+            rng,
+        );
         let x3d = Reshape::push_new(&mut graph, input, shape_3d, false, rng);
 
         let axis2 = Constant::new_scalar(&mut graph, 2i64, rng);
-        let pooled = crate::milli_graph::ops::ReduceMax::push_new(&mut graph, x3d, Some(axis2), true, false, rng);
+        let pooled = crate::milli_graph::ops::ReduceMax::push_new(
+            &mut graph,
+            x3d,
+            Some(axis2),
+            true,
+            false,
+            rng,
+        );
 
-        let c_zero = Constant::push_new(&mut graph, NDArrayNumericTensor::from(vec![0i64]).to_dyn(), rng);
-        let c_two = Constant::push_new(&mut graph, NDArrayNumericTensor::from(vec![2i64]).to_dyn(), rng);
+        let c_zero = Constant::push_new(
+            &mut graph,
+            NDArrayNumericTensor::from(vec![0i64]).to_dyn(),
+            rng,
+        );
+        let c_two = Constant::push_new(
+            &mut graph,
+            NDArrayNumericTensor::from(vec![2i64]).to_dyn(),
+            rng,
+        );
         let bc = Slice::push_new(&mut graph, input_shape, c_zero, c_two, None, None, rng);
         let shape_len = Shape::push_new(&mut graph, input_shape, rng);
-        let two_1d = Constant::push_new(&mut graph, NDArrayNumericTensor::from(vec![2i64]).to_dyn(), rng);
+        let two_1d = Constant::push_new(
+            &mut graph,
+            NDArrayNumericTensor::from(vec![2i64]).to_dyn(),
+            rng,
+        );
         let n_spatial = SimpleBinary::sub(&mut graph, shape_len, two_1d, rng);
         let spatial_ones = {
-            let op_id = crate::milli_graph::ops::ConstantOfShape::push_new(&mut graph, crate::numeric_scalar::NumericScalar::I64(1), n_spatial, rng);
-            graph.get_node_by_id(&op_id).unwrap().outputs().next().unwrap()
+            let op_id = crate::milli_graph::ops::ConstantOfShape::push_new(
+                &mut graph,
+                crate::numeric_scalar::NumericScalar::I64(1),
+                n_spatial,
+                rng,
+            );
+            graph
+                .get_node_by_id(&op_id)
+                .unwrap()
+                .outputs()
+                .next()
+                .unwrap()
         };
         let out_shape = Concat::push_new(&mut graph, vec![bc, spatial_ones], 0, rng);
         let out = Reshape::push_new(&mut graph, pooled, out_shape, false, rng);
@@ -947,30 +1053,60 @@ impl Operation for GlobalMaxPoolOperation {
 
 /// ONNX Mean: element-wise mean of N inputs.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct MeanOperation { global_id: GlobalId, inputs: Vec<GlobalId>, output: GlobalId }
+pub struct MeanOperation {
+    global_id: GlobalId,
+    inputs: Vec<GlobalId>,
+    output: GlobalId,
+}
 
 impl MeanOperation {
-    pub(crate) fn from_onnx(inputs: &[Option<GlobalId>], outputs: &[Option<GlobalId>], _attributes: &[onnx::AttributeProto], rng: &mut impl Rng) -> Result<Self, ONNXDecodingError> {
-        if inputs.is_empty() { return Err(ONNXDecodingError::InvalidOperatorInputs("Mean")); }
-        if outputs.len() != 1 { return Err(ONNXDecodingError::InvalidOperatorOutputs("Mean")); }
-        let inputs: Vec<GlobalId> = inputs.iter().map(|x| x.ok_or(ONNXDecodingError::InvalidOperatorInputs("Mean"))).collect::<Result<_, _>>()?;
-        Ok(Self { global_id: GlobalId::new(rng), inputs, output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("Mean"))? })
+    pub(crate) fn from_onnx(
+        inputs: &[Option<GlobalId>],
+        outputs: &[Option<GlobalId>],
+        _attributes: &[onnx::AttributeProto],
+        rng: &mut impl Rng,
+    ) -> Result<Self, ONNXDecodingError> {
+        if inputs.is_empty() {
+            return Err(ONNXDecodingError::InvalidOperatorInputs("Mean"));
+        }
+        if outputs.len() != 1 {
+            return Err(ONNXDecodingError::InvalidOperatorOutputs("Mean"));
+        }
+        let inputs: Vec<GlobalId> = inputs
+            .iter()
+            .map(|x| x.ok_or(ONNXDecodingError::InvalidOperatorInputs("Mean")))
+            .collect::<Result<_, _>>()?;
+        Ok(Self {
+            global_id: GlobalId::new(rng),
+            inputs,
+            output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("Mean"))?,
+        })
     }
 }
 
 impl Node for MeanOperation {
     type OpKind = String;
-    fn global_id(&self) -> GlobalId { self.global_id }
-    fn op_kind(&self) -> Self::OpKind { "Mean".to_string() }
-    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> { Box::new(self.inputs.clone().into_iter()) }
-    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> { Box::new(std::iter::once(self.output)) }
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
+    fn op_kind(&self) -> Self::OpKind {
+        "Mean".to_string()
+    }
+    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
+        Box::new(self.inputs.clone().into_iter())
+    }
+    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
+        Box::new(std::iter::once(self.output))
+    }
 }
 
 impl Operation for MeanOperation {
     fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let mut sum = input_map[&self.inputs[0]];
-        for inp in &self.inputs[1..] { sum = SimpleBinary::add(&mut graph, sum, input_map[inp], rng); }
+        for inp in &self.inputs[1..] {
+            sum = SimpleBinary::add(&mut graph, sum, input_map[inp], rng);
+        }
         let n = Constant::new_scalar(&mut graph, self.inputs.len() as f32, rng);
         let n = CastLike::push_new(&mut graph, n, sum, rng);
         let out = SimpleBinary::div(&mut graph, sum, n, rng);
@@ -983,30 +1119,60 @@ impl Operation for MeanOperation {
 
 /// ONNX Sum: element-wise sum of N inputs.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct SumOperation { global_id: GlobalId, inputs: Vec<GlobalId>, output: GlobalId }
+pub struct SumOperation {
+    global_id: GlobalId,
+    inputs: Vec<GlobalId>,
+    output: GlobalId,
+}
 
 impl SumOperation {
-    pub(crate) fn from_onnx(inputs: &[Option<GlobalId>], outputs: &[Option<GlobalId>], _attributes: &[onnx::AttributeProto], rng: &mut impl Rng) -> Result<Self, ONNXDecodingError> {
-        if inputs.is_empty() { return Err(ONNXDecodingError::InvalidOperatorInputs("Sum")); }
-        if outputs.len() != 1 { return Err(ONNXDecodingError::InvalidOperatorOutputs("Sum")); }
-        let inputs: Vec<GlobalId> = inputs.iter().map(|x| x.ok_or(ONNXDecodingError::InvalidOperatorInputs("Sum"))).collect::<Result<_, _>>()?;
-        Ok(Self { global_id: GlobalId::new(rng), inputs, output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("Sum"))? })
+    pub(crate) fn from_onnx(
+        inputs: &[Option<GlobalId>],
+        outputs: &[Option<GlobalId>],
+        _attributes: &[onnx::AttributeProto],
+        rng: &mut impl Rng,
+    ) -> Result<Self, ONNXDecodingError> {
+        if inputs.is_empty() {
+            return Err(ONNXDecodingError::InvalidOperatorInputs("Sum"));
+        }
+        if outputs.len() != 1 {
+            return Err(ONNXDecodingError::InvalidOperatorOutputs("Sum"));
+        }
+        let inputs: Vec<GlobalId> = inputs
+            .iter()
+            .map(|x| x.ok_or(ONNXDecodingError::InvalidOperatorInputs("Sum")))
+            .collect::<Result<_, _>>()?;
+        Ok(Self {
+            global_id: GlobalId::new(rng),
+            inputs,
+            output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("Sum"))?,
+        })
     }
 }
 
 impl Node for SumOperation {
     type OpKind = String;
-    fn global_id(&self) -> GlobalId { self.global_id }
-    fn op_kind(&self) -> Self::OpKind { "Sum".to_string() }
-    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> { Box::new(self.inputs.clone().into_iter()) }
-    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> { Box::new(std::iter::once(self.output)) }
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
+    fn op_kind(&self) -> Self::OpKind {
+        "Sum".to_string()
+    }
+    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
+        Box::new(self.inputs.clone().into_iter())
+    }
+    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
+        Box::new(std::iter::once(self.output))
+    }
 }
 
 impl Operation for SumOperation {
     fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let mut sum = input_map[&self.inputs[0]];
-        for inp in &self.inputs[1..] { sum = SimpleBinary::add(&mut graph, sum, input_map[inp], rng); }
+        for inp in &self.inputs[1..] {
+            sum = SimpleBinary::add(&mut graph, sum, input_map[inp], rng);
+        }
         let mut output_map = HashMap::new();
         output_map.insert(sum, self.output);
         graph.set_output_map(output_map);
@@ -1016,48 +1182,106 @@ impl Operation for SumOperation {
 
 /// ONNX SpaceToDepth: [N, C, H, W] → [N, C*bs*bs, H/bs, W/bs]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct SpaceToDepthOperation { global_id: GlobalId, input: GlobalId, output: GlobalId, blocksize: i64 }
+pub struct SpaceToDepthOperation {
+    global_id: GlobalId,
+    input: GlobalId,
+    output: GlobalId,
+    blocksize: i64,
+}
 
 impl SpaceToDepthOperation {
-    pub(crate) fn from_onnx(inputs: &[Option<GlobalId>], outputs: &[Option<GlobalId>], attributes: &[onnx::AttributeProto], rng: &mut impl Rng) -> Result<Self, ONNXDecodingError> {
-        if inputs.len() != 1 { return Err(ONNXDecodingError::InvalidOperatorInputs("SpaceToDepth")); }
-        if outputs.len() != 1 { return Err(ONNXDecodingError::InvalidOperatorOutputs("SpaceToDepth")); }
-        let blocksize = query_attribute_int(attributes, "blocksize").ok_or(ONNXDecodingError::InvalidOperatorInputs("SpaceToDepth"))?;
-        Ok(Self { global_id: GlobalId::new(rng), input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("SpaceToDepth"))?, output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("SpaceToDepth"))?, blocksize })
+    pub(crate) fn from_onnx(
+        inputs: &[Option<GlobalId>],
+        outputs: &[Option<GlobalId>],
+        attributes: &[onnx::AttributeProto],
+        rng: &mut impl Rng,
+    ) -> Result<Self, ONNXDecodingError> {
+        if inputs.len() != 1 {
+            return Err(ONNXDecodingError::InvalidOperatorInputs("SpaceToDepth"));
+        }
+        if outputs.len() != 1 {
+            return Err(ONNXDecodingError::InvalidOperatorOutputs("SpaceToDepth"));
+        }
+        let blocksize = query_attribute_int(attributes, "blocksize")
+            .ok_or(ONNXDecodingError::InvalidOperatorInputs("SpaceToDepth"))?;
+        Ok(Self {
+            global_id: GlobalId::new(rng),
+            input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("SpaceToDepth"))?,
+            output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("SpaceToDepth"))?,
+            blocksize,
+        })
     }
 }
 
 impl Node for SpaceToDepthOperation {
     type OpKind = String;
-    fn global_id(&self) -> GlobalId { self.global_id }
-    fn op_kind(&self) -> Self::OpKind { "SpaceToDepth".to_string() }
-    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> { Box::new(std::iter::once(self.input)) }
-    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> { Box::new(std::iter::once(self.output)) }
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
+    fn op_kind(&self) -> Self::OpKind {
+        "SpaceToDepth".to_string()
+    }
+    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
+        Box::new(std::iter::once(self.input))
+    }
+    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
+        Box::new(std::iter::once(self.output))
+    }
 }
 
 impl Operation for SpaceToDepthOperation {
-    fn parameters(&self) -> Vec<Property> { vec![Property::new("blocksize", PropertyValue::Int(self.blocksize))] }
+    fn parameters(&self) -> Vec<Property> {
+        vec![Property::new(
+            "blocksize",
+            PropertyValue::Int(self.blocksize),
+        )]
+    }
     fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, rng: &mut impl Rng) -> MilliOpGraph {
         // [N,C,H,W] → reshape [N,C,H/bs,bs,W/bs,bs] → transpose [0,1,3,5,2,4] → reshape [N,C*bs²,H/bs,W/bs]
         let bs = self.blocksize;
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let input = input_map[&self.input];
         let input_shape = Shape::push_new(&mut graph, input, rng);
-        let c0 = Constant::push_new(&mut graph, NDArrayNumericTensor::from(vec![0i64]).to_dyn(), rng);
-        let c1 = Constant::push_new(&mut graph, NDArrayNumericTensor::from(vec![1i64]).to_dyn(), rng);
-        let c2 = Constant::push_new(&mut graph, NDArrayNumericTensor::from(vec![2i64]).to_dyn(), rng);
-        let c3 = Constant::push_new(&mut graph, NDArrayNumericTensor::from(vec![3i64]).to_dyn(), rng);
-        let c4 = Constant::push_new(&mut graph, NDArrayNumericTensor::from(vec![4i64]).to_dyn(), rng);
+        let c0 = Constant::push_new(
+            &mut graph,
+            NDArrayNumericTensor::from(vec![0i64]).to_dyn(),
+            rng,
+        );
+        let c1 = Constant::push_new(
+            &mut graph,
+            NDArrayNumericTensor::from(vec![1i64]).to_dyn(),
+            rng,
+        );
+        let c2 = Constant::push_new(
+            &mut graph,
+            NDArrayNumericTensor::from(vec![2i64]).to_dyn(),
+            rng,
+        );
+        let c3 = Constant::push_new(
+            &mut graph,
+            NDArrayNumericTensor::from(vec![3i64]).to_dyn(),
+            rng,
+        );
+        let c4 = Constant::push_new(
+            &mut graph,
+            NDArrayNumericTensor::from(vec![4i64]).to_dyn(),
+            rng,
+        );
         let s0 = Slice::push_new(&mut graph, input_shape, c0, c1, None, None, rng);
         let s1 = Slice::push_new(&mut graph, input_shape, c1, c2, None, None, rng);
         let s2 = Slice::push_new(&mut graph, input_shape, c2, c3, None, None, rng);
         let s3 = Slice::push_new(&mut graph, input_shape, c3, c4, None, None, rng);
-        let bs_t = Constant::push_new(&mut graph, NDArrayNumericTensor::from(vec![bs]).to_dyn(), rng);
+        let bs_t = Constant::push_new(
+            &mut graph,
+            NDArrayNumericTensor::from(vec![bs]).to_dyn(),
+            rng,
+        );
         let h_div = SimpleBinary::div(&mut graph, s2, bs_t, rng);
         let w_div = SimpleBinary::div(&mut graph, s3, bs_t, rng);
         let inter = Concat::push_new(&mut graph, vec![s0, s1, h_div, bs_t, w_div, bs_t], 0, rng);
         let reshaped = Reshape::push_new(&mut graph, input, inter, false, rng);
-        let transposed = Transpose::push_new(&mut graph, reshaped, Some(vec![0, 3, 5, 1, 2, 4]), rng);
+        let transposed =
+            Transpose::push_new(&mut graph, reshaped, Some(vec![0, 3, 5, 1, 2, 4]), rng);
         let c_bs_sq = SimpleBinary::mul(&mut graph, s1, bs_t, rng);
         let c_bs_sq = SimpleBinary::mul(&mut graph, c_bs_sq, bs_t, rng);
         let final_shape = Concat::push_new(&mut graph, vec![s0, c_bs_sq, h_div, w_div], 0, rng);
@@ -1071,53 +1295,120 @@ impl Operation for SpaceToDepthOperation {
 
 /// ONNX DepthToSpace: [N, C, H, W] → [N, C/(bs²), H*bs, W*bs]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct DepthToSpaceOperation { global_id: GlobalId, input: GlobalId, output: GlobalId, blocksize: i64, mode: String }
+pub struct DepthToSpaceOperation {
+    global_id: GlobalId,
+    input: GlobalId,
+    output: GlobalId,
+    blocksize: i64,
+    mode: String,
+}
 
 impl DepthToSpaceOperation {
-    pub(crate) fn from_onnx(inputs: &[Option<GlobalId>], outputs: &[Option<GlobalId>], attributes: &[onnx::AttributeProto], rng: &mut impl Rng) -> Result<Self, ONNXDecodingError> {
-        if inputs.len() != 1 { return Err(ONNXDecodingError::InvalidOperatorInputs("DepthToSpace")); }
-        if outputs.len() != 1 { return Err(ONNXDecodingError::InvalidOperatorOutputs("DepthToSpace")); }
-        let blocksize = query_attribute_int(attributes, "blocksize").ok_or(ONNXDecodingError::InvalidOperatorInputs("DepthToSpace"))?;
+    pub(crate) fn from_onnx(
+        inputs: &[Option<GlobalId>],
+        outputs: &[Option<GlobalId>],
+        attributes: &[onnx::AttributeProto],
+        rng: &mut impl Rng,
+    ) -> Result<Self, ONNXDecodingError> {
+        if inputs.len() != 1 {
+            return Err(ONNXDecodingError::InvalidOperatorInputs("DepthToSpace"));
+        }
+        if outputs.len() != 1 {
+            return Err(ONNXDecodingError::InvalidOperatorOutputs("DepthToSpace"));
+        }
+        let blocksize = query_attribute_int(attributes, "blocksize")
+            .ok_or(ONNXDecodingError::InvalidOperatorInputs("DepthToSpace"))?;
         let mode = query_attribute_string(attributes, "mode").unwrap_or_else(|| "DCR".to_string());
-        Ok(Self { global_id: GlobalId::new(rng), input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("DepthToSpace"))?, output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("DepthToSpace"))?, blocksize, mode })
+        Ok(Self {
+            global_id: GlobalId::new(rng),
+            input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("DepthToSpace"))?,
+            output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("DepthToSpace"))?,
+            blocksize,
+            mode,
+        })
     }
 }
 
 impl Node for DepthToSpaceOperation {
     type OpKind = String;
-    fn global_id(&self) -> GlobalId { self.global_id }
-    fn op_kind(&self) -> Self::OpKind { "DepthToSpace".to_string() }
-    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> { Box::new(std::iter::once(self.input)) }
-    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> { Box::new(std::iter::once(self.output)) }
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
+    fn op_kind(&self) -> Self::OpKind {
+        "DepthToSpace".to_string()
+    }
+    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
+        Box::new(std::iter::once(self.input))
+    }
+    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
+        Box::new(std::iter::once(self.output))
+    }
 }
 
 impl Operation for DepthToSpaceOperation {
     fn parameters(&self) -> Vec<Property> {
-        vec![Property::new("blocksize", PropertyValue::Int(self.blocksize)), Property::new("mode", PropertyValue::String(self.mode.clone()))]
+        vec![
+            Property::new("blocksize", PropertyValue::Int(self.blocksize)),
+            Property::new("mode", PropertyValue::String(self.mode.clone())),
+        ]
     }
     fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, rng: &mut impl Rng) -> MilliOpGraph {
         let bs = self.blocksize;
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let input = input_map[&self.input];
         let input_shape = Shape::push_new(&mut graph, input, rng);
-        let c0 = Constant::push_new(&mut graph, NDArrayNumericTensor::from(vec![0i64]).to_dyn(), rng);
-        let c1 = Constant::push_new(&mut graph, NDArrayNumericTensor::from(vec![1i64]).to_dyn(), rng);
-        let c2 = Constant::push_new(&mut graph, NDArrayNumericTensor::from(vec![2i64]).to_dyn(), rng);
-        let c3 = Constant::push_new(&mut graph, NDArrayNumericTensor::from(vec![3i64]).to_dyn(), rng);
-        let c4 = Constant::push_new(&mut graph, NDArrayNumericTensor::from(vec![4i64]).to_dyn(), rng);
+        let c0 = Constant::push_new(
+            &mut graph,
+            NDArrayNumericTensor::from(vec![0i64]).to_dyn(),
+            rng,
+        );
+        let c1 = Constant::push_new(
+            &mut graph,
+            NDArrayNumericTensor::from(vec![1i64]).to_dyn(),
+            rng,
+        );
+        let c2 = Constant::push_new(
+            &mut graph,
+            NDArrayNumericTensor::from(vec![2i64]).to_dyn(),
+            rng,
+        );
+        let c3 = Constant::push_new(
+            &mut graph,
+            NDArrayNumericTensor::from(vec![3i64]).to_dyn(),
+            rng,
+        );
+        let c4 = Constant::push_new(
+            &mut graph,
+            NDArrayNumericTensor::from(vec![4i64]).to_dyn(),
+            rng,
+        );
         let s0 = Slice::push_new(&mut graph, input_shape, c0, c1, None, None, rng);
         let s1 = Slice::push_new(&mut graph, input_shape, c1, c2, None, None, rng);
         let s2 = Slice::push_new(&mut graph, input_shape, c2, c3, None, None, rng);
         let s3 = Slice::push_new(&mut graph, input_shape, c3, c4, None, None, rng);
-        let bs_t = Constant::push_new(&mut graph, NDArrayNumericTensor::from(vec![bs]).to_dyn(), rng);
-        let bs_sq = Constant::push_new(&mut graph, NDArrayNumericTensor::from(vec![bs * bs]).to_dyn(), rng);
+        let bs_t = Constant::push_new(
+            &mut graph,
+            NDArrayNumericTensor::from(vec![bs]).to_dyn(),
+            rng,
+        );
+        let bs_sq = Constant::push_new(
+            &mut graph,
+            NDArrayNumericTensor::from(vec![bs * bs]).to_dyn(),
+            rng,
+        );
         let c_red = SimpleBinary::div(&mut graph, s1, bs_sq, rng);
         let h_mul = SimpleBinary::mul(&mut graph, s2, bs_t, rng);
         let w_mul = SimpleBinary::mul(&mut graph, s3, bs_t, rng);
         let (inter, perm) = if self.mode == "CRD" {
-            (Concat::push_new(&mut graph, vec![s0, c_red, bs_t, bs_t, s2, s3], 0, rng), vec![0, 1, 4, 2, 5, 3])
+            (
+                Concat::push_new(&mut graph, vec![s0, c_red, bs_t, bs_t, s2, s3], 0, rng),
+                vec![0, 1, 4, 2, 5, 3],
+            )
         } else {
-            (Concat::push_new(&mut graph, vec![s0, bs_t, bs_t, c_red, s2, s3], 0, rng), vec![0, 3, 4, 1, 5, 2])
+            (
+                Concat::push_new(&mut graph, vec![s0, bs_t, bs_t, c_red, s2, s3], 0, rng),
+                vec![0, 3, 4, 1, 5, 2],
+            )
         };
         let reshaped = Reshape::push_new(&mut graph, input, inter, false, rng);
         let transposed = Transpose::push_new(&mut graph, reshaped, Some(perm), rng);
@@ -1132,52 +1423,109 @@ impl Operation for DepthToSpaceOperation {
 
 /// ONNX Trilu: upper or lower triangular part of the last two dims.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct TriluOperation { global_id: GlobalId, input: GlobalId, k: Option<GlobalId>, output: GlobalId, upper: bool }
+pub struct TriluOperation {
+    global_id: GlobalId,
+    input: GlobalId,
+    k: Option<GlobalId>,
+    output: GlobalId,
+    upper: bool,
+}
 
 impl TriluOperation {
-    pub(crate) fn from_onnx(inputs: &[Option<GlobalId>], outputs: &[Option<GlobalId>], attributes: &[onnx::AttributeProto], rng: &mut impl Rng) -> Result<Self, ONNXDecodingError> {
-        if inputs.is_empty() || inputs.len() > 2 { return Err(ONNXDecodingError::InvalidOperatorInputs("Trilu")); }
-        if outputs.len() != 1 { return Err(ONNXDecodingError::InvalidOperatorOutputs("Trilu")); }
+    pub(crate) fn from_onnx(
+        inputs: &[Option<GlobalId>],
+        outputs: &[Option<GlobalId>],
+        attributes: &[onnx::AttributeProto],
+        rng: &mut impl Rng,
+    ) -> Result<Self, ONNXDecodingError> {
+        if inputs.is_empty() || inputs.len() > 2 {
+            return Err(ONNXDecodingError::InvalidOperatorInputs("Trilu"));
+        }
+        if outputs.len() != 1 {
+            return Err(ONNXDecodingError::InvalidOperatorOutputs("Trilu"));
+        }
         let upper = query_attribute_int(attributes, "upper").unwrap_or(1) != 0;
-        Ok(Self { global_id: GlobalId::new(rng), input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("Trilu"))?, k: if inputs.len() > 1 { inputs[1] } else { None }, output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("Trilu"))?, upper })
+        Ok(Self {
+            global_id: GlobalId::new(rng),
+            input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("Trilu"))?,
+            k: if inputs.len() > 1 { inputs[1] } else { None },
+            output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("Trilu"))?,
+            upper,
+        })
     }
 }
 
 impl Node for TriluOperation {
     type OpKind = String;
-    fn global_id(&self) -> GlobalId { self.global_id }
-    fn op_kind(&self) -> Self::OpKind { "Trilu".to_string() }
-    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
-        if let Some(k) = self.k { Box::new([self.input, k].into_iter()) } else { Box::new(std::iter::once(self.input)) }
+    fn global_id(&self) -> GlobalId {
+        self.global_id
     }
-    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> { Box::new(std::iter::once(self.output)) }
+    fn op_kind(&self) -> Self::OpKind {
+        "Trilu".to_string()
+    }
+    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
+        if let Some(k) = self.k {
+            Box::new([self.input, k].into_iter())
+        } else {
+            Box::new(std::iter::once(self.input))
+        }
+    }
+    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
+        Box::new(std::iter::once(self.output))
+    }
 }
 
 impl Operation for TriluOperation {
-    fn parameters(&self) -> Vec<Property> { vec![Property::new("upper", PropertyValue::Bool(self.upper))] }
+    fn parameters(&self) -> Vec<Property> {
+        vec![Property::new("upper", PropertyValue::Bool(self.upper))]
+    }
     fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, rng: &mut impl Rng) -> MilliOpGraph {
         // Build row/col index matrices, compare col-row vs k, mask with Where.
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let input = input_map[&self.input];
-        let k = if let Some(k_id) = self.k { input_map[&k_id] } else { Constant::new_scalar(&mut graph, 0i64, rng) };
+        let k = if let Some(k_id) = self.k {
+            input_map[&k_id]
+        } else {
+            Constant::new_scalar(&mut graph, 0i64, rng)
+        };
 
         let input_shape = Shape::push_new(&mut graph, input, rng);
         // rows = shape[-2], cols = shape[-1]
-        let neg1 = Constant::push_new(&mut graph, NDArrayNumericTensor::from(vec![-1i64]).to_dyn(), rng);
-        let neg2 = Constant::push_new(&mut graph, NDArrayNumericTensor::from(vec![-2i64]).to_dyn(), rng);
-        let big = Constant::push_new(&mut graph, NDArrayNumericTensor::from(vec![i64::MAX]).to_dyn(), rng);
+        let neg1 = Constant::push_new(
+            &mut graph,
+            NDArrayNumericTensor::from(vec![-1i64]).to_dyn(),
+            rng,
+        );
+        let neg2 = Constant::push_new(
+            &mut graph,
+            NDArrayNumericTensor::from(vec![-2i64]).to_dyn(),
+            rng,
+        );
+        let big = Constant::push_new(
+            &mut graph,
+            NDArrayNumericTensor::from(vec![i64::MAX]).to_dyn(),
+            rng,
+        );
         let rows = Slice::push_new(&mut graph, input_shape, neg2, neg1, None, None, rng);
         let cols = Slice::push_new(&mut graph, input_shape, neg1, big, None, None, rng);
 
         let zero = Constant::new_scalar(&mut graph, 0i64, rng);
         let one = Constant::new_scalar(&mut graph, 1i64, rng);
-        let empty_shape = Constant::push_new(&mut graph, NDArrayNumericTensor::from(Vec::<i64>::new()).to_dyn(), rng);
+        let empty_shape = Constant::push_new(
+            &mut graph,
+            NDArrayNumericTensor::from(Vec::<i64>::new()).to_dyn(),
+            rng,
+        );
         let rows_s = Reshape::push_new(&mut graph, rows, empty_shape, false, rng);
         let cols_s = Reshape::push_new(&mut graph, cols, empty_shape, false, rng);
         let row_idx = crate::milli_graph::ops::Range::push_new(&mut graph, zero, rows_s, one, rng);
         let col_idx = crate::milli_graph::ops::Range::push_new(&mut graph, zero, cols_s, one, rng);
 
-        let one_1d = Constant::push_new(&mut graph, NDArrayNumericTensor::from(vec![1i64]).to_dyn(), rng);
+        let one_1d = Constant::push_new(
+            &mut graph,
+            NDArrayNumericTensor::from(vec![1i64]).to_dyn(),
+            rng,
+        );
         let row_shape = Concat::push_new(&mut graph, vec![rows, one_1d], 0, rng);
         let col_shape = Concat::push_new(&mut graph, vec![one_1d, cols], 0, rng);
         let row_mat = Reshape::push_new(&mut graph, row_idx, row_shape, false, rng);
@@ -1314,11 +1662,7 @@ impl Operation for EyeLikeOperation {
         Ok(Box::new(std::iter::once((self.output, out))))
     }
 
-    fn get_milli_op_graph(
-        &self,
-        _ctx: &MilliLoweringContext,
-        _rng: &mut impl Rng,
-    ) -> MilliOpGraph {
+    fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, _rng: &mut impl Rng) -> MilliOpGraph {
         panic!("EyeLike uses custom eval")
     }
 }
@@ -1531,11 +1875,7 @@ impl Operation for HardmaxOperation {
         Ok(Box::new(std::iter::once((self.output, out))))
     }
 
-    fn get_milli_op_graph(
-        &self,
-        _ctx: &MilliLoweringContext,
-        _rng: &mut impl Rng,
-    ) -> MilliOpGraph {
+    fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, _rng: &mut impl Rng) -> MilliOpGraph {
         panic!("Hardmax uses custom eval")
     }
 }
@@ -1689,11 +2029,7 @@ impl Operation for CompressOperation {
         Ok(Box::new(std::iter::once((self.output, out))))
     }
 
-    fn get_milli_op_graph(
-        &self,
-        _ctx: &MilliLoweringContext,
-        _rng: &mut impl Rng,
-    ) -> MilliOpGraph {
+    fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, _rng: &mut impl Rng) -> MilliOpGraph {
         panic!("Compress uses custom eval")
     }
 }

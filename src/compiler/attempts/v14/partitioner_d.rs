@@ -53,8 +53,13 @@ pub fn plan(
 
     // Step 5: Within each phase, assign super-groups to lanes for load balance.
     let num_phases = phase_assignments.iter().copied().max().unwrap_or(0) + 1;
-    let lane_assignments =
-        assign_lanes(graph, &super_groups, &phase_assignments, num_phases, num_lanes);
+    let lane_assignments = assign_lanes(
+        graph,
+        &super_groups,
+        &phase_assignments,
+        num_phases,
+        num_lanes,
+    );
 
     // Step 6: Build the final Phase/Span structures.
     build_phases(
@@ -252,10 +257,7 @@ fn assign_lanes(
         let mut phase_sgs: Vec<(usize, u64)> = (0..n_sg)
             .filter(|&sg| phase_assignments[sg] == phase)
             .map(|sg| {
-                let atom_count: u64 = super_groups[sg]
-                    .iter()
-                    .map(|&gi| groups[gi].count)
-                    .sum();
+                let atom_count: u64 = super_groups[sg].iter().map(|&gi| groups[gi].count).sum();
                 (sg, atom_count)
             })
             .collect();
@@ -296,8 +298,7 @@ fn build_phases(
     let groups = graph.groups();
 
     // For each (phase, lane), collect group indices (sorted for topo order).
-    let mut phase_lane_groups: Vec<Vec<Vec<usize>>> =
-        vec![vec![vec![]; num_lanes]; num_phases];
+    let mut phase_lane_groups: Vec<Vec<Vec<usize>>> = vec![vec![vec![]; num_lanes]; num_phases];
     for (sg_idx, members) in super_groups.iter().enumerate() {
         let phase = phase_assignments[sg_idx];
         let lane = lane_assignments[sg_idx];
@@ -335,8 +336,7 @@ fn build_phases(
                 continue;
             }
 
-            let lane_group_set: HashSet<usize> =
-                lane_group_indices.iter().copied().collect();
+            let lane_group_set: HashSet<usize> = lane_group_indices.iter().copied().collect();
 
             // Determine external group dependencies (predecessors not in this span).
             let mut external_inputs: BTreeMap<u64, AtomRange> = BTreeMap::new();
@@ -349,13 +349,13 @@ fn build_phases(
                 for &pi in &predecessors[gi] {
                     if !lane_group_set.contains(&pi) {
                         let pg = &groups[pi];
-                        external_inputs.entry(pg.base_id.0).or_insert_with(|| {
-                            AtomRange {
+                        external_inputs
+                            .entry(pg.base_id.0)
+                            .or_insert_with(|| AtomRange {
                                 base: pg.base_id,
                                 count: pg.count,
                                 dtype: pg.output_dtype,
-                            }
-                        });
+                            });
                     }
                 }
 
@@ -395,9 +395,7 @@ fn build_phases(
                 // Check IndirectLoad table references.
                 if let ScalarOp::IndirectLoad { table_base } = &group.op {
                     for (it_idx, it) in input_tensors.iter().enumerate() {
-                        if table_base.0 >= it.base_id.0
-                            && table_base.0 < it.base_id.0 + it.count
-                        {
+                        if table_base.0 >= it.base_id.0 && table_base.0 < it.base_id.0 + it.count {
                             needed_input_tensors.insert(it_idx);
                         }
                     }
@@ -422,8 +420,8 @@ fn build_phases(
             let mut span_output_ranges: Vec<AtomRange> = Vec::new();
             for &gi in lane_group_indices {
                 let g = &groups[gi];
-                let is_model_output = (0..g.count)
-                    .any(|i| output_atom_set.contains(&(g.base_id.0 + i)));
+                let is_model_output =
+                    (0..g.count).any(|i| output_atom_set.contains(&(g.base_id.0 + i)));
                 let needed_externally = successors[gi]
                     .iter()
                     .any(|&succ| !lane_group_set.contains(&succ));
@@ -457,9 +455,9 @@ fn build_phases(
 
     // Remove empty trailing phases.
     while phases.len() > 1
-        && phases.last().map_or(false, |p| {
-            p.spans.iter().all(|s| s.graph.num_groups() == 0)
-        })
+        && phases
+            .last()
+            .map_or(false, |p| p.spans.iter().all(|s| s.graph.num_groups() == 0))
     {
         phases.pop();
     }
@@ -930,7 +928,9 @@ mod tests {
                 assert!(
                     errors.is_empty(),
                     "Phase {} lane {} validation errors: {:?}",
-                    pi, li, errors
+                    pi,
+                    li,
+                    errors
                 );
             }
         }
@@ -951,7 +951,9 @@ mod tests {
                 assert!(
                     errors.is_empty(),
                     "Phase {} lane {} validation errors: {:?}",
-                    pi, li, errors
+                    pi,
+                    li,
+                    errors
                 );
             }
         }
@@ -978,7 +980,9 @@ mod tests {
                 assert!(
                     errors.is_empty(),
                     "Phase {} lane {} validation errors: {:?}",
-                    pi, li, errors
+                    pi,
+                    li,
+                    errors
                 );
             }
         }
@@ -999,7 +1003,9 @@ mod tests {
                 assert!(
                     errors.is_empty(),
                     "Phase {} lane {} validation errors: {:?}",
-                    pi, li, errors
+                    pi,
+                    li,
+                    errors
                 );
             }
         }
@@ -1041,7 +1047,10 @@ mod tests {
                                 assert!(
                                     !other_produced.contains(&atom_id),
                                     "Phase {} span {} reads atom {} produced by span {}",
-                                    pi, li, atom_id, other_li
+                                    pi,
+                                    li,
+                                    atom_id,
+                                    other_li
                                 );
                             }
                         }
@@ -1165,7 +1174,9 @@ mod tests {
                 assert!(
                     errors.is_empty(),
                     "Phase {} lane {} validation errors: {:?}",
-                    pi, li, errors
+                    pi,
+                    li,
+                    errors
                 );
             }
         }
@@ -1219,7 +1230,9 @@ mod tests {
                 assert!(
                     errors.is_empty(),
                     "Phase {} lane {} validation errors: {:?}",
-                    pi, li, errors
+                    pi,
+                    li,
+                    errors
                 );
             }
         }
@@ -1253,7 +1266,9 @@ mod tests {
                 assert!(
                     errors.is_empty(),
                     "Phase {} lane {} validation errors: {:?}",
-                    pi, li, errors
+                    pi,
+                    li,
+                    errors
                 );
             }
         }
@@ -1299,7 +1314,9 @@ mod tests {
                 assert!(
                     errors.is_empty(),
                     "Phase {} lane {} validation errors: {:?}",
-                    pi, li, errors
+                    pi,
+                    li,
+                    errors
                 );
             }
         }
@@ -1433,7 +1450,9 @@ mod tests {
                 assert!(
                     errors.is_empty(),
                     "Phase {} lane {} validation errors: {:?}",
-                    pi, li, errors
+                    pi,
+                    li,
+                    errors
                 );
             }
         }

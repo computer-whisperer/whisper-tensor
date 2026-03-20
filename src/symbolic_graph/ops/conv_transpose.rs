@@ -154,18 +154,39 @@ impl Operation for ConvTransposeOperation {
         // Per-axis parameters with defaults
         let kernel: Vec<usize> = (0..nd)
             .map(|i| {
-                if i < self.kernel_shape.len() { self.kernel_shape[i] as usize }
-                else { w_shape[2 + i] }
+                if i < self.kernel_shape.len() {
+                    self.kernel_shape[i] as usize
+                } else {
+                    w_shape[2 + i]
+                }
             })
             .collect();
         let stride: Vec<usize> = (0..nd)
-            .map(|i| if i < self.strides.len() { self.strides[i] as usize } else { 1 })
+            .map(|i| {
+                if i < self.strides.len() {
+                    self.strides[i] as usize
+                } else {
+                    1
+                }
+            })
             .collect();
         let dilation: Vec<usize> = (0..nd)
-            .map(|i| if i < self.dilations.len() { self.dilations[i] as usize } else { 1 })
+            .map(|i| {
+                if i < self.dilations.len() {
+                    self.dilations[i] as usize
+                } else {
+                    1
+                }
+            })
             .collect();
         let output_pad: Vec<usize> = (0..nd)
-            .map(|i| if i < self.output_padding.len() { self.output_padding[i] as usize } else { 0 })
+            .map(|i| {
+                if i < self.output_padding.len() {
+                    self.output_padding[i] as usize
+                } else {
+                    0
+                }
+            })
             .collect();
         let in_spatial: Vec<usize> = (0..nd).map(|i| x_shape[2 + i]).collect();
 
@@ -213,11 +234,21 @@ impl Operation for ConvTransposeOperation {
                 }
                 _ => {
                     let pb = (0..nd)
-                        .map(|i| if i < self.pads.len() { self.pads[i] as usize } else { 0 })
+                        .map(|i| {
+                            if i < self.pads.len() {
+                                self.pads[i] as usize
+                            } else {
+                                0
+                            }
+                        })
                         .collect();
                     let pe = (0..nd)
                         .map(|i| {
-                            if nd + i < self.pads.len() { self.pads[nd + i] as usize } else { 0 }
+                            if nd + i < self.pads.len() {
+                                self.pads[nd + i] as usize
+                            } else {
+                                0
+                            }
                         })
                         .collect();
                     (pb, pe, output_pad)
@@ -236,17 +267,23 @@ impl Operation for ConvTransposeOperation {
         // Compute strides for flat indexing
         let in_spatial_stride = {
             let mut s = vec![1usize; nd];
-            for i in (0..nd - 1).rev() { s[i] = s[i + 1] * in_spatial[i + 1]; }
+            for i in (0..nd - 1).rev() {
+                s[i] = s[i + 1] * in_spatial[i + 1];
+            }
             s
         };
         let out_spatial_stride = {
             let mut s = vec![1usize; nd];
-            for i in (0..nd - 1).rev() { s[i] = s[i + 1] * out_spatial[i + 1]; }
+            for i in (0..nd - 1).rev() {
+                s[i] = s[i + 1] * out_spatial[i + 1];
+            }
             s
         };
         let kernel_stride = {
             let mut s = vec![1usize; nd];
-            for i in (0..nd - 1).rev() { s[i] = s[i + 1] * kernel[i + 1]; }
+            for i in (0..nd - 1).rev() {
+                s[i] = s[i + 1] * kernel[i + 1];
+            }
             s
         };
 

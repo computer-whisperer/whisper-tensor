@@ -1022,19 +1022,11 @@ impl Operation for BatchNormalizationOperation {
         // Unsqueeze 1-D params [C] → [C, 1] so they broadcast over the spatial dim,
         // casting each to F32.
         let axis1 = milli_graph::ops::Constant::new_scalar(&mut graph, 1i64, rng);
-        let scale = milli_graph::ops::Cast::push_new(
-            &mut graph,
-            input_map[&self.scale],
-            DType::F32,
-            rng,
-        );
+        let scale =
+            milli_graph::ops::Cast::push_new(&mut graph, input_map[&self.scale], DType::F32, rng);
         let scale = milli_graph::ops::Unsqueeze::push_new(&mut graph, scale, axis1, rng);
-        let bias = milli_graph::ops::Cast::push_new(
-            &mut graph,
-            input_map[&self.bias],
-            DType::F32,
-            rng,
-        );
+        let bias =
+            milli_graph::ops::Cast::push_new(&mut graph, input_map[&self.bias], DType::F32, rng);
         let bias = milli_graph::ops::Unsqueeze::push_new(&mut graph, bias, axis1, rng);
         let mean = milli_graph::ops::Cast::push_new(
             &mut graph,

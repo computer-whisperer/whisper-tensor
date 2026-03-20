@@ -1,4 +1,11 @@
-#![allow(clippy::all, dead_code, unreachable_code, unreachable_patterns, unused_imports, unused_variables)]
+#![allow(
+    clippy::all,
+    dead_code,
+    unreachable_code,
+    unreachable_patterns,
+    unused_imports,
+    unused_variables
+)]
 
 //! Dependency-Driven Wavefront Scheduling Partitioner (attempt B)
 //!
@@ -516,8 +523,12 @@ fn build_span(
         let all_internal = |atom: AtomId| -> bool {
             // Check if atom is in a span compute group.
             if let Some(idx) = graph.find_group_idx(atom) {
-                if span_compute_set.contains(&idx) { return true; }
-                if needed_internal_literals.contains(&idx) { return true; }
+                if span_compute_set.contains(&idx) {
+                    return true;
+                }
+                if needed_internal_literals.contains(&idx) {
+                    return true;
+                }
             }
             false
         };
@@ -529,9 +540,13 @@ fn build_span(
             // Walk through main-graph groups/input_tensors in this range.
             // Record external ones that we need.
             collect_external_in_range(
-                graph, lo, hi, group.output_dtype,
+                graph,
+                lo,
+                hi,
+                group.output_dtype,
                 input_tensors,
-                &span_compute_set, &needed_internal_literals,
+                &span_compute_set,
+                &needed_internal_literals,
                 &mut needed_external_atoms,
             );
         }
@@ -558,9 +573,13 @@ fn build_span(
                     let hi = *endpoints.iter().max().unwrap();
 
                     collect_external_in_range(
-                        graph, lo, hi, group.output_dtype,
+                        graph,
+                        lo,
+                        hi,
+                        group.output_dtype,
                         input_tensors,
-                        &span_compute_set, &needed_internal_literals,
+                        &span_compute_set,
+                        &needed_internal_literals,
                         &mut needed_external_atoms,
                     );
                 }
@@ -571,8 +590,7 @@ fn build_span(
         if let ScalarOp::IndirectLoad { table_base, .. } = &group.op {
             if let Some(pi) = graph.find_group_idx(*table_base) {
                 if !span_compute_set.contains(&pi) {
-                    if is_literal_group(&groups[pi])
-                        && groups[pi].count < LITERAL_INLINE_THRESHOLD
+                    if is_literal_group(&groups[pi]) && groups[pi].count < LITERAL_INLINE_THRESHOLD
                     {
                         needed_internal_literals.insert(pi);
                     } else {
@@ -588,12 +606,7 @@ fn build_span(
             } else if let Some((ti, _)) = graph.find_input_idx(*table_base) {
                 // Table is an input_tensor (weight in shape-only lowering).
                 let it = &input_tensors[ti];
-                record_external_range(
-                    &mut needed_external_atoms,
-                    it.base_id,
-                    it.count,
-                    it.dtype,
-                );
+                record_external_range(&mut needed_external_atoms, it.base_id, it.count, it.dtype);
             }
         }
     }
@@ -653,10 +666,7 @@ fn build_span(
     let mut items: Vec<(u64, InsertItem)> = Vec::new();
 
     for &(base, count, dtype) in &merged_external {
-        items.push((
-            base.0,
-            InsertItem::ExternalInput { base, count, dtype },
-        ));
+        items.push((base.0, InsertItem::ExternalInput { base, count, dtype }));
     }
 
     for &li in &needed_internal_literals {
@@ -747,17 +757,19 @@ fn build_span(
                 inserted_ranges.push((base.0, *atom_count));
 
                 // Check if this group's output is needed after this phase.
-                if output_group_set.contains(gi) || needs_output(
-                    *gi,
-                    *atom_offset,
-                    *atom_count,
-                    &groups[*gi],
-                    phase_assignments,
-                    producers,
-                    phase_group_set,
-                    &span_compute_set,
-                    successors,
-                ) {
+                if output_group_set.contains(gi)
+                    || needs_output(
+                        *gi,
+                        *atom_offset,
+                        *atom_count,
+                        &groups[*gi],
+                        phase_assignments,
+                        producers,
+                        phase_group_set,
+                        &span_compute_set,
+                        successors,
+                    )
+                {
                     span_outputs.push(AtomRange {
                         base,
                         count: *atom_count,
@@ -834,7 +846,11 @@ fn input_ref_source_range(input: &InputRef, count: u64, atom_offset: u64) -> (u6
             let last = input.resolve(atom_offset + count - 1);
             (first.0.min(last.0), first.0.max(last.0))
         }
-        InputRef::Modular { base, stride, modulus } => {
+        InputRef::Modular {
+            base,
+            stride,
+            modulus,
+        } => {
             let a = base.0;
             let b = (base.0 as i64 + *stride * (*modulus as i64 - 1)) as u64;
             (a.min(b), a.max(b))
@@ -864,8 +880,12 @@ fn collect_external_in_range(
     for (gi, g) in groups.iter().enumerate() {
         let g_lo = g.base_id.0;
         let g_hi = g_lo + g.count;
-        if g_lo > hi { break; } // groups are sorted
-        if g_hi <= lo { continue; }
+        if g_lo > hi {
+            break;
+        } // groups are sorted
+        if g_hi <= lo {
+            continue;
+        }
         // This group overlaps [lo, hi].
         if span_compute_set.contains(&gi) || inlined_literals.contains(&gi) {
             continue; // internal
@@ -893,12 +913,7 @@ fn collect_external_in_range(
             let range_hi = it_hi.min(hi + 1);
             let range_count = range_hi - range_lo;
             if range_count > 0 {
-                record_external_range(
-                    needed_external,
-                    AtomId(range_lo),
-                    range_count,
-                    it.dtype,
-                );
+                record_external_range(needed_external, AtomId(range_lo), range_count, it.dtype);
             }
         }
     }
@@ -1049,9 +1064,7 @@ fn would_overlap(inserted: &[(u64, u64)], start: u64, count: u64) -> bool {
 }
 
 /// Merge overlapping/adjacent external ranges into consolidated ranges.
-fn merge_external_ranges(
-    ranges: &BTreeMap<AtomId, (u64, DType)>,
-) -> Vec<(AtomId, u64, DType)> {
+fn merge_external_ranges(ranges: &BTreeMap<AtomId, (u64, DType)>) -> Vec<(AtomId, u64, DType)> {
     if ranges.is_empty() {
         return vec![];
     }
@@ -1066,11 +1079,11 @@ fn merge_external_ranges(
 
     for (base, count, dtype) in sorted {
         if let Some(last) = merged.last_mut() {
-            let last_end = last.0 .0 + last.1;
+            let last_end = last.0.0 + last.1;
             if base.0 <= last_end && dtype == last.2 {
                 // Overlapping or adjacent, same dtype: extend.
                 let new_end = (base.0 + count).max(last_end);
-                last.1 = new_end - last.0 .0;
+                last.1 = new_end - last.0.0;
                 continue;
             }
         }
@@ -1466,8 +1479,7 @@ mod tests {
             for (li, span) in phase.spans.iter().enumerate() {
                 for group in span.graph.groups() {
                     let mut deps = HashSet::new();
-                    span.graph
-                        .collect_all_producer_indices(group, 0, &mut deps);
+                    span.graph.collect_all_producer_indices(group, 0, &mut deps);
                     // The deps are indices within this span's graph, which is fine.
                     // What we need to check is that input atoms don't come from
                     // other spans.
@@ -1552,9 +1564,9 @@ mod tests {
         verify_no_cross_span_reads(&phases);
 
         // At least one span should declare the input tensor as an input.
-        let has_input = phases.iter().any(|p| {
-            p.spans.iter().any(|s| !s.inputs.is_empty())
-        });
+        let has_input = phases
+            .iter()
+            .any(|p| p.spans.iter().any(|s| !s.inputs.is_empty()));
         assert!(has_input, "No span declares the input tensor");
     }
 
@@ -1621,10 +1633,10 @@ mod tests {
         //  \ /
         //   3
         let producers = vec![
-            vec![],        // group 0: no deps
-            vec![0],       // group 1: depends on 0
-            vec![0],       // group 2: depends on 0
-            vec![1, 2],    // group 3: depends on 1 and 2
+            vec![],     // group 0: no deps
+            vec![0],    // group 1: depends on 0
+            vec![0],    // group 2: depends on 0
+            vec![1, 2], // group 3: depends on 1 and 2
         ];
 
         let depths = compute_depths(4, &producers);
@@ -1634,11 +1646,11 @@ mod tests {
     #[test]
     fn test_wavefront_formation() {
         let producers = vec![
-            vec![],        // depth 0
-            vec![],        // depth 0
-            vec![0],       // depth 1
-            vec![1],       // depth 1
-            vec![2, 3],    // depth 2
+            vec![],     // depth 0
+            vec![],     // depth 0
+            vec![0],    // depth 1
+            vec![1],    // depth 1
+            vec![2, 3], // depth 2
         ];
 
         let depths = compute_depths(5, &producers);
@@ -1734,11 +1746,7 @@ mod tests {
         let output_ids: Vec<AtomId> = g.outputs.clone();
         let phases = plan(&g, 2, &inputs, &output_ids);
 
-        let main_groups: HashSet<u64> = g
-            .groups()
-            .iter()
-            .map(|gr| gr.base_id.0)
-            .collect();
+        let main_groups: HashSet<u64> = g.groups().iter().map(|gr| gr.base_id.0).collect();
 
         let mut span_groups: HashSet<u64> = HashSet::new();
         for phase in &phases {

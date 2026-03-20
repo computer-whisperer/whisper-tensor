@@ -205,11 +205,7 @@ impl Operation for ScatterElementsOperation {
         Ok(Box::new(result.into_iter()))
     }
 
-    fn get_milli_op_graph(
-        &self,
-        _ctx: &MilliLoweringContext,
-        _rng: &mut impl Rng,
-    ) -> MilliOpGraph {
+    fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, _rng: &mut impl Rng) -> MilliOpGraph {
         panic!("ScatterElements uses custom eval")
     }
 }

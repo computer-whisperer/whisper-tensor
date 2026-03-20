@@ -196,7 +196,13 @@ impl Operation for AveragePoolOperation {
                 let two = ops_helpers::scalar_const(&mut graph, 2i64, rng);
                 let n_end = ops_helpers::scalar_const(&mut graph, (2 + n_spatial) as i64, rng);
                 let spatial = milli_ops::Slice::push_new(
-                    &mut graph, input_shape, two, n_end, None, None, rng,
+                    &mut graph,
+                    input_shape,
+                    two,
+                    n_end,
+                    None,
+                    None,
+                    rng,
                 );
                 let strides_t = milli_ops::Constant::push_new(
                     &mut graph,
@@ -225,8 +231,7 @@ impl Operation for AveragePoolOperation {
 
                 let half = ops_helpers::scalar_const(&mut graph, 2i64, rng);
                 let half_pad = milli_ops::SimpleBinary::div(&mut graph, total_pad, half, rng);
-                let other_half =
-                    milli_ops::SimpleBinary::sub(&mut graph, total_pad, half_pad, rng);
+                let other_half = milli_ops::SimpleBinary::sub(&mut graph, total_pad, half_pad, rng);
 
                 let (pad_begin, pad_end) = if matches!(auto_pad, PoolAutoPad::SameUpper) {
                     (half_pad, other_half)
@@ -255,8 +260,13 @@ impl Operation for AveragePoolOperation {
         let padded = if let Some(pc) = pads_const {
             let zero_val = ops_helpers::scalar_const(&mut graph, 0.0f32, rng);
             milli_ops::Pad::push_new(
-                &mut graph, input_f32, pc, Some(zero_val), None,
-                milli_ops::PadMode::Constant, rng,
+                &mut graph,
+                input_f32,
+                pc,
+                Some(zero_val),
+                None,
+                milli_ops::PadMode::Constant,
+                rng,
             )
         } else {
             input_f32
@@ -268,8 +278,7 @@ impl Operation for AveragePoolOperation {
         // We need a per-position count of valid taps when:
         // - There is padding and count_include_pad=false (padded zeros shouldn't count)
         // - ceil_mode is true (boundary windows may have out-of-bounds taps)
-        let need_count_tensor =
-            (has_padding && !self.count_include_pad) || self.ceil_mode;
+        let need_count_tensor = (has_padding && !self.count_include_pad) || self.ceil_mode;
         let ones_padded = if need_count_tensor {
             let zero_c = ops_helpers::scalar_const(&mut graph, 0.0f32, rng);
             let one_c = ops_helpers::scalar_const(&mut graph, 1.0f32, rng);
@@ -286,8 +295,13 @@ impl Operation for AveragePoolOperation {
                 let pc = pads_const.unwrap();
                 let zero_val = ops_helpers::scalar_const(&mut graph, 0.0f32, rng);
                 Some(milli_ops::Pad::push_new(
-                    &mut graph, ones, pc, Some(zero_val), None,
-                    milli_ops::PadMode::Constant, rng,
+                    &mut graph,
+                    ones,
+                    pc,
+                    Some(zero_val),
+                    None,
+                    milli_ops::PadMode::Constant,
+                    rng,
                 ))
             }
         } else {
@@ -307,7 +321,6 @@ impl Operation for AveragePoolOperation {
             let s = ops_helpers::scalar_const(&mut graph, 2i64, rng);
             let e = ops_helpers::scalar_const(&mut graph, (2 + n_spatial) as i64, rng);
             milli_ops::Slice::push_new(&mut graph, padded_shape, s, e, None, None, rng)
-
         };
 
         // out_spatial = (spatial_shape - dilated_kernel) / strides + 1
@@ -331,8 +344,7 @@ impl Operation for AveragePoolOperation {
         let out_spatial = if self.ceil_mode {
             let strides_m1 =
                 milli_ops::SimpleBinary::sub(&mut graph, strides_const, one_const, rng);
-            let numer_ceil =
-                milli_ops::SimpleBinary::add(&mut graph, numer, strides_m1, rng);
+            let numer_ceil = milli_ops::SimpleBinary::add(&mut graph, numer, strides_m1, rng);
             let ceil_div = milli_ops::SimpleBinary::div(&mut graph, numer_ceil, strides_const, rng);
             let ceil_out = milli_ops::SimpleBinary::add(&mut graph, ceil_div, one_const, rng);
             // ONNX spec: drop last window if its start >= (input_spatial + pad_begin).
@@ -344,7 +356,13 @@ impl Operation for AveragePoolOperation {
             let two2 = ops_helpers::scalar_const(&mut graph, 2i64, rng);
             let n_end2 = ops_helpers::scalar_const(&mut graph, (2 + n_spatial) as i64, rng);
             let input_spatial = milli_ops::Slice::push_new(
-                &mut graph, input_shape_full, two2, n_end2, None, None, rng,
+                &mut graph,
+                input_shape_full,
+                two2,
+                n_end2,
+                None,
+                None,
+                rng,
             );
             // threshold = input_spatial + pad_begin
             // pad_begin: for NOTSET, it's pads[0..n_spatial]; for SAME_*, we compute from
@@ -357,9 +375,9 @@ impl Operation for AveragePoolOperation {
             // For NOTSET:
             let pad_begin_spatial = match &self.auto_pad {
                 PoolAutoPad::NotSet => {
-                    let pb: Vec<i64> = (0..n_spatial).map(|i| {
-                        if i < self.pads.len() { self.pads[i] } else { 0 }
-                    }).collect();
+                    let pb: Vec<i64> = (0..n_spatial)
+                        .map(|i| if i < self.pads.len() { self.pads[i] } else { 0 })
+                        .collect();
                     milli_ops::Constant::push_new(
                         &mut graph,
                         NDArrayNumericTensor::from(pb).to_dyn(),
@@ -374,9 +392,8 @@ impl Operation for AveragePoolOperation {
                     // pad_begin + pad_end = padded - input
                     // For SAME_UPPER: pad_begin = total/2
                     // For SAME_LOWER: pad_begin = total - total/2
-                    let total_pad = milli_ops::SimpleBinary::sub(
-                        &mut graph, spatial_shape, input_spatial, rng,
-                    );
+                    let total_pad =
+                        milli_ops::SimpleBinary::sub(&mut graph, spatial_shape, input_spatial, rng);
                     let two_c = ops_helpers::scalar_const(&mut graph, 2i64, rng);
                     let half = milli_ops::SimpleBinary::div(&mut graph, total_pad, two_c, rng);
                     if matches!(self.auto_pad, PoolAutoPad::SameUpper) {
@@ -386,13 +403,11 @@ impl Operation for AveragePoolOperation {
                     }
                 }
             };
-            let threshold = milli_ops::SimpleBinary::add(
-                &mut graph, input_spatial, pad_begin_spatial, rng,
-            );
-            let threshold_m1 = milli_ops::SimpleBinary::sub(
-                &mut graph, threshold, one_const, rng,
-            );
-            let max_div = milli_ops::SimpleBinary::div(&mut graph, threshold_m1, strides_const, rng);
+            let threshold =
+                milli_ops::SimpleBinary::add(&mut graph, input_spatial, pad_begin_spatial, rng);
+            let threshold_m1 = milli_ops::SimpleBinary::sub(&mut graph, threshold, one_const, rng);
+            let max_div =
+                milli_ops::SimpleBinary::div(&mut graph, threshold_m1, strides_const, rng);
             let max_out = milli_ops::SimpleBinary::add(&mut graph, max_div, one_const, rng);
             milli_ops::SimpleBinary::min(&mut graph, ceil_out, max_out, rng)
         } else {
@@ -415,9 +430,11 @@ impl Operation for AveragePoolOperation {
         );
         let out_m1 = milli_ops::SimpleBinary::sub(&mut graph, out_spatial, one_const, rng);
         let out_m1_times_s = milli_ops::SimpleBinary::mul(&mut graph, out_m1, strides_const, rng);
-        let required = milli_ops::SimpleBinary::add(&mut graph, max_start_const, out_m1_times_s, rng);
+        let required =
+            milli_ops::SimpleBinary::add(&mut graph, max_start_const, out_m1_times_s, rng);
         let required_plus1 = milli_ops::SimpleBinary::add(&mut graph, required, one_const, rng);
-        let extra_pad = milli_ops::SimpleBinary::sub(&mut graph, required_plus1, spatial_shape, rng);
+        let extra_pad =
+            milli_ops::SimpleBinary::sub(&mut graph, required_plus1, spatial_shape, rng);
         let zero_const = ops_helpers::scalar_const(&mut graph, 0i64, rng);
         let extra_pad = milli_ops::SimpleBinary::max(&mut graph, extra_pad, zero_const, rng);
 
@@ -444,8 +461,13 @@ impl Operation for AveragePoolOperation {
         let padded = {
             let zero_val = ops_helpers::scalar_const(&mut graph, 0.0f32, rng);
             milli_ops::Pad::push_new(
-                &mut graph, padded, extra_pads, Some(zero_val), None,
-                milli_ops::PadMode::Constant, rng,
+                &mut graph,
+                padded,
+                extra_pads,
+                Some(zero_val),
+                None,
+                milli_ops::PadMode::Constant,
+                rng,
             )
         };
 
@@ -459,8 +481,13 @@ impl Operation for AveragePoolOperation {
             );
             let zero_val = ops_helpers::scalar_const(&mut graph, 0.0f32, rng);
             milli_ops::Pad::push_new(
-                &mut graph, ones_p, extra_pads2, Some(zero_val), None,
-                milli_ops::PadMode::Constant, rng,
+                &mut graph,
+                ones_p,
+                extra_pads2,
+                Some(zero_val),
+                None,
+                milli_ops::PadMode::Constant,
+                rng,
             )
         });
 
@@ -509,8 +536,13 @@ impl Operation for AveragePoolOperation {
                 milli_ops::SimpleBinary::add(&mut graph, starts_const, out_times_strides, rng);
 
             let tap = milli_ops::Slice::push_new(
-                &mut graph, padded, starts_const, ends_const,
-                Some(steps_const), Some(axes_const), rng,
+                &mut graph,
+                padded,
+                starts_const,
+                ends_const,
+                Some(steps_const),
+                Some(axes_const),
+                rng,
             );
 
             sum_acc = Some(match sum_acc {
@@ -520,8 +552,13 @@ impl Operation for AveragePoolOperation {
 
             if let Some(ones_p) = ones_padded {
                 let count_tap = milli_ops::Slice::push_new(
-                    &mut graph, ones_p, starts_const, ends_const,
-                    Some(steps_const), Some(axes_const), rng,
+                    &mut graph,
+                    ones_p,
+                    starts_const,
+                    ends_const,
+                    Some(steps_const),
+                    Some(axes_const),
+                    rng,
                 );
                 count_acc = Some(match count_acc {
                     None => count_tap,
@@ -714,7 +751,13 @@ impl Operation for MaxPoolOperation {
                 let two = ops_helpers::scalar_const(&mut graph, 2i64, rng);
                 let n_end = ops_helpers::scalar_const(&mut graph, (2 + n_spatial) as i64, rng);
                 let spatial = milli_ops::Slice::push_new(
-                    &mut graph, input_shape, two, n_end, None, None, rng,
+                    &mut graph,
+                    input_shape,
+                    two,
+                    n_end,
+                    None,
+                    None,
+                    rng,
                 );
                 let strides_t = milli_ops::Constant::push_new(
                     &mut graph,
@@ -740,8 +783,7 @@ impl Operation for MaxPoolOperation {
 
                 let half = ops_helpers::scalar_const(&mut graph, 2i64, rng);
                 let half_pad = milli_ops::SimpleBinary::div(&mut graph, total_pad, half, rng);
-                let other_half =
-                    milli_ops::SimpleBinary::sub(&mut graph, total_pad, half_pad, rng);
+                let other_half = milli_ops::SimpleBinary::sub(&mut graph, total_pad, half_pad, rng);
 
                 let (pad_begin, pad_end) = if matches!(auto_pad, PoolAutoPad::SameUpper) {
                     (half_pad, other_half)
@@ -767,8 +809,13 @@ impl Operation for MaxPoolOperation {
         let padded = if let Some(pc) = pads_const {
             let neg_inf_val = ops_helpers::scalar_const(&mut graph, f32::NEG_INFINITY, rng);
             milli_ops::Pad::push_new(
-                &mut graph, input_f32, pc, Some(neg_inf_val), None,
-                milli_ops::PadMode::Constant, rng,
+                &mut graph,
+                input_f32,
+                pc,
+                Some(neg_inf_val),
+                None,
+                milli_ops::PadMode::Constant,
+                rng,
             )
         } else {
             input_f32
@@ -800,8 +847,7 @@ impl Operation for MaxPoolOperation {
         let out_spatial = if self.ceil_mode {
             let strides_m1 =
                 milli_ops::SimpleBinary::sub(&mut graph, strides_const, one_const, rng);
-            let numer_ceil =
-                milli_ops::SimpleBinary::add(&mut graph, numer, strides_m1, rng);
+            let numer_ceil = milli_ops::SimpleBinary::add(&mut graph, numer, strides_m1, rng);
             let ceil_div = milli_ops::SimpleBinary::div(&mut graph, numer_ceil, strides_const, rng);
             let ceil_out = milli_ops::SimpleBinary::add(&mut graph, ceil_div, one_const, rng);
 
@@ -809,14 +855,20 @@ impl Operation for MaxPoolOperation {
             let two2 = ops_helpers::scalar_const(&mut graph, 2i64, rng);
             let n_end2 = ops_helpers::scalar_const(&mut graph, (2 + n_spatial) as i64, rng);
             let input_spatial = milli_ops::Slice::push_new(
-                &mut graph, input_shape_full, two2, n_end2, None, None, rng,
+                &mut graph,
+                input_shape_full,
+                two2,
+                n_end2,
+                None,
+                None,
+                rng,
             );
 
             let pad_begin_spatial = match &self.auto_pad {
                 PoolAutoPad::NotSet => {
-                    let pb: Vec<i64> = (0..n_spatial).map(|i| {
-                        if i < self.pads.len() { self.pads[i] } else { 0 }
-                    }).collect();
+                    let pb: Vec<i64> = (0..n_spatial)
+                        .map(|i| if i < self.pads.len() { self.pads[i] } else { 0 })
+                        .collect();
                     milli_ops::Constant::push_new(
                         &mut graph,
                         NDArrayNumericTensor::from(pb).to_dyn(),
@@ -824,9 +876,8 @@ impl Operation for MaxPoolOperation {
                     )
                 }
                 _ => {
-                    let total_pad = milli_ops::SimpleBinary::sub(
-                        &mut graph, spatial_shape, input_spatial, rng,
-                    );
+                    let total_pad =
+                        milli_ops::SimpleBinary::sub(&mut graph, spatial_shape, input_spatial, rng);
                     let two_c = ops_helpers::scalar_const(&mut graph, 2i64, rng);
                     let half = milli_ops::SimpleBinary::div(&mut graph, total_pad, two_c, rng);
                     if matches!(self.auto_pad, PoolAutoPad::SameUpper) {
@@ -836,13 +887,11 @@ impl Operation for MaxPoolOperation {
                     }
                 }
             };
-            let threshold = milli_ops::SimpleBinary::add(
-                &mut graph, input_spatial, pad_begin_spatial, rng,
-            );
-            let threshold_m1 = milli_ops::SimpleBinary::sub(
-                &mut graph, threshold, one_const, rng,
-            );
-            let max_div = milli_ops::SimpleBinary::div(&mut graph, threshold_m1, strides_const, rng);
+            let threshold =
+                milli_ops::SimpleBinary::add(&mut graph, input_spatial, pad_begin_spatial, rng);
+            let threshold_m1 = milli_ops::SimpleBinary::sub(&mut graph, threshold, one_const, rng);
+            let max_div =
+                milli_ops::SimpleBinary::div(&mut graph, threshold_m1, strides_const, rng);
             let max_out = milli_ops::SimpleBinary::add(&mut graph, max_div, one_const, rng);
             milli_ops::SimpleBinary::min(&mut graph, ceil_out, max_out, rng)
         } else {
@@ -861,9 +910,11 @@ impl Operation for MaxPoolOperation {
         );
         let out_m1 = milli_ops::SimpleBinary::sub(&mut graph, out_spatial, one_const, rng);
         let out_m1_times_s = milli_ops::SimpleBinary::mul(&mut graph, out_m1, strides_const, rng);
-        let required = milli_ops::SimpleBinary::add(&mut graph, max_start_const, out_m1_times_s, rng);
+        let required =
+            milli_ops::SimpleBinary::add(&mut graph, max_start_const, out_m1_times_s, rng);
         let required_plus1 = milli_ops::SimpleBinary::add(&mut graph, required, one_const, rng);
-        let extra_pad = milli_ops::SimpleBinary::sub(&mut graph, required_plus1, spatial_shape, rng);
+        let extra_pad =
+            milli_ops::SimpleBinary::sub(&mut graph, required_plus1, spatial_shape, rng);
         let zero_const = ops_helpers::scalar_const(&mut graph, 0i64, rng);
         let extra_pad = milli_ops::SimpleBinary::max(&mut graph, extra_pad, zero_const, rng);
 
@@ -887,8 +938,13 @@ impl Operation for MaxPoolOperation {
         let padded = {
             let neg_inf_val = ops_helpers::scalar_const(&mut graph, f32::NEG_INFINITY, rng);
             milli_ops::Pad::push_new(
-                &mut graph, padded, extra_pads, Some(neg_inf_val), None,
-                milli_ops::PadMode::Constant, rng,
+                &mut graph,
+                padded,
+                extra_pads,
+                Some(neg_inf_val),
+                None,
+                milli_ops::PadMode::Constant,
+                rng,
             )
         };
 
@@ -935,8 +991,13 @@ impl Operation for MaxPoolOperation {
                 milli_ops::SimpleBinary::add(&mut graph, starts_const, out_times_strides, rng);
 
             let tap = milli_ops::Slice::push_new(
-                &mut graph, padded, starts_const, ends_const,
-                Some(steps_const), Some(axes_const), rng,
+                &mut graph,
+                padded,
+                starts_const,
+                ends_const,
+                Some(steps_const),
+                Some(axes_const),
+                rng,
             );
 
             max_acc = Some(match max_acc {

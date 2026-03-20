@@ -602,17 +602,25 @@ fn build_cogvideox_denoising_loop(
         let ts_in = *input_map.get(&inner_timestep.global_id()).unwrap();
 
         let lat_cast = Cast::push_new_with_label(
-            &mut mg, lat_in, model_dtype,
-            Some("latent.cast_model_dtype".to_string()), rng,
+            &mut mg,
+            lat_in,
+            model_dtype,
+            Some("latent.cast_model_dtype".to_string()),
+            rng,
         );
         let ts_shape = Constant::push_new_with_label(
             &mut mg,
             NDArrayNumericTensor::from_vec_shape(vec![1i64], &vec![1]).unwrap(),
-            Some("timestep.shape_1".to_string()), rng,
+            Some("timestep.shape_1".to_string()),
+            rng,
         );
         let ts_reshaped = crate::milli_graph::ops::Reshape::push_new_with_label(
-            &mut mg, ts_in, ts_shape, false,
-            Some("timestep.reshape".to_string()), rng,
+            &mut mg,
+            ts_in,
+            ts_shape,
+            false,
+            Some("timestep.reshape".to_string()),
+            rng,
         );
         mg.set_output_map(vec![
             (lat_cast, cast_latent.global_id()),

@@ -303,91 +303,121 @@ fn populate_from_tensor(
     match tensor {
         NDArrayNumericTensor::F32(a) => {
             for (i, &v) in a.iter().enumerate() {
-                if offset + i >= limit { break; }
+                if offset + i >= limit {
+                    break;
+                }
                 buf[offset + i] = NumericScalar::F32(v);
             }
         }
         NDArrayNumericTensor::F64(a) => {
             for (i, &v) in a.iter().enumerate() {
-                if offset + i >= limit { break; }
+                if offset + i >= limit {
+                    break;
+                }
                 buf[offset + i] = NumericScalar::F64(v);
             }
         }
         NDArrayNumericTensor::BF16(a) => {
             for (i, &v) in a.iter().enumerate() {
-                if offset + i >= limit { break; }
+                if offset + i >= limit {
+                    break;
+                }
                 buf[offset + i] = NumericScalar::BF16(v);
             }
         }
         NDArrayNumericTensor::F16(a) => {
             for (i, &v) in a.iter().enumerate() {
-                if offset + i >= limit { break; }
+                if offset + i >= limit {
+                    break;
+                }
                 buf[offset + i] = NumericScalar::F16(v);
             }
         }
         NDArrayNumericTensor::I64(a) => {
             for (i, &v) in a.iter().enumerate() {
-                if offset + i >= limit { break; }
+                if offset + i >= limit {
+                    break;
+                }
                 buf[offset + i] = NumericScalar::I64(v);
             }
         }
         NDArrayNumericTensor::U64(a) => {
             for (i, &v) in a.iter().enumerate() {
-                if offset + i >= limit { break; }
+                if offset + i >= limit {
+                    break;
+                }
                 buf[offset + i] = NumericScalar::U64(v);
             }
         }
         NDArrayNumericTensor::I32(a) => {
             for (i, &v) in a.iter().enumerate() {
-                if offset + i >= limit { break; }
+                if offset + i >= limit {
+                    break;
+                }
                 buf[offset + i] = NumericScalar::I32(v);
             }
         }
         NDArrayNumericTensor::U32(a) => {
             for (i, &v) in a.iter().enumerate() {
-                if offset + i >= limit { break; }
+                if offset + i >= limit {
+                    break;
+                }
                 buf[offset + i] = NumericScalar::U32(v);
             }
         }
         NDArrayNumericTensor::I16(a) => {
             for (i, &v) in a.iter().enumerate() {
-                if offset + i >= limit { break; }
+                if offset + i >= limit {
+                    break;
+                }
                 buf[offset + i] = NumericScalar::I16(v);
             }
         }
         NDArrayNumericTensor::U16(a) => {
             for (i, &v) in a.iter().enumerate() {
-                if offset + i >= limit { break; }
+                if offset + i >= limit {
+                    break;
+                }
                 buf[offset + i] = NumericScalar::U16(v);
             }
         }
         NDArrayNumericTensor::I8(a) => {
             for (i, &v) in a.iter().enumerate() {
-                if offset + i >= limit { break; }
+                if offset + i >= limit {
+                    break;
+                }
                 buf[offset + i] = NumericScalar::I8(v);
             }
         }
         NDArrayNumericTensor::U8(a) => {
             for (i, &v) in a.iter().enumerate() {
-                if offset + i >= limit { break; }
+                if offset + i >= limit {
+                    break;
+                }
                 buf[offset + i] = NumericScalar::U8(v);
             }
         }
         NDArrayNumericTensor::F8E4M3(a) => {
             for (i, &v) in a.iter().enumerate() {
-                if offset + i >= limit { break; }
+                if offset + i >= limit {
+                    break;
+                }
                 buf[offset + i] = NumericScalar::F8E4M3(v);
             }
         }
         NDArrayNumericTensor::F8E5M2(a) => {
             for (i, &v) in a.iter().enumerate() {
-                if offset + i >= limit { break; }
+                if offset + i >= limit {
+                    break;
+                }
                 buf[offset + i] = NumericScalar::F8E5M2(v);
             }
         }
         NDArrayNumericTensor::BOOL(a) => {
             for (i, &v) in a.iter().enumerate() {
-                if offset + i >= limit { break; }
+                if offset + i >= limit {
+                    break;
+                }
                 buf[offset + i] = NumericScalar::BOOL(v);
             }
         }

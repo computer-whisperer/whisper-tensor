@@ -3,10 +3,10 @@ use crate::dtype::DType;
 use crate::graph::{GlobalId, Node, Property, PropertyValue};
 use crate::milli_graph::{MilliLoweringContext, MilliOpGraph};
 use crate::numeric_tensor::NumericTensor;
+use crate::onnx::AttributeProto;
 use crate::symbolic_graph::ops::{EvalError, Operation};
 use crate::symbolic_graph::{ONNXDecodingError, query_attribute_string};
 use crate::tensor_rank::DynRank;
-use crate::onnx::AttributeProto;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -39,10 +39,7 @@ impl EinsumOperation {
         let equation = query_attribute_string(attributes, "equation")
             .ok_or(ONNXDecodingError::MissingField("equation"))?;
 
-        let input_ids: Vec<GlobalId> = inputs
-            .iter()
-            .filter_map(|x| *x)
-            .collect();
+        let input_ids: Vec<GlobalId> = inputs.iter().filter_map(|x| *x).collect();
 
         Ok(Self {
             global_id: GlobalId::new(rng),

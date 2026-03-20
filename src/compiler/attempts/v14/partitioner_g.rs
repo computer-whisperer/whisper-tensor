@@ -1,4 +1,11 @@
-#![allow(clippy::all, dead_code, unreachable_code, unreachable_patterns, unused_imports, unused_variables)]
+#![allow(
+    clippy::all,
+    dead_code,
+    unreachable_code,
+    unreachable_patterns,
+    unused_imports,
+    unused_variables
+)]
 
 //! Row-Aware Matmul Scheduling Partitioner (attempt G)
 //!
@@ -64,13 +71,8 @@ pub fn plan(
     let row_chains = find_matmul_row_chains(graph, &producers, &successors);
 
     // Step 4: Group row chains into matmul stages and detect phase boundaries.
-    let phase_assignments = assign_phases_matmul_aware(
-        graph,
-        &producers,
-        &successors,
-        &depths,
-        &row_chains,
-    );
+    let phase_assignments =
+        assign_phases_matmul_aware(graph, &producers, &successors, &depths, &row_chains);
 
     // Step 5: Build per-phase group lists.
     let num_phases = phase_assignments.iter().copied().max().unwrap_or(0) + 1;
@@ -181,8 +183,7 @@ fn find_matmul_row_chains(
         // The ReduceSum should have an input that resolves to atoms in the Mul group.
         let reads_mul = group.inputs.iter().any(|input| {
             let resolved = input.resolve(group.atom_offset);
-            resolved.0 >= mul_group.base_id.0
-                && resolved.0 < mul_group.base_id.0 + mul_group.count
+            resolved.0 >= mul_group.base_id.0 && resolved.0 < mul_group.base_id.0 + mul_group.count
         });
 
         if !reads_mul {
@@ -406,9 +407,7 @@ fn build_phase(
     let mut chain_group_set: HashSet<usize> = HashSet::new();
     let mut phase_chains: Vec<&RowChain> = Vec::new();
     for chain in row_chains {
-        if phase_group_set.contains(&chain.mul_gi)
-            && phase_group_set.contains(&chain.reduce_gi)
-        {
+        if phase_group_set.contains(&chain.mul_gi) && phase_group_set.contains(&chain.reduce_gi) {
             chain_group_set.insert(chain.mul_gi);
             chain_group_set.insert(chain.reduce_gi);
             phase_chains.push(chain);
@@ -597,8 +596,7 @@ fn build_span(
         for &pi in &producers[gi] {
             if span_compute_set.contains(&pi) {
                 queue.push(pi);
-            } else if is_literal_group(&groups[pi]) && groups[pi].count < LITERAL_INLINE_THRESHOLD
-            {
+            } else if is_literal_group(&groups[pi]) && groups[pi].count < LITERAL_INLINE_THRESHOLD {
                 needed_internal_literals.insert(pi);
             } else {
                 let g = &groups[pi];
@@ -704,10 +702,7 @@ fn build_span(
     let mut items: Vec<(u64, InsertItem)> = Vec::new();
 
     for &(base, count, dtype) in &merged_external {
-        items.push((
-            base.0,
-            InsertItem::ExternalInput { base, count, dtype },
-        ));
+        items.push((base.0, InsertItem::ExternalInput { base, count, dtype }));
     }
 
     for &li in &needed_internal_literals {
@@ -958,9 +953,7 @@ fn would_overlap(inserted: &[(u64, u64)], start: u64, count: u64) -> bool {
     false
 }
 
-fn merge_external_ranges(
-    ranges: &BTreeMap<AtomId, (u64, DType)>,
-) -> Vec<(AtomId, u64, DType)> {
+fn merge_external_ranges(ranges: &BTreeMap<AtomId, (u64, DType)>) -> Vec<(AtomId, u64, DType)> {
     if ranges.is_empty() {
         return vec![];
     }
@@ -973,10 +966,10 @@ fn merge_external_ranges(
     let mut merged: Vec<(AtomId, u64, DType)> = Vec::new();
     for (base, count, dtype) in sorted {
         if let Some(last) = merged.last_mut() {
-            let last_end = last.0 .0 + last.1;
+            let last_end = last.0.0 + last.1;
             if base.0 <= last_end && dtype == last.2 {
                 let new_end = (base.0 + count).max(last_end);
-                last.1 = new_end - last.0 .0;
+                last.1 = new_end - last.0.0;
                 continue;
             }
         }
@@ -1063,19 +1056,31 @@ mod tests {
         let mut g = NanoGraph::new();
 
         let a = g.push_group(
-            100, DType::F32,
+            100,
+            DType::F32,
             ScalarOp::Literal(NumericScalar::F32(1.0)),
-            vec![], vec![],
+            vec![],
+            vec![],
         );
         let b = g.push_group(
-            100, DType::F32,
-            ScalarOp::Unary { op: ScalarUnaryOp::Neg, compute_dtype: DType::F32 },
-            vec![], vec![InputRef::Affine { base: a, stride: 1 }],
+            100,
+            DType::F32,
+            ScalarOp::Unary {
+                op: ScalarUnaryOp::Neg,
+                compute_dtype: DType::F32,
+            },
+            vec![],
+            vec![InputRef::Affine { base: a, stride: 1 }],
         );
         let c = g.push_group(
-            100, DType::F32,
-            ScalarOp::Unary { op: ScalarUnaryOp::Exp, compute_dtype: DType::F32 },
-            vec![], vec![InputRef::Affine { base: b, stride: 1 }],
+            100,
+            DType::F32,
+            ScalarOp::Unary {
+                op: ScalarUnaryOp::Exp,
+                compute_dtype: DType::F32,
+            },
+            vec![],
+            vec![InputRef::Affine { base: b, stride: 1 }],
         );
 
         g.outputs.push(c);
@@ -1087,23 +1092,45 @@ mod tests {
         let mut g = NanoGraph::new();
 
         let lit = g.push_group(
-            100, DType::F32,
+            100,
+            DType::F32,
             ScalarOp::Literal(NumericScalar::F32(1.0)),
-            vec![], vec![],
+            vec![],
+            vec![],
         );
         let b = g.push_group(
-            100, DType::F32,
-            ScalarOp::Unary { op: ScalarUnaryOp::Neg, compute_dtype: DType::F32 },
-            vec![], vec![InputRef::Affine { base: lit, stride: 1 }],
+            100,
+            DType::F32,
+            ScalarOp::Unary {
+                op: ScalarUnaryOp::Neg,
+                compute_dtype: DType::F32,
+            },
+            vec![],
+            vec![InputRef::Affine {
+                base: lit,
+                stride: 1,
+            }],
         );
         let c = g.push_group(
-            100, DType::F32,
-            ScalarOp::Unary { op: ScalarUnaryOp::Exp, compute_dtype: DType::F32 },
-            vec![], vec![InputRef::Affine { base: lit, stride: 1 }],
+            100,
+            DType::F32,
+            ScalarOp::Unary {
+                op: ScalarUnaryOp::Exp,
+                compute_dtype: DType::F32,
+            },
+            vec![],
+            vec![InputRef::Affine {
+                base: lit,
+                stride: 1,
+            }],
         );
         let d = g.push_group(
-            100, DType::F32,
-            ScalarOp::Binary { op: ScalarBinOp::Add, compute_dtype: DType::F32 },
+            100,
+            DType::F32,
+            ScalarOp::Binary {
+                op: ScalarBinOp::Add,
+                compute_dtype: DType::F32,
+            },
             vec![],
             vec![
                 InputRef::Affine { base: b, stride: 1 },
@@ -1120,24 +1147,38 @@ mod tests {
         let mut g = NanoGraph::new();
 
         let a = g.push_group(
-            1000, DType::F32,
+            1000,
+            DType::F32,
             ScalarOp::Literal(NumericScalar::F32(1.0)),
-            vec![], vec![],
+            vec![],
+            vec![],
         );
         let b = g.push_group(
-            1000, DType::F32,
-            ScalarOp::Unary { op: ScalarUnaryOp::Neg, compute_dtype: DType::F32 },
-            vec![], vec![InputRef::Affine { base: a, stride: 1 }],
+            1000,
+            DType::F32,
+            ScalarOp::Unary {
+                op: ScalarUnaryOp::Neg,
+                compute_dtype: DType::F32,
+            },
+            vec![],
+            vec![InputRef::Affine { base: a, stride: 1 }],
         );
         let c = g.push_group(
-            1000, DType::F32,
+            1000,
+            DType::F32,
             ScalarOp::Literal(NumericScalar::F32(2.0)),
-            vec![], vec![],
+            vec![],
+            vec![],
         );
         let d = g.push_group(
-            1000, DType::F32,
-            ScalarOp::Unary { op: ScalarUnaryOp::Exp, compute_dtype: DType::F32 },
-            vec![], vec![InputRef::Affine { base: c, stride: 1 }],
+            1000,
+            DType::F32,
+            ScalarOp::Unary {
+                op: ScalarUnaryOp::Exp,
+                compute_dtype: DType::F32,
+            },
+            vec![],
+            vec![InputRef::Affine { base: c, stride: 1 }],
         );
 
         g.outputs.push(b);
@@ -1158,9 +1199,17 @@ mod tests {
         }];
 
         let b = g.push_group(
-            100, DType::F32,
-            ScalarOp::Unary { op: ScalarUnaryOp::Neg, compute_dtype: DType::F32 },
-            vec![], vec![InputRef::Affine { base: input_base, stride: 1 }],
+            100,
+            DType::F32,
+            ScalarOp::Unary {
+                op: ScalarUnaryOp::Neg,
+                compute_dtype: DType::F32,
+            },
+            vec![],
+            vec![InputRef::Affine {
+                base: input_base,
+                stride: 1,
+            }],
         );
 
         g.outputs.push(b);
@@ -1178,39 +1227,59 @@ mod tests {
 
         // Weight vector: K values (shared by all rows).
         let weights = g.push_group(
-            k, DType::F32,
+            k,
+            DType::F32,
             ScalarOp::Literal(NumericScalar::F32(0.5)),
-            vec![], vec![],
+            vec![],
+            vec![],
         );
 
         // Input matrix: M*K values.
         let input = g.push_group(
-            m * k, DType::F32,
+            m * k,
+            DType::F32,
             ScalarOp::Literal(NumericScalar::F32(1.0)),
-            vec![], vec![],
+            vec![],
+            vec![],
         );
 
         // Mul: M*K elementwise products.
         let mul = g.push_group(
-            m * k, DType::F32,
-            ScalarOp::Binary { op: ScalarBinOp::Mul, compute_dtype: DType::F32 },
+            m * k,
+            DType::F32,
+            ScalarOp::Binary {
+                op: ScalarBinOp::Mul,
+                compute_dtype: DType::F32,
+            },
             vec![],
             vec![
-                InputRef::Affine { base: input, stride: 1 },
-                InputRef::Modular { base: weights, stride: 1, modulus: k },
+                InputRef::Affine {
+                    base: input,
+                    stride: 1,
+                },
+                InputRef::Modular {
+                    base: weights,
+                    stride: 1,
+                    modulus: k,
+                },
             ],
         );
 
         // ReduceSum: M outputs, each summing K products.
         let reduce = g.push_group(
-            m, DType::F32,
+            m,
+            DType::F32,
             ScalarOp::Reduce {
                 kind: ReduceKind::Sum,
                 reduce_count: k,
                 reduce_stride: 1,
                 compute_dtype: DType::F32,
             },
-            vec![], vec![InputRef::Affine { base: mul, stride: k as i64 }],
+            vec![],
+            vec![InputRef::Affine {
+                base: mul,
+                stride: k as i64,
+            }],
         );
 
         g.outputs.push(reduce);
@@ -1228,60 +1297,96 @@ mod tests {
 
         // First matmul: A[M,K1] @ B1[K1]
         let b1 = g.push_group(
-            k1, DType::F32,
+            k1,
+            DType::F32,
             ScalarOp::Literal(NumericScalar::F32(0.5)),
-            vec![], vec![],
+            vec![],
+            vec![],
         );
         let a = g.push_group(
-            m * k1, DType::F32,
+            m * k1,
+            DType::F32,
             ScalarOp::Literal(NumericScalar::F32(1.0)),
-            vec![], vec![],
+            vec![],
+            vec![],
         );
         let mul1 = g.push_group(
-            m * k1, DType::F32,
-            ScalarOp::Binary { op: ScalarBinOp::Mul, compute_dtype: DType::F32 },
+            m * k1,
+            DType::F32,
+            ScalarOp::Binary {
+                op: ScalarBinOp::Mul,
+                compute_dtype: DType::F32,
+            },
             vec![],
             vec![
                 InputRef::Affine { base: a, stride: 1 },
-                InputRef::Modular { base: b1, stride: 1, modulus: k1 },
+                InputRef::Modular {
+                    base: b1,
+                    stride: 1,
+                    modulus: k1,
+                },
             ],
         );
         let red1 = g.push_group(
-            m, DType::F32,
+            m,
+            DType::F32,
             ScalarOp::Reduce {
                 kind: ReduceKind::Sum,
                 reduce_count: k1,
                 reduce_stride: 1,
                 compute_dtype: DType::F32,
             },
-            vec![], vec![InputRef::Affine { base: mul1, stride: k1 as i64 }],
+            vec![],
+            vec![InputRef::Affine {
+                base: mul1,
+                stride: k1 as i64,
+            }],
         );
 
         // Second matmul: C1[M] * B2[K2] (each element of C1 broadcast over K2)
         // Then reduce M*K2 -> M outputs.
         let b2 = g.push_group(
-            k2, DType::F32,
+            k2,
+            DType::F32,
             ScalarOp::Literal(NumericScalar::F32(0.3)),
-            vec![], vec![],
+            vec![],
+            vec![],
         );
         let mul2 = g.push_group(
-            m * k2, DType::F32,
-            ScalarOp::Binary { op: ScalarBinOp::Mul, compute_dtype: DType::F32 },
+            m * k2,
+            DType::F32,
+            ScalarOp::Binary {
+                op: ScalarBinOp::Mul,
+                compute_dtype: DType::F32,
+            },
             vec![],
             vec![
-                InputRef::StridedBroadcast { base: red1, stride: 1, repeat: k2 },
-                InputRef::Modular { base: b2, stride: 1, modulus: k2 },
+                InputRef::StridedBroadcast {
+                    base: red1,
+                    stride: 1,
+                    repeat: k2,
+                },
+                InputRef::Modular {
+                    base: b2,
+                    stride: 1,
+                    modulus: k2,
+                },
             ],
         );
         let red2 = g.push_group(
-            m, DType::F32,
+            m,
+            DType::F32,
             ScalarOp::Reduce {
                 kind: ReduceKind::Sum,
                 reduce_count: k2,
                 reduce_stride: 1,
                 compute_dtype: DType::F32,
             },
-            vec![], vec![InputRef::Affine { base: mul2, stride: k2 as i64 }],
+            vec![],
+            vec![InputRef::Affine {
+                base: mul2,
+                stride: k2 as i64,
+            }],
         );
 
         g.outputs.push(red2);
@@ -1297,33 +1402,53 @@ mod tests {
         let m: u64 = 32;
 
         let weights = g.push_group(
-            k, DType::F32,
+            k,
+            DType::F32,
             ScalarOp::Literal(NumericScalar::F32(0.5)),
-            vec![], vec![],
+            vec![],
+            vec![],
         );
         let input = g.push_group(
-            m * k, DType::F32,
+            m * k,
+            DType::F32,
             ScalarOp::Literal(NumericScalar::F32(1.0)),
-            vec![], vec![],
+            vec![],
+            vec![],
         );
         let mul = g.push_group(
-            m * k, DType::F32,
-            ScalarOp::Binary { op: ScalarBinOp::Mul, compute_dtype: DType::F32 },
+            m * k,
+            DType::F32,
+            ScalarOp::Binary {
+                op: ScalarBinOp::Mul,
+                compute_dtype: DType::F32,
+            },
             vec![],
             vec![
-                InputRef::Affine { base: input, stride: 1 },
-                InputRef::Modular { base: weights, stride: 1, modulus: k },
+                InputRef::Affine {
+                    base: input,
+                    stride: 1,
+                },
+                InputRef::Modular {
+                    base: weights,
+                    stride: 1,
+                    modulus: k,
+                },
             ],
         );
         let reduce = g.push_group(
-            m, DType::F32,
+            m,
+            DType::F32,
             ScalarOp::Reduce {
                 kind: ReduceKind::Sum,
                 reduce_count: k,
                 reduce_stride: 1,
                 compute_dtype: DType::F32,
             },
-            vec![], vec![InputRef::Affine { base: mul, stride: k as i64 }],
+            vec![],
+            vec![InputRef::Affine {
+                base: mul,
+                stride: k as i64,
+            }],
         );
 
         g.outputs.push(reduce);
@@ -1338,56 +1463,96 @@ mod tests {
         let m: u64 = 8;
 
         let weights = g.push_group(
-            k, DType::F32,
+            k,
+            DType::F32,
             ScalarOp::Literal(NumericScalar::F32(0.5)),
-            vec![], vec![],
+            vec![],
+            vec![],
         );
         let input = g.push_group(
-            m * k, DType::F32,
+            m * k,
+            DType::F32,
             ScalarOp::Literal(NumericScalar::F32(1.0)),
-            vec![], vec![],
+            vec![],
+            vec![],
         );
         let mul = g.push_group(
-            m * k, DType::F32,
-            ScalarOp::Binary { op: ScalarBinOp::Mul, compute_dtype: DType::F32 },
+            m * k,
+            DType::F32,
+            ScalarOp::Binary {
+                op: ScalarBinOp::Mul,
+                compute_dtype: DType::F32,
+            },
             vec![],
             vec![
-                InputRef::Affine { base: input, stride: 1 },
-                InputRef::Modular { base: weights, stride: 1, modulus: k },
+                InputRef::Affine {
+                    base: input,
+                    stride: 1,
+                },
+                InputRef::Modular {
+                    base: weights,
+                    stride: 1,
+                    modulus: k,
+                },
             ],
         );
         let reduce = g.push_group(
-            m, DType::F32,
+            m,
+            DType::F32,
             ScalarOp::Reduce {
                 kind: ReduceKind::Sum,
                 reduce_count: k,
                 reduce_stride: 1,
                 compute_dtype: DType::F32,
             },
-            vec![], vec![InputRef::Affine { base: mul, stride: k as i64 }],
+            vec![],
+            vec![InputRef::Affine {
+                base: mul,
+                stride: k as i64,
+            }],
         );
 
         // Bias add (elementwise on the reduce output).
         let bias = g.push_group(
-            m, DType::F32,
+            m,
+            DType::F32,
             ScalarOp::Literal(NumericScalar::F32(0.1)),
-            vec![], vec![],
+            vec![],
+            vec![],
         );
         let biased = g.push_group(
-            m, DType::F32,
-            ScalarOp::Binary { op: ScalarBinOp::Add, compute_dtype: DType::F32 },
+            m,
+            DType::F32,
+            ScalarOp::Binary {
+                op: ScalarBinOp::Add,
+                compute_dtype: DType::F32,
+            },
             vec![],
             vec![
-                InputRef::Affine { base: reduce, stride: 1 },
-                InputRef::Affine { base: bias, stride: 1 },
+                InputRef::Affine {
+                    base: reduce,
+                    stride: 1,
+                },
+                InputRef::Affine {
+                    base: bias,
+                    stride: 1,
+                },
             ],
         );
 
         // GELU-like activation.
         let activated = g.push_group(
-            m, DType::F32,
-            ScalarOp::Unary { op: ScalarUnaryOp::Exp, compute_dtype: DType::F32 },
-            vec![], vec![InputRef::Affine { base: biased, stride: 1 }],
+            m,
+            DType::F32,
+            ScalarOp::Unary {
+                op: ScalarUnaryOp::Exp,
+                compute_dtype: DType::F32,
+            },
+            vec![],
+            vec![InputRef::Affine {
+                base: biased,
+                stride: 1,
+            }],
         );
 
         g.outputs.push(activated);
@@ -1399,9 +1564,12 @@ mod tests {
     fn verify_plan(graph: &NanoGraph, phases: &[Phase], num_lanes: usize) {
         for (pi, phase) in phases.iter().enumerate() {
             assert_eq!(
-                phase.spans.len(), num_lanes,
+                phase.spans.len(),
+                num_lanes,
                 "Phase {} has {} spans, expected {}",
-                pi, phase.spans.len(), num_lanes,
+                pi,
+                phase.spans.len(),
+                num_lanes,
             );
         }
 
@@ -1414,7 +1582,9 @@ mod tests {
                 assert!(
                     errors.is_empty(),
                     "Phase {} lane {} validation errors: {:?}",
-                    pi, li, errors,
+                    pi,
+                    li,
+                    errors,
                 );
             }
         }
@@ -1478,7 +1648,10 @@ mod tests {
                 if li >= lane_totals.len() {
                     lane_totals.resize(phase.spans.len(), 0);
                 }
-                let atoms: u64 = span.graph.groups().iter()
+                let atoms: u64 = span
+                    .graph
+                    .groups()
+                    .iter()
                     .filter(|g| !is_literal_op(&g.op))
                     .map(|g| g.count)
                     .sum();
@@ -1487,7 +1660,12 @@ mod tests {
         }
 
         let max_atoms = lane_totals.iter().copied().max().unwrap_or(0);
-        let min_atoms = lane_totals.iter().copied().filter(|&x| x > 0).min().unwrap_or(1);
+        let min_atoms = lane_totals
+            .iter()
+            .copied()
+            .filter(|&x| x > 0)
+            .min()
+            .unwrap_or(1);
         if min_atoms == 0 {
             max_atoms as f64
         } else {
@@ -1557,7 +1735,9 @@ mod tests {
         verify_plan(&g, &phases, 2);
         verify_no_cross_span_reads(&phases);
 
-        let has_input = phases.iter().any(|p| p.spans.iter().any(|s| !s.inputs.is_empty()));
+        let has_input = phases
+            .iter()
+            .any(|p| p.spans.iter().any(|s| !s.inputs.is_empty()));
         assert!(has_input, "No span declares the input tensor");
     }
 
@@ -1635,9 +1815,11 @@ mod tests {
     fn test_single_group() {
         let mut g = NanoGraph::new();
         let a = g.push_group(
-            100, DType::F32,
+            100,
+            DType::F32,
             ScalarOp::Literal(NumericScalar::F32(42.0)),
-            vec![], vec![],
+            vec![],
+            vec![],
         );
         g.outputs.push(a);
 
@@ -1649,14 +1831,21 @@ mod tests {
     fn test_large_groups() {
         let mut g = NanoGraph::new();
         let a = g.push_group(
-            10000, DType::F32,
+            10000,
+            DType::F32,
             ScalarOp::Literal(NumericScalar::F32(1.0)),
-            vec![], vec![],
+            vec![],
+            vec![],
         );
         let b = g.push_group(
-            10000, DType::F32,
-            ScalarOp::Unary { op: ScalarUnaryOp::Neg, compute_dtype: DType::F32 },
-            vec![], vec![InputRef::Affine { base: a, stride: 1 }],
+            10000,
+            DType::F32,
+            ScalarOp::Unary {
+                op: ScalarUnaryOp::Neg,
+                compute_dtype: DType::F32,
+            },
+            vec![],
+            vec![InputRef::Affine { base: a, stride: 1 }],
         );
         g.outputs.push(b);
 
@@ -1669,19 +1858,31 @@ mod tests {
         let mut g = NanoGraph::new();
 
         let shared = g.push_group(
-            1, DType::F32,
+            1,
+            DType::F32,
             ScalarOp::Literal(NumericScalar::F32(1.0)),
-            vec![], vec![],
+            vec![],
+            vec![],
         );
         let c1 = g.push_group(
-            100, DType::F32,
-            ScalarOp::Unary { op: ScalarUnaryOp::Neg, compute_dtype: DType::F32 },
-            vec![], vec![InputRef::Broadcast(shared)],
+            100,
+            DType::F32,
+            ScalarOp::Unary {
+                op: ScalarUnaryOp::Neg,
+                compute_dtype: DType::F32,
+            },
+            vec![],
+            vec![InputRef::Broadcast(shared)],
         );
         let c2 = g.push_group(
-            100, DType::F32,
-            ScalarOp::Unary { op: ScalarUnaryOp::Exp, compute_dtype: DType::F32 },
-            vec![], vec![InputRef::Broadcast(shared)],
+            100,
+            DType::F32,
+            ScalarOp::Unary {
+                op: ScalarUnaryOp::Exp,
+                compute_dtype: DType::F32,
+            },
+            vec![],
+            vec![InputRef::Broadcast(shared)],
         );
 
         g.outputs.push(c1);
@@ -1697,19 +1898,26 @@ mod tests {
         let mut g = NanoGraph::new();
 
         let data = g.push_group(
-            64, DType::F32,
+            64,
+            DType::F32,
             ScalarOp::Literal(NumericScalar::F32(1.0)),
-            vec![], vec![],
+            vec![],
+            vec![],
         );
         let reduced = g.push_group(
-            8, DType::F32,
+            8,
+            DType::F32,
             ScalarOp::Reduce {
                 kind: ReduceKind::Sum,
                 reduce_count: 8,
                 reduce_stride: 1,
                 compute_dtype: DType::F32,
             },
-            vec![], vec![InputRef::Affine { base: data, stride: 8 }],
+            vec![],
+            vec![InputRef::Affine {
+                base: data,
+                stride: 8,
+            }],
         );
 
         g.outputs.push(reduced);
@@ -1750,14 +1958,25 @@ mod tests {
         let mut g = NanoGraph::new();
 
         let weights = g.push_group(
-            10, DType::F32,
+            10,
+            DType::F32,
             ScalarOp::Literal(NumericScalar::F32(1.0)),
-            vec![], vec![],
+            vec![],
+            vec![],
         );
         let result = g.push_group(
-            100, DType::F32,
-            ScalarOp::Unary { op: ScalarUnaryOp::Neg, compute_dtype: DType::F32 },
-            vec![], vec![InputRef::Modular { base: weights, stride: 1, modulus: 10 }],
+            100,
+            DType::F32,
+            ScalarOp::Unary {
+                op: ScalarUnaryOp::Neg,
+                compute_dtype: DType::F32,
+            },
+            vec![],
+            vec![InputRef::Modular {
+                base: weights,
+                stride: 1,
+                modulus: 10,
+            }],
         );
 
         g.outputs.push(result);
@@ -1769,12 +1988,7 @@ mod tests {
 
     #[test]
     fn test_depth_computation() {
-        let producers = vec![
-            vec![],
-            vec![0],
-            vec![0],
-            vec![1, 2],
-        ];
+        let producers = vec![vec![], vec![0], vec![0], vec![1, 2]];
         let depths = compute_depths(4, &producers);
         assert_eq!(depths, vec![0, 1, 1, 2]);
     }
@@ -1784,7 +1998,10 @@ mod tests {
         let (g, _) = make_linear_chain();
         let (producers, successors) = build_dependency_dag(&g);
         let chains = find_matmul_row_chains(&g, &producers, &successors);
-        assert!(chains.is_empty(), "Non-matmul graph should have no row chains");
+        assert!(
+            chains.is_empty(),
+            "Non-matmul graph should have no row chains"
+        );
     }
 
     #[test]
@@ -1792,14 +2009,21 @@ mod tests {
         // More lanes than groups: some lanes should be empty.
         let mut g = NanoGraph::new();
         let a = g.push_group(
-            10, DType::F32,
+            10,
+            DType::F32,
             ScalarOp::Literal(NumericScalar::F32(1.0)),
-            vec![], vec![],
+            vec![],
+            vec![],
         );
         let b = g.push_group(
-            10, DType::F32,
-            ScalarOp::Unary { op: ScalarUnaryOp::Neg, compute_dtype: DType::F32 },
-            vec![], vec![InputRef::Affine { base: a, stride: 1 }],
+            10,
+            DType::F32,
+            ScalarOp::Unary {
+                op: ScalarUnaryOp::Neg,
+                compute_dtype: DType::F32,
+            },
+            vec![],
+            vec![InputRef::Affine { base: a, stride: 1 }],
         );
         g.outputs.push(b);
 
@@ -1812,15 +2036,25 @@ mod tests {
         let mut g = NanoGraph::new();
 
         let source = g.push_group(
-            4, DType::F32,
+            4,
+            DType::F32,
             ScalarOp::Literal(NumericScalar::F32(1.0)),
-            vec![], vec![],
+            vec![],
+            vec![],
         );
         let expanded = g.push_group(
-            12, DType::F32,
-            ScalarOp::Unary { op: ScalarUnaryOp::Neg, compute_dtype: DType::F32 },
+            12,
+            DType::F32,
+            ScalarOp::Unary {
+                op: ScalarUnaryOp::Neg,
+                compute_dtype: DType::F32,
+            },
             vec![],
-            vec![InputRef::StridedBroadcast { base: source, stride: 1, repeat: 3 }],
+            vec![InputRef::StridedBroadcast {
+                base: source,
+                stride: 1,
+                repeat: 3,
+            }],
         );
 
         g.outputs.push(expanded);

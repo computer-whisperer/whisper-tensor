@@ -1,9 +1,9 @@
 use crate::dtype::DType;
 use crate::graph::{GlobalId, Node, Property, PropertyValue};
 use crate::milli_graph::{self, MilliLoweringContext, MilliOpGraph};
+use crate::onnx::AttributeProto;
 use crate::symbolic_graph::ops::Operation;
 use crate::symbolic_graph::{ONNXDecodingError, query_attribute_int, query_attribute_string};
-use crate::onnx::AttributeProto;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -44,8 +44,8 @@ impl NegativeLogLikelihoodLossOperation {
             ));
         }
 
-        let reduction = query_attribute_string(attributes, "reduction")
-            .unwrap_or_else(|| "mean".to_string());
+        let reduction =
+            query_attribute_string(attributes, "reduction").unwrap_or_else(|| "mean".to_string());
         let ignore_index = query_attribute_int(attributes, "ignore_index");
 
         Ok(Self {
@@ -115,8 +115,7 @@ pub(super) fn gather_class_axis(
     let flat_target_i64 = milli_graph::ops::Cast::push_new(graph, flat_target, DType::I64, rng);
 
     // N_total = product of target shape elements
-    let target_flat_shape =
-        milli_graph::ops::Shape::push_new(graph, flat_target_i64, rng);
+    let target_flat_shape = milli_graph::ops::Shape::push_new(graph, flat_target_i64, rng);
     let n_total = milli_graph::ops::Gather::push_new(graph, target_flat_shape, idx0, 0, rng);
 
     // S = N_total / N (spatial product)
@@ -169,11 +168,9 @@ impl Operation for NegativeLogLikelihoodLossOperation {
         // When ignore_index is set, target values may be out-of-bounds (e.g. 10
         // when C=5). Clamp them to 0 before indexing, then zero out loss later.
         let (safe_target, is_ignored) = if let Some(ii) = self.ignore_index {
-            let target_i64 =
-                milli_graph::ops::Cast::push_new(&mut graph, target, DType::I64, rng);
+            let target_i64 = milli_graph::ops::Cast::push_new(&mut graph, target, DType::I64, rng);
             let ii_const = milli_graph::ops::Constant::new_scalar(&mut graph, ii, rng);
-            let mask =
-                milli_graph::ops::SimpleBinary::equal(&mut graph, target_i64, ii_const, rng);
+            let mask = milli_graph::ops::SimpleBinary::equal(&mut graph, target_i64, ii_const, rng);
             let zero_i64 = milli_graph::ops::Constant::new_scalar(&mut graph, 0i64, rng);
             // Replace ignored indices with 0 so gathers don't go OOB
             let clamped =
@@ -208,8 +205,7 @@ impl Operation for NegativeLogLikelihoodLossOperation {
             let w = input_map[&w_id];
             let w_flat =
                 milli_graph::ops::Gather::push_new(&mut graph, w, flat_safe_target, 0, rng);
-            let target_shape =
-                milli_graph::ops::Shape::push_new(&mut graph, target, rng);
+            let target_shape = milli_graph::ops::Shape::push_new(&mut graph, target, rng);
             let w_per_sample =
                 milli_graph::ops::Reshape::push_new(&mut graph, w_flat, target_shape, false, rng);
             loss = milli_graph::ops::SimpleBinary::mul(&mut graph, loss, w_per_sample, rng);
@@ -224,13 +220,11 @@ impl Operation for NegativeLogLikelihoodLossOperation {
             loss = milli_graph::ops::Where::push_new(&mut graph, mask, zero, loss, rng);
 
             if let Some(sw) = sample_weight {
-                let w_masked =
-                    milli_graph::ops::Where::push_new(&mut graph, mask, zero, sw, rng);
+                let w_masked = milli_graph::ops::Where::push_new(&mut graph, mask, zero, sw, rng);
                 sample_weight = Some(w_masked);
             } else {
                 let one = milli_graph::ops::Constant::new_scalar(&mut graph, 1.0f32, rng);
-                let w_masked =
-                    milli_graph::ops::Where::push_new(&mut graph, mask, zero, one, rng);
+                let w_masked = milli_graph::ops::Where::push_new(&mut graph, mask, zero, one, rng);
                 sample_weight = Some(w_masked);
             }
         }

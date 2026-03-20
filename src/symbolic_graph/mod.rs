@@ -81,7 +81,10 @@ fn query_attribute_int(attributes: &[onnx::AttributeProto], name: &str) -> Optio
     None
 }
 
-pub(crate) fn query_attribute_ints(attributes: &[onnx::AttributeProto], name: &str) -> Option<Vec<i64>> {
+pub(crate) fn query_attribute_ints(
+    attributes: &[onnx::AttributeProto],
+    name: &str,
+) -> Option<Vec<i64>> {
     for attr in attributes {
         if attr.name == name && attr.r#type == onnx::attribute_proto::AttributeType::Ints as i32 {
             return Some(attr.ints.clone());
@@ -2432,14 +2435,12 @@ impl SymbolicGraphMutator {
                     rng,
                 )?,
             )),
-            "MaxPool" => Some(AnyOperation::MaxPool(
-                ops::MaxPoolOperation::from_onnx(
-                    &input_tensors,
-                    &output_tensors,
-                    &onnx_node.attribute,
-                    rng,
-                )?,
-            )),
+            "MaxPool" => Some(AnyOperation::MaxPool(ops::MaxPoolOperation::from_onnx(
+                &input_tensors,
+                &output_tensors,
+                &onnx_node.attribute,
+                rng,
+            )?)),
             "InstanceNormalization" => Some(AnyOperation::InstanceNormalization(
                 ops::InstanceNormalizationOperation::from_onnx(
                     &input_tensors,
@@ -2788,14 +2789,12 @@ impl SymbolicGraphMutator {
                     rng,
                 )?,
             )),
-            "Einsum" => Some(AnyOperation::Einsum(
-                ops::EinsumOperation::from_onnx(
-                    &input_tensors,
-                    &output_tensors,
-                    &onnx_node.attribute,
-                    rng,
-                )?,
-            )),
+            "Einsum" => Some(AnyOperation::Einsum(ops::EinsumOperation::from_onnx(
+                &input_tensors,
+                &output_tensors,
+                &onnx_node.attribute,
+                rng,
+            )?)),
             "SoftmaxCrossEntropyLoss" => Some(AnyOperation::SoftmaxCrossEntropyLoss(
                 ops::SoftmaxCrossEntropyLossOperation::from_onnx(
                     &input_tensors,

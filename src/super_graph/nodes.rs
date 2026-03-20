@@ -1725,8 +1725,7 @@ impl SuperGraphNode for SuperGraphNodeVideoClipToTensor {
                     ": missing video clip input link {:?}",
                     video_input_link
                 )))?;
-        data.tensors
-            .insert(tensor_output_link, clip.frames.clone());
+        data.tensors.insert(tensor_output_link, clip.frames.clone());
         Ok(())
     }
 

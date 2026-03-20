@@ -3,10 +3,10 @@ use crate::dtype::DType;
 use crate::graph::{GlobalId, Node, Property, PropertyValue};
 use crate::milli_graph::{MilliLoweringContext, MilliOpGraph};
 use crate::numeric_tensor::NumericTensor;
+use crate::onnx::AttributeProto;
 use crate::symbolic_graph::ops::{EvalError, Operation};
 use crate::symbolic_graph::{ONNXDecodingError, query_attribute_int};
 use crate::tensor_rank::DynRank;
-use crate::onnx::AttributeProto;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -37,9 +37,7 @@ impl ReverseSequenceOperation {
             return Err(ONNXDecodingError::InvalidOperatorInputs("ReverseSequence"));
         }
         if outputs.is_empty() {
-            return Err(ONNXDecodingError::InvalidOperatorOutputs(
-                "ReverseSequence",
-            ));
+            return Err(ONNXDecodingError::InvalidOperatorOutputs("ReverseSequence"));
         }
 
         let batch_axis = query_attribute_int(attributes, "batch_axis").unwrap_or(1);
@@ -47,15 +45,11 @@ impl ReverseSequenceOperation {
 
         Ok(Self {
             global_id: GlobalId::new(rng),
-            input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs(
-                "ReverseSequence",
-            ))?,
-            sequence_lens: inputs[1].ok_or(ONNXDecodingError::InvalidOperatorInputs(
-                "ReverseSequence",
-            ))?,
-            output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs(
-                "ReverseSequence",
-            ))?,
+            input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("ReverseSequence"))?,
+            sequence_lens: inputs[1]
+                .ok_or(ONNXDecodingError::InvalidOperatorInputs("ReverseSequence"))?,
+            output: outputs[0]
+                .ok_or(ONNXDecodingError::InvalidOperatorOutputs("ReverseSequence"))?,
             batch_axis,
             time_axis,
         })

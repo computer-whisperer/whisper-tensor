@@ -669,10 +669,7 @@ macro_rules! define_reduce_variant {
                     input_data: inputs[0]
                         .ok_or(ONNXDecodingError::InvalidOperatorInputs($op_name))?,
                     input_axes: if inputs.len() > 1 {
-                        Some(
-                            inputs[1]
-                                .ok_or(ONNXDecodingError::InvalidOperatorInputs($op_name))?,
-                        )
+                        Some(inputs[1].ok_or(ONNXDecodingError::InvalidOperatorInputs($op_name))?)
                     } else {
                         None
                     },
@@ -692,8 +689,7 @@ macro_rules! define_reduce_variant {
                     Some(input_map[input_axes])
                 } else if let Some(axes) = &self.axes_attr {
                     let tensor = NDArrayNumericTensor::from(axes.clone());
-                    let tid =
-                        milli_graph::ops::Constant::push_new(graph, tensor.to_dyn(), rng);
+                    let tid = milli_graph::ops::Constant::push_new(graph, tensor.to_dyn(), rng);
                     Some(tid)
                 } else {
                     None
@@ -817,14 +813,18 @@ impl Operation for ReduceLogSumExpOperation {
         let x = input_map[&self.input_data];
         let axes = self.resolve_axes(&mut graph, &input_map, rng);
         // ReduceMax with keepdims=true for broadcasting
-        let row_max_kd = milli_graph::ops::ReduceMax::push_new(
-            &mut graph, x, axes, true, noop, rng,
-        );
+        let row_max_kd =
+            milli_graph::ops::ReduceMax::push_new(&mut graph, x, axes, true, noop, rng);
         let shifted = milli_graph::ops::SimpleBinary::sub(&mut graph, x, row_max_kd, rng);
         let exp_shifted = milli_graph::ops::SimpleUnaryOp::exp(&mut graph, shifted, rng);
         let axes2 = self.resolve_axes(&mut graph, &input_map, rng);
         let sum = milli_graph::ops::ReduceSum::push_new(
-            &mut graph, exp_shifted, axes2, keepdims, noop, rng,
+            &mut graph,
+            exp_shifted,
+            axes2,
+            keepdims,
+            noop,
+            rng,
         );
         let log_sum = milli_graph::ops::SimpleUnaryOp::ln(&mut graph, sum, rng);
         // Get row_max in the final shape (may need to drop keepdims)
@@ -832,9 +832,7 @@ impl Operation for ReduceLogSumExpOperation {
             row_max_kd
         } else {
             let axes3 = self.resolve_axes(&mut graph, &input_map, rng);
-            milli_graph::ops::ReduceMax::push_new(
-                &mut graph, x, axes3, false, noop, rng,
-            )
+            milli_graph::ops::ReduceMax::push_new(&mut graph, x, axes3, false, noop, rng)
         };
         let out = milli_graph::ops::SimpleBinary::add(&mut graph, log_sum, row_max_final, rng);
         let mut output_map = HashMap::new();

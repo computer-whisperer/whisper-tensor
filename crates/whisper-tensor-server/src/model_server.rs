@@ -215,8 +215,8 @@ impl ModelServer {
 #[cfg(feature = "import")]
 pub fn default_loaders() -> Vec<Box<dyn Loader>> {
     use whisper_tensor_import::loaders::{
-        AutoLoader, CogVideoXLoader, F5TtsLoader, FluxLoader, GgufLoader, KokoroLoader,
-        OnnxLoader, PiperLoader, Rwkv7Loader, SD2Loader, SD15Loader, SD35Loader, SDXLLoader,
+        AutoLoader, CogVideoXLoader, F5TtsLoader, FluxLoader, GgufLoader, KokoroLoader, OnnxLoader,
+        PiperLoader, Rwkv7Loader, SD2Loader, SD15Loader, SD35Loader, SDXLLoader,
         TransformersLoader, WhisperLoader,
     };
     vec![

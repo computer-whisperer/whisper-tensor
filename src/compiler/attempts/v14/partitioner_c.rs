@@ -1,4 +1,10 @@
-#![allow(clippy::all, dead_code, unreachable_patterns, unused_variables, unused_imports)]
+#![allow(
+    clippy::all,
+    dead_code,
+    unreachable_patterns,
+    unused_variables,
+    unused_imports
+)]
 
 //! Greedy Lane Simulation partitioner.
 //!
@@ -57,7 +63,11 @@ pub fn plan(
         graph.collect_all_producer_indices(group, gi, &mut producers);
         producer_sets.push(producers);
     }
-    eprintln!("  [C] dependency DAG: {:.1?} ({} groups)", t0.elapsed(), num_groups);
+    eprintln!(
+        "  [C] dependency DAG: {:.1?} ({} groups)",
+        t0.elapsed(),
+        num_groups
+    );
 
     // Note: input tensors are external data (weights, user inputs) that are
     // always available. They don't constrain lane assignment — only groups
@@ -152,9 +162,7 @@ pub fn plan(
                 // Check if it's in a *different* lane in the current phase.
                 let mut in_other_lane = false;
                 for other_lane in 0..num_lanes {
-                    if other_lane != lane
-                        && lane_groups_current_phase[other_lane].contains(&pi)
-                    {
+                    if other_lane != lane && lane_groups_current_phase[other_lane].contains(&pi) {
                         in_other_lane = true;
                         break;
                     }
@@ -282,7 +290,11 @@ pub fn plan(
     }
 
     // ─── Construct span NanoGraphs ───────────────────────────────────────
-    eprintln!("  [C] greedy simulation: {:.1?} ({} phases)", t1.elapsed(), total_phases);
+    eprintln!(
+        "  [C] greedy simulation: {:.1?} ({} phases)",
+        t1.elapsed(),
+        total_phases
+    );
     let t2 = std::time::Instant::now();
 
     let mut phases: Vec<Phase> = Vec::with_capacity(total_phases);
@@ -420,7 +432,11 @@ fn build_span_graph_with_id_preservation(
     let mut items: Vec<(u64, u64, SpanItem)> = Vec::new(); // (base_id, count, item)
 
     for (_, range) in external_inputs.iter() {
-        items.push((range.base.0, range.count, SpanItem::ExternalInput(range.clone())));
+        items.push((
+            range.base.0,
+            range.count,
+            SpanItem::ExternalInput(range.clone()),
+        ));
     }
 
     for &gi in group_indices {
@@ -524,7 +540,13 @@ fn collect_input_tensor_refs(
 ) {
     // Check each InputRef for references to input tensors.
     for input_ref in &group.inputs {
-        collect_input_ref_tensor_refs(main_graph, input_ref, group.count, group.atom_offset, external_ranges);
+        collect_input_ref_tensor_refs(
+            main_graph,
+            input_ref,
+            group.count,
+            group.atom_offset,
+            external_ranges,
+        );
     }
 
     // For reduce ops, also check the strided range.
@@ -558,11 +580,13 @@ fn collect_input_tensor_refs(
         // the normal producer tracking handles it. If it's an input tensor, add it.
         if let Some((idx, _)) = main_graph.find_input_idx(*table_base) {
             let it = &main_graph.input_tensors()[idx];
-            external_ranges.entry(it.base_id.0).or_insert_with(|| AtomRange {
-                base: it.base_id,
-                count: it.count,
-                dtype: it.dtype,
-            });
+            external_ranges
+                .entry(it.base_id.0)
+                .or_insert_with(|| AtomRange {
+                    base: it.base_id,
+                    count: it.count,
+                    dtype: it.dtype,
+                });
         }
     }
 }
@@ -582,11 +606,13 @@ fn collect_input_ref_tensor_refs(
         InputRef::Broadcast(base) => {
             if let Some((idx, _)) = main_graph.find_input_idx(*base) {
                 let it = &input_tensors[idx];
-                external_ranges.entry(it.base_id.0).or_insert_with(|| AtomRange {
-                    base: it.base_id,
-                    count: it.count,
-                    dtype: it.dtype,
-                });
+                external_ranges
+                    .entry(it.base_id.0)
+                    .or_insert_with(|| AtomRange {
+                        base: it.base_id,
+                        count: it.count,
+                        dtype: it.dtype,
+                    });
             }
         }
         InputRef::Affine { .. } | InputRef::StridedBroadcast { .. } => {
@@ -603,22 +629,19 @@ fn collect_input_ref_tensor_refs(
         } => {
             let a = base.0;
             let b = (base.0 as i64 + *stride * (*modulus as i64 - 1)) as u64;
-            add_input_tensor_ranges_in_id_range(
-                main_graph,
-                a.min(b),
-                a.max(b),
-                external_ranges,
-            );
+            add_input_tensor_ranges_in_id_range(main_graph, a.min(b), a.max(b), external_ranges);
         }
         InputRef::Explicit(ids) => {
             for id in ids.iter().skip(atom_offset as usize).take(count as usize) {
                 if let Some((idx, _)) = main_graph.find_input_idx(*id) {
                     let it = &input_tensors[idx];
-                    external_ranges.entry(it.base_id.0).or_insert_with(|| AtomRange {
-                        base: it.base_id,
-                        count: it.count,
-                        dtype: it.dtype,
-                    });
+                    external_ranges
+                        .entry(it.base_id.0)
+                        .or_insert_with(|| AtomRange {
+                            base: it.base_id,
+                            count: it.count,
+                            dtype: it.dtype,
+                        });
                 }
             }
         }
@@ -635,11 +658,13 @@ fn add_input_tensor_ranges_in_id_range(
         let it_lo = it.base_id.0;
         let it_hi = it_lo + it.count - 1;
         if it_lo <= hi && it_hi >= lo {
-            external_ranges.entry(it.base_id.0).or_insert_with(|| AtomRange {
-                base: it.base_id,
-                count: it.count,
-                dtype: it.dtype,
-            });
+            external_ranges
+                .entry(it.base_id.0)
+                .or_insert_with(|| AtomRange {
+                    base: it.base_id,
+                    count: it.count,
+                    dtype: it.dtype,
+                });
         }
     }
 }
@@ -677,7 +702,6 @@ fn empty_span(graph: &NanoGraph) -> Span {
         outputs: vec![],
     }
 }
-
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
 
@@ -737,7 +761,9 @@ mod tests {
                             assert!(
                                 !other_produced.contains(&source.0),
                                 "Phase {} lane {} reads atom {} produced by another lane in same phase",
-                                pi, li, source
+                                pi,
+                                li,
+                                source
                             );
                         }
                     }
@@ -1449,14 +1475,8 @@ mod tests {
                     base: cond,
                     stride: 1,
                 },
-                InputRef::Affine {
-                    base: x,
-                    stride: 1,
-                },
-                InputRef::Affine {
-                    base: y,
-                    stride: 1,
-                },
+                InputRef::Affine { base: x, stride: 1 },
+                InputRef::Affine { base: y, stride: 1 },
             ],
         );
         g.outputs = vec![sel];

@@ -784,10 +784,8 @@ impl SeluOperation {
             global_id: GlobalId::new(rng),
             input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("Selu"))?,
             output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("Selu"))?,
-            alpha: query_attribute_float(attributes, "alpha")
-                .unwrap_or(1.6732632423543772),
-            gamma: query_attribute_float(attributes, "gamma")
-                .unwrap_or(1.0507009873554805),
+            alpha: query_attribute_float(attributes, "alpha").unwrap_or(1.6732632423543772),
+            gamma: query_attribute_float(attributes, "gamma").unwrap_or(1.0507009873554805),
         })
     }
 }

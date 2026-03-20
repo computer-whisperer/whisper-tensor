@@ -1,4 +1,11 @@
-#![allow(clippy::all, dead_code, unreachable_code, unreachable_patterns, unused_imports, unused_variables)]
+#![allow(
+    clippy::all,
+    dead_code,
+    unreachable_code,
+    unreachable_patterns,
+    unused_imports,
+    unused_variables
+)]
 
 //! Recursive-Bisection Partitioner with Structural Pattern Detection (attempt F)
 //!
@@ -77,8 +84,7 @@ pub fn plan(
     let output_group_set = identify_output_groups(graph, output_atom_ids);
 
     // Step 3: Find phase boundaries using frontier-width analysis.
-    let phase_boundaries =
-        find_phase_boundaries(graph, &producers, &consumers, &output_group_set);
+    let phase_boundaries = find_phase_boundaries(graph, &producers, &consumers, &output_group_set);
 
     // Step 4: Assign groups to phases.
     let phase_assignments = assign_to_phases(n, &phase_boundaries);
@@ -429,10 +435,11 @@ fn assign_lanes_per_phase(
             } else {
                 let mut key = literal_producers.clone();
                 key.extend(op_sig.iter().map(|&x| x + 1_000_000)); // namespace separation
-                bundle_key_to_components
-                    .entry(key)
-                    .or_default()
-                    .push((*rep, comp_groups.clone(), total_atoms));
+                bundle_key_to_components.entry(key).or_default().push((
+                    *rep,
+                    comp_groups.clone(),
+                    total_atoms,
+                ));
             }
         }
 
@@ -577,8 +584,7 @@ fn build_all_phases(
     let n = groups.len();
 
     // Build per-phase-per-lane group lists.
-    let mut phase_lane_groups: Vec<Vec<Vec<usize>>> =
-        vec![vec![Vec::new(); num_lanes]; num_phases];
+    let mut phase_lane_groups: Vec<Vec<Vec<usize>>> = vec![vec![Vec::new(); num_lanes]; num_phases];
 
     // Place non-duplicated groups.
     for gi in 0..n {
@@ -794,9 +800,17 @@ fn build_span(
     // Now insert everything into the span graph in atom ID order.
     #[derive(Clone)]
     enum InsertItem {
-        External { base: AtomId, count: u64, dtype: DType },
-        InlineLiteral { gi: usize },
-        ComputeGroup { gi: usize },
+        External {
+            base: AtomId,
+            count: u64,
+            dtype: DType,
+        },
+        InlineLiteral {
+            gi: usize,
+        },
+        ComputeGroup {
+            gi: usize,
+        },
     }
 
     let mut items: Vec<(u64, InsertItem)> = Vec::new();
@@ -921,7 +935,11 @@ fn collect_input_tensor_external(
             let last = input_ref.resolve(atom_offset + count - 1);
             vec![first, last]
         }
-        InputRef::Modular { base, stride, modulus } => {
+        InputRef::Modular {
+            base,
+            stride,
+            modulus,
+        } => {
             let a = *base;
             let b = AtomId((base.0 as i64 + *stride * (*modulus as i64 - 1)) as u64);
             vec![a, b]
@@ -1002,9 +1020,7 @@ fn collect_reduce_external(
 
 // ─── Range merging ─────────────────────────────────────────────────────────
 
-fn merge_ranges(
-    ranges: &BTreeMap<u64, (AtomId, u64, DType)>,
-) -> Vec<(AtomId, u64, DType)> {
+fn merge_ranges(ranges: &BTreeMap<u64, (AtomId, u64, DType)>) -> Vec<(AtomId, u64, DType)> {
     if ranges.is_empty() {
         return vec![];
     }
@@ -1017,10 +1033,10 @@ fn merge_ranges(
     let mut merged: Vec<(AtomId, u64, DType)> = Vec::new();
     for (base, count, dtype) in sorted {
         if let Some(last) = merged.last_mut() {
-            let last_end = last.0 .0 + last.1;
+            let last_end = last.0.0 + last.1;
             if base.0 <= last_end && dtype == last.2 {
                 let new_end = (base.0 + count).max(last_end);
-                last.1 = new_end - last.0 .0;
+                last.1 = new_end - last.0.0;
                 continue;
             }
         }
@@ -1142,7 +1158,13 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine { base: a, stride: a_stride }, b_ref],
+            vec![
+                InputRef::Affine {
+                    base: a,
+                    stride: a_stride,
+                },
+                b_ref,
+            ],
         )
     }
 
@@ -1193,7 +1215,9 @@ mod tests {
                 assert!(
                     errors.is_empty(),
                     "Phase {} lane {} validation errors: {:?}",
-                    pi, li, errors
+                    pi,
+                    li,
+                    errors
                 );
             }
         }
@@ -1260,7 +1284,13 @@ mod tests {
                 .map(|s| s.graph.groups().iter().map(|g| g.count).sum::<u64>())
                 .collect();
             let max_load = loads.iter().copied().max().unwrap_or(0);
-            let min_load = loads.iter().copied().filter(|&l| l > 0).min().unwrap_or(1).max(1);
+            let min_load = loads
+                .iter()
+                .copied()
+                .filter(|&l| l > 0)
+                .min()
+                .unwrap_or(1)
+                .max(1);
             let ratio = max_load as f64 / min_load as f64;
             if ratio > max_ratio {
                 max_ratio = ratio;
@@ -1346,9 +1376,9 @@ mod tests {
         verify_independence(&phases);
 
         // Should have parallel execution.
-        let has_parallel = phases.iter().any(|p| {
-            p.spans.iter().filter(|s| s.graph.num_groups() > 0).count() > 1
-        });
+        let has_parallel = phases
+            .iter()
+            .any(|p| p.spans.iter().filter(|s| s.graph.num_groups() > 0).count() > 1);
         assert!(has_parallel, "Expected parallel execution");
     }
 
@@ -1642,10 +1672,7 @@ mod tests {
                         base: w1.offset(row * k),
                         stride: 1,
                     },
-                    InputRef::Affine {
-                        base: x,
-                        stride: 1,
-                    },
+                    InputRef::Affine { base: x, stride: 1 },
                 ],
             );
             mul1.push(mid);
@@ -1691,9 +1718,7 @@ mod tests {
                         base: w2.offset(row * hidden),
                         stride: 1,
                     },
-                    InputRef::Explicit(
-                        (0..hidden).map(|i| res[i as usize]).collect(),
-                    ),
+                    InputRef::Explicit((0..hidden).map(|i| res[i as usize]).collect()),
                 ],
             );
             mul2.push(mid);
@@ -1753,11 +1778,7 @@ mod tests {
 
         let phases = plan(&g, 2, &[], &g.outputs.clone());
 
-        let main_groups: HashSet<u64> = g
-            .groups()
-            .iter()
-            .map(|gr| gr.base_id.0)
-            .collect();
+        let main_groups: HashSet<u64> = g.groups().iter().map(|gr| gr.base_id.0).collect();
 
         let mut span_groups: HashSet<u64> = HashSet::new();
         for phase in &phases {
@@ -1893,7 +1914,10 @@ mod tests {
                     .map(|g| g.count)
                     .sum();
                 if total_compute > 100 {
-                    panic!("Phase with {} compute atoms only uses {} lanes", total_compute, active);
+                    panic!(
+                        "Phase with {} compute atoms only uses {} lanes",
+                        total_compute, active
+                    );
                 }
             }
         }

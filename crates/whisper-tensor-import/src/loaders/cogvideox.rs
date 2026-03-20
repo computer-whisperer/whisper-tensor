@@ -84,38 +84,35 @@ fn load_cogvideox(base_path: PathBuf) -> Result<LoaderOutput, LoaderError> {
     println!("Detected CogVideoX-{variant}");
 
     // Load safetensors files from a directory (may be sharded)
-    let load_safetensors_dir = |dir: &std::path::Path| -> Result<SafetensorsWeightManager, LoaderError> {
-        let mut mmaps = Vec::new();
-        let mut paths = Vec::new();
-        // Collect all .safetensors files in the directory
-        let mut entries: Vec<_> = std::fs::read_dir(dir)
-            .map_err(|e| LoaderError::LoadFailed(e.into()))?
-            .filter_map(|e| e.ok())
-            .filter(|e| {
-                e.path()
-                    .extension()
-                    .is_some_and(|ext| ext == "safetensors")
-            })
-            .collect();
-        entries.sort_by_key(|e| e.path());
-        for entry in entries {
-            let path = entry.path();
-            let file =
-                std::fs::File::open(&path).map_err(|e| LoaderError::LoadFailed(e.into()))?;
-            let mmap =
-                unsafe { Mmap::map(&file) }.map_err(|e| LoaderError::LoadFailed(e.into()))?;
-            mmaps.push(Arc::new(mmap));
-            paths.push(path);
-        }
-        if mmaps.is_empty() {
-            return Err(LoaderError::LoadFailed(anyhow::anyhow!(
-                "No .safetensors files found in {}",
-                dir.display()
-            )));
-        }
-        SafetensorsWeightManager::new_with_paths(mmaps, paths)
-            .map_err(|e| LoaderError::LoadFailed(e.into()))
-    };
+    let load_safetensors_dir =
+        |dir: &std::path::Path| -> Result<SafetensorsWeightManager, LoaderError> {
+            let mut mmaps = Vec::new();
+            let mut paths = Vec::new();
+            // Collect all .safetensors files in the directory
+            let mut entries: Vec<_> = std::fs::read_dir(dir)
+                .map_err(|e| LoaderError::LoadFailed(e.into()))?
+                .filter_map(|e| e.ok())
+                .filter(|e| e.path().extension().is_some_and(|ext| ext == "safetensors"))
+                .collect();
+            entries.sort_by_key(|e| e.path());
+            for entry in entries {
+                let path = entry.path();
+                let file =
+                    std::fs::File::open(&path).map_err(|e| LoaderError::LoadFailed(e.into()))?;
+                let mmap =
+                    unsafe { Mmap::map(&file) }.map_err(|e| LoaderError::LoadFailed(e.into()))?;
+                mmaps.push(Arc::new(mmap));
+                paths.push(path);
+            }
+            if mmaps.is_empty() {
+                return Err(LoaderError::LoadFailed(anyhow::anyhow!(
+                    "No .safetensors files found in {}",
+                    dir.display()
+                )));
+            }
+            SafetensorsWeightManager::new_with_paths(mmaps, paths)
+                .map_err(|e| LoaderError::LoadFailed(e.into()))
+        };
 
     // Build T5-XXL encoder
     println!("Building T5-XXL encoder...");

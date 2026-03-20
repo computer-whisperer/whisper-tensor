@@ -118,7 +118,11 @@ impl Operation for SplitOperation {
                 self.axis.unwrap_or_default(),
                 self.num_outputs.map(|x| x as usize).or_else(|| {
                     // Opset 13: when no split sizes and no num_outputs, infer from output count
-                    if split.is_none() { Some(self.outputs.len()) } else { None }
+                    if split.is_none() {
+                        Some(self.outputs.len())
+                    } else {
+                        None
+                    }
                 }),
                 output_id,
                 rng,

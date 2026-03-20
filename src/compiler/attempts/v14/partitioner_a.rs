@@ -61,8 +61,7 @@ pub fn plan(
     } else {
         phase_boundaries.len() + 1
     };
-    let lane_result =
-        assign_lanes(graph, &dep_info, &phase_assignments, num_phases, num_lanes);
+    let lane_result = assign_lanes(graph, &dep_info, &phase_assignments, num_phases, num_lanes);
 
     // Step 5: Build span NanoGraphs.
     build_phases(
@@ -214,9 +213,8 @@ fn find_pinch_points(
 
         // Check if this is a local minimum within a window.
         let window = 5.min(i).min(n - 1 - i);
-        let is_local_min = (1..=window).all(|d| {
-            profile[i] <= profile[i - d] && profile[i] <= profile[i + d]
-        });
+        let is_local_min =
+            (1..=window).all(|d| profile[i] <= profile[i - d] && profile[i] <= profile[i + d]);
 
         if is_local_min {
             candidates.push((i, val));
@@ -416,8 +414,7 @@ fn assign_lanes(
         }
 
         // Sort components by total atoms (descending) for greedy bin-packing.
-        let mut sorted_components: Vec<(Vec<usize>, u64)> =
-            components.into_values().collect();
+        let mut sorted_components: Vec<(Vec<usize>, u64)> = components.into_values().collect();
         sorted_components.sort_by(|a, b| b.1.cmp(&a.1));
 
         // Greedy bin-packing: assign each component to the least-loaded lane.
@@ -511,8 +508,7 @@ fn build_phases(
 
     // For each phase+lane, collect the group indices.
     // Duplicated groups are added to EVERY lane that consumes them.
-    let mut phase_lane_groups: Vec<Vec<Vec<usize>>> =
-        vec![vec![Vec::new(); num_lanes]; num_phases];
+    let mut phase_lane_groups: Vec<Vec<Vec<usize>>> = vec![vec![Vec::new(); num_lanes]; num_phases];
 
     // First, place non-duplicated groups.
     for gi in 0..n {
@@ -658,16 +654,24 @@ fn build_span(
 
             // External producer. Add its atom range as an input.
             let producer = &groups[pi];
-            external_ranges.entry(producer.base_id.0).or_insert_with(|| AtomRange {
-                base: producer.base_id,
-                count: producer.count,
-                dtype: producer.output_dtype,
-            });
+            external_ranges
+                .entry(producer.base_id.0)
+                .or_insert_with(|| AtomRange {
+                    base: producer.base_id,
+                    count: producer.count,
+                    dtype: producer.output_dtype,
+                });
         }
 
         // Also check if any InputRef references an input tensor.
         for input_ref in &group.inputs {
-            collect_input_tensor_refs(graph, input_ref, group.count, group.atom_offset, &mut external_ranges);
+            collect_input_tensor_refs(
+                graph,
+                input_ref,
+                group.count,
+                group.atom_offset,
+                &mut external_ranges,
+            );
         }
 
         // For reduce ops, check the reduce stride range for input tensor refs.
@@ -695,30 +699,35 @@ fn build_span(
         // For IndirectLoad, check table_base.
         if let ScalarOp::IndirectLoad { table_base } = &group.op {
             // Check if table_base is in an input tensor.
-            let in_input_tensor = graph.input_tensors().iter().any(|it| {
-                table_base.0 >= it.base_id.0 && table_base.0 < it.base_id.0 + it.count
-            });
+            let in_input_tensor = graph
+                .input_tensors()
+                .iter()
+                .any(|it| table_base.0 >= it.base_id.0 && table_base.0 < it.base_id.0 + it.count);
             if in_input_tensor {
                 // Will be picked up by collect_input_tensor_refs via the group's InputRef.
                 // Also add the input tensor range explicitly.
                 for it in graph.input_tensors() {
                     if table_base.0 >= it.base_id.0 && table_base.0 < it.base_id.0 + it.count {
-                        external_ranges.entry(it.base_id.0).or_insert_with(|| AtomRange {
-                            base: it.base_id,
-                            count: it.count,
-                            dtype: it.dtype,
-                        });
+                        external_ranges
+                            .entry(it.base_id.0)
+                            .or_insert_with(|| AtomRange {
+                                base: it.base_id,
+                                count: it.count,
+                                dtype: it.dtype,
+                            });
                         break;
                     }
                 }
             } else if let Some(pi) = graph.find_group_idx(*table_base) {
                 if !my_group_set.contains(&pi) {
                     let producer = &groups[pi];
-                    external_ranges.entry(producer.base_id.0).or_insert_with(|| AtomRange {
-                        base: producer.base_id,
-                        count: producer.count,
-                        dtype: producer.output_dtype,
-                    });
+                    external_ranges
+                        .entry(producer.base_id.0)
+                        .or_insert_with(|| AtomRange {
+                            base: producer.base_id,
+                            count: producer.count,
+                            dtype: producer.output_dtype,
+                        });
                 }
             }
         }
@@ -768,8 +777,15 @@ fn collect_input_tensor_refs(
             let last = input_ref.resolve(atom_offset + count - 1);
             vec![first, last]
         }
-        InputRef::Modular { base, stride, modulus } => {
-            vec![*base, AtomId((base.0 as i64 + *stride * (*modulus as i64 - 1)) as u64)]
+        InputRef::Modular {
+            base,
+            stride,
+            modulus,
+        } => {
+            vec![
+                *base,
+                AtomId((base.0 as i64 + *stride * (*modulus as i64 - 1)) as u64),
+            ]
         }
         InputRef::Explicit(ids) => {
             // Sample first, last, and middle.
@@ -788,11 +804,13 @@ fn collect_input_tensor_refs(
         // Check if this atom is in an input tensor.
         for it in graph.input_tensors() {
             if id.0 >= it.base_id.0 && id.0 < it.base_id.0 + it.count {
-                external_ranges.entry(it.base_id.0).or_insert_with(|| AtomRange {
-                    base: it.base_id,
-                    count: it.count,
-                    dtype: it.dtype,
-                });
+                external_ranges
+                    .entry(it.base_id.0)
+                    .or_insert_with(|| AtomRange {
+                        base: it.base_id,
+                        count: it.count,
+                        dtype: it.dtype,
+                    });
                 break;
             }
         }
@@ -829,11 +847,13 @@ fn collect_reduce_input_tensor_refs(
         let id = AtomId(ep);
         for it in graph.input_tensors() {
             if id.0 >= it.base_id.0 && id.0 < it.base_id.0 + it.count {
-                external_ranges.entry(it.base_id.0).or_insert_with(|| AtomRange {
-                    base: it.base_id,
-                    count: it.count,
-                    dtype: it.dtype,
-                });
+                external_ranges
+                    .entry(it.base_id.0)
+                    .or_insert_with(|| AtomRange {
+                        base: it.base_id,
+                        count: it.count,
+                        dtype: it.dtype,
+                    });
                 break;
             }
         }
@@ -895,21 +915,14 @@ fn build_span_nanograph(
         // Skip ahead if needed by allocating a dummy input tensor to fill the gap.
         if target > current_id {
             let gap = target - current_id;
-            span_graph.add_input_tensor(
-                GlobalId(u64::MAX - current_id),
-                gap,
-                DType::F32,
-            );
+            span_graph.add_input_tensor(GlobalId(u64::MAX - current_id), gap, DType::F32);
             current_id = target;
         }
 
         match item {
             PlaceItem::InputRange(range) => {
-                let base = span_graph.add_input_tensor(
-                    GlobalId(range.base.0),
-                    range.count,
-                    range.dtype,
-                );
+                let base =
+                    span_graph.add_input_tensor(GlobalId(range.base.0), range.count, range.dtype);
                 debug_assert_eq!(
                     base.0, target,
                     "Input range placed at wrong position: expected {}, got {}",
@@ -980,7 +993,14 @@ mod tests {
     }
 
     /// Helper: create a multiply group.
-    fn push_mul(g: &mut NanoGraph, count: u64, a: AtomId, a_stride: i64, b: AtomId, b_stride: i64) -> AtomId {
+    fn push_mul(
+        g: &mut NanoGraph,
+        count: u64,
+        a: AtomId,
+        a_stride: i64,
+        b: AtomId,
+        b_stride: i64,
+    ) -> AtomId {
         g.push_group(
             count,
             DType::F32,
@@ -990,8 +1010,14 @@ mod tests {
             },
             vec![],
             vec![
-                InputRef::Affine { base: a, stride: a_stride },
-                InputRef::Affine { base: b, stride: b_stride },
+                InputRef::Affine {
+                    base: a,
+                    stride: a_stride,
+                },
+                InputRef::Affine {
+                    base: b,
+                    stride: b_stride,
+                },
             ],
         )
     }
@@ -1038,11 +1064,7 @@ mod tests {
         assert_eq!(phases[0].spans.len(), 2);
 
         // One span should have the group, the other should be empty.
-        let total_groups: usize = phases[0]
-            .spans
-            .iter()
-            .map(|s| s.graph.num_groups())
-            .sum();
+        let total_groups: usize = phases[0].spans.iter().map(|s| s.graph.num_groups()).sum();
         assert_eq!(total_groups, 1);
     }
 
@@ -1181,9 +1203,9 @@ mod tests {
 
         // With 2 lanes, the two branches should be in different lanes.
         // Check that at least one phase has work on both lanes.
-        let has_parallel_phase = phases.iter().any(|p| {
-            p.spans.iter().filter(|s| s.graph.num_groups() > 0).count() > 1
-        });
+        let has_parallel_phase = phases
+            .iter()
+            .any(|p| p.spans.iter().filter(|s| s.graph.num_groups() > 0).count() > 1);
         assert!(
             has_parallel_phase,
             "Expected parallel execution of independent branches"
@@ -1329,7 +1351,10 @@ mod tests {
 
         // At least one active span should have inputs (the input tensor).
         let has_inputs = active_spans.iter().any(|s| !s.inputs.is_empty());
-        assert!(has_inputs, "Active spans should declare input tensor as input");
+        assert!(
+            has_inputs,
+            "Active spans should declare input tensor as input"
+        );
 
         for span in &active_spans {
             let errors = span.graph.validate();
@@ -1438,10 +1463,7 @@ mod tests {
                         base: w1.offset(row * k),
                         stride: 1,
                     },
-                    InputRef::Affine {
-                        base: x,
-                        stride: 1,
-                    },
+                    InputRef::Affine { base: x, stride: 1 },
                 ],
             );
             mul1.push(m_id);
@@ -1473,11 +1495,7 @@ mod tests {
                         base: w2.offset(row * hidden),
                         stride: 1,
                     },
-                    InputRef::Explicit(
-                        (0..hidden)
-                            .map(|i| res[i as usize])
-                            .collect(),
-                    ),
+                    InputRef::Explicit((0..hidden).map(|i| res[i as usize]).collect()),
                 ],
             );
             mul2.push(m_id);
@@ -1589,7 +1607,10 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine { base: a1, stride: 1 }],
+            vec![InputRef::Affine {
+                base: a1,
+                stride: 1,
+            }],
         );
 
         let a2 = push_literal(&mut g, 500);
@@ -1601,7 +1622,10 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine { base: a2, stride: 1 }],
+            vec![InputRef::Affine {
+                base: a2,
+                stride: 1,
+            }],
         );
 
         g.outputs = vec![b1, b2];
@@ -1631,20 +1655,18 @@ mod tests {
                                 if produced.contains(&src.0) {
                                     // This is only a problem if the source isn't
                                     // declared as an input to span_j.
-                                    let is_declared = span_j.inputs.iter().any(|r| {
-                                        src.0 >= r.base.0 && src.0 < r.base.0 + r.count
-                                    });
+                                    let is_declared = span_j
+                                        .inputs
+                                        .iter()
+                                        .any(|r| src.0 >= r.base.0 && src.0 < r.base.0 + r.count);
                                     // If it's produced by span_i and consumed by span_j
                                     // in the same phase, that's an independence violation
                                     // unless it's a declared input (from a prior phase).
                                     if !is_declared {
                                         // Check if it's produced in a prior phase via the store.
                                         // For now, we just check the graph structure.
-                                        let is_input_tensor = span_j
-                                            .graph
-                                            .input_tensors()
-                                            .iter()
-                                            .any(|it| {
+                                        let is_input_tensor =
+                                            span_j.graph.input_tensors().iter().any(|it| {
                                                 src.0 >= it.base_id.0
                                                     && src.0 < it.base_id.0 + it.count
                                             });
