@@ -35,5 +35,12 @@ RUN rustup component add clippy rustfmt
 # Git LFS
 RUN git lfs install --system
 
+# First-party reference implementations (pinned to specific commits)
+# RWKV-7: official inference code from BlinkDL/RWKV-LM
+ARG RWKV_LM_COMMIT=c61a66cf725f2d504d84b3cb12eefaf77320c856
+RUN git clone https://github.com/BlinkDL/RWKV-LM.git /opt/rwkv-lm \
+    && cd /opt/rwkv-lm && git checkout $RWKV_LM_COMMIT
+ENV RWKV_LM_PATH=/opt/rwkv-lm
+
 # Default working directory
 WORKDIR /builds
