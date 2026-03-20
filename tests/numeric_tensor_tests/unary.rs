@@ -180,6 +180,42 @@ pub fn test_mish_chain_fp32(backend: &mut EvalBackend) {
     test_eq_f32(mish, mish_ref);
 }
 
+// Test Softplus via the MilliOpGraph path (Operation::eval), not direct
+// NumericTensor calls. This exercises the exact code path the ONNX test uses.
+// If this diverges from NDArray but the chain test doesn't, the bug is in
+// how the milli-op graph evaluator interacts with Vulkan.
+pub fn test_softplus_via_operation_fp32(backend: &mut EvalBackend) {
+    use std::collections::HashMap;
+    use whisper_tensor::graph::GlobalId;
+    use whisper_tensor::symbolic_graph::ops::{Operation, UnaryOperation, WhichUnaryOperation};
+
+    let n = 10000;
+    let vals: Vec<f32> = (0..n)
+        .map(|i| -10.0 + 20.0 * (i as f32) / (n as f32 - 1.0))
+        .collect();
+    let x = NumericTensor::from_vec(vals).to_dyn_rank();
+
+    let mut rng = wyrand::WyRand::new(42);
+    let input_id = GlobalId::new(&mut rng);
+    let output_id = GlobalId::new(&mut rng);
+    let softplus_op =
+        UnaryOperation::new(input_id, output_id, WhichUnaryOperation::Softplus, &mut rng);
+    let mut inputs = HashMap::new();
+    inputs.insert(input_id, x.clone());
+
+    let result_map: HashMap<GlobalId, NumericTensor<whisper_tensor::DynRank>> =
+        softplus_op.eval(backend, &inputs).unwrap().collect();
+    let result = result_map[&output_id].clone();
+
+    // Reference: same via NDArray
+    let mut nda = EvalBackend::NDArray;
+    let ref_map: HashMap<GlobalId, NumericTensor<whisper_tensor::DynRank>> =
+        softplus_op.eval(&mut nda, &inputs).unwrap().collect();
+    let reference = ref_map[&output_id].clone();
+
+    test_eq_f32(result, reference);
+}
+
 pub fn test_ln_bf16(backend: &mut EvalBackend) {
     let x = NumericTensor::from_vec(vec![
         bf16::from_f32(1.0),
