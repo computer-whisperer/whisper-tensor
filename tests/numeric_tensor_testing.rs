@@ -85,6 +85,7 @@ macro_rules! do_tests {
         do_test!($runner_fn, $runner_name, test_tanh_small_fp32);
         do_test!($runner_fn, $runner_name, test_mish_chain_fp32);
         do_test!($runner_fn, $runner_name, test_softplus_via_operation_fp32);
+        do_test!($runner_fn, $runner_name, test_mish_via_model_eval_fp32);
         do_test!($runner_fn, $runner_name, test_abs_fp32);
         do_test!($runner_fn, $runner_name, test_abs_bf16);
         do_test!($runner_fn, $runner_name, test_abs_f16);

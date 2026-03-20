@@ -216,6 +216,45 @@ pub fn test_softplus_via_operation_fp32(backend: &mut EvalBackend) {
     test_eq_f32(result, reference);
 }
 
+// Test Mish by loading the actual ONNX model through Model::eval, exactly
+// as the ONNX test runner does. Compares Vulkan vs NDArray.
+pub fn test_mish_via_model_eval_fp32(backend: &mut EvalBackend) {
+    use std::collections::HashMap;
+    use whisper_tensor::model::Model;
+
+    let model_bytes =
+        std::fs::read("libs/onnx/onnx/backend/test/data/node/test_mish/model.onnx").unwrap();
+    let mut rng = wyrand::WyRand::new(42);
+    let model = Model::new_from_onnx(&model_bytes, &mut rng, None).unwrap();
+
+    // Use the actual ONNX test input
+    let input_pb_bytes =
+        std::fs::read("libs/onnx/onnx/backend/test/data/node/test_mish/test_data_set_0/input_0.pb")
+            .unwrap();
+    use prost::Message;
+    let tensor_proto = whisper_tensor::onnx::TensorProto::decode(&*input_pb_bytes).unwrap();
+    let input_tensor: NumericTensor<whisper_tensor::DynRank> =
+        whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor::try_from(&tensor_proto)
+            .unwrap()
+            .into();
+
+    let mut inputs = HashMap::new();
+    inputs.insert("X".to_string(), input_tensor.clone());
+
+    // Run on the given backend
+    let result = model.eval(inputs, &mut (), None, backend).unwrap();
+
+    // Run on NDArray for reference
+    let mut nda = EvalBackend::NDArray;
+    let mut inputs_ref = HashMap::new();
+    inputs_ref.insert("X".to_string(), input_tensor);
+    let reference = model.eval(inputs_ref, &mut (), None, &mut nda).unwrap();
+
+    let result_y = &result["Y"];
+    let reference_y = &reference["Y"];
+    test_eq_f32(result_y.clone(), reference_y.clone());
+}
+
 pub fn test_ln_bf16(backend: &mut EvalBackend) {
     let x = NumericTensor::from_vec(vec![
         bf16::from_f32(1.0),
