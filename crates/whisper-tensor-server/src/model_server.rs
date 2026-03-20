@@ -217,7 +217,7 @@ pub fn default_loaders() -> Vec<Box<dyn Loader>> {
     use whisper_tensor_import::loaders::{
         AutoLoader, CogVideoXLoader, F5TtsLoader, FluxLoader, GgufLoader, KokoroLoader,
         OnnxLoader, PiperLoader, Rwkv7Loader, SD2Loader, SD15Loader, SD35Loader, SDXLLoader,
-        TransformersLoader, WhisperLoader,
+        TransformersLoader, WanLoader, WhisperLoader,
     };
     vec![
         Box::new(AutoLoader),
@@ -232,6 +232,7 @@ pub fn default_loaders() -> Vec<Box<dyn Loader>> {
         Box::new(SD35Loader),
         Box::new(FluxLoader),
         Box::new(CogVideoXLoader),
+        Box::new(WanLoader),
         Box::new(KokoroLoader),
         Box::new(PiperLoader),
         Box::new(F5TtsLoader),

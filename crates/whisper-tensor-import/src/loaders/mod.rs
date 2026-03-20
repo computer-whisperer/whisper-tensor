@@ -13,6 +13,7 @@ mod sd35;
 mod sd_xl;
 mod shared;
 mod transformers;
+mod wan;
 mod whisper;
 
 pub use self::auto::AutoLoader;
@@ -29,4 +30,5 @@ pub use self::sd2::SD2Loader;
 pub use self::sd15::SD15Loader;
 pub use self::sd35::SD35Loader;
 pub use self::transformers::TransformersLoader;
+pub use self::wan::WanLoader;
 pub use self::whisper::WhisperLoader;
