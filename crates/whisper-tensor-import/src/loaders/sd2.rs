@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use whisper_tensor::interfaces::ImageGenerationInterface;
 use whisper_tensor::loader::*;
 use whisper_tensor::metadata::TokenizerInfo;
 use whisper_tensor::model::Model;
@@ -83,7 +82,7 @@ impl Loader for SD2Loader {
 
         let interface = {
             let mut rng = rand::rng();
-            ImageGenerationInterface::new_single_te_cfg(
+            super::shared::interface_helpers::build_single_te_cfg_interface(
                 &mut rng,
                 TokenizerInfo::HFTokenizer("laion/CLIP-ViT-H-14-laion2B-s32B-b79K".to_string()),
                 model_dtype,

@@ -4,7 +4,6 @@ use memmap2::Mmap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use whisper_tensor::dtype::DType;
-use whisper_tensor::interfaces::ImageGenerationInterface;
 use whisper_tensor::loader::{LoadedInterface, LoadedModel, LoaderError, LoaderOutput};
 use whisper_tensor::metadata::TokenizerInfo;
 use whisper_tensor::model::Model;
@@ -318,7 +317,7 @@ pub(super) fn load_diffusers_sd3_pipeline(
 
     let interface = {
         let mut rng = rand::rng();
-        ImageGenerationInterface::new_sd3(
+        super::build_sd3_interface(
             &mut rng,
             TokenizerInfo::HFTokenizer(clip_tokenizer),
             TokenizerInfo::HFTokenizer(t5_tokenizer),

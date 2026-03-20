@@ -1,5 +1,6 @@
 mod onnx_model;
 mod rnn_supergraph;
+pub(crate) mod interface_helpers;
 
 use crate::onnx_graph::WeightStorageStrategy;
 use std::path::Path;
