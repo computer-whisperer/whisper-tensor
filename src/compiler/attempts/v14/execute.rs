@@ -71,63 +71,37 @@ pub fn execute(
             }
 
             // Gather this span's inputs from the store.
-            let zero_fills: Vec<(usize, NDArrayNumericTensor<DynRank>)> = span
-                .inputs
-                .iter()
-                .enumerate()
-                .filter(|(_, range)| !store.contains_key(&range.base))
-                .map(|(i, range)| (i, make_zeros(range.count as usize, range.dtype)))
-                .collect();
-            let missing = zero_fills.len();
-
-            for &(i, ref tensor) in &zero_fills {
-                store.insert(span.inputs[i].base, tensor.clone());
-            }
-
-            // Collect ALL store entries that fall within each span input range.
-            // A single span input range may be served by multiple store entries
-            // (e.g., when prior-phase outputs were merged into a wider range).
-            // The eval's find_input_idx handles offset-based placement.
+            //
+            // For each declared input range, find all overlapping store entries
+            // and extract the exact overlap. The key insight: a store entry may
+            // start BEFORE the input range (e.g., a weight tensor or a wide
+            // prior-phase output), so we must slice to the intersection and
+            // rebase the AtomId to the overlap start — otherwise eval's
+            // find_input_idx can't resolve it.
             let mut collected_inputs: Vec<(AtomId, NDArrayNumericTensor<DynRank>)> = Vec::new();
             for range in &span.inputs {
                 let range_lo = range.base.0;
                 let range_hi = range_lo + range.count;
 
-                // Find all store entries whose base falls within this range.
-                let mut found_any = false;
                 for (&base, tensor) in &store {
                     let t_lo = base.0;
                     let t_hi = t_lo + tensor.num_elements() as u64;
                     // Store entry overlaps this input range?
                     if t_lo < range_hi && t_hi > range_lo {
-                        // Slice to fit within the declared range if needed.
-                        let needed = range_hi.min(t_hi) - t_lo;
-                        if needed as usize > tensor.num_elements() {
-                            collected_inputs.push((base, tensor.clone()));
-                        } else if (needed as usize) < tensor.num_elements() {
-                            collected_inputs.push((base, slice_tensor_prefix(tensor, needed as usize)));
-                        } else {
-                            collected_inputs.push((base, tensor.clone()));
-                        }
-                        found_any = true;
+                        let overlap_start = t_lo.max(range_lo);
+                        let overlap_end = t_hi.min(range_hi);
+                        let overlap_count = (overlap_end - overlap_start) as usize;
+                        let skip = (overlap_start - t_lo) as usize;
+
+                        let sliced = slice_tensor_range(tensor, skip, overlap_count);
+                        collected_inputs.push((AtomId(overlap_start), sliced));
                     }
-                }
-                if !found_any {
-                    // Zero-fill was already handled above.
                 }
             }
             let span_inputs: Vec<(AtomId, &NDArrayNumericTensor<DynRank>)> = collected_inputs
                 .iter()
                 .map(|(base, tensor)| (*base, tensor))
                 .collect();
-
-            if missing > 0 && phase_idx == 0 && lane_idx == 0 {
-                eprintln!(
-                    "  Warning: {} of {} input ranges zero-filled (unsupported boundary ops)",
-                    missing,
-                    span.inputs.len()
-                );
-            }
 
             if phase_idx == 0 && lane_idx == 0 {
                 for (inp_idx, inp) in span.inputs.iter().enumerate() {
@@ -378,15 +352,23 @@ pub fn execute(
     store
 }
 
-/// Slice a tensor to its first `count` elements (flattened).
-fn slice_tensor_prefix(
+/// Extract a contiguous sub-range from a flattened tensor.
+///
+/// Skips the first `skip` elements, then takes the next `count` elements.
+/// Returns a 1D tensor of length `count`.
+fn slice_tensor_range(
     tensor: &NDArrayNumericTensor<DynRank>,
+    skip: usize,
     count: usize,
 ) -> NDArrayNumericTensor<DynRank> {
     use ndarray::{ArcArray, IxDyn};
+    // Fast path: no slicing needed.
+    if skip == 0 && count == tensor.num_elements() {
+        return tensor.clone();
+    }
     macro_rules! slice_variant {
         ($arr:expr, $variant:ident) => {{
-            let flat: Vec<_> = $arr.iter().take(count).copied().collect();
+            let flat: Vec<_> = $arr.iter().skip(skip).take(count).copied().collect();
             NDArrayNumericTensor::$variant(ArcArray::from_shape_vec(IxDyn(&[count]), flat).unwrap())
         }};
     }

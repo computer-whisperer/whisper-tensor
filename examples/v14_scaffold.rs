@@ -401,9 +401,10 @@ fn main() {
     use whisper_tensor::compiler::attempts::v14::partitioner_b;
     use whisper_tensor::nano_graph::AtomId;
 
-    // Collect ALL atom IDs that model outputs reference — including both
-    // segments of Concat tensors. The partitioner uses these to mark the
-    // right groups as span outputs.
+    // Collect output atom IDs — one per group that contributes to any model
+    // output. Walk all elements of each output tensor to find every unique
+    // group, since a tensor may span many groups (e.g. the LM-head logits)
+    // and segmented tensors scatter atoms across non-contiguous ranges.
     let b_output_ids: Vec<AtomId> = {
         let reverse_out: HashMap<GlobalId, GlobalId> = milli_graph
             .output_map
@@ -411,16 +412,16 @@ fn main() {
             .map(|m| m.iter().map(|(&int, &ext)| (ext, int)).collect())
             .unwrap_or_default();
         let mut ids = Vec::new();
+        let mut seen_groups = std::collections::HashSet::new();
         for om in &model_outputs {
             let int_id = reverse_out.get(&om.tensor_id).copied().unwrap_or(om.tensor_id);
             if let Some(tam) = result.tensor_map.get(&int_id) {
-                if tam.segments.is_empty() {
-                    ids.push(AtomId(tam.base_id.0));
-                } else {
-                    // Sample atoms from each segment to ensure all segments' groups
-                    // are identified as output groups.
-                    for i in (0..tam.count).step_by((tam.count as usize / 20).max(1)) {
-                        ids.push(tam.atom_id_for_element(i));
+                for i in 0..tam.count {
+                    let atom = tam.atom_id_for_element(i);
+                    if let Some(gi) = result.graph.find_group_idx(atom) {
+                        if seen_groups.insert(gi) {
+                            ids.push(atom);
+                        }
                     }
                 }
             }
