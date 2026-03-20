@@ -1,3 +1,4 @@
+pub mod allegro;
 pub mod cogvideox;
 pub mod flux;
 pub mod hunyuan_video;

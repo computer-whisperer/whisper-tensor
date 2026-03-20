@@ -1,3 +1,4 @@
+mod allegro;
 mod auto;
 mod cogvideox;
 mod f5_tts;
@@ -19,6 +20,7 @@ mod transformers;
 mod wan;
 mod whisper;
 
+pub use self::allegro::AllegroLoader;
 pub use self::auto::AutoLoader;
 pub use self::cogvideox::CogVideoXLoader;
 pub use self::f5_tts::F5TtsLoader;

@@ -97,6 +97,28 @@ impl CogVideoXTransformerConfig {
             norm_eps: 1e-5,
         }
     }
+
+    /// CogVideoX1.5-5B: same architecture as 5B, longer videos, higher resolution.
+    /// Uses pure 3D RoPE (no learnable positional embeddings).
+    /// Supports 81 frames (10 sec) at up to 1360x768.
+    pub fn cogvideox_1_5_5b() -> Self {
+        Self {
+            num_layers: 42,
+            num_attention_heads: 48,
+            attention_head_dim: 64,
+            in_channels: 16,
+            out_channels: 16,
+            text_embed_dim: 4096,
+            time_embed_dim: 512,
+            patch_size: 2,
+            sample_frames: 81,
+            sample_height: 96,  // 768 / 8
+            sample_width: 170,  // 1360 / 8
+            max_text_seq_length: 226,
+            use_rotary_positional_embeddings: true,
+            norm_eps: 1e-5,
+        }
+    }
 }
 
 // Shared helpers (slice_axis, split_chunks, ones_constant, layer_norm_bare, adaln_modulate)
