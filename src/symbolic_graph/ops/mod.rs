@@ -4,16 +4,20 @@ mod concat;
 mod constant;
 mod conv;
 mod conv_transpose;
+mod einsum;
 mod gather;
 mod gather_elements;
 mod lstm;
 mod misc;
+mod nlll;
 mod normalization;
 mod pool;
 mod quant_matmul;
 mod reduce;
 mod reshape;
 mod resize;
+mod reverse_sequence;
+mod sce;
 mod rotary_embedding;
 mod scan;
 mod scatter_elements;
@@ -31,6 +35,7 @@ pub use binary::{
     MaxOperation, MinOperation, ModuloOperation, PowOperation, WhichBinaryOperation,
 };
 pub use cast::{CastLikeOperation, CastOperation};
+pub use einsum::EinsumOperation;
 pub use concat::ConcatOperation;
 pub use constant::{ConstantOfShapeOperation, ConstantOperation};
 pub use conv::ConvOperation;
@@ -45,6 +50,7 @@ pub use misc::{
     RandomNormalLikeOperation, RangeOperation, ShrinkOperation, SpaceToDepthOperation,
     SumOperation, TileOperation, TriluOperation, WhereOperation,
 };
+pub use nlll::NegativeLogLikelihoodLossOperation;
 pub use pool::{AveragePoolOperation, MaxPoolOperation};
 pub use normalization::{
     BatchNormalizationOperation, GroupNormalizationOperation, InstanceNormalizationOperation,
@@ -58,6 +64,8 @@ pub use reduce::{
 };
 pub use reshape::{FlattenOperation, ReshapeOperation, SqueezeOperation, UnsqueezeOperation};
 pub use resize::ResizeOperation;
+pub use sce::SoftmaxCrossEntropyLossOperation;
+pub use reverse_sequence::ReverseSequenceOperation;
 pub use rotary_embedding::RotaryEmbeddingOperation;
 pub use scan::ScanOperation;
 pub use scatter_elements::ScatterElementsOperation;
@@ -325,6 +333,10 @@ pub enum AnyOperation {
     Compress(CompressOperation),
     ScatterElements(ScatterElementsOperation),
     MeanVarianceNormalization(MeanVarianceNormalizationOperation),
+    ReverseSequence(ReverseSequenceOperation),
+    NegativeLogLikelihoodLoss(NegativeLogLikelihoodLossOperation),
+    Einsum(EinsumOperation),
+    SoftmaxCrossEntropyLoss(SoftmaxCrossEntropyLossOperation),
 }
 
 macro_rules! delegate {
@@ -424,7 +436,11 @@ macro_rules! delegate {
             AnyOperation::Hardmax(x) => x.$name($($arg),*),
             AnyOperation::Compress(x) => x.$name($($arg),*),
             AnyOperation::ScatterElements(x) => x.$name($($arg),*),
-            AnyOperation::MeanVarianceNormalization(x) => x.$name($($arg),*)
+            AnyOperation::MeanVarianceNormalization(x) => x.$name($($arg),*),
+            AnyOperation::ReverseSequence(x) => x.$name($($arg),*),
+            AnyOperation::NegativeLogLikelihoodLoss(x) => x.$name($($arg),*),
+            AnyOperation::Einsum(x) => x.$name($($arg),*),
+            AnyOperation::SoftmaxCrossEntropyLoss(x) => x.$name($($arg),*)
                     }
         }
     }

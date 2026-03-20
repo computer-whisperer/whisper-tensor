@@ -2756,7 +2756,7 @@ impl SymbolicGraphMutator {
                 &onnx_node.attribute,
                 rng,
             )?)),
-            "ScatterElements" => Some(AnyOperation::ScatterElements(
+            "Scatter" | "ScatterElements" => Some(AnyOperation::ScatterElements(
                 ops::ScatterElementsOperation::from_onnx(
                     &input_tensors,
                     &output_tensors,
@@ -2766,6 +2766,38 @@ impl SymbolicGraphMutator {
             )),
             "MeanVarianceNormalization" => Some(AnyOperation::MeanVarianceNormalization(
                 ops::MeanVarianceNormalizationOperation::from_onnx(
+                    &input_tensors,
+                    &output_tensors,
+                    &onnx_node.attribute,
+                    rng,
+                )?,
+            )),
+            "ReverseSequence" => Some(AnyOperation::ReverseSequence(
+                ops::ReverseSequenceOperation::from_onnx(
+                    &input_tensors,
+                    &output_tensors,
+                    &onnx_node.attribute,
+                    rng,
+                )?,
+            )),
+            "NegativeLogLikelihoodLoss" => Some(AnyOperation::NegativeLogLikelihoodLoss(
+                ops::NegativeLogLikelihoodLossOperation::from_onnx(
+                    &input_tensors,
+                    &output_tensors,
+                    &onnx_node.attribute,
+                    rng,
+                )?,
+            )),
+            "Einsum" => Some(AnyOperation::Einsum(
+                ops::EinsumOperation::from_onnx(
+                    &input_tensors,
+                    &output_tensors,
+                    &onnx_node.attribute,
+                    rng,
+                )?,
+            )),
+            "SoftmaxCrossEntropyLoss" => Some(AnyOperation::SoftmaxCrossEntropyLoss(
+                ops::SoftmaxCrossEntropyLossOperation::from_onnx(
                     &input_tensors,
                     &output_tensors,
                     &onnx_node.attribute,

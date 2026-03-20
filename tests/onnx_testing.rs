@@ -908,14 +908,13 @@ macro_rules! do_tests {
         do_test!($runner_fn, $runner_name, test_dynamicquantizelinear_min_adjusted_expanded);
         */
 
-        //do_test!($runner_fn, $runner_name, test_edge_pad);
+        //do_test!($runner_fn, $runner_name, test_edge_pad); // duplicate: already at line ~1390
 
-        /*
         do_test!($runner_fn, $runner_name, test_einsum_batch_diagonal);
         do_test!($runner_fn, $runner_name, test_einsum_batch_matmul);
         do_test!($runner_fn, $runner_name, test_einsum_inner_prod);
         do_test!($runner_fn, $runner_name, test_einsum_sum);
-        do_test!($runner_fn, $runner_name, test_einsum_transpose);*/
+        do_test!($runner_fn, $runner_name, test_einsum_transpose);
 
         do_test!($runner_fn, $runner_name, test_elu);
         do_test!($runner_fn, $runner_name, test_elu_default);
@@ -1581,7 +1580,7 @@ macro_rules! do_tests {
         do_test!($runner_fn, $runner_name, test_reduce_sum_square_negative_axes_keepdims_random);
         do_test!($runner_fn, $runner_name, test_reduce_sum_square_negative_axes_keepdims_random_expanded);
 
-        //do_test!($runner_fn, $runner_name, test_reflect_pad);
+        //do_test!($runner_fn, $runner_name, test_reflect_pad); // duplicate: already at line ~1391
 
         /*
         do_test!($runner_fn, $runner_name, test_regex_full_match_basic);
@@ -1640,8 +1639,8 @@ macro_rules! do_tests {
         do_test!($runner_fn, $runner_name, test_resize_upsample_sizes_nearest_not_smaller);
         do_test!($runner_fn, $runner_name, test_resize_upsample_sizes_nearest_round_prefer_ceil_asymmetric);
 
-        //do_test!($runner_fn, $runner_name, test_reversesequence_batch);
-        //do_test!($runner_fn, $runner_name, test_reversesequence_time);
+        do_test!($runner_fn, $runner_name, test_reversesequence_batch);
+        do_test!($runner_fn, $runner_name, test_reversesequence_time);
 
 
         do_test!($runner_fn, $runner_name, test_rms_normalization_2d_axis0);
@@ -1695,23 +1694,23 @@ macro_rules! do_tests {
         do_test!($runner_fn, $runner_name, test_rotary_embedding_3d_input);
         do_test!($runner_fn, $runner_name, test_rotary_embedding_3d_input_expanded);
         do_test!($runner_fn, $runner_name, test_rotary_embedding_expanded);
-        //do_test!($runner_fn, $runner_name, test_rotary_embedding_interleaved);
-        //do_test!($runner_fn, $runner_name, test_rotary_embedding_interleaved_expanded);
+        do_test!($runner_fn, $runner_name, test_rotary_embedding_interleaved);
+        do_test!($runner_fn, $runner_name, test_rotary_embedding_interleaved_expanded);
         do_test!($runner_fn, $runner_name, test_rotary_embedding_no_position_ids);
         do_test!($runner_fn, $runner_name, test_rotary_embedding_no_position_ids_expanded);
-        //do_test!($runner_fn, $runner_name, test_rotary_embedding_no_position_ids_interleaved);
-        //do_test!($runner_fn, $runner_name, test_rotary_embedding_no_position_ids_interleaved_expanded);
+        do_test!($runner_fn, $runner_name, test_rotary_embedding_no_position_ids_interleaved);
+        do_test!($runner_fn, $runner_name, test_rotary_embedding_no_position_ids_interleaved_expanded);
         do_test!($runner_fn, $runner_name, test_rotary_embedding_no_position_ids_rotary_dim);
         do_test!($runner_fn, $runner_name, test_rotary_embedding_no_position_ids_rotary_dim_expanded);
-        //do_test!($runner_fn, $runner_name, test_rotary_embedding_with_interleaved_rotary_dim);
-        //do_test!($runner_fn, $runner_name, test_rotary_embedding_with_interleaved_rotary_dim_expanded);
+        do_test!($runner_fn, $runner_name, test_rotary_embedding_with_interleaved_rotary_dim);
+        do_test!($runner_fn, $runner_name, test_rotary_embedding_with_interleaved_rotary_dim_expanded);
         do_test!($runner_fn, $runner_name, test_rotary_embedding_with_rotary_dim);
         do_test!($runner_fn, $runner_name, test_rotary_embedding_with_rotary_dim_expanded);
 
         do_test!($runner_fn, $runner_name, test_round);
 
         do_test!($runner_fn, $runner_name, test_scan9_sum);
-        //do_test!($runner_fn, $runner_name, test_scan_sum);
+        //do_test!($runner_fn, $runner_name, test_scan_sum); // v8 Scan: needs batch dim handling
 
         do_test!($runner_fn, $runner_name, test_scatter_elements_with_axis);
         do_test!($runner_fn, $runner_name, test_scatter_elements_with_duplicate_indices);
@@ -1725,10 +1724,9 @@ macro_rules! do_tests {
         do_test!($runner_fn, $runner_name, test_scatternd_max);
         do_test!($runner_fn, $runner_name, test_scatternd_min);
         do_test!($runner_fn, $runner_name, test_scatternd_multiply);
-        /*do_test!($runner_fn, $runner_name, test_scatter_with_axis);
-        do_test!($runner_fn, $runner_name, test_scatter_without_axis);*/
+        do_test!($runner_fn, $runner_name, test_scatter_with_axis);
+        do_test!($runner_fn, $runner_name, test_scatter_without_axis);
 
-        /*
         do_test!($runner_fn, $runner_name, test_sce_mean);
         do_test!($runner_fn, $runner_name, test_sce_mean_3d);
         do_test!($runner_fn, $runner_name, test_sce_mean_3d_expanded);
@@ -1796,7 +1794,7 @@ macro_rules! do_tests {
         do_test!($runner_fn, $runner_name, test_sce_sum);
         do_test!($runner_fn, $runner_name, test_sce_sum_expanded);
         do_test!($runner_fn, $runner_name, test_sce_sum_log_prob);
-        do_test!($runner_fn, $runner_name, test_sce_sum_log_prob_expanded);*/
+        do_test!($runner_fn, $runner_name, test_sce_sum_log_prob_expanded);
 
         do_test!($runner_fn, $runner_name, test_selu);
         do_test!($runner_fn, $runner_name, test_selu_default);
@@ -2043,7 +2041,7 @@ macro_rules! do_tests {
         do_test!($runner_fn, $runner_name, test_where_example);
         do_test!($runner_fn, $runner_name, test_where_long_example);
 
-        //do_test!($runner_fn, $runner_name, test_wrap_pad);
+        //do_test!($runner_fn, $runner_name, test_wrap_pad); // duplicate: already at line ~1392
 
         do_test!($runner_fn, $runner_name, test_xor2d);
         do_test!($runner_fn, $runner_name, test_xor3d);

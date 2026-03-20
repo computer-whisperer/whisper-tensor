@@ -43,12 +43,8 @@ impl ScanOperation {
             inner_graph
         };
 
-        let scan_inputs_start = if core_opset_version < 9 {
-            //1
-            panic!("We don't support this version of scan!")
-        } else {
-            0
-        };
+        // In opset < 9, input[0] is an optional sequence_lens tensor (skip it).
+        let scan_inputs_start = if core_opset_version < 9 { 1 } else { 0 };
 
         let num_scan_inputs = query_attribute_int(attributes, "num_scan_inputs")
             .ok_or(ONNXDecodingError::MissingField("num_scan_inputs"))?;
@@ -61,7 +57,7 @@ impl ScanOperation {
         let scan_output_axes = query_attribute_ints(attributes, "scan_output_axes");
         let scan_output_directions = query_attribute_ints(attributes, "scan_output_directions");
 
-        let state_inputs = inputs[scan_inputs_start..num_state_tensors].to_vec();
+        let state_inputs = inputs[scan_inputs_start..scan_inputs_start + num_state_tensors].to_vec();
         let scan_inputs = inputs[scan_inputs_start + num_state_tensors..].to_vec();
 
         let state_outputs = outputs[..num_state_tensors].to_vec();
