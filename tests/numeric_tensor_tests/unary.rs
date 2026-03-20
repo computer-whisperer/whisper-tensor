@@ -148,6 +148,13 @@ pub fn test_mish_chain_fp32(backend: &mut EvalBackend) {
     // Step 1: exp(x)
     let exp_x = x.exp(backend).unwrap();
     let exp_x_ref = x.exp(&mut nda).unwrap();
+    // Verify we're actually testing the target backend, not silently falling back
+    if matches!(backend, EvalBackend::Vulkan(_)) {
+        assert!(
+            !matches!(exp_x, NumericTensor::NDArray(_)),
+            "exp fell back to NDArray — chain test is not exercising Vulkan"
+        );
+    }
     test_eq_f32(exp_x.clone(), exp_x_ref.clone());
 
     // Step 2: 1 + exp(x)
