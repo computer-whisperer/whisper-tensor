@@ -60,32 +60,33 @@ pub fn plan(
     // Step 2: Compute depth for each group.
     let depths = compute_depths(n, &producers);
 
-    // Step 3: Form wavefronts (groups at the same depth).
-    let max_depth = depths.iter().copied().max().unwrap_or(0);
-    let mut wavefronts: Vec<Vec<usize>> = vec![vec![]; max_depth + 1];
-    for (gi, &depth) in depths.iter().enumerate() {
-        wavefronts[depth].push(gi);
-    }
+    // Step 3: Assign lanes and compute phases.
+    //
+    // Lanes first, phases second. Groups at the same depth are independent
+    // and get distributed across lanes via bin-packing. Phases are then
+    // determined by cross-lane dependencies: a group is in the same phase
+    // as its producer if they share a lane, otherwise it needs a new phase
+    // (barrier) to wait for the cross-lane data.
+    let (lane_assignments, phase_assignments) =
+        assign_lanes_and_phases(n, num_lanes, &producers, &depths, groups);
 
-    // Step 4: Merge wavefronts into phases.
-    let phase_assignments = merge_wavefronts(&wavefronts, &producers, &successors, n);
-
-    // Step 5: Determine which groups are in each phase.
+    // Step 4: Determine which groups are in each phase.
     let num_phases = phase_assignments.iter().copied().max().unwrap_or(0) + 1;
     let mut phase_groups: Vec<Vec<usize>> = vec![vec![]; num_phases];
     for (gi, &phase) in phase_assignments.iter().enumerate() {
         phase_groups[phase].push(gi);
     }
 
-    // Step 6: Identify which groups are output-relevant.
+    // Step 5: Identify which groups are output-relevant.
     let output_group_set = identify_output_groups(graph, output_atom_ids);
 
-    // Step 7: For each phase, assign groups to lanes and build spans.
+    // Step 6: For each phase, build spans using pre-assigned lanes.
     let mut phases = Vec::with_capacity(num_phases);
     for phase_idx in 0..num_phases {
-        let phase = build_phase(
+        let phase = build_phase_from_lanes(
             graph,
             &phase_groups[phase_idx],
+            &lane_assignments,
             &phase_assignments,
             &producers,
             &successors,
@@ -148,7 +149,117 @@ fn compute_depths(n: usize, producers: &[Vec<usize>]) -> Vec<usize> {
     depths
 }
 
-// ─── Wavefront merging ─────────────────────────────────────────────────────
+// ─── Lanes-first scheduling ───────────────────────────────────────────────
+
+/// Assign each group to a lane, then compute the minimum phase for each group.
+///
+/// Lane assignment strategy:
+/// - Groups with all producers on a single lane stay on that lane (preserves
+///   chains, avoids phase boundaries from cross-lane deps).
+/// - Groups with producers on multiple lanes go to the producer lane with
+///   the most atoms (minimizes the dominant cross-lane penalty).
+/// - Groups with no producers (roots) are distributed across lanes via
+///   least-loaded bin-packing.
+///
+/// Within each depth level, groups whose producers don't constrain them to
+/// a specific lane are distributed for load balance.
+///
+/// Phases are determined by cross-lane dependencies: a group is in the same
+/// phase as its producers if they share a lane, otherwise it needs a later
+/// phase (barrier) to wait for cross-lane data.
+fn assign_lanes_and_phases(
+    n: usize,
+    num_lanes: usize,
+    producers: &[Vec<usize>],
+    depths: &[usize],
+    groups: &[AtomGroup],
+) -> (Vec<usize>, Vec<usize>) {
+    let mut lane_of = vec![0usize; n];
+    let mut phase_of = vec![0usize; n];
+
+    let max_depth = depths.iter().copied().max().unwrap_or(0);
+
+    // Collect groups by depth.
+    let mut by_depth: Vec<Vec<usize>> = vec![vec![]; max_depth + 1];
+    for gi in 0..n {
+        by_depth[depths[gi]].push(gi);
+    }
+
+    let mut lane_atoms: Vec<u64> = vec![0; num_lanes];
+
+    for depth in 0..=max_depth {
+        // Separate groups into "constrained" (have producers → prefer their lane)
+        // and "free" (no producers → distribute for load balance).
+        let mut constrained: Vec<(usize, u64)> = Vec::new();
+        let mut free: Vec<(usize, u64)> = Vec::new();
+
+        for &gi in &by_depth[depth] {
+            if producers[gi].is_empty() {
+                free.push((gi, groups[gi].count));
+            } else {
+                constrained.push((gi, groups[gi].count));
+            }
+        }
+
+        // Combine all groups at this depth and sort by atom count desc.
+        let mut all_items: Vec<(usize, u64)> = by_depth[depth]
+            .iter()
+            .map(|&gi| (gi, groups[gi].count))
+            .collect();
+        all_items.sort_by(|a, b| b.1.cmp(&a.1));
+
+        for (gi, atoms) in all_items {
+            let chosen = if producers[gi].is_empty() {
+                // Root group: least-loaded lane.
+                (0..num_lanes)
+                    .min_by_key(|&l| lane_atoms[l])
+                    .unwrap()
+            } else {
+                // Find which lanes our producers are on, weighted by atom count.
+                let mut lane_weight: Vec<u64> = vec![0; num_lanes];
+                for &pi in &producers[gi] {
+                    lane_weight[lane_of[pi]] += groups[pi].count;
+                }
+
+                // Find the dominant producer lane and the least-loaded lane.
+                let dominant = (0..num_lanes)
+                    .max_by_key(|&l| lane_weight[l])
+                    .unwrap();
+                let least_loaded = (0..num_lanes)
+                    .min_by_key(|&l| lane_atoms[l])
+                    .unwrap();
+
+                // Stay with producer if it avoids a cross-lane dep AND the
+                // lane isn't severely overloaded. Otherwise distribute.
+                // "Severely overloaded" = more than 2x the least-loaded lane.
+                let min_load = lane_atoms[least_loaded];
+                if lane_atoms[dominant] <= min_load.saturating_mul(2).saturating_add(atoms) {
+                    dominant
+                } else {
+                    least_loaded
+                }
+            };
+
+            lane_of[gi] = chosen;
+            lane_atoms[chosen] += atoms;
+
+            // Phase = max over all producers, +1 if cross-lane.
+            let mut earliest = 0usize;
+            for &pi in &producers[gi] {
+                if lane_of[pi] == chosen {
+                    earliest = earliest.max(phase_of[pi]);
+                } else {
+                    earliest = earliest.max(phase_of[pi] + 1);
+                }
+            }
+            phase_of[gi] = earliest;
+        }
+    }
+
+    (lane_of, phase_of)
+}
+
+// ─── Wavefront merging (legacy, unused) ───────────────────────────────────
 
 /// Merge consecutive wavefronts into phases to reduce barrier count.
 ///
@@ -410,6 +521,63 @@ fn build_phase(
     // Sort each lane's work items by group index (topo order).
     for lane in &mut lane_work {
         lane.sort_by_key(|w| (w.group_idx, w.atom_offset));
+    }
+
+    // Build spans for each lane.
+    let spans: Vec<Span> = (0..num_lanes)
+        .map(|lane_idx| {
+            build_span(
+                graph,
+                &lane_work[lane_idx],
+                phase_assignments,
+                producers,
+                successors,
+                input_tensors,
+                output_group_set,
+                phase_idx,
+                num_phases,
+                &phase_group_set,
+            )
+        })
+        .collect();
+
+    Phase { spans }
+}
+
+/// Build a Phase using pre-assigned lane mappings.
+///
+/// Unlike `build_phase` which does its own bin-packing, this uses the lane
+/// assignments computed by `assign_lanes_and_phases`.
+fn build_phase_from_lanes(
+    graph: &NanoGraph,
+    phase_group_indices: &[usize],
+    lane_assignments: &[usize],
+    phase_assignments: &[usize],
+    producers: &[Vec<usize>],
+    successors: &[Vec<usize>],
+    num_lanes: usize,
+    input_tensors: &[InputTensor],
+    output_group_set: &HashSet<usize>,
+    phase_idx: usize,
+    num_phases: usize,
+) -> Phase {
+    let groups = graph.groups();
+    let phase_group_set: HashSet<usize> = phase_group_indices.iter().copied().collect();
+
+    // Distribute groups to lanes per the pre-computed assignment.
+    let mut lane_work: Vec<Vec<WorkItem>> = vec![vec![]; num_lanes];
+    for &gi in phase_group_indices {
+        let lane = lane_assignments[gi];
+        lane_work[lane].push(WorkItem {
+            group_idx: gi,
+            atom_offset: 0,
+            atom_count: groups[gi].count,
+        });
+    }
+
+    // Sort each lane's work items by group index (topo order).
+    for lane in &mut lane_work {
+        lane.sort_by_key(|w| w.group_idx);
     }
 
     // Build spans for each lane.
