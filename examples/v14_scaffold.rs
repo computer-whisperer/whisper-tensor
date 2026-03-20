@@ -1054,19 +1054,30 @@ fn main() {
     // (handles segmented Concat tensors correctly).
     println!("\n=== Partitioner B vs Milli Reference ===");
 
-    // Build atom lookup from B's store.
-    let mut b_atom_vals: HashMap<u64, f64> = HashMap::new();
-    for (atom_id, tensor) in &b_store {
-        let flat = tensor.flatten();
-        for i in 0..flat.num_elements() {
-            b_atom_vals.insert(atom_id.0 + i as u64, flat.get(&[i as u64]).unwrap().to_f64());
-        }
-    }
-
-    // Quick sanity: how many atoms are in the store vs how many we expect?
     let total_store_atoms: u64 = b_store.values().map(|t| t.num_elements() as u64).sum();
     println!("  Store: {} entries, {} total atoms", b_store.len(), total_store_atoms);
-    println!("  atom_vals lookup: {} entries", b_atom_vals.len());
+
+    // Build a sorted index for O(log n) atom lookup into the store.
+    // Each entry is (base_atom_id, tensor_ref). Sorted by base for binary search.
+    let mut store_index: Vec<(u64, &NDArrayNumericTensor<whisper_tensor::DynRank>)> =
+        b_store.iter().map(|(id, t)| (id.0, t)).collect();
+    store_index.sort_by_key(|&(base, _)| base);
+
+    /// Look up a single atom's value from the sorted store index.
+    /// Binary search for the entry whose range [base, base+count) contains the atom.
+    fn lookup_atom(store_index: &[(u64, &NDArrayNumericTensor<whisper_tensor::DynRank>)], atom: u64) -> Option<f64> {
+        // Find the last entry with base <= atom.
+        let idx = store_index.partition_point(|&(base, _)| base <= atom);
+        if idx == 0 { return None; }
+        let (base, tensor) = &store_index[idx - 1];
+        let offset = atom - base;
+        if offset < tensor.num_elements() as u64 {
+            let flat = tensor.flatten();
+            Some(flat.get(&[offset]).unwrap().to_f64())
+        } else {
+            None
+        }
+    }
 
     let mut b_all_match = true;
     for &(ext_id, _, _) in &output_range_mapping {
@@ -1082,7 +1093,7 @@ fn main() {
             for j in 0..n {
                 let m = milli_flat.get(&[j as u64]).unwrap().to_f64();
                 let atom = tam.atom_id_for_element(j as u64);
-                let Some(&bv) = b_atom_vals.get(&atom.0) else {
+                let Some(bv) = lookup_atom(&store_index, atom.0) else {
                     missing_atoms += 1;
                     continue;
                 };
