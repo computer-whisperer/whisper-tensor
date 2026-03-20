@@ -116,9 +116,28 @@ impl OnnxNodeTest {
 
             // Convert protobuf inputs to NumericTensor, fixing up dtype
             // mismatches from old ONNX test data (BF16/F16 stored as UINT16).
-            let inputs =
+            let mut inputs =
                 parse_tensors_with_dtype_fixup(&test_data_set.inputs, &model_input_info)
                     .map_err(|e| format!("Failed to parse inputs: {e}"))?;
+
+            // Fix tensor name mismatches: some ONNX test .pb files use
+            // different names than the model graph. Fall back to positional
+            // matching when names don't align.
+            let model_input_names: Vec<String> =
+                model_input_info.keys().cloned().collect();
+            if !model_input_names.is_empty()
+                && !inputs.keys().any(|k| model_input_names.contains(k))
+            {
+                let mut sorted_pb: Vec<_> = inputs.drain().collect();
+                sorted_pb.sort_by_key(|(name, _)| name.clone());
+                let mut sorted_model: Vec<_> = model_input_names;
+                sorted_model.sort();
+                inputs = sorted_pb
+                    .into_iter()
+                    .zip(sorted_model)
+                    .map(|((_, tensor), model_name)| (model_name, tensor))
+                    .collect();
+            }
 
             // Run the model
             let outputs = model
@@ -128,13 +147,27 @@ impl OnnxNodeTest {
             // Build output type info from actual model outputs for dtype fixup
             let output_type_info: HashMap<String, (DType, Vec<Option<u64>>)> = outputs
                 .iter()
-                .map(|(name, tensor)| {
-                    (name.clone(), (tensor.dtype(), vec![]))
-                })
+                .map(|(name, tensor)| (name.clone(), (tensor.dtype(), vec![])))
                 .collect();
-            let expected =
+            let mut expected =
                 parse_tensors_with_dtype_fixup(&test_data_set.outputs, &output_type_info)
                     .map_err(|e| format!("Failed to parse expected outputs: {e}"))?;
+
+            // Same name fixup for outputs
+            let output_names: Vec<String> = outputs.keys().cloned().collect();
+            if !output_names.is_empty()
+                && !expected.keys().any(|k| output_names.contains(k))
+            {
+                let mut sorted_pb: Vec<_> = expected.drain().collect();
+                sorted_pb.sort_by_key(|(name, _)| name.clone());
+                let mut sorted_model: Vec<_> = output_names;
+                sorted_model.sort();
+                expected = sorted_pb
+                    .into_iter()
+                    .zip(sorted_model)
+                    .map(|((_, tensor), model_name)| (model_name, tensor))
+                    .collect();
+            }
 
             // Compare outputs with expected values
             for (name, expected_tensor) in &expected {
@@ -631,29 +664,29 @@ macro_rules! do_tests {
         do_test!($runner_fn, $runner_name, test_cast_FLOAT16_to_DOUBLE);
         do_test!($runner_fn, $runner_name, test_cast_FLOAT16_to_FLOAT);
         //do_test!($runner_fn, $runner_name, test_cast_FLOAT16_to_FLOAT4E2M1);
-        //do_test!($runner_fn, $runner_name, test_cast_FLOAT16_to_FLOAT8E4M3FN);
+        do_test!($runner_fn, $runner_name, test_cast_FLOAT16_to_FLOAT8E4M3FN);
         //do_test!($runner_fn, $runner_name, test_cast_FLOAT16_to_FLOAT8E4M3FNUZ);
-        //do_test!($runner_fn, $runner_name, test_cast_FLOAT16_to_FLOAT8E5M2);
+        do_test!($runner_fn, $runner_name, test_cast_FLOAT16_to_FLOAT8E5M2);
         //do_test!($runner_fn, $runner_name, test_cast_FLOAT16_to_FLOAT8E5M2FNUZ);
         //do_test!($runner_fn, $runner_name, test_cast_FLOAT16_to_INT4);
         //do_test!($runner_fn, $runner_name, test_cast_FLOAT16_to_UINT4);
         //do_test!($runner_fn, $runner_name, test_cast_FLOAT4E2M1_to_FLOAT);
         //do_test!($runner_fn, $runner_name, test_cast_FLOAT4E2M1_to_FLOAT16);
-        //do_test!($runner_fn, $runner_name, test_cast_FLOAT8E4M3FN_to_FLOAT);
-        //do_test!($runner_fn, $runner_name, test_cast_FLOAT8E4M3FN_to_FLOAT16);
+        do_test!($runner_fn, $runner_name, test_cast_FLOAT8E4M3FN_to_FLOAT);
+        do_test!($runner_fn, $runner_name, test_cast_FLOAT8E4M3FN_to_FLOAT16);
         //do_test!($runner_fn, $runner_name, test_cast_FLOAT8E4M3FNUZ_to_FLOAT);
         //do_test!($runner_fn, $runner_name, test_cast_FLOAT8E4M3FNUZ_to_FLOAT16);
         //do_test!($runner_fn, $runner_name, test_cast_FLOAT8E5M2FNUZ_to_FLOAT);
         //do_test!($runner_fn, $runner_name, test_cast_FLOAT8E5M2FNUZ_to_FLOAT16);
-        //do_test!($runner_fn, $runner_name, test_cast_FLOAT8E5M2_to_FLOAT);
-        //do_test!($runner_fn, $runner_name, test_cast_FLOAT8E5M2_to_FLOAT16);
+        do_test!($runner_fn, $runner_name, test_cast_FLOAT8E5M2_to_FLOAT);
+        do_test!($runner_fn, $runner_name, test_cast_FLOAT8E5M2_to_FLOAT16);
         do_test!($runner_fn, $runner_name, test_cast_FLOAT_to_BFLOAT16);
         do_test!($runner_fn, $runner_name, test_cast_FLOAT_to_DOUBLE);
         do_test!($runner_fn, $runner_name, test_cast_FLOAT_to_FLOAT16);
         //do_test!($runner_fn, $runner_name, test_cast_FLOAT_to_FLOAT4E2M1);
-        //do_test!($runner_fn, $runner_name, test_cast_FLOAT_to_FLOAT8E4M3FN);
+        do_test!($runner_fn, $runner_name, test_cast_FLOAT_to_FLOAT8E4M3FN);
         //do_test!($runner_fn, $runner_name, test_cast_FLOAT_to_FLOAT8E4M3FNUZ);
-        //do_test!($runner_fn, $runner_name, test_cast_FLOAT_to_FLOAT8E5M2);
+        do_test!($runner_fn, $runner_name, test_cast_FLOAT_to_FLOAT8E5M2);
         //do_test!($runner_fn, $runner_name, test_cast_FLOAT_to_FLOAT8E5M2FNUZ);
         //do_test!($runner_fn, $runner_name, test_cast_FLOAT_to_INT4);
         //do_test!($runner_fn, $runner_name, test_cast_FLOAT_to_STRING);
@@ -673,14 +706,14 @@ macro_rules! do_tests {
         do_test!($runner_fn, $runner_name, test_castlike_FLOAT16_to_FLOAT);
         do_test!($runner_fn, $runner_name, test_castlike_FLOAT16_to_FLOAT_expanded);
 
-        //do_test!($runner_fn, $runner_name, test_castlike_FLOAT8E4M3FN_to_FLOAT);
-        //do_test!($runner_fn, $runner_name, test_castlike_FLOAT8E4M3FN_to_FLOAT_expanded);
+        //do_test!($runner_fn, $runner_name, test_castlike_FLOAT8E4M3FN_to_FLOAT); // model uses FNUZ internally
+        //do_test!($runner_fn, $runner_name, test_castlike_FLOAT8E4M3FN_to_FLOAT_expanded); // also uses FNUZ
         //do_test!($runner_fn, $runner_name, test_castlike_FLOAT8E4M3FNUZ_to_FLOAT);
         //do_test!($runner_fn, $runner_name, test_castlike_FLOAT8E4M3FNUZ_to_FLOAT_expanded);
         //do_test!($runner_fn, $runner_name, test_castlike_FLOAT8E5M2FNUZ_to_FLOAT);
         //do_test!($runner_fn, $runner_name, test_castlike_FLOAT8E5M2FNUZ_to_FLOAT_expanded);
-        //do_test!($runner_fn, $runner_name, test_castlike_FLOAT8E5M2_to_FLOAT);
-        //do_test!($runner_fn, $runner_name, test_castlike_FLOAT8E5M2_to_FLOAT_expanded);
+        //do_test!($runner_fn, $runner_name, test_castlike_FLOAT8E5M2_to_FLOAT); // model uses FNUZ internally
+        //do_test!($runner_fn, $runner_name, test_castlike_FLOAT8E5M2_to_FLOAT_expanded); // also uses FNUZ
         do_test!($runner_fn, $runner_name, test_castlike_FLOAT_to_BFLOAT16);
         do_test!($runner_fn, $runner_name, test_castlike_FLOAT_to_BFLOAT16_expanded);
 
@@ -689,25 +722,25 @@ macro_rules! do_tests {
         do_test!($runner_fn, $runner_name, test_castlike_FLOAT_to_FLOAT16);
         do_test!($runner_fn, $runner_name, test_castlike_FLOAT_to_FLOAT16_expanded);
 
-        //do_test!($runner_fn, $runner_name, test_castlike_FLOAT_to_FLOAT8E4M3FN);
-        //do_test!($runner_fn, $runner_name, test_castlike_FLOAT_to_FLOAT8E4M3FN_expanded);
+        //do_test!($runner_fn, $runner_name, test_castlike_FLOAT_to_FLOAT8E4M3FN); // test pb name mismatch
+        do_test!($runner_fn, $runner_name, test_castlike_FLOAT_to_FLOAT8E4M3FN_expanded);
         //do_test!($runner_fn, $runner_name, test_castlike_FLOAT_to_FLOAT8E4M3FNUZ);
         //do_test!($runner_fn, $runner_name, test_castlike_FLOAT_to_FLOAT8E4M3FNUZ_expanded);
-        //do_test!($runner_fn, $runner_name, test_castlike_FLOAT_to_FLOAT8E5M2);
-        //do_test!($runner_fn, $runner_name, test_castlike_FLOAT_to_FLOAT8E5M2_expanded);
+        //do_test!($runner_fn, $runner_name, test_castlike_FLOAT_to_FLOAT8E5M2); // test pb name mismatch
+        do_test!($runner_fn, $runner_name, test_castlike_FLOAT_to_FLOAT8E5M2_expanded);
         //do_test!($runner_fn, $runner_name, test_castlike_FLOAT_to_FLOAT8E5M2FNUZ);
         //do_test!($runner_fn, $runner_name, test_castlike_FLOAT_to_FLOAT8E5M2FNUZ_expanded);
         //do_test!($runner_fn, $runner_name, test_castlike_FLOAT_to_STRING);
         //do_test!($runner_fn, $runner_name, test_castlike_FLOAT_to_STRING_expanded);
         //do_test!($runner_fn, $runner_name, test_castlike_STRING_to_FLOAT);
         //do_test!($runner_fn, $runner_name, test_castlike_STRING_to_FLOAT_expanded);
-        //do_test!($runner_fn, $runner_name, test_cast_no_saturate_FLOAT16_to_FLOAT8E4M3FN);
+        do_test!($runner_fn, $runner_name, test_cast_no_saturate_FLOAT16_to_FLOAT8E4M3FN);
         //do_test!($runner_fn, $runner_name, test_cast_no_saturate_FLOAT16_to_FLOAT8E4M3FNUZ);
-        //do_test!($runner_fn, $runner_name, test_cast_no_saturate_FLOAT16_to_FLOAT8E5M2);
+        do_test!($runner_fn, $runner_name, test_cast_no_saturate_FLOAT16_to_FLOAT8E5M2);
         //do_test!($runner_fn, $runner_name, test_cast_no_saturate_FLOAT16_to_FLOAT8E5M2FNUZ);
-        //do_test!($runner_fn, $runner_name, test_cast_no_saturate_FLOAT_to_FLOAT8E4M3FN);
+        do_test!($runner_fn, $runner_name, test_cast_no_saturate_FLOAT_to_FLOAT8E4M3FN);
         //do_test!($runner_fn, $runner_name, test_cast_no_saturate_FLOAT_to_FLOAT8E4M3FNUZ);
-        //do_test!($runner_fn, $runner_name, test_cast_no_saturate_FLOAT_to_FLOAT8E5M2);
+        do_test!($runner_fn, $runner_name, test_cast_no_saturate_FLOAT_to_FLOAT8E5M2);
         //do_test!($runner_fn, $runner_name, test_cast_no_saturate_FLOAT_to_FLOAT8E5M2FNUZ);
         //do_test!($runner_fn, $runner_name, test_cast_STRING_to_FLOAT);
         //do_test!($runner_fn, $runner_name, test_cast_UINT4_to_FLOAT);

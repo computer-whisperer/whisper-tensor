@@ -1277,6 +1277,38 @@ impl TryFrom<&onnx::TensorProto> for NDArrayNumericTensor<DynRank> {
                         .collect::<Vec<_>>(),
                     &shape,
                 )?,
+                DType::F8E4M3 => NDArrayNumericTensor::from_vec_shape(
+                    tensor
+                        .int32_data
+                        .iter()
+                        .map(|x| float8::F8E4M3::from_bits(*x as u8))
+                        .collect::<Vec<_>>(),
+                    &shape,
+                )?,
+                DType::F8E5M2 => NDArrayNumericTensor::from_vec_shape(
+                    tensor
+                        .int32_data
+                        .iter()
+                        .map(|x| float8::F8E5M2::from_bits(*x as u8))
+                        .collect::<Vec<_>>(),
+                    &shape,
+                )?,
+                DType::F16 => NDArrayNumericTensor::from_vec_shape(
+                    tensor
+                        .int32_data
+                        .iter()
+                        .map(|x| half::f16::from_bits(*x as u16))
+                        .collect::<Vec<_>>(),
+                    &shape,
+                )?,
+                DType::BF16 => NDArrayNumericTensor::from_vec_shape(
+                    tensor
+                        .int32_data
+                        .iter()
+                        .map(|x| half::bf16::from_bits(*x as u16))
+                        .collect::<Vec<_>>(),
+                    &shape,
+                )?,
                 _ => Err(ONNXDecodingError::UnsupportedONNX(
                     "Unsupported dtype in int32_data field!".to_string(),
                 ))?,
