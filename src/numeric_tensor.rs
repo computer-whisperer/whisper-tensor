@@ -332,6 +332,11 @@ impl<R: Rank> NumericTensor<R> {
         Ok(NumericTensor::NDArray(self.to_ndarray()?.ln()?))
     }
 
+    /// Element-wise ln(1 + x), numerically stable for small x.
+    pub fn log1p(&self, _backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
+        Ok(NumericTensor::NDArray(self.to_ndarray()?.log1p()?))
+    }
+
     /// Create a tensor of ones with the same shape and dtype as self.
     pub fn ones_like(&self, _backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
         Ok(NumericTensor::NDArray(self.to_ndarray()?.ones_like()?))

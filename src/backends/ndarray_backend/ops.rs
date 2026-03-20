@@ -949,6 +949,7 @@ pub enum NativeNumericTensorUnaryOperation {
     Floor,
     Ceil,
     Softplus,
+    Log1p,
 }
 
 impl core::fmt::Display for NativeNumericTensorUnaryOperation {
@@ -974,11 +975,12 @@ impl NativeNumericTensorUnaryOperation {
                 a.mapv(|x| T::one() / (T::one() + T::exp(-x))).to_shared()
             }
             NativeNumericTensorUnaryOperation::Softplus => {
-                // Numerically stable: softplus(x) = max(x, 0) + ln(1 + exp(-|x|))
-                a.mapv(|x| x.max(T::zero()) + T::ln(T::one() + T::exp(-x.abs())))
+                // Numerically stable: softplus(x) = max(x, 0) + log1p(exp(-|x|))
+                a.mapv(|x| x.max(T::zero()) + T::exp(-x.abs()).ln_1p())
                     .to_shared()
             }
             NativeNumericTensorUnaryOperation::Log => a.mapv(|x| x.ln()).to_shared(),
+            NativeNumericTensorUnaryOperation::Log1p => a.mapv(|x| x.ln_1p()).to_shared(),
             NativeNumericTensorUnaryOperation::Floor => a.mapv(|x| x.floor()).to_shared(),
             NativeNumericTensorUnaryOperation::Ceil => a.mapv(|x| x.ceil()).to_shared(),
             /*_ => {

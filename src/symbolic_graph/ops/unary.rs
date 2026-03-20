@@ -129,21 +129,17 @@ impl Operation for UnaryOperation {
             WhichUnaryOperation::Exp => milli_graph::ops::SimpleUnaryOp::exp(&mut graph, a, rng),
             WhichUnaryOperation::Log => milli_graph::ops::SimpleUnaryOp::ln(&mut graph, a, rng),
             WhichUnaryOperation::Softplus => {
-                // Numerically stable: softplus(x) = max(x, 0) + ln(1 + exp(-|x|))
-                // Naive ln(1 + exp(x)) loses precision when x is very negative
-                // (exp(x) ≈ 0, so ln(1 + tiny) ≈ 0 with poor relative accuracy).
+                // Numerically stable: softplus(x) = max(x, 0) + log1p(exp(-|x|))
+                // Uses log1p for precision when exp(-|x|) is small.
                 let zero = milli_graph::ops::Constant::new_scalar(&mut graph, 0.0f32, rng);
                 let zero = milli_graph::ops::CastLike::push_new(&mut graph, zero, a, rng);
-                let one = milli_graph::ops::Constant::new_scalar(&mut graph, 1.0f32, rng);
-                let one = milli_graph::ops::CastLike::push_new(&mut graph, one, a, rng);
                 let abs_x = milli_graph::ops::SimpleUnaryOp::abs(&mut graph, a, rng);
                 let neg_abs_x = milli_graph::ops::SimpleUnaryOp::neg(&mut graph, abs_x, rng);
                 let exp_neg_abs = milli_graph::ops::SimpleUnaryOp::exp(&mut graph, neg_abs_x, rng);
-                let one_plus =
-                    milli_graph::ops::SimpleBinary::add(&mut graph, one, exp_neg_abs, rng);
-                let ln_part = milli_graph::ops::SimpleUnaryOp::ln(&mut graph, one_plus, rng);
+                let log1p_part =
+                    milli_graph::ops::SimpleUnaryOp::log1p(&mut graph, exp_neg_abs, rng);
                 let max_part = milli_graph::ops::SimpleBinary::max(&mut graph, a, zero, rng);
-                milli_graph::ops::SimpleBinary::add(&mut graph, max_part, ln_part, rng)
+                milli_graph::ops::SimpleBinary::add(&mut graph, max_part, log1p_part, rng)
             }
             WhichUnaryOperation::Neg => milli_graph::ops::SimpleUnaryOp::neg(&mut graph, a, rng),
             WhichUnaryOperation::Sqrt => milli_graph::ops::SimpleUnaryOp::sqrt(&mut graph, a, rng),
@@ -1131,20 +1127,17 @@ impl Node for MishOperation {
 impl Operation for MishOperation {
     fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, rng: &mut impl Rng) -> MilliOpGraph {
         // Mish(x) = x * tanh(softplus(x))
-        // Using numerically stable softplus: max(x, 0) + ln(1 + exp(-|x|))
+        // Using numerically stable softplus: max(x, 0) + log1p(exp(-|x|))
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let x = input_map[&self.input];
         let zero = milli_graph::ops::Constant::new_scalar(&mut graph, 0.0f32, rng);
         let zero = milli_graph::ops::CastLike::push_new(&mut graph, zero, x, rng);
-        let one = milli_graph::ops::Constant::new_scalar(&mut graph, 1.0f32, rng);
-        let one = milli_graph::ops::CastLike::push_new(&mut graph, one, x, rng);
         let abs_x = milli_graph::ops::SimpleUnaryOp::abs(&mut graph, x, rng);
         let neg_abs_x = milli_graph::ops::SimpleUnaryOp::neg(&mut graph, abs_x, rng);
         let exp_neg_abs = milli_graph::ops::SimpleUnaryOp::exp(&mut graph, neg_abs_x, rng);
-        let one_plus = milli_graph::ops::SimpleBinary::add(&mut graph, one, exp_neg_abs, rng);
-        let ln_part = milli_graph::ops::SimpleUnaryOp::ln(&mut graph, one_plus, rng);
+        let log1p_part = milli_graph::ops::SimpleUnaryOp::log1p(&mut graph, exp_neg_abs, rng);
         let max_part = milli_graph::ops::SimpleBinary::max(&mut graph, x, zero, rng);
-        let softplus = milli_graph::ops::SimpleBinary::add(&mut graph, max_part, ln_part, rng);
+        let softplus = milli_graph::ops::SimpleBinary::add(&mut graph, max_part, log1p_part, rng);
         let tanh_sp =
             milli_graph::ops::SimpleUnaryOp::trig(&mut graph, softplus, TrigOp::Tanh, rng);
         let out_tid = milli_graph::ops::SimpleBinary::mul(&mut graph, x, tanh_sp, rng);

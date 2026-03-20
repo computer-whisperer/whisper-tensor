@@ -33,6 +33,8 @@ pub(crate) enum WhichSimpleUnaryOp {
         detect_negative: bool,
     },
     Erf,
+    /// ln(1 + x) — numerically stable for small x where ln(1+x) ≈ x.
+    Log1p,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -143,6 +145,9 @@ impl SimpleUnaryOp {
     }
     pub fn erf(graph: &mut MilliOpGraph, input: GlobalId, rng: &mut impl rand::Rng) -> GlobalId {
         Self::new_internal(graph, input, WhichSimpleUnaryOp::Erf, None, rng)
+    }
+    pub fn log1p(graph: &mut MilliOpGraph, input: GlobalId, rng: &mut impl rand::Rng) -> GlobalId {
+        Self::new_internal(graph, input, WhichSimpleUnaryOp::Log1p, None, rng)
     }
 }
 
@@ -257,6 +262,7 @@ impl Node for SimpleUnaryOp {
             WhichSimpleUnaryOp::IsNan => "IsNan",
             WhichSimpleUnaryOp::IsInf { .. } => "IsInf",
             WhichSimpleUnaryOp::Erf => "Erf",
+            WhichSimpleUnaryOp::Log1p => "Log1p",
         }
         .to_string()
     }
@@ -345,6 +351,7 @@ impl MilliOp for SimpleUnaryOp {
             } => input.is_inf(detect_positive, detect_negative)?,
             WhichSimpleUnaryOp::IsNan => input.is_nan(backend)?,
             WhichSimpleUnaryOp::Erf => input.erf(backend)?,
+            WhichSimpleUnaryOp::Log1p => input.log1p(backend)?,
         };
         Ok(Box::new([(self.output, out)].into_iter()))
     }

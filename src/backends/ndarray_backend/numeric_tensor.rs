@@ -654,6 +654,10 @@ impl<R: Rank> NDArrayNumericTensor<R> {
         Self::try_unary_op(self, NativeNumericTensorUnaryOperation::Log)
     }
 
+    pub fn log1p(&self) -> Result<Self, NDArrayNumericTensorError> {
+        Self::try_unary_op(self, NativeNumericTensorUnaryOperation::Log1p)
+    }
+
     pub fn floor(&self) -> Result<Self, NDArrayNumericTensorError> {
         Self::try_unary_op(self, NativeNumericTensorUnaryOperation::Floor)
     }
