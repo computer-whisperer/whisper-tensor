@@ -2,8 +2,8 @@ use crate::models::diffusion::sd_common::{CastingWeightManager, cos_op, sin_op};
 use crate::onnx_graph::Error;
 use crate::onnx_graph::WeightStorageStrategy;
 use crate::onnx_graph::operators::{
-    Add, Concat, Constant, Conv, GroupNormalization, LayerNormalization, MatMul, Mul, Resize,
-    RotaryEmbedding, Softmax, Transpose,
+    Add, Concat, Constant, Conv, LayerNormalization, MatMul, Mul, Resize, RotaryEmbedding,
+    Softmax, Transpose,
 };
 use crate::onnx_graph::pytorch::{
     cast, conv2d, div_scalar, gelu_pytorch_tanh, group_norm, linear, reshape, silu, unsqueeze,
@@ -215,7 +215,7 @@ fn precompute_cogvideox_3d_rope(
         })
         .collect();
 
-    let latent_frames = config.latent_frames();
+    let _latent_frames = config.latent_frames();
     let patch_h = config.patch_h();
     let patch_w = config.patch_w();
 
