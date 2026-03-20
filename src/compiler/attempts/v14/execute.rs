@@ -84,22 +84,39 @@ pub fn execute(
                 store.insert(span.inputs[i].base, tensor.clone());
             }
 
-            // Slice store tensors to match the span's declared input count.
-            let sliced_tensors: Vec<(AtomId, NDArrayNumericTensor<DynRank>)> = span
-                .inputs
-                .iter()
-                .map(|range| {
-                    let tensor = store.get(&range.base).unwrap();
-                    let needed = range.count as usize;
-                    let available = tensor.num_elements();
-                    if available > needed {
-                        (range.base, slice_tensor_prefix(tensor, needed))
-                    } else {
-                        (range.base, tensor.clone())
+            // Collect ALL store entries that fall within each span input range.
+            // A single span input range may be served by multiple store entries
+            // (e.g., when prior-phase outputs were merged into a wider range).
+            // The eval's find_input_idx handles offset-based placement.
+            let mut collected_inputs: Vec<(AtomId, NDArrayNumericTensor<DynRank>)> = Vec::new();
+            for range in &span.inputs {
+                let range_lo = range.base.0;
+                let range_hi = range_lo + range.count;
+
+                // Find all store entries whose base falls within this range.
+                let mut found_any = false;
+                for (&base, tensor) in &store {
+                    let t_lo = base.0;
+                    let t_hi = t_lo + tensor.num_elements() as u64;
+                    // Store entry overlaps this input range?
+                    if t_lo < range_hi && t_hi > range_lo {
+                        // Slice to fit within the declared range if needed.
+                        let needed = range_hi.min(t_hi) - t_lo;
+                        if needed as usize > tensor.num_elements() {
+                            collected_inputs.push((base, tensor.clone()));
+                        } else if (needed as usize) < tensor.num_elements() {
+                            collected_inputs.push((base, slice_tensor_prefix(tensor, needed as usize)));
+                        } else {
+                            collected_inputs.push((base, tensor.clone()));
+                        }
+                        found_any = true;
                     }
-                })
-                .collect();
-            let span_inputs: Vec<(AtomId, &NDArrayNumericTensor<DynRank>)> = sliced_tensors
+                }
+                if !found_any {
+                    // Zero-fill was already handled above.
+                }
+            }
+            let span_inputs: Vec<(AtomId, &NDArrayNumericTensor<DynRank>)> = collected_inputs
                 .iter()
                 .map(|(base, tensor)| (*base, tensor))
                 .collect();
@@ -127,24 +144,65 @@ pub fn execute(
                 }
             }
 
-            // For panicking spans, check what atom is missing.
+            // Exhaustive pre-check for the FIRST span that will panic.
+            // Only do this once (first non-empty span in phases 0-2).
             if phase_idx < 3 && span.graph.num_groups() > 0 {
-                // Pre-check: for each compute group, verify all InputRef sources exist.
-                for g in span.graph.groups() {
+                let mut found_missing = false;
+                'groups: for g in span.graph.groups() {
                     if matches!(g.op, crate::nano_graph::ScalarOp::Literal(_)) { continue; }
-                    for input in &g.inputs {
-                        let test_atom = input.resolve(g.atom_offset);
-                        if !span.graph.contains_atom(test_atom) {
-                            // Where is this atom in the MAIN graph?
-                            let main_gi = plan.graph.find_group_idx(test_atom);
-                            let main_ii = plan.graph.find_input_idx(test_atom);
-                            eprintln!(
-                                "  Phase {} lane {}: span group base={} references atom {} which is NOT in span. \
-                                 Main graph: group_idx={:?}, input_idx={:?}",
-                                phase_idx, lane_idx, g.base_id, test_atom,
-                                main_gi, main_ii.map(|(i,o)| (i, o)),
-                            );
-                            break;
+
+                    // Check every InputRef at every position.
+                    for (inp_idx, input) in g.inputs.iter().enumerate() {
+                        for pos in 0..g.count {
+                            let source = input.resolve(pos + g.atom_offset);
+                            if !span.graph.contains_atom(source) {
+                                let main_gi = plan.graph.find_group_idx(source);
+                                let main_ii = plan.graph.find_input_idx(source);
+                                let main_info = if let Some(gi) = main_gi {
+                                    let mg = &plan.graph.groups()[gi];
+                                    format!("group[{}] base={} count={} {:?}", gi, mg.base_id, mg.count, op_name(&mg.op))
+                                } else if let Some((ti, off)) = main_ii {
+                                    let it = &plan.graph.input_tensors()[ti];
+                                    format!("input_tensor[{}] base={} count={} off={}", ti, it.base_id, it.count, off)
+                                } else {
+                                    "NOT IN MAIN GRAPH EITHER".to_string()
+                                };
+                                eprintln!(
+                                    "  Phase {} lane {}: group base={} count={} input[{}] at pos={}: atom {} NOT in span. Main: {}",
+                                    phase_idx, lane_idx, g.base_id, g.count, inp_idx, pos, source, main_info,
+                                );
+                                found_missing = true;
+                                break 'groups;
+                            }
+                        }
+                    }
+
+                    // For Reduce ops, also check the stride range.
+                    if let crate::nano_graph::ScalarOp::Reduce { reduce_count, reduce_stride, .. } = &g.op {
+                        if *reduce_count > 1 && *reduce_stride != 0 {
+                            for input in &g.inputs {
+                                for pos in 0..g.count {
+                                    let base_atom = input.resolve(pos + g.atom_offset);
+                                    for k in 0..*reduce_count {
+                                        let atom = AtomId((base_atom.0 as i64 + k as i64 * reduce_stride) as u64);
+                                        if !span.graph.contains_atom(atom) {
+                                            let main_gi = plan.graph.find_group_idx(atom);
+                                            let main_info = if let Some(gi) = main_gi {
+                                                let mg = &plan.graph.groups()[gi];
+                                                format!("group[{}] base={} count={} {:?}", gi, mg.base_id, mg.count, op_name(&mg.op))
+                                            } else {
+                                                "NOT IN MAIN".to_string()
+                                            };
+                                            eprintln!(
+                                                "  Phase {} lane {}: REDUCE group base={} pos={} stride atom {} (k={}) NOT in span. Main: {}",
+                                                phase_idx, lane_idx, g.base_id, pos, atom, k, main_info,
+                                            );
+                                            found_missing = true;
+                                            break 'groups;
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -495,7 +553,22 @@ pub fn validate_spans(plan: &ExecutionPlan) -> Vec<String> {
                 }
             }
 
-            // Check 3: every span.inputs entry resolves in the span graph's input_tensors.
+            // Check 3: every atom in span.outputs is in the span graph.
+            for (out_idx, out) in span.outputs.iter().enumerate() {
+                for offset in [0, out.count / 2, out.count.saturating_sub(1)] {
+                    if offset >= out.count { continue; }
+                    let atom = AtomId(out.base.0 + offset);
+                    if !span.graph.contains_atom(atom) {
+                        errors.push(format!(
+                            "{}: span.outputs[{}] atom {} (base={} offset={}) not in span graph",
+                            prefix, out_idx, atom, out.base, offset
+                        ));
+                        break;
+                    }
+                }
+            }
+
+            // Check 4: every span.inputs entry resolves in the span graph's input_tensors.
             for (inp_idx, inp) in span.inputs.iter().enumerate() {
                 match span.graph.find_input_idx(inp.base) {
                     Some((_, offset)) => {

@@ -498,35 +498,40 @@ fn build_span(
             continue;
         }
 
+        // Determine which producer groups are internal vs external.
         for &pi in &producers[gi] {
             if span_compute_set.contains(&pi) {
-                // Producer is in this span, recurse to find its deps.
                 queue.push(pi);
             } else if is_literal_group(&groups[pi]) && groups[pi].count < LITERAL_INLINE_THRESHOLD {
-                // Small literal: inline into this span.
                 needed_internal_literals.insert(pi);
-            } else {
-                // External dependency: need it as an input.
-                // Record the full group as external.
-                let g = &groups[pi];
-                record_external_range(
-                    &mut needed_external_atoms,
-                    g.base_id,
-                    g.count,
-                    g.output_dtype,
-                );
             }
+            // External computed/large-literal groups are handled below
+            // via InputRef range analysis (not full-group recording).
         }
 
-        // Also check if group reads from input tensors.
+        // For each InputRef of this group, compute the exact source atom
+        // range and record external atoms that aren't produced by this span
+        // or covered by an inlined literal.
         let group = &groups[gi];
+        let all_internal = |atom: AtomId| -> bool {
+            // Check if atom is in a span compute group.
+            if let Some(idx) = graph.find_group_idx(atom) {
+                if span_compute_set.contains(&idx) { return true; }
+                if needed_internal_literals.contains(&idx) { return true; }
+            }
+            false
+        };
+
         for input in &group.inputs {
-            collect_input_tensor_deps(
-                input,
-                group.count,
-                group.atom_offset,
-                graph,
+            // Compute the source atom range for this InputRef.
+            let (lo, hi) = input_ref_source_range(input, group.count, group.atom_offset);
+
+            // Walk through main-graph groups/input_tensors in this range.
+            // Record external ones that we need.
+            collect_external_in_range(
+                graph, lo, hi, group.output_dtype,
                 input_tensors,
+                &span_compute_set, &needed_internal_literals,
                 &mut needed_external_atoms,
             );
         }
@@ -540,17 +545,23 @@ fn build_span(
         {
             if *reduce_count > 1 && *reduce_stride != 0 {
                 for input in &group.inputs {
-                    collect_reduce_deps(
-                        input,
-                        group,
-                        *reduce_count,
-                        *reduce_stride,
-                        graph,
+                    let first = input.resolve(group.atom_offset);
+                    let last = input.resolve(group.atom_offset + group.count - 1);
+                    let end_off = (*reduce_count as i64 - 1) * reduce_stride;
+                    let endpoints = [
+                        first.0,
+                        (first.0 as i64 + end_off) as u64,
+                        last.0,
+                        (last.0 as i64 + end_off) as u64,
+                    ];
+                    let lo = *endpoints.iter().min().unwrap();
+                    let hi = *endpoints.iter().max().unwrap();
+
+                    collect_external_in_range(
+                        graph, lo, hi, group.output_dtype,
                         input_tensors,
-                        &groups,
-                        &span_compute_set,
+                        &span_compute_set, &needed_internal_literals,
                         &mut needed_external_atoms,
-                        &mut needed_internal_literals,
                     );
                 }
             }
@@ -574,6 +585,15 @@ fn build_span(
                         );
                     }
                 }
+            } else if let Some((ti, _)) = graph.find_input_idx(*table_base) {
+                // Table is an input_tensor (weight in shape-only lowering).
+                let it = &input_tensors[ti];
+                record_external_range(
+                    &mut needed_external_atoms,
+                    it.base_id,
+                    it.count,
+                    it.dtype,
+                );
             }
         }
     }
@@ -594,7 +614,8 @@ fn build_span(
         }
     }
 
-    // Merge overlapping/adjacent external ranges for efficiency.
+    // Merge overlapping/adjacent external ranges. The executor handles
+    // partial fills by iterating all store entries within each range.
     let merged_external = merge_external_ranges(&needed_external_atoms);
 
     if phase_idx < 3 {
@@ -770,9 +791,9 @@ fn needs_output(
     span_compute_set: &HashSet<usize>,
     successors: &[Vec<usize>],
 ) -> bool {
-    if is_literal_op(&group.op) {
-        return false;
-    }
+    // Don't skip Literals — they might be adjacent to compute groups
+    // and get merged into a single input range by a consuming span.
+    // If a Literal has consumers in later phases, it must be output.
 
     let my_phase = phase_assignments[gi];
 
@@ -801,6 +822,88 @@ fn is_literal_group(group: &AtomGroup) -> bool {
 }
 
 /// Record an external atom range dependency.
+/// Compute the (lo, hi) inclusive source atom range for an InputRef.
+fn input_ref_source_range(input: &InputRef, count: u64, atom_offset: u64) -> (u64, u64) {
+    if count == 0 {
+        return (0, 0);
+    }
+    match input {
+        InputRef::Broadcast(base) => (base.0, base.0),
+        InputRef::Affine { .. } | InputRef::StridedBroadcast { .. } => {
+            let first = input.resolve(atom_offset);
+            let last = input.resolve(atom_offset + count - 1);
+            (first.0.min(last.0), first.0.max(last.0))
+        }
+        InputRef::Modular { base, stride, modulus } => {
+            let a = base.0;
+            let b = (base.0 as i64 + *stride * (*modulus as i64 - 1)) as u64;
+            (a.min(b), a.max(b))
+        }
+        InputRef::Explicit(ids) => {
+            let slice = &ids[atom_offset as usize..(atom_offset + count) as usize];
+            let lo = slice.iter().map(|id| id.0).min().unwrap_or(0);
+            let hi = slice.iter().map(|id| id.0).max().unwrap_or(0);
+            (lo, hi)
+        }
+    }
+}
+
+/// Record external dependencies in [lo, hi] that aren't produced internally.
+fn collect_external_in_range(
+    graph: &NanoGraph,
+    lo: u64,
+    hi: u64,
+    fallback_dtype: DType,
+    input_tensors: &[InputTensor],
+    span_compute_set: &HashSet<usize>,
+    inlined_literals: &BTreeSet<usize>,
+    needed_external: &mut BTreeMap<AtomId, (u64, DType)>,
+) {
+    // Walk groups in the main graph that overlap [lo, hi].
+    let groups = graph.groups();
+    for (gi, g) in groups.iter().enumerate() {
+        let g_lo = g.base_id.0;
+        let g_hi = g_lo + g.count;
+        if g_lo > hi { break; } // groups are sorted
+        if g_hi <= lo { continue; }
+        // This group overlaps [lo, hi].
+        if span_compute_set.contains(&gi) || inlined_literals.contains(&gi) {
+            continue; // internal
+        }
+        // Record only the overlapping portion.
+        let range_lo = g_lo.max(lo);
+        let range_hi = g_hi.min(hi + 1);
+        let range_count = range_hi - range_lo;
+        if range_count > 0 {
+            record_external_range(
+                needed_external,
+                AtomId(range_lo),
+                range_count,
+                g.output_dtype,
+            );
+        }
+    }
+
+    // Also check input_tensors that overlap [lo, hi].
+    for it in input_tensors {
+        let it_lo = it.base_id.0;
+        let it_hi = it_lo + it.count;
+        if it_lo <= hi && it_hi > lo {
+            let range_lo = it_lo.max(lo);
+            let range_hi = it_hi.min(hi + 1);
+            let range_count = range_hi - range_lo;
+            if range_count > 0 {
+                record_external_range(
+                    needed_external,
+                    AtomId(range_lo),
+                    range_count,
+                    it.dtype,
+                );
+            }
+        }
+    }
+}
+
 fn record_external_range(
     ranges: &mut BTreeMap<AtomId, (u64, DType)>,
     base: AtomId,
