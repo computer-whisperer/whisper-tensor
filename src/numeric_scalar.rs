@@ -1,7 +1,6 @@
 use crate::TrigOp;
 use crate::dtype::{DType, DTypeOfPrimitive};
 use arbitrary_int::{i4, u4};
-use arbitrary_int::traits::Integer;
 use float8::{F8E4M3, F8E5M2};
 
 /// Clamp and construct a u4, saturating to [0, 15].
@@ -258,7 +257,11 @@ impl NumericScalar {
             NumericScalar::I32(x) => Self::I32(if *x == 0 { 0 } else { x.signum() }),
             NumericScalar::I16(x) => Self::I16(if *x == 0 { 0 } else { x.signum() }),
             NumericScalar::I8(x) => Self::I8(if *x == 0 { 0 } else { x.signum() }),
-            NumericScalar::U4(x) => Self::U4(if x.value() == 0 { u4::new(0) } else { u4::new(1) }),
+            NumericScalar::U4(x) => Self::U4(if x.value() == 0 {
+                u4::new(0)
+            } else {
+                u4::new(1)
+            }),
             NumericScalar::I4(x) => Self::I4(if x.value() == 0 {
                 i4::new(0)
             } else {

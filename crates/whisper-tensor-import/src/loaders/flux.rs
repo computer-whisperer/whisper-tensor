@@ -306,7 +306,9 @@ fn detect_compute_dtype(
         crate::models::diffusion::sd_common::detect_model_dtype_with_canary(wm, canary);
     println!("Detected DiT storage dtype: {storage_dtype:?}");
     match storage_dtype {
-        crate::onnx_graph::tensor::DType::F8E4M3FN => Ok((whisper_tensor::dtype::DType::BF16, true)),
+        crate::onnx_graph::tensor::DType::F8E4M3FN => {
+            Ok((whisper_tensor::dtype::DType::BF16, true))
+        }
         crate::onnx_graph::tensor::DType::BF16 => Ok((whisper_tensor::dtype::DType::BF16, false)),
         crate::onnx_graph::tensor::DType::F16 => Ok((whisper_tensor::dtype::DType::F16, false)),
         crate::onnx_graph::tensor::DType::F32 => Ok((whisper_tensor::dtype::DType::F32, false)),

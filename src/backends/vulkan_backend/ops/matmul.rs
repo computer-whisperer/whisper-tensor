@@ -83,7 +83,9 @@ fn build_matmul_pipeline(
     builder.decorate(
         io_data_type_array,
         Decoration::ArrayStride,
-        [Operand::LiteralBit32(stored_dtype.bytes_per_element().unwrap() as u32)],
+        [Operand::LiteralBit32(
+            stored_dtype.bytes_per_element().unwrap() as u32,
+        )],
     );
     let io_data_type_array_struct = builder.type_struct([io_data_type_array]);
     builder.decorate(io_data_type_array_struct, Decoration::Block, []);
@@ -574,8 +576,10 @@ impl<R: Rank> VulkanTensor<R> {
             ]))?;
 
         let op_metadata_vec = [
-            (a.offset as u32 + a.suballocation.offset as u32) / a.dtype().bytes_per_element().unwrap() as u32,
-            (b.offset as u32 + b.suballocation.offset as u32) / b.dtype().bytes_per_element().unwrap() as u32,
+            (a.offset as u32 + a.suballocation.offset as u32)
+                / a.dtype().bytes_per_element().unwrap() as u32,
+            (b.offset as u32 + b.suballocation.offset as u32)
+                / b.dtype().bytes_per_element().unwrap() as u32,
             (output_tensor.offset as u32 + output_tensor.suballocation.offset as u32)
                 / a.dtype().bytes_per_element().unwrap() as u32,
         ];

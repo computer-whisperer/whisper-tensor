@@ -119,11 +119,7 @@ impl Operation for LrnOperation {
         let zeros_left = zeros_f32(&pad_shape)?;
         pad_shape[1] = (size - 1 - half) as u64;
         let zeros_right = zeros_f32(&pad_shape)?;
-        let x_sq_padded = NumericTensor::concat(
-            &[&zeros_left, &x_sq, &zeros_right],
-            1,
-            backend,
-        )?;
+        let x_sq_padded = NumericTensor::concat(&[&zeros_left, &x_sq, &zeros_right], 1, backend)?;
 
         // Sliding window sum over channel dimension
         // For k in 0..size: accumulate x_sq_padded[:, k:k+C, ...]
@@ -164,11 +160,7 @@ impl Operation for LrnOperation {
         Ok(Box::new(result.into_iter()))
     }
 
-    fn get_milli_op_graph(
-        &self,
-        _ctx: &MilliLoweringContext,
-        _rng: &mut impl Rng,
-    ) -> MilliOpGraph {
+    fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, _rng: &mut impl Rng) -> MilliOpGraph {
         panic!("LRN uses custom eval, not milli-op decomposition")
     }
 }

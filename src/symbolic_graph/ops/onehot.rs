@@ -174,7 +174,8 @@ impl Operation for OneHotOperation {
         }
 
         // Build the output tensor in the values dtype
-        let out_nd: NDArrayNumericTensor<DynRank> = NDArrayNumericTensor::from_vec_shape(out_data, &out_shape)?;
+        let out_nd: NDArrayNumericTensor<DynRank> =
+            NDArrayNumericTensor::from_vec_shape(out_data, &out_shape)?;
         let out_tensor = NumericTensor::NDArray(out_nd.to_dyn());
         let out_tensor = out_tensor.cast(values.dtype(), backend)?;
 
@@ -183,11 +184,7 @@ impl Operation for OneHotOperation {
         Ok(Box::new(result.into_iter()))
     }
 
-    fn get_milli_op_graph(
-        &self,
-        _ctx: &MilliLoweringContext,
-        _rng: &mut impl Rng,
-    ) -> MilliOpGraph {
+    fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, _rng: &mut impl Rng) -> MilliOpGraph {
         panic!("OneHot uses custom eval, not milli-op decomposition")
     }
 }

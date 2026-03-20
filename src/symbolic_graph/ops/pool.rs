@@ -1221,8 +1221,7 @@ impl Operation for LpPoolOperation {
 
                 let half = ops_helpers::scalar_const(&mut graph, 2i64, rng);
                 let half_pad = milli_ops::SimpleBinary::div(&mut graph, total_pad, half, rng);
-                let other_half =
-                    milli_ops::SimpleBinary::sub(&mut graph, total_pad, half_pad, rng);
+                let other_half = milli_ops::SimpleBinary::sub(&mut graph, total_pad, half_pad, rng);
 
                 let (pad_begin, pad_end) = if matches!(auto_pad, PoolAutoPad::SameUpper) {
                     (half_pad, other_half)
@@ -1287,8 +1286,7 @@ impl Operation for LpPoolOperation {
             let strides_m1 =
                 milli_ops::SimpleBinary::sub(&mut graph, strides_const, one_const, rng);
             let numer_ceil = milli_ops::SimpleBinary::add(&mut graph, numer, strides_m1, rng);
-            let ceil_div =
-                milli_ops::SimpleBinary::div(&mut graph, numer_ceil, strides_const, rng);
+            let ceil_div = milli_ops::SimpleBinary::div(&mut graph, numer_ceil, strides_const, rng);
             let ceil_out = milli_ops::SimpleBinary::add(&mut graph, ceil_div, one_const, rng);
 
             let input_shape_full = milli_ops::Shape::push_new(&mut graph, input_f32, rng);
@@ -1316,12 +1314,8 @@ impl Operation for LpPoolOperation {
                     )
                 }
                 _ => {
-                    let total_pad = milli_ops::SimpleBinary::sub(
-                        &mut graph,
-                        spatial_shape,
-                        input_spatial,
-                        rng,
-                    );
+                    let total_pad =
+                        milli_ops::SimpleBinary::sub(&mut graph, spatial_shape, input_spatial, rng);
                     let two_c = ops_helpers::scalar_const(&mut graph, 2i64, rng);
                     let half = milli_ops::SimpleBinary::div(&mut graph, total_pad, two_c, rng);
                     if matches!(self.auto_pad, PoolAutoPad::SameUpper) {
@@ -1333,8 +1327,7 @@ impl Operation for LpPoolOperation {
             };
             let threshold =
                 milli_ops::SimpleBinary::add(&mut graph, input_spatial, pad_begin_spatial, rng);
-            let threshold_m1 =
-                milli_ops::SimpleBinary::sub(&mut graph, threshold, one_const, rng);
+            let threshold_m1 = milli_ops::SimpleBinary::sub(&mut graph, threshold, one_const, rng);
             let max_div =
                 milli_ops::SimpleBinary::div(&mut graph, threshold_m1, strides_const, rng);
             let max_out = milli_ops::SimpleBinary::add(&mut graph, max_div, one_const, rng);
@@ -1354,8 +1347,7 @@ impl Operation for LpPoolOperation {
             rng,
         );
         let out_m1 = milli_ops::SimpleBinary::sub(&mut graph, out_spatial, one_const, rng);
-        let out_m1_times_s =
-            milli_ops::SimpleBinary::mul(&mut graph, out_m1, strides_const, rng);
+        let out_m1_times_s = milli_ops::SimpleBinary::mul(&mut graph, out_m1, strides_const, rng);
         let required =
             milli_ops::SimpleBinary::add(&mut graph, max_start_const, out_m1_times_s, rng);
         let required_plus1 = milli_ops::SimpleBinary::add(&mut graph, required, one_const, rng);

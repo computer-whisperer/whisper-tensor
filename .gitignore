@@ -2,3 +2,4 @@ target
 /lib/onnx
 .idea
 ci/accuracy/golden/
+__pycache__/

@@ -2,8 +2,8 @@ use crate::dtype::DType;
 use crate::graph::{GlobalId, Node};
 use crate::milli_graph::ops::*;
 use crate::milli_graph::{MilliLoweringContext, MilliOpGraph};
-use crate::symbolic_graph::ops::Operation;
 use crate::symbolic_graph::ONNXDecodingError;
+use crate::symbolic_graph::ops::Operation;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -42,8 +42,7 @@ impl MatMulIntegerOperation {
             b: inputs[1].ok_or(ONNXDecodingError::InvalidOperatorInputs("MatMulInteger"))?,
             a_zero_point: inputs.get(2).and_then(|x| *x),
             b_zero_point: inputs.get(3).and_then(|x| *x),
-            output: outputs[0]
-                .ok_or(ONNXDecodingError::InvalidOperatorOutputs("MatMulInteger"))?,
+            output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("MatMulInteger"))?,
         })
     }
 }
@@ -94,7 +93,16 @@ impl Operation for MatMulIntegerOperation {
         }
 
         // MatMul in INT32
-        let out = MatMul::push_new(&mut g, a_i32, b_i32, DType::I32, DType::I32, DType::I32, DType::I32, rng);
+        let out = MatMul::push_new(
+            &mut g,
+            a_i32,
+            b_i32,
+            DType::I32,
+            DType::I32,
+            DType::I32,
+            DType::I32,
+            rng,
+        );
 
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);

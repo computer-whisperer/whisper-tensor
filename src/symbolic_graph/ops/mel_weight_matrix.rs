@@ -37,9 +37,7 @@ impl MelWeightMatrixOperation {
             return Err(ONNXDecodingError::InvalidOperatorInputs("MelWeightMatrix"));
         }
         if outputs.len() != 1 {
-            return Err(ONNXDecodingError::InvalidOperatorOutputs(
-                "MelWeightMatrix",
-            ));
+            return Err(ONNXDecodingError::InvalidOperatorOutputs("MelWeightMatrix"));
         }
         Ok(Self {
             global_id: GlobalId::new(rng),
@@ -151,8 +149,7 @@ impl Operation for MelWeightMatrixOperation {
             } else {
                 for j in lower..=center {
                     if j < num_spectrogram_bins {
-                        output[j * num_mel_bins + i] =
-                            (j - lower) as f32 / low_to_center as f32;
+                        output[j * num_mel_bins + i] = (j - lower) as f32 / low_to_center as f32;
                     }
                 }
             }
@@ -161,8 +158,7 @@ impl Operation for MelWeightMatrixOperation {
             if center_to_high > 0 {
                 for j in center..higher {
                     if j < num_spectrogram_bins {
-                        output[j * num_mel_bins + i] =
-                            (higher - j) as f32 / center_to_high as f32;
+                        output[j * num_mel_bins + i] = (higher - j) as f32 / center_to_high as f32;
                     }
                 }
             }

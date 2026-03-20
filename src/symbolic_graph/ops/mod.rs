@@ -9,18 +9,20 @@ mod gather;
 mod gather_elements;
 mod lrn;
 mod lstm;
+mod matmul_integer;
+mod mel_weight_matrix;
 mod misc;
 mod nlll;
-mod onehot;
 mod normalization;
+mod onehot;
 mod pool;
 mod quant_matmul;
 mod reduce;
 mod reshape;
 mod resize;
 mod reverse_sequence;
-mod rotary_embedding;
 mod rnn;
+mod rotary_embedding;
 mod scan;
 mod scatter_elements;
 mod scatter_nd;
@@ -31,8 +33,6 @@ mod split;
 mod stft;
 mod topk;
 mod transpose;
-mod matmul_integer;
-mod mel_weight_matrix;
 mod unary;
 mod window;
 
@@ -50,6 +50,8 @@ pub use gather::GatherOperation;
 pub use gather_elements::{GatherElementsOperation, GatherNDOperation};
 pub use lrn::LrnOperation;
 pub use lstm::LstmOperation;
+pub use matmul_integer::MatMulIntegerOperation;
+pub use mel_weight_matrix::MelWeightMatrixOperation;
 pub use misc::{
     ClipOperation, CompressOperation, DepthToSpaceOperation, DropoutOperation, ExpandOperation,
     EyeLikeOperation, GlobalAveragePoolOperation, GlobalMaxPoolOperation, HardmaxOperation,
@@ -58,11 +60,11 @@ pub use misc::{
     SumOperation, TileOperation, TriluOperation, WhereOperation,
 };
 pub use nlll::NegativeLogLikelihoodLossOperation;
-pub use onehot::OneHotOperation;
 pub use normalization::{
     BatchNormalizationOperation, GroupNormalizationOperation, InstanceNormalizationOperation,
     LayerNormalizationOperation, LpNormalizationOperation, RMSNormalizationOperation,
 };
+pub use onehot::OneHotOperation;
 pub use pool::{AveragePoolOperation, LpPoolOperation, MaxPoolOperation};
 pub use quant_matmul::QuantMatMulOperation;
 pub use reduce::{
@@ -85,15 +87,13 @@ pub use split::SplitOperation;
 pub use stft::StftOperation;
 pub use topk::TopKOperation;
 pub use transpose::TransposeOperation;
-pub use matmul_integer::MatMulIntegerOperation;
-pub use mel_weight_matrix::MelWeightMatrixOperation;
-pub use window::{WindowKind, WindowOperation};
 pub use unary::{
     BiasGeluOperation, CeluOperation, EluOperation, GeluOperation, HardSigmoidOperation,
     HardSwishOperation, IdentityOperation, IsInfOperation, LeakyReluOperation, LogSoftmaxOperation,
     MishOperation, PReluOperation, SeluOperation, SoftmaxOperation, SoftsignOperation,
     ThresholdedReluOperation, UnaryOperation, WhichUnaryOperation,
 };
+pub use window::{WindowKind, WindowOperation};
 
 use crate::backends::eval_backend::EvalBackend;
 use crate::backends::ndarray_backend::NDArrayNumericTensorError;

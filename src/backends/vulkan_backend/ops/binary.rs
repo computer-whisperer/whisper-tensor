@@ -71,7 +71,9 @@ fn build_binary_pipeline(
     b.decorate(
         input_0_data_type_array,
         Decoration::ArrayStride,
-        [Operand::LiteralBit32(input_0_dtype.bytes_per_element().unwrap() as u32)],
+        [Operand::LiteralBit32(
+            input_0_dtype.bytes_per_element().unwrap() as u32,
+        )],
     );
     let input_0_data_type_array_struct = b.type_struct([input_0_data_type_array]);
     b.decorate(input_0_data_type_array_struct, Decoration::Block, []);
@@ -96,7 +98,9 @@ fn build_binary_pipeline(
         b.decorate(
             input_1_data_type_array,
             Decoration::ArrayStride,
-            [Operand::LiteralBit32(input_1_dtype.bytes_per_element().unwrap() as u32)],
+            [Operand::LiteralBit32(
+                input_1_dtype.bytes_per_element().unwrap() as u32,
+            )],
         );
     }
     let input_1_data_type_array_struct = b.type_struct([input_1_data_type_array]);
@@ -126,7 +130,9 @@ fn build_binary_pipeline(
         b.decorate(
             output_data_type_array,
             Decoration::ArrayStride,
-            [Operand::LiteralBit32(output_dtype.bytes_per_element().unwrap() as u32)],
+            [Operand::LiteralBit32(
+                output_dtype.bytes_per_element().unwrap() as u32,
+            )],
         );
     }
     let output_data_type_array_struct = b.type_struct([output_data_type_array]);

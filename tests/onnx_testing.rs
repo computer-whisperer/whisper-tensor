@@ -1806,38 +1806,126 @@ macro_rules! do_tests {
         do_test!($runner_fn, $runner_name, test_nllloss_NC);
         do_test!($runner_fn, $runner_name, test_nllloss_NCd1);
         do_test!($runner_fn, $runner_name, test_nllloss_NCd1d2);
-        do_test!($runner_fn, $runner_name, test_nllloss_NCd1d2d3d4d5_mean_weight);
-        do_test!($runner_fn, $runner_name, test_nllloss_NCd1d2d3d4d5_mean_weight_expanded);
-        do_test!($runner_fn, $runner_name, test_nllloss_NCd1d2d3d4d5_none_no_weight);
-        do_test!($runner_fn, $runner_name, test_nllloss_NCd1d2d3d4d5_none_no_weight_expanded);
-        do_test!($runner_fn, $runner_name, test_nllloss_NCd1d2d3_none_no_weight_negative_ii);
-        do_test!($runner_fn, $runner_name, test_nllloss_NCd1d2d3_none_no_weight_negative_ii_expanded);
-        do_test!($runner_fn, $runner_name, test_nllloss_NCd1d2d3_sum_weight_high_ii);
-        do_test!($runner_fn, $runner_name, test_nllloss_NCd1d2d3_sum_weight_high_ii_expanded);
+        do_test!(
+            $runner_fn,
+            $runner_name,
+            test_nllloss_NCd1d2d3d4d5_mean_weight
+        );
+        do_test!(
+            $runner_fn,
+            $runner_name,
+            test_nllloss_NCd1d2d3d4d5_mean_weight_expanded
+        );
+        do_test!(
+            $runner_fn,
+            $runner_name,
+            test_nllloss_NCd1d2d3d4d5_none_no_weight
+        );
+        do_test!(
+            $runner_fn,
+            $runner_name,
+            test_nllloss_NCd1d2d3d4d5_none_no_weight_expanded
+        );
+        do_test!(
+            $runner_fn,
+            $runner_name,
+            test_nllloss_NCd1d2d3_none_no_weight_negative_ii
+        );
+        do_test!(
+            $runner_fn,
+            $runner_name,
+            test_nllloss_NCd1d2d3_none_no_weight_negative_ii_expanded
+        );
+        do_test!(
+            $runner_fn,
+            $runner_name,
+            test_nllloss_NCd1d2d3_sum_weight_high_ii
+        );
+        do_test!(
+            $runner_fn,
+            $runner_name,
+            test_nllloss_NCd1d2d3_sum_weight_high_ii_expanded
+        );
         do_test!($runner_fn, $runner_name, test_nllloss_NCd1d2_expanded);
-        do_test!($runner_fn, $runner_name, test_nllloss_NCd1d2_no_weight_reduction_mean_ii);
-        do_test!($runner_fn, $runner_name, test_nllloss_NCd1d2_no_weight_reduction_mean_ii_expanded);
+        do_test!(
+            $runner_fn,
+            $runner_name,
+            test_nllloss_NCd1d2_no_weight_reduction_mean_ii
+        );
+        do_test!(
+            $runner_fn,
+            $runner_name,
+            test_nllloss_NCd1d2_no_weight_reduction_mean_ii_expanded
+        );
         do_test!($runner_fn, $runner_name, test_nllloss_NCd1d2_reduction_mean);
-        do_test!($runner_fn, $runner_name, test_nllloss_NCd1d2_reduction_mean_expanded);
+        do_test!(
+            $runner_fn,
+            $runner_name,
+            test_nllloss_NCd1d2_reduction_mean_expanded
+        );
         do_test!($runner_fn, $runner_name, test_nllloss_NCd1d2_reduction_sum);
-        do_test!($runner_fn, $runner_name, test_nllloss_NCd1d2_reduction_sum_expanded);
+        do_test!(
+            $runner_fn,
+            $runner_name,
+            test_nllloss_NCd1d2_reduction_sum_expanded
+        );
         do_test!($runner_fn, $runner_name, test_nllloss_NCd1d2_with_weight);
-        do_test!($runner_fn, $runner_name, test_nllloss_NCd1d2_with_weight_expanded);
-        do_test!($runner_fn, $runner_name, test_nllloss_NCd1d2_with_weight_reduction_mean);
-        do_test!($runner_fn, $runner_name, test_nllloss_NCd1d2_with_weight_reduction_mean_expanded);
-        do_test!($runner_fn, $runner_name, test_nllloss_NCd1d2_with_weight_reduction_sum);
-        do_test!($runner_fn, $runner_name, test_nllloss_NCd1d2_with_weight_reduction_sum_expanded);
-        do_test!($runner_fn, $runner_name, test_nllloss_NCd1d2_with_weight_reduction_sum_ii);
-        do_test!($runner_fn, $runner_name, test_nllloss_NCd1d2_with_weight_reduction_sum_ii_expanded);
+        do_test!(
+            $runner_fn,
+            $runner_name,
+            test_nllloss_NCd1d2_with_weight_expanded
+        );
+        do_test!(
+            $runner_fn,
+            $runner_name,
+            test_nllloss_NCd1d2_with_weight_reduction_mean
+        );
+        do_test!(
+            $runner_fn,
+            $runner_name,
+            test_nllloss_NCd1d2_with_weight_reduction_mean_expanded
+        );
+        do_test!(
+            $runner_fn,
+            $runner_name,
+            test_nllloss_NCd1d2_with_weight_reduction_sum
+        );
+        do_test!(
+            $runner_fn,
+            $runner_name,
+            test_nllloss_NCd1d2_with_weight_reduction_sum_expanded
+        );
+        do_test!(
+            $runner_fn,
+            $runner_name,
+            test_nllloss_NCd1d2_with_weight_reduction_sum_ii
+        );
+        do_test!(
+            $runner_fn,
+            $runner_name,
+            test_nllloss_NCd1d2_with_weight_reduction_sum_ii_expanded
+        );
         do_test!($runner_fn, $runner_name, test_nllloss_NCd1_expanded);
         do_test!($runner_fn, $runner_name, test_nllloss_NCd1_ii);
         do_test!($runner_fn, $runner_name, test_nllloss_NCd1_ii_expanded);
-        do_test!($runner_fn, $runner_name, test_nllloss_NCd1_mean_weight_negative_ii);
-        do_test!($runner_fn, $runner_name, test_nllloss_NCd1_mean_weight_negative_ii_expanded);
+        do_test!(
+            $runner_fn,
+            $runner_name,
+            test_nllloss_NCd1_mean_weight_negative_ii
+        );
+        do_test!(
+            $runner_fn,
+            $runner_name,
+            test_nllloss_NCd1_mean_weight_negative_ii_expanded
+        );
         do_test!($runner_fn, $runner_name, test_nllloss_NCd1_weight);
         do_test!($runner_fn, $runner_name, test_nllloss_NCd1_weight_expanded);
         do_test!($runner_fn, $runner_name, test_nllloss_NCd1_weight_ii);
-        do_test!($runner_fn, $runner_name, test_nllloss_NCd1_weight_ii_expanded);
+        do_test!(
+            $runner_fn,
+            $runner_name,
+            test_nllloss_NCd1_weight_ii_expanded
+        );
         do_test!($runner_fn, $runner_name, test_nllloss_NC_expanded);
 
         /*

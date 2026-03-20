@@ -710,7 +710,9 @@ fn rebuild_args(args: Object) -> Result<(PthLayout, DType, String, usize)> {
         other => return Err(PthError::UnsupportedStorageType(other.to_string())),
     };
 
-    let item_size = dtype.bytes_per_element().ok_or(PthError::UnsupportedDType(dtype))?;
+    let item_size = dtype
+        .bytes_per_element()
+        .ok_or(PthError::UnsupportedDType(dtype))?;
     let layout = PthLayout::new(size, stride, offset * item_size);
 
     Ok((layout, dtype, path, storage_size))

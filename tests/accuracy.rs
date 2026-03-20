@@ -22,6 +22,7 @@ use whisper_tensor::dtype::DType;
 use whisper_tensor::model::{Model, ModelExecutionRuntime};
 use whisper_tensor::numeric_tensor::NumericTensor;
 use whisper_tensor::tensor_rank::DynRank;
+use whisper_tensor_import::onnx_graph::WeightStorageStrategy;
 
 // ---------------------------------------------------------------------------
 // .npy reader
@@ -174,8 +175,7 @@ struct TensorEntry {
 
 fn load_manifest(dir: &Path) -> Result<Manifest, String> {
     let path = dir.join("manifest.json");
-    let data =
-        fs::read_to_string(&path).map_err(|e| format!("Failed to read manifest: {e}"))?;
+    let data = fs::read_to_string(&path).map_err(|e| format!("Failed to read manifest: {e}"))?;
     serde_json::from_str(&data).map_err(|e| format!("Failed to parse manifest: {e}"))
 }
 
@@ -304,11 +304,7 @@ fn compare_tensor(
         max_abs_error: max_abs,
         mean_abs_error: if n > 0 { sum_abs / n as f64 } else { 0.0 },
         max_rel_error: max_rel,
-        within_tolerance: if n > 0 {
-            within as f64 / n as f64
-        } else {
-            1.0
-        },
+        within_tolerance: if n > 0 { within as f64 / n as f64 } else { 1.0 },
     })
 }
 
@@ -362,10 +358,7 @@ fn write_report(report: &AccuracyReport) {
             output.within_tolerance * 100.0,
         );
     }
-    println!(
-        "  RESULT: {}",
-        if report.pass { "PASS" } else { "FAIL" }
-    );
+    println!("  RESULT: {}", if report.pass { "PASS" } else { "FAIL" });
 
     // Optionally write JSON artifact
     if let Some(dir) = report_dir() {
@@ -398,22 +391,19 @@ fn validate_onnx_model(
 
     // Load model
     let mut rng = rand::rng();
-    let model =
-        Model::new_from_onnx(onnx_data, &mut rng, base_dir).expect("model loads from ONNX");
+    let model = Model::new_from_onnx(onnx_data, &mut rng, base_dir).expect("model loads from ONNX");
 
-    // Prepare inputs: match golden input names to model input names
+    // Prepare inputs: match golden input names to model input names.
+    // Inputs present in the golden snapshot override model defaults.
+    // Inputs NOT in the golden snapshot (e.g., state tensors with zero initializers)
+    // are left for the model to fill from its ONNX initializers.
     let model_input_info = model.get_input_tensor_info().expect("get input info");
     let mut inputs: HashMap<String, NumericTensor<DynRank>> = HashMap::new();
     for (name, _) in &model_input_info {
         if let Some(tensor) = golden_inputs.get(name) {
             inputs.insert(name.clone(), tensor.clone());
-        } else {
-            panic!(
-                "Model input '{name}' not found in golden snapshot. \
-                 Golden has: {:?}",
-                golden_inputs.keys().collect::<Vec<_>>()
-            );
         }
+        // else: model will use its ONNX initializer (e.g., zero states for RWKV)
     }
 
     // Run eval
@@ -474,11 +464,15 @@ fn accuracy_gpt2() {
             "Skipping accuracy_gpt2: no golden snapshot at {}",
             golden_path.display()
         );
-        eprintln!("Generate with: python ci/accuracy/references/gpt2_onnxrt.py --model test_models/gpt2-lm-head-10.onnx --output {}", golden_path.display());
+        eprintln!(
+            "Generate with: python ci/accuracy/references/gpt2_onnxrt.py --model test_models/gpt2-lm-head-10.onnx --output {}",
+            golden_path.display()
+        );
         return;
     }
 
-    let model_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test_models/gpt2-lm-head-10.onnx");
+    let model_path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test_models/gpt2-lm-head-10.onnx");
     if !is_real_file(&model_path) {
         eprintln!("Skipping accuracy_gpt2: model file not available (LFS pointer or missing)");
         return;
@@ -493,6 +487,51 @@ fn accuracy_gpt2() {
         &golden_path,
         1e-5, // rtol
         1e-5, // atol
-    None,
+        None,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// RWKV-7 accuracy test
+// ---------------------------------------------------------------------------
+
+#[test]
+fn accuracy_rwkv7() {
+    let golden_path = golden_dir().join("rwkv7");
+    if !golden_path.join("manifest.json").exists() {
+        eprintln!(
+            "Skipping accuracy_rwkv7: no golden snapshot at {}",
+            golden_path.display()
+        );
+        eprintln!(
+            "Generate with: python ci/accuracy/references/rwkv7_reference.py --output {}",
+            golden_path.display()
+        );
+        return;
+    }
+
+    let pth_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("test_models/RWKV-x070-World-0.1B-v2.8-20241210-ctx4096.pth");
+    if !is_real_file(&pth_path) {
+        eprintln!("Skipping accuracy_rwkv7: model file not available (LFS pointer or missing)");
+        return;
+    }
+
+    // Convert .pth → ONNX via the importer (this is part of what we're validating)
+    let onnx_data =
+        whisper_tensor_import::identify_and_load(&pth_path, WeightStorageStrategy::EmbeddedData)
+            .expect("import rwkv7 .pth to ONNX");
+
+    // RWKV-7 reference is the official PyTorch implementation.
+    // Wider tolerance than GPT-2 because we're comparing across two different
+    // implementations (PyTorch reference vs our ONNX graph builder + NDArray eval),
+    // not just the same ONNX graph through two runtimes.
+    validate_onnx_model(
+        "rwkv7",
+        &onnx_data,
+        &golden_path,
+        1e-3, // rtol
+        1e-4, // atol
+        None,
     );
 }

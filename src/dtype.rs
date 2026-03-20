@@ -1,6 +1,6 @@
-use arbitrary_int::{i4, u4};
 use crate::onnx;
 use crate::packed_format::PackedFormat;
+use arbitrary_int::{i4, u4};
 use float8::{F8E4M3, F8E5M2};
 use half::{bf16, f16};
 use serde::{Deserialize, Serialize};

@@ -6,8 +6,6 @@ pub mod tensor_store;
 use crate::backends::ModelLoadedTensorCache;
 use crate::backends::eval_backend::EvalBackend;
 use crate::backends::ndarray_backend::{NDArrayNumericTensor, NDArrayNumericTensorError};
-use arbitrary_int::{i4, u4};
-use arbitrary_int::traits::Integer;
 use crate::dtype::DType;
 use crate::graph::{
     GlobalId, Graph, Link, LinkCategory, LinkMetadata, Node, NodeMetadata, Property,
@@ -21,6 +19,8 @@ use crate::symbolic_graph::tensor_store::{StoredTensor, TensorStore, TensorStore
 use crate::symbolic_scalar::{SymbolicResolver, SymbolicScalar, SymbolicScalarTyped};
 use crate::tensor_rank::DynRank;
 use crate::{TrigOp, onnx};
+use arbitrary_int::traits::Integer;
+use arbitrary_int::{i4, u4};
 use prost::Message;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -1353,8 +1353,7 @@ impl TryFrom<&onnx::TensorProto> for NDArrayNumericTensor<DynRank> {
                 // ONNX packs two 4-bit elements per int32: first in low nibble, second in high nibble.
                 DType::U4 => {
                     let numel: u64 = shape.iter().product();
-                    let bytes: Vec<u8> =
-                        tensor.int32_data.iter().map(|x| *x as u8).collect();
+                    let bytes: Vec<u8> = tensor.int32_data.iter().map(|x| *x as u8).collect();
                     let data: Vec<u4> = unpack_4bit_pairs(&bytes, numel as usize)
                         .iter()
                         .map(|&b| u4::masked_new(b))
@@ -1363,8 +1362,7 @@ impl TryFrom<&onnx::TensorProto> for NDArrayNumericTensor<DynRank> {
                 }
                 DType::I4 => {
                     let numel: u64 = shape.iter().product();
-                    let bytes: Vec<u8> =
-                        tensor.int32_data.iter().map(|x| *x as u8).collect();
+                    let bytes: Vec<u8> = tensor.int32_data.iter().map(|x| *x as u8).collect();
                     let data: Vec<i4> = unpack_4bit_pairs(&bytes, numel as usize)
                         .iter()
                         .map(|&b| i4::masked_new(b as i8))
