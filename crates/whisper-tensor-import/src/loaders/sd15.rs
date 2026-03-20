@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use whisper_tensor::interfaces::ImageGenerationInterface;
 use whisper_tensor::loader::*;
 use whisper_tensor::metadata::TokenizerInfo;
 use whisper_tensor::model::Model;
@@ -83,7 +82,7 @@ impl Loader for SD15Loader {
 
         let interface = {
             let mut rng = rand::rng();
-            ImageGenerationInterface::new_single_te_cfg(
+            super::shared::interface_helpers::build_single_te_cfg_interface(
                 &mut rng,
                 TokenizerInfo::HFTokenizer("openai/clip-vit-large-patch14".to_string()),
                 model_dtype,

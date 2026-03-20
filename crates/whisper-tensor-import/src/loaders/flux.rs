@@ -1,6 +1,5 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use whisper_tensor::interfaces::ImageGenerationInterface;
 use whisper_tensor::loader::*;
 use whisper_tensor::metadata::TokenizerInfo;
 use whisper_tensor::model::Model;
@@ -350,7 +349,7 @@ fn assemble_output(
 
     let interface = {
         let mut rng = rand::rng();
-        ImageGenerationInterface::new_flux(
+        build_flux_interface(
             &mut rng,
             TokenizerInfo::HFTokenizer("openai/clip-vit-large-patch14".to_string()),
             TokenizerInfo::HFTokenizer("google-t5/t5-base".to_string()),
@@ -379,4 +378,183 @@ fn build_from_safetensors(
     let wm = SafetensorsWeightManager::new(vec![Arc::new(mmap)])
         .map_err(|e| LoaderError::LoadFailed(e.into()))?;
     builder(wm).map_err(LoaderError::LoadFailed)
+}
+
+/// Build interface for Flux (CLIP-L + T5-XXL + DiT + VAE, rectified flow).
+///
+/// Model weights order: [clip_l, t5_xxl, dit, vae_decoder]
+///
+/// When `has_guidance` is true (Flux Dev), the DiT expects a guidance input
+/// and `guidance_scale_input` is populated. When false (Schnell), no guidance.
+#[allow(clippy::too_many_arguments)]
+fn build_flux_interface(
+    rng: &mut impl rand::Rng,
+    clip_tokenizer: TokenizerInfo,
+    t5_tokenizer: TokenizerInfo,
+    model_dtype: whisper_tensor::dtype::DType,
+    has_guidance: bool,
+) -> whisper_tensor::interfaces::ImageGenerationInterface {
+    use super::shared::interface_helpers::{
+        build_cast_node, build_eos_indices_node, build_flux_denoising_loop, build_flux_vae_decode,
+    };
+    use whisper_tensor::interfaces::{ImageGenerationInterface, SchedulerType};
+    use whisper_tensor::super_graph::nodes::{
+        SuperGraphNode, SuperGraphNodeModelExecution, SuperGraphNodeTensorToImage,
+        SuperGraphNodeTokenizerEncode, SuperGraphNodeTokenizerEncodeMode,
+        SuperGraphNodeTokenizerLoad,
+    };
+    use whisper_tensor::super_graph::SuperGraphBuilder;
+
+    let mut builder = SuperGraphBuilder::new();
+
+    // Create input links
+    let positive_prompt_input = builder.new_string_link(rng);
+    let initial_latent_input = builder.new_tensor_link(rng);
+    let timesteps_input = builder.new_tensor_link(rng);
+    let dt_input = builder.new_tensor_link(rng);
+    let sigmas_input = builder.new_tensor_link(rng);
+    let iteration_count_input = builder.new_tensor_link(rng);
+    let guidance_scale_link = if has_guidance {
+        Some(builder.new_tensor_link(rng))
+    } else {
+        None
+    };
+    let clip_weights = builder.new_model_link(rng);
+    let t5_weights = builder.new_model_link(rng);
+    let dit_weights = builder.new_model_link(rng);
+    let vae_weights = builder.new_model_link(rng);
+    builder.set_link_label(positive_prompt_input, "prompt_positive");
+    builder.set_link_label(initial_latent_input, "latent_initial");
+    builder.set_link_label(timesteps_input, "timesteps");
+    builder.set_link_label(dt_input, "dt");
+    builder.set_link_label(sigmas_input, "sigmas");
+    builder.set_link_label(iteration_count_input, "iteration_count");
+    if let Some(gl) = guidance_scale_link {
+        builder.set_link_label(gl, "guidance_scale");
+    }
+    builder.set_link_label(clip_weights, "clip_l_weights");
+    builder.set_link_label(t5_weights, "t5_weights");
+    builder.set_link_label(dit_weights, "dit_weights");
+    builder.set_link_label(vae_weights, "vae_decoder_weights");
+
+    // Prompt tokenization inside the supergraph.
+    let clip_tokenizer_link =
+        SuperGraphNodeTokenizerLoad::new_and_add(&mut builder, clip_tokenizer, rng);
+    let t5_tokenizer_link =
+        SuperGraphNodeTokenizerLoad::new_and_add(&mut builder, t5_tokenizer, rng);
+    let cond_ids_input = SuperGraphNodeTokenizerEncode::new_with_mode_and_add(
+        &mut builder,
+        clip_tokenizer_link,
+        positive_prompt_input,
+        SuperGraphNodeTokenizerEncodeMode::ClipStyle {
+            seq_len: 77,
+            bos: 49406,
+            eos: 49407,
+            pad: 0,
+        },
+        rng,
+    );
+    let t5_ids_input = SuperGraphNodeTokenizerEncode::new_with_mode_and_add(
+        &mut builder,
+        t5_tokenizer_link,
+        positive_prompt_input,
+        SuperGraphNodeTokenizerEncodeMode::RawPad {
+            seq_len: 256,
+            pad: 0,
+        },
+        rng,
+    );
+
+    // --- CLIP-L: input_ids + eos_indices -> pooled_output [1, 768] ---
+    let clip_pooled_f32 = builder.new_tensor_link(rng);
+    let clip_eos = build_eos_indices_node(&mut builder, rng, cond_ids_input);
+    let mut clip_node = SuperGraphNodeModelExecution::new(
+        rng,
+        clip_weights,
+        0,
+        vec![
+            (cond_ids_input, "input_ids".to_string()),
+            (clip_eos, "eos_indices".to_string()),
+        ],
+        vec![("pooled_output".to_string(), clip_pooled_f32)],
+    );
+    clip_node.label = Some("clip_l_encode".to_string());
+    builder.add_node(clip_node.to_any());
+    let clip_pooled = build_cast_node(&mut builder, rng, clip_pooled_f32, model_dtype);
+
+    // --- T5-XXL: input_ids -> hidden_states [1, seq, 4096] ---
+    let t5_hidden_f32 = builder.new_tensor_link(rng);
+    let mut t5_node = SuperGraphNodeModelExecution::new(
+        rng,
+        t5_weights,
+        1,
+        vec![(t5_ids_input, "input_ids".to_string())],
+        vec![("hidden_states".to_string(), t5_hidden_f32)],
+    );
+    t5_node.label = Some("t5_encode".to_string());
+    builder.add_node(t5_node.to_any());
+    let t5_hidden = build_cast_node(&mut builder, rng, t5_hidden_f32, model_dtype);
+
+    // --- Denoising loop (rectified flow) ---
+    let final_latent = build_flux_denoising_loop(
+        &mut builder,
+        rng,
+        dit_weights,
+        clip_pooled,
+        t5_hidden,
+        initial_latent_input,
+        timesteps_input,
+        dt_input,
+        sigmas_input,
+        iteration_count_input,
+        guidance_scale_link,
+        model_dtype,
+        2, // dit model index
+    );
+
+    // --- VAE decode ---
+    // Flux VAE: latent / 0.3611 + 0.1159, then wrap tensor into Image
+    let decoded_image_tensor =
+        build_flux_vae_decode(&mut builder, rng, final_latent, vae_weights, 3);
+    let image_output =
+        SuperGraphNodeTensorToImage::new_and_add(&mut builder, decoded_image_tensor, rng);
+    builder.set_link_label(image_output, "image_output");
+
+    // Build outer graph
+    let model_weights = vec![clip_weights, t5_weights, dit_weights, vae_weights];
+    let mut input_links: Vec<_> = vec![
+        positive_prompt_input.to_any(),
+        initial_latent_input.to_any(),
+        timesteps_input.to_any(),
+        dt_input.to_any(),
+        sigmas_input.to_any(),
+        iteration_count_input.to_any(),
+    ];
+    if let Some(gl) = guidance_scale_link {
+        input_links.push(gl.to_any());
+    }
+    input_links.extend([
+        clip_weights.to_any(),
+        t5_weights.to_any(),
+        dit_weights.to_any(),
+        vae_weights.to_any(),
+    ]);
+    let output_links: Vec<_> = vec![image_output.to_any()];
+    let super_graph = builder.build(rng, &input_links, &output_links);
+
+    ImageGenerationInterface {
+        super_graph,
+        positive_prompt_input,
+        negative_prompt_input: None,
+        initial_latent_input,
+        timesteps_input,
+        dt_input,
+        sigmas_input,
+        iteration_count_input,
+        guidance_scale_input: guidance_scale_link,
+        model_weights,
+        image_output,
+        scheduler: SchedulerType::RectifiedFlow,
+        latent_channels: 16,
+    }
 }

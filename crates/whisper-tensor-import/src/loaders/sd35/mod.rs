@@ -12,7 +12,6 @@ use self::path::{
     resolve_component_onnx_any,
 };
 use whisper_tensor::dtype::DType;
-use whisper_tensor::interfaces::ImageGenerationInterface;
 use whisper_tensor::loader::*;
 use whisper_tensor::metadata::TokenizerInfo;
 
@@ -225,7 +224,7 @@ impl Loader for SD35Loader {
 
         let interface = {
             let mut rng = rand::rng();
-            ImageGenerationInterface::new_sd3(
+            build_sd3_interface(
                 &mut rng,
                 TokenizerInfo::HFTokenizer(clip_tokenizer),
                 TokenizerInfo::HFTokenizer(t5_tokenizer),
@@ -260,5 +259,425 @@ impl Loader for SD35Loader {
         }];
 
         Ok(LoaderOutput { models, interfaces })
+    }
+}
+
+/// Build interface for SD3/SD3.5 ONNX pipelines.
+///
+/// Model weights order: [clip_l, clip_g, t5_xxl, transformer, vae_decoder]
+///
+/// This function accepts IO tensor names to support different ONNX export variants.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn build_sd3_interface(
+    rng: &mut impl rand::Rng,
+    clip_tokenizer: TokenizerInfo,
+    t5_tokenizer: TokenizerInfo,
+    model_dtype: DType,
+    t5_sequence_length: usize,
+    clip_l_input_name: &str,
+    clip_l_eos_input_name: Option<&str>,
+    clip_l_hidden_output_name: &str,
+    clip_l_pooled_output_name: &str,
+    clip_g_input_name: &str,
+    clip_g_eos_input_name: Option<&str>,
+    clip_g_hidden_output_name: &str,
+    clip_g_pooled_output_name: &str,
+    t5_input_name: &str,
+    t5_hidden_output_name: &str,
+    transformer_latent_input_name: &str,
+    transformer_timestep_input_name: &str,
+    transformer_context_input_name: &str,
+    transformer_pooled_input_name: &str,
+    transformer_output_name: &str,
+    vae_input_name: &str,
+    vae_output_name: &str,
+    vae_scale_factor: f32,
+    vae_shift_factor: f32,
+    latent_channels: usize,
+) -> whisper_tensor::interfaces::ImageGenerationInterface {
+    use super::shared::interface_helpers::{
+        build_cast_node, build_eos_indices_node, build_sd3_denoising_loop,
+        build_vae_decode_with_shift,
+    };
+    use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
+    use whisper_tensor::interfaces::{ImageGenerationInterface, SchedulerType};
+    use whisper_tensor::milli_graph::MilliOpGraph;
+    use whisper_tensor::milli_graph::ops::{Cast, Concat as MilliConcat, Constant, Pad, PadMode};
+    use whisper_tensor::super_graph::nodes::{
+        SuperGraphNode, SuperGraphNodeMilliOpGraph, SuperGraphNodeModelExecution,
+        SuperGraphNodeTensorToImage, SuperGraphNodeTokenizerEncode,
+        SuperGraphNodeTokenizerEncodeMode, SuperGraphNodeTokenizerLoad,
+    };
+    use whisper_tensor::super_graph::SuperGraphBuilder;
+
+    let mut builder = SuperGraphBuilder::new();
+
+    // Inputs
+    let positive_prompt_input = builder.new_string_link(rng);
+    let negative_prompt_input = builder.new_string_link(rng);
+    let initial_latent_input = builder.new_tensor_link(rng);
+    let timesteps_input = builder.new_tensor_link(rng);
+    let dt_input = builder.new_tensor_link(rng);
+    let sigmas_input = builder.new_tensor_link(rng);
+    let iteration_count_input = builder.new_tensor_link(rng);
+    let guidance_scale_input = builder.new_tensor_link(rng);
+    let clip_l_weights = builder.new_model_link(rng);
+    let clip_g_weights = builder.new_model_link(rng);
+    let t5_weights = builder.new_model_link(rng);
+    let transformer_weights = builder.new_model_link(rng);
+    let vae_weights = builder.new_model_link(rng);
+    builder.set_link_label(positive_prompt_input, "prompt_positive");
+    builder.set_link_label(negative_prompt_input, "prompt_negative");
+    builder.set_link_label(initial_latent_input, "latent_initial");
+    builder.set_link_label(timesteps_input, "timesteps");
+    builder.set_link_label(dt_input, "dt");
+    builder.set_link_label(sigmas_input, "sigmas");
+    builder.set_link_label(iteration_count_input, "iteration_count");
+    builder.set_link_label(guidance_scale_input, "guidance_scale");
+    builder.set_link_label(clip_l_weights, "clip_l_weights");
+    builder.set_link_label(clip_g_weights, "clip_g_weights");
+    builder.set_link_label(t5_weights, "t5_weights");
+    builder.set_link_label(transformer_weights, "transformer_weights");
+    builder.set_link_label(vae_weights, "vae_decoder_weights");
+
+    // Tokenizers
+    let clip_tokenizer_link =
+        SuperGraphNodeTokenizerLoad::new_and_add(&mut builder, clip_tokenizer, rng);
+    let t5_tokenizer_link =
+        SuperGraphNodeTokenizerLoad::new_and_add(&mut builder, t5_tokenizer, rng);
+
+    let clip_ids_pos = SuperGraphNodeTokenizerEncode::new_with_mode_and_add(
+        &mut builder,
+        clip_tokenizer_link,
+        positive_prompt_input,
+        SuperGraphNodeTokenizerEncodeMode::ClipStyle {
+            seq_len: 77,
+            bos: 49406,
+            eos: 49407,
+            pad: 0,
+        },
+        rng,
+    );
+    let clip_ids_neg = SuperGraphNodeTokenizerEncode::new_with_mode_and_add(
+        &mut builder,
+        clip_tokenizer_link,
+        negative_prompt_input,
+        SuperGraphNodeTokenizerEncodeMode::ClipStyle {
+            seq_len: 77,
+            bos: 49406,
+            eos: 49407,
+            pad: 0,
+        },
+        rng,
+    );
+    let t5_ids_pos = SuperGraphNodeTokenizerEncode::new_with_mode_and_add(
+        &mut builder,
+        t5_tokenizer_link,
+        positive_prompt_input,
+        SuperGraphNodeTokenizerEncodeMode::RawPad {
+            seq_len: t5_sequence_length,
+            pad: 0,
+        },
+        rng,
+    );
+    let t5_ids_neg = SuperGraphNodeTokenizerEncode::new_with_mode_and_add(
+        &mut builder,
+        t5_tokenizer_link,
+        negative_prompt_input,
+        SuperGraphNodeTokenizerEncodeMode::RawPad {
+            seq_len: t5_sequence_length,
+            pad: 0,
+        },
+        rng,
+    );
+
+    let clip_eos_pos = build_eos_indices_node(&mut builder, rng, clip_ids_pos);
+    let clip_eos_neg = build_eos_indices_node(&mut builder, rng, clip_ids_neg);
+
+    // Conditional encoders
+    let clip_l_hidden_pos = builder.new_tensor_link(rng);
+    let clip_l_pooled_pos = builder.new_tensor_link(rng);
+    let mut clip_l_cond_inputs = vec![(clip_ids_pos, clip_l_input_name.to_string())];
+    if let Some(eos_name) = clip_l_eos_input_name {
+        clip_l_cond_inputs.push((clip_eos_pos, eos_name.to_string()));
+    }
+    let mut clip_l_cond = SuperGraphNodeModelExecution::new(
+        rng,
+        clip_l_weights,
+        0,
+        clip_l_cond_inputs,
+        vec![
+            (clip_l_hidden_output_name.to_string(), clip_l_hidden_pos),
+            (clip_l_pooled_output_name.to_string(), clip_l_pooled_pos),
+        ],
+    );
+    clip_l_cond.label = Some("clip_l_conditional".to_string());
+    builder.add_node(clip_l_cond.to_any());
+
+    let clip_g_hidden_pos = builder.new_tensor_link(rng);
+    let clip_g_pooled_pos = builder.new_tensor_link(rng);
+    let mut clip_g_cond_inputs = vec![(clip_ids_pos, clip_g_input_name.to_string())];
+    if let Some(eos_name) = clip_g_eos_input_name {
+        clip_g_cond_inputs.push((clip_eos_pos, eos_name.to_string()));
+    }
+    let mut clip_g_cond = SuperGraphNodeModelExecution::new(
+        rng,
+        clip_g_weights,
+        1,
+        clip_g_cond_inputs,
+        vec![
+            (clip_g_hidden_output_name.to_string(), clip_g_hidden_pos),
+            (clip_g_pooled_output_name.to_string(), clip_g_pooled_pos),
+        ],
+    );
+    clip_g_cond.label = Some("clip_g_conditional".to_string());
+    builder.add_node(clip_g_cond.to_any());
+
+    let t5_hidden_pos = builder.new_tensor_link(rng);
+    let mut t5_cond = SuperGraphNodeModelExecution::new(
+        rng,
+        t5_weights,
+        2,
+        vec![(t5_ids_pos, t5_input_name.to_string())],
+        vec![(t5_hidden_output_name.to_string(), t5_hidden_pos)],
+    );
+    t5_cond.label = Some("t5_conditional".to_string());
+    builder.add_node(t5_cond.to_any());
+
+    // Unconditional encoders
+    let clip_l_hidden_neg = builder.new_tensor_link(rng);
+    let clip_l_pooled_neg = builder.new_tensor_link(rng);
+    let mut clip_l_uncond_inputs = vec![(clip_ids_neg, clip_l_input_name.to_string())];
+    if let Some(eos_name) = clip_l_eos_input_name {
+        clip_l_uncond_inputs.push((clip_eos_neg, eos_name.to_string()));
+    }
+    let mut clip_l_uncond = SuperGraphNodeModelExecution::new(
+        rng,
+        clip_l_weights,
+        0,
+        clip_l_uncond_inputs,
+        vec![
+            (clip_l_hidden_output_name.to_string(), clip_l_hidden_neg),
+            (clip_l_pooled_output_name.to_string(), clip_l_pooled_neg),
+        ],
+    );
+    clip_l_uncond.label = Some("clip_l_unconditional".to_string());
+    builder.add_node(clip_l_uncond.to_any());
+
+    let clip_g_hidden_neg = builder.new_tensor_link(rng);
+    let clip_g_pooled_neg = builder.new_tensor_link(rng);
+    let mut clip_g_uncond_inputs = vec![(clip_ids_neg, clip_g_input_name.to_string())];
+    if let Some(eos_name) = clip_g_eos_input_name {
+        clip_g_uncond_inputs.push((clip_eos_neg, eos_name.to_string()));
+    }
+    let mut clip_g_uncond = SuperGraphNodeModelExecution::new(
+        rng,
+        clip_g_weights,
+        1,
+        clip_g_uncond_inputs,
+        vec![
+            (clip_g_hidden_output_name.to_string(), clip_g_hidden_neg),
+            (clip_g_pooled_output_name.to_string(), clip_g_pooled_neg),
+        ],
+    );
+    clip_g_uncond.label = Some("clip_g_unconditional".to_string());
+    builder.add_node(clip_g_uncond.to_any());
+
+    let t5_hidden_neg = builder.new_tensor_link(rng);
+    let mut t5_uncond = SuperGraphNodeModelExecution::new(
+        rng,
+        t5_weights,
+        2,
+        vec![(t5_ids_neg, t5_input_name.to_string())],
+        vec![(t5_hidden_output_name.to_string(), t5_hidden_neg)],
+    );
+    t5_uncond.label = Some("t5_unconditional".to_string());
+    builder.add_node(t5_uncond.to_any());
+
+    // Build conditional context + pooled projections.
+    let cond_context = builder.new_tensor_link(rng);
+    let cond_pooled = builder.new_tensor_link(rng);
+    {
+        let (mut mg, input_map) = MilliOpGraph::new(
+            [
+                clip_l_hidden_pos.global_id(),
+                clip_g_hidden_pos.global_id(),
+                t5_hidden_pos.global_id(),
+                clip_l_pooled_pos.global_id(),
+                clip_g_pooled_pos.global_id(),
+            ],
+            rng,
+        );
+        let l_hidden = *input_map.get(&clip_l_hidden_pos.global_id()).unwrap();
+        let g_hidden = *input_map.get(&clip_g_hidden_pos.global_id()).unwrap();
+        let t5_hidden = *input_map.get(&t5_hidden_pos.global_id()).unwrap();
+        let l_pooled = *input_map.get(&clip_l_pooled_pos.global_id()).unwrap();
+        let g_pooled = *input_map.get(&clip_g_pooled_pos.global_id()).unwrap();
+
+        // [1,77,768] + [1,77,1280] -> [1,77,2048]
+        let clip_hidden = MilliConcat::push_new(&mut mg, vec![l_hidden, g_hidden], -1, rng);
+        // Pad feature dim to 4096, then append T5 along sequence dim.
+        let pads = Constant::push_new(
+            &mut mg,
+            NDArrayNumericTensor::from_vec_shape(vec![0i64, 0, 0, 0, 0, 2048], &vec![6])
+                .unwrap(),
+            rng,
+        );
+        let clip_hidden_padded = Pad::push_new(
+            &mut mg,
+            clip_hidden,
+            pads,
+            None,
+            None,
+            PadMode::Constant,
+            rng,
+        );
+        let combined_context =
+            MilliConcat::push_new(&mut mg, vec![clip_hidden_padded, t5_hidden], -2, rng);
+        let combined_context = Cast::push_new(&mut mg, combined_context, model_dtype, rng);
+
+        // [1,768] + [1,1280] -> [1,2048]
+        let pooled = MilliConcat::push_new(&mut mg, vec![l_pooled, g_pooled], -1, rng);
+        let pooled = Cast::push_new(&mut mg, pooled, model_dtype, rng);
+
+        mg.set_output_map([
+            (combined_context, cond_context.global_id()),
+            (pooled, cond_pooled.global_id()),
+        ]);
+        let mut node = SuperGraphNodeMilliOpGraph::new(mg, rng);
+        node.label = Some("sd3_conditioning_conditional_assemble".to_string());
+        builder.add_node(node.to_any());
+    }
+
+    // Build unconditional context + pooled projections.
+    let uncond_context = builder.new_tensor_link(rng);
+    let uncond_pooled = builder.new_tensor_link(rng);
+    {
+        let (mut mg, input_map) = MilliOpGraph::new(
+            [
+                clip_l_hidden_neg.global_id(),
+                clip_g_hidden_neg.global_id(),
+                t5_hidden_neg.global_id(),
+                clip_l_pooled_neg.global_id(),
+                clip_g_pooled_neg.global_id(),
+            ],
+            rng,
+        );
+        let l_hidden = *input_map.get(&clip_l_hidden_neg.global_id()).unwrap();
+        let g_hidden = *input_map.get(&clip_g_hidden_neg.global_id()).unwrap();
+        let t5_hidden = *input_map.get(&t5_hidden_neg.global_id()).unwrap();
+        let l_pooled = *input_map.get(&clip_l_pooled_neg.global_id()).unwrap();
+        let g_pooled = *input_map.get(&clip_g_pooled_neg.global_id()).unwrap();
+
+        let clip_hidden = MilliConcat::push_new(&mut mg, vec![l_hidden, g_hidden], -1, rng);
+        let pads = Constant::push_new(
+            &mut mg,
+            NDArrayNumericTensor::from_vec_shape(vec![0i64, 0, 0, 0, 0, 2048], &vec![6])
+                .unwrap(),
+            rng,
+        );
+        let clip_hidden_padded = Pad::push_new(
+            &mut mg,
+            clip_hidden,
+            pads,
+            None,
+            None,
+            PadMode::Constant,
+            rng,
+        );
+        let combined_context =
+            MilliConcat::push_new(&mut mg, vec![clip_hidden_padded, t5_hidden], -2, rng);
+        let combined_context = Cast::push_new(&mut mg, combined_context, model_dtype, rng);
+
+        let pooled = MilliConcat::push_new(&mut mg, vec![l_pooled, g_pooled], -1, rng);
+        let pooled = Cast::push_new(&mut mg, pooled, model_dtype, rng);
+
+        mg.set_output_map([
+            (combined_context, uncond_context.global_id()),
+            (pooled, uncond_pooled.global_id()),
+        ]);
+        let mut node = SuperGraphNodeMilliOpGraph::new(mg, rng);
+        node.label = Some("sd3_conditioning_unconditional_assemble".to_string());
+        builder.add_node(node.to_any());
+    }
+
+    let final_latent = build_sd3_denoising_loop(
+        &mut builder,
+        rng,
+        transformer_weights,
+        cond_context,
+        uncond_context,
+        cond_pooled,
+        uncond_pooled,
+        guidance_scale_input,
+        initial_latent_input,
+        timesteps_input,
+        dt_input,
+        sigmas_input,
+        iteration_count_input,
+        model_dtype,
+        3,
+        transformer_latent_input_name,
+        transformer_timestep_input_name,
+        transformer_context_input_name,
+        transformer_pooled_input_name,
+        transformer_output_name,
+    );
+
+    let decoded_image_tensor = build_vae_decode_with_shift(
+        &mut builder,
+        rng,
+        final_latent,
+        vae_weights,
+        4,
+        vae_scale_factor,
+        vae_shift_factor,
+        model_dtype,
+        vae_input_name,
+        vae_output_name,
+    );
+    let image_output =
+        SuperGraphNodeTensorToImage::new_and_add(&mut builder, decoded_image_tensor, rng);
+    builder.set_link_label(image_output, "image_output");
+
+    let model_weights = vec![
+        clip_l_weights,
+        clip_g_weights,
+        t5_weights,
+        transformer_weights,
+        vae_weights,
+    ];
+    let input_links: Vec<_> = vec![
+        positive_prompt_input.to_any(),
+        negative_prompt_input.to_any(),
+        initial_latent_input.to_any(),
+        timesteps_input.to_any(),
+        dt_input.to_any(),
+        sigmas_input.to_any(),
+        iteration_count_input.to_any(),
+        guidance_scale_input.to_any(),
+        clip_l_weights.to_any(),
+        clip_g_weights.to_any(),
+        t5_weights.to_any(),
+        transformer_weights.to_any(),
+        vae_weights.to_any(),
+    ];
+    let output_links: Vec<_> = vec![image_output.to_any()];
+    let super_graph = builder.build(rng, &input_links, &output_links);
+
+    ImageGenerationInterface {
+        super_graph,
+        positive_prompt_input,
+        negative_prompt_input: Some(negative_prompt_input),
+        initial_latent_input,
+        timesteps_input,
+        dt_input,
+        sigmas_input,
+        iteration_count_input,
+        guidance_scale_input: Some(guidance_scale_input),
+        model_weights,
+        image_output,
+        scheduler: SchedulerType::RectifiedFlow,
+        latent_channels,
     }
 }

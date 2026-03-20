@@ -16,7 +16,7 @@ use whisper_tensor::super_graph::nodes::{
 };
 use whisper_tensor::super_graph::{SuperGraphBuilder, SuperGraphLink};
 
-use super::shared::video_interface::{
+use super::shared::interface_helpers::{
     build_cast_node, build_input_prep, build_progress_init, build_step_increment, build_zeros_like,
 };
 
