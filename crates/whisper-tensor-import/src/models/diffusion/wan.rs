@@ -1,4 +1,7 @@
-use crate::models::diffusion::sd_common::{CastingWeightManager, cos_op, sin_op};
+use crate::models::diffusion::sd_common::{
+    CastingWeightManager, adaln_modulate, cos_op, layer_norm_bare, ones_constant, sin_op,
+    slice_axis, split_chunks,
+};
 use crate::onnx_graph::Error;
 use crate::onnx_graph::WeightStorageStrategy;
 use crate::onnx_graph::operators::{
@@ -104,90 +107,8 @@ impl WanVaeConfig {
     }
 }
 
-// =============================================================================
-// Helpers
-// =============================================================================
-
-fn slice_axis(
-    input: Arc<dyn Tensor>,
-    axis: i64,
-    start: i64,
-    end: i64,
-) -> Result<Arc<dyn Tensor>, Error> {
-    let resolved_axis = if axis < 0 {
-        input.rank() as i64 + axis
-    } else {
-        axis
-    };
-    let shape = Shape::new(vec![Dimension::new(Some(1), None, None)]);
-    let starts = Constant::new(None, TensorData::new(vec![start].into(), shape.clone())?);
-    let ends = Constant::new(None, TensorData::new(vec![end].into(), shape.clone())?);
-    let axes = Constant::new(None, TensorData::new(vec![resolved_axis].into(), shape)?);
-    Ok(crate::onnx_graph::operators::Slice::new(
-        None, input, starts, ends, Some(axes), None,
-    )?)
-}
-
-fn split_chunks(
-    input: Arc<dyn Tensor>,
-    chunk_size: usize,
-    num_chunks: usize,
-) -> Result<Vec<Arc<dyn Tensor>>, Error> {
-    let mut out = Vec::with_capacity(num_chunks);
-    for i in 0..num_chunks {
-        out.push(slice_axis(
-            input.clone(),
-            -1,
-            (i * chunk_size) as i64,
-            ((i + 1) * chunk_size) as i64,
-        )?);
-    }
-    Ok(out)
-}
-
-fn ones_constant(size: usize, dtype: DType) -> Arc<dyn Tensor> {
-    let shape = Shape::new(vec![Dimension::new(Some(size), None, None)]);
-    match dtype {
-        DType::F32 => Constant::new(
-            None,
-            TensorData::new(TensorDataValue::F32(vec![1.0; size]), shape).unwrap(),
-        ),
-        DType::BF16 => Constant::new(
-            None,
-            TensorData::new(TensorDataValue::BF16(vec![half::bf16::ONE; size]), shape).unwrap(),
-        ),
-        DType::F16 => Constant::new(
-            None,
-            TensorData::new(TensorDataValue::F16(vec![half::f16::ONE; size]), shape).unwrap(),
-        ),
-        _ => panic!("unsupported dtype for ones_constant: {:?}", dtype),
-    }
-}
-
-/// LayerNorm without learnable affine (weight=ones, no bias).
-fn layer_norm_bare(
-    input: Arc<dyn Tensor>,
-    hidden_dim: usize,
-    epsilon: f32,
-) -> Result<Arc<LayerNormalization>, Error> {
-    let scale = ones_constant(hidden_dim, input.dtype());
-    LayerNormalization::new(None, input, scale, None, -1, epsilon, 1)
-}
-
-/// AdaLN modulation: LayerNorm(input) * (1 + scale) + shift
-fn adaln_modulate(
-    input: Arc<dyn Tensor>,
-    shift: Arc<dyn Tensor>,
-    scale: Arc<dyn Tensor>,
-    hidden_dim: usize,
-    epsilon: f32,
-) -> Result<Arc<dyn Tensor>, Error> {
-    let normed = layer_norm_bare(input, hidden_dim, epsilon)?;
-    let one = ones_constant(hidden_dim, normed.dtype());
-    let scale_plus_one = Add::new(None, one, scale)?;
-    let scaled = Mul::new(None, normed, scale_plus_one)?;
-    Ok(Add::new(None, scaled, shift)?)
-}
+// Shared helpers (slice_axis, split_chunks, ones_constant, layer_norm_bare, adaln_modulate)
+// are in sd_common.rs
 
 // =============================================================================
 // 3D RoPE for Wan2.1
@@ -741,27 +662,7 @@ fn wan_rms_norm_5d(
     channels: usize,
     eps: f32,
 ) -> Result<Arc<dyn Tensor>, Error> {
-    // Reshape [B, C, T, H, W] -> [B, T*H*W, C], apply RMSNorm on last dim, reshape back
-    let x = Transpose::new(None, input.clone(), Some(vec![0, 2, 3, 4, 1])); // [B, T, H, W, C]
-    let x = reshape(x, vec![0, -1, channels as i64])?; // [B, T*H*W, C]
-    let x = rms_norm(wm, x, Some(eps))?;
-    // We need to reshape back, but we don't know T*H*W statically in all cases.
-    // Use Shape of original input to recover dims.
-    // For now, use the same reshape pattern:
-    let x = reshape(x, vec![0, -1, 0, 0, channels as i64])?;
-    // Actually, we can't infer T,H,W from the flattened form.
-    // Better approach: transpose so C is last, apply norm, transpose back.
-    // RMSNorm on axis=-1 matches C when C is last.
-    // But we already reshaped... Let me use a different approach.
-    // Actually the simplest: reshape to [B*T*H*W, C], norm, reshape back.
-    // We need the original spatial dims. Let's just use Transpose-based approach:
-
-    // Restart: [B, C, T, H, W] -> transpose to [B, T, H, W, C] -> flatten spatial
-    // -> rms_norm on last dim -> unflatten -> transpose back
-    // This is awkward. Better: just do elementwise norm on axis=1.
-    // Our RMSNorm op supports axis=-1. Let's transpose C to last.
-    let _ = x; // discard above attempt
-
+    // Transpose C to last so RMSNorm (axis=-1) operates on channels
     let x = Transpose::new(None, input, Some(vec![0, 2, 3, 4, 1])); // [B, T, H, W, C]
     let x = rms_norm(wm, x, Some(eps))?;
     let x = Transpose::new(None, x, Some(vec![0, 4, 1, 2, 3])); // [B, C, T, H, W]

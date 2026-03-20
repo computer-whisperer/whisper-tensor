@@ -346,8 +346,17 @@ pub struct VideoGenerationInterface {
     pub negative_prompt_input: Option<SuperGraphLink>,
     // Latent / scheduler inputs
     pub initial_latent_input: SuperGraphLink,
+    /// Per-step timestep values, scanned along axis 0.
     pub timesteps_input: SuperGraphLink,
+    /// Per-step scheduler data, scanned along axis 0.
+    /// Interpretation depends on scheduler type:
+    /// - RectifiedFlow: dt values (scalar per step)
+    /// - DDIMVPrediction: `[alpha_{t-1}, sigma_{t-1}]` pairs per step
     pub dt_input: SuperGraphLink,
+    /// Per-step scheduler data, scanned along axis 0.
+    /// Interpretation depends on scheduler type:
+    /// - RectifiedFlow: unused (still required as graph input)
+    /// - DDIMVPrediction: `[alpha_t, sigma_t]` pairs per step
     pub sigmas_input: SuperGraphLink,
     pub iteration_count_input: SuperGraphLink,
     pub guidance_scale_input: Option<SuperGraphLink>,

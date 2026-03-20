@@ -1,4 +1,7 @@
-use crate::models::diffusion::sd_common::{CastingWeightManager, cos_op, sin_op};
+use crate::models::diffusion::sd_common::{
+    self, CastingWeightManager, adaln_modulate, cos_op, layer_norm_bare, ones_constant, sin_op,
+    slice_axis, split_chunks,
+};
 use crate::onnx_graph::Error;
 use crate::onnx_graph::WeightStorageStrategy;
 use crate::onnx_graph::operators::{
@@ -96,85 +99,8 @@ impl CogVideoXTransformerConfig {
     }
 }
 
-// --- Helper functions ---
-
-fn slice_axis(
-    input: Arc<dyn Tensor>,
-    axis: i64,
-    start: i64,
-    end: i64,
-) -> Result<Arc<dyn Tensor>, Error> {
-    let resolved_axis = if axis < 0 {
-        input.rank() as i64 + axis
-    } else {
-        axis
-    };
-    let shape = Shape::new(vec![Dimension::new(Some(1), None, None)]);
-    let starts = Constant::new(None, TensorData::new(vec![start].into(), shape.clone())?);
-    let ends = Constant::new(None, TensorData::new(vec![end].into(), shape.clone())?);
-    let axes = Constant::new(None, TensorData::new(vec![resolved_axis].into(), shape)?);
-    Ok(crate::onnx_graph::operators::Slice::new(None, input, starts, ends, Some(axes), None)?)
-}
-
-fn split_chunks(
-    input: Arc<dyn Tensor>,
-    chunk_size: usize,
-    num_chunks: usize,
-) -> Result<Vec<Arc<dyn Tensor>>, Error> {
-    let mut out = Vec::with_capacity(num_chunks);
-    for i in 0..num_chunks {
-        out.push(slice_axis(
-            input.clone(),
-            -1,
-            (i * chunk_size) as i64,
-            ((i + 1) * chunk_size) as i64,
-        )?);
-    }
-    Ok(out)
-}
-
-fn ones_constant(size: usize, dtype: DType) -> Arc<dyn Tensor> {
-    let shape = Shape::new(vec![Dimension::new(Some(size), None, None)]);
-    match dtype {
-        DType::F32 => Constant::new(
-            None,
-            TensorData::new(TensorDataValue::F32(vec![1.0; size]), shape).unwrap(),
-        ),
-        DType::BF16 => Constant::new(
-            None,
-            TensorData::new(TensorDataValue::BF16(vec![half::bf16::ONE; size]), shape).unwrap(),
-        ),
-        DType::F16 => Constant::new(
-            None,
-            TensorData::new(TensorDataValue::F16(vec![half::f16::ONE; size]), shape).unwrap(),
-        ),
-        _ => panic!("unsupported dtype for ones_constant: {:?}", dtype),
-    }
-}
-
-fn layer_norm_bare(
-    input: Arc<dyn Tensor>,
-    hidden_dim: usize,
-    epsilon: f32,
-) -> Result<Arc<LayerNormalization>, Error> {
-    let scale = ones_constant(hidden_dim, input.dtype());
-    LayerNormalization::new(None, input, scale, None, -1, epsilon, 1)
-}
-
-/// AdaLN modulation: LayerNorm(input) * (1 + scale) + shift
-fn adaln_modulate(
-    input: Arc<dyn Tensor>,
-    shift: Arc<dyn Tensor>,
-    scale: Arc<dyn Tensor>,
-    hidden_dim: usize,
-    epsilon: f32,
-) -> Result<Arc<dyn Tensor>, Error> {
-    let normed = layer_norm_bare(input, hidden_dim, epsilon)?;
-    let one = ones_constant(hidden_dim, normed.dtype());
-    let scale_plus_one = Add::new(None, one, scale)?;
-    let scaled = Mul::new(None, normed, scale_plus_one)?;
-    Ok(Add::new(None, scaled, shift)?)
-}
+// Shared helpers (slice_axis, split_chunks, ones_constant, layer_norm_bare, adaln_modulate)
+// are in sd_common.rs
 
 // --- CogVideoX 3D RoPE ---
 
