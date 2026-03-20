@@ -421,6 +421,22 @@ fn populate_from_tensor(
                 buf[offset + i] = NumericScalar::BOOL(v);
             }
         }
+        NDArrayNumericTensor::U4(a) => {
+            for (i, &v) in a.iter().enumerate() {
+                if offset + i >= limit {
+                    break;
+                }
+                buf[offset + i] = NumericScalar::U4(v);
+            }
+        }
+        NDArrayNumericTensor::I4(a) => {
+            for (i, &v) in a.iter().enumerate() {
+                if offset + i >= limit {
+                    break;
+                }
+                buf[offset + i] = NumericScalar::I4(v);
+            }
+        }
         NDArrayNumericTensor::STRING(_) => panic!("Cannot populate values from string tensor"),
     }
 }

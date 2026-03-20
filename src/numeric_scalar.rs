@@ -1,5 +1,7 @@
 use crate::TrigOp;
 use crate::dtype::{DType, DTypeOfPrimitive};
+use arbitrary_int::{i4, u4};
+use arbitrary_int::traits::Integer;
 use float8::{F8E4M3, F8E5M2};
 use half::{bf16, f16};
 use num_traits::Float;
@@ -22,6 +24,8 @@ pub enum NumericScalar {
     I16(i16),
     U8(u8),
     I8(i8),
+    U4(u4),
+    I4(i4),
     BOOL(bool),
     STRING(String),
 }
@@ -43,6 +47,8 @@ impl std::fmt::Display for NumericScalar {
             NumericScalar::I16(v) => write!(f, "{}", v),
             NumericScalar::U8(v) => write!(f, "{}", v),
             NumericScalar::I8(v) => write!(f, "{}", v),
+            NumericScalar::U4(v) => write!(f, "{}", v),
+            NumericScalar::I4(v) => write!(f, "{}", v),
             NumericScalar::BOOL(v) => write!(f, "{}", v),
             NumericScalar::STRING(v) => write!(f, "{}", v),
         }
@@ -66,6 +72,8 @@ impl NumericScalar {
             NumericScalar::I16(_) => DType::I16,
             NumericScalar::U8(_) => DType::U8,
             NumericScalar::I8(_) => DType::I8,
+            NumericScalar::U4(_) => DType::U4,
+            NumericScalar::I4(_) => DType::I4,
             NumericScalar::BOOL(_) => DType::BOOL,
             NumericScalar::STRING(_) => DType::STRING,
         }
@@ -87,10 +95,12 @@ impl NumericScalar {
             DType::I16 => NumericScalar::I16(0),
             DType::U8 => NumericScalar::U8(0),
             DType::I8 => NumericScalar::I8(0),
+            DType::U4 => NumericScalar::U4(u4::new(0)),
+            DType::I4 => NumericScalar::I4(i4::new(0)),
             DType::BOOL => NumericScalar::BOOL(false),
             DType::STRING => NumericScalar::STRING(String::new()),
-            DType::F4E2M1 | DType::I4 | DType::U4 => {
-                panic!("4-bit scalar types not yet implemented")
+            DType::F4E2M1 => {
+                panic!("4-bit float scalar types not yet implemented")
             }
             DType::Packed(fmt) => panic!("Cannot create scalar zero for packed format {fmt}"),
         }
@@ -108,6 +118,7 @@ impl NumericScalar {
             NumericScalar::I32(x) => Self::I32(-x),
             NumericScalar::I16(x) => Self::I16(-x),
             NumericScalar::I8(x) => Self::I8(-x),
+            NumericScalar::I4(x) => Self::I4(i4::masked_new(-x.value())),
             _ => panic!("Cannot negate this type"),
         }
     }
@@ -149,6 +160,8 @@ impl NumericScalar {
             NumericScalar::U16(x) => Self::U16(*x),
             NumericScalar::I8(x) => Self::I8(-x),
             NumericScalar::U8(x) => Self::U8(*x),
+            NumericScalar::I4(x) => Self::I4(i4::masked_new(x.value().abs())),
+            NumericScalar::U4(x) => Self::U4(*x),
             _ => panic!("Cannot abs this type"),
         }
     }
@@ -233,6 +246,12 @@ impl NumericScalar {
             NumericScalar::I32(x) => Self::I32(if *x == 0 { 0 } else { x.signum() }),
             NumericScalar::I16(x) => Self::I16(if *x == 0 { 0 } else { x.signum() }),
             NumericScalar::I8(x) => Self::I8(if *x == 0 { 0 } else { x.signum() }),
+            NumericScalar::U4(x) => Self::U4(if x.value() == 0 { u4::new(0) } else { u4::new(1) }),
+            NumericScalar::I4(x) => Self::I4(if x.value() == 0 {
+                i4::new(0)
+            } else {
+                i4::masked_new(x.value().signum())
+            }),
             _ => panic!("Cannot sign this type"),
         }
     }
@@ -394,6 +413,8 @@ impl NumericScalar {
             DType::I16 => NumericScalar::I16(i16::cast_from_numeric_scalar(self)),
             DType::U8 => NumericScalar::U8(u8::cast_from_numeric_scalar(self)),
             DType::I8 => NumericScalar::I8(i8::cast_from_numeric_scalar(self)),
+            DType::U4 => NumericScalar::U4(u4::cast_from_numeric_scalar(self)),
+            DType::I4 => NumericScalar::I4(i4::cast_from_numeric_scalar(self)),
             DType::BOOL => NumericScalar::BOOL(bool::cast_from_numeric_scalar(self)),
             _ => panic!("Cannot cast to {:?}", dtype),
         }
@@ -422,6 +443,9 @@ impl NumericScalar {
             NumericScalar::U64(x) => *x != 0,
             NumericScalar::U32(x) => *x != 0,
             NumericScalar::U8(x) => *x != 0,
+            NumericScalar::I8(x) => *x != 0,
+            NumericScalar::U4(x) => x.value() != 0,
+            NumericScalar::I4(x) => x.value() != 0,
             NumericScalar::BOOL(x) => *x,
             _ => panic!("is_nonzero not supported for {:?}", self.dtype()),
         }
@@ -554,6 +578,8 @@ impl NumericScalar {
             NumericScalar::I16(x) => x.to_le_bytes().to_vec(),
             NumericScalar::U8(x) => x.to_le_bytes().to_vec(),
             NumericScalar::I8(x) => x.to_le_bytes().to_vec(),
+            NumericScalar::U4(v) => vec![v.value()],
+            NumericScalar::I4(v) => vec![v.value() as u8],
             NumericScalar::BOOL(x) => vec![*x as u8],
             NumericScalar::STRING(_) => panic!(),
         }
@@ -585,6 +611,8 @@ impl NumericScalarType for f64 {
             NumericScalar::I16(v) => *v as f64,
             NumericScalar::U8(v) => *v as f64,
             NumericScalar::I8(v) => *v as f64,
+            NumericScalar::U4(v) => v.value() as f64,
+            NumericScalar::I4(v) => v.value() as f64,
             NumericScalar::BOOL(v) => {
                 if *v {
                     1.0
@@ -617,6 +645,8 @@ impl NumericScalarType for f32 {
             NumericScalar::I16(v) => *v as f32,
             NumericScalar::U8(v) => *v as f32,
             NumericScalar::I8(v) => *v as f32,
+            NumericScalar::U4(v) => v.value() as f32,
+            NumericScalar::I4(v) => v.value() as f32,
             NumericScalar::BOOL(v) => {
                 if *v {
                     1.0
@@ -649,6 +679,8 @@ impl NumericScalarType for bf16 {
             NumericScalar::I16(v) => bf16::from_f32(*v as f32),
             NumericScalar::U8(v) => bf16::from_f32(*v as f32),
             NumericScalar::I8(v) => bf16::from_f32(*v as f32),
+            NumericScalar::U4(v) => bf16::from_f32(v.value() as f32),
+            NumericScalar::I4(v) => bf16::from_f32(v.value() as f32),
             NumericScalar::BOOL(v) => bf16::from_f32(if *v { 1.0 } else { 0.0 }),
             _ => panic!("Cannot cast from {value:?} to bf16"),
         }
@@ -675,6 +707,8 @@ impl NumericScalarType for f16 {
             NumericScalar::I16(v) => f16::from_f32(*v as f32),
             NumericScalar::U8(v) => f16::from_f32(*v as f32),
             NumericScalar::I8(v) => f16::from_f32(*v as f32),
+            NumericScalar::U4(v) => f16::from_f32(v.value() as f32),
+            NumericScalar::I4(v) => f16::from_f32(v.value() as f32),
             NumericScalar::BOOL(v) => f16::from_f32(if *v { 1.0 } else { 0.0 }),
             _ => panic!("Cannot cast from {value:?} to f16"),
         }
@@ -701,6 +735,8 @@ impl NumericScalarType for F8E4M3 {
             NumericScalar::I16(v) => F8E4M3::from_f32(*v as f32),
             NumericScalar::U8(v) => F8E4M3::from_f32(*v as f32),
             NumericScalar::I8(v) => F8E4M3::from_f32(*v as f32),
+            NumericScalar::U4(v) => F8E4M3::from_f32(v.value() as f32),
+            NumericScalar::I4(v) => F8E4M3::from_f32(v.value() as f32),
             NumericScalar::BOOL(v) => F8E4M3::from_f32(if *v { 1.0 } else { 0.0 }),
             _ => panic!("Cannot cast from {value:?} to F8E4M3"),
         }
@@ -727,6 +763,8 @@ impl NumericScalarType for F8E5M2 {
             NumericScalar::I16(v) => F8E5M2::from_f32(*v as f32),
             NumericScalar::U8(v) => F8E5M2::from_f32(*v as f32),
             NumericScalar::I8(v) => F8E5M2::from_f32(*v as f32),
+            NumericScalar::U4(v) => F8E5M2::from_f32(v.value() as f32),
+            NumericScalar::I4(v) => F8E5M2::from_f32(v.value() as f32),
             NumericScalar::BOOL(v) => F8E5M2::from_f32(if *v { 1.0 } else { 0.0 }),
             _ => panic!("Cannot cast from {value:?} to F8E5M2"),
         }
@@ -753,6 +791,8 @@ impl NumericScalarType for u64 {
             NumericScalar::I16(v) => *v as u64,
             NumericScalar::U8(v) => *v as u64,
             NumericScalar::I8(v) => *v as u64,
+            NumericScalar::U4(v) => v.value() as u64,
+            NumericScalar::I4(v) => v.value() as u64,
             NumericScalar::BOOL(v) => {
                 if *v {
                     1
@@ -785,6 +825,8 @@ impl NumericScalarType for i64 {
             NumericScalar::I16(v) => *v as i64,
             NumericScalar::U8(v) => *v as i64,
             NumericScalar::I8(v) => *v as i64,
+            NumericScalar::U4(v) => v.value() as i64,
+            NumericScalar::I4(v) => v.value() as i64,
             NumericScalar::BOOL(v) => {
                 if *v {
                     1
@@ -817,6 +859,8 @@ impl NumericScalarType for u32 {
             NumericScalar::I16(v) => *v as u32,
             NumericScalar::U8(v) => *v as u32,
             NumericScalar::I8(v) => *v as u32,
+            NumericScalar::U4(v) => v.value() as u32,
+            NumericScalar::I4(v) => v.value() as u32,
             NumericScalar::BOOL(v) => {
                 if *v {
                     1
@@ -849,6 +893,8 @@ impl NumericScalarType for i32 {
             NumericScalar::I16(v) => *v as i32,
             NumericScalar::U8(v) => *v as i32,
             NumericScalar::I8(v) => *v as i32,
+            NumericScalar::U4(v) => v.value() as i32,
+            NumericScalar::I4(v) => v.value() as i32,
             NumericScalar::BOOL(v) => {
                 if *v {
                     1
@@ -881,6 +927,8 @@ impl NumericScalarType for u16 {
             NumericScalar::I16(v) => *v as u16,
             NumericScalar::U8(v) => *v as u16,
             NumericScalar::I8(v) => *v as u16,
+            NumericScalar::U4(v) => v.value() as u16,
+            NumericScalar::I4(v) => v.value() as u16,
             NumericScalar::BOOL(v) => {
                 if *v {
                     1
@@ -913,6 +961,8 @@ impl NumericScalarType for i16 {
             NumericScalar::I16(v) => *v,
             NumericScalar::U8(v) => *v as i16,
             NumericScalar::I8(v) => *v as i16,
+            NumericScalar::U4(v) => v.value() as i16,
+            NumericScalar::I4(v) => v.value() as i16,
             NumericScalar::BOOL(v) => {
                 if *v {
                     1
@@ -945,6 +995,8 @@ impl NumericScalarType for u8 {
             NumericScalar::I16(v) => *v as u8,
             NumericScalar::U8(v) => *v,
             NumericScalar::I8(v) => *v as u8,
+            NumericScalar::U4(v) => v.value(),
+            NumericScalar::I4(v) => v.value() as u8,
             NumericScalar::BOOL(v) => {
                 if *v {
                     1
@@ -977,6 +1029,8 @@ impl NumericScalarType for i8 {
             NumericScalar::I16(v) => *v as i8,
             NumericScalar::U8(v) => *v as i8,
             NumericScalar::I8(v) => *v,
+            NumericScalar::U4(v) => v.value() as i8,
+            NumericScalar::I4(v) => v.value(),
             NumericScalar::BOOL(v) => {
                 if *v {
                     1
@@ -985,6 +1039,74 @@ impl NumericScalarType for i8 {
                 }
             }
             _ => panic!("Cannot cast from {value:?} to i8",),
+        }
+    }
+}
+
+impl NumericScalarType for u4 {
+    fn to_numeric_scalar(self) -> NumericScalar {
+        NumericScalar::U4(self)
+    }
+    fn cast_from_numeric_scalar(value: &NumericScalar) -> Self {
+        match value {
+            NumericScalar::F64(v) => u4::masked_new(*v as u8),
+            NumericScalar::F32(v) => u4::masked_new(*v as u8),
+            NumericScalar::BF16(v) => u4::masked_new(v.to_f32() as u8),
+            NumericScalar::F16(v) => u4::masked_new(v.to_f32() as u8),
+            NumericScalar::F8E4M3FN(v) => u4::masked_new(v.to_f32() as u8),
+            NumericScalar::F8E5M2(v) => u4::masked_new(v.to_f32() as u8),
+            NumericScalar::U64(v) => u4::masked_new(*v as u8),
+            NumericScalar::I64(v) => u4::masked_new(*v as u8),
+            NumericScalar::U32(v) => u4::masked_new(*v as u8),
+            NumericScalar::I32(v) => u4::masked_new(*v as u8),
+            NumericScalar::U16(v) => u4::masked_new(*v as u8),
+            NumericScalar::I16(v) => u4::masked_new(*v as u8),
+            NumericScalar::U8(v) => u4::masked_new(*v),
+            NumericScalar::I8(v) => u4::masked_new(*v as u8),
+            NumericScalar::U4(v) => *v,
+            NumericScalar::I4(v) => u4::masked_new(v.value() as u8),
+            NumericScalar::BOOL(v) => {
+                if *v {
+                    u4::new(1)
+                } else {
+                    u4::new(0)
+                }
+            }
+            _ => panic!("Cannot cast from {value:?} to u4"),
+        }
+    }
+}
+
+impl NumericScalarType for i4 {
+    fn to_numeric_scalar(self) -> NumericScalar {
+        NumericScalar::I4(self)
+    }
+    fn cast_from_numeric_scalar(value: &NumericScalar) -> Self {
+        match value {
+            NumericScalar::F64(v) => i4::masked_new(*v as i8),
+            NumericScalar::F32(v) => i4::masked_new(*v as i8),
+            NumericScalar::BF16(v) => i4::masked_new(v.to_f32() as i8),
+            NumericScalar::F16(v) => i4::masked_new(v.to_f32() as i8),
+            NumericScalar::F8E4M3FN(v) => i4::masked_new(v.to_f32() as i8),
+            NumericScalar::F8E5M2(v) => i4::masked_new(v.to_f32() as i8),
+            NumericScalar::U64(v) => i4::masked_new(*v as i8),
+            NumericScalar::I64(v) => i4::masked_new(*v as i8),
+            NumericScalar::U32(v) => i4::masked_new(*v as i8),
+            NumericScalar::I32(v) => i4::masked_new(*v as i8),
+            NumericScalar::U16(v) => i4::masked_new(*v as i8),
+            NumericScalar::I16(v) => i4::masked_new(*v as i8),
+            NumericScalar::U8(v) => i4::masked_new(*v as i8),
+            NumericScalar::I8(v) => i4::masked_new(*v),
+            NumericScalar::U4(v) => i4::masked_new(v.value() as i8),
+            NumericScalar::I4(v) => *v,
+            NumericScalar::BOOL(v) => {
+                if *v {
+                    i4::new(1)
+                } else {
+                    i4::new(0)
+                }
+            }
+            _ => panic!("Cannot cast from {value:?} to i4"),
         }
     }
 }

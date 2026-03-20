@@ -47,6 +47,7 @@ paste = "1.0.15"
 image = "0.25"
 ndarray-npy = "0.10"
 float8 = { version = "0.7.0", features = ["serde", "num-traits", "zerocopy"] }
+arbitrary-int = { version = "2.1", features = ["serde"] }
 
 cranelift-codegen = { version = "0.116", optional = true }
 cranelift-frontend = { version = "0.116", optional = true }

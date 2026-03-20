@@ -1,3 +1,4 @@
+use arbitrary_int::{i4, u4};
 use crate::onnx;
 use crate::packed_format::PackedFormat;
 use float8::{F8E4M3, F8E5M2};
@@ -295,6 +296,12 @@ impl DTypeOfPrimitive for i8 {
 }
 impl DTypeOfPrimitive for u8 {
     const DTYPE: DType = DType::U8;
+}
+impl DTypeOfPrimitive for i4 {
+    const DTYPE: DType = DType::I4;
+}
+impl DTypeOfPrimitive for u4 {
+    const DTYPE: DType = DType::U4;
 }
 impl DTypeOfPrimitive for bool {
     const DTYPE: DType = DType::BOOL;
