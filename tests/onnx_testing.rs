@@ -847,17 +847,13 @@ macro_rules! do_tests {
         do_test!($runner_fn, $runner_name, test_gather_0);
         do_test!($runner_fn, $runner_name, test_gather_1);
         do_test!($runner_fn, $runner_name, test_gather_2d_indices);
-/*
         do_test!($runner_fn, $runner_name, test_gather_elements_0);
         do_test!($runner_fn, $runner_name, test_gather_elements_1);
-        do_test!($runner_fn, $runner_name, test_gather_elements_negative_indices);*/
+        do_test!($runner_fn, $runner_name, test_gather_elements_negative_indices);
 
-        /*
         do_test!($runner_fn, $runner_name, test_gathernd_example_float32);
         do_test!($runner_fn, $runner_name, test_gathernd_example_int32);
         do_test!($runner_fn, $runner_name, test_gathernd_example_int32_batch_dim1);
-
-         */
 
         do_test!($runner_fn, $runner_name, test_gather_negative_indices);
 
@@ -1410,17 +1406,16 @@ macro_rules! do_tests {
         do_test!($runner_fn, $runner_name, test_reduce_log_sum_negative_axes);
         do_test!($runner_fn, $runner_name, test_reduce_log_sum_negative_axes_expanded);
 
-        /*
-        do_test!($runner_fn, $runner_name, test_reduce_max_bool_inputs);
+        //do_test!($runner_fn, $runner_name, test_reduce_max_bool_inputs); // BOOL dtype unsupported
         do_test!($runner_fn, $runner_name, test_reduce_max_default_axes_keepdim_example);
         do_test!($runner_fn, $runner_name, test_reduce_max_default_axes_keepdims_random);
         do_test!($runner_fn, $runner_name, test_reduce_max_do_not_keepdims_example);
         do_test!($runner_fn, $runner_name, test_reduce_max_do_not_keepdims_random);
-        do_test!($runner_fn, $runner_name, test_reduce_max_empty_set);
+        //do_test!($runner_fn, $runner_name, test_reduce_max_empty_set); // 0-dim panic
         do_test!($runner_fn, $runner_name, test_reduce_max_keepdims_example);
         do_test!($runner_fn, $runner_name, test_reduce_max_keepdims_random);
         do_test!($runner_fn, $runner_name, test_reduce_max_negative_axes_keepdims_example);
-        do_test!($runner_fn, $runner_name, test_reduce_max_negative_axes_keepdims_random);*/
+        do_test!($runner_fn, $runner_name, test_reduce_max_negative_axes_keepdims_random);
 
 
         do_test!($runner_fn, $runner_name, test_reduce_mean_default_axes_keepdims_example);
@@ -1432,8 +1427,7 @@ macro_rules! do_tests {
         do_test!($runner_fn, $runner_name, test_reduce_mean_negative_axes_keepdims_example);
         do_test!($runner_fn, $runner_name, test_reduce_mean_negative_axes_keepdims_random);
 
-        /*
-        do_test!($runner_fn, $runner_name, test_reduce_min_bool_inputs);
+        /*do_test!($runner_fn, $runner_name, test_reduce_min_bool_inputs);
         do_test!($runner_fn, $runner_name, test_reduce_min_default_axes_keepdims_example);
         do_test!($runner_fn, $runner_name, test_reduce_min_default_axes_keepdims_random);
         do_test!($runner_fn, $runner_name, test_reduce_min_do_not_keepdims_example);
@@ -1442,7 +1436,7 @@ macro_rules! do_tests {
         do_test!($runner_fn, $runner_name, test_reduce_min_keepdims_example);
         do_test!($runner_fn, $runner_name, test_reduce_min_keepdims_random);
         do_test!($runner_fn, $runner_name, test_reduce_min_negative_axes_keepdims_example);
-        do_test!($runner_fn, $runner_name, test_reduce_min_negative_axes_keepdims_random);*/
+        do_test!($runner_fn, $runner_name, test_reduce_min_negative_axes_keepdims_random);*/ // ReduceMin eval unimplemented
 
         do_test!($runner_fn, $runner_name, test_reduce_prod_default_axes_keepdims_example);
         do_test!($runner_fn, $runner_name, test_reduce_prod_default_axes_keepdims_random);
@@ -1806,11 +1800,11 @@ macro_rules! do_tests {
 
         do_test!($runner_fn, $runner_name, test_split_1d_uneven_split_opset18);
         do_test!($runner_fn, $runner_name, test_split_2d_uneven_split_opset18);
-        //do_test!($runner_fn, $runner_name, test_split_equal_parts_1d_opset13); // opset13 Split lacks num_outputs
+        do_test!($runner_fn, $runner_name, test_split_equal_parts_1d_opset13);
         do_test!($runner_fn, $runner_name, test_split_equal_parts_1d_opset18);
         do_test!($runner_fn, $runner_name, test_split_equal_parts_2d);
-        //do_test!($runner_fn, $runner_name, test_split_equal_parts_2d_opset13);
-        //do_test!($runner_fn, $runner_name, test_split_equal_parts_default_axis_opset13);
+        do_test!($runner_fn, $runner_name, test_split_equal_parts_2d_opset13);
+        do_test!($runner_fn, $runner_name, test_split_equal_parts_default_axis_opset13);
         do_test!($runner_fn, $runner_name, test_split_equal_parts_default_axis_opset18);
         //do_test!($runner_fn, $runner_name, test_split_to_sequence_1);
         //do_test!($runner_fn, $runner_name, test_split_to_sequence_2);
@@ -1886,14 +1880,13 @@ macro_rules! do_tests {
         do_test!($runner_fn, $runner_name, test_tile);
         do_test!($runner_fn, $runner_name, test_tile_precomputed);
 
-        /*
         do_test!($runner_fn, $runner_name, test_top_k);
         do_test!($runner_fn, $runner_name, test_top_k_negative_axis);
         do_test!($runner_fn, $runner_name, test_top_k_same_values);
         do_test!($runner_fn, $runner_name, test_top_k_same_values_2d);
         do_test!($runner_fn, $runner_name, test_top_k_same_values_largest);
         do_test!($runner_fn, $runner_name, test_top_k_smallest);
-        do_test!($runner_fn, $runner_name, test_top_k_uint64);*/
+        do_test!($runner_fn, $runner_name, test_top_k_uint64);
 
         /*
         do_test!($runner_fn, $runner_name, test_training_dropout);
