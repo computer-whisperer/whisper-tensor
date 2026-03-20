@@ -55,22 +55,6 @@ pub enum NumericTensor<R: Rank> {
     TCH(tch_backend::TCHNumericTensor<R>),
 }
 
-/// Try a Vulkan operation, falling back to the NDArray path on any VulkanError.
-///
-/// Usage: `try_vulkan!(executor, self.to_vulkan(executor)?.op(executor))`
-/// If the Vulkan operation succeeds, returns `Ok(NumericTensor::Vulkan(result))`.
-/// If it fails with any VulkanError, the macro expands to nothing (falls through
-/// to the NDArray implementation that follows).
-#[cfg(feature = "vulkan")]
-macro_rules! try_vulkan {
-    ($executor:expr, $op:expr) => {
-        match (|| -> Result<_, NumericTensorError> { Ok($op) })() {
-            Ok(vk) => return Ok(NumericTensor::Vulkan(vk)),
-            Err(_) => {} // Fall through to NDArray
-        }
-    };
-}
-
 impl<R: Rank> NumericTensor<R> {
     /// Convert this tensor to the NDArray backend without changing shape, dtype, or values.
     ///
@@ -292,7 +276,9 @@ impl<R: Rank> NumericTensor<R> {
             }
             #[cfg(feature = "vulkan")]
             if let EvalBackend::Vulkan(executor) = backend {
-                try_vulkan!(executor, self.to_vulkan(executor)?.neg(executor)?);
+                return Ok(NumericTensor::Vulkan(
+                    self.to_vulkan(executor)?.neg(executor)?,
+                ));
             }
         }
         Ok(NumericTensor::NDArray(self.to_ndarray()?.neg()?))
@@ -307,7 +293,9 @@ impl<R: Rank> NumericTensor<R> {
             }
             #[cfg(feature = "vulkan")]
             if let EvalBackend::Vulkan(executor) = backend {
-                try_vulkan!(executor, self.to_vulkan(executor)?.exp(executor)?);
+                return Ok(NumericTensor::Vulkan(
+                    self.to_vulkan(executor)?.exp(executor)?,
+                ));
             }
             #[cfg(feature = "tch")]
             if let EvalBackend::TCH = backend {
@@ -322,7 +310,9 @@ impl<R: Rank> NumericTensor<R> {
         if backend.supports_dtype(self.dtype()) {
             #[cfg(feature = "vulkan")]
             if let EvalBackend::Vulkan(executor) = backend {
-                try_vulkan!(executor, self.to_vulkan(executor)?.ln(executor)?);
+                return Ok(NumericTensor::Vulkan(
+                    self.to_vulkan(executor)?.ln(executor)?,
+                ));
             }
             #[cfg(feature = "tch")]
             if let EvalBackend::TCH = backend {
@@ -347,7 +337,9 @@ impl<R: Rank> NumericTensor<R> {
         if backend.supports_dtype(self.dtype()) {
             #[cfg(feature = "vulkan")]
             if let EvalBackend::Vulkan(executor) = backend {
-                try_vulkan!(executor, self.to_vulkan(executor)?.floor(executor)?);
+                return Ok(NumericTensor::Vulkan(
+                    self.to_vulkan(executor)?.floor(executor)?,
+                ));
             }
             #[cfg(feature = "tch")]
             if let EvalBackend::TCH = backend {
@@ -362,7 +354,9 @@ impl<R: Rank> NumericTensor<R> {
         if backend.supports_dtype(self.dtype()) {
             #[cfg(feature = "vulkan")]
             if let EvalBackend::Vulkan(executor) = backend {
-                try_vulkan!(executor, self.to_vulkan(executor)?.ceil(executor)?);
+                return Ok(NumericTensor::Vulkan(
+                    self.to_vulkan(executor)?.ceil(executor)?,
+                ));
             }
             #[cfg(feature = "tch")]
             if let EvalBackend::TCH = backend {
@@ -377,7 +371,9 @@ impl<R: Rank> NumericTensor<R> {
         if backend.supports_dtype(self.dtype()) {
             #[cfg(feature = "vulkan")]
             if let EvalBackend::Vulkan(executor) = backend {
-                try_vulkan!(executor, self.to_vulkan(executor)?.round(executor)?);
+                return Ok(NumericTensor::Vulkan(
+                    self.to_vulkan(executor)?.round(executor)?,
+                ));
             }
             #[cfg(feature = "tch")]
             if let EvalBackend::TCH = backend {
@@ -401,7 +397,9 @@ impl<R: Rank> NumericTensor<R> {
             }
             #[cfg(feature = "vulkan")]
             if let EvalBackend::Vulkan(executor) = backend {
-                try_vulkan!(executor, self.to_vulkan(executor)?.abs(executor)?);
+                return Ok(NumericTensor::Vulkan(
+                    self.to_vulkan(executor)?.abs(executor)?,
+                ));
             }
             #[cfg(feature = "tch")]
             if let EvalBackend::TCH = backend {
@@ -421,7 +419,9 @@ impl<R: Rank> NumericTensor<R> {
         if backend.supports_dtype(self.dtype()) {
             #[cfg(feature = "vulkan")]
             if let EvalBackend::Vulkan(executor) = backend {
-                try_vulkan!(executor, self.to_vulkan(executor)?.trig(op, executor)?);
+                return Ok(NumericTensor::Vulkan(
+                    self.to_vulkan(executor)?.trig(op, executor)?,
+                ));
             }
         }
         Ok(NumericTensor::NDArray(self.to_ndarray()?.trig(op)?))
@@ -432,7 +432,9 @@ impl<R: Rank> NumericTensor<R> {
         if backend.supports_dtype(self.dtype()) {
             #[cfg(feature = "vulkan")]
             if let EvalBackend::Vulkan(executor) = backend {
-                try_vulkan!(executor, self.to_vulkan(executor)?.reciprocal(executor)?);
+                return Ok(NumericTensor::Vulkan(
+                    self.to_vulkan(executor)?.reciprocal(executor)?,
+                ));
             }
         }
         Ok(NumericTensor::NDArray(self.to_ndarray()?.reciprocal()?))
@@ -447,7 +449,9 @@ impl<R: Rank> NumericTensor<R> {
             }
             #[cfg(feature = "vulkan")]
             if let EvalBackend::Vulkan(executor) = backend {
-                try_vulkan!(executor, self.to_vulkan(executor)?.sqrt(executor)?);
+                return Ok(NumericTensor::Vulkan(
+                    self.to_vulkan(executor)?.sqrt(executor)?,
+                ));
             }
         }
         Ok(NumericTensor::NDArray(self.to_ndarray()?.sqrt()?))
@@ -458,7 +462,9 @@ impl<R: Rank> NumericTensor<R> {
         if backend.supports_dtype(self.dtype()) {
             #[cfg(feature = "vulkan")]
             if let EvalBackend::Vulkan(executor) = backend {
-                try_vulkan!(executor, self.to_vulkan(executor)?.not(executor)?);
+                return Ok(NumericTensor::Vulkan(
+                    self.to_vulkan(executor)?.not(executor)?,
+                ));
             }
         }
         Ok(NumericTensor::NDArray(self.to_ndarray()?.not()?))
@@ -469,7 +475,9 @@ impl<R: Rank> NumericTensor<R> {
         if backend.supports_dtype(self.dtype()) {
             #[cfg(feature = "vulkan")]
             if let EvalBackend::Vulkan(executor) = backend {
-                try_vulkan!(executor, self.to_vulkan(executor)?.bitwise_not(executor)?);
+                return Ok(NumericTensor::Vulkan(
+                    self.to_vulkan(executor)?.bitwise_not(executor)?,
+                ));
             }
         }
         Ok(NumericTensor::NDArray(self.to_ndarray()?.bitwise_not()?))
@@ -659,11 +667,11 @@ impl NumericTensor<DynRank> {
             }
             #[cfg(feature = "vulkan")]
             if let EvalBackend::Vulkan(executor) = backend {
-                try_vulkan!(executor, {
-                    let a_vk = a.to_vulkan(executor)?;
-                    let b_vk = b.to_vulkan(executor)?;
-                    VulkanTensor::add(&a_vk, &b_vk, executor)?
-                });
+                return Ok(NumericTensor::Vulkan(VulkanTensor::add(
+                    &a.to_vulkan(executor)?,
+                    &b.to_vulkan(executor)?,
+                    executor,
+                )?));
             }
             #[cfg(feature = "tch")]
             if let EvalBackend::TCH = backend {
@@ -694,11 +702,11 @@ impl NumericTensor<DynRank> {
             }
             #[cfg(feature = "vulkan")]
             if let EvalBackend::Vulkan(executor) = backend {
-                try_vulkan!(executor, {
-                    let a_vk = a.to_vulkan(executor)?;
-                    let b_vk = b.to_vulkan(executor)?;
-                    VulkanTensor::sub(&a_vk, &b_vk, executor)?
-                });
+                return Ok(NumericTensor::Vulkan(VulkanTensor::sub(
+                    &a.to_vulkan(executor)?,
+                    &b.to_vulkan(executor)?,
+                    executor,
+                )?));
             }
             #[cfg(feature = "tch")]
             if let EvalBackend::TCH = backend {
@@ -733,11 +741,11 @@ impl NumericTensor<DynRank> {
             }
             #[cfg(feature = "vulkan")]
             if let EvalBackend::Vulkan(executor) = backend {
-                try_vulkan!(executor, {
-                    let a_vk = a.to_vulkan(executor)?;
-                    let b_vk = b.to_vulkan(executor)?;
-                    VulkanTensor::div(&a_vk, &b_vk, executor)?
-                });
+                return Ok(NumericTensor::Vulkan(VulkanTensor::div(
+                    &a.to_vulkan(executor)?,
+                    &b.to_vulkan(executor)?,
+                    executor,
+                )?));
             }
             #[cfg(feature = "tch")]
             if let EvalBackend::TCH = backend {
@@ -768,11 +776,11 @@ impl NumericTensor<DynRank> {
             }
             #[cfg(feature = "vulkan")]
             if let EvalBackend::Vulkan(executor) = backend {
-                try_vulkan!(executor, {
-                    let a_vk = a.to_vulkan(executor)?;
-                    let b_vk = b.to_vulkan(executor)?;
-                    VulkanTensor::mul(&a_vk, &b_vk, executor)?
-                });
+                return Ok(NumericTensor::Vulkan(VulkanTensor::mul(
+                    &a.to_vulkan(executor)?,
+                    &b.to_vulkan(executor)?,
+                    executor,
+                )?));
             }
             #[cfg(feature = "tch")]
             if let EvalBackend::TCH = backend {
@@ -798,11 +806,11 @@ impl NumericTensor<DynRank> {
         if backend.supports_dtype(a.dtype()) && backend.supports_dtype(b.dtype()) {
             #[cfg(feature = "vulkan")]
             if let EvalBackend::Vulkan(executor) = backend {
-                try_vulkan!(executor, {
-                    let a_vk = a.to_vulkan(executor)?;
-                    let b_vk = b.to_vulkan(executor)?;
-                    VulkanTensor::fmod(&a_vk, &b_vk, executor)?
-                });
+                return Ok(NumericTensor::Vulkan(VulkanTensor::fmod(
+                    &a.to_vulkan(executor)?,
+                    &b.to_vulkan(executor)?,
+                    executor,
+                )?));
             }
         }
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::fmod(
@@ -820,11 +828,11 @@ impl NumericTensor<DynRank> {
         if backend.supports_dtype(a.dtype()) && backend.supports_dtype(b.dtype()) {
             #[cfg(feature = "vulkan")]
             if let EvalBackend::Vulkan(executor) = backend {
-                try_vulkan!(executor, {
-                    let a_vk = a.to_vulkan(executor)?;
-                    let b_vk = b.to_vulkan(executor)?;
-                    VulkanTensor::imod(&a_vk, &b_vk, executor)?
-                });
+                return Ok(NumericTensor::Vulkan(VulkanTensor::imod(
+                    &a.to_vulkan(executor)?,
+                    &b.to_vulkan(executor)?,
+                    executor,
+                )?));
             }
         }
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::imod(
@@ -855,11 +863,12 @@ impl NumericTensor<DynRank> {
             }
             #[cfg(feature = "vulkan")]
             if let EvalBackend::Vulkan(executor) = backend {
-                try_vulkan!(executor, {
-                    let a_vk = a.to_vulkan(executor)?;
-                    let b_vk = b.to_vulkan(executor)?;
-                    VulkanTensor::matmul(&a_vk, &b_vk, accumulate_dtype, executor)?
-                });
+                return Ok(NumericTensor::Vulkan(VulkanTensor::matmul(
+                    &a.to_vulkan(executor)?,
+                    &b.to_vulkan(executor)?,
+                    accumulate_dtype,
+                    executor,
+                )?));
             }
             #[cfg(feature = "tch")]
             if let EvalBackend::TCH = backend {
@@ -886,11 +895,11 @@ impl NumericTensor<DynRank> {
         if backend.supports_dtype(a.dtype()) && backend.supports_dtype(b.dtype()) {
             #[cfg(feature = "vulkan")]
             if let EvalBackend::Vulkan(executor) = backend {
-                try_vulkan!(executor, {
-                    let a_vk = a.to_vulkan(executor)?;
-                    let b_vk = b.to_vulkan(executor)?;
-                    VulkanTensor::and(&a_vk, &b_vk, executor)?
-                });
+                return Ok(NumericTensor::Vulkan(VulkanTensor::and(
+                    &a.to_vulkan(executor)?,
+                    &b.to_vulkan(executor)?,
+                    executor,
+                )?));
             }
         }
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::and(
@@ -907,11 +916,11 @@ impl NumericTensor<DynRank> {
         if backend.supports_dtype(a.dtype()) && backend.supports_dtype(b.dtype()) {
             #[cfg(feature = "vulkan")]
             if let EvalBackend::Vulkan(executor) = backend {
-                try_vulkan!(executor, {
-                    let a_vk = a.to_vulkan(executor)?;
-                    let b_vk = b.to_vulkan(executor)?;
-                    VulkanTensor::or(&a_vk, &b_vk, executor)?
-                });
+                return Ok(NumericTensor::Vulkan(VulkanTensor::or(
+                    &a.to_vulkan(executor)?,
+                    &b.to_vulkan(executor)?,
+                    executor,
+                )?));
             }
         }
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::or(
@@ -928,11 +937,11 @@ impl NumericTensor<DynRank> {
         if backend.supports_dtype(a.dtype()) && backend.supports_dtype(b.dtype()) {
             #[cfg(feature = "vulkan")]
             if let EvalBackend::Vulkan(executor) = backend {
-                try_vulkan!(executor, {
-                    let a_vk = a.to_vulkan(executor)?;
-                    let b_vk = b.to_vulkan(executor)?;
-                    VulkanTensor::xor(&a_vk, &b_vk, executor)?
-                });
+                return Ok(NumericTensor::Vulkan(VulkanTensor::xor(
+                    &a.to_vulkan(executor)?,
+                    &b.to_vulkan(executor)?,
+                    executor,
+                )?));
             }
         }
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::xor(
@@ -953,11 +962,11 @@ impl NumericTensor<DynRank> {
         if backend.supports_dtype(a.dtype()) && backend.supports_dtype(b.dtype()) {
             #[cfg(feature = "vulkan")]
             if let EvalBackend::Vulkan(executor) = backend {
-                try_vulkan!(executor, {
-                    let a_vk = a.to_vulkan(executor)?;
-                    let b_vk = b.to_vulkan(executor)?;
-                    VulkanTensor::bitwise_and(&a_vk, &b_vk, executor)?
-                });
+                return Ok(NumericTensor::Vulkan(VulkanTensor::bitwise_and(
+                    &a.to_vulkan(executor)?,
+                    &b.to_vulkan(executor)?,
+                    executor,
+                )?));
             }
         }
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::bitwise_and(
@@ -978,11 +987,11 @@ impl NumericTensor<DynRank> {
         if backend.supports_dtype(a.dtype()) && backend.supports_dtype(b.dtype()) {
             #[cfg(feature = "vulkan")]
             if let EvalBackend::Vulkan(executor) = backend {
-                try_vulkan!(executor, {
-                    let a_vk = a.to_vulkan(executor)?;
-                    let b_vk = b.to_vulkan(executor)?;
-                    VulkanTensor::bitwise_or(&a_vk, &b_vk, executor)?
-                });
+                return Ok(NumericTensor::Vulkan(VulkanTensor::bitwise_or(
+                    &a.to_vulkan(executor)?,
+                    &b.to_vulkan(executor)?,
+                    executor,
+                )?));
             }
         }
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::bitwise_or(
@@ -1003,11 +1012,11 @@ impl NumericTensor<DynRank> {
         if backend.supports_dtype(a.dtype()) && backend.supports_dtype(b.dtype()) {
             #[cfg(feature = "vulkan")]
             if let EvalBackend::Vulkan(executor) = backend {
-                try_vulkan!(executor, {
-                    let a_vk = a.to_vulkan(executor)?;
-                    let b_vk = b.to_vulkan(executor)?;
-                    VulkanTensor::bitwise_xor(&a_vk, &b_vk, executor)?
-                });
+                return Ok(NumericTensor::Vulkan(VulkanTensor::bitwise_xor(
+                    &a.to_vulkan(executor)?,
+                    &b.to_vulkan(executor)?,
+                    executor,
+                )?));
             }
         }
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::bitwise_xor(
@@ -1048,11 +1057,11 @@ impl NumericTensor<DynRank> {
         if backend.supports_dtype(a.dtype()) && backend.supports_dtype(b.dtype()) {
             #[cfg(feature = "vulkan")]
             if let EvalBackend::Vulkan(executor) = backend {
-                try_vulkan!(executor, {
-                    let a_vk = a.to_vulkan(executor)?;
-                    let b_vk = b.to_vulkan(executor)?;
-                    VulkanTensor::max(&a_vk, &b_vk, executor)?
-                });
+                return Ok(NumericTensor::Vulkan(VulkanTensor::max(
+                    &a.to_vulkan(executor)?,
+                    &b.to_vulkan(executor)?,
+                    executor,
+                )?));
             }
         }
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::max(
@@ -1070,11 +1079,11 @@ impl NumericTensor<DynRank> {
         if backend.supports_dtype(a.dtype()) && backend.supports_dtype(b.dtype()) {
             #[cfg(feature = "vulkan")]
             if let EvalBackend::Vulkan(executor) = backend {
-                try_vulkan!(executor, {
-                    let a_vk = a.to_vulkan(executor)?;
-                    let b_vk = b.to_vulkan(executor)?;
-                    VulkanTensor::min(&a_vk, &b_vk, executor)?
-                });
+                return Ok(NumericTensor::Vulkan(VulkanTensor::min(
+                    &a.to_vulkan(executor)?,
+                    &b.to_vulkan(executor)?,
+                    executor,
+                )?));
             }
         }
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::min(
@@ -1097,11 +1106,11 @@ impl NumericTensor<DynRank> {
         if backend.supports_dtype(a.dtype()) && backend.supports_dtype(b.dtype()) {
             #[cfg(feature = "vulkan")]
             if let EvalBackend::Vulkan(executor) = backend {
-                try_vulkan!(executor, {
-                    let a_vk = a.to_vulkan(executor)?;
-                    let b_vk = b.to_vulkan(executor)?;
-                    VulkanTensor::equal(&a_vk, &b_vk, executor)?
-                });
+                return Ok(NumericTensor::Vulkan(VulkanTensor::equal(
+                    &a.to_vulkan(executor)?,
+                    &b.to_vulkan(executor)?,
+                    executor,
+                )?));
             }
         }
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::equal(
@@ -1123,11 +1132,11 @@ impl NumericTensor<DynRank> {
         if backend.supports_dtype(a.dtype()) && backend.supports_dtype(b.dtype()) {
             #[cfg(feature = "vulkan")]
             if let EvalBackend::Vulkan(executor) = backend {
-                try_vulkan!(executor, {
-                    let a_vk = a.to_vulkan(executor)?;
-                    let b_vk = b.to_vulkan(executor)?;
-                    VulkanTensor::greater(&a_vk, &b_vk, executor)?
-                });
+                return Ok(NumericTensor::Vulkan(VulkanTensor::greater(
+                    &a.to_vulkan(executor)?,
+                    &b.to_vulkan(executor)?,
+                    executor,
+                )?));
             }
         }
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::greater(
@@ -1149,11 +1158,11 @@ impl NumericTensor<DynRank> {
         if backend.supports_dtype(a.dtype()) && backend.supports_dtype(b.dtype()) {
             #[cfg(feature = "vulkan")]
             if let EvalBackend::Vulkan(executor) = backend {
-                try_vulkan!(executor, {
-                    let a_vk = a.to_vulkan(executor)?;
-                    let b_vk = b.to_vulkan(executor)?;
-                    VulkanTensor::greater_or_equal(&a_vk, &b_vk, executor)?
-                });
+                return Ok(NumericTensor::Vulkan(VulkanTensor::greater_or_equal(
+                    &a.to_vulkan(executor)?,
+                    &b.to_vulkan(executor)?,
+                    executor,
+                )?));
             }
         }
         Ok(NumericTensor::NDArray(
@@ -1170,11 +1179,11 @@ impl NumericTensor<DynRank> {
         if backend.supports_dtype(a.dtype()) && backend.supports_dtype(b.dtype()) {
             #[cfg(feature = "vulkan")]
             if let EvalBackend::Vulkan(executor) = backend {
-                try_vulkan!(executor, {
-                    let a_vk = a.to_vulkan(executor)?;
-                    let b_vk = b.to_vulkan(executor)?;
-                    VulkanTensor::less(&a_vk, &b_vk, executor)?
-                });
+                return Ok(NumericTensor::Vulkan(VulkanTensor::less(
+                    &a.to_vulkan(executor)?,
+                    &b.to_vulkan(executor)?,
+                    executor,
+                )?));
             }
         }
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::less(
@@ -1196,11 +1205,11 @@ impl NumericTensor<DynRank> {
         if backend.supports_dtype(a.dtype()) && backend.supports_dtype(b.dtype()) {
             #[cfg(feature = "vulkan")]
             if let EvalBackend::Vulkan(executor) = backend {
-                try_vulkan!(executor, {
-                    let a_vk = a.to_vulkan(executor)?;
-                    let b_vk = b.to_vulkan(executor)?;
-                    VulkanTensor::less_or_equal(&a_vk, &b_vk, executor)?
-                });
+                return Ok(NumericTensor::Vulkan(VulkanTensor::less_or_equal(
+                    &a.to_vulkan(executor)?,
+                    &b.to_vulkan(executor)?,
+                    executor,
+                )?));
             }
         }
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::less_or_equal(
@@ -1235,11 +1244,10 @@ impl NumericTensor<DynRank> {
             }
             #[cfg(feature = "vulkan")]
             if let EvalBackend::Vulkan(executor) = backend {
-                try_vulkan!(executor, {
-                    let self_vk = self.to_vulkan(executor)?;
-                    let exp_vk = exponent.to_vulkan(executor)?;
-                    self_vk.pow(&exp_vk, executor)?
-                });
+                return Ok(NumericTensor::Vulkan(
+                    self.to_vulkan(executor)?
+                        .pow(&exponent.to_vulkan(executor)?, executor)?,
+                ));
             }
         }
 
@@ -1282,7 +1290,9 @@ impl NumericTensor<DynRank> {
         if backend.supports_dtype(self.dtype()) {
             #[cfg(feature = "vulkan")]
             if let EvalBackend::Vulkan(executor) = backend {
-                try_vulkan!(executor, self.to_vulkan(executor)?.is_nan(executor)?);
+                return Ok(NumericTensor::Vulkan(
+                    self.to_vulkan(executor)?.is_nan(executor)?,
+                ));
             }
         }
         Ok(NumericTensor::NDArray(self.to_ndarray()?.is_nan()?))
@@ -1306,7 +1316,9 @@ impl NumericTensor<DynRank> {
     pub fn sign(&self, _backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
         #[cfg(feature = "vulkan")]
         if let EvalBackend::Vulkan(executor) = _backend {
-            try_vulkan!(executor, self.to_vulkan(executor)?.sign(executor)?);
+            return Ok(NumericTensor::Vulkan(
+                self.to_vulkan(executor)?.sign(executor)?,
+            ));
         }
         Ok(NumericTensor::NDArray(self.to_ndarray()?.sign()?))
     }
@@ -1335,11 +1347,12 @@ impl NumericTensor<DynRank> {
     ) -> Result<Self, NumericTensorError> {
         #[cfg(feature = "vulkan")]
         if let EvalBackend::Vulkan(executor) = _backend {
-            try_vulkan!(executor, {
-                let data_vk = data.to_vulkan(executor)?;
-                let indices_vk = indices.to_vulkan(executor)?;
-                VulkanTensor::gather(&data_vk, &indices_vk, axis, executor)?
-            });
+            return Ok(NumericTensor::Vulkan(VulkanTensor::gather(
+                &data.to_vulkan(executor)?,
+                &indices.to_vulkan(executor)?,
+                axis,
+                executor,
+            )?));
         }
         Ok(NumericTensor::NDArray(
             NDArrayNumericTensor::<DynRank>::gather(&data.try_into()?, &indices.try_into()?, axis)?,
@@ -1517,7 +1530,9 @@ impl NumericTensor<DynRank> {
             }
             #[cfg(feature = "vulkan")]
             if let EvalBackend::Vulkan(executor) = backend {
-                try_vulkan!(executor, self.to_vulkan(executor)?.cast(executor, dtype)?);
+                return Ok(NumericTensor::Vulkan(
+                    self.to_vulkan(executor)?.cast(executor, dtype)?,
+                ));
             }
         }
         Ok(NumericTensor::NDArray(self.to_ndarray()?.cast(dtype)?))

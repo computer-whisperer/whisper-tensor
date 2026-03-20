@@ -1953,14 +1953,17 @@ impl Operation for CompressOperation {
         let input = &inputs[&self.input];
         let condition = &inputs[&self.condition];
 
-        // Get condition as boolean values (nonzero = true)
-        let cond_cast = condition.cast(DType::I64, backend)?;
+        // Get condition as boolean values (nonzero = true).
+        // Force NDArray — Compress does CPU-side filtering, no point in
+        // uploading to Vulkan just to download again.
+        let cond_cast = condition.cast(DType::I64, &mut EvalBackend::NDArray)?;
         let cond_i64: Vec<i64> = cond_cast.to_ndarray()?.flatten().try_into()?;
         let cond_bool: Vec<bool> = cond_i64.iter().map(|&v| v != 0).collect();
 
         let input_shape: Vec<usize> = input.shape().iter().map(|&v| v as usize).collect();
 
-        let input_f32 = input.cast(DType::F32, backend)?;
+        // Force NDArray — Compress does CPU-side filtering.
+        let input_f32 = input.cast(DType::F32, &mut EvalBackend::NDArray)?;
 
         let out = if let Some(axis_val) = self.axis {
             let rank = input_shape.len();
