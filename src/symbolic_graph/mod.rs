@@ -2862,6 +2862,36 @@ impl SymbolicGraphMutator {
                     rng,
                 )?,
             )),
+            "OneHot" => Some(AnyOperation::OneHot(ops::OneHotOperation::from_onnx(
+                &input_tensors,
+                &output_tensors,
+                &onnx_node.attribute,
+                rng,
+            )?)),
+            "LpPool" => Some(AnyOperation::LpPool(ops::LpPoolOperation::from_onnx(
+                &input_tensors,
+                &output_tensors,
+                &onnx_node.attribute,
+                rng,
+            )?)),
+            "LRN" => Some(AnyOperation::Lrn(ops::LrnOperation::from_onnx(
+                &input_tensors,
+                &output_tensors,
+                &onnx_node.attribute,
+                rng,
+            )?)),
+            "RNN" => Some(AnyOperation::SimpleRnn(ops::SimpleRnnOperation::from_onnx(
+                &input_tensors,
+                &output_tensors,
+                &onnx_node.attribute,
+                rng,
+            )?)),
+            "GRU" => Some(AnyOperation::Gru(ops::GruOperation::from_onnx(
+                &input_tensors,
+                &output_tensors,
+                &onnx_node.attribute,
+                rng,
+            )?)),
             x => Err(ONNXDecodingError::UnsupportedONNXType(x.to_string()))?,
         };
 

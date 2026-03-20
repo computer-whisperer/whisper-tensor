@@ -7,9 +7,11 @@ mod conv_transpose;
 mod einsum;
 mod gather;
 mod gather_elements;
+mod lrn;
 mod lstm;
 mod misc;
 mod nlll;
+mod onehot;
 mod normalization;
 mod pool;
 mod quant_matmul;
@@ -18,6 +20,7 @@ mod reshape;
 mod resize;
 mod reverse_sequence;
 mod rotary_embedding;
+mod rnn;
 mod scan;
 mod scatter_elements;
 mod scatter_nd;
@@ -42,6 +45,7 @@ pub use conv_transpose::ConvTransposeOperation;
 pub use einsum::EinsumOperation;
 pub use gather::GatherOperation;
 pub use gather_elements::{GatherElementsOperation, GatherNDOperation};
+pub use lrn::LrnOperation;
 pub use lstm::LstmOperation;
 pub use misc::{
     ClipOperation, CompressOperation, DepthToSpaceOperation, DropoutOperation, ExpandOperation,
@@ -51,11 +55,12 @@ pub use misc::{
     SumOperation, TileOperation, TriluOperation, WhereOperation,
 };
 pub use nlll::NegativeLogLikelihoodLossOperation;
+pub use onehot::OneHotOperation;
 pub use normalization::{
     BatchNormalizationOperation, GroupNormalizationOperation, InstanceNormalizationOperation,
     LayerNormalizationOperation, LpNormalizationOperation, RMSNormalizationOperation,
 };
-pub use pool::{AveragePoolOperation, MaxPoolOperation};
+pub use pool::{AveragePoolOperation, LpPoolOperation, MaxPoolOperation};
 pub use quant_matmul::QuantMatMulOperation;
 pub use reduce::{
     CumSumOperation, ReduceL1Operation, ReduceL2Operation, ReduceLogSumExpOperation,
@@ -65,6 +70,7 @@ pub use reduce::{
 pub use reshape::{FlattenOperation, ReshapeOperation, SqueezeOperation, UnsqueezeOperation};
 pub use resize::ResizeOperation;
 pub use reverse_sequence::ReverseSequenceOperation;
+pub use rnn::{GruOperation, SimpleRnnOperation};
 pub use rotary_embedding::RotaryEmbeddingOperation;
 pub use scan::ScanOperation;
 pub use scatter_elements::ScatterElementsOperation;
@@ -337,6 +343,11 @@ pub enum AnyOperation {
     NegativeLogLikelihoodLoss(NegativeLogLikelihoodLossOperation),
     Einsum(EinsumOperation),
     SoftmaxCrossEntropyLoss(SoftmaxCrossEntropyLossOperation),
+    OneHot(OneHotOperation),
+    LpPool(LpPoolOperation),
+    Lrn(LrnOperation),
+    SimpleRnn(SimpleRnnOperation),
+    Gru(GruOperation),
 }
 
 macro_rules! delegate {
@@ -440,7 +451,12 @@ macro_rules! delegate {
             AnyOperation::ReverseSequence(x) => x.$name($($arg),*),
             AnyOperation::NegativeLogLikelihoodLoss(x) => x.$name($($arg),*),
             AnyOperation::Einsum(x) => x.$name($($arg),*),
-            AnyOperation::SoftmaxCrossEntropyLoss(x) => x.$name($($arg),*)
+            AnyOperation::SoftmaxCrossEntropyLoss(x) => x.$name($($arg),*),
+            AnyOperation::OneHot(x) => x.$name($($arg),*),
+            AnyOperation::LpPool(x) => x.$name($($arg),*),
+            AnyOperation::Lrn(x) => x.$name($($arg),*),
+            AnyOperation::SimpleRnn(x) => x.$name($($arg),*),
+            AnyOperation::Gru(x) => x.$name($($arg),*)
                     }
         }
     }
