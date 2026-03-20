@@ -82,6 +82,44 @@ pub fn test_ln_fp32(backend: &mut EvalBackend) {
     test_eq_f32(y, correct);
 }
 
+// ln near 1.0 — exercises precision for softplus(x) = ln(1 + exp(x)) when x is very negative
+pub fn test_ln_near_one_fp32(backend: &mut EvalBackend) {
+    let x = NumericTensor::from_vec(vec![
+        1.00004553794860839844f32, // 1 + exp(-9.998) — the Mish failure case
+        1.001f32,
+        1.0001f32,
+        1.00001f32,
+        1.000001f32,
+    ])
+    .to_dyn_rank();
+    let y = x.ln(backend).unwrap();
+    let correct = ln_correct(&x);
+    test_eq_f32(y, correct);
+}
+
+// exp of large negative — exercises exp(-10) which is tiny
+pub fn test_exp_large_negative_fp32(backend: &mut EvalBackend) {
+    let x = NumericTensor::from_vec(vec![-9.998f32, -20.0, -50.0, -5.0, -1.0]).to_dyn_rank();
+    let y = x.exp(backend).unwrap();
+    let correct = exp_correct(&x);
+    test_eq_f32(y, correct);
+}
+
+// tanh of small values — exercises tanh(~0) precision
+pub fn test_tanh_small_fp32(backend: &mut EvalBackend) {
+    let x = NumericTensor::from_vec(vec![
+        4.55e-5f32, // tanh(softplus(-9.998))
+        1e-4f32, 1e-6f32, 0.5f32, -0.5f32,
+    ])
+    .to_dyn_rank();
+    let y = x.trig(whisper_tensor::TrigOp::Tanh, backend).unwrap();
+    let correct = {
+        let mut be = EvalBackend::NDArray;
+        x.trig(whisper_tensor::TrigOp::Tanh, &mut be).unwrap()
+    };
+    test_eq_f32(y, correct);
+}
+
 pub fn test_ln_bf16(backend: &mut EvalBackend) {
     let x = NumericTensor::from_vec(vec![
         bf16::from_f32(1.0),
