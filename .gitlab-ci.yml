@@ -2,6 +2,7 @@ stages:
   - lint
   - build
   - test
+  - validate
 
 variables:
   CARGO_TERM_COLOR: always
@@ -68,3 +69,94 @@ test:
   stage: test
   script:
     - cargo test -p whisper-tensor --features "$CI_FEATURES" --locked --verbose
+
+# ---------------------------------------------------------------------------
+# Validate stage — model accuracy against reference implementations
+# ---------------------------------------------------------------------------
+# These jobs run on the high-cpu runner (c-srv3) with access to /models (Ceph)
+# and are triggered manually. Each model is a separate job for independent
+# re-runs and parallel execution.
+
+.validate-model:
+  stage: validate
+  when: manual
+  tags:
+    - high-cpu
+  image: registry.cjbal.com/whisper-tensor/accuracy:latest
+  variables:
+    GOLDEN_DIR: /tmp/golden
+    ACCURACY_REPORT_DIR: ${CI_PROJECT_DIR}/accuracy-reports
+    HF_HOME: /hf-cache
+  before_script:
+    - git config --global url."https://github.com/".insteadOf "git@github.com:"
+    - git submodule update --init --recursive
+    - git lfs install && git lfs pull
+    - mkdir -p ${GOLDEN_DIR} ${ACCURACY_REPORT_DIR}
+  artifacts:
+    paths:
+      - accuracy-reports/
+    when: always
+    expire_in: 90 days
+
+validate-gpt2:
+  extends: .validate-model
+  variables:
+    MODEL_NAME: gpt2
+  script:
+    - python3 ci/accuracy/references/gpt2_onnxrt.py
+        --model test_models/gpt2-lm-head-10.onnx
+        --output ${GOLDEN_DIR}/gpt2
+    - cargo test --release -p whisper-tensor
+        --features "${CI_FEATURES}"
+        --test accuracy accuracy_gpt2
+        -- --nocapture
+
+# --- HuggingFace transformers models (Ceph) ---
+# Template for HF causal LM validation jobs
+.validate-hf-causal-lm:
+  extends: .validate-model
+  script:
+    - python3 ci/accuracy/references/hf_causal_lm.py
+        --model /models/llms/${MODEL_SUBPATH}
+        --output ${GOLDEN_DIR}/${MODEL_NAME}
+        --dtype ${MODEL_DTYPE:-bfloat16}
+    - cargo test --release -p whisper-tensor
+        --features "${CI_FEATURES}"
+        --test accuracy accuracy_${MODEL_NAME}
+        -- --nocapture
+
+validate-qwen2-05b:
+  extends: .validate-hf-causal-lm
+  variables:
+    MODEL_NAME: qwen2_05b
+    MODEL_SUBPATH: Qwen2-0.5B
+
+validate-qwen3-06b:
+  extends: .validate-hf-causal-lm
+  variables:
+    MODEL_NAME: qwen3_06b
+    MODEL_SUBPATH: Qwen3-0.6B
+
+validate-gemma2-2b:
+  extends: .validate-hf-causal-lm
+  variables:
+    MODEL_NAME: gemma2_2b
+    MODEL_SUBPATH: gemma-2-2b-it
+
+validate-llama3-8b:
+  extends: .validate-hf-causal-lm
+  variables:
+    MODEL_NAME: llama3_8b
+    MODEL_SUBPATH: Llama-3-8B
+
+validate-mistral-7b:
+  extends: .validate-hf-causal-lm
+  variables:
+    MODEL_NAME: mistral_7b
+    MODEL_SUBPATH: mistralai_Mistral-7B-v0.1
+
+validate-phi3-mini:
+  extends: .validate-hf-causal-lm
+  variables:
+    MODEL_NAME: phi3_mini
+    MODEL_SUBPATH: Phi-3-mini-4k-instruct-model

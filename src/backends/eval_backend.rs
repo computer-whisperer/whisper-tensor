@@ -51,7 +51,7 @@ impl<'a> EvalBackend<'a> {
             EvalBackend::Vulkan(_) => {
                 !matches!(
                     _dtype,
-                    DType::STRING | DType::F64 | DType::F8E4M3 | DType::F8E5M2
+                    DType::STRING | DType::F64 | DType::F8E4M3FN | DType::F8E5M2
                 ) && !_dtype.is_packed()
             }
             #[cfg(feature = "tch")]

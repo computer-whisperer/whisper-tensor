@@ -710,7 +710,9 @@ fn rebuild_args(args: Object) -> Result<(PthLayout, DType, String, usize)> {
         other => return Err(PthError::UnsupportedStorageType(other.to_string())),
     };
 
-    let item_size = dtype.size().ok_or(PthError::UnsupportedDType(dtype))?;
+    let item_size = dtype
+        .bytes_per_element()
+        .ok_or(PthError::UnsupportedDType(dtype))?;
     let layout = PthLayout::new(size, stride, offset * item_size);
 
     Ok((layout, dtype, path, storage_size))
@@ -843,7 +845,7 @@ impl PthTensors {
 
         let elem_size = tensor_info
             .dtype
-            .size()
+            .bytes_per_element()
             .ok_or(PthError::UnsupportedDType(tensor_info.dtype))?;
         let numel = tensor_info.layout.num_elements();
         let byte_len = numel.saturating_mul(elem_size);

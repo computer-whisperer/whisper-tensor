@@ -10,7 +10,7 @@ pub fn get_spirv_datatype(
         DType::F32 => b.type_float(32, None),
         DType::BF16 => b.type_float(16, None),
         DType::F16 => b.type_float(16, None),
-        DType::F8E4M3 => b.type_float(8, None),
+        DType::F8E4M3FN => b.type_float(8, None),
         DType::F8E5M2 => b.type_float(8, None),
         DType::I64 => b.type_int(64, 1),
         DType::U64 => b.type_int(64, 0),
@@ -21,7 +21,9 @@ pub fn get_spirv_datatype(
         DType::I8 => b.type_int(8, 1),
         DType::U8 => b.type_int(8, 0),
         DType::BOOL => b.type_bool(),
-        DType::STRING | DType::Packed(_) => panic!("no SPIR-V type for {dtype:?}"),
+        DType::F4E2M1 | DType::I4 | DType::U4 | DType::STRING | DType::Packed(_) => {
+            panic!("no SPIR-V type for {dtype:?}")
+        }
     })
 }
 
@@ -67,37 +69,40 @@ pub fn spirv_standard_cast(
         let input_data_type = get_spirv_datatype(b, input_dtype)?;
         let output_data_type = get_spirv_datatype(b, output_dtype)?;
         match input_dtype {
-            DType::BF16 | DType::F16 | DType::F8E4M3 | DType::F8E5M2 | DType::F32 | DType::F64 => {
-                match output_dtype {
-                    DType::BF16
-                    | DType::F16
-                    | DType::F8E4M3
-                    | DType::F8E5M2
-                    | DType::F32
-                    | DType::F64 => Ok(b.f_convert(output_data_type, None, input).unwrap()),
-                    DType::I64 | DType::I32 | DType::I16 | DType::I8 => {
-                        Ok(b.convert_f_to_s(output_data_type, None, input).unwrap())
-                    }
-                    DType::U64 | DType::U32 | DType::U16 | DType::U8 => {
-                        Ok(b.convert_f_to_u(output_data_type, None, input).unwrap())
-                    }
-                    DType::BOOL => {
-                        let f32_type = b.type_float(32, None);
-                        let const_zero = b.constant_bit32(f32_type, 0.0f32.to_bits());
-                        let const_zero = b.f_convert(input_data_type, None, const_zero).unwrap();
-                        Ok(
-                            b.f_unord_not_equal(output_data_type, None, input, const_zero)
-                                .unwrap(),
-                        )
-                    }
-                    _ => Err(VulkanError::UnsupportedByBackendError),
+            DType::BF16
+            | DType::F16
+            | DType::F8E4M3FN
+            | DType::F8E5M2
+            | DType::F32
+            | DType::F64 => match output_dtype {
+                DType::BF16
+                | DType::F16
+                | DType::F8E4M3FN
+                | DType::F8E5M2
+                | DType::F32
+                | DType::F64 => Ok(b.f_convert(output_data_type, None, input).unwrap()),
+                DType::I64 | DType::I32 | DType::I16 | DType::I8 => {
+                    Ok(b.convert_f_to_s(output_data_type, None, input).unwrap())
                 }
-            }
+                DType::U64 | DType::U32 | DType::U16 | DType::U8 => {
+                    Ok(b.convert_f_to_u(output_data_type, None, input).unwrap())
+                }
+                DType::BOOL => {
+                    let f32_type = b.type_float(32, None);
+                    let const_zero = b.constant_bit32(f32_type, 0.0f32.to_bits());
+                    let const_zero = b.f_convert(input_data_type, None, const_zero).unwrap();
+                    Ok(
+                        b.f_unord_not_equal(output_data_type, None, input, const_zero)
+                            .unwrap(),
+                    )
+                }
+                _ => Err(VulkanError::UnsupportedByBackendError),
+            },
             DType::I64 | DType::I32 | DType::I16 | DType::I8 => {
                 match output_dtype {
                     DType::BF16
                     | DType::F16
-                    | DType::F8E4M3
+                    | DType::F8E4M3FN
                     | DType::F8E5M2
                     | DType::F32
                     | DType::F64 => Ok(b.convert_s_to_f(output_data_type, None, input).unwrap()),
@@ -128,7 +133,7 @@ pub fn spirv_standard_cast(
                 match output_dtype {
                     DType::BF16
                     | DType::F16
-                    | DType::F8E4M3
+                    | DType::F8E4M3FN
                     | DType::F8E5M2
                     | DType::F32
                     | DType::F64 => Ok(b.convert_u_to_f(output_data_type, None, input).unwrap()),
@@ -158,7 +163,7 @@ pub fn spirv_standard_cast(
             DType::BOOL => match output_dtype {
                 DType::BF16
                 | DType::F16
-                | DType::F8E4M3
+                | DType::F8E4M3FN
                 | DType::F8E5M2
                 | DType::F32
                 | DType::F64 => {

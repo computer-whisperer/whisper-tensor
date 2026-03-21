@@ -49,7 +49,9 @@ fn build_cumsum_pipeline(
     b.decorate(
         input_data_type_array,
         Decoration::ArrayStride,
-        [Operand::LiteralBit32(dtype.size().unwrap() as u32)],
+        [Operand::LiteralBit32(
+            dtype.bytes_per_element().unwrap() as u32
+        )],
     );
     let input_data_type_array_struct = b.type_struct([input_data_type_array]);
     b.decorate(input_data_type_array_struct, Decoration::Block, []);
@@ -73,7 +75,9 @@ fn build_cumsum_pipeline(
         b.decorate(
             output_data_type_array,
             Decoration::ArrayStride,
-            [Operand::LiteralBit32(dtype.size().unwrap() as u32)],
+            [Operand::LiteralBit32(
+                dtype.bytes_per_element().unwrap() as u32
+            )],
         );
     }
     let output_data_type_array_struct = b.type_struct([output_data_type_array]);
@@ -476,9 +480,9 @@ impl<R: Rank> VulkanTensor<R> {
         let op_metadata_vec = {
             let mut v = vec![
                 (self.offset as u32 + self.suballocation.offset as u32)
-                    / self.dtype().size().unwrap() as u32,
+                    / self.dtype().bytes_per_element().unwrap() as u32,
                 (output_tensor.offset as u32 + output_tensor.suballocation.offset as u32)
-                    / output_tensor.dtype().size().unwrap() as u32,
+                    / output_tensor.dtype().bytes_per_element().unwrap() as u32,
                 num_elems,
                 axis_u as u32,
                 axis_len,

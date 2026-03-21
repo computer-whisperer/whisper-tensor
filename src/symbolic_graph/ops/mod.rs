@@ -7,16 +7,21 @@ mod conv_transpose;
 mod einsum;
 mod gather;
 mod gather_elements;
+mod lrn;
 mod lstm;
+mod matmul_integer;
+mod mel_weight_matrix;
 mod misc;
 mod nlll;
 mod normalization;
+mod onehot;
 mod pool;
 mod quant_matmul;
 mod reduce;
 mod reshape;
 mod resize;
 mod reverse_sequence;
+mod rnn;
 mod rotary_embedding;
 mod scan;
 mod scatter_elements;
@@ -29,6 +34,7 @@ mod stft;
 mod topk;
 mod transpose;
 mod unary;
+mod window;
 
 pub use binary::{
     ArgMaxOperation, ArgMinOperation, BinaryOperation, BitShiftOperation, GemmOperation,
@@ -42,7 +48,10 @@ pub use conv_transpose::ConvTransposeOperation;
 pub use einsum::EinsumOperation;
 pub use gather::GatherOperation;
 pub use gather_elements::{GatherElementsOperation, GatherNDOperation};
+pub use lrn::LrnOperation;
 pub use lstm::LstmOperation;
+pub use matmul_integer::MatMulIntegerOperation;
+pub use mel_weight_matrix::MelWeightMatrixOperation;
 pub use misc::{
     ClipOperation, CompressOperation, DepthToSpaceOperation, DropoutOperation, ExpandOperation,
     EyeLikeOperation, GlobalAveragePoolOperation, GlobalMaxPoolOperation, HardmaxOperation,
@@ -55,7 +64,8 @@ pub use normalization::{
     BatchNormalizationOperation, GroupNormalizationOperation, InstanceNormalizationOperation,
     LayerNormalizationOperation, LpNormalizationOperation, RMSNormalizationOperation,
 };
-pub use pool::{AveragePoolOperation, MaxPoolOperation};
+pub use onehot::OneHotOperation;
+pub use pool::{AveragePoolOperation, LpPoolOperation, MaxPoolOperation};
 pub use quant_matmul::QuantMatMulOperation;
 pub use reduce::{
     CumSumOperation, ReduceL1Operation, ReduceL2Operation, ReduceLogSumExpOperation,
@@ -65,6 +75,7 @@ pub use reduce::{
 pub use reshape::{FlattenOperation, ReshapeOperation, SqueezeOperation, UnsqueezeOperation};
 pub use resize::ResizeOperation;
 pub use reverse_sequence::ReverseSequenceOperation;
+pub use rnn::{GruOperation, SimpleRnnOperation};
 pub use rotary_embedding::RotaryEmbeddingOperation;
 pub use scan::ScanOperation;
 pub use scatter_elements::ScatterElementsOperation;
@@ -82,6 +93,7 @@ pub use unary::{
     MishOperation, PReluOperation, SeluOperation, SoftmaxOperation, SoftsignOperation,
     ThresholdedReluOperation, UnaryOperation, WhichUnaryOperation,
 };
+pub use window::{WindowKind, WindowOperation};
 
 use crate::backends::eval_backend::EvalBackend;
 use crate::backends::ndarray_backend::NDArrayNumericTensorError;
@@ -337,6 +349,14 @@ pub enum AnyOperation {
     NegativeLogLikelihoodLoss(NegativeLogLikelihoodLossOperation),
     Einsum(EinsumOperation),
     SoftmaxCrossEntropyLoss(SoftmaxCrossEntropyLossOperation),
+    OneHot(OneHotOperation),
+    LpPool(LpPoolOperation),
+    Lrn(LrnOperation),
+    SimpleRnn(SimpleRnnOperation),
+    Gru(GruOperation),
+    Window(WindowOperation),
+    MatMulInteger(MatMulIntegerOperation),
+    MelWeightMatrix(MelWeightMatrixOperation),
 }
 
 macro_rules! delegate {
@@ -440,7 +460,15 @@ macro_rules! delegate {
             AnyOperation::ReverseSequence(x) => x.$name($($arg),*),
             AnyOperation::NegativeLogLikelihoodLoss(x) => x.$name($($arg),*),
             AnyOperation::Einsum(x) => x.$name($($arg),*),
-            AnyOperation::SoftmaxCrossEntropyLoss(x) => x.$name($($arg),*)
+            AnyOperation::SoftmaxCrossEntropyLoss(x) => x.$name($($arg),*),
+            AnyOperation::OneHot(x) => x.$name($($arg),*),
+            AnyOperation::LpPool(x) => x.$name($($arg),*),
+            AnyOperation::Lrn(x) => x.$name($($arg),*),
+            AnyOperation::SimpleRnn(x) => x.$name($($arg),*),
+            AnyOperation::Gru(x) => x.$name($($arg),*),
+            AnyOperation::Window(x) => x.$name($($arg),*),
+            AnyOperation::MatMulInteger(x) => x.$name($($arg),*),
+            AnyOperation::MelWeightMatrix(x) => x.$name($($arg),*)
                     }
         }
     }

@@ -76,7 +76,7 @@ impl<R: Rank> VulkanTensor<R> {
                 .sum::<u64>()
                 + 1
         };
-        let needed_space = (needed_elems as usize) * dtype.size().unwrap();
+        let needed_space = (needed_elems as usize) * dtype.bytes_per_element().unwrap();
         // Ensure non-zero allocations for internal buffers; transfers will be skipped when size is zero.
         let alloc_size = needed_space.max(1);
         let (buffer, suballocation) = executor.alloc_space(alloc_size);
@@ -313,7 +313,7 @@ impl<R: Rank> VulkanTensor<R> {
                 .map(|(a, b)| (a - 1) * b)
                 .sum::<u64>()
                 + 1) as usize
-                * self.dtype.size().unwrap();
+                * self.dtype.bytes_per_element().unwrap();
 
             if bytes_to_read == 0 {
                 return NDArrayNumericTensor::from_bytes(
@@ -325,8 +325,8 @@ impl<R: Rank> VulkanTensor<R> {
                 .unwrap();
             }
 
-            let start_offset =
-                self.suballocation.offset + self.offset as u64 * self.dtype.size().unwrap() as u64;
+            let start_offset = self.suballocation.offset
+                + self.offset as u64 * self.dtype.bytes_per_element().unwrap() as u64;
             let transfer_buffer = &self.buffer_transfer_kit.transfer_buffer;
             let mut builder = AutoCommandBufferBuilder::primary(
                 self.buffer_transfer_kit
