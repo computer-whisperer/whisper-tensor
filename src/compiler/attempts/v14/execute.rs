@@ -180,8 +180,7 @@ fn slice_tensor_range(
 ///    - covered by one of the span's declared input ranges
 /// 3. No span group references atoms that are neither internal nor declared.
 pub fn validate_spans(plan: &ExecutionPlan) -> Vec<String> {
-    use std::collections::HashSet;
-    use crate::nano_graph::{InputRef, ScalarOp};
+    use crate::nano_graph::ScalarOp;
 
     let main = &plan.graph;
     let mut errors = Vec::new();
@@ -208,10 +207,14 @@ pub fn validate_spans(plan: &ExecutionPlan) -> Vec<String> {
 
             let atom_covered = |atom: u64| -> bool {
                 for &(lo, hi) in &span_produced {
-                    if atom >= lo && atom < hi { return true; }
+                    if atom >= lo && atom < hi {
+                        return true;
+                    }
                 }
                 for &(lo, hi) in &span_input_ranges {
-                    if atom >= lo && atom < hi { return true; }
+                    if atom >= lo && atom < hi {
+                        return true;
+                    }
                 }
                 false
             };
@@ -226,7 +229,10 @@ pub fn validate_spans(plan: &ExecutionPlan) -> Vec<String> {
                         {
                             errors.push(format!(
                                 "{}: span group {} (base={}, op={:?}) not found in main graph",
-                                prefix, gi, span_group.base_id, op_name(&span_group.op)
+                                prefix,
+                                gi,
+                                span_group.base_id,
+                                op_name(&span_group.op)
                             ));
                         }
                     }
@@ -234,26 +240,32 @@ pub fn validate_spans(plan: &ExecutionPlan) -> Vec<String> {
                         if op_name(&span_group.op) != op_name(&mg.op) {
                             errors.push(format!(
                                 "{}: group base={}: op mismatch: span={:?} main={:?}",
-                                prefix, span_group.base_id,
-                                op_name(&span_group.op), op_name(&mg.op)
+                                prefix,
+                                span_group.base_id,
+                                op_name(&span_group.op),
+                                op_name(&mg.op)
                             ));
                         }
                         if span_group.output_dtype != mg.output_dtype {
                             errors.push(format!(
                                 "{}: group base={}: dtype mismatch: span={:?} main={:?}",
-                                prefix, span_group.base_id,
-                                span_group.output_dtype, mg.output_dtype
+                                prefix,
+                                span_group.base_id,
+                                span_group.output_dtype,
+                                mg.output_dtype
                             ));
                         }
                         if span_group.inputs.len() != mg.inputs.len() {
                             errors.push(format!(
                                 "{}: group base={}: input count mismatch: span={} main={}",
-                                prefix, span_group.base_id,
-                                span_group.inputs.len(), mg.inputs.len()
+                                prefix,
+                                span_group.base_id,
+                                span_group.inputs.len(),
+                                mg.inputs.len()
                             ));
                         } else {
-                            for (inp_idx, (si, mi)) in span_group.inputs.iter()
-                                .zip(mg.inputs.iter()).enumerate()
+                            for (inp_idx, (si, mi)) in
+                                span_group.inputs.iter().zip(mg.inputs.iter()).enumerate()
                             {
                                 if si != mi {
                                     errors.push(format!(
@@ -276,7 +288,11 @@ pub fn validate_spans(plan: &ExecutionPlan) -> Vec<String> {
 
                 // Check 2: all InputRef targets are covered.
                 let sample_count = span_group.count.min(16);
-                let step = if span_group.count > 16 { span_group.count / 16 } else { 1 };
+                let step = if span_group.count > 16 {
+                    span_group.count / 16
+                } else {
+                    1
+                };
                 for input_ref in &span_group.inputs {
                     for s in 0..sample_count {
                         let i = s * step;
@@ -285,17 +301,27 @@ pub fn validate_spans(plan: &ExecutionPlan) -> Vec<String> {
                             errors.push(format!(
                                 "{}: group base={} atom_offset={} input {:?}: \
                                  source atom {} (at i={}) not covered by span groups or inputs",
-                                prefix, span_group.base_id, span_group.atom_offset,
-                                format_input_ref(input_ref), source, i
+                                prefix,
+                                span_group.base_id,
+                                span_group.atom_offset,
+                                format_input_ref(input_ref),
+                                source,
+                                i
                             ));
                             break;
                         }
                     }
 
-                    if let ScalarOp::Reduce { reduce_count, reduce_stride, .. } = &span_group.op {
+                    if let ScalarOp::Reduce {
+                        reduce_count,
+                        reduce_stride,
+                        ..
+                    } = &span_group.op
+                    {
                         if *reduce_count > 1 && *reduce_stride != 0 {
                             let first = input_ref.resolve(span_group.atom_offset);
-                            let last = input_ref.resolve(span_group.atom_offset + span_group.count - 1);
+                            let last =
+                                input_ref.resolve(span_group.atom_offset + span_group.count - 1);
                             let end_off = (*reduce_count as i64 - 1) * reduce_stride;
                             let endpoints = [
                                 first.0,
@@ -329,7 +355,9 @@ pub fn validate_spans(plan: &ExecutionPlan) -> Vec<String> {
             // Check 3: every atom in span.outputs is in the span graph.
             for (out_idx, out) in span.outputs.iter().enumerate() {
                 for offset in [0, out.count / 2, out.count.saturating_sub(1)] {
-                    if offset >= out.count { continue; }
+                    if offset >= out.count {
+                        continue;
+                    }
                     let atom = AtomId(out.base.0 + offset);
                     if !span.graph.contains_atom(atom) {
                         errors.push(format!(
@@ -392,11 +420,30 @@ fn format_input_ref(ir: &crate::nano_graph::InputRef) -> String {
     match ir {
         InputRef::Broadcast(id) => format!("Broadcast({})", id),
         InputRef::Affine { base, stride } => format!("Affine(base={}, stride={})", base, stride),
-        InputRef::StridedBroadcast { base, stride, repeat } =>
-            format!("StridedBroadcast(base={}, stride={}, repeat={})", base, stride, repeat),
-        InputRef::Modular { base, stride, modulus } =>
-            format!("Modular(base={}, stride={}, modulus={})", base, stride, modulus),
-        InputRef::Explicit(ids) =>
-            format!("Explicit([{}; len={}])", if ids.is_empty() { "".into() } else { format!("{}, ...", ids[0]) }, ids.len()),
+        InputRef::StridedBroadcast {
+            base,
+            stride,
+            repeat,
+        } => format!(
+            "StridedBroadcast(base={}, stride={}, repeat={})",
+            base, stride, repeat
+        ),
+        InputRef::Modular {
+            base,
+            stride,
+            modulus,
+        } => format!(
+            "Modular(base={}, stride={}, modulus={})",
+            base, stride, modulus
+        ),
+        InputRef::Explicit(ids) => format!(
+            "Explicit([{}; len={}])",
+            if ids.is_empty() {
+                "".into()
+            } else {
+                format!("{}, ...", ids[0])
+            },
+            ids.len()
+        ),
     }
 }
