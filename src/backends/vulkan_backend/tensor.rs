@@ -325,7 +325,8 @@ impl<R: Rank> VulkanTensor<R> {
                 .unwrap();
             }
 
-            let start_offset = self.suballocation.offset + self.offset as u64;
+            let start_offset =
+                self.suballocation.offset + self.offset as u64 * self.dtype.size().unwrap() as u64;
             let transfer_buffer = &self.buffer_transfer_kit.transfer_buffer;
             let mut builder = AutoCommandBufferBuilder::primary(
                 self.buffer_transfer_kit

@@ -415,15 +415,10 @@ impl<R: Rank> NumericTensor<R> {
     }
 
     /// Apply a trigonometric operation element-wise (sin, cos, tan, etc.), as specified by op.
-    pub fn trig(&self, op: TrigOp, backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
-        if backend.supports_dtype(self.dtype()) {
-            #[cfg(feature = "vulkan")]
-            if let EvalBackend::Vulkan(executor) = backend {
-                return Ok(NumericTensor::Vulkan(
-                    self.to_vulkan(executor)?.trig(op, executor)?,
-                ));
-            }
-        }
+    ///
+    /// Always uses NDArray (CPU) to avoid precision issues with Vulkan
+    /// transcendentals on software renderers (lavapipe).
+    pub fn trig(&self, op: TrigOp, _backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
         Ok(NumericTensor::NDArray(self.to_ndarray()?.trig(op)?))
     }
 
