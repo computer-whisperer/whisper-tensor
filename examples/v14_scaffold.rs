@@ -143,6 +143,19 @@ fn main() {
         println!("  Output dtypes: {:?}", od);
         println!("  Compute dtypes: {:?}", cd);
         println!("  Input tensor dtypes: {:?}", id);
+        // Detail: what ops have I64 compute?
+        let mut i64_ops: HashMap<String, usize> = HashMap::new();
+        for g in result.graph.groups() {
+            if g.op.compute_dtype() == Some(whisper_tensor::dtype::DType::I64) {
+                let name = format!("{:?}", g.op).chars().take(40).collect::<String>();
+                *i64_ops.entry(name).or_default() += 1;
+            }
+        }
+        if !i64_ops.is_empty() {
+            let mut v: Vec<_> = i64_ops.into_iter().collect();
+            v.sort_by(|a, b| b.1.cmp(&a.1));
+            println!("  I64 compute ops: {:?}", v);
+        }
     }
 
     if !result.unsupported.is_empty() {

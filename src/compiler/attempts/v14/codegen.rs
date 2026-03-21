@@ -1719,13 +1719,29 @@ fn emit_binop(
         (ScalarBinOp::Mul, ReprKind::Float) => builder.ins().fmul(a, b),
         (ScalarBinOp::Mul, ReprKind::Int) => builder.ins().imul(a, b),
         (ScalarBinOp::Div, ReprKind::Float) => builder.ins().fdiv(a, b),
-        (ScalarBinOp::Div, ReprKind::Int) => builder.ins().sdiv(a, b),
+        (ScalarBinOp::Div, ReprKind::Int) => {
+            // Guard against division by zero (which traps on x86).
+            // If b == 0, result is 0 (matches NumericScalar behavior).
+            let zero = builder.ins().iconst(types::I64, 0);
+            let one = builder.ins().iconst(types::I64, 1);
+            let is_zero = builder.ins().icmp(IntCC::Equal, b, zero);
+            let safe_b = builder.ins().select(is_zero, one, b);
+            let quot = builder.ins().sdiv(a, safe_b);
+            builder.ins().select(is_zero, zero, quot)
+        }
         (ScalarBinOp::Mod, ReprKind::Float) => {
             let func_ref = module.declare_func_in_func(math.fmodf, builder.func);
             let call = builder.ins().call(func_ref, &[a, b]);
             builder.inst_results(call)[0]
         }
-        (ScalarBinOp::Mod, ReprKind::Int) => builder.ins().srem(a, b),
+        (ScalarBinOp::Mod, ReprKind::Int) => {
+            let zero = builder.ins().iconst(types::I64, 0);
+            let one = builder.ins().iconst(types::I64, 1);
+            let is_zero = builder.ins().icmp(IntCC::Equal, b, zero);
+            let safe_b = builder.ins().select(is_zero, one, b);
+            let rem = builder.ins().srem(a, safe_b);
+            builder.ins().select(is_zero, zero, rem)
+        }
 
         // ── Min/Max ──
         (ScalarBinOp::Max, ReprKind::Float) => {
