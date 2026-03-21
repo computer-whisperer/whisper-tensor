@@ -274,6 +274,11 @@ impl<R: Rank> NDArrayNumericTensor<R> {
         let n = shape.dim_product() as usize;
         let type_size = dtype.size().unwrap_or(1);
 
+        // Empty tensor: no data to read, pass through as-is.
+        if n == 0 {
+            return Self::from_slice_shape_stride(Vec::<u8>::new(), shape, stride);
+        }
+
         // Check if layout is contiguous (standard row-major stride).
         // If so, we can use the fast linear path.
         let is_contiguous = {
