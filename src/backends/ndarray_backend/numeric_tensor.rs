@@ -266,143 +266,193 @@ impl<R: Rank> NDArrayNumericTensor<R> {
         shape: &R::KnownDims,
         stride: &R::KnownDims,
     ) -> Result<Self, NDArrayNumericTensorError> {
+        // Helper: iterate multi-indices in row-major order and compute byte
+        // offset using the stride. This correctly handles non-contiguous
+        // (sliced/transposed) layouts where elements aren't sequential in memory.
+        let shape_slice = shape.as_slice();
+        let stride_slice = stride.as_slice();
+        let n = shape.dim_product() as usize;
+        let type_size = dtype.size().unwrap_or(1);
+
+        // Check if layout is contiguous (standard row-major stride).
+        // If so, we can use the fast linear path.
+        let is_contiguous = {
+            let mut expected = 1u64;
+            let mut ok = true;
+            for d in (0..shape_slice.len()).rev() {
+                if stride_slice[d] != expected {
+                    ok = false;
+                    break;
+                }
+                expected *= shape_slice[d];
+            }
+            ok
+        };
+
+        // Compute the flat element index from the stride for non-contiguous layouts.
+        let byte_offset = |linear_idx: usize| -> usize {
+            if is_contiguous {
+                return linear_idx * type_size;
+            }
+            let mut remaining = linear_idx;
+            let mut offset = 0u64;
+            for d in (0..shape_slice.len()).rev() {
+                let dim_size = shape_slice[d] as usize;
+                if dim_size > 0 {
+                    let coord = remaining % dim_size;
+                    remaining /= dim_size;
+                    offset += coord as u64 * stride_slice[d];
+                }
+            }
+            offset as usize * type_size
+        };
+
+        // For non-contiguous layouts, always produce standard (contiguous) stride.
+        let out_shape = shape;
+        let standard_stride = {
+            let mut s = vec![];
+            let mut v = 1u64;
+            for &dim in shape_slice.iter().rev() {
+                s.push(v);
+                v *= dim;
+            }
+            s.reverse();
+            R::KnownDims::try_from_slice(&s).unwrap()
+        };
+        let out_stride = if is_contiguous {
+            stride
+        } else {
+            &standard_stride
+        };
+
         Ok(match dtype {
             DType::F64 => {
-                let mut v = Vec::new();
-                for i in 0..shape.dim_product() as usize {
-                    let type_len = 8;
+                let mut v = Vec::with_capacity(n);
+                for i in 0..n {
+                    let off = byte_offset(i);
                     v.push(f64::from_bits(u64::from_le_bytes(
-                        bytes[i * type_len..(i + 1) * type_len].try_into().unwrap(),
+                        bytes[off..off + 8].try_into().unwrap(),
                     )));
                 }
-                Self::from_slice_shape_stride(v, shape, stride)?
+                Self::from_slice_shape_stride(v, out_shape, out_stride)?
             }
             DType::F32 => {
-                let mut v = Vec::new();
-                for i in 0..shape.dim_product() as usize {
-                    let type_len = 4;
+                let mut v = Vec::with_capacity(n);
+                for i in 0..n {
+                    let off = byte_offset(i);
                     v.push(f32::from_bits(u32::from_le_bytes(
-                        bytes[i * type_len..(i + 1) * type_len].try_into().unwrap(),
+                        bytes[off..off + 4].try_into().unwrap(),
                     )));
                 }
-                Self::from_slice_shape_stride(v, shape, stride)?
+                Self::from_slice_shape_stride(v, out_shape, out_stride)?
             }
             DType::BF16 => {
-                let mut v = Vec::new();
-                for i in 0..shape.dim_product() as usize {
-                    let type_len = 2;
+                let mut v = Vec::with_capacity(n);
+                for i in 0..n {
+                    let off = byte_offset(i);
                     v.push(bf16::from_bits(u16::from_le_bytes(
-                        bytes[i * type_len..(i + 1) * type_len].try_into().unwrap(),
+                        bytes[off..off + 2].try_into().unwrap(),
                     )));
                 }
-                Self::from_slice_shape_stride(v, shape, stride)?
+                Self::from_slice_shape_stride(v, out_shape, out_stride)?
             }
             DType::F16 => {
-                let mut v = Vec::new();
-                for i in 0..shape.dim_product() as usize {
-                    let type_len = 2;
+                let mut v = Vec::with_capacity(n);
+                for i in 0..n {
+                    let off = byte_offset(i);
                     v.push(f16::from_bits(u16::from_le_bytes(
-                        bytes[i * type_len..(i + 1) * type_len].try_into().unwrap(),
+                        bytes[off..off + 2].try_into().unwrap(),
                     )));
                 }
-                Self::from_slice_shape_stride(v, shape, stride)?
+                Self::from_slice_shape_stride(v, out_shape, out_stride)?
             }
             DType::F8E4M3 => {
-                let v: Vec<_> = bytes
-                    .iter()
-                    .take(shape.dim_product() as usize)
-                    .map(|&b| F8E4M3::from_bits(b))
-                    .collect();
-                Self::from_slice_shape_stride(v, shape, stride)?
+                let mut v = Vec::with_capacity(n);
+                for i in 0..n {
+                    let off = byte_offset(i);
+                    v.push(F8E4M3::from_bits(bytes[off]));
+                }
+                Self::from_slice_shape_stride(v, out_shape, out_stride)?
             }
             DType::F8E5M2 => {
-                let v: Vec<_> = bytes
-                    .iter()
-                    .take(shape.dim_product() as usize)
-                    .map(|&b| F8E5M2::from_bits(b))
-                    .collect();
-                Self::from_slice_shape_stride(v, shape, stride)?
+                let mut v = Vec::with_capacity(n);
+                for i in 0..n {
+                    let off = byte_offset(i);
+                    v.push(F8E5M2::from_bits(bytes[off]));
+                }
+                Self::from_slice_shape_stride(v, out_shape, out_stride)?
             }
             DType::U64 => {
-                let mut v = Vec::new();
-                for i in 0..shape.dim_product() as usize {
-                    let type_len = 8;
-                    v.push(u64::from_le_bytes(
-                        bytes[i * type_len..(i + 1) * type_len].try_into().unwrap(),
-                    ));
+                let mut v = Vec::with_capacity(n);
+                for i in 0..n {
+                    let off = byte_offset(i);
+                    v.push(u64::from_le_bytes(bytes[off..off + 8].try_into().unwrap()));
                 }
-                Self::from_slice_shape_stride(v, shape, stride)?
+                Self::from_slice_shape_stride(v, out_shape, out_stride)?
             }
             DType::I64 => {
-                let mut v = Vec::new();
-                for i in 0..shape.dim_product() as usize {
-                    let type_len = 8;
-                    v.push(i64::from_le_bytes(
-                        bytes[i * type_len..(i + 1) * type_len].try_into().unwrap(),
-                    ));
+                let mut v = Vec::with_capacity(n);
+                for i in 0..n {
+                    let off = byte_offset(i);
+                    v.push(i64::from_le_bytes(bytes[off..off + 8].try_into().unwrap()));
                 }
-                Self::from_slice_shape_stride(v, shape, stride)?
+                Self::from_slice_shape_stride(v, out_shape, out_stride)?
             }
             DType::U32 => {
-                let mut v = Vec::new();
-                for i in 0..shape.dim_product() as usize {
-                    let type_len = 4;
-                    v.push(u32::from_le_bytes(
-                        bytes[i * type_len..(i + 1) * type_len].try_into().unwrap(),
-                    ));
+                let mut v = Vec::with_capacity(n);
+                for i in 0..n {
+                    let off = byte_offset(i);
+                    v.push(u32::from_le_bytes(bytes[off..off + 4].try_into().unwrap()));
                 }
-                Self::from_slice_shape_stride(v, shape, stride)?
+                Self::from_slice_shape_stride(v, out_shape, out_stride)?
             }
             DType::I32 => {
-                let mut v = Vec::new();
-                for i in 0..shape.dim_product() as usize {
-                    let type_len = 4;
-                    v.push(i32::from_le_bytes(
-                        bytes[i * type_len..(i + 1) * type_len].try_into().unwrap(),
-                    ));
+                let mut v = Vec::with_capacity(n);
+                for i in 0..n {
+                    let off = byte_offset(i);
+                    v.push(i32::from_le_bytes(bytes[off..off + 4].try_into().unwrap()));
                 }
-                Self::from_slice_shape_stride(v, shape, stride)?
+                Self::from_slice_shape_stride(v, out_shape, out_stride)?
             }
             DType::U16 => {
-                let mut v = Vec::new();
-                for i in 0..shape.dim_product() as usize {
-                    let type_len = 2;
-                    v.push(u16::from_le_bytes(
-                        bytes[i * type_len..(i + 1) * type_len].try_into().unwrap(),
-                    ));
+                let mut v = Vec::with_capacity(n);
+                for i in 0..n {
+                    let off = byte_offset(i);
+                    v.push(u16::from_le_bytes(bytes[off..off + 2].try_into().unwrap()));
                 }
-                Self::from_slice_shape_stride(v, shape, stride)?
+                Self::from_slice_shape_stride(v, out_shape, out_stride)?
             }
             DType::I16 => {
-                let mut v = Vec::new();
-                for i in 0..shape.dim_product() as usize {
-                    let type_len = 2;
-                    v.push(i16::from_le_bytes(
-                        bytes[i * type_len..(i + 1) * type_len].try_into().unwrap(),
-                    ));
+                let mut v = Vec::with_capacity(n);
+                for i in 0..n {
+                    let off = byte_offset(i);
+                    v.push(i16::from_le_bytes(bytes[off..off + 2].try_into().unwrap()));
                 }
-                Self::from_slice_shape_stride(v, shape, stride)?
+                Self::from_slice_shape_stride(v, out_shape, out_stride)?
             }
             DType::U8 => {
-                let mut v = Vec::new();
-                for &byte in bytes.iter().take(shape.dim_product() as usize) {
-                    v.push(byte);
+                let mut v = Vec::with_capacity(n);
+                for i in 0..n {
+                    let off = byte_offset(i);
+                    v.push(bytes[off]);
                 }
-                Self::from_slice_shape_stride(v, shape, stride)?
+                Self::from_slice_shape_stride(v, out_shape, out_stride)?
             }
             DType::I8 => {
-                let mut v = Vec::new();
-                for i in 0..shape.dim_product() as usize {
-                    v.push(i8::from_le_bytes(bytes[i..i + 1].try_into().unwrap()));
+                let mut v = Vec::with_capacity(n);
+                for i in 0..n {
+                    let off = byte_offset(i);
+                    v.push(bytes[off] as i8);
                 }
-                Self::from_slice_shape_stride(v, shape, stride)?
+                Self::from_slice_shape_stride(v, out_shape, out_stride)?
             }
             DType::BOOL => {
-                let mut v = Vec::new();
-                for &byte in bytes.iter().take(shape.dim_product() as usize) {
-                    v.push(byte != 0);
+                let mut v = Vec::with_capacity(n);
+                for i in 0..n {
+                    let off = byte_offset(i);
+                    v.push(bytes[off] != 0);
                 }
-                Self::from_slice_shape_stride(v, shape, stride)?
+                Self::from_slice_shape_stride(v, out_shape, out_stride)?
             }
             _ => {
                 return Err(NDArrayNumericTensorError::UnsupportedOperationForDTypes(

@@ -334,9 +334,7 @@ impl MilliOp for SimpleUnaryOp {
         let out = match self.op {
             WhichSimpleUnaryOp::Neg => input.neg(backend)?,
             WhichSimpleUnaryOp::Abs => input.abs(backend)?,
-            WhichSimpleUnaryOp::Exp => {
-                panic!("DEBUG: SimpleUnaryOp::Exp::eval reached");
-            }
+            WhichSimpleUnaryOp::Exp => input.exp(backend)?,
             WhichSimpleUnaryOp::Ln => input.ln(backend)?,
             WhichSimpleUnaryOp::Sqrt => input.sqrt(backend)?,
             WhichSimpleUnaryOp::Not => input.not(backend)?,
