@@ -71,6 +71,10 @@ pub struct BufferLayout {
     slots: Vec<SlotInfo>,
     /// Total buffer size in bytes (high-water mark of the allocator).
     pub total_bytes: usize,
+    /// Per-group use counts from liveness analysis. Groups with use_count=0
+    /// are dead — their slots may be reused, so the JIT must NOT emit code
+    /// for them (their writes would corrupt the new slot occupant).
+    pub group_use_counts: Vec<u32>,
 }
 
 impl BufferLayout {
@@ -503,6 +507,8 @@ pub fn compute_layout(graph: &NanoGraph, output_ranges: &[AtomRange]) -> BufferL
 
     // ── Step 4: Allocate slots ──
 
+    let trace_byte = std::env::var("TRACE_BYTE").ok().and_then(|s| s.parse::<usize>().ok());
+
     let mut allocator = FreeList::new();
     let mut all_slots = Vec::new();
     let mut slab_allocated = vec![false; slabs.len()];
@@ -581,16 +587,25 @@ pub fn compute_layout(graph: &NanoGraph, output_ranges: &[AtomRange]) -> BufferL
 
         group_slot_indices[gi] = slot_idx;
 
-        // Free producer slots (skip slab members — slab is freed as a whole).
-        let mut producers = HashSet::new();
-        graph.collect_all_producer_indices(group, gi, &mut producers);
-        for pi in producers {
-            remaining[pi] = remaining[pi].saturating_sub(1);
-            if remaining[pi] == 0 && slab_assignment[num_inputs + pi].is_none() {
-                let freed = &all_slots[group_slot_indices[pi]];
-                allocator.free(freed.byte_offset, freed.count as usize * freed.elem_bytes);
+        if let Some(tb) = trace_byte {
+            let s = &all_slots[slot_idx];
+            let end = s.byte_offset + s.count as usize * s.elem_bytes;
+            if s.byte_offset <= tb && end > tb {
+                eprintln!(
+                    "  ALLOC group {} base={} at [{}-{}) eb={} dtype={:?} op={:?}",
+                    gi, group.base_id, s.byte_offset, end, s.elem_bytes, s.dtype,
+                    op_name_short(&group.op)
+                );
             }
         }
+
+        // Slot reuse disabled: we were getting overlapping allocations between
+        // slab members and FreeList allocations. TODO: fix the allocator to
+        // properly handle mixed-dtype slabs before re-enabling.
+        //
+        // The old code freed producer slots here, but with mixed I64/F32 slabs
+        // the freed regions can overlap with slab-allocated literal slots,
+        // causing the JIT to corrupt pre-populated literal values.
     }
 
     all_slots.sort_by_key(|s| s.atom_base.0);
@@ -598,6 +613,7 @@ pub fn compute_layout(graph: &NanoGraph, output_ranges: &[AtomRange]) -> BufferL
     BufferLayout {
         total_bytes: allocator.watermark,
         slots: all_slots,
+        group_use_counts: use_counts,
     }
 }
 
@@ -850,9 +866,14 @@ pub fn compile_span(graph: &NanoGraph, layout: &BufferLayout) -> Result<Compiled
         let mut var_counter = VarCounter::new();
         let mut table_counter = 0usize;
 
-        for group in graph.groups() {
+        for (gi, group) in graph.groups().iter().enumerate() {
             if matches!(&group.op, ScalarOp::Literal(_)) {
                 continue; // Pre-filled by caller.
+            }
+            // Skip dead groups: their slots may have been reused by later groups,
+            // so emitting a write would corrupt the new occupant.
+            if gi < layout.group_use_counts.len() && layout.group_use_counts[gi] == 0 {
+                continue;
             }
             emit_group(
                 &mut builder,
@@ -1964,6 +1985,7 @@ impl CompiledPlan {
                         layout: BufferLayout {
                             slots: vec![],
                             total_bytes: 0,
+                            group_use_counts: vec![],
                         },
                         compiled: compile_empty_span()?,
                         graph: span.graph.clone(),
@@ -2222,6 +2244,218 @@ impl CompiledPlan {
 
         store
     }
+}
+
+/// Serial per-group JIT vs eval comparison for a compiled plan.
+///
+/// Runs each phase sequentially. Within each phase, runs each span's JIT
+/// and eval independently (same store inputs), then compares every group's
+/// output. Stops and reports at the first diverging group.
+pub fn diagnose_first_divergence(plan: &CompiledPlan, exec_plan: &ExecutionPlan, inputs: Vec<(AtomId, NDArrayNumericTensor<DynRank>)>) {
+    use crate::nano_graph::eval;
+
+    let mut store: HashMap<AtomId, NDArrayNumericTensor<DynRank>> = HashMap::new();
+    for (base, tensor) in inputs {
+        store.insert(base, tensor);
+    }
+
+    for (pi, (compiled_phase, plan_phase)) in plan.phases.iter().zip(exec_plan.phases.iter()).enumerate() {
+        let mut phase_outputs: Vec<Vec<(AtomId, NDArrayNumericTensor<DynRank>)>> = Vec::new();
+
+        for (si, (entry, span)) in compiled_phase.spans.iter().zip(plan_phase.spans.iter()).enumerate() {
+            if entry.layout.total_bytes == 0 {
+                phase_outputs.push(Vec::new());
+                continue;
+            }
+
+            // Run JIT.
+            let mut buffer = entry.literal_buffer.clone();
+            populate_buffer_from_store(&entry.inputs, &store, &entry.layout, &mut buffer);
+
+            // Snapshot literal values before JIT for corruption detection.
+            let pre_jit_literals: Vec<(usize, f32, AtomId)> = entry.graph.groups().iter()
+                .filter(|g| matches!(&g.op, ScalarOp::Literal(_)))
+                .filter_map(|g| {
+                    let range = AtomRange { base: g.base_id, count: g.count, dtype: g.output_dtype };
+                    let vals = entry.layout.read_f32_output(&range, &buffer);
+                    let gi = entry.graph.find_group_idx(g.base_id)?;
+                    Some((gi, vals[0], g.base_id))
+                })
+                .collect();
+
+            entry.compiled.execute(&mut buffer);
+
+            // Check if any literal was corrupted by JIT execution.
+            for &(gi, pre_val, base) in &pre_jit_literals {
+                let group = &entry.graph.groups()[gi];
+                let range = AtomRange { base: group.base_id, count: group.count, dtype: group.output_dtype };
+                let post_vals = entry.layout.read_f32_output(&range, &buffer);
+                if (post_vals[0] - pre_val).abs() > 1e-10 {
+                    eprintln!(
+                        "  LITERAL CORRUPTED by JIT: phase {} span {} group {} base={} pre={} post={} op={:?}",
+                        pi, si, gi, base, pre_val, post_vals[0], group.op
+                    );
+                    // Show the slot info for this literal.
+                    if let Some((slot, _)) = entry.layout.find(base) {
+                        let lit_off = slot.byte_offset;
+                        eprintln!(
+                            "    slot: byte_offset={} count={} elem_bytes={} dtype={:?}",
+                            lit_off, slot.count, slot.elem_bytes, slot.dtype
+                        );
+                        // Show raw bytes at that location.
+                        if lit_off + 8 <= buffer.len() {
+                            let bytes = &buffer[lit_off..lit_off + 8];
+                            eprintln!("    raw bytes: {:02x?}", bytes);
+                        }
+                        // Find neighbor slots that end at or near this offset.
+                        for other_group in entry.graph.groups() {
+                            if let Some((os, _)) = entry.layout.find(other_group.base_id) {
+                                let end = os.byte_offset + os.count as usize * os.elem_bytes;
+                                if end > lit_off && end <= lit_off + 8 && os.atom_base != slot.atom_base {
+                                    eprintln!(
+                                        "    NEIGHBOR: base={} byte_offset={} count={} elem_bytes={} dtype={:?} end={} op={:?}",
+                                        os.atom_base, os.byte_offset, os.count, os.elem_bytes, os.dtype,
+                                        end, op_name_short(&other_group.op)
+                                    );
+                                }
+                                // Also check if any slot CONTAINS byte lit_off.
+                                if os.byte_offset <= lit_off && end > lit_off && os.atom_base != slot.atom_base {
+                                    eprintln!(
+                                        "    OVERLAPPING: base={} byte_offset={} count={} elem_bytes={} dtype={:?} end={} op={:?}",
+                                        os.atom_base, os.byte_offset, os.count, os.elem_bytes, os.dtype,
+                                        end, op_name_short(&other_group.op)
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    break;
+                }
+            }
+
+            // Run eval with same inputs.
+            let interp_inputs = super::execute::gather_inputs_pub(
+                &entry.inputs, &entry.outputs, &store,
+            );
+            let refs: Vec<_> = interp_inputs.iter().map(|(b, t)| (*b, t)).collect();
+
+            // Build per-group output ranges so eval computes every group.
+            let group_ranges: Vec<AtomRange> = entry.graph.groups().iter().map(|g| AtomRange {
+                base: g.base_id,
+                count: g.count,
+                dtype: g.output_dtype,
+            }).collect();
+            let eval_results = eval::eval(&entry.graph, &refs, &group_ranges);
+
+            // Compare group by group (skip dead groups — JIT doesn't emit code for them).
+            for (gi, (group, eval_tensor)) in entry.graph.groups().iter().zip(eval_results.iter()).enumerate() {
+                if gi < entry.layout.group_use_counts.len() && entry.layout.group_use_counts[gi] == 0 {
+                    continue;
+                }
+                let jit_data = entry.layout.read_f32_output(
+                    &AtomRange { base: group.base_id, count: group.count, dtype: group.output_dtype },
+                    &buffer,
+                );
+
+                let eval_flat = eval_tensor.flatten();
+                let n = jit_data.len().min(eval_flat.num_elements());
+                let mut max_diff = 0.0f64;
+                let mut first_bad: Option<(usize, f32, f64)> = None;
+                for j in 0..n {
+                    let jv = jit_data[j] as f64;
+                    let ev = eval_flat.get(&[j as u64]).unwrap().to_f64();
+                    if jv.is_nan() != ev.is_nan() {
+                        first_bad.get_or_insert((j, jit_data[j], ev));
+                    }
+                    if !jv.is_nan() && !ev.is_nan() {
+                        let d = (jv - ev).abs();
+                        max_diff = max_diff.max(d);
+                        if d > 1e-4 && first_bad.is_none() {
+                            first_bad = Some((j, jit_data[j], ev));
+                        }
+                    }
+                }
+
+                if let Some((elem, jv, ev)) = first_bad {
+                    let op_desc = match &group.op {
+                        ScalarOp::Binary { op, compute_dtype } => format!("Binary({:?}, {:?})", op, compute_dtype),
+                        ScalarOp::Unary { op, compute_dtype } => format!("Unary({:?}, {:?})", op, compute_dtype),
+                        ScalarOp::Reduce { kind, reduce_count, reduce_stride, compute_dtype } =>
+                            format!("Reduce({:?}, rc={}, rs={}, {:?})", kind, reduce_count, reduce_stride, compute_dtype),
+                        ScalarOp::Identity => "Identity".to_string(),
+                        ScalarOp::Select => "Select".to_string(),
+                        ScalarOp::IndirectLoad { table_base } => format!("IndirectLoad(table={})", table_base),
+                        ScalarOp::Literal(s) => format!("Literal({:?})", s),
+                    };
+                    eprintln!(
+                        "\n  DIVERGENCE: phase {} span {} group {} (of {})",
+                        pi, si, gi, entry.graph.num_groups()
+                    );
+                    eprintln!(
+                        "    base={} count={} atom_offset={} output_dtype={:?}",
+                        group.base_id, group.count, group.atom_offset, group.output_dtype
+                    );
+                    eprintln!("    op: {}", op_desc);
+                    let is_dead = gi < entry.layout.group_use_counts.len()
+                        && entry.layout.group_use_counts[gi] == 0;
+                    eprintln!(
+                        "    elem={}: jit={} eval={} max_diff={:.6} dead={}",
+                        elem, jv, ev, max_diff, is_dead
+                    );
+                    for (ii, ir) in group.inputs.iter().enumerate() {
+                        eprintln!("    input[{}]: {:?}", ii, ir);
+                        // Read input values at the diverging element from both JIT buffer and eval.
+                        let src_atom = ir.resolve(elem as u64 + group.atom_offset);
+                        let jit_src = entry.layout.find(src_atom).map(|(slot, idx)| {
+                            let off = slot.byte_offset + idx as usize * slot.elem_bytes;
+                            let s = read_scalar(&buffer, off, slot.dtype);
+                            format!("{:?} (dtype={:?})", s, slot.dtype)
+                        });
+                        // Find eval value for same atom.
+                        let eval_src = entry.graph.find_group_idx(src_atom).and_then(|sgi| {
+                            let sg = &entry.graph.groups()[sgi];
+                            let off = (src_atom.0 - sg.base_id.0) as usize;
+                            eval_results.get(sgi).map(|t| {
+                                let f = t.flatten();
+                                if off < f.num_elements() { f.get(&[off as u64]).unwrap().to_f64() }
+                                else { f64::NAN }
+                            })
+                        });
+                        let src_dead = entry.graph.find_group_idx(src_atom).map(|sgi| {
+                            sgi < entry.layout.group_use_counts.len()
+                                && entry.layout.group_use_counts[sgi] == 0
+                        });
+                        eprintln!("      src atom={} jit_buf={:?} eval={:?} src_dead={:?}", src_atom, jit_src, eval_src, src_dead);
+                    }
+
+                    // Show a window of JIT vs eval around the diverging element.
+                    let start = if elem > 3 { elem - 3 } else { 0 };
+                    let end = (elem + 5).min(n);
+                    let mut window = Vec::new();
+                    for j in start..end {
+                        let jv = jit_data[j];
+                        let ev = eval_flat.get(&[j as u64]).unwrap().to_f64();
+                        window.push((j, jv, ev as f32));
+                    }
+                    eprintln!("    window (elem, jit, eval): {:?}", window);
+                    return;
+                }
+            }
+
+            // Extract JIT outputs for the store.
+            let jit_outputs = extract_outputs(&entry.outputs, &entry.layout, &buffer);
+            phase_outputs.push(jit_outputs);
+        }
+
+        // Commit phase outputs to store.
+        for span_outputs in phase_outputs {
+            for (base, tensor) in span_outputs {
+                store.insert(base, tensor);
+            }
+        }
+        eprintln!("  phase {}: all {} spans match", pi, compiled_phase.spans.len());
+    }
+    eprintln!("  All phases match — no divergence found.");
 }
 
 /// Execute a single compiled span: populate buffer from store, run JIT, extract outputs.

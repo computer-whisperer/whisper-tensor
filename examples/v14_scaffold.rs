@@ -1204,6 +1204,15 @@ fn main() {
             }
         }
 
+        if std::env::var("JIT_DIAGNOSE").is_ok() {
+            use whisper_tensor::compiler::attempts::v14::codegen::diagnose_first_divergence;
+            println!("\n=== JIT Per-Group Divergence Diagnosis ===");
+            let t0 = Instant::now();
+            diagnose_first_divergence(&compiled_plan, &b_exec_plan, jit_inputs);
+            println!("  Diagnosis completed in {:.3}s", t0.elapsed().as_secs_f64());
+            std::process::exit(0);
+        }
+
         let t0 = Instant::now();
         let jit_store = compiled_plan.execute_with_diagnostics(jit_inputs);
         println!(
