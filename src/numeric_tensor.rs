@@ -285,11 +285,23 @@ impl<R: Rank> NumericTensor<R> {
     }
 
     /// Element-wise natural exponential.
-    ///
-    /// Always uses NDArray (libm) — SPIR-V Exp precision is implementation-defined.
-    /// On lavapipe the accumulated error through compound chains like
-    /// softplus = log1p(exp(-|x|)) exceeds ONNX test tolerance.
-    pub fn exp(&self, _backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
+    pub fn exp(&self, backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
+        if backend.supports_dtype(self.dtype()) {
+            #[cfg(feature = "candle")]
+            if let EvalBackend::Candle(device) = backend {
+                return Ok(NumericTensor::Candle(self.to_candle(device)?.exp()?));
+            }
+            #[cfg(feature = "vulkan")]
+            if let EvalBackend::Vulkan(executor) = backend {
+                return Ok(NumericTensor::Vulkan(
+                    self.to_vulkan(executor)?.exp(executor)?,
+                ));
+            }
+            #[cfg(feature = "tch")]
+            if let EvalBackend::TCH = backend {
+                return Ok(NumericTensor::TCH(self.to_tch().exp()?));
+            }
+        }
         Ok(NumericTensor::NDArray(self.to_ndarray()?.exp()?))
     }
 
@@ -403,15 +415,11 @@ impl<R: Rank> NumericTensor<R> {
     }
 
     /// Apply a trigonometric operation element-wise (sin, cos, tan, etc.), as specified by op.
-    pub fn trig(&self, op: TrigOp, backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
-        if backend.supports_dtype(self.dtype()) {
-            #[cfg(feature = "vulkan")]
-            if let EvalBackend::Vulkan(executor) = backend {
-                return Ok(NumericTensor::Vulkan(
-                    self.to_vulkan(executor)?.trig(op, executor)?,
-                ));
-            }
-        }
+    ///
+    /// Always uses NDArray (libm) — SPIR-V trig precision is implementation-defined
+    /// and diverges from libm by enough to cause compound ops (Mish) to exceed
+    /// ONNX test tolerances.
+    pub fn trig(&self, op: TrigOp, _backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
         Ok(NumericTensor::NDArray(self.to_ndarray()?.trig(op)?))
     }
 

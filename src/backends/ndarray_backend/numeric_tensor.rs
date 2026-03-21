@@ -274,9 +274,25 @@ impl<R: Rank> NDArrayNumericTensor<R> {
         let n = shape.dim_product() as usize;
         let type_size = dtype.size().unwrap_or(1);
 
-        // Empty tensor: no data to read, pass through as-is.
+        // Empty tensor: no data to read. Dispatch to the correct dtype
+        // variant below with zero iterations (the loops won't execute).
         if n == 0 {
-            return Self::from_slice_shape_stride(Vec::<u8>::new(), shape, stride);
+            return Ok(match dtype {
+                DType::F64 => Self::from_slice_shape_stride(Vec::<f64>::new(), shape, stride)?,
+                DType::F32 => Self::from_slice_shape_stride(Vec::<f32>::new(), shape, stride)?,
+                DType::BF16 => Self::from_slice_shape_stride(Vec::<bf16>::new(), shape, stride)?,
+                DType::F16 => Self::from_slice_shape_stride(Vec::<f16>::new(), shape, stride)?,
+                DType::I64 => Self::from_slice_shape_stride(Vec::<i64>::new(), shape, stride)?,
+                DType::I32 => Self::from_slice_shape_stride(Vec::<i32>::new(), shape, stride)?,
+                DType::U64 => Self::from_slice_shape_stride(Vec::<u64>::new(), shape, stride)?,
+                DType::U32 => Self::from_slice_shape_stride(Vec::<u32>::new(), shape, stride)?,
+                DType::I16 => Self::from_slice_shape_stride(Vec::<i16>::new(), shape, stride)?,
+                DType::U16 => Self::from_slice_shape_stride(Vec::<u16>::new(), shape, stride)?,
+                DType::I8 => Self::from_slice_shape_stride(Vec::<i8>::new(), shape, stride)?,
+                DType::U8 => Self::from_slice_shape_stride(Vec::<u8>::new(), shape, stride)?,
+                DType::BOOL => Self::from_slice_shape_stride(Vec::<bool>::new(), shape, stride)?,
+                _ => Self::from_slice_shape_stride(Vec::<u8>::new(), shape, stride)?,
+            });
         }
 
         // Check if layout is contiguous (standard row-major stride).
