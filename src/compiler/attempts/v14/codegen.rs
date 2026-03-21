@@ -2269,18 +2269,28 @@ fn populate_buffer_from_store(
                 let skip = (overlap_start - t_lo) as usize;
                 let count = (overlap_end - overlap_start) as usize;
 
-                // Write each element as a NumericScalar cast to the slot's dtype.
                 let scalars = tensor_slice_to_scalars(tensor, skip, count);
+                // Bulk-write within slots: find the slot for the first atom,
+                // then write contiguously until we exhaust this slot or the data.
+                let mut written = 0usize;
                 let mut atom = overlap_start;
-                for scalar in &scalars {
+                while written < scalars.len() {
                     if let Some((slot, elem_start)) = layout.find(AtomId(atom)) {
-                        let off = slot.byte_offset + elem_start as usize * slot.elem_bytes;
-                        if off + slot.elem_bytes <= buffer.len() {
-                            let stored = scalar.cast_to(slot.dtype);
-                            write_scalar(buffer, off, &stored);
+                        let available = (slot.count - elem_start) as usize;
+                        let to_write = available.min(scalars.len() - written);
+                        for i in 0..to_write {
+                            let off = slot.byte_offset + (elem_start as usize + i) * slot.elem_bytes;
+                            if off + slot.elem_bytes <= buffer.len() {
+                                let stored = scalars[written + i].cast_to(slot.dtype);
+                                write_scalar(buffer, off, &stored);
+                            }
                         }
+                        written += to_write;
+                        atom += to_write as u64;
+                    } else {
+                        written += 1;
+                        atom += 1;
                     }
-                    atom += 1;
                 }
             }
         }
