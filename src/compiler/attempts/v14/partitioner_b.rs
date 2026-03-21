@@ -218,9 +218,7 @@ fn assign_lanes_and_phases(
         for (gi, atoms) in all_items {
             let chosen = if producers[gi].is_empty() {
                 // Root group: least-loaded lane.
-                (0..num_lanes)
-                    .min_by_key(|&l| lane_atoms[l])
-                    .unwrap()
+                (0..num_lanes).min_by_key(|&l| lane_atoms[l]).unwrap()
             } else {
                 // Find which lanes our producers are on, weighted by atom count.
                 let mut lane_weight: Vec<u64> = vec![0; num_lanes];
@@ -229,12 +227,8 @@ fn assign_lanes_and_phases(
                 }
 
                 // Find the dominant producer lane and the least-loaded lane.
-                let dominant = (0..num_lanes)
-                    .max_by_key(|&l| lane_weight[l])
-                    .unwrap();
-                let least_loaded = (0..num_lanes)
-                    .min_by_key(|&l| lane_atoms[l])
-                    .unwrap();
+                let dominant = (0..num_lanes).max_by_key(|&l| lane_weight[l]).unwrap();
+                let least_loaded = (0..num_lanes).min_by_key(|&l| lane_atoms[l]).unwrap();
 
                 // Stay with producer if it avoids a cross-lane dep AND the
                 // lane isn't severely overloaded. Otherwise distribute.
