@@ -2425,7 +2425,24 @@ pub fn diagnose_first_divergence(plan: &CompiledPlan, exec_plan: &ExecutionPlan,
                             sgi < entry.layout.group_use_counts.len()
                                 && entry.layout.group_use_counts[sgi] == 0
                         });
-                        eprintln!("      src atom={} jit_buf={:?} eval={:?} src_dead={:?}", src_atom, jit_src, eval_src, src_dead);
+                        // Check store for this atom.
+                        let store_val = {
+                            let mut found = None;
+                            for (base, tensor) in store.iter() {
+                                let t_lo = base.0;
+                                let t_hi = t_lo + tensor.num_elements() as u64;
+                                if src_atom.0 >= t_lo && src_atom.0 < t_hi {
+                                    let off = (src_atom.0 - t_lo) as usize;
+                                    let scalars = tensor_slice_to_scalars(&tensor, off, 1);
+                                    found = Some(format!("{:?} (tensor dtype={:?}, base={}, n={})",
+                                        scalars[0], tensor.dtype(), base, tensor.num_elements()));
+                                    break;
+                                }
+                            }
+                            found
+                        };
+                        eprintln!("      src atom={} jit_buf={:?} eval={:?} src_dead={:?} store={:?}",
+                            src_atom, jit_src, eval_src, src_dead, store_val);
                     }
 
                     // Show a window of JIT vs eval around the diverging element.
@@ -2558,6 +2575,7 @@ fn tensor_slice_to_scalars(
         NDArrayNumericTensor::F16(a) => extract!(a, F16),
         NDArrayNumericTensor::U8(a) => extract!(a, U8),
         NDArrayNumericTensor::I8(a) => extract!(a, I8),
+        NDArrayNumericTensor::BOOL(a) => extract!(a, BOOL),
         _ => vec![NumericScalar::F32(0.0); count],
     }
 }
