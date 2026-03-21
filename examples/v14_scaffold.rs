@@ -119,6 +119,32 @@ fn main() {
     let stats = result.graph.stats();
     println!("\n=== NanoGraph ===\n{}", stats);
 
+    // Dtype census: what output_dtype and compute_dtype values actually appear?
+    {
+        let mut output_dtypes: HashMap<String, usize> = HashMap::new();
+        let mut compute_dtypes: HashMap<String, usize> = HashMap::new();
+        let mut input_dtypes: HashMap<String, usize> = HashMap::new();
+        for g in result.graph.groups() {
+            *output_dtypes.entry(format!("{:?}", g.output_dtype)).or_default() += 1;
+            if let Some(cd) = g.op.compute_dtype() {
+                *compute_dtypes.entry(format!("{:?}", cd)).or_default() += 1;
+            }
+        }
+        for it in result.graph.input_tensors() {
+            *input_dtypes.entry(format!("{:?}", it.dtype)).or_default() += 1;
+        }
+        let mut od: Vec<_> = output_dtypes.into_iter().collect();
+        od.sort_by(|a, b| b.1.cmp(&a.1));
+        let mut cd: Vec<_> = compute_dtypes.into_iter().collect();
+        cd.sort_by(|a, b| b.1.cmp(&a.1));
+        let mut id: Vec<_> = input_dtypes.into_iter().collect();
+        id.sort_by(|a, b| b.1.cmp(&a.1));
+        println!("\n=== DType Census ===");
+        println!("  Output dtypes: {:?}", od);
+        println!("  Compute dtypes: {:?}", cd);
+        println!("  Input tensor dtypes: {:?}", id);
+    }
+
     if !result.unsupported.is_empty() {
         let mut counts: HashMap<String, usize> = HashMap::new();
         for (_, kind) in &result.unsupported {
@@ -1006,7 +1032,25 @@ fn main() {
 
     } // end SKIP_DIRECT
 
+    /// Look up a single atom's value from a sorted store index.
+    fn lookup_atom(store_index: &[(u64, &NDArrayNumericTensor<whisper_tensor::DynRank>)], atom: u64) -> Option<f64> {
+        let idx = store_index.partition_point(|&(base, _)| base <= atom);
+        if idx == 0 { return None; }
+        let (base, tensor) = &store_index[idx - 1];
+        let offset = atom - base;
+        if offset < tensor.num_elements() as u64 {
+            let flat = tensor.flatten();
+            Some(flat.get(&[offset]).unwrap().to_f64())
+        } else {
+            None
+        }
+    }
+
     // ── Step 12: Run partitioner B through executor ─────────────────────────
+
+    if std::env::var("SKIP_INTERP").is_ok() {
+        println!("\n  Skipping interpreter B eval (SKIP_INTERP=1)");
+    } else {
 
     println!("\n=== Partitioner B Eval ({} phases, {} lanes) ===", b_exec_plan.phases.len(),
              b_exec_plan.phases.first().map_or(0, |p| p.spans.len()));
@@ -1063,22 +1107,6 @@ fn main() {
         b_store.iter().map(|(id, t)| (id.0, t)).collect();
     store_index.sort_by_key(|&(base, _)| base);
 
-    /// Look up a single atom's value from the sorted store index.
-    /// Binary search for the entry whose range [base, base+count) contains the atom.
-    fn lookup_atom(store_index: &[(u64, &NDArrayNumericTensor<whisper_tensor::DynRank>)], atom: u64) -> Option<f64> {
-        // Find the last entry with base <= atom.
-        let idx = store_index.partition_point(|&(base, _)| base <= atom);
-        if idx == 0 { return None; }
-        let (base, tensor) = &store_index[idx - 1];
-        let offset = atom - base;
-        if offset < tensor.num_elements() as u64 {
-            let flat = tensor.flatten();
-            Some(flat.get(&[offset]).unwrap().to_f64())
-        } else {
-            None
-        }
-    }
-
     let mut b_all_match = true;
     for &(ext_id, _, _) in &output_range_mapping {
         let int_id = reverse_output_map.get(&ext_id).copied().unwrap_or(ext_id);
@@ -1120,6 +1148,105 @@ fn main() {
         println!("\nPartitioner B: All outputs MATCH!");
     } else {
         println!("\nPartitioner B: Some outputs MISMATCHED.");
+    }
+
+    } // end SKIP_INTERP
+
+    // ── Step 13: Compiled execution (Cranelift JIT) ─────────────────────────
+
+    #[cfg(feature = "cranelift")]
+    {
+        use whisper_tensor::compiler::attempts::v14::codegen::CompiledPlan;
+
+        println!("\n=== Cranelift JIT Compilation ===");
+        let t0 = Instant::now();
+        let compiled_plan = CompiledPlan::compile(&b_exec_plan).expect("JIT compilation failed");
+        println!("  Compiled in {:.3}s", t0.elapsed().as_secs_f64());
+
+        // Build inputs (same data as interpreter path).
+        let mut jit_inputs: Vec<(whisper_tensor::nano_graph::AtomId, whisper_tensor::backends::ndarray_backend::numeric_tensor::NDArrayNumericTensor<whisper_tensor::DynRank>)> = Vec::new();
+        for it in b_exec_plan.graph.input_tensors() {
+            let milli_id = it.tensor_id;
+            let ext_id = milli_graph
+                .input_map
+                .iter()
+                .find(|(_, int)| **int == milli_id)
+                .map(|(ext, _)| *ext);
+            let tensor = if let Some(ext) = ext_id {
+                if let Some(t) = initialized.get(&ext) {
+                    Some(t.clone())
+                } else {
+                    let name = sym_graph.get_tensor_name(ext);
+                    name.and_then(|n| user_inputs.get(n).cloned())
+                }
+            } else {
+                None
+            };
+            if let Some(t) = tensor {
+                let nd = match t {
+                    NumericTensor::NDArray(nd) => nd,
+                    _ => t.to_ndarray().unwrap(),
+                };
+                jit_inputs.push((it.base_id, nd));
+            }
+        }
+
+        let t0 = Instant::now();
+        let jit_store = compiled_plan.execute_with_diagnostics(jit_inputs);
+        println!(
+            "  JIT executed in {:.3}s, {} store entries",
+            t0.elapsed().as_secs_f64(),
+            jit_store.len()
+        );
+
+        // Compare JIT outputs against milli reference.
+        println!("\n=== JIT vs Milli Reference ===");
+        let mut jit_store_index: Vec<(u64, &NDArrayNumericTensor<whisper_tensor::DynRank>)> =
+            jit_store.iter().map(|(id, t)| (id.0, t)).collect();
+        jit_store_index.sort_by_key(|&(base, _)| base);
+
+        let mut jit_all_match = true;
+        for &(ext_id, _, _) in &output_range_mapping {
+            let int_id = reverse_output_map.get(&ext_id).copied().unwrap_or(ext_id);
+            let tam = &lower_tensor_map_for_compare[&int_id];
+            if let Some(milli_tensor) = milli_outputs.get(&ext_id) {
+                let milli_nd = milli_tensor.to_ndarray().unwrap();
+                let n = milli_nd.num_elements().min(tam.count as usize);
+                let milli_flat = milli_nd.flatten();
+                let mut max_abs_diff = 0.0f64;
+                let mut mismatches = 0usize;
+                let mut missing_atoms = 0usize;
+                for j in 0..n {
+                    let m = milli_flat.get(&[j as u64]).unwrap().to_f64();
+                    let atom = tam.atom_id_for_element(j as u64);
+                    let Some(jv) = lookup_atom(&jit_store_index, atom.0) else {
+                        missing_atoms += 1;
+                        continue;
+                    };
+                    if m.is_nan() || jv.is_nan() { continue; }
+                    let abs_diff = (m - jv).abs();
+                    max_abs_diff = max_abs_diff.max(abs_diff);
+                    let denom = m.abs().max(1e-10);
+                    if abs_diff > 1e-3 && abs_diff / denom > 1e-3 { mismatches += 1; }
+                }
+                let status = if mismatches == 0 && missing_atoms == 0 { "MATCH" } else { "MISMATCH" };
+                let seg_info = if tam.segments.is_empty() { "" } else { " [segmented]" };
+                println!(
+                    "  {:?}: {} ({} elements, max_abs={:.6}, mismatches={}, missing_atoms={}){}",
+                    ext_id, status, n, max_abs_diff, mismatches, missing_atoms, seg_info
+                );
+                if mismatches > 0 || missing_atoms > 0 { jit_all_match = false; }
+            } else {
+                println!("  {:?}: MISSING from milli outputs", ext_id);
+                jit_all_match = false;
+            }
+        }
+
+        if jit_all_match {
+            println!("\nJIT: All outputs MATCH!");
+        } else {
+            println!("\nJIT: Some outputs MISMATCHED.");
+        }
     }
 }
 

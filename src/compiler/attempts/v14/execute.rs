@@ -83,6 +83,32 @@ fn eval_span(
 /// extracts the exact intersection. Store entries may start before or extend
 /// past the input range — we slice to the overlap and rebase the AtomId so
 /// that eval's `find_input_idx` can resolve it.
+/// Public gather for diagnostic use by codegen.
+pub fn gather_inputs_pub(
+    input_ranges: &[AtomRange],
+    _output_ranges: &[AtomRange],
+    store: &HashMap<AtomId, NDArrayNumericTensor<DynRank>>,
+) -> Vec<(AtomId, NDArrayNumericTensor<DynRank>)> {
+    let mut collected = Vec::new();
+    for range in input_ranges {
+        let range_lo = range.base.0;
+        let range_hi = range_lo + range.count;
+        for (&base, tensor) in store {
+            let t_lo = base.0;
+            let t_hi = t_lo + tensor.num_elements() as u64;
+            if t_lo < range_hi && t_hi > range_lo {
+                let overlap_start = t_lo.max(range_lo);
+                let overlap_end = t_hi.min(range_hi);
+                let overlap_count = (overlap_end - overlap_start) as usize;
+                let skip = (overlap_start - t_lo) as usize;
+                let sliced = slice_tensor_range(tensor, skip, overlap_count);
+                collected.push((AtomId(overlap_start), sliced));
+            }
+        }
+    }
+    collected
+}
+
 fn gather_inputs(
     span: &Span,
     store: &HashMap<AtomId, NDArrayNumericTensor<DynRank>>,

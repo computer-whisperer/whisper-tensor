@@ -1,5 +1,7 @@
 #![allow(clippy::all, dead_code, unreachable_patterns)]
 
+#[cfg(feature = "cranelift")]
+pub mod codegen;
 pub mod execute;
 pub mod partitioner_a;
 pub mod partitioner_b;
