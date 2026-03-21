@@ -22,9 +22,10 @@ RUN apt-get update -qq && apt-get install -y -qq \
 RUN python3 -m venv /opt/accuracy-venv
 ENV PATH="/opt/accuracy-venv/bin:$PATH"
 RUN pip install --no-cache-dir \
+    --extra-index-url https://download.pytorch.org/whl/cpu \
     numpy \
     onnxruntime \
-    torch --index-url https://download.pytorch.org/whl/cpu \
+    torch \
     transformers \
     safetensors \
     accelerate
