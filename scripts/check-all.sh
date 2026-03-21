@@ -75,6 +75,11 @@ if [[ "$RUN_TESTS" -eq 1 ]]; then
   step "Test whisper-tensor (all features)"
   run cargo test -p whisper-tensor --all-features --locked
 
+  # tch tests must run without the blas feature to avoid OpenBLAS/MKL symbol
+  # collisions (system libtorch links MKL; the blas feature links OpenBLAS).
+  step "Test whisper-tensor (tch, no blas)"
+  run cargo test -p whisper-tensor --no-default-features --features tch --locked --test numeric_tensor_testing
+
   step "Test whisper-tensor-server (all features)"
   run cargo test -p whisper-tensor-server --all-features --locked
 fi

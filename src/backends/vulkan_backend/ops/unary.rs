@@ -394,12 +394,13 @@ impl<R: Rank> VulkanTensor<R> {
         let op_metadata_vec = {
             let mut v = vec![];
             v.push(
-                (self.offset as u32 + self.suballocation.offset as u32)
-                    / self.dtype().bytes_per_element().unwrap() as u32,
+                self.suballocation.offset as u32 / self.dtype().bytes_per_element().unwrap() as u32
+                    + self.offset as u32,
             );
             v.push(
-                (output_tensor.offset as u32 + output_tensor.suballocation.offset as u32)
-                    / output_dtype.bytes_per_element().unwrap() as u32,
+                output_tensor.suballocation.offset as u32
+                    / output_dtype.bytes_per_element().unwrap() as u32
+                    + output_tensor.offset as u32,
             );
             v.push(self.shape().dim_product() as u32);
             for dim in self.shape().as_slice() {

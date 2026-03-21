@@ -11,7 +11,10 @@ fn run_ndarray_test(test: impl FnOnce(&mut EvalBackend)) {
     test(&mut EvalBackend::NDArray)
 }
 
-#[cfg(feature = "tch")]
+// tch uses system libtorch (linked against MKL) while the `blas` feature links
+// OpenBLAS for ndarray.  Having both in the same process causes BLAS symbol
+// collisions and segfaults, so tch tests are gated on `not(feature = "blas")`.
+#[cfg(all(feature = "tch", not(feature = "blas")))]
 fn run_tch_test(test: impl FnOnce(&mut EvalBackend)) {
     test(&mut EvalBackend::TCH)
 }
@@ -124,5 +127,5 @@ macro_rules! do_tests {
 do_tests!(run_ndarray_test, ndarray);
 #[cfg(feature = "vulkan")]
 do_tests!(run_vulkan_test, vulkan);
-#[cfg(feature = "tch")]
+#[cfg(all(feature = "tch", not(feature = "blas")))]
 do_tests!(run_tch_test, tch);
