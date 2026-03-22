@@ -321,12 +321,17 @@ fn is_lane_local_access(consumer: &AtomGroup, producer: &AtomGroup, num_lanes: u
                 let abs_stride = (*stride).unsigned_abs();
 
                 // General check: does stride * consumer_count == producer_count?
-                // This means each lane's consumer chunk maps to exactly one lane's
-                // producer chunk.
+                // Each consumer element reads abs_stride producer elements (the
+                // matmul Mul→Reduce pattern). With aligned splitting — splitting
+                // the producer as K × consumer_chunks instead of even splits —
+                // each lane's consumer fragment reads exactly from its own
+                // producer fragment by construction.
+                //
+                // We do NOT require consumer.count % num_lanes == 0. Uneven
+                // consumer splits (some lanes get one extra) are fine as long as
+                // emit_split_group uses aligned splits for the producer.
                 if abs_stride > 0
                     && abs_stride * consumer.count == producer.count
-                    && producer.count % num_lanes as u64 == 0
-                    && consumer.count % num_lanes as u64 == 0
                 {
                     // Verify base alignment: first consumer atom should read from
                     // producer start (or start of producer + some lane-aligned offset).
@@ -339,9 +344,8 @@ fn is_lane_local_access(consumer: &AtomGroup, producer: &AtomGroup, num_lanes: u
                     };
 
                     if first_read == prod_base {
-                        // Perfect alignment: lane k's consumer chunk
-                        // reads exactly lane k's producer chunk.
-                        continue; // lane-local
+                        // Lane-local with aligned split.
+                        continue;
                     }
                 }
 
@@ -506,11 +510,41 @@ fn input_refs_group(
 
 /// For a split group, compute the atom range for a given lane.
 fn split_range(group: &AtomGroup, lane: usize, num_lanes: usize) -> (u64, u64) {
-    let chunk = group.count / num_lanes as u64;
-    let remainder = group.count % num_lanes as u64;
-    // Distribute remainder: first `remainder` lanes get one extra atom.
+    split_count(group.count, lane, num_lanes)
+}
+
+/// Split `count` items evenly across lanes.
+fn split_count(count: u64, lane: usize, num_lanes: usize) -> (u64, u64) {
+    let chunk = count / num_lanes as u64;
+    let remainder = count % num_lanes as u64;
+    // Distribute remainder: first `remainder` lanes get one extra item.
     let start = chunk * lane as u64 + (lane as u64).min(remainder);
-    let count = chunk + if (lane as u64) < remainder { 1 } else { 0 };
+    let lane_count = chunk + if (lane as u64) < remainder { 1 } else { 0 };
+    (start, lane_count)
+}
+
+/// Split a producer group aligned to a consumer's boundaries.
+///
+/// When a Mul group feeds a Reduce with stride K, the producer must be split
+/// as K × consumer_chunk per lane (not even splits of the producer count).
+/// This ensures each lane's Reduce fragment reads exactly from its lane's
+/// Mul fragment, even when the consumer count doesn't divide evenly by num_lanes.
+fn split_range_aligned(
+    group: &AtomGroup,
+    lane: usize,
+    num_lanes: usize,
+    consumer_count: u64,
+    stride: u64,
+) -> (u64, u64) {
+    // Split the consumer evenly, then scale by stride for the producer.
+    let (cons_start, cons_lane_count) = split_count(consumer_count, lane, num_lanes);
+    let start = cons_start * stride;
+    let count = cons_lane_count * stride;
+    debug_assert!(
+        start + count <= group.count,
+        "aligned split overflow: start={} count={} group.count={} consumer_count={} stride={}",
+        start, count, group.count, consumer_count, stride
+    );
     (start, count)
 }
 
@@ -711,6 +745,39 @@ fn build_phase(
         .copied()
         .collect();
 
+    // Pre-compute aligned splits: for each Split group in this phase that
+    // feeds a Reduce consumer in the same phase via Affine with stride K,
+    // record (consumer_count, K) so emit_split_group uses aligned splitting.
+    // This ensures the Mul→Reduce pair stays lane-local even when the Reduce
+    // count doesn't divide evenly by num_lanes.
+    let mut aligned_splits: HashMap<usize, (u64, u64)> = HashMap::new(); // gi → (consumer_count, stride)
+    let phase_set: HashSet<usize> = phase_group_indices.iter().copied().collect();
+    for &gi in phase_group_indices {
+        if kinds[gi] != GroupKind::Split {
+            continue;
+        }
+        let group = &all_groups[gi];
+        for &ci in &successors[gi] {
+            if !phase_set.contains(&ci) || kinds[ci] != GroupKind::Split {
+                continue;
+            }
+            let cons = &all_groups[ci];
+            if let ScalarOp::Reduce { .. } = &cons.op {
+                for inp in &cons.inputs {
+                    if let InputRef::Affine { base, stride } = inp {
+                        let abs_stride = (*stride).unsigned_abs();
+                        if abs_stride > 0
+                            && abs_stride * cons.count == group.count
+                            && input_refs_group(inp, cons.count, cons.atom_offset, group)
+                        {
+                            aligned_splits.insert(gi, (cons.count, abs_stride));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Process groups in topological order (they're already sorted by index
     // which is topological order in NanoGraph).
     let mut sorted_indices = phase_group_indices.to_vec();
@@ -727,6 +794,7 @@ fn build_phase(
                     group,
                     gi,
                     num_lanes,
+                    aligned_splits.get(&gi).copied(),
                     &mut span_graphs,
                     &mut span_inputs,
                     &mut span_outputs,
@@ -794,11 +862,16 @@ fn build_phase(
 }
 
 /// Emit a split group: fragment into N lanes, each getting count/N atoms.
+///
+/// `aligned_split`: if Some((consumer_count, stride)), split as
+/// stride × consumer_chunks instead of even splits. Used for Mul groups
+/// paired with a Reduce consumer to maintain lane alignment.
 fn emit_split_group(
     graph: &NanoGraph,
     group: &AtomGroup,
     gi: usize,
     num_lanes: usize,
+    aligned_split: Option<(u64, u64)>,
     span_graphs: &mut [NanoGraph],
     span_inputs: &mut [Vec<AtomRange>],
     span_outputs: &mut [Vec<AtomRange>],
@@ -813,7 +886,11 @@ fn emit_split_group(
     let base = group.base_id.0;
 
     for lane in 0..num_lanes {
-        let (start, count) = split_range(group, lane, num_lanes);
+        let (start, count) = if let Some((cons_count, stride)) = aligned_split {
+            split_range_aligned(group, lane, num_lanes, cons_count, stride)
+        } else {
+            split_range(group, lane, num_lanes)
+        };
         if count == 0 {
             continue;
         }

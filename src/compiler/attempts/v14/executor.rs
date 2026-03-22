@@ -206,6 +206,11 @@ impl PhaseStore {
     pub fn iter(&self) -> impl Iterator<Item = (AtomId, &TypedBuffer)> {
         self.entries.iter().map(|e| (AtomId(e.base), &e.buffer))
     }
+
+    /// Total bytes of data in all store entries.
+    pub fn data_bytes(&self) -> usize {
+        self.entries.iter().map(|e| e.buffer.data.len()).sum()
+    }
 }
 
 // ─── Executable plan ────────────────────────────────────────────────────────
@@ -267,15 +272,56 @@ impl ExecutablePlanBuilder {
     }
 
     /// Build the final plan, computing output liveness.
+    ///
+    /// For each output range produced by any phase, determines the last phase
+    /// that reads any atom in that range. This handles group splitting correctly:
+    /// a single input range [base, base+N) may overlap multiple output ranges
+    /// at sub-range offsets.
     pub fn build(self) -> ExecutablePlan {
-        // Compute liveness: for each input range base, find the last phase that reads it.
-        let mut output_liveness: HashMap<u64, usize> = HashMap::new();
-        for (phase_idx, inputs) in &self.all_input_ranges {
-            for input in inputs {
-                let entry = output_liveness.entry(input.base.0).or_insert(0);
-                *entry = (*entry).max(*phase_idx);
+        // Collect all output ranges (base, end) sorted by base, for overlap queries.
+        let mut all_outputs: Vec<(u64, u64)> = Vec::new();
+        for phase in &self.phases {
+            for lane in &phase.lanes {
+                for out in &lane.outputs {
+                    all_outputs.push((out.base.0, out.base.0 + out.count));
+                }
             }
         }
+        all_outputs.sort_unstable_by_key(|&(base, _)| base);
+        all_outputs.dedup();
+
+        let mut output_liveness: HashMap<u64, usize> = HashMap::new();
+
+        for (phase_idx, inputs) in &self.all_input_ranges {
+            for input in inputs {
+                let in_lo = input.base.0;
+                let in_hi = in_lo + input.count;
+
+                // Register liveness for the input base itself (covers initial
+                // inputs like weights whose base matches exactly).
+                let entry = output_liveness.entry(in_lo).or_insert(0);
+                *entry = (*entry).max(*phase_idx);
+
+                // Find all output ranges that overlap [in_lo, in_hi) and
+                // register liveness for their bases too.
+                let start = all_outputs.partition_point(|&(_, end)| end <= in_lo);
+                for &(out_base, _) in &all_outputs[start..] {
+                    if out_base >= in_hi {
+                        break;
+                    }
+                    let entry = output_liveness.entry(out_base).or_insert(0);
+                    *entry = (*entry).max(*phase_idx);
+                }
+            }
+        }
+
+        let tracked = output_liveness.len();
+        let total_outputs = all_outputs.len();
+        eprintln!(
+            "  Liveness: {} output ranges tracked of {} total",
+            tracked, total_outputs
+        );
+
         ExecutablePlan {
             phases: self.phases,
             output_liveness,
@@ -345,8 +391,10 @@ impl ExecutablePlan {
             total_evict += evict_dt;
 
             if spans_dt.as_millis() > 500 || pi < 3 || pi + 1 == self.phases.len() {
+                let rss_mb = read_rss_mb();
+                let store_mb = store.data_bytes() as f64 / (1024.0 * 1024.0);
                 eprintln!(
-                    "  phase {:>3}: spans={:.1}ms merge={:.1}ms evict={:.1}ms ({} out, store {} → {})",
+                    "  phase {:>3}: spans={:.1}ms merge={:.1}ms evict={:.1}ms ({} out, store {} → {}, {:.0}MB data, RSS {:.0}MB)",
                     pi,
                     spans_dt.as_secs_f64() * 1e3,
                     merge_dt.as_secs_f64() * 1e3,
@@ -354,6 +402,8 @@ impl ExecutablePlan {
                     n_outputs,
                     store_before,
                     store.len(),
+                    store_mb,
+                    rss_mb,
                 );
             }
         }
@@ -403,6 +453,15 @@ fn execute_lane(lane: &ExecutableLane, store: &PhaseStore) -> Vec<(AtomId, Typed
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
+
+fn read_rss_mb() -> f64 {
+    std::fs::read_to_string("/proc/self/statm")
+        .ok()
+        .and_then(|s| s.split_whitespace().nth(1)?.parse::<u64>().ok())
+        .unwrap_or(0) as f64
+        * 4096.0
+        / (1024.0 * 1024.0)
+}
 
 pub fn dtype_elem_bytes(dtype: DType) -> usize {
     match dtype {
