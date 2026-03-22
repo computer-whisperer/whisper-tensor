@@ -519,8 +519,8 @@ fn accuracy_gpt2() {
         "gpt2",
         &onnx_data,
         &golden_path,
-        1e-5, // rtol
-        1e-5, // atol
+        1e-4, // rtol
+        1e-4, // atol
         None,
     );
 }

@@ -235,43 +235,79 @@ pub fn silu(input: Arc<dyn Tensor>) -> Result<Arc<dyn Tensor>, Error> {
 
 pub fn gelu(input: Arc<dyn Tensor>) -> Result<Arc<dyn Tensor>, Error> {
     // gelu(x) = x * 0.5 * (1 + erf(x / sqrt(2)))
-    let sqrt2 = f32_scalar_matching(std::f32::consts::SQRT_2, input.as_ref());
-    let x_div = Div::new(None, input.clone(), sqrt2)?;
+    // Compute in F32 for BF16/F16 inputs to match PyTorch's fused implementation.
+    let input_dtype = input.dtype();
+    let x: Arc<dyn Tensor> = if input_dtype != DType::F32 {
+        cast(input, DType::F32)
+    } else {
+        input
+    };
+    let sqrt2 = f32_scalar_matching(std::f32::consts::SQRT_2, x.as_ref());
+    let x_div = Div::new(None, x.clone(), sqrt2)?;
     let erf_val = Erf::new(None, x_div);
-    let one = f32_scalar_matching(1.0, input.as_ref());
+    let one = f32_scalar_matching(1.0, x.as_ref());
     let erf_plus_one = Add::new(None, erf_val, one)?;
-    let half = f32_scalar_matching(0.5, input.as_ref());
+    let half = f32_scalar_matching(0.5, x.as_ref());
     let scaled = Mul::new(None, erf_plus_one, half)?;
-    Ok(Mul::new(None, input, scaled)?)
+    let result: Arc<dyn Tensor> = Mul::new(None, x, scaled)?;
+    if input_dtype != DType::F32 {
+        Ok(cast(result, input_dtype))
+    } else {
+        Ok(result)
+    }
 }
 
 pub fn gelu_pytorch_tanh(input: Arc<dyn Tensor>) -> Result<Arc<dyn Tensor>, Error> {
     // PyTorch approximate GELU:
     // 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
-    let x2 = Mul::new(None, input.clone(), input.clone())?;
-    let x3 = Mul::new(None, x2, input.clone())?;
+    // Compute in F32 for BF16/F16 inputs to match PyTorch's fused implementation.
+    let input_dtype = input.dtype();
+    let x: Arc<dyn Tensor> = if input_dtype != DType::F32 {
+        cast(input, DType::F32)
+    } else {
+        input
+    };
+    let x2 = Mul::new(None, x.clone(), x.clone())?;
+    let x3 = Mul::new(None, x2, x.clone())?;
 
-    let c = f32_scalar_matching(0.044715, input.as_ref());
+    let c = f32_scalar_matching(0.044715, x.as_ref());
     let c_x3 = Mul::new(None, c, x3)?;
-    let inner = Add::new(None, input.clone(), c_x3)?;
+    let inner = Add::new(None, x.clone(), c_x3)?;
 
-    let sqrt_2_over_pi = f32_scalar_matching(0.7978846, input.as_ref());
+    let sqrt_2_over_pi = f32_scalar_matching(0.7978846, x.as_ref());
     let scaled = Mul::new(None, sqrt_2_over_pi, inner)?;
     let t = Tanh::new(None, scaled);
 
-    let one = f32_scalar_matching(1.0, input.as_ref());
+    let one = f32_scalar_matching(1.0, x.as_ref());
     let one_plus_t = Add::new(None, one, t)?;
-    let half = f32_scalar_matching(0.5, input.as_ref());
-    let half_x = Mul::new(None, half, input)?;
-    Ok(Mul::new(None, half_x, one_plus_t)?)
+    let half = f32_scalar_matching(0.5, x.as_ref());
+    let half_x = Mul::new(None, half, x)?;
+    let result: Arc<dyn Tensor> = Mul::new(None, half_x, one_plus_t)?;
+    if input_dtype != DType::F32 {
+        Ok(cast(result, input_dtype))
+    } else {
+        Ok(result)
+    }
 }
 
 pub fn quick_gelu(input: Arc<dyn Tensor>) -> Result<Arc<dyn Tensor>, Error> {
     // quick_gelu(x) = x * sigmoid(1.702 * x)
-    let scale = f32_scalar_matching(1.702, input.as_ref());
-    let scaled = Mul::new(None, input.clone(), scale)?;
+    // Compute in F32 for BF16/F16 inputs to match PyTorch's fused implementation.
+    let input_dtype = input.dtype();
+    let x: Arc<dyn Tensor> = if input_dtype != DType::F32 {
+        cast(input, DType::F32)
+    } else {
+        input
+    };
+    let scale = f32_scalar_matching(1.702, x.as_ref());
+    let scaled = Mul::new(None, x.clone(), scale)?;
     let sig = Sigmoid::new(None, scaled);
-    Ok(Mul::new(None, input, sig)?)
+    let result: Arc<dyn Tensor> = Mul::new(None, x, sig)?;
+    if input_dtype != DType::F32 {
+        Ok(cast(result, input_dtype))
+    } else {
+        Ok(result)
+    }
 }
 
 pub fn swiglu(

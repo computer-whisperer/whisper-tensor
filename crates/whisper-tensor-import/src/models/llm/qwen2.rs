@@ -220,12 +220,12 @@ pub fn load_qwen2(
         // QK-norm (Qwen3): RMS norm on Q and K per-head before RoPE
         let attn_wm = layer_weight_manager.prefix("self_attn");
         let q: Arc<dyn Tensor> = if attn_wm.prefix("q_norm").get_tensor("weight").is_ok() {
-            rms_norm(&attn_wm.prefix("q_norm"), q, None)?
+            rms_norm(&attn_wm.prefix("q_norm"), q, Some(config.rms_norm_eps))?
         } else {
             q
         };
         let k: Arc<dyn Tensor> = if attn_wm.prefix("k_norm").get_tensor("weight").is_ok() {
-            rms_norm(&attn_wm.prefix("k_norm"), k, None)?
+            rms_norm(&attn_wm.prefix("k_norm"), k, Some(config.rms_norm_eps))?
         } else {
             k
         };
