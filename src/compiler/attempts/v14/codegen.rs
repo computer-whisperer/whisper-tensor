@@ -1060,6 +1060,458 @@ pub fn validate_layout(graph: &NanoGraph, layout: &BufferLayout) -> Vec<String> 
     errors
 }
 
+// ─── Elementwise loop fusion ────────────────────────────────────────────────
+
+/// A chain of consecutive groups that share a single loop.
+struct FusionChain {
+    /// Indices into graph.groups().
+    group_indices: Vec<usize>,
+    count: u64,
+    atom_offset: u64,
+}
+
+/// Build chains of consecutive fusable groups.
+///
+/// Two consecutive groups A and B fuse if they have the same count/atom_offset,
+/// B is not a Reduce/IndirectLoad/Literal, B is not dead, and all of B's inputs
+/// that reference A use Affine stride=1 (Strided with stride_inner=1,
+/// stride_outer=0, modulus=MAX).
+fn build_fusion_chains(groups: &[AtomGroup], layout: &BufferLayout) -> Vec<FusionChain> {
+    // Fusion is opt-in while the chain detection bug is being investigated.
+    // Enable with FUSION=1.
+    if std::env::var("FUSION").is_err() {
+        return groups.iter().enumerate()
+            .filter(|(gi, g)| !matches!(&g.op, ScalarOp::Literal(_))
+                && !(*gi < layout.group_use_counts.len() && layout.group_use_counts[*gi] == 0)
+                && g.count > 0)
+            .map(|(gi, g)| FusionChain {
+                group_indices: vec![gi],
+                count: g.count,
+                atom_offset: g.atom_offset,
+            })
+            .collect();
+    }
+    let mut chains: Vec<FusionChain> = Vec::new();
+
+    // Track atom ranges of groups in the current chain for fusion checks.
+    // A group can only fuse if none of its inputs overlap a chain member's
+    // range at a non-aligned offset (which would cause read-before-write).
+    let mut chain_ranges: Vec<(u64, u64)> = Vec::new(); // (base_id, base_id + count)
+
+    for (gi, group) in groups.iter().enumerate() {
+        // Skip literals and dead groups — they don't participate in chains.
+        if matches!(&group.op, ScalarOp::Literal(_)) {
+            continue;
+        }
+        if gi < layout.group_use_counts.len() && layout.group_use_counts[gi] == 0 {
+            continue;
+        }
+
+        // Groups that always start a new chain.
+        let must_break = matches!(
+            &group.op,
+            ScalarOp::Reduce { .. } | ScalarOp::IndirectLoad { .. }
+        );
+
+        let can_fuse = if must_break {
+            false
+        } else if let Some(prev_chain) = chains.last() {
+            // Check count/atom_offset match with the current chain.
+            prev_chain.count == group.count
+                && prev_chain.atom_offset == group.atom_offset
+                && group.count > 1  // No point fusing single-element groups.
+                && inputs_fusable_with_chain(group, &chain_ranges)
+        } else {
+            false
+        };
+
+        if can_fuse {
+            // Extend the current chain.
+            chain_ranges.push((group.base_id.0, group.base_id.0 + group.count));
+            chains.last_mut().unwrap().group_indices.push(gi);
+        } else {
+            // Start a new chain.
+            chain_ranges.clear();
+            chain_ranges.push((group.base_id.0, group.base_id.0 + group.count));
+            chains.push(FusionChain {
+                group_indices: vec![gi],
+                count: group.count,
+                atom_offset: group.atom_offset,
+            });
+        }
+    }
+
+    chains
+}
+
+/// Check if all of a group's inputs that reference a chain producer use
+/// Affine stride=1 (eligible for register forwarding).
+fn inputs_fusable_with_chain(group: &AtomGroup, chain_ranges: &[(u64, u64)]) -> bool {
+    for input in &group.inputs {
+        match input {
+            InputRef::Strided {
+                base,
+                stride_inner,
+                stride_outer,
+                modulus,
+            } => {
+                // Check if this input's base falls within ANY chain member's range.
+                for &(range_lo, range_hi) in chain_ranges {
+                    if base.0 >= range_lo && base.0 < range_hi {
+                        // This input overlaps a chain producer's range.
+                        // Fusion is only safe if it reads the SAME iteration's atom:
+                        // - Affine stride=1 with base == producer's base_id (exact alignment)
+                        if *stride_inner != 1 || *stride_outer != 0 || *modulus != u64::MAX
+                            || base.0 != range_lo
+                        {
+                            return false;
+                        }
+                    }
+                }
+            }
+            InputRef::Broadcast(id) => {
+                // Broadcast reads a single atom. If it's in a chain member's range,
+                // it reads a fixed position — only safe if that atom has been written
+                // before this iteration. In a fused loop, we can't guarantee that.
+                for &(range_lo, range_hi) in chain_ranges {
+                    if id.0 >= range_lo && id.0 < range_hi {
+                        return false;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    true
+}
+
+/// Emit a fusion chain. Single-group chains delegate to `emit_group`.
+/// Multi-group chains emit a single loop with forwarded register values.
+fn emit_chain(
+    builder: &mut FunctionBuilder,
+    module: &mut JITModule,
+    chain: &FusionChain,
+    groups: &[AtomGroup],
+    layout: &BufferLayout,
+    buffer_ptr: Value,
+    math: &MathFuncs,
+    var_counter: &mut VarCounter,
+    table_counter: &mut usize,
+) -> Result<(), String> {
+    // Single-group chain: delegate to existing emit_group (no change).
+    if chain.group_indices.len() == 1 {
+        let gi = chain.group_indices[0];
+        return emit_group(
+            builder, module, &groups[gi], layout, buffer_ptr, math, var_counter, table_counter,
+        );
+    }
+
+    let count = chain.count;
+    let atom_offset = chain.atom_offset;
+
+    if count == 0 {
+        return Ok(());
+    }
+
+    // Single-element chain: emit all bodies inline without a loop.
+    if count == 1 {
+        let mut forwarded: HashMap<u64, (Value, DType)> = HashMap::new();
+        for &gi in &chain.group_indices {
+            let group = &groups[gi];
+            emit_group_body_forwarded(
+                builder, module, group, layout, buffer_ptr, None, atom_offset,
+                math, var_counter, table_counter, &mut forwarded,
+            )?;
+        }
+        return Ok(());
+    }
+
+    // Multi-element chain: one loop for all groups.
+    let loop_header = builder.create_block();
+    let loop_body = builder.create_block();
+    let loop_exit = builder.create_block();
+
+    let start = builder.ins().iconst(types::I64, atom_offset as i64);
+    let end = builder.ins().iconst(types::I64, (atom_offset + count) as i64);
+
+    builder.ins().jump(loop_header, &[start]);
+
+    builder.switch_to_block(loop_header);
+    builder.append_block_param(loop_header, types::I64);
+    let i_val = builder.block_params(loop_header)[0];
+
+    let cmp = builder.ins().icmp(IntCC::SignedLessThan, i_val, end);
+    builder.ins().brif(cmp, loop_body, &[], loop_exit, &[]);
+
+    builder.switch_to_block(loop_body);
+
+    // Forwarding map: producer base_id → (Cranelift Value, output DType).
+    // Rebuilt each iteration (Cranelift SSA values are block-local within the loop body).
+    let mut forwarded: HashMap<u64, (Value, DType)> = HashMap::new();
+
+    for &gi in &chain.group_indices {
+        let group = &groups[gi];
+        emit_group_body_forwarded(
+            builder, module, group, layout, buffer_ptr, Some(i_val), 0,
+            math, var_counter, table_counter, &mut forwarded,
+        )?;
+    }
+
+    let i_next = builder.ins().iadd_imm(i_val, 1);
+    builder.ins().jump(loop_header, &[i_next]);
+
+    builder.switch_to_block(loop_exit);
+    builder.seal_block(loop_header);
+    builder.seal_block(loop_body);
+    builder.seal_block(loop_exit);
+
+    Ok(())
+}
+
+/// Emit one iteration of a group's computation with register forwarding.
+///
+/// Like `emit_group_body`, but:
+/// - Uses `load_input_forwarded` to check the forwarding map before memory loads.
+/// - After computing, registers the output in `forwarded` for downstream groups.
+/// - Always stores to the buffer (store elimination is a future optimization).
+fn emit_group_body_forwarded(
+    builder: &mut FunctionBuilder,
+    module: &mut JITModule,
+    group: &AtomGroup,
+    layout: &BufferLayout,
+    buffer_ptr: Value,
+    i_val: Option<Value>,
+    i_const: u64,
+    math: &MathFuncs,
+    var_counter: &mut VarCounter,
+    table_counter: &mut usize,
+    forwarded: &mut HashMap<u64, (Value, DType)>,
+) -> Result<(), String> {
+    let (out_slot, _) = layout
+        .find(group.base_id)
+        .ok_or_else(|| format!("no slot for group base={}", group.base_id))?;
+    let out_slot = out_slot.clone();
+
+    let output_dtype = group.output_dtype;
+    let output_repr = repr_of(output_dtype);
+
+    let result_val = match &group.op {
+        ScalarOp::Literal(_) => return Ok(()),
+
+        ScalarOp::Identity => {
+            let src = load_input_forwarded(
+                builder, module, &group.inputs[0], layout, buffer_ptr,
+                i_val, i_const, group.atom_offset, table_counter, forwarded,
+            )?;
+            let src_repr = forwarded_or_slot_repr(&group.inputs[0], layout, group.atom_offset, forwarded);
+            emit_cast_to_output(builder, src, src_repr, output_dtype)
+        }
+
+        ScalarOp::Binary { op, compute_dtype } => {
+            let compute_repr = repr_of(*compute_dtype);
+            let a_raw = load_input_forwarded(
+                builder, module, &group.inputs[0], layout, buffer_ptr,
+                i_val, i_const, group.atom_offset, table_counter, forwarded,
+            )?;
+            let a_repr = forwarded_or_slot_repr(&group.inputs[0], layout, group.atom_offset, forwarded);
+            let a = emit_repr_cast(builder, a_raw, a_repr, compute_repr);
+
+            let b_raw = load_input_forwarded(
+                builder, module, &group.inputs[1], layout, buffer_ptr,
+                i_val, i_const, group.atom_offset, table_counter, forwarded,
+            )?;
+            let b_repr = forwarded_or_slot_repr(&group.inputs[1], layout, group.atom_offset, forwarded);
+            let b = emit_repr_cast(builder, b_raw, b_repr, compute_repr);
+
+            let result = emit_binop(builder, module, math, *op, a, b, compute_repr)?;
+            emit_cast_to_output(builder, result, compute_repr, output_dtype)
+        }
+
+        ScalarOp::Unary { op, compute_dtype } => {
+            let compute_repr = repr_of(*compute_dtype);
+            let x_raw = load_input_forwarded(
+                builder, module, &group.inputs[0], layout, buffer_ptr,
+                i_val, i_const, group.atom_offset, table_counter, forwarded,
+            )?;
+            let x_repr = forwarded_or_slot_repr(&group.inputs[0], layout, group.atom_offset, forwarded);
+            let x = emit_repr_cast(builder, x_raw, x_repr, compute_repr);
+
+            let result = emit_unop(builder, module, math, *op, x, compute_repr)?;
+            emit_cast_to_output(builder, result, compute_repr, output_dtype)
+        }
+
+        ScalarOp::Select => {
+            let cond = load_input_forwarded(
+                builder, module, &group.inputs[0], layout, buffer_ptr,
+                i_val, i_const, group.atom_offset, table_counter, forwarded,
+            )?;
+            let cond_repr = forwarded_or_slot_repr(&group.inputs[0], layout, group.atom_offset, forwarded);
+
+            let is_nonzero = match cond_repr {
+                ReprKind::Float => {
+                    let zero = builder.ins().f32const(0.0);
+                    builder.ins().fcmp(FloatCC::NotEqual, cond, zero)
+                }
+                ReprKind::Int => {
+                    let zero = builder.ins().iconst(types::I64, 0);
+                    builder.ins().icmp(IntCC::NotEqual, cond, zero)
+                }
+            };
+
+            let x_raw = load_input_forwarded(
+                builder, module, &group.inputs[1], layout, buffer_ptr,
+                i_val, i_const, group.atom_offset, table_counter, forwarded,
+            )?;
+            let x_repr = forwarded_or_slot_repr(&group.inputs[1], layout, group.atom_offset, forwarded);
+            let x = emit_cast_to_output(builder, x_raw, x_repr, output_dtype);
+
+            let y_raw = load_input_forwarded(
+                builder, module, &group.inputs[2], layout, buffer_ptr,
+                i_val, i_const, group.atom_offset, table_counter, forwarded,
+            )?;
+            let y_repr = forwarded_or_slot_repr(&group.inputs[2], layout, group.atom_offset, forwarded);
+            let y = emit_cast_to_output(builder, y_raw, y_repr, output_dtype);
+
+            builder.ins().select(is_nonzero, x, y)
+        }
+
+        ScalarOp::Reduce { .. } | ScalarOp::IndirectLoad { .. } => {
+            // These should not appear in multi-group chains (build_fusion_chains
+            // ensures they always start their own chain). Fall through to
+            // emit_group_body for safety.
+            return emit_group_body(
+                builder, module, group, layout, buffer_ptr, i_val, i_const,
+                math, var_counter, table_counter,
+            );
+        }
+    };
+
+    // Always store to buffer (safe approach — avoids needing to track
+    // whether any out-of-chain consumer reads this group).
+    store_result(builder, buffer_ptr, &out_slot, group.atom_offset, i_val, i_const, result_val);
+
+    // Register in forwarding map for downstream groups in the same chain.
+    // Apply the store→load round-trip in registers so the forwarded value
+    // matches exactly what a memory load would produce. This preserves the
+    // dtype truncation contract (e.g., BF16 precision loss between steps).
+    let load_repr_val = emit_store_load_roundtrip(builder, result_val, output_dtype);
+    forwarded.insert(group.base_id.0, (load_repr_val, output_dtype));
+
+    Ok(())
+}
+
+/// Apply the equivalent of store→load in registers, so a forwarded value
+/// matches exactly what `emit_typed_store` + `emit_typed_load` would produce.
+///
+/// This preserves the dtype truncation contract: BF16 outputs must lose
+/// precision between steps, I32 values must be sign-extended to I64, etc.
+fn emit_store_load_roundtrip(
+    builder: &mut FunctionBuilder,
+    val: Value,
+    dtype: DType,
+) -> Value {
+    match dtype {
+        DType::BF16 => {
+            // F32 → BF16 round-to-nearest-even → F32
+            // Store path: bitcast f32→i32, round, take top 16 bits
+            // Load path: uextend i16→i32, shift left 16, bitcast i32→f32
+            let bits = builder.ins().bitcast(types::I32, MemFlags::new(), val);
+            let shifted16 = builder.ins().ushr_imm(bits, 16);
+            let lsb = builder.ins().band_imm(shifted16, 1);
+            let bias = builder.ins().iadd_imm(lsb, 0x7FFF);
+            let rounded = builder.ins().iadd(bits, bias);
+            // Zero out the bottom 16 bits (equivalent to store i16 + load i16 + shift)
+            let masked = builder.ins().band_imm(rounded, !0xFFFF_i64);
+            builder.ins().bitcast(types::F32, MemFlags::new(), masked)
+        }
+        DType::F16 => {
+            // Similar to BF16 but different bit layout. For now, just pass through
+            // (F16 handling would need its own rounding logic).
+            val
+        }
+        DType::F64 => {
+            // Store: f64 store. Load: f64 load → fdemote to f32.
+            // Round-trip: promote f32→f64→fdemote f64→f32 = f32 (no-op if already f32)
+            val
+        }
+        DType::I32 => {
+            // Store: ireduce i64→i32. Load: sextend i32→i64.
+            let narrow = builder.ins().ireduce(types::I32, val);
+            builder.ins().sextend(types::I64, narrow)
+        }
+        DType::U32 => {
+            let narrow = builder.ins().ireduce(types::I32, val);
+            builder.ins().uextend(types::I64, narrow)
+        }
+        DType::BOOL | DType::U8 => {
+            let narrow = builder.ins().ireduce(types::I8, val);
+            builder.ins().uextend(types::I64, narrow)
+        }
+        DType::I8 => {
+            let narrow = builder.ins().ireduce(types::I8, val);
+            builder.ins().sextend(types::I64, narrow)
+        }
+        // F32, I64 — value is already in repr format, no round-trip needed.
+        _ => val,
+    }
+}
+
+/// Determine the repr kind of a loaded input, considering forwarded values.
+///
+/// If the input is an Affine stride=1 reference to a forwarded producer,
+/// returns the repr of the producer's output dtype. Otherwise falls through
+/// to the normal slot-based lookup.
+fn forwarded_or_slot_repr(
+    input: &InputRef,
+    layout: &BufferLayout,
+    atom_offset: u64,
+    forwarded: &HashMap<u64, (Value, DType)>,
+) -> ReprKind {
+    if let InputRef::Strided { base, stride_inner, stride_outer, modulus } = input {
+        if *stride_inner == 1 && *stride_outer == 0 && *modulus == u64::MAX {
+            if let Some((_val, dtype)) = forwarded.get(&base.0) {
+                return repr_of(*dtype);
+            }
+        }
+    }
+    input_slot_dtype(input, layout, atom_offset)
+        .map(repr_of)
+        .unwrap_or(ReprKind::Float)
+}
+
+/// Load an input value, checking the forwarding map first.
+///
+/// For Affine stride=1 inputs whose base is in the forwarding map, returns
+/// the forwarded register value directly (skipping the memory load).
+/// All other patterns fall through to the normal `load_input`.
+fn load_input_forwarded(
+    builder: &mut FunctionBuilder,
+    module: &mut JITModule,
+    input: &InputRef,
+    layout: &BufferLayout,
+    buffer_ptr: Value,
+    i_val: Option<Value>,
+    i_const: u64,
+    atom_offset: u64,
+    table_counter: &mut usize,
+    forwarded: &HashMap<u64, (Value, DType)>,
+) -> Result<Value, String> {
+    // Check for forwarding: Affine stride=1 with a forwarded producer.
+    if let InputRef::Strided { base, stride_inner, stride_outer, modulus } = input {
+        if *stride_inner == 1 && *stride_outer == 0 && *modulus == u64::MAX {
+            if let Some((fwd_val, _fwd_dtype)) = forwarded.get(&base.0) {
+                // The forwarded value has already been through
+                // emit_store_load_roundtrip, so it's in the same format
+                // that emit_typed_load would produce from memory.
+                return Ok(*fwd_val);
+            }
+        }
+    }
+
+    // Not forwarded — normal memory load.
+    load_input(builder, module, input, layout, buffer_ptr, i_val, i_const, atom_offset, table_counter)
+}
+
 /// Compile a span's NanoGraph into native code using the given buffer layout.
 pub fn compile_span(graph: &NanoGraph, layout: &BufferLayout) -> Result<CompiledSpan, String> {
     let mut flag_builder = settings::builder();
@@ -1095,19 +1547,14 @@ pub fn compile_span(graph: &NanoGraph, layout: &BufferLayout) -> Result<Compiled
         let mut var_counter = VarCounter::new();
         let mut table_counter = 0usize;
 
-        for (gi, group) in graph.groups().iter().enumerate() {
-            if matches!(&group.op, ScalarOp::Literal(_)) {
-                continue; // Pre-filled by caller.
-            }
-            // Skip dead groups: their slots may have been reused by later groups,
-            // so emitting a write would corrupt the new occupant.
-            if gi < layout.group_use_counts.len() && layout.group_use_counts[gi] == 0 {
-                continue;
-            }
-            emit_group(
+        // Build fusion chains and emit one loop per chain.
+        let chains = build_fusion_chains(graph.groups(), layout);
+        for chain in &chains {
+            emit_chain(
                 &mut builder,
                 &mut module,
-                group,
+                chain,
+                graph.groups(),
                 layout,
                 buffer_ptr,
                 &math,
