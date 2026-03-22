@@ -202,14 +202,16 @@ pub fn cmd_dump_tensors(
     eprintln!("Loading model from {}...", model_path.display());
     let onnx_data = whisper_tensor_import::identify_and_load(
         &model_path,
-        WeightStorageStrategy::EmbeddedData,
+        WeightStorageStrategy::OriginReference,
     )
     .unwrap_or_else(|e| {
         eprintln!("Failed to import model: {e}");
         std::process::exit(1);
     });
 
+    eprintln!("ONNX data size: {} bytes", onnx_data.len());
     let mut rng = rand::rng();
+    eprintln!("Parsing ONNX...");
     let model = Model::new_from_onnx(&onnx_data, &mut rng, Some(&model_path))
         .unwrap_or_else(|e| {
             eprintln!("Failed to load ONNX: {e}");
