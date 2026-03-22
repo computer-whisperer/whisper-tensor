@@ -24,6 +24,7 @@ pub struct Qwen2Config {
     pub rope_theta: f64,
     pub max_position_embeddings: usize,
     pub tie_word_embeddings: bool,
+    pub rms_norm_eps: f32,
 }
 
 impl Qwen2Config {
@@ -55,6 +56,10 @@ impl Qwen2Config {
             .get("tie_word_embeddings")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
+        let rms_norm_eps = config
+            .get("rms_norm_eps")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(1e-5) as f32;
         Ok(Self {
             num_hidden_layers,
             num_attention_heads,
@@ -63,6 +68,7 @@ impl Qwen2Config {
             rope_theta,
             max_position_embeddings,
             tie_word_embeddings,
+            rms_norm_eps,
         })
     }
 }
@@ -156,7 +162,7 @@ pub fn load_qwen2(
         let att_norm = rms_norm(
             &layer_weight_manager.prefix("input_layernorm"),
             layer_input.clone(),
-            None,
+            Some(config.rms_norm_eps),
         )?;
         tensor_names.insert(Arc::as_ptr(&att_norm) as *const dyn Tensor, format!("layers.{i}.input_layernorm.output"));
 
@@ -306,7 +312,7 @@ pub fn load_qwen2(
         let ffn_norm = rms_norm(
             &layer_weight_manager.prefix("post_attention_layernorm"),
             attention_output.clone(),
-            None,
+            Some(config.rms_norm_eps),
         )?;
         tensor_names.insert(Arc::as_ptr(&ffn_norm) as *const dyn Tensor, format!("layers.{i}.post_attention_layernorm.output"));
 
@@ -327,7 +333,7 @@ pub fn load_qwen2(
         tensor_names.insert(Arc::as_ptr(&layer_output) as *const dyn Tensor, format!("layers.{i}.output"));
     }
 
-    let h = rms_norm(&model_weight_manager.prefix("norm"), layer_output, None)?;
+    let h = rms_norm(&model_weight_manager.prefix("norm"), layer_output, Some(config.rms_norm_eps))?;
 
     // Qwen2 can tie word embeddings: reuse embed_tokens.weight as the output projection
     let out = if config.tie_word_embeddings {

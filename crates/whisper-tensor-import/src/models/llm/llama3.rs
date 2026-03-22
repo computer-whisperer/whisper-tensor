@@ -21,6 +21,7 @@ pub struct Llama3Config {
     pub num_key_value_heads: usize,
     pub rope_theta: f64,
     pub max_position_embeddings: usize,
+    pub rms_norm_eps: f32,
 }
 
 impl Llama3Config {
@@ -44,12 +45,17 @@ impl Llama3Config {
             .get("max_position_embeddings")
             .and_then(|v| v.as_i64())
             .unwrap_or(8192) as usize;
+        let rms_norm_eps = config
+            .get("rms_norm_eps")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(1e-5) as f32;
         Ok(Self {
             num_hidden_layers,
             num_attention_heads,
             num_key_value_heads,
             rope_theta,
             max_position_embeddings,
+            rms_norm_eps,
         })
     }
 }
@@ -301,7 +307,7 @@ pub fn load_llama3(
         layer_output = Add::new(None, attention_output, hidden_layer)?;
     }
 
-    let h = rms_norm(&model_weight_manager.prefix("norm"), layer_output, None)?;
+    let h = rms_norm(&model_weight_manager.prefix("norm"), layer_output, Some(config.rms_norm_eps))?;
     let out = linear(&weight_manager.prefix("lm_head"), h)?;
     output_tensors.push(("logits".to_string(), out));
 
