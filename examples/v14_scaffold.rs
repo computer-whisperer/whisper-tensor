@@ -280,7 +280,7 @@ fn main() {
 
     {
         use whisper_tensor::compiler::attempts::v14::{
-            partitioner_b, partitioner_i, partitioner_j, partitioner_l, partitioner_m,
+            partitioner_i, partitioner_j, partitioner_l, partitioner_m,
         };
         use whisper_tensor::nano_graph::AtomId as AId;
 
@@ -299,7 +299,6 @@ fn main() {
             ) -> Vec<Phase>,
         )> = if std::env::var("RUN_STRUCTURAL").is_ok() {
             vec![
-                ("B (gen-1 wavefront)", partitioner_b::plan),
                 ("I (top-down tiling)", partitioner_i::plan),
                 ("J (critical path)", partitioner_j::plan),
                 ("L (open-ended 1)", partitioner_l::plan),
@@ -460,7 +459,7 @@ fn main() {
 
     // ── Build execution plan from selected partitioner ─────────────────
 
-    use whisper_tensor::compiler::attempts::v14::{partitioner_b, partitioner_m};
+    use whisper_tensor::compiler::attempts::v14::partitioner_m;
     use whisper_tensor::nano_graph::AtomId;
 
     // Collect output atom IDs — one per group that contributes to any model
@@ -493,24 +492,14 @@ fn main() {
         }
         ids
     };
-    let use_m = std::env::var("USE_M").is_ok();
     let t0 = Instant::now();
-    let b_phases = if use_m {
-        partitioner_m::plan(
-            &result.graph,
-            8,
-            result.graph.input_tensors(),
-            &b_output_ids,
-        )
-    } else {
-        partitioner_b::plan(
-            &result.graph,
-            8,
-            result.graph.input_tensors(),
-            &b_output_ids,
-        )
-    };
-    let part_name = if use_m { "M" } else { "B" };
+    let b_phases = partitioner_m::plan(
+        &result.graph,
+        8,
+        result.graph.input_tensors(),
+        &b_output_ids,
+    );
+    let part_name = "M";
     eprintln!(
         "Partitioner {}: {:.1?}, {} phases",
         part_name,
@@ -1384,24 +1373,72 @@ fn main() {
         }
     } // end SKIP_INTERP
 
-    // ── Step 13: Compiled execution (Cranelift JIT) ─────────────────────────
+    // ── Step 13: Compiled execution via new executor ────────────────────────
 
     #[cfg(feature = "cranelift")]
     {
-        use whisper_tensor::compiler::attempts::v14::codegen::CompiledPlan;
+        use whisper_tensor::compiler::attempts::v14::codegen::JitCompiledSpan;
+        use whisper_tensor::compiler::attempts::v14::executor::{
+            ExecutablePlanBuilder, TypedBuffer,
+        };
 
-        println!("\n=== Cranelift JIT Compilation ===");
+        println!("\n=== JIT Compilation (new executor) ===");
         let t0 = Instant::now();
-        let compiled_plan = CompiledPlan::compile(&b_exec_plan).expect("JIT compilation failed");
-        println!("  Compiled in {:.3}s", t0.elapsed().as_secs_f64());
 
-        // Build inputs (same data as interpreter path).
-        let mut jit_inputs: Vec<(
-            whisper_tensor::nano_graph::AtomId,
-            whisper_tensor::backends::ndarray_backend::numeric_tensor::NDArrayNumericTensor<
-                whisper_tensor::DynRank,
-            >,
-        )> = Vec::new();
+        // Compile all spans into JitCompiledSpan instances.
+        let mut plan_builder = ExecutablePlanBuilder::new();
+        let mut compile_errors = Vec::new();
+
+        for (pi, phase) in b_exec_plan.phases.iter().enumerate() {
+            let mut lanes = Vec::new();
+            for (si, span) in phase.spans.iter().enumerate() {
+                match JitCompiledSpan::compile(&span.graph, &span.outputs) {
+                    Ok(jit_span) => {
+                        lanes.push((
+                            Box::new(jit_span)
+                                as Box<dyn whisper_tensor::compiler::attempts::v14::executor::CompiledSpanFn>,
+                            span.inputs.clone(),
+                            span.outputs.clone(),
+                        ));
+                    }
+                    Err(e) => {
+                        compile_errors.push(format!("phase {} span {}: {}", pi, si, e));
+                        // Push a no-op span to keep lane count consistent.
+                        let noop = JitCompiledSpan::compile(
+                            &whisper_tensor::nano_graph::NanoGraph::new(),
+                            &[],
+                        )
+                        .unwrap();
+                        lanes.push((
+                            Box::new(noop)
+                                as Box<dyn whisper_tensor::compiler::attempts::v14::executor::CompiledSpanFn>,
+                            vec![],
+                            vec![],
+                        ));
+                    }
+                }
+            }
+            plan_builder.add_phase(lanes);
+        }
+
+        let exec_plan = plan_builder.build();
+        println!(
+            "  Compiled {} phases in {:.3}s ({} errors)",
+            exec_plan.num_phases(),
+            t0.elapsed().as_secs_f64(),
+            compile_errors.len(),
+        );
+        if !compile_errors.is_empty() {
+            for e in compile_errors.iter().take(5) {
+                eprintln!("  COMPILE ERROR: {}", e);
+            }
+            if compile_errors.len() > 5 {
+                eprintln!("  ... and {} more", compile_errors.len() - 5);
+            }
+        }
+
+        // Build inputs as TypedBuffers.
+        let mut jit_inputs: Vec<(AtomId, TypedBuffer)> = Vec::new();
         for it in b_exec_plan.graph.input_tensors() {
             let milli_id = it.tensor_id;
             let ext_id = milli_graph
@@ -1424,24 +1461,14 @@ fn main() {
                     NumericTensor::NDArray(nd) => nd,
                     _ => t.to_ndarray().unwrap(),
                 };
-                jit_inputs.push((it.base_id, nd));
+                // Convert NDArray to TypedBuffer (raw bytes).
+                let typed = ndarray_to_typed_buffer(&nd, it.dtype);
+                jit_inputs.push((it.base_id, typed));
             }
         }
 
-        if std::env::var("JIT_DIAGNOSE").is_ok() {
-            use whisper_tensor::compiler::attempts::v14::codegen::diagnose_first_divergence;
-            println!("\n=== JIT Per-Group Divergence Diagnosis ===");
-            let t0 = Instant::now();
-            diagnose_first_divergence(&compiled_plan, &b_exec_plan, jit_inputs);
-            println!(
-                "  Diagnosis completed in {:.3}s",
-                t0.elapsed().as_secs_f64()
-            );
-            std::process::exit(0);
-        }
-
         let t0 = Instant::now();
-        let jit_store = compiled_plan.execute_timed(jit_inputs);
+        let jit_store = exec_plan.execute_timed(jit_inputs);
         println!(
             "  JIT executed in {:.3}s, {} store entries",
             t0.elapsed().as_secs_f64(),
@@ -1450,9 +1477,6 @@ fn main() {
 
         // Compare JIT outputs against milli reference.
         println!("\n=== JIT vs Milli Reference ===");
-        let mut jit_store_index: Vec<(u64, &NDArrayNumericTensor<whisper_tensor::DynRank>)> =
-            jit_store.iter().map(|(id, t)| (id.0, t)).collect();
-        jit_store_index.sort_by_key(|&(base, _)| base);
 
         let mut jit_all_match = true;
         for &(ext_id, _, _) in &output_range_mapping {
@@ -1468,7 +1492,9 @@ fn main() {
                 for j in 0..n {
                     let m = milli_flat.get(&[j as u64]).unwrap().to_f64();
                     let atom = tam.atom_id_for_element(j as u64);
-                    let Some(jv) = lookup_atom(&jit_store_index, atom.0) else {
+                    // Look up in PhaseStore.
+                    let jv = lookup_atom_in_store(&jit_store, atom.0);
+                    let Some(jv) = jv else {
                         missing_atoms += 1;
                         continue;
                     };
@@ -1517,6 +1543,95 @@ fn main() {
 ///
 /// Classifies each tensor as Weight, Input, or Computed by cross-referencing
 /// the milli_graph's input_map with the user-provided input_info.
+type NdTensor = whisper_tensor::backends::ndarray_backend::numeric_tensor::NDArrayNumericTensor<
+    whisper_tensor::DynRank,
+>;
+
+/// Convert an NDArray tensor to a TypedBuffer (raw bytes).
+fn ndarray_to_typed_buffer(
+    nd: &NdTensor,
+    dtype: DType,
+) -> whisper_tensor::compiler::attempts::v14::executor::TypedBuffer {
+    use whisper_tensor::compiler::attempts::v14::executor::TypedBuffer;
+    macro_rules! to_bytes {
+        ($arr:expr) => {{
+            let slice = $arr.as_slice().expect("non-contiguous ndarray");
+            let byte_len = slice.len() * std::mem::size_of_val(&slice[0]);
+            let bytes: Vec<u8> =
+                unsafe { std::slice::from_raw_parts(slice.as_ptr() as *const u8, byte_len) }
+                    .to_vec();
+            TypedBuffer {
+                data: bytes,
+                dtype,
+                count: slice.len() as u64,
+            }
+        }};
+    }
+    match nd {
+        NdTensor::F32(a) => to_bytes!(a),
+        NdTensor::F64(a) => to_bytes!(a),
+        NdTensor::I64(a) => to_bytes!(a),
+        NdTensor::I32(a) => to_bytes!(a),
+        NdTensor::BF16(a) => to_bytes!(a),
+        NdTensor::F16(a) => to_bytes!(a),
+        NdTensor::U8(a) => to_bytes!(a),
+        NdTensor::I8(a) => to_bytes!(a),
+        NdTensor::BOOL(a) => {
+            let data: Vec<u8> = a.iter().map(|&b| if b { 1 } else { 0 }).collect();
+            TypedBuffer {
+                data,
+                dtype: DType::BOOL,
+                count: a.len() as u64,
+            }
+        }
+        _ => TypedBuffer {
+            data: vec![],
+            dtype,
+            count: 0,
+        },
+    }
+}
+
+/// Look up a single atom's f64 value in a PhaseStore.
+fn lookup_atom_in_store(
+    store: &whisper_tensor::compiler::attempts::v14::executor::PhaseStore,
+    atom: u64,
+) -> Option<f64> {
+    use whisper_tensor::nano_graph::AtomId;
+    let slices = store.gather(AtomId(atom), 1);
+    for slice in &slices {
+        if slice.base.0 <= atom && atom < slice.base.0 + slice.count {
+            let offset = (atom - slice.base.0) as usize;
+            let elem_bytes =
+                whisper_tensor::compiler::attempts::v14::executor::dtype_elem_bytes(slice.dtype);
+            let byte_off = offset * elem_bytes;
+            if byte_off + elem_bytes <= slice.data.len() {
+                return Some(match slice.dtype {
+                    DType::F32 => {
+                        f32::from_le_bytes(slice.data[byte_off..byte_off + 4].try_into().unwrap())
+                            as f64
+                    }
+                    DType::F64 => {
+                        f64::from_le_bytes(slice.data[byte_off..byte_off + 8].try_into().unwrap())
+                    }
+                    DType::I64 => {
+                        i64::from_le_bytes(slice.data[byte_off..byte_off + 8].try_into().unwrap())
+                            as f64
+                    }
+                    DType::BF16 => {
+                        let bits = u16::from_le_bytes(
+                            slice.data[byte_off..byte_off + 2].try_into().unwrap(),
+                        );
+                        half::bf16::from_bits(bits).to_f64()
+                    }
+                    _ => 0.0,
+                });
+            }
+        }
+    }
+    None
+}
+
 fn build_tensor_map(
     lower_tensor_map: &HashMap<GlobalId, lower::TensorAtomMapInfo>,
     input_map: &HashMap<GlobalId, GlobalId>,
