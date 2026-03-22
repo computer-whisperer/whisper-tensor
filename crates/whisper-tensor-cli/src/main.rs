@@ -1,3 +1,5 @@
+mod dump_tensors;
+
 use clap::Parser;
 use std::collections::HashMap;
 use std::io::Write;
@@ -124,6 +126,28 @@ enum Command {
         /// Transcript of the reference audio (for F5-TTS duration estimation)
         #[arg(long)]
         ref_text: Option<String>,
+    },
+
+    /// Dump intermediate tensors from a model evaluation.
+    ///
+    /// Loads a model, runs it with the given inputs, and writes selected
+    /// intermediate tensors (by ONNX name) to .npy files. Pass no --tensor
+    /// args to list all available tensor names.
+    DumpTensors {
+        /// Path to the model (directory or file)
+        model: PathBuf,
+
+        /// Input tensor: name=path.npy (repeatable)
+        #[arg(long = "input", value_name = "NAME=PATH")]
+        inputs: Vec<String>,
+
+        /// ONNX tensor name to capture (repeatable). Omit to list all names.
+        #[arg(long = "tensor", value_name = "NAME")]
+        tensors: Vec<String>,
+
+        /// Output directory for .npy files
+        #[arg(long, short, default_value = "dump_out")]
+        output: PathBuf,
     },
 
     /// Transcribe speech to text
@@ -315,6 +339,24 @@ fn main() {
             eprintln!("Loading model...");
             let loaded = load_model(&loader, config);
             cmd_stt(loaded, audio, model);
+        }
+        Command::DumpTensors {
+            model,
+            inputs,
+            tensors,
+            output,
+        } => {
+            let input_npys: Vec<(String, PathBuf)> = inputs
+                .iter()
+                .map(|s| {
+                    let (name, path) = s.split_once('=').unwrap_or_else(|| {
+                        eprintln!("Bad --input '{s}' (expected name=path.npy)");
+                        std::process::exit(1);
+                    });
+                    (name.to_string(), PathBuf::from(path))
+                })
+                .collect();
+            dump_tensors::cmd_dump_tensors(model, input_npys, tensors, output);
         }
     }
 }
