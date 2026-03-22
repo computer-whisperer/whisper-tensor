@@ -94,7 +94,16 @@ pub fn build_proto(
     outputs: &[(String, Arc<dyn Tensor>)],
     weight_storage: WeightStorageStrategy,
 ) -> Result<onnx::ModelProto, Error> {
-    build_proto_with_origin_path(inputs, outputs, weight_storage, None)
+    build_proto_ext(inputs, outputs, weight_storage, None, &HashMap::new())
+}
+
+pub fn build_proto_with_tensor_names(
+    inputs: &[Arc<dyn Tensor>],
+    outputs: &[(String, Arc<dyn Tensor>)],
+    weight_storage: WeightStorageStrategy,
+    extra_tensor_names: &HashMap<*const dyn Tensor, String>,
+) -> Result<onnx::ModelProto, Error> {
+    build_proto_ext(inputs, outputs, weight_storage, None, extra_tensor_names)
 }
 
 pub fn build_proto_with_origin_path(
@@ -102,6 +111,16 @@ pub fn build_proto_with_origin_path(
     outputs: &[(String, Arc<dyn Tensor>)],
     weight_storage: WeightStorageStrategy,
     origin_pth_path: Option<&std::path::Path>,
+) -> Result<onnx::ModelProto, Error> {
+    build_proto_ext(inputs, outputs, weight_storage, origin_pth_path, &HashMap::new())
+}
+
+fn build_proto_ext(
+    inputs: &[Arc<dyn Tensor>],
+    outputs: &[(String, Arc<dyn Tensor>)],
+    weight_storage: WeightStorageStrategy,
+    origin_pth_path: Option<&std::path::Path>,
+    extra_tensor_names: &HashMap<*const dyn Tensor, String>,
 ) -> Result<onnx::ModelProto, Error> {
     // Get all nodes in graph
     let mut nodes = HashSet::new();
@@ -144,10 +163,15 @@ pub fn build_proto_with_origin_path(
     let mut chosen_tensor_names: HashSet<String> = HashSet::new();
     let mut tensor_names: HashMap<&dyn Tensor, String> = HashMap::new();
 
-    // Assign requested names
+    // Assign requested names (from tensor get_name() and extra_tensor_names map)
     for tensor in &tensors {
-        if let Some(name) = tensor.get_name() {
-            let name = name.to_string();
+        // Check extra_tensor_names map first (keyed by pointer)
+        let ptr = (*tensor) as *const dyn Tensor;
+        let name = extra_tensor_names
+            .get(&ptr)
+            .cloned()
+            .or_else(|| tensor.get_name().map(|s| s.to_string()));
+        if let Some(name) = name {
             if chosen_tensor_names.contains(&name) {
                 return Err(Error::NameConflictError(name));
             }

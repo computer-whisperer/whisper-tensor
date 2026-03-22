@@ -144,6 +144,7 @@ pub struct TensorDumpObserver {
     watched_ids: HashMap<GlobalId, String>,
     /// Captured tensor values, keyed by ONNX name.
     pub captured: HashMap<String, NumericTensor<DynRank>>,
+    call_count: usize,
 }
 
 impl TensorDumpObserver {
@@ -162,10 +163,14 @@ impl TensorDumpObserver {
                 eprintln!("Warning: tensor '{}' not found in graph", name);
             }
         }
+        for (id, name) in &watched_ids {
+            eprintln!("  watching {:?} → '{}'", id, name);
+        }
         eprintln!("Watching {} tensors", watched_ids.len());
         Self {
             watched_ids,
             captured: HashMap::new(),
+            call_count: 0,
         }
     }
 }
@@ -179,6 +184,13 @@ impl SymbolicGraphObserver for TensorDumpObserver {
         _backend: &mut EvalBackend,
     ) {
         if let Some(id) = tensor_path.last() {
+            if self.watched_ids.contains_key(id) {
+                // Match found
+            } else if self.captured.len() == 0 && self.call_count < 5 {
+                // Debug: print first few unmatched IDs
+                eprintln!("  observer: tensor_id={:?} (no match in {} watched)", id, self.watched_ids.len());
+            }
+            self.call_count += 1;
             if let Some(name) = self.watched_ids.get(id) {
                 eprintln!("  captured '{}': shape={:?} dtype={:?}", name, tensor.shape(), tensor.dtype());
                 self.captured.insert(name.clone(), tensor.clone());
@@ -199,6 +211,7 @@ pub fn cmd_dump_tensors(
     output_dir: PathBuf,
 ) {
     // Import model
+    let t0 = std::time::Instant::now();
     eprintln!("Loading model from {}...", model_path.display());
     let onnx_data = whisper_tensor_import::identify_and_load(
         &model_path,
@@ -209,14 +222,18 @@ pub fn cmd_dump_tensors(
         std::process::exit(1);
     });
 
-    eprintln!("ONNX data size: {} bytes", onnx_data.len());
+    eprintln!("ONNX export: {:.1}s, {} bytes", t0.elapsed().as_secs_f32(), onnx_data.len());
+    use std::io::Write;
+    std::io::stderr().flush().ok();
+    let t1 = std::time::Instant::now();
     let mut rng = rand::rng();
-    eprintln!("Parsing ONNX...");
     let model = Model::new_from_onnx(&onnx_data, &mut rng, Some(&model_path))
         .unwrap_or_else(|e| {
             eprintln!("Failed to load ONNX: {e}");
             std::process::exit(1);
         });
+    eprintln!("ONNX parse: {:.1}s", t1.elapsed().as_secs_f32());
+    std::io::stderr().flush().ok();
 
     // Build observer
     let graph = model.get_symbolic_graph();
@@ -270,12 +287,17 @@ pub fn cmd_dump_tensors(
     // Run
     eprintln!("Running eval...");
     let mut runtime = ModelExecutionRuntime::Eval(EvalBackend::NDArray);
-    let _outputs = model
+    let outputs = model
         .run(inputs, &mut observer, &mut runtime)
         .unwrap_or_else(|e| {
             eprintln!("Eval failed: {e}");
             std::process::exit(1);
         });
+
+    eprintln!("Eval complete. {} outputs, observer called {} times", outputs.len(), observer.call_count);
+    for (name, t) in &outputs {
+        eprintln!("  output '{}': shape={:?} dtype={:?}", name, t.shape(), t.dtype());
+    }
 
     // Write captured tensors
     fs::create_dir_all(&output_dir).unwrap_or_else(|e| {

@@ -3,15 +3,10 @@ use super::operators::{
     LayerNormalization, Mul, RMSNormalization, ReduceSum, Reshape, Resize, Sigmoid, Slice, Squeeze,
     Tanh, TopK, Transpose, Unsqueeze,
 };
-use super::tensor::{DType, Dimension, NamedTensor, Shape, Tensor, TensorData};
+use super::tensor::{DType, Dimension, Shape, Tensor, TensorData};
 use super::weights::WeightManager;
 use super::{Error, operators};
 use std::sync::Arc;
-
-/// Assign an ONNX tensor name to an intermediate result for introspection.
-pub fn named(tensor: Arc<dyn Tensor>, name: impl Into<String>) -> Arc<dyn Tensor> {
-    NamedTensor::new(tensor, name.into())
-}
 
 pub fn linear(
     weight_manager: &impl WeightManager,
