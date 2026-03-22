@@ -279,7 +279,10 @@ fn main() {
     // ── Partitioner tests ──────────────────────────────────────────────────
 
     {
-        use whisper_tensor::compiler::attempts::v14::partitioner_b;
+        use whisper_tensor::compiler::attempts::v14::{
+            partitioner_b, partitioner_i, partitioner_j,
+            partitioner_l, partitioner_m,
+        };
         use whisper_tensor::nano_graph::AtomId as AId;
 
         let input_ts = result.graph.input_tensors();
@@ -296,7 +299,13 @@ fn main() {
                 &[AId],
             ) -> Vec<Phase>,
         )> = if std::env::var("RUN_STRUCTURAL").is_ok() {
-            vec![("B (wavefront)", partitioner_b::plan)]
+            vec![
+                ("B (gen-1 wavefront)", partitioner_b::plan),
+                ("I (top-down tiling)", partitioner_i::plan),
+                ("J (critical path)", partitioner_j::plan),
+                ("L (open-ended 1)", partitioner_l::plan),
+                ("M (open-ended 2)", partitioner_m::plan),
+            ]
         } else {
             vec![]
         };
@@ -450,9 +459,9 @@ fn main() {
         }
     }
 
-    // ── Build partitioner B plan before trivial plan consumes result ─────
+    // ── Build execution plan from selected partitioner ─────────────────
 
-    use whisper_tensor::compiler::attempts::v14::partitioner_b;
+    use whisper_tensor::compiler::attempts::v14::{partitioner_b, partitioner_m};
     use whisper_tensor::nano_graph::AtomId;
 
     // Collect output atom IDs — one per group that contributes to any model
@@ -485,15 +494,27 @@ fn main() {
         }
         ids
     };
+    let use_m = std::env::var("USE_M").is_ok();
     let t0 = Instant::now();
-    let b_phases = partitioner_b::plan(
-        &result.graph,
-        8,
-        result.graph.input_tensors(),
-        &b_output_ids,
-    );
+    let b_phases = if use_m {
+        partitioner_m::plan(
+            &result.graph,
+            8,
+            result.graph.input_tensors(),
+            &b_output_ids,
+        )
+    } else {
+        partitioner_b::plan(
+            &result.graph,
+            8,
+            result.graph.input_tensors(),
+            &b_output_ids,
+        )
+    };
+    let part_name = if use_m { "M" } else { "B" };
     eprintln!(
-        "Partitioner B: {:.1?}, {} phases",
+        "Partitioner {}: {:.1?}, {} phases",
+        part_name,
         t0.elapsed(),
         b_phases.len()
     );
