@@ -1575,7 +1575,8 @@ fn main() {
         println!("\n=== JIT Compilation (new executor) ===");
         let t0 = Instant::now();
 
-        // Compile all spans into JitCompiledSpan instances.
+        // Compile all spans sequentially. Cranelift's JITModule has
+        // thread-safety issues that prevent parallel compilation.
         let mut plan_builder = ExecutablePlanBuilder::new();
         let mut compile_errors = Vec::new();
 
@@ -1593,7 +1594,6 @@ fn main() {
                     }
                     Err(e) => {
                         compile_errors.push(format!("phase {} span {}: {}", pi, si, e));
-                        // Push a no-op span to keep lane count consistent.
                         let noop = JitCompiledSpan::compile(
                             &whisper_tensor::nano_graph::NanoGraph::new(),
                             &[],
