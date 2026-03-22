@@ -17,6 +17,211 @@ use whisper_tensor::tensor_info::TensorInfo;
 use whisper_tensor_import::identify_and_load;
 use whisper_tensor_import::onnx_graph::WeightStorageStrategy;
 
+// ─── Process resource profiler ──────────────────────────────────────────────
+
+mod profiler {
+    use std::sync::{Arc, Mutex};
+    use std::thread::{self, JoinHandle};
+    use std::time::{Duration, Instant};
+
+    struct Shared {
+        current_phase: String,
+        stop: bool,
+    }
+
+    pub struct Profiler {
+        shared: Arc<Mutex<Shared>>,
+        thread: Option<JoinHandle<()>>,
+    }
+
+    impl Profiler {
+        /// Start the profiler. `rss_limit_mb` sets a hard RSS ceiling —
+        /// the process exits immediately if RSS exceeds it.
+        /// Set via RSS_LIMIT_MB env var (default: no limit).
+        pub fn start(rss_limit_mb: Option<u64>) -> Self {
+            let shared = Arc::new(Mutex::new(Shared {
+                current_phase: "init".to_string(),
+                stop: false,
+            }));
+            let shared2 = shared.clone();
+            let start = Instant::now();
+            let rss_limit_bytes = rss_limit_mb.map(|mb| mb * 1024 * 1024);
+
+            eprintln!(
+                "  {:<20} {:>7} {:>10} {:>10} {:>10} {:>10} {:>7}",
+                "Phase", "Wall", "RSS Start", "RSS Peak", "RSS End", "RSS Δ", "CPU"
+            );
+
+            let thread = thread::spawn(move || {
+                let mut prev_phase = String::new();
+                let mut phase_start_elapsed = Duration::ZERO;
+                let mut phase_rss_start: u64 = 0;
+                let mut phase_rss_peak: u64 = 0;
+                let mut phase_cpu_start: u64 = 0;
+
+                loop {
+                    let rss = read_rss_bytes();
+                    let cpu = read_cpu_ms();
+                    let elapsed = start.elapsed();
+
+                    let (phase, should_stop) = {
+                        let s = shared2.lock().unwrap();
+                        (s.current_phase.clone(), s.stop)
+                    };
+
+                    // Check RSS limit.
+                    if let Some(limit) = rss_limit_bytes {
+                        if rss > limit {
+                            // Print whatever phase we're in before dying.
+                            if !prev_phase.is_empty() {
+                                print_phase_line(
+                                    &prev_phase,
+                                    elapsed.saturating_sub(phase_start_elapsed),
+                                    phase_rss_start,
+                                    phase_rss_peak.max(rss),
+                                    rss,
+                                    phase_cpu_start,
+                                    cpu,
+                                );
+                            }
+                            eprintln!(
+                                "\n  KILLED: RSS {:.0}MB exceeds limit {:.0}MB (phase: {})",
+                                rss as f64 / (1024.0 * 1024.0),
+                                limit as f64 / (1024.0 * 1024.0),
+                                phase,
+                            );
+                            std::process::exit(1);
+                        }
+                    }
+
+                    // Phase transition — print summary of completed phase.
+                    if phase != prev_phase {
+                        if !prev_phase.is_empty() {
+                            print_phase_line(
+                                &prev_phase,
+                                elapsed.saturating_sub(phase_start_elapsed),
+                                phase_rss_start,
+                                phase_rss_peak,
+                                rss,
+                                phase_cpu_start,
+                                cpu,
+                            );
+                        }
+                        prev_phase = phase;
+                        phase_start_elapsed = elapsed;
+                        phase_rss_start = rss;
+                        phase_rss_peak = rss;
+                        phase_cpu_start = cpu;
+                    } else {
+                        phase_rss_peak = phase_rss_peak.max(rss);
+                    }
+
+                    if should_stop {
+                        // Print final phase.
+                        if !prev_phase.is_empty() {
+                            print_phase_line(
+                                &prev_phase,
+                                elapsed.saturating_sub(phase_start_elapsed),
+                                phase_rss_start,
+                                phase_rss_peak,
+                                rss,
+                                phase_cpu_start,
+                                cpu,
+                            );
+                        }
+                        let total_cpu = cpu;
+                        eprintln!(
+                            "  {:<20} {:>6.1}s {:>9} {:>8.0}MB",
+                            "TOTAL",
+                            elapsed.as_secs_f64(),
+                            "",
+                            phase_rss_peak as f64 / (1024.0 * 1024.0),
+                        );
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(250));
+                }
+            });
+            Profiler {
+                shared,
+                thread: Some(thread),
+            }
+        }
+
+        pub fn phase(&self, name: &str) {
+            self.shared.lock().unwrap().current_phase = name.to_string();
+        }
+
+        pub fn finish(mut self) {
+            self.shared.lock().unwrap().stop = true;
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
+        }
+    }
+
+    impl Drop for Profiler {
+        fn drop(&mut self) {
+            if let Some(thread) = self.thread.take() {
+                self.shared.lock().unwrap().stop = true;
+                let _ = thread.join();
+            }
+        }
+    }
+
+    fn read_rss_bytes() -> u64 {
+        std::fs::read_to_string("/proc/self/statm")
+            .ok()
+            .and_then(|s| s.split_whitespace().nth(1)?.parse::<u64>().ok())
+            .unwrap_or(0)
+            * 4096
+    }
+
+    fn read_cpu_ms() -> u64 {
+        let buf = match std::fs::read_to_string("/proc/self/stat") {
+            Ok(s) => s,
+            Err(_) => return 0,
+        };
+        let after_comm = match buf.find(')') {
+            Some(i) => &buf[i + 2..],
+            None => return 0,
+        };
+        let fields: Vec<&str> = after_comm.split_whitespace().collect();
+        let utime: u64 = fields.get(11).and_then(|s| s.parse().ok()).unwrap_or(0);
+        let stime: u64 = fields.get(12).and_then(|s| s.parse().ok()).unwrap_or(0);
+        (utime + stime) * 10
+    }
+
+    fn print_phase_line(
+        name: &str,
+        wall: Duration,
+        rss_start: u64,
+        rss_peak: u64,
+        rss_end: u64,
+        cpu_start: u64,
+        cpu_end: u64,
+    ) {
+        let mb = |b: u64| b as f64 / (1024.0 * 1024.0);
+        let delta = rss_end as i64 - rss_start as i64;
+        let delta_str = format!(
+            "{}{:.0}",
+            if delta >= 0 { "+" } else { "-" },
+            (delta.unsigned_abs()) as f64 / (1024.0 * 1024.0)
+        );
+        let cpu = cpu_end.saturating_sub(cpu_start);
+        eprintln!(
+            "  {:<20} {:>6.1}s {:>8.0}MB {:>8.0}MB {:>8.0}MB {:>8}MB {:>5.1}s",
+            name,
+            wall.as_secs_f64(),
+            mb(rss_start),
+            mb(rss_peak),
+            mb(rss_end),
+            delta_str,
+            cpu as f64 / 1e3,
+        );
+    }
+}
+
 fn main() {
     let onnx_path = std::env::args()
         .nth(1)
@@ -28,8 +233,14 @@ fn main() {
         std::process::exit(1);
     }
 
+    let rss_limit = std::env::var("RSS_LIMIT_MB")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok());
+    let profiler = profiler::Profiler::start(rss_limit);
+
     // ── Step 1: Load ONNX model ──────────────────────────────────────────────
 
+    profiler.phase("load_model");
     let t0 = Instant::now();
     let onnx_data = identify_and_load(path, WeightStorageStrategy::EmbeddedData).unwrap();
     let mut rng = rand::rng();
@@ -38,6 +249,7 @@ fn main() {
 
     // ── Step 2: Generate MilliOpGraph ────────────────────────────────────────
 
+    profiler.phase("gen_milli");
     let t0 = Instant::now();
     let sym_graph = model.get_symbolic_graph();
     let tensor_store = model.get_tensor_store();
@@ -56,6 +268,7 @@ fn main() {
 
     // ── Step 3: Build TensorInfo for lowering (shapes + dtypes only) ─────────
 
+    profiler.phase("build_tensors");
     let t0 = Instant::now();
     let input_info = model.get_input_tensor_info().unwrap();
     let tensors_by_name = sym_graph.get_tensors_by_name();
@@ -117,8 +330,10 @@ fn main() {
 
     // ── Step 4: Lower to NanoGraph ───────────────────────────────────────────
 
+    profiler.phase("lower");
     let t0 = Instant::now();
     let result = lower::lower(&milli_graph, &all_infos).unwrap();
+    drop(all_infos); // Only needed for lowering — free early.
     eprintln!("Lowered in {:.1}ms", t0.elapsed().as_secs_f64() * 1e3);
 
     let stats = result.graph.stats();
@@ -189,6 +404,7 @@ fn main() {
     }
 
     // ── Step 5: Build tensor_map for the ExecutionPlan ───────────────────────
+    profiler.phase("plan_setup");
 
     let tensor_map = build_tensor_map(
         &result.tensor_map,
@@ -458,6 +674,7 @@ fn main() {
     }
 
     // ── Build execution plan from selected partitioner ─────────────────
+    profiler.phase("partition");
 
     use whisper_tensor::compiler::attempts::v14::partitioner_m;
     use whisper_tensor::nano_graph::AtomId;
@@ -567,6 +784,7 @@ fn main() {
     }
 
     // ── Generate execution plan reports ─────────────────────────────────
+    profiler.phase("reports");
     {
         use whisper_tensor::compiler::attempts::v14::report;
 
@@ -951,6 +1169,7 @@ fn main() {
     println!("  Span outputs: {} ranges", span.outputs.len());
 
     // ── Step 8: Build shared inputs ────────────────────────────────────────
+    profiler.phase("build_inputs");
 
     use whisper_tensor::backends::eval_backend::EvalBackend;
     use whisper_tensor::backends::ndarray_backend::numeric_tensor::NDArrayNumericTensor;
@@ -988,12 +1207,8 @@ fn main() {
     }
 
     // Build milli-eval inputs: HashMap<external GlobalId, NumericTensor>.
-    // Includes all initialized tensors (weights + small constants) and user inputs.
-    let mut milli_inputs: HashMap<GlobalId, NumericTensor<whisper_tensor::DynRank>> =
-        HashMap::new();
-    for (ext_id, tensor) in &initialized {
-        milli_inputs.insert(*ext_id, tensor.clone());
-    }
+    // Consume initialized directly — no clone needed, we're done with it.
+    let mut milli_inputs: HashMap<GlobalId, NumericTensor<whisper_tensor::DynRank>> = initialized;
     for (name, tensor) in &user_inputs {
         if let Some(&ext_id) = tensors_by_name.get(name.as_str()) {
             milli_inputs.insert(ext_id, tensor.clone());
@@ -1001,6 +1216,7 @@ fn main() {
     }
 
     // ── Step 9: Run MilliOpGraph reference eval ─────────────────────────────
+    profiler.phase("milli_eval");
 
     println!("\n=== MilliOpGraph Reference Eval ===");
     let t0 = Instant::now();
@@ -1028,62 +1244,60 @@ fn main() {
         );
     }
 
-    // ── Step 10: Run NanoGraph eval via v14 executor ────────────────────────
+    // ── Step 10: Build shared nano inputs (AtomId-keyed) ────────────────────
+    //
+    // Built once from milli_inputs, then reused for direct eval, interpreter B,
+    // and JIT. Avoids rebuilding from scratch per eval path.
+    profiler.phase("nano_inputs");
 
-    // Build nano executor inputs from the same data.
-    let mut exec_inputs: Vec<(AtomId, NDArrayNumericTensor<whisper_tensor::DynRank>)> = Vec::new();
-    let mut matched = 0usize;
-    let mut unmatched = 0usize;
-    let mut unmatched_atoms = 0u64;
+    let nano_inputs: Vec<(AtomId, NDArrayNumericTensor<whisper_tensor::DynRank>)> = {
+        let mut inputs = Vec::new();
+        let mut matched = 0usize;
+        let mut unmatched = 0usize;
+        let mut unmatched_atoms = 0u64;
 
-    for it in exec_plan.graph.input_tensors() {
-        let milli_id = it.tensor_id;
-        let ext_id = milli_graph
-            .input_map
-            .iter()
-            .find(|(_, int)| **int == milli_id)
-            .map(|(ext, _)| *ext);
+        for it in b_exec_plan.graph.input_tensors() {
+            let milli_id = it.tensor_id;
+            let ext_id = milli_graph
+                .input_map
+                .iter()
+                .find(|(_, int)| **int == milli_id)
+                .map(|(ext, _)| *ext);
 
-        let tensor = if let Some(ext) = ext_id {
-            if let Some(t) = initialized.get(&ext) {
-                Some(t.clone())
+            let tensor = ext_id.and_then(|ext| milli_inputs.remove(&ext));
+
+            if tensor.is_none() {
+                unmatched += 1;
+                unmatched_atoms += it.count;
+                if unmatched <= 5 {
+                    eprintln!(
+                        "  UNMATCHED input_tensor: milli_id={:?} base={} count={} {:?} ext_id={:?}",
+                        milli_id, it.base_id.0, it.count, it.dtype, ext_id
+                    );
+                }
             } else {
-                let name = sym_graph.get_tensor_name(ext);
-                name.and_then(|n| user_inputs.get(n).cloned())
+                matched += 1;
             }
-        } else {
-            None
-        };
 
-        if tensor.is_none() {
-            unmatched += 1;
-            unmatched_atoms += it.count;
-            if unmatched <= 5 {
-                eprintln!(
-                    "  UNMATCHED input_tensor: milli_id={:?} base={} count={} {:?} ext_id={:?}",
-                    milli_id, it.base_id.0, it.count, it.dtype, ext_id
-                );
+            if let Some(t) = tensor {
+                let nd = match t {
+                    NumericTensor::NDArray(nd) => nd,
+                    _ => t.to_ndarray().unwrap(),
+                };
+                inputs.push((it.base_id, nd));
             }
-        } else {
-            matched += 1;
         }
 
-        if let Some(t) = tensor {
-            let nd = match t {
-                NumericTensor::NDArray(nd) => nd,
-                _ => t.to_ndarray().unwrap(),
-            };
-            exec_inputs.push((it.base_id, nd));
-        }
-    }
-
-    println!(
-        "\n=== NanoGraph Eval ({} input tensors, {} matched, {} unmatched ({} atoms)) ===",
-        exec_plan.graph.input_tensors().len(),
-        matched,
-        unmatched,
-        unmatched_atoms
-    );
+        println!(
+            "\n=== NanoGraph Inputs ({} input tensors, {} matched, {} unmatched ({} atoms)) ===",
+            b_exec_plan.graph.input_tensors().len(),
+            matched,
+            unmatched,
+            unmatched_atoms
+        );
+        inputs
+    };
+    drop(milli_inputs); // Free remaining weight data not needed for nano eval.
 
     // Build output atom ranges — handle segmented (Concat) tensors
     // by collecting all underlying atom ranges.
@@ -1141,13 +1355,12 @@ fn main() {
         output_range_mapping.push((om.tensor_id, start, end));
     }
 
-    // When SKIP_DIRECT=1, skip the slow direct eval and trivial executor.
-    if std::env::var("SKIP_DIRECT").is_ok() {
-        println!("  Skipping direct eval (SKIP_DIRECT=1)");
-    } else {
+    // Direct nano eval — slow, opt-in via RUN_DIRECT=1.
+    if std::env::var("RUN_DIRECT").is_ok() {
+        profiler.phase("direct_eval");
         // Direct eval with all output ranges.
         let eval_input_refs: Vec<(AtomId, &NDArrayNumericTensor<whisper_tensor::DynRank>)> =
-            exec_inputs
+            nano_inputs
                 .iter()
                 .map(|(base, tensor)| (*base, tensor))
                 .collect();
@@ -1226,7 +1439,7 @@ fn main() {
         }
 
         // (Trivial executor comparison removed — direct eval covers correctness.)
-    } // end SKIP_DIRECT
+    } // end RUN_DIRECT
 
     /// Look up a single atom's value from a sorted store index.
     fn lookup_atom(
@@ -1249,45 +1462,21 @@ fn main() {
 
     // ── Step 12: Run partitioner B through executor ─────────────────────────
 
-    if std::env::var("SKIP_INTERP").is_ok() {
-        println!("\n  Skipping interpreter B eval (SKIP_INTERP=1)");
-    } else {
+    // Interpreter eval — slow, no eviction, opt-in via RUN_INTERP=1.
+    if std::env::var("RUN_INTERP").is_ok() {
+        profiler.phase("interp_eval");
         println!(
             "\n=== Partitioner B Eval ({} phases, {} lanes) ===",
             b_exec_plan.phases.len(),
             b_exec_plan.phases.first().map_or(0, |p| p.spans.len())
         );
 
-        // Build B's executor inputs from the same data.
-        let mut b_exec_inputs: Vec<(AtomId, NDArrayNumericTensor<whisper_tensor::DynRank>)> =
-            Vec::new();
-        for it in b_exec_plan.graph.input_tensors() {
-            let milli_id = it.tensor_id;
-            let ext_id = milli_graph
-                .input_map
+        // Reuse shared nano_inputs — ArcArray clone is O(1) per tensor.
+        let b_exec_inputs: Vec<(AtomId, NDArrayNumericTensor<whisper_tensor::DynRank>)> =
+            nano_inputs
                 .iter()
-                .find(|(_, int)| **int == milli_id)
-                .map(|(ext, _)| *ext);
-
-            let tensor = if let Some(ext) = ext_id {
-                if let Some(t) = initialized.get(&ext) {
-                    Some(t.clone())
-                } else {
-                    let name = sym_graph.get_tensor_name(ext);
-                    name.and_then(|n| user_inputs.get(n).cloned())
-                }
-            } else {
-                None
-            };
-
-            if let Some(t) = tensor {
-                let nd = match t {
-                    NumericTensor::NDArray(nd) => nd,
-                    _ => t.to_ndarray().unwrap(),
-                };
-                b_exec_inputs.push((it.base_id, nd));
-            }
-        }
+                .map(|(base, t)| (*base, t.clone()))
+                .collect();
 
         // Run B's executor — returns raw store (base AtomId → tensor).
         let t0 = Instant::now();
@@ -1371,7 +1560,7 @@ fn main() {
         } else {
             println!("\nPartitioner B: Some outputs MISMATCHED.");
         }
-    } // end SKIP_INTERP
+    } // end RUN_INTERP
 
     // ── Step 13: Compiled execution via new executor ────────────────────────
 
@@ -1382,6 +1571,7 @@ fn main() {
             ExecutablePlanBuilder, TypedBuffer,
         };
 
+        profiler.phase("jit_compile");
         println!("\n=== JIT Compilation (new executor) ===");
         let t0 = Instant::now();
 
@@ -1437,36 +1627,24 @@ fn main() {
             }
         }
 
-        // Build inputs as TypedBuffers.
-        let mut jit_inputs: Vec<(AtomId, TypedBuffer)> = Vec::new();
-        for it in b_exec_plan.graph.input_tensors() {
-            let milli_id = it.tensor_id;
-            let ext_id = milli_graph
-                .input_map
-                .iter()
-                .find(|(_, int)| **int == milli_id)
-                .map(|(ext, _)| *ext);
-            let tensor = if let Some(ext) = ext_id {
-                if let Some(t) = initialized.get(&ext) {
-                    Some(t.clone())
-                } else {
-                    let name = sym_graph.get_tensor_name(ext);
-                    name.and_then(|n| user_inputs.get(n).cloned())
-                }
-            } else {
-                None
-            };
-            if let Some(t) = tensor {
-                let nd = match t {
-                    NumericTensor::NDArray(nd) => nd,
-                    _ => t.to_ndarray().unwrap(),
-                };
-                // Convert NDArray to TypedBuffer (raw bytes).
-                let typed = ndarray_to_typed_buffer(&nd, it.dtype);
-                jit_inputs.push((it.base_id, typed));
-            }
-        }
+        // Convert shared nano_inputs to TypedBuffers for JIT, then drop
+        // the NDArray data so we don't hold both formats during execution.
+        let input_dtypes: HashMap<AtomId, DType> = b_exec_plan
+            .graph
+            .input_tensors()
+            .iter()
+            .map(|it| (it.base_id, it.dtype))
+            .collect();
+        let jit_inputs: Vec<(AtomId, TypedBuffer)> = nano_inputs
+            .iter()
+            .map(|(base, nd)| {
+                let dtype = input_dtypes.get(base).copied().unwrap_or(DType::F32);
+                (*base, ndarray_to_typed_buffer(nd, dtype))
+            })
+            .collect();
+        drop(nano_inputs); // Free NDArray refs before JIT execution.
 
+        profiler.phase("jit_execute");
         let t0 = Instant::now();
         let jit_store = exec_plan.execute_timed(jit_inputs);
         println!(
@@ -1476,6 +1654,7 @@ fn main() {
         );
 
         // Compare JIT outputs against milli reference.
+        profiler.phase("jit_compare");
         println!("\n=== JIT vs Milli Reference ===");
 
         let mut jit_all_match = true;
@@ -1537,6 +1716,8 @@ fn main() {
             println!("\nJIT: Some outputs MISMATCHED.");
         }
     }
+
+    profiler.finish();
 }
 
 /// Build the ExecutionPlan's tensor_map from lowering results.
