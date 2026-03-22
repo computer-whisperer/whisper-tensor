@@ -570,6 +570,21 @@ fn main() {
         }
     }
 
+    // ── Generate execution plan reports ─────────────────────────────────
+    {
+        use whisper_tensor::compiler::attempts::v14::report;
+
+        let text = report::text_report(&b_exec_plan, &result.group_provenance, &result.graph);
+        let report_path = "v14_report.txt";
+        std::fs::write(report_path, &text).unwrap();
+        eprintln!("Text report written to {}", report_path);
+
+        let svg = report::svg_report(&b_exec_plan, &result.group_provenance, &result.graph);
+        let svg_path = "v14_report.svg";
+        std::fs::write(svg_path, &svg).unwrap();
+        eprintln!("SVG report written to {}", svg_path);
+    }
+
     // ── Single-span correctness test (skip unless SINGLE_SPAN=1) ─────────
     if std::env::var("SINGLE_SPAN").is_ok() {
         // Evaluate B's first non-empty span directly and compare against the
@@ -1419,7 +1434,7 @@ fn main() {
         }
 
         let t0 = Instant::now();
-        let jit_store = compiled_plan.execute_with_diagnostics(jit_inputs);
+        let jit_store = compiled_plan.execute_timed(jit_inputs);
         println!(
             "  JIT executed in {:.3}s, {} store entries",
             t0.elapsed().as_secs_f64(),

@@ -12,4 +12,5 @@ pub mod partitioner_f;
 pub mod partitioner_g;
 pub mod partitioner_h;
 pub mod plan;
+pub mod report;
 pub mod types;

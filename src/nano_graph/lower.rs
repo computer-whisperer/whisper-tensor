@@ -85,6 +85,9 @@ pub struct LowerResult {
     pub unsupported_details: Vec<String>,
     /// Mapping from milli tensor GlobalId to nano atom group.
     pub tensor_map: HashMap<GlobalId, TensorAtomMapInfo>,
+    /// Provenance: for each nano group index, the (milli_op_id, op_kind) that produced it.
+    /// Length equals graph.num_groups(). Used by reporting/visualization.
+    pub group_provenance: Vec<(GlobalId, String)>,
 }
 
 /// Public view of how a milli tensor maps to nano atoms.
@@ -428,6 +431,7 @@ pub fn lower(
         unsupported: ctx.unsupported,
         unsupported_details: ctx.unsupported_details,
         tensor_map,
+        group_provenance: ctx.group_provenance,
     })
 }
 
@@ -452,6 +456,9 @@ pub struct NanoLoweringContext<'a> {
     next_anon_sym: usize,
     pub unsupported: Vec<(GlobalId, String)>,
     pub unsupported_details: Vec<String>,
+    /// Provenance: maps each nano group index to the milli op that produced it.
+    /// Recorded as (milli_op_id, op_kind_string).
+    pub group_provenance: Vec<(GlobalId, String)>,
 }
 
 impl<'a> NanoLoweringContext<'a> {
@@ -463,6 +470,7 @@ impl<'a> NanoLoweringContext<'a> {
             next_anon_sym: 0,
             unsupported: Vec::new(),
             unsupported_details: Vec::new(),
+            group_provenance: Vec::new(),
         }
     }
 
@@ -1040,7 +1048,15 @@ impl<'a> NanoLoweringContext<'a> {
     }
 
     pub fn lower_op(&mut self, op: &AnyMilliOp) {
+        let groups_before = self.nano.num_groups();
         op.lower_to_nano(self);
+        let groups_after = self.nano.num_groups();
+        // Record provenance for any new groups.
+        let op_id = op.global_id();
+        let op_kind = op.op_kind();
+        for _ in groups_before..groups_after {
+            self.group_provenance.push((op_id, op_kind.clone()));
+        }
     }
 
     /// Default lowering for unsupported ops: if all outputs are numeric

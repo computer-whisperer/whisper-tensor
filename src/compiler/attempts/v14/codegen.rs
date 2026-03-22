@@ -2164,10 +2164,13 @@ impl CompiledPlan {
         }
 
         for phase in &self.phases {
+            // Build sorted index ONCE per phase, shared across all parallel spans.
+            let index = build_store_index(&store);
+
             let phase_outputs: Vec<Vec<(AtomId, NDArrayNumericTensor<DynRank>)>> = phase
                 .spans
                 .par_iter()
-                .map(|entry| execute_compiled_span(entry, &store))
+                .map(|entry| execute_compiled_span_indexed(entry, &index))
                 .collect();
 
             for span_outputs in phase_outputs {
@@ -2176,6 +2179,73 @@ impl CompiledPlan {
                 }
             }
         }
+
+        store
+    }
+
+    /// Execute with per-phase timing breakdown printed to stderr.
+    pub fn execute_timed(
+        &self,
+        inputs: Vec<(AtomId, NDArrayNumericTensor<DynRank>)>,
+    ) -> HashMap<AtomId, NDArrayNumericTensor<DynRank>> {
+        use rayon::prelude::*;
+        use std::time::Instant;
+
+        let mut store: HashMap<AtomId, NDArrayNumericTensor<DynRank>> = HashMap::new();
+        for (base, tensor) in inputs {
+            store.insert(base, tensor);
+        }
+
+        let mut total_index = std::time::Duration::ZERO;
+        let mut total_spans = std::time::Duration::ZERO;
+        let mut total_merge = std::time::Duration::ZERO;
+
+        for (pi, phase) in self.phases.iter().enumerate() {
+            let t0 = Instant::now();
+            let index = build_store_index(&store);
+            let index_dt = t0.elapsed();
+            total_index += index_dt;
+
+            let t0 = Instant::now();
+            let phase_outputs: Vec<Vec<(AtomId, NDArrayNumericTensor<DynRank>)>> = phase
+                .spans
+                .par_iter()
+                .map(|entry| execute_compiled_span_indexed(entry, &index))
+                .collect();
+            let spans_dt = t0.elapsed();
+            total_spans += spans_dt;
+
+            let t0 = Instant::now();
+            let mut n_outputs = 0usize;
+            for span_outputs in phase_outputs {
+                n_outputs += span_outputs.len();
+                for (base, tensor) in span_outputs {
+                    store.insert(base, tensor);
+                }
+            }
+            let merge_dt = t0.elapsed();
+            total_merge += merge_dt;
+
+            // Only print phases that take > 500ms or the first/last few.
+            if spans_dt.as_millis() > 500 || pi < 3 || (pi + 1) == self.phases.len() {
+                eprintln!(
+                    "  phase {:>3}: index={:.1}ms spans={:.1}ms merge={:.1}ms ({} outputs, store={})",
+                    pi,
+                    index_dt.as_secs_f64() * 1e3,
+                    spans_dt.as_secs_f64() * 1e3,
+                    merge_dt.as_secs_f64() * 1e3,
+                    n_outputs,
+                    store.len(),
+                );
+            }
+        }
+
+        eprintln!(
+            "  TOTALS: index={:.1}ms spans={:.1}ms merge={:.1}ms",
+            total_index.as_secs_f64() * 1e3,
+            total_spans.as_secs_f64() * 1e3,
+            total_merge.as_secs_f64() * 1e3,
+        );
 
         store
     }
@@ -2778,56 +2848,232 @@ fn execute_compiled_span(
     extract_outputs(&entry.outputs, &entry.layout, &buffer)
 }
 
+/// Sorted index over the value store for O(log N) lookups.
+/// Built once per phase, shared across all parallel span executions.
+type StoreIndex<'a> = Vec<(u64, u64, &'a NDArrayNumericTensor<DynRank>)>;
+
+fn build_store_index(store: &HashMap<AtomId, NDArrayNumericTensor<DynRank>>) -> StoreIndex<'_> {
+    let mut index: Vec<(u64, u64, &NDArrayNumericTensor<DynRank>)> = store
+        .iter()
+        .map(|(base, t)| (base.0, t.num_elements() as u64, t))
+        .collect();
+    index.sort_unstable_by_key(|&(base, _, _)| base);
+    index
+}
+
+fn execute_compiled_span_indexed(
+    entry: &CompiledSpanEntry,
+    index: &StoreIndex<'_>,
+) -> Vec<(AtomId, NDArrayNumericTensor<DynRank>)> {
+    if entry.layout.total_bytes == 0 {
+        return Vec::new();
+    }
+
+    let mut buffer = entry.literal_buffer.clone();
+    populate_buffer_from_index(&entry.inputs, index, &entry.layout, &mut buffer);
+    entry.compiled.execute(&mut buffer);
+    extract_outputs(&entry.outputs, &entry.layout, &buffer)
+}
+
+/// Populate buffer from a pre-built sorted store index.
+fn populate_buffer_from_index(
+    input_ranges: &[AtomRange],
+    index: &StoreIndex<'_>,
+    layout: &BufferLayout,
+    buffer: &mut [u8],
+) {
+    for range in input_ranges {
+        let range_lo = range.base.0;
+        let range_hi = range_lo + range.count;
+
+        let start = index.partition_point(|&(base, _, _)| base + 0 < range_lo);
+        let start = if start > 0 { start - 1 } else { 0 };
+
+        for &(t_lo, t_count, tensor) in &index[start..] {
+            if t_lo >= range_hi {
+                break;
+            }
+            let t_hi = t_lo + t_count;
+            if t_hi <= range_lo {
+                continue;
+            }
+
+            let overlap_start = t_lo.max(range_lo);
+            let overlap_end = t_hi.min(range_hi);
+            let skip = (overlap_start - t_lo) as usize;
+            let count = (overlap_end - overlap_start) as usize;
+
+            write_tensor_to_buffer(tensor, skip, count, overlap_start, layout, buffer);
+        }
+    }
+}
+
 /// Copy data from the store into the buffer for each declared input range.
 /// Writes tensor elements in their native dtype, matching the slot's storage format.
+///
+/// Uses a sorted index over the store for O(log N) lookup per input range
+/// instead of O(store_size) linear scan.
 fn populate_buffer_from_store(
     input_ranges: &[AtomRange],
     store: &HashMap<AtomId, NDArrayNumericTensor<DynRank>>,
     layout: &BufferLayout,
     buffer: &mut [u8],
 ) {
-    use crate::numeric_scalar::NumericScalar;
+    // Build sorted index: (base_atom_u64, num_elements, &tensor).
+    let mut index: Vec<(u64, u64, &NDArrayNumericTensor<DynRank>)> = store
+        .iter()
+        .map(|(base, t)| (base.0, t.num_elements() as u64, t))
+        .collect();
+    index.sort_unstable_by_key(|&(base, _, _)| base);
 
     for range in input_ranges {
         let range_lo = range.base.0;
         let range_hi = range_lo + range.count;
 
-        for (&base, tensor) in store {
-            let t_lo = base.0;
-            let t_hi = t_lo + tensor.num_elements() as u64;
-            if t_lo < range_hi && t_hi > range_lo {
-                let overlap_start = t_lo.max(range_lo);
-                let overlap_end = t_hi.min(range_hi);
-                let skip = (overlap_start - t_lo) as usize;
-                let count = (overlap_end - overlap_start) as usize;
+        // Find first store entry that could overlap: entries whose end > range_lo.
+        // Since entries are sorted by base, start at the first entry where
+        // base + count > range_lo, i.e. base > range_lo - max_count.
+        // Conservatively, start at the first entry where base < range_hi.
+        let start = index.partition_point(|&(base, _, _)| base + 0 < range_lo);
+        // Back up to catch entries that start before range_lo but extend into it.
+        let start = if start > 0 { start - 1 } else { 0 };
 
-                let scalars = tensor_slice_to_scalars(tensor, skip, count);
-                // Bulk-write within slots: find the slot for the first atom,
-                // then write contiguously until we exhaust this slot or the data.
-                let mut written = 0usize;
-                let mut atom = overlap_start;
-                while written < scalars.len() {
-                    if let Some((slot, elem_start)) = layout.find(AtomId(atom)) {
-                        let available = (slot.count - elem_start) as usize;
-                        let to_write = available.min(scalars.len() - written);
-                        for i in 0..to_write {
-                            let off =
-                                slot.byte_offset + (elem_start as usize + i) * slot.elem_bytes;
-                            if off + slot.elem_bytes <= buffer.len() {
-                                let stored = scalars[written + i].cast_to(slot.dtype);
-                                write_scalar(buffer, off, &stored);
-                            }
-                        }
-                        written += to_write;
-                        atom += to_write as u64;
-                    } else {
-                        written += 1;
-                        atom += 1;
-                    }
-                }
+        for &(t_lo, t_count, tensor) in &index[start..] {
+            if t_lo >= range_hi {
+                break;
             }
+            let t_hi = t_lo + t_count;
+            if t_hi <= range_lo {
+                continue;
+            }
+
+            let overlap_start = t_lo.max(range_lo);
+            let overlap_end = t_hi.min(range_hi);
+            let skip = (overlap_start - t_lo) as usize;
+            let count = (overlap_end - overlap_start) as usize;
+
+            // Try bulk memcpy when tensor dtype matches slot dtype.
+            write_tensor_to_buffer(tensor, skip, count, overlap_start, layout, buffer);
         }
     }
+}
+
+/// Write `count` elements from `tensor[skip..]` into `buffer` starting at `atom_start`.
+/// Uses bulk memcpy when the tensor's dtype matches the slot's dtype (common case),
+/// falls back to per-scalar conversion otherwise.
+fn write_tensor_to_buffer(
+    tensor: &NDArrayNumericTensor<DynRank>,
+    skip: usize,
+    count: usize,
+    atom_start: u64,
+    layout: &BufferLayout,
+    buffer: &mut [u8],
+) {
+    let mut written = 0usize;
+    let mut atom = atom_start;
+    while written < count {
+        let Some((slot, elem_start)) = layout.find(AtomId(atom)) else {
+            written += 1;
+            atom += 1;
+            continue;
+        };
+        let available = (slot.count - elem_start) as usize;
+        let to_write = available.min(count - written);
+        let buf_off = slot.byte_offset + elem_start as usize * slot.elem_bytes;
+
+        // Fast path: bulk copy when dtypes match.
+        if bulk_copy_to_buffer(
+            tensor,
+            skip + written,
+            to_write,
+            slot.dtype,
+            buf_off,
+            buffer,
+        ) {
+            written += to_write;
+            atom += to_write as u64;
+            continue;
+        }
+
+        // Slow path: per-scalar conversion.
+        let scalars = tensor_slice_to_scalars(tensor, skip + written, to_write);
+        for i in 0..to_write {
+            let off = buf_off + i * slot.elem_bytes;
+            if off + slot.elem_bytes <= buffer.len() {
+                let stored = scalars[i].cast_to(slot.dtype);
+                write_scalar(buffer, off, &stored);
+            }
+        }
+        written += to_write;
+        atom += to_write as u64;
+    }
+}
+
+/// Bulk-copy tensor elements directly into the buffer when dtypes match.
+/// Returns true if the fast path was taken.
+fn bulk_copy_to_buffer(
+    tensor: &NDArrayNumericTensor<DynRank>,
+    skip: usize,
+    count: usize,
+    slot_dtype: DType,
+    buf_offset: usize,
+    buffer: &mut [u8],
+) -> bool {
+    macro_rules! bulk {
+        ($arr:expr, $dt:expr, $expected:expr) => {{
+            if $dt == $expected {
+                let slice = $arr
+                    .as_slice()
+                    .unwrap_or_else(|| panic!("non-contiguous ndarray in bulk_copy_to_buffer"));
+                let src = &slice[skip..skip + count];
+                let byte_len = count * std::mem::size_of_val(&src[0]);
+                let dst = &mut buffer[buf_offset..buf_offset + byte_len];
+                // SAFETY: src and dst are the same size, both properly aligned for u8 copy.
+                dst.copy_from_slice(unsafe {
+                    std::slice::from_raw_parts(src.as_ptr() as *const u8, byte_len)
+                });
+                return true;
+            }
+            false
+        }};
+    }
+    match tensor {
+        NDArrayNumericTensor::F32(a) => {
+            bulk!(a, slot_dtype, DType::F32);
+        }
+        NDArrayNumericTensor::I64(a) => {
+            bulk!(a, slot_dtype, DType::I64);
+        }
+        NDArrayNumericTensor::I32(a) => {
+            bulk!(a, slot_dtype, DType::I32);
+        }
+        NDArrayNumericTensor::BF16(a) => {
+            bulk!(a, slot_dtype, DType::BF16);
+        }
+        NDArrayNumericTensor::F16(a) => {
+            bulk!(a, slot_dtype, DType::F16);
+        }
+        NDArrayNumericTensor::U8(a) => {
+            bulk!(a, slot_dtype, DType::U8);
+        }
+        NDArrayNumericTensor::F64(a) => {
+            bulk!(a, slot_dtype, DType::F64);
+        }
+        NDArrayNumericTensor::U64(a) => {
+            bulk!(a, slot_dtype, DType::U64);
+        }
+        NDArrayNumericTensor::U32(a) => {
+            bulk!(a, slot_dtype, DType::U32);
+        }
+        NDArrayNumericTensor::I8(a) => {
+            bulk!(a, slot_dtype, DType::I8);
+        }
+        NDArrayNumericTensor::BOOL(a) => {
+            bulk!(a, slot_dtype, DType::BOOL);
+        }
+        _ => {}
+    }
+    false
 }
 
 /// Extract elements from a tensor at [skip..skip+count] as NumericScalars.
@@ -2863,95 +3109,160 @@ fn tensor_slice_to_scalars(
 }
 
 /// Extract output ranges from the buffer as NDArray tensors in the correct dtype.
+///
+/// Uses bulk memcpy when the output dtype matches the slot dtype (the common
+/// case), and falls back to per-scalar conversion only when a dtype mismatch
+/// or slot boundary crossing demands it.
 fn extract_outputs(
     output_ranges: &[AtomRange],
     layout: &BufferLayout,
     buffer: &[u8],
 ) -> Vec<(AtomId, NDArrayNumericTensor<DynRank>)> {
-    use crate::numeric_scalar::{NumericScalar, NumericScalarType};
-
     output_ranges
         .iter()
         .map(|range| {
-            // Read scalars from buffer in their native slot dtype.
-            let mut scalars = Vec::with_capacity(range.count as usize);
-            let mut remaining = range.count;
-            let mut atom = range.base.0;
-            while remaining > 0 {
-                if let Some((slot, elem_start)) = layout.find(AtomId(atom)) {
-                    let available = slot.count - elem_start;
-                    let to_read = remaining.min(available);
-                    for i in 0..to_read {
-                        let off = slot.byte_offset + (elem_start + i) as usize * slot.elem_bytes;
-                        if off + slot.elem_bytes <= buffer.len() {
-                            scalars.push(read_scalar(buffer, off, slot.dtype));
-                        } else {
-                            scalars.push(NumericScalar::F32(0.0));
-                        }
-                    }
-                    atom += to_read;
-                    remaining -= to_read;
-                } else {
-                    scalars.push(NumericScalar::F32(0.0));
-                    atom += 1;
-                    remaining -= 1;
-                }
-            }
-
-            // Build NDArray tensor in the output range's dtype.
-            let len = scalars.len();
-            let tensor = match range.dtype {
-                DType::F32 => {
-                    let data: Vec<f32> = scalars.iter().map(|s| s.to_f64() as f32).collect();
-                    NDArrayNumericTensor::F32(
-                        ArcArray::from_shape_vec(IxDyn(&[len]), data).unwrap(),
-                    )
-                }
-                DType::I64 => {
-                    let data: Vec<i64> = scalars
-                        .iter()
-                        .map(|s| i64::cast_from_numeric_scalar(s))
-                        .collect();
-                    NDArrayNumericTensor::I64(
-                        ArcArray::from_shape_vec(IxDyn(&[len]), data).unwrap(),
-                    )
-                }
-                DType::BF16 => {
-                    let data: Vec<half::bf16> = scalars
-                        .iter()
-                        .map(|s| half::bf16::cast_from_numeric_scalar(s))
-                        .collect();
-                    NDArrayNumericTensor::BF16(
-                        ArcArray::from_shape_vec(IxDyn(&[len]), data).unwrap(),
-                    )
-                }
-                DType::U8 => {
-                    let data: Vec<u8> = scalars
-                        .iter()
-                        .map(|s| u8::cast_from_numeric_scalar(s))
-                        .collect();
-                    NDArrayNumericTensor::U8(ArcArray::from_shape_vec(IxDyn(&[len]), data).unwrap())
-                }
-                DType::BOOL => {
-                    let data: Vec<bool> = scalars
-                        .iter()
-                        .map(|s| bool::cast_from_numeric_scalar(s))
-                        .collect();
-                    NDArrayNumericTensor::BOOL(
-                        ArcArray::from_shape_vec(IxDyn(&[len]), data).unwrap(),
-                    )
-                }
-                _ => {
-                    // Fallback to f32.
-                    let data: Vec<f32> = scalars.iter().map(|s| s.to_f64() as f32).collect();
-                    NDArrayNumericTensor::F32(
-                        ArcArray::from_shape_vec(IxDyn(&[len]), data).unwrap(),
-                    )
-                }
-            };
+            let len = range.count as usize;
+            let tensor = extract_output_bulk(range, layout, buffer, len);
             (range.base, tensor)
         })
         .collect()
+}
+
+/// Try to extract an entire output range via bulk memcpy. Falls back to
+/// per-scalar read when dtypes don't match or the range spans multiple slots.
+fn extract_output_bulk(
+    range: &AtomRange,
+    layout: &BufferLayout,
+    buffer: &[u8],
+    len: usize,
+) -> NDArrayNumericTensor<DynRank> {
+    // Check if the entire range fits in a single slot with matching dtype.
+    // This is the common case and we can do a single memcpy.
+    if let Some((slot, elem_start)) = layout.find(range.base) {
+        let available = (slot.count - elem_start) as usize;
+        if available >= len && slot.dtype == range.dtype {
+            let buf_off = slot.byte_offset + elem_start as usize * slot.elem_bytes;
+            let byte_len = len * slot.elem_bytes;
+            if buf_off + byte_len <= buffer.len() {
+                let src = &buffer[buf_off..buf_off + byte_len];
+                return bulk_read_tensor(src, range.dtype, len);
+            }
+        }
+    }
+
+    // Slow path: per-scalar extraction.
+    extract_output_scalar(range, layout, buffer, len)
+}
+
+/// Bulk-read `len` elements from `src` bytes into an NDArray tensor.
+fn bulk_read_tensor(src: &[u8], dtype: DType, len: usize) -> NDArrayNumericTensor<DynRank> {
+    macro_rules! bulk_read {
+        ($ty:ty, $variant:ident) => {{
+            let mut data = vec![<$ty>::default(); len];
+            // SAFETY: copying raw bytes into properly-sized typed slice.
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    src.as_ptr(),
+                    data.as_mut_ptr() as *mut u8,
+                    src.len(),
+                );
+            }
+            NDArrayNumericTensor::$variant(ArcArray::from_shape_vec(IxDyn(&[len]), data).unwrap())
+        }};
+    }
+    match dtype {
+        DType::F32 => bulk_read!(f32, F32),
+        DType::F64 => bulk_read!(f64, F64),
+        DType::I64 => bulk_read!(i64, I64),
+        DType::I32 => bulk_read!(i32, I32),
+        DType::U64 => bulk_read!(u64, U64),
+        DType::U32 => bulk_read!(u32, U32),
+        DType::BF16 => bulk_read!(half::bf16, BF16),
+        DType::F16 => bulk_read!(half::f16, F16),
+        DType::U8 => bulk_read!(u8, U8),
+        DType::I8 => bulk_read!(i8, I8),
+        DType::BOOL => {
+            let data: Vec<bool> = src.iter().map(|&b| b != 0).collect();
+            NDArrayNumericTensor::BOOL(ArcArray::from_shape_vec(IxDyn(&[len]), data).unwrap())
+        }
+        _ => {
+            // Fallback: read as f32.
+            bulk_read!(f32, F32)
+        }
+    }
+}
+
+/// Per-scalar fallback extraction (handles dtype mismatches and multi-slot ranges).
+fn extract_output_scalar(
+    range: &AtomRange,
+    layout: &BufferLayout,
+    buffer: &[u8],
+    len: usize,
+) -> NDArrayNumericTensor<DynRank> {
+    use crate::numeric_scalar::{NumericScalar, NumericScalarType};
+
+    let mut scalars = Vec::with_capacity(len);
+    let mut remaining = range.count;
+    let mut atom = range.base.0;
+    while remaining > 0 {
+        if let Some((slot, elem_start)) = layout.find(AtomId(atom)) {
+            let available = slot.count - elem_start;
+            let to_read = remaining.min(available);
+            for i in 0..to_read {
+                let off = slot.byte_offset + (elem_start + i) as usize * slot.elem_bytes;
+                if off + slot.elem_bytes <= buffer.len() {
+                    scalars.push(read_scalar(buffer, off, slot.dtype));
+                } else {
+                    scalars.push(NumericScalar::F32(0.0));
+                }
+            }
+            atom += to_read;
+            remaining -= to_read;
+        } else {
+            scalars.push(NumericScalar::F32(0.0));
+            atom += 1;
+            remaining -= 1;
+        }
+    }
+
+    match range.dtype {
+        DType::F32 => {
+            let data: Vec<f32> = scalars.iter().map(|s| s.to_f64() as f32).collect();
+            NDArrayNumericTensor::F32(ArcArray::from_shape_vec(IxDyn(&[len]), data).unwrap())
+        }
+        DType::I64 => {
+            let data: Vec<i64> = scalars
+                .iter()
+                .map(|s| i64::cast_from_numeric_scalar(s))
+                .collect();
+            NDArrayNumericTensor::I64(ArcArray::from_shape_vec(IxDyn(&[len]), data).unwrap())
+        }
+        DType::BF16 => {
+            let data: Vec<half::bf16> = scalars
+                .iter()
+                .map(|s| half::bf16::cast_from_numeric_scalar(s))
+                .collect();
+            NDArrayNumericTensor::BF16(ArcArray::from_shape_vec(IxDyn(&[len]), data).unwrap())
+        }
+        DType::U8 => {
+            let data: Vec<u8> = scalars
+                .iter()
+                .map(|s| u8::cast_from_numeric_scalar(s))
+                .collect();
+            NDArrayNumericTensor::U8(ArcArray::from_shape_vec(IxDyn(&[len]), data).unwrap())
+        }
+        DType::BOOL => {
+            let data: Vec<bool> = scalars
+                .iter()
+                .map(|s| bool::cast_from_numeric_scalar(s))
+                .collect();
+            NDArrayNumericTensor::BOOL(ArcArray::from_shape_vec(IxDyn(&[len]), data).unwrap())
+        }
+        _ => {
+            let data: Vec<f32> = scalars.iter().map(|s| s.to_f64() as f32).collect();
+            NDArrayNumericTensor::F32(ArcArray::from_shape_vec(IxDyn(&[len]), data).unwrap())
+        }
+    }
 }
 
 /// Compile an empty span (no groups). Returns a no-op CompiledSpan.
