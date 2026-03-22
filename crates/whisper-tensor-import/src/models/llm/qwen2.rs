@@ -176,6 +176,9 @@ pub fn load_qwen2(
             att_norm.clone(),
         )?;
         let v = linear(&layer_weight_manager.prefix("self_attn.v_proj"), att_norm)?;
+        tensor_names.insert(Arc::as_ptr(&q) as *const dyn Tensor, format!("layers.{i}.self_attn.q_proj.output"));
+        tensor_names.insert(Arc::as_ptr(&k) as *const dyn Tensor, format!("layers.{i}.self_attn.k_proj.output"));
+        tensor_names.insert(Arc::as_ptr(&v) as *const dyn Tensor, format!("layers.{i}.self_attn.v_proj.output"));
 
         let q: Arc<dyn Tensor> = Transpose::new(
             None,
@@ -305,7 +308,9 @@ pub fn load_qwen2(
         let output = Transpose::new(None, output, Some(vec![0, 2, 1, 3]));
         let output = reshape(output, vec![0, 0, -1])?;
 
+        tensor_names.insert(Arc::as_ptr(&output) as *const dyn Tensor, format!("layers.{i}.self_attn.pre_o_proj"));
         let hidden_layer = linear(&layer_weight_manager.prefix("self_attn.o_proj"), output)?;
+        tensor_names.insert(Arc::as_ptr(&hidden_layer) as *const dyn Tensor, format!("layers.{i}.self_attn.o_proj.output"));
 
         let attention_output = Add::new(None, layer_input, hidden_layer)?;
         tensor_names.insert(Arc::as_ptr(&attention_output) as *const dyn Tensor, format!("layers.{i}.attn_residual"));
@@ -317,17 +322,20 @@ pub fn load_qwen2(
         tensor_names.insert(Arc::as_ptr(&ffn_norm) as *const dyn Tensor, format!("layers.{i}.post_attention_layernorm.output"));
 
         // SwiGLU Feed-Forward
-        let x = linear(
+        let gate = linear(
             &layer_weight_manager.prefix("mlp.gate_proj"),
             ffn_norm.clone(),
         )?;
-        let x = silu(x)?;
-        let x2 = linear(
+        tensor_names.insert(Arc::as_ptr(&gate) as *const dyn Tensor, format!("layers.{i}.mlp.gate_proj.output"));
+        let gate = silu(gate)?;
+        let up = linear(
             &layer_weight_manager.prefix("mlp.up_proj"),
             ffn_norm.clone(),
         )?;
-        let hidden_layer = Mul::new(None, x, x2)?;
+        let hidden_layer = Mul::new(None, gate, up)?;
+        tensor_names.insert(Arc::as_ptr(&hidden_layer) as *const dyn Tensor, format!("layers.{i}.mlp.gate_up_mul"));
         let hidden_layer = linear(&layer_weight_manager.prefix("mlp.down_proj"), hidden_layer)?;
+        tensor_names.insert(Arc::as_ptr(&hidden_layer) as *const dyn Tensor, format!("layers.{i}.mlp.down_proj.output"));
 
         layer_output = Add::new(None, attention_output, hidden_layer)?;
         tensor_names.insert(Arc::as_ptr(&layer_output) as *const dyn Tensor, format!("layers.{i}.output"));
