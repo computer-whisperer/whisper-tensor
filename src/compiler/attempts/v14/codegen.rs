@@ -381,25 +381,34 @@ pub fn compute_layout(graph: &NanoGraph, output_ranges: &[AtomRange]) -> BufferL
         result
     };
 
-    // Compute accessed atom range for an InputRef applied to a group.
+    // Compute the bounding atom range accessed by an InputRef over [atom_offset, atom_offset+count).
     let input_ref_range = |ir: &InputRef, count: u64, atom_offset: u64| -> Option<(u64, u64)> {
         match ir {
-            InputRef::Broadcast(_) | InputRef::Explicit(_) => None, // no stride, no constraint
-            InputRef::Strided { base, stride_inner: stride, .. } => {
-                let a = base.0 as i64 + *stride * atom_offset as i64;
-                let b = base.0 as i64 + *stride * (atom_offset + count - 1) as i64;
-                Some((a.min(b) as u64, a.max(b) as u64 + 1))
-            }
-            InputRef::Strided { base, stride_outer: stride, modulus: repeat, .. } => {
-                let max_block = (atom_offset + count - 1) / repeat;
-                let a = base.0 as i64;
-                let b = base.0 as i64 + *stride * max_block as i64;
-                Some((a.min(b) as u64, a.max(b) as u64 + 1))
-            }
-            InputRef::Strided { base, stride_inner: stride, modulus, .. } => {
-                let a = base.0 as i64;
-                let b = base.0 as i64 + *stride as i64 * (*modulus as i64 - 1);
-                Some((a.min(b) as u64, a.max(b) as u64 + 1))
+            InputRef::Broadcast(_) | InputRef::Explicit(_) => None,
+            InputRef::Strided { base, stride_inner, stride_outer, modulus } => {
+                // Sample all corner positions to find the bounding range.
+                let mut lo = i64::MAX;
+                let mut hi = i64::MIN;
+                let first_i = atom_offset;
+                let last_i = atom_offset + count - 1;
+                for &i in &[first_i, last_i] {
+                    let inner = i % modulus;
+                    let outer = i / modulus;
+                    let off = *stride_inner * inner as i64 + *stride_outer * outer as i64;
+                    lo = lo.min(off);
+                    hi = hi.max(off);
+                    // Also check boundary: when inner wraps, the offset can jump.
+                    if *modulus != u64::MAX && i > 0 {
+                        let inner2 = (modulus - 1) % modulus;
+                        let outer2 = (modulus - 1) / modulus;
+                        let off2 = *stride_inner * inner2 as i64 + *stride_outer * outer2 as i64;
+                        lo = lo.min(off2);
+                        hi = hi.max(off2);
+                    }
+                }
+                let a = base.0 as i64 + lo;
+                let b = base.0 as i64 + hi;
+                Some((a as u64, b as u64 + 1))
             }
         }
     };
@@ -1579,99 +1588,100 @@ fn load_input(
             Ok(emit_typed_load(builder, addr, slot.dtype))
         }
 
-        InputRef::Strided { base, stride_inner: stride, .. } => {
-            let (base_byte, elem_bytes, load_dtype) =
-                resolve_affine_base(layout, *base, *stride, atom_offset, "Affine")?;
-            let byte_stride = *stride * elem_bytes as i64;
+        InputRef::Strided { base, stride_inner, stride_outer, modulus } => {
+            // General strided: atom i reads base + stride_inner*(i%modulus) + stride_outer*(i/modulus).
+            //
+            // Special cases for fast paths:
+            //   Affine:          stride_outer==0, modulus==MAX → base + stride_inner * i
+            //   StridedBroadcast: stride_inner==0             → base + stride_outer * (i / modulus)
+            //   Modular:         stride_outer==0              → base + stride_inner * (i % modulus)
+            //   General:         both non-zero                → full formula
+            let is_affine = *stride_outer == 0 && *modulus == u64::MAX;
 
-            let addr = match i_val {
-                Some(iv) => {
-                    let i_bytes = builder.ins().imul_imm(iv, byte_stride);
-                    let base_val = builder.ins().iconst(types::I64, base_byte);
-                    let off = builder.ins().iadd(base_val, i_bytes);
-                    builder.ins().iadd(buffer_ptr, off)
-                }
-                None => {
-                    let byte_off = base_byte + byte_stride * i_const as i64;
-                    addr_const(builder, buffer_ptr, byte_off)
-                }
-            };
-            Ok(emit_typed_load(builder, addr, load_dtype))
-        }
+            // Find the buffer slot by resolving the first accessed atom.
+            let first_inner = atom_offset % modulus;
+            let first_outer = atom_offset / modulus;
+            let first_offset = *stride_inner * first_inner as i64 + *stride_outer * first_outer as i64;
+            let first_atom = AtomId((base.0 as i64 + first_offset) as u64);
 
-        InputRef::Strided { base, stride_outer: stride, modulus: repeat, .. } => {
-            // StridedBroadcast: atom i reads base + stride * (i / repeat).
-            // For split groups, first accessed = base + stride * (atom_offset / repeat).
-            let first_block = atom_offset / repeat;
-            let first_atom = AtomId((base.0 as i64 + *stride * first_block as i64) as u64);
             let (slot, elem) = layout
                 .find(*base)
                 .or_else(|| layout.find(first_atom))
                 .ok_or_else(|| {
                     format!(
-                        "no slot for StridedBroadcast base={} first_atom={}",
-                        base, first_atom
+                        "no slot for Strided base={} first_atom={} (atom_offset={}, si={}, so={}, mod={})",
+                        base, first_atom, atom_offset, stride_inner, stride_outer, modulus
                     )
                 })?;
+
+            let elem_bytes = slot.elem_bytes as i64;
+            let load_dtype = slot.dtype;
+
+            // Compute base_byte: byte offset of the logical `base` atom in the buffer.
+            let slot_byte = slot.byte_offset as i64 + elem as i64 * elem_bytes;
             let base_byte = if layout.find(*base).is_some() {
-                slot.byte_offset as i64 + elem as i64 * slot.elem_bytes as i64
+                slot_byte
             } else {
-                // Back-compute: base_byte + stride * first_block * elem_bytes = slot.byte_offset + elem * elem_bytes
-                let first_byte = slot.byte_offset as i64 + elem as i64 * slot.elem_bytes as i64;
-                first_byte - *stride * first_block as i64 * slot.elem_bytes as i64
+                // Back-compute: base_byte + first_offset * elem_bytes = slot_byte
+                slot_byte - first_offset * elem_bytes
             };
-            let byte_stride = *stride * slot.elem_bytes as i64;
-            let load_dtype = slot.dtype;
+
+            // ── Affine fast path ──
+            if is_affine {
+                let byte_stride = *stride_inner * elem_bytes;
+                let addr = match i_val {
+                    Some(iv) => {
+                        let i_bytes = builder.ins().imul_imm(iv, byte_stride);
+                        let base_val = builder.ins().iconst(types::I64, base_byte);
+                        let off = builder.ins().iadd(base_val, i_bytes);
+                        builder.ins().iadd(buffer_ptr, off)
+                    }
+                    None => {
+                        let byte_off = base_byte + byte_stride * i_const as i64;
+                        addr_const(builder, buffer_ptr, byte_off)
+                    }
+                };
+                return Ok(emit_typed_load(builder, addr, load_dtype));
+            }
+
+            // ── General path (handles StridedBroadcast, Modular, and mixed) ──
+            let byte_stride_inner = *stride_inner * elem_bytes;
+            let byte_stride_outer = *stride_outer * elem_bytes;
 
             let addr = match i_val {
                 Some(iv) => {
-                    let block_idx = if repeat.is_power_of_two() {
-                        let shift = repeat.trailing_zeros() as i64;
-                        builder.ins().ushr_imm(iv, shift)
+                    // inner = i_eff % modulus, outer = i_eff / modulus
+                    let (inner_val, outer_val) = if modulus.is_power_of_two() {
+                        let shift = modulus.trailing_zeros() as i64;
+                        let mask = *modulus as i64 - 1;
+                        let inner = builder.ins().band_imm(iv, mask);
+                        let outer = builder.ins().ushr_imm(iv, shift);
+                        (inner, outer)
                     } else {
-                        let rep = builder.ins().iconst(types::I64, *repeat as i64);
-                        builder.ins().udiv(iv, rep)
+                        let modval = builder.ins().iconst(types::I64, *modulus as i64);
+                        let inner = builder.ins().urem(iv, modval);
+                        let outer = builder.ins().udiv(iv, modval);
+                        (inner, outer)
                     };
-                    let elem_off = builder.ins().imul_imm(block_idx, byte_stride);
-                    let base_val = builder.ins().iconst(types::I64, base_byte);
-                    let off = builder.ins().iadd(base_val, elem_off);
+
+                    // offset = stride_inner * inner + stride_outer * outer
+                    let mut off = builder.ins().iconst(types::I64, base_byte);
+                    if byte_stride_inner != 0 {
+                        let inner_bytes = builder.ins().imul_imm(inner_val, byte_stride_inner);
+                        off = builder.ins().iadd(off, inner_bytes);
+                    }
+                    if byte_stride_outer != 0 {
+                        let outer_bytes = builder.ins().imul_imm(outer_val, byte_stride_outer);
+                        off = builder.ins().iadd(off, outer_bytes);
+                    }
                     builder.ins().iadd(buffer_ptr, off)
                 }
                 None => {
-                    let block = i_const / repeat;
-                    let byte_off = base_byte + byte_stride * block as i64;
-                    addr_const(builder, buffer_ptr, byte_off)
-                }
-            };
-            Ok(emit_typed_load(builder, addr, load_dtype))
-        }
-
-        InputRef::Strided { base, stride_inner: stride, modulus, .. } => {
-            // Modular: atom i reads base + stride * (i % modulus). The full
-            // modular range [base..base+stride*modulus) must be in the buffer.
-            let (slot, slot_elem_base) = layout.find(*base).ok_or_else(|| {
-                format!(
-                    "no slot for Modular base={} (atom_offset={})",
-                    base, atom_offset
-                )
-            })?;
-            let base_byte =
-                slot.byte_offset as i64 + slot_elem_base as i64 * slot.elem_bytes as i64;
-            let byte_stride = *stride as i64 * slot.elem_bytes as i64;
-            let load_dtype = slot.dtype;
-
-            let addr = match i_val {
-                Some(iv) => {
-                    let modval = builder.ins().iconst(types::I64, *modulus as i64);
-                    let wrapped = builder.ins().urem(iv, modval);
-                    let elem_off = builder.ins().imul_imm(wrapped, byte_stride);
-                    let base_val = builder.ins().iconst(types::I64, base_byte);
-                    let off = builder.ins().iadd(base_val, elem_off);
-                    builder.ins().iadd(buffer_ptr, off)
-                }
-                None => {
-                    let wrapped = i_const % modulus;
-                    let byte_off = base_byte + byte_stride * wrapped as i64;
+                    let inner = i_const % modulus;
+                    let outer = i_const / modulus;
+                    let byte_off = base_byte
+                        + byte_stride_inner * inner as i64
+                        + byte_stride_outer * outer as i64;
                     addr_const(builder, buffer_ptr, byte_off)
                 }
             };

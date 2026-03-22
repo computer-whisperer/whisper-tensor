@@ -474,6 +474,10 @@ impl NanoGraph {
         self.groups.values()
     }
 
+    pub fn groups_mut(&mut self) -> &mut [AtomGroup] {
+        self.groups.values_mut()
+    }
+
     /// Access the input tensors.
     pub fn input_tensors(&self) -> &[InputTensor] {
         self.input_ranges.values()

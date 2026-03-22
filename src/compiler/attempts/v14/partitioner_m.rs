@@ -39,6 +39,176 @@ use crate::nano_graph::{AtomGroup, AtomId, AtomRange, InputRef, NanoGraph, Scala
 
 use super::types::{Phase, Span};
 
+// ─── Matmul relayout ──────────────────────────────────────────────────────
+
+/// Detect matmul Mul→Reduce pairs in [K,N] layout and transpose to [N,K].
+///
+/// Pattern detected (per pair):
+///   Mul group:   count = K*N, op = Binary{Mul}
+///     input_a:   StridedBroadcast(A_base, a_stride, repeat=N)  [A element per K-block]
+///     input_b:   Affine(B_base, stride=1)                      [B row-major K×N]
+///   Reduce group: count = N, op = Reduce{count=K, stride=N}
+///     input:     Affine(Mul_base, stride=1)
+///
+/// Transformed to:
+///   Mul group:   count = K*N (unchanged), op = Binary{Mul} (unchanged)
+///     input_a:   Modular(A_base, a_stride, modulus=K)
+///     input_b:   Strided(B_base, stride_inner=N, stride_outer=1, modulus=K)
+///   Reduce group: count = N (unchanged), op = Reduce{count=K, stride=1}
+///     input:     Affine(Mul_base, stride=K)
+///
+/// Returns the number of pairs relayouted.
+fn relayout_matmul_groups(graph: &mut NanoGraph) -> usize {
+    let mut count = 0;
+
+    // First pass: find Reduce groups and their Mul producers.
+    // Collect (mul_group_idx, reduce_group_idx, K, N) tuples.
+    let mut pairs: Vec<(usize, usize, u64, u64)> = Vec::new();
+
+    let groups = graph.groups();
+    for (ri, rgroup) in groups.iter().enumerate() {
+        let (k, n_stride) = match &rgroup.op {
+            ScalarOp::Reduce {
+                reduce_count,
+                reduce_stride,
+                ..
+            } if *reduce_count > 1 && *reduce_stride > 0 => {
+                (*reduce_count, *reduce_stride)
+            }
+            _ => continue,
+        };
+
+        let n = rgroup.count;
+        if n_stride != n as i64 {
+            continue; // reduce_stride must equal N for the [K,N] pattern
+        }
+
+        // Check the Reduce's input: must be Affine(Mul_base, stride=1).
+        if rgroup.inputs.len() != 1 {
+            continue;
+        }
+        let (mul_base, mul_stride) = match &rgroup.inputs[0] {
+            InputRef::Strided {
+                base,
+                stride_inner,
+                stride_outer,
+                modulus,
+            } if *stride_inner == 1 && *stride_outer == 0 && *modulus == u64::MAX => {
+                (*base, *stride_inner)
+            }
+            _ => continue,
+        };
+        if mul_stride != 1 {
+            continue;
+        }
+
+        // Find the Mul group at this base.
+        let Some(mi) = graph.find_group_idx(mul_base) else {
+            continue;
+        };
+        let mgroup = &groups[mi];
+
+        // Verify it's a Binary{Mul} with count = K*N.
+        let is_mul = matches!(
+            &mgroup.op,
+            ScalarOp::Binary {
+                op: crate::nano_graph::ScalarBinOp::Mul,
+                ..
+            }
+        );
+        if !is_mul || mgroup.count != k * n {
+            continue;
+        }
+
+        // Verify the Mul's inputs match the [K,N] pattern:
+        // One input is StridedBroadcast(_, _, repeat=N) — the A input
+        // One input is Affine(_, stride=1) — the B input
+        if mgroup.inputs.len() != 2 {
+            continue;
+        }
+        let has_sb_n = mgroup.inputs.iter().any(|inp| matches!(
+            inp,
+            InputRef::Strided { stride_inner: 0, modulus, .. } if *modulus == n
+        ));
+        let has_affine_1 = mgroup.inputs.iter().any(|inp| matches!(
+            inp,
+            InputRef::Strided { stride_inner: 1, stride_outer: 0, modulus, .. }
+                if *modulus == u64::MAX
+        ));
+        if !has_sb_n || !has_affine_1 {
+            continue;
+        }
+
+        pairs.push((mi, ri, k, n));
+    }
+
+    // Second pass: apply transformations.
+    let groups = graph.groups_mut();
+    for (mi, ri, k, n) in pairs {
+        let mgroup = &mut groups[mi];
+
+        // Transform Mul inputs from [K,N] to [N,K] layout.
+        for inp in &mut mgroup.inputs {
+            match inp {
+                // StridedBroadcast(A_base, a_stride, repeat=N)
+                //   → Modular(A_base, a_stride, modulus=K)
+                InputRef::Strided {
+                    stride_inner: si,
+                    stride_outer: so,
+                    modulus,
+                    ..
+                } if *si == 0 && *modulus == n => {
+                    // Was: stride_inner=0, stride_outer=a_stride, modulus=N
+                    // New: stride_inner=a_stride, stride_outer=0, modulus=K
+                    let a_stride = *so;
+                    *si = a_stride;
+                    *so = 0;
+                    *modulus = k;
+                }
+                // Affine(B_base, stride=1)
+                //   → Strided(B_base, stride_inner=N, stride_outer=1, modulus=K)
+                InputRef::Strided {
+                    stride_inner: si,
+                    stride_outer: so,
+                    modulus,
+                    ..
+                } if *si == 1 && *so == 0 && *modulus == u64::MAX => {
+                    *si = n as i64;
+                    *so = 1;
+                    *modulus = k;
+                }
+                _ => {}
+            }
+        }
+
+        // Transform Reduce: stride=1→stride=K, reduce_stride=N→1.
+        let rgroup = &mut groups[ri];
+        if let Some(inp) = rgroup.inputs.first_mut() {
+            match inp {
+                InputRef::Strided {
+                    stride_inner: si,
+                    stride_outer: so,
+                    modulus,
+                    ..
+                } if *si == 1 && *so == 0 && *modulus == u64::MAX => {
+                    *si = k as i64;
+                }
+                _ => {}
+            }
+        }
+        if let ScalarOp::Reduce {
+            reduce_stride, ..
+        } = &mut rgroup.op
+        {
+            *reduce_stride = 1;
+        }
+
+        count += 1;
+    }
+
+    count
+}
+
 // ─── Group classification ──────────────────────────────────────────────────
 
 /// How a group should be handled during partitioning.
@@ -604,10 +774,8 @@ pub fn plan(
     output_atom_ids: &[AtomId],
 ) -> Vec<Phase> {
     let num_lanes = num_lanes.max(1);
-    let groups = graph.groups();
-    let n = groups.len();
 
-    if n == 0 {
+    if graph.groups().is_empty() {
         return vec![Phase {
             spans: (0..num_lanes)
                 .map(|_| Span {
@@ -618,6 +786,25 @@ pub fn plan(
                 .collect(),
         }];
     }
+
+    // Step 0: Relayout matmul Mul→Reduce pairs from [K,N] to [N,K] order.
+    //
+    // The lowering produces Mul groups in [K,N] layout where each output atom's
+    // reduction footprint spans the entire group (stride=1, reduce_stride=N).
+    // This prevents lane-local splitting because every consumer lane needs all
+    // producer atoms.
+    //
+    // Transposing to [N,K] layout makes the reduce access contiguous (stride=K,
+    // reduce_stride=1), so each lane's N/L output atoms access a contiguous
+    // K*(N/L) chunk of the producer — exactly lane-local.
+    let mut graph = graph.clone();
+    let relayouted = relayout_matmul_groups(&mut graph);
+    if relayouted > 0 {
+        eprintln!("  Relayouted {} matmul Mul→Reduce pairs from [K,N] to [N,K]", relayouted);
+    }
+    let graph = &graph;
+    let groups = graph.groups();
+    let n = groups.len();
 
     // Step 1: Classify groups.
     let kinds: Vec<GroupKind> = groups
