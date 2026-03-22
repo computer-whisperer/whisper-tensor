@@ -239,10 +239,7 @@ impl Gather {
                 indices_map.sym_dims.clone(),
                 vec![
                     InputRef::Broadcast(mul_id),
-                    InputRef::Affine {
-                        base: col_offsets_base,
-                        stride: 1,
-                    },
+                    InputRef::affine(col_offsets_base, 1),
                 ],
             );
 
@@ -254,10 +251,7 @@ impl Gather {
                     table_base: data_map.base_id,
                 },
                 indices_map.sym_dims.clone(),
-                vec![InputRef::Affine {
-                    base: add_id,
-                    stride: 1,
-                }],
+                vec![InputRef::affine(add_id, 1)],
             );
 
             let out_strides = TensorAtomMap::compute_strides(&out_known_dims);
@@ -279,10 +273,7 @@ impl Gather {
             // Build the indices InputRef: for output atom `flat`, row = flat / D_total
             let indices_ref = if d_total == 1 {
                 // 1:1 mapping
-                InputRef::Affine {
-                    base: indices_map.base_id,
-                    stride: 1,
-                }
+                InputRef::affine(indices_map.base_id, 1)
             } else {
                 // For each output flat index, the row is flat / D_total
                 let mut ids = Vec::with_capacity(out_count as usize);
@@ -331,15 +322,8 @@ impl Gather {
                 },
                 vec![],
                 vec![
-                    InputRef::Affine {
-                        base: mul_base,
-                        stride: 1,
-                    },
-                    InputRef::Modular {
-                        base: col_lit_base,
-                        stride: 1,
-                        modulus: d_total,
-                    },
+                    InputRef::affine(mul_base, 1),
+                    InputRef::modular(col_lit_base, 1, d_total),
                 ],
             );
 
@@ -351,10 +335,7 @@ impl Gather {
                     table_base: data_map.base_id,
                 },
                 vec![],
-                vec![InputRef::Affine {
-                    base: add_base,
-                    stride: 1,
-                }],
+                vec![InputRef::affine(add_base, 1)],
             );
 
             let out_strides = TensorAtomMap::compute_strides(&out_known_dims);

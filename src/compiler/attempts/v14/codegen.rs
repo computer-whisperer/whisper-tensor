@@ -385,26 +385,18 @@ pub fn compute_layout(graph: &NanoGraph, output_ranges: &[AtomRange]) -> BufferL
     let input_ref_range = |ir: &InputRef, count: u64, atom_offset: u64| -> Option<(u64, u64)> {
         match ir {
             InputRef::Broadcast(_) | InputRef::Explicit(_) => None, // no stride, no constraint
-            InputRef::Affine { base, stride } => {
+            InputRef::Strided { base, stride_inner: stride, .. } => {
                 let a = base.0 as i64 + *stride * atom_offset as i64;
                 let b = base.0 as i64 + *stride * (atom_offset + count - 1) as i64;
                 Some((a.min(b) as u64, a.max(b) as u64 + 1))
             }
-            InputRef::StridedBroadcast {
-                base,
-                stride,
-                repeat,
-            } => {
+            InputRef::Strided { base, stride_outer: stride, modulus: repeat, .. } => {
                 let max_block = (atom_offset + count - 1) / repeat;
                 let a = base.0 as i64;
                 let b = base.0 as i64 + *stride * max_block as i64;
                 Some((a.min(b) as u64, a.max(b) as u64 + 1))
             }
-            InputRef::Modular {
-                base,
-                stride,
-                modulus,
-            } => {
+            InputRef::Strided { base, stride_inner: stride, modulus, .. } => {
                 let a = base.0 as i64;
                 let b = base.0 as i64 + *stride as i64 * (*modulus as i64 - 1);
                 Some((a.min(b) as u64, a.max(b) as u64 + 1))
@@ -432,7 +424,7 @@ pub fn compute_layout(graph: &NanoGraph, output_ranges: &[AtomRange]) -> BufferL
         } = &group.op
         {
             if *reduce_count > 1 && *reduce_stride != 0 {
-                if let Some(InputRef::Affine { base, stride }) = group.inputs.first() {
+                if let Some(InputRef::Strided { base, stride_inner: stride, .. }) = group.inputs.first() {
                     let first_i = base.0 as i64 + *stride * group.atom_offset as i64;
                     let last_i =
                         base.0 as i64 + *stride * (group.atom_offset + group.count - 1) as i64;
@@ -976,7 +968,7 @@ pub fn validate_layout(graph: &NanoGraph, layout: &BufferLayout) -> Vec<String> 
     for (gi, group) in graph.groups().iter().enumerate() {
         for (ii, ir) in group.inputs.iter().enumerate() {
             match ir {
-                InputRef::Affine { base, stride } if *stride != 0 => {
+                InputRef::Strided { base, stride_inner: stride, .. } if *stride != 0 => {
                     let first_atom = (base.0 as i64 + *stride * group.atom_offset as i64) as u64;
                     let last_atom = (base.0 as i64
                         + *stride * (group.atom_offset + group.count - 1) as i64)
@@ -1018,7 +1010,7 @@ pub fn validate_layout(graph: &NanoGraph, layout: &BufferLayout) -> Vec<String> 
             } = &group.op
             {
                 if *reduce_count > 1 && *reduce_stride != 0 {
-                    if let InputRef::Affine { base, stride } = ir {
+                    if let InputRef::Strided { base, stride_inner: stride, .. } = ir {
                         let first = (base.0 as i64 + *stride * group.atom_offset as i64) as u64;
                         let last = (base.0 as i64
                             + *stride * (group.atom_offset + group.count - 1) as i64)
@@ -1509,20 +1501,14 @@ fn input_slot_dtype(input: &InputRef, layout: &BufferLayout, atom_offset: u64) -
     let try_find = |atom: AtomId| layout.find(atom).map(|(s, _)| s.dtype);
     match input {
         InputRef::Broadcast(atom_id) => try_find(*atom_id),
-        InputRef::Affine { base, stride } => try_find(*base).or_else(|| {
-            let first = AtomId((base.0 as i64 + stride * atom_offset as i64) as u64);
+        InputRef::Strided { base, stride_inner, stride_outer, modulus } => try_find(*base).or_else(|| {
+            let inner = atom_offset % modulus;
+            let outer = atom_offset / modulus;
+            let first = AtomId(base.0.wrapping_add(
+                (*stride_inner * inner as i64 + *stride_outer * outer as i64) as u64
+            ));
             try_find(first)
         }),
-        InputRef::StridedBroadcast {
-            base,
-            stride,
-            repeat,
-        } => try_find(*base).or_else(|| {
-            let block = atom_offset / repeat;
-            let first = AtomId((base.0 as i64 + stride * block as i64) as u64);
-            try_find(first)
-        }),
-        InputRef::Modular { base, .. } => try_find(*base),
         InputRef::Explicit(ids) if !ids.is_empty() => {
             let idx = (atom_offset as usize).min(ids.len() - 1);
             try_find(ids[idx])
@@ -1593,7 +1579,7 @@ fn load_input(
             Ok(emit_typed_load(builder, addr, slot.dtype))
         }
 
-        InputRef::Affine { base, stride } => {
+        InputRef::Strided { base, stride_inner: stride, .. } => {
             let (base_byte, elem_bytes, load_dtype) =
                 resolve_affine_base(layout, *base, *stride, atom_offset, "Affine")?;
             let byte_stride = *stride * elem_bytes as i64;
@@ -1613,11 +1599,7 @@ fn load_input(
             Ok(emit_typed_load(builder, addr, load_dtype))
         }
 
-        InputRef::StridedBroadcast {
-            base,
-            stride,
-            repeat,
-        } => {
+        InputRef::Strided { base, stride_outer: stride, modulus: repeat, .. } => {
             // StridedBroadcast: atom i reads base + stride * (i / repeat).
             // For split groups, first accessed = base + stride * (atom_offset / repeat).
             let first_block = atom_offset / repeat;
@@ -1664,11 +1646,7 @@ fn load_input(
             Ok(emit_typed_load(builder, addr, load_dtype))
         }
 
-        InputRef::Modular {
-            base,
-            stride,
-            modulus,
-        } => {
+        InputRef::Strided { base, stride_inner: stride, modulus, .. } => {
             // Modular: atom i reads base + stride * (i % modulus). The full
             // modular range [base..base+stride*modulus) must be in the buffer.
             let (slot, slot_elem_base) = layout.find(*base).ok_or_else(|| {
@@ -1986,7 +1964,7 @@ fn emit_reduce(
 
     // Resolve the source slot. Reduce input must be Affine.
     let (base_byte, input_byte_stride, reduce_byte_stride, src_dtype) = match &group.inputs[0] {
-        InputRef::Affine { base, stride } => {
+        InputRef::Strided { base, stride_inner: stride, .. } => {
             let (base_byte, elem_bytes, src_dtype) =
                 resolve_affine_base(layout, *base, *stride, group.atom_offset, "reduce input")?;
             let byte_stride = *stride * elem_bytes as i64;
@@ -2693,7 +2671,7 @@ impl CompiledPlan {
                                             ..
                                         } = &group.op
                                         {
-                                            if let Some(InputRef::Affine { base, stride }) =
+                                            if let Some(InputRef::Strided { base, stride_inner: stride, .. }) =
                                                 group.inputs.first()
                                             {
                                                 let elem = (atom.0 - group.base_id.0) as u64;
@@ -3604,10 +3582,7 @@ mod tests {
             },
             vec![],
             vec![
-                InputRef::Affine {
-                    base: inp,
-                    stride: 1,
-                },
+                InputRef::affine(inp, 1),
                 InputRef::Broadcast(lit),
             ],
         );
@@ -3643,10 +3618,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine {
-                base: inp,
-                stride: 1,
-            }],
+            vec![InputRef::affine(inp, 1)],
         );
 
         let outputs = vec![AtomRange {
@@ -3681,10 +3653,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine {
-                base: inp,
-                stride: 1,
-            }],
+            vec![InputRef::affine(inp, 1)],
         );
 
         let outputs = vec![AtomRange {
@@ -3725,10 +3694,7 @@ mod tests {
             },
             vec![],
             vec![
-                InputRef::Affine {
-                    base: inp,
-                    stride: 1,
-                },
+                InputRef::affine(inp, 1),
                 InputRef::Broadcast(lit3),
             ],
         );
@@ -3740,10 +3706,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine {
-                base: mul,
-                stride: 1,
-            }],
+            vec![InputRef::affine(mul, 1)],
         );
 
         let outputs = vec![AtomRange {
@@ -3780,10 +3743,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine {
-                base: inp,
-                stride: 1,
-            }],
+            vec![InputRef::affine(inp, 1)],
         );
         let b = g.push_group(
             100,
@@ -3793,7 +3753,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine { base: a, stride: 1 }],
+            vec![InputRef::affine(a, 1)],
         );
         let c = g.push_group(
             100,
@@ -3803,7 +3763,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine { base: b, stride: 1 }],
+            vec![InputRef::affine(b, 1)],
         );
 
         let outputs = vec![AtomRange {
@@ -3858,12 +3818,9 @@ mod tests {
             ScalarOp::Select,
             vec![],
             vec![
-                InputRef::Affine {
-                    base: cond,
-                    stride: 1,
-                },
-                InputRef::Affine { base: x, stride: 1 },
-                InputRef::Affine { base: y, stride: 1 },
+                InputRef::affine(cond, 1),
+                InputRef::affine(x, 1),
+                InputRef::affine(y, 1),
             ],
         );
 
@@ -3901,10 +3858,7 @@ mod tests {
                 DType::F32,
                 ScalarOp::Identity,
                 vec![],
-                vec![InputRef::Affine {
-                    base: AtomId(inp.0 + i * 4),
-                    stride: 1,
-                }],
+                vec![InputRef::affine(AtomId(inp.0 + i * 4), 1)],
             );
             sources.push(src);
         }
@@ -3973,7 +3927,7 @@ mod tests {
             DType::F32,
             ScalarOp::Identity,
             vec![],
-            vec![InputRef::Affine { base: a, stride: 1 }],
+            vec![InputRef::affine(a, 1)],
         );
 
         let outputs = vec![AtomRange {

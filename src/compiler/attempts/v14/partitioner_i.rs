@@ -263,16 +263,12 @@ fn input_ref_source_range(input: &InputRef, count: u64, atom_offset: u64) -> (u6
     }
     match input {
         InputRef::Broadcast(base) => (base.0, base.0),
-        InputRef::Affine { .. } | InputRef::StridedBroadcast { .. } => {
+        InputRef::Strided { .. } => {
             let first = input.resolve(atom_offset);
             let last = input.resolve(atom_offset + count - 1);
             (first.0.min(last.0), first.0.max(last.0))
         }
-        InputRef::Modular {
-            base,
-            stride,
-            modulus,
-        } => {
+        InputRef::Strided { base, stride_inner: stride, modulus, .. } => {
             let a = base.0;
             let b = (base.0 as i64 + *stride * (*modulus as i64 - 1)) as u64;
             (a.min(b), a.max(b))
@@ -1019,14 +1015,8 @@ mod tests {
             },
             vec![],
             vec![
-                InputRef::Affine {
-                    base: lit_id,
-                    stride: 1,
-                },
-                InputRef::Affine {
-                    base: lit_id,
-                    stride: 1,
-                },
+                InputRef::affine(lit_id, 1),
+                InputRef::affine(lit_id, 1),
             ],
         );
 
@@ -1039,14 +1029,8 @@ mod tests {
             },
             vec![],
             vec![
-                InputRef::Affine {
-                    base: add_id,
-                    stride: 1,
-                },
-                InputRef::Affine {
-                    base: add_id,
-                    stride: 1,
-                },
+                InputRef::affine(add_id, 1),
+                InputRef::affine(add_id, 1),
             ],
         );
 
@@ -1121,14 +1105,8 @@ mod tests {
             },
             vec![],
             vec![
-                InputRef::Affine {
-                    base: lit,
-                    stride: 1,
-                },
-                InputRef::Affine {
-                    base: lit,
-                    stride: 1,
-                },
+                InputRef::affine(lit, 1),
+                InputRef::affine(lit, 1),
             ],
         );
 
@@ -1141,10 +1119,7 @@ mod tests {
             },
             vec![],
             vec![
-                InputRef::Affine {
-                    base: sub_id,
-                    stride: 1,
-                },
+                InputRef::affine(sub_id, 1),
                 InputRef::Broadcast(lit),
             ],
         );
@@ -1158,10 +1133,7 @@ mod tests {
             },
             vec![],
             vec![
-                InputRef::Affine {
-                    base: pow_id,
-                    stride: 1,
-                },
+                InputRef::affine(pow_id, 1),
                 InputRef::Broadcast(lit),
             ],
         );
@@ -1225,7 +1197,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine { base: a, stride: 1 }],
+            vec![InputRef::affine(a, 1)],
         );
 
         let c = graph.push_group(
@@ -1236,7 +1208,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine { base: a, stride: 1 }],
+            vec![InputRef::affine(a, 1)],
         );
 
         let d = graph.push_group(
@@ -1248,8 +1220,8 @@ mod tests {
             },
             vec![],
             vec![
-                InputRef::Affine { base: b, stride: 1 },
-                InputRef::Affine { base: c, stride: 1 },
+                InputRef::affine(b, 1),
+                InputRef::affine(c, 1),
             ],
         );
 
@@ -1331,15 +1303,8 @@ mod tests {
             },
             vec![],
             vec![
-                InputRef::Affine {
-                    base: weights,
-                    stride: 1,
-                },
-                InputRef::Modular {
-                    base: input_vec,
-                    stride: 1,
-                    modulus: k,
-                },
+                InputRef::affine(weights, 1),
+                InputRef::modular(input_vec, 1, k),
             ],
         );
 
@@ -1354,10 +1319,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine {
-                base: mul,
-                stride: k as i64,
-            }],
+            vec![InputRef::affine(mul, k as i64)],
         );
 
         graph.outputs = vec![reduce];
@@ -1431,14 +1393,8 @@ mod tests {
             },
             vec![],
             vec![
-                InputRef::Affine {
-                    base: lit,
-                    stride: 1,
-                },
-                InputRef::Affine {
-                    base: lit,
-                    stride: 1,
-                },
+                InputRef::affine(lit, 1),
+                InputRef::affine(lit, 1),
             ],
         );
 
@@ -1516,14 +1472,8 @@ mod tests {
             },
             vec![],
             vec![
-                InputRef::Affine {
-                    base: lit,
-                    stride: 0,
-                },
-                InputRef::Affine {
-                    base: lit,
-                    stride: 0,
-                },
+                InputRef::affine(lit, 0),
+                InputRef::affine(lit, 0),
             ],
         );
 
@@ -1538,10 +1488,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine {
-                base: source,
-                stride: 1,
-            }],
+            vec![InputRef::affine(source, 1)],
         );
 
         graph.outputs = vec![reduce];
@@ -1598,14 +1545,8 @@ mod tests {
             },
             vec![],
             vec![
-                InputRef::Affine {
-                    base: lit,
-                    stride: 1,
-                },
-                InputRef::Affine {
-                    base: lit,
-                    stride: 1,
-                },
+                InputRef::affine(lit, 1),
+                InputRef::affine(lit, 1),
             ],
         );
 
@@ -1665,14 +1606,8 @@ mod tests {
             },
             vec![],
             vec![
-                InputRef::Affine {
-                    base: lit,
-                    stride: 1,
-                },
-                InputRef::Affine {
-                    base: lit,
-                    stride: 1,
-                },
+                InputRef::affine(lit, 1),
+                InputRef::affine(lit, 1),
             ],
         );
 
@@ -1685,10 +1620,7 @@ mod tests {
             },
             vec![],
             vec![
-                InputRef::Affine {
-                    base: add,
-                    stride: 1,
-                },
+                InputRef::affine(add, 1),
                 InputRef::Broadcast(lit),
             ],
         );
@@ -1740,14 +1672,8 @@ mod tests {
             },
             vec![],
             vec![
-                InputRef::Affine {
-                    base: lit,
-                    stride: 1,
-                },
-                InputRef::Affine {
-                    base: lit,
-                    stride: 1,
-                },
+                InputRef::affine(lit, 1),
+                InputRef::affine(lit, 1),
             ],
         );
 
@@ -1810,14 +1736,8 @@ mod tests {
             },
             vec![],
             vec![
-                InputRef::Affine {
-                    base: lit,
-                    stride: 1,
-                },
-                InputRef::Affine {
-                    base: lit,
-                    stride: 1,
-                },
+                InputRef::affine(lit, 1),
+                InputRef::affine(lit, 1),
             ],
         );
 
@@ -1913,10 +1833,7 @@ mod tests {
             DType::F32,
             ScalarOp::IndirectLoad { table_base: table },
             vec![],
-            vec![InputRef::Affine {
-                base: index,
-                stride: 1,
-            }],
+            vec![InputRef::affine(index, 1)],
         );
 
         graph.outputs = vec![load];
@@ -1976,10 +1893,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine {
-                base: lit,
-                stride: 1,
-            }],
+            vec![InputRef::affine(lit, 1)],
         );
 
         graph.outputs = vec![unary];

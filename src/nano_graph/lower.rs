@@ -678,10 +678,7 @@ impl<'a> NanoLoweringContext<'a> {
                 })
                 .collect();
             if c_known == p_known && consumer.known_strides == producer.known_strides {
-                return InputRef::Affine {
-                    base: producer.base_id,
-                    stride: 1,
-                };
+                return InputRef::affine(producer.base_id, 1);
             }
         }
 
@@ -863,10 +860,7 @@ impl<'a> NanoLoweringContext<'a> {
             .windows(2)
             .all(|w| (w[1].0 as i64 - w[0].0 as i64) == stride);
         if is_affine {
-            return InputRef::Affine {
-                base: ids[0],
-                stride,
-            };
+            return InputRef::affine(ids[0], stride);
         }
 
         // Check for StridedBroadcast: blocks of identical values with regular stride.
@@ -884,11 +878,7 @@ impl<'a> NanoLoweringContext<'a> {
                     (0..repeat).all(|r| ids[(b * repeat + r) as usize].0 as i64 == expected_base)
                 });
                 if is_strided_broadcast {
-                    return InputRef::StridedBroadcast {
-                        base: ids[0],
-                        stride: block_stride,
-                        repeat,
-                    };
+                    return InputRef::strided_broadcast(ids[0], block_stride, repeat);
                 }
             }
         }
@@ -922,11 +912,7 @@ impl<'a> NanoLoweringContext<'a> {
                     .windows(2)
                     .all(|w| (w[1].0 as i64 - w[0].0 as i64) == inner_stride);
             if inner_is_affine {
-                return InputRef::Modular {
-                    base: ids[0],
-                    stride: inner_stride,
-                    modulus: period as u64,
-                };
+                return InputRef::modular(ids[0], inner_stride, period as u64);
             }
             break 'modular;
         }
@@ -1095,10 +1081,7 @@ impl<'a> NanoLoweringContext<'a> {
         let known_dims = in_map.known_dims();
         let row_major = TensorAtomMap::compute_strides(&known_dims);
         if in_map.known_strides == row_major || in_map.count <= 1 {
-            InputRef::Affine {
-                base: in_map.base_id,
-                stride: 1,
-            }
+            InputRef::affine(in_map.base_id, 1)
         } else {
             let mut ids = Vec::with_capacity(in_map.count as usize);
             for flat in 0..in_map.count {
@@ -1462,10 +1445,7 @@ impl<'a> NanoLoweringContext<'a> {
             } else {
                 1
             };
-            InputRef::Affine {
-                base: in_map.base_id.offset(base_ids[0]),
-                stride: stride_i,
-            }
+            InputRef::affine(in_map.base_id.offset(base_ids[0]), stride_i)
         } else if out_count > 0 {
             InputRef::Explicit(
                 base_ids
@@ -1978,15 +1958,15 @@ mod tests {
             );
             // Input 0 should be StridedBroadcast with repeat=N=16.
             match &g.inputs[0] {
-                InputRef::StridedBroadcast { repeat, .. } => {
-                    assert_eq!(*repeat, 16, "StridedBroadcast repeat should be N=16");
+                InputRef::Strided { stride_inner, stride_outer, modulus, .. } if *stride_inner == 0 && *stride_outer != 0 => {
+                    assert_eq!(*modulus, 16, "StridedBroadcast repeat should be N=16");
                 }
                 other => panic!("Expected StridedBroadcast for input 0, got {:?}", other),
             }
             // Input 1 should be Affine with stride=1.
             match &g.inputs[1] {
-                InputRef::Affine { stride, .. } => {
-                    assert_eq!(*stride, 1, "Affine stride should be 1");
+                InputRef::Strided { stride_inner, stride_outer, modulus, .. } if *stride_outer == 0 && *modulus == u64::MAX => {
+                    assert_eq!(*stride_inner, 1, "Affine stride should be 1");
                 }
                 other => panic!("Expected Affine for input 1, got {:?}", other),
             }

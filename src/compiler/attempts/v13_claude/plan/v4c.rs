@@ -314,7 +314,7 @@ fn is_lane_proportional(consumer: &AtomGroup, producer: &AtomGroup, num_lanes: u
             }
 
             match input {
-                InputRef::Affine { base, stride } => {
+                InputRef::Strided { base, stride_inner: stride, .. } => {
                     let first = base.0 as i64 + *stride as i64 * c_off as i64;
                     let last = first + *stride as i64 * (c_cnt as i64 - 1);
                     let lo = first.min(last) as u64;
@@ -323,11 +323,7 @@ fn is_lane_proportional(consumer: &AtomGroup, producer: &AtomGroup, num_lanes: u
                         return false;
                     }
                 }
-                InputRef::StridedBroadcast {
-                    base,
-                    stride,
-                    repeat,
-                } => {
+                InputRef::Strided { base, stride_outer: stride, modulus: repeat, .. } => {
                     let first_block = c_off / repeat;
                     let last_block = (c_off + c_cnt - 1) / repeat;
                     let first = base.0 as i64 + *stride * first_block as i64;
@@ -339,7 +335,7 @@ fn is_lane_proportional(consumer: &AtomGroup, producer: &AtomGroup, num_lanes: u
                     }
                 }
                 InputRef::Broadcast(_) => {}
-                InputRef::Modular { .. } => return false,
+                InputRef::Strided { .. } => return false,
                 InputRef::Explicit(_) => return false,
             }
         }
@@ -369,7 +365,7 @@ fn needs_full_producer(consumer: &AtomGroup, producer: &AtomGroup, groups: &[Ato
     for input in &consumer.inputs {
         match input {
             InputRef::Broadcast(id) if producer.contains(*id) => return true,
-            InputRef::Modular { base, modulus, .. } => {
+            InputRef::Strided { base, modulus, .. } => {
                 // Modular wraps around, so it accesses the full modulus range.
                 if producer.contains(*base) && *modulus >= producer.count {
                     return true;
@@ -400,7 +396,7 @@ fn input_ref_range(input: &InputRef, count: u64, op: &ScalarOp) -> (u64, u64) {
 
     let base_range = match input {
         InputRef::Broadcast(id) => (id.0, id.0 + 1),
-        InputRef::Affine { base, stride } => {
+        InputRef::Strided { base, stride_inner: stride, .. } => {
             let last = base.0 as i64 + *stride as i64 * (count as i64 - 1);
             let lo = (base.0 as i64).min(last) as u64;
             let hi = (base.0 as i64).max(last) as u64 + 1;
@@ -411,22 +407,14 @@ fn input_ref_range(input: &InputRef, count: u64, op: &ScalarOp) -> (u64, u64) {
             let hi = ids.iter().map(|id| id.0).max().unwrap_or(0) + 1;
             (lo, hi)
         }
-        InputRef::StridedBroadcast {
-            base,
-            stride,
-            repeat,
-        } => {
+        InputRef::Strided { base, stride_outer: stride, modulus: repeat, .. } => {
             let num_blocks = (count + repeat - 1) / repeat;
             let last = base.0 as i64 + *stride * (num_blocks as i64 - 1);
             let lo = (base.0 as i64).min(last) as u64;
             let hi = (base.0 as i64).max(last) as u64 + 1;
             (lo, hi)
         }
-        InputRef::Modular {
-            base,
-            stride,
-            modulus,
-        } => {
+        InputRef::Strided { base, stride_inner: stride, modulus, .. } => {
             if *modulus == 0 {
                 return (u64::MAX, 0);
             }
@@ -1175,7 +1163,7 @@ impl RangeAtomMap {
 fn resolve_producer_groups(input: &InputRef, count: u64, groups: &[AtomGroup]) -> Vec<usize> {
     match input {
         InputRef::Broadcast(atom_id) => find_group_idx(groups, *atom_id).into_iter().collect(),
-        InputRef::Affine { base, stride } => {
+        InputRef::Strided { base, stride_inner: stride, .. } => {
             if count == 0 {
                 return vec![];
             }
@@ -1197,11 +1185,7 @@ fn resolve_producer_groups(input: &InputRef, count: u64, groups: &[AtomGroup]) -
             }
             result
         }
-        InputRef::StridedBroadcast {
-            base,
-            stride,
-            repeat,
-        } => {
+        InputRef::Strided { base, stride_outer: stride, modulus: repeat, .. } => {
             if count == 0 {
                 return vec![];
             }
@@ -1212,11 +1196,7 @@ fn resolve_producer_groups(input: &InputRef, count: u64, groups: &[AtomGroup]) -
             let hi = base.0.max(last.0);
             find_groups_in_range(groups, lo, hi)
         }
-        InputRef::Modular {
-            base,
-            stride,
-            modulus,
-        } => {
+        InputRef::Strided { base, stride_inner: stride, modulus, .. } => {
             if *modulus == 0 {
                 return vec![];
             }
@@ -1244,18 +1224,14 @@ fn resolve_producer_groups_with_reduce(
     let max_reduce_ext = 0i64.max(reduce_stride * (reduce_count as i64 - 1));
 
     match input {
-        InputRef::Affine { base, stride } => {
+        InputRef::Strided { base, stride_inner: stride, .. } => {
             let first_base = base.0 as i64;
             let last_base = base.0 as i64 + *stride as i64 * (count as i64 - 1);
             let lo = first_base.min(last_base) + min_reduce_ext;
             let hi = first_base.max(last_base) + max_reduce_ext;
             find_groups_in_range(groups, lo as u64, hi as u64)
         }
-        InputRef::StridedBroadcast {
-            base,
-            stride,
-            repeat,
-        } => {
+        InputRef::Strided { base, stride_outer: stride, modulus: repeat, .. } => {
             let last_block = ((count - 1) / repeat) as i64;
             let first_read = base.0 as i64;
             let last_read = base.0 as i64 + stride * last_block;
@@ -1324,7 +1300,7 @@ fn resolve_input_to_group_ranges(
                 result.push((gi, lo as u64, (hi + 1) as u64));
             }
         }
-        InputRef::Affine { base, stride } => {
+        InputRef::Strided { base, stride_inner: stride, .. } => {
             let first_k = offset;
             let last_k = offset + count - 1;
             let first_pos = base.0 as i64 + *stride as i64 * first_k as i64;
@@ -1338,11 +1314,7 @@ fn resolve_input_to_group_ranges(
                 result.push((gi, ext_lo as u64, (ext_hi + 1) as u64));
             }
         }
-        InputRef::StridedBroadcast {
-            base,
-            stride,
-            repeat,
-        } => {
+        InputRef::Strided { base, stride_outer: stride, modulus: repeat, .. } => {
             let first_block = offset / repeat;
             let last_block = (offset + count - 1) / repeat;
             let first_pos = base.0 as i64 + *stride * first_block as i64;
@@ -1355,11 +1327,7 @@ fn resolve_input_to_group_ranges(
                 result.push((gi, ext_lo as u64, (ext_hi + 1) as u64));
             }
         }
-        InputRef::Modular {
-            base,
-            stride,
-            modulus,
-        } => {
+        InputRef::Strided { base, stride_inner: stride, modulus, .. } => {
             if *modulus == 0 {
                 return result;
             }
@@ -1503,30 +1471,19 @@ fn remap_single_input(
 ) -> InputRef {
     match input {
         InputRef::Broadcast(id) => InputRef::Broadcast(atom_map.get(*id).unwrap_or(*id)),
-        InputRef::Affine { base, stride } => {
+        InputRef::Strided { base, stride_inner: stride, .. } => {
             let new_base_raw = AtomId(
                 base.0
                     .wrapping_add((*stride as i64 * atom_offset as i64) as u64),
             );
-            InputRef::Affine {
-                base: atom_map.get(new_base_raw).unwrap_or(new_base_raw),
-                stride: *stride,
-            }
+            InputRef::affine(atom_map.get(new_base_raw).unwrap_or(new_base_raw), *stride)
         }
-        InputRef::StridedBroadcast {
-            base,
-            stride,
-            repeat,
-        } => {
+        InputRef::Strided { base, stride_outer: stride, modulus: repeat, .. } => {
             let block_idx = (atom_offset / repeat) as i64;
             let new_base_raw = AtomId(base.0.wrapping_add((stride * block_idx) as u64));
             let new_offset_in_block = atom_offset % repeat;
             if new_offset_in_block == 0 {
-                InputRef::StridedBroadcast {
-                    base: atom_map.get(new_base_raw).unwrap_or(new_base_raw),
-                    stride: *stride,
-                    repeat: *repeat,
-                }
+                InputRef::strided_broadcast(atom_map.get(new_base_raw).unwrap_or(new_base_raw), *stride, *repeat)
             } else {
                 // Can't maintain StridedBroadcast pattern with non-aligned offset.
                 // Fall back to Explicit.
@@ -1538,18 +1495,10 @@ fn remap_single_input(
                 InputRef::Explicit(ids)
             }
         }
-        InputRef::Modular {
-            base,
-            stride,
-            modulus,
-        } => {
+        InputRef::Strided { base, stride_inner: stride, modulus, .. } => {
             if atom_offset % modulus == 0 {
                 // Aligned: modular pattern preserved, just remap base
-                InputRef::Modular {
-                    base: atom_map.get(*base).unwrap_or(*base),
-                    stride: *stride,
-                    modulus: *modulus,
-                }
+                InputRef::modular(atom_map.get(*base).unwrap_or(*base), *stride, *modulus)
             } else {
                 // Misaligned split: (atom_offset + i) % modulus != i % modulus
                 // Fall back to explicit enumeration
@@ -1978,15 +1927,8 @@ mod tests {
                 },
                 vec![],
                 vec![
-                    InputRef::StridedBroadcast {
-                        base: AtomId(input.0 + row * 4),
-                        stride: 1,
-                        repeat: 8,
-                    },
-                    InputRef::Affine {
-                        base: AtomId(input.0 + 8), // second half as B
-                        stride: 1,
-                    },
+                    InputRef::strided_broadcast(AtomId(input.0 + row * 4), 1, 8),
+                    InputRef::affine(AtomId(input.0 + 8), 1), // second half as B
                 ],
             );
             mul_bases.push(mul);
@@ -2004,10 +1946,7 @@ mod tests {
                     compute_dtype: DType::F32,
                 },
                 vec![],
-                vec![InputRef::Affine {
-                    base: mul_bases[row as usize],
-                    stride: 1,
-                }],
+                vec![InputRef::affine(mul_bases[row as usize], 1)],
             );
             red_bases.push(red);
         }
@@ -2021,10 +1960,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine {
-                base: red_bases[0],
-                stride: 1,
-            }],
+            vec![InputRef::affine(red_bases[0], 1)],
         );
         g.outputs = vec![act];
 
@@ -2067,18 +2003,9 @@ mod tests {
             ScalarOp::Select,
             vec![],
             vec![
-                InputRef::Affine {
-                    base: lit_cond,
-                    stride: 1,
-                },
-                InputRef::Affine {
-                    base: lit_a,
-                    stride: 1,
-                },
-                InputRef::Affine {
-                    base: lit_b,
-                    stride: 1,
-                },
+                InputRef::affine(lit_cond, 1),
+                InputRef::affine(lit_a, 1),
+                InputRef::affine(lit_b, 1),
             ],
         );
 
@@ -2099,15 +2026,8 @@ mod tests {
             },
             vec![],
             vec![
-                InputRef::Modular {
-                    base: sel,
-                    stride: 1,
-                    modulus: small_count,
-                },
-                InputRef::Affine {
-                    base: lit_d,
-                    stride: 1,
-                },
+                InputRef::modular(sel, 1, small_count),
+                InputRef::affine(lit_d, 1),
             ],
         );
 

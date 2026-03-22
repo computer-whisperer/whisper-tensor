@@ -200,7 +200,7 @@ fn build_group_deps(groups: &[AtomGroup]) -> (Vec<Vec<usize>>, Vec<Vec<usize>>) 
 fn resolve_producer_groups(input: &InputRef, count: u64, groups: &[AtomGroup]) -> Vec<usize> {
     match input {
         InputRef::Broadcast(atom_id) => find_group_idx(groups, *atom_id).into_iter().collect(),
-        InputRef::Affine { base, stride } => {
+        InputRef::Strided { base, stride_inner: stride, .. } => {
             if count == 0 {
                 return vec![];
             }
@@ -222,11 +222,7 @@ fn resolve_producer_groups(input: &InputRef, count: u64, groups: &[AtomGroup]) -
             }
             result
         }
-        InputRef::StridedBroadcast {
-            base,
-            stride,
-            repeat,
-        } => {
+        InputRef::Strided { base, stride_outer: stride, modulus: repeat, .. } => {
             if count == 0 {
                 return vec![];
             }
@@ -237,11 +233,7 @@ fn resolve_producer_groups(input: &InputRef, count: u64, groups: &[AtomGroup]) -
             let hi = base.0.max(last.0);
             find_groups_in_range(groups, lo, hi)
         }
-        InputRef::Modular {
-            base,
-            stride,
-            modulus,
-        } => {
+        InputRef::Strided { base, stride_inner: stride, modulus, .. } => {
             if *modulus == 0 {
                 return vec![];
             }
@@ -562,7 +554,7 @@ fn is_allrows_chain_lane_local_samephase(
 
         // Check the access pattern for lane-locality.
         match input {
-            InputRef::Affine { stride, .. } => {
+            InputRef::Strided { stride_inner: stride, .. } => {
                 if *stride != 1 {
                     return false; // Non-unit stride can cross lane boundaries.
                 }
@@ -580,10 +572,11 @@ fn is_allrows_chain_lane_local_samephase(
                 // atom lives in one lane, but ALL lanes read it → cross-lane.
                 return false;
             }
-            InputRef::StridedBroadcast {
-                base: _,
-                stride: _,
-                repeat,
+            InputRef::Strided {
+                stride_inner: 0,
+                stride_outer: _,
+                modulus: repeat,
+                ..
             } => {
                 // atom i reads base + stride * (i / repeat).
                 // The mapping i → i/repeat is monotonically non-decreasing,
@@ -597,7 +590,7 @@ fn is_allrows_chain_lane_local_samephase(
                     }
                 }
             }
-            InputRef::Modular { .. } => {
+            InputRef::Strided { .. } => {
                 // Modular wraps around — not lane-local in general.
                 return false;
             }
@@ -923,18 +916,14 @@ fn resolve_producer_groups_with_reduce(
     let max_reduce_ext = 0i64.max(reduce_stride * (reduce_count as i64 - 1));
 
     match input {
-        InputRef::Affine { base, stride } => {
+        InputRef::Strided { base, stride_inner: stride, .. } => {
             let first_base = base.0 as i64;
             let last_base = base.0 as i64 + *stride as i64 * (count as i64 - 1);
             let lo = first_base.min(last_base) + min_reduce_ext;
             let hi = first_base.max(last_base) + max_reduce_ext;
             find_groups_in_range(groups, lo as u64, hi as u64)
         }
-        InputRef::StridedBroadcast {
-            base,
-            stride,
-            repeat,
-        } => {
+        InputRef::Strided { base, stride_outer: stride, modulus: repeat, .. } => {
             let first_block = 0i64;
             let last_block = ((count - 1) / repeat) as i64;
             let first_read = base.0 as i64 + stride * first_block;
@@ -1281,15 +1270,8 @@ mod tests {
                 },
                 vec![],
                 vec![
-                    InputRef::StridedBroadcast {
-                        base: a_row,
-                        stride: 1,
-                        repeat: n,
-                    },
-                    InputRef::Affine {
-                        base: b_base,
-                        stride: 1,
-                    },
+                    InputRef::strided_broadcast(a_row, 1, n),
+                    InputRef::affine(b_base, 1),
                 ],
             );
             mul_bases.push(mul);
@@ -1307,10 +1289,7 @@ mod tests {
                     compute_dtype: DType::F32,
                 },
                 vec![],
-                vec![InputRef::Affine {
-                    base: mul_bases[row as usize],
-                    stride: 1,
-                }],
+                vec![InputRef::affine(mul_bases[row as usize], 1)],
             );
             reduce_bases.push(red);
         }
@@ -1359,15 +1338,8 @@ mod tests {
                 },
                 vec![],
                 vec![
-                    InputRef::StridedBroadcast {
-                        base: a_row,
-                        stride: 1,
-                        repeat: n1,
-                    },
-                    InputRef::Affine {
-                        base: b1,
-                        stride: 1,
-                    },
+                    InputRef::strided_broadcast(a_row, 1, n1),
+                    InputRef::affine(b1, 1),
                 ],
             );
             mul1_bases.push(mul);
@@ -1385,10 +1357,7 @@ mod tests {
                     compute_dtype: DType::F32,
                 },
                 vec![],
-                vec![InputRef::Affine {
-                    base: mul1_bases[row as usize],
-                    stride: 1,
-                }],
+                vec![InputRef::affine(mul1_bases[row as usize], 1)],
             );
             red1_bases.push(red);
         }
@@ -1404,10 +1373,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine {
-                base: red1_bases[0],
-                stride: 1,
-            }],
+            vec![InputRef::affine(red1_bases[0], 1)],
         );
 
         // Weights for matmul 2.
@@ -1431,15 +1397,8 @@ mod tests {
                 },
                 vec![],
                 vec![
-                    InputRef::StridedBroadcast {
-                        base: AtomId(act.0 + row * n1),
-                        stride: 1,
-                        repeat: n2,
-                    },
-                    InputRef::Affine {
-                        base: b2,
-                        stride: 1,
-                    },
+                    InputRef::strided_broadcast(AtomId(act.0 + row * n1), 1, n2),
+                    InputRef::affine(b2, 1),
                 ],
             );
             mul2_bases.push(mul);
@@ -1457,10 +1416,7 @@ mod tests {
                     compute_dtype: DType::F32,
                 },
                 vec![],
-                vec![InputRef::Affine {
-                    base: mul2_bases[row as usize],
-                    stride: 1,
-                }],
+                vec![InputRef::affine(mul2_bases[row as usize], 1)],
             );
             red2_bases.push(red);
         }
@@ -1506,15 +1462,8 @@ mod tests {
                 },
                 vec![],
                 vec![
-                    InputRef::StridedBroadcast {
-                        base: a_row,
-                        stride: 1,
-                        repeat: n1,
-                    },
-                    InputRef::Affine {
-                        base: b1,
-                        stride: 1,
-                    },
+                    InputRef::strided_broadcast(a_row, 1, n1),
+                    InputRef::affine(b1, 1),
                 ],
             );
             mul1_bases.push(mul);
@@ -1532,10 +1481,7 @@ mod tests {
                     compute_dtype: DType::F32,
                 },
                 vec![],
-                vec![InputRef::Affine {
-                    base: mul1_bases[row as usize],
-                    stride: 1,
-                }],
+                vec![InputRef::affine(mul1_bases[row as usize], 1)],
             );
             red1_bases.push(red);
         }
@@ -1551,10 +1497,7 @@ mod tests {
                     compute_dtype: DType::F32,
                 },
                 vec![],
-                vec![InputRef::Affine {
-                    base: red1_bases[row as usize],
-                    stride: 1,
-                }],
+                vec![InputRef::affine(red1_bases[row as usize], 1)],
             );
             act_bases.push(act);
         }
@@ -1578,15 +1521,8 @@ mod tests {
                 },
                 vec![],
                 vec![
-                    InputRef::StridedBroadcast {
-                        base: act_bases[row as usize],
-                        stride: 1,
-                        repeat: n2,
-                    },
-                    InputRef::Affine {
-                        base: b2,
-                        stride: 1,
-                    },
+                    InputRef::strided_broadcast(act_bases[row as usize], 1, n2),
+                    InputRef::affine(b2, 1),
                 ],
             );
             mul2_bases.push(mul);
@@ -1604,10 +1540,7 @@ mod tests {
                     compute_dtype: DType::F32,
                 },
                 vec![],
-                vec![InputRef::Affine {
-                    base: mul2_bases[row as usize],
-                    stride: 1,
-                }],
+                vec![InputRef::affine(mul2_bases[row as usize], 1)],
             );
             red2_bases.push(red);
         }
@@ -1661,15 +1594,8 @@ mod tests {
                 },
                 vec![],
                 vec![
-                    InputRef::StridedBroadcast {
-                        base: a_row,
-                        stride: 1,
-                        repeat: n,
-                    },
-                    InputRef::Affine {
-                        base: b1,
-                        stride: 1,
-                    },
+                    InputRef::strided_broadcast(a_row, 1, n),
+                    InputRef::affine(b1, 1),
                 ],
             );
             let red = g.push_group(
@@ -1682,10 +1608,7 @@ mod tests {
                     compute_dtype: DType::F32,
                 },
                 vec![],
-                vec![InputRef::Affine {
-                    base: mul,
-                    stride: 1,
-                }],
+                vec![InputRef::affine(mul, 1)],
             );
             red1_bases.push(red);
         }
@@ -1702,15 +1625,8 @@ mod tests {
                 },
                 vec![],
                 vec![
-                    InputRef::StridedBroadcast {
-                        base: a_row,
-                        stride: 1,
-                        repeat: n,
-                    },
-                    InputRef::Affine {
-                        base: b2,
-                        stride: 1,
-                    },
+                    InputRef::strided_broadcast(a_row, 1, n),
+                    InputRef::affine(b2, 1),
                 ],
             );
             let red = g.push_group(
@@ -1723,10 +1639,7 @@ mod tests {
                     compute_dtype: DType::F32,
                 },
                 vec![],
-                vec![InputRef::Affine {
-                    base: mul,
-                    stride: 1,
-                }],
+                vec![InputRef::affine(mul, 1)],
             );
             red2_bases.push(red);
         }
@@ -1771,8 +1684,8 @@ mod tests {
             },
             vec![],
             vec![
-                InputRef::Affine { base: a, stride: 1 },
-                InputRef::Affine { base: b, stride: 1 },
+                InputRef::affine(a, 1),
+                InputRef::affine(b, 1),
             ],
         );
         for i in 0..count {
@@ -1990,7 +1903,7 @@ mod tests {
                     vec![]
                 }
             }
-            InputRef::Affine { base, stride } => {
+            InputRef::Strided { base, stride_inner: stride, .. } => {
                 let first_read = base.0 as i64 + *stride as i64 * first_i as i64;
                 let last_read = base.0 as i64 + *stride as i64 * last_i as i64;
                 let lo = first_read.min(last_read) as u64;
@@ -2009,11 +1922,7 @@ mod tests {
                     })
                     .collect()
             }
-            InputRef::StridedBroadcast {
-                base,
-                stride,
-                repeat,
-            } => {
+            InputRef::Strided { base, stride_outer: stride, modulus: repeat, .. } => {
                 let first_block = first_i / repeat;
                 let last_block = last_i / repeat;
                 let first_read = base.0 as i64 + *stride * first_block as i64;
@@ -2033,11 +1942,7 @@ mod tests {
                     })
                     .collect()
             }
-            InputRef::Modular {
-                base,
-                stride,
-                modulus,
-            } => {
+            InputRef::Strided { base, stride_inner: stride, modulus, .. } => {
                 // Modular wraps, so the full range of the modulus is accessed.
                 let lo = base.0;
                 let span = (*stride as i64).unsigned_abs() * (*modulus - 1);
@@ -2095,7 +2000,7 @@ mod tests {
         // the reduce reads: resolved_input(i) + k*reduce_stride for k in 0..reduce_count.
         // The min/max offsets across all i and k determine the accessed range.
         match input {
-            InputRef::Affine { base, stride } => {
+            InputRef::Strided { base, stride_inner: stride, .. } => {
                 let first_i = atom_offset;
                 let last_i = atom_offset + atom_count - 1;
                 let first_base = base.0 as i64 + *stride as i64 * first_i as i64;
@@ -2433,15 +2338,8 @@ mod tests {
                 },
                 vec![],
                 vec![
-                    InputRef::StridedBroadcast {
-                        base: AtomId(a1.0 + row * k),
-                        stride: 1,
-                        repeat: n,
-                    },
-                    InputRef::Affine {
-                        base: b1,
-                        stride: 1,
-                    },
+                    InputRef::strided_broadcast(AtomId(a1.0 + row * k), 1, n),
+                    InputRef::affine(b1, 1),
                 ],
             );
             mul1_bases.push(mul);
@@ -2458,10 +2356,7 @@ mod tests {
                     compute_dtype: DType::F32,
                 },
                 vec![],
-                vec![InputRef::Affine {
-                    base: mul1_bases[row as usize],
-                    stride: 1,
-                }],
+                vec![InputRef::affine(mul1_bases[row as usize], 1)],
             );
             prev_reduce_bases.push(red);
         }
@@ -2477,10 +2372,7 @@ mod tests {
                     compute_dtype: DType::F32,
                 },
                 vec![],
-                vec![InputRef::Affine {
-                    base: prev_reduce_bases[0],
-                    stride: 1,
-                }],
+                vec![InputRef::affine(prev_reduce_bases[0], 1)],
             );
 
             let b = g.push_group(
@@ -2503,12 +2395,8 @@ mod tests {
                     },
                     vec![],
                     vec![
-                        InputRef::StridedBroadcast {
-                            base: AtomId(act.0 + row * n),
-                            stride: 1,
-                            repeat: n,
-                        },
-                        InputRef::Affine { base: b, stride: 1 },
+                        InputRef::strided_broadcast(AtomId(act.0 + row * n), 1, n),
+                        InputRef::affine(b, 1),
                     ],
                 );
                 mul_bases.push(mul);
@@ -2525,10 +2413,7 @@ mod tests {
                         compute_dtype: DType::F32,
                     },
                     vec![],
-                    vec![InputRef::Affine {
-                        base: mul_bases[row as usize],
-                        stride: 1,
-                    }],
+                    vec![InputRef::affine(mul_bases[row as usize], 1)],
                 );
                 new_reduce_bases.push(red);
             }
@@ -2646,10 +2531,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine {
-                base: lit,
-                stride: 1,
-            }],
+            vec![InputRef::affine(lit, 1)],
         );
         let b = g.push_group(
             count,
@@ -2659,7 +2541,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine { base: a, stride: 1 }],
+            vec![InputRef::affine(a, 1)],
         );
         let c = g.push_group(
             count,
@@ -2669,7 +2551,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine { base: b, stride: 1 }],
+            vec![InputRef::affine(b, 1)],
         );
         for i in 0..count {
             g.outputs.push(AtomId(c.0 + i));
@@ -2721,10 +2603,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine {
-                base: lit,
-                stride: 1,
-            }],
+            vec![InputRef::affine(lit, 1)],
         );
         // Broadcast from first element of a (which is AllRows) → needs barrier
         let b = g.push_group(
@@ -2736,7 +2615,7 @@ mod tests {
             },
             vec![],
             vec![
-                InputRef::Affine { base: a, stride: 1 },
+                InputRef::affine(a, 1),
                 InputRef::Broadcast(a), // Broadcast from AllRows
             ],
         );
@@ -2786,10 +2665,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine {
-                base: lit,
-                stride: 1,
-            }],
+            vec![InputRef::affine(lit, 1)],
         );
 
         // mean: AllRows ReduceSum (small_count, reduce_count=count/small_count)
@@ -2804,7 +2680,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine { base: a, stride: 1 }],
+            vec![InputRef::affine(a, 1)],
         );
 
         // B: AllRows binary that reads from mean via Broadcast
@@ -2818,7 +2694,7 @@ mod tests {
             },
             vec![],
             vec![
-                InputRef::Affine { base: a, stride: 1 },
+                InputRef::affine(a, 1),
                 InputRef::Broadcast(mean),
             ],
         );
@@ -2833,7 +2709,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine { base: b, stride: 1 }],
+            vec![InputRef::affine(b, 1)],
         );
 
         for i in 0..count {
@@ -2930,15 +2806,8 @@ mod tests {
             },
             vec![],
             vec![
-                InputRef::StridedBroadcast {
-                    base: AtomId(lit_a.0),
-                    stride: 1,
-                    repeat: 4,
-                },
-                InputRef::Affine {
-                    base: lit_b,
-                    stride: 1,
-                },
+                InputRef::strided_broadcast(AtomId(lit_a.0), 1, 4),
+                InputRef::affine(lit_b, 1),
             ],
         );
         let mul1 = g.push_group(
@@ -2950,15 +2819,8 @@ mod tests {
             },
             vec![],
             vec![
-                InputRef::StridedBroadcast {
-                    base: AtomId(lit_a.0 + 2),
-                    stride: 1,
-                    repeat: 4,
-                },
-                InputRef::Affine {
-                    base: lit_b,
-                    stride: 1,
-                },
+                InputRef::strided_broadcast(AtomId(lit_a.0 + 2), 1, 4),
+                InputRef::affine(lit_b, 1),
             ],
         );
 
@@ -2973,10 +2835,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine {
-                base: mul0,
-                stride: 1,
-            }],
+            vec![InputRef::affine(mul0, 1)],
         );
         let red1 = g.push_group(
             4,
@@ -2988,10 +2847,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine {
-                base: mul1,
-                stride: 1,
-            }],
+            vec![InputRef::affine(mul1, 1)],
         );
 
         // Phase 1: monolithic elementwise that reads from BOTH row reduces (AllRows).
@@ -3005,10 +2861,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine {
-                base: red0,
-                stride: 1,
-            }],
+            vec![InputRef::affine(red0, 1)],
         );
 
         // mono_b: depends on mono_a via Broadcast (reads ONE atom from mono_a).
@@ -3022,10 +2875,7 @@ mod tests {
             },
             vec![],
             vec![
-                InputRef::Affine {
-                    base: mono_a,
-                    stride: 1,
-                },
+                InputRef::affine(mono_a, 1),
                 InputRef::Broadcast(mono_a), // Broadcast from AllRows → barrier
             ],
         );
@@ -3049,10 +2899,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine {
-                base: mono_a,
-                stride: 1,
-            }],
+            vec![InputRef::affine(mono_a, 1)],
         );
 
         for i in 0..4 {

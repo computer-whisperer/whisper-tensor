@@ -335,7 +335,7 @@ fn input_crosses_lane_boundary(
             // Broadcast: every atom reads the same source. No crossing.
             false
         }
-        InputRef::Affine { base, stride } => {
+        InputRef::Strided { base, stride_inner: stride, .. } => {
             if *stride == 0 {
                 // Degenerate broadcast-like: all atoms read the same source.
                 return false;
@@ -418,11 +418,7 @@ fn input_crosses_lane_boundary(
             // Source not found as a group (might be an input tensor) → no crossing.
             false
         }
-        InputRef::StridedBroadcast {
-            base,
-            stride,
-            repeat,
-        } => {
+        InputRef::Strided { base, stride_outer: stride, modulus: repeat, .. } => {
             // StridedBroadcast: atom i reads base + stride * (i / repeat).
             // When we split the consumer, lane k gets atoms [k*C..(k+1)*C).
             // Those atoms read source atoms at base + stride * (k*C/repeat)
@@ -430,7 +426,7 @@ fn input_crosses_lane_boundary(
             // As long as the source range is contiguous per lane, this is fine.
             false
         }
-        InputRef::Modular { modulus, .. } => {
+        InputRef::Strided { modulus, stride_inner: _, stride_outer: 0, .. } => {
             // Modular: every lane reads from the full modular range.
             // The source is typically a small bias/weight that gets duplicated
             // (classified as Literal) or provided as input. No barrier needed
@@ -1133,25 +1129,17 @@ fn input_ref_source_range(input: &InputRef, count: u64, atom_offset: u64) -> (u6
     }
     match input {
         InputRef::Broadcast(base) => (base.0, base.0),
-        InputRef::Affine { base, stride } => {
+        InputRef::Strided { base, stride_inner: stride, .. } => {
             let first = input.resolve(atom_offset);
             let last = input.resolve(atom_offset + count - 1);
             (first.0.min(last.0), first.0.max(last.0))
         }
-        InputRef::StridedBroadcast {
-            base,
-            stride,
-            repeat,
-        } => {
+        InputRef::Strided { base, stride_outer: stride, modulus: repeat, .. } => {
             let first = input.resolve(atom_offset);
             let last = input.resolve(atom_offset + count - 1);
             (first.0.min(last.0), first.0.max(last.0))
         }
-        InputRef::Modular {
-            base,
-            stride,
-            modulus,
-        } => {
+        InputRef::Strided { base, stride_inner: stride, modulus, .. } => {
             let a = base.0;
             let b = (base.0 as i64 + *stride * (*modulus as i64 - 1)) as u64;
             (a.min(b), a.max(b))
@@ -1210,8 +1198,8 @@ mod tests {
             },
             vec![],
             vec![
-                InputRef::Affine { base: a, stride: 1 },
-                InputRef::Affine { base: b, stride: 1 },
+                InputRef::affine(a, 1),
+                InputRef::affine(b, 1),
             ],
         )
     }
@@ -1226,10 +1214,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine {
-                base: input,
-                stride: 1,
-            }],
+            vec![InputRef::affine(input, 1)],
         )
     }
 
@@ -1250,10 +1235,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine {
-                base: input,
-                stride: reduce_count as i64,
-            }],
+            vec![InputRef::affine(input, reduce_count as i64)],
         )
     }
 
@@ -1374,15 +1356,8 @@ mod tests {
             },
             vec![],
             vec![
-                InputRef::StridedBroadcast {
-                    base: input,
-                    stride: 1,
-                    repeat: 128,
-                },
-                InputRef::Affine {
-                    base: weights,
-                    stride: 1,
-                },
+                InputRef::strided_broadcast(input, 1, 128),
+                InputRef::affine(weights, 1),
             ],
         );
         let reduce = g.push_group(
@@ -1395,10 +1370,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine {
-                base: mul,
-                stride: 128,
-            }],
+            vec![InputRef::affine(mul, 128)],
         );
         g.outputs = vec![reduce];
 
@@ -1458,15 +1430,8 @@ mod tests {
             },
             vec![],
             vec![
-                InputRef::Affine {
-                    base: input,
-                    stride: 1,
-                },
-                InputRef::Modular {
-                    base: lit,
-                    stride: 1,
-                    modulus: 100,
-                },
+                InputRef::affine(input, 1),
+                InputRef::modular(lit, 1, 100),
             ],
         );
         g.outputs = vec![add];
@@ -1522,10 +1487,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine {
-                base: neg,
-                stride: 1,
-            }],
+            vec![InputRef::affine(neg, 1)],
         );
         // Downstream: broadcast the reduce result to 1024 atoms.
         let broadcast = g.push_group(
@@ -1537,10 +1499,7 @@ mod tests {
             },
             vec![],
             vec![
-                InputRef::Affine {
-                    base: input,
-                    stride: 1,
-                },
+                InputRef::affine(input, 1),
                 InputRef::Broadcast(reduce),
             ],
         );
@@ -1727,10 +1686,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine {
-                base: input,
-                stride: 128,
-            }],
+            vec![InputRef::affine(input, 128)],
         );
         g.outputs = vec![reduce];
 

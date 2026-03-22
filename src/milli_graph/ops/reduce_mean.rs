@@ -163,10 +163,7 @@ impl ReduceMean {
             },
             sum_map.sym_dims.clone(),
             vec![
-                InputRef::Affine {
-                    base: sum_map.base_id,
-                    stride: 1,
-                },
+                InputRef::affine(sum_map.base_id, 1),
                 InputRef::Broadcast(extent_lit),
             ],
         );

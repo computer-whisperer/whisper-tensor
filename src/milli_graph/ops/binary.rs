@@ -1093,11 +1093,7 @@ impl MatMul {
             let input_a = if a_map.segments.is_empty() {
                 // Simple A: StridedBroadcast with physical k-stride.
                 let a_row_base = a_map.base_id.offset(a_offset);
-                InputRef::StridedBroadcast {
-                    base: a_row_base,
-                    stride: a_k_stride as i64,
-                    repeat: n_u64,
-                }
+                InputRef::strided_broadcast(a_row_base, a_k_stride as i64, n_u64)
             } else {
                 // Segmented A: build explicit per-atom mapping.
                 // Atom j in the merged group reads A[m, j/N], repeated N times.
@@ -1139,10 +1135,7 @@ impl MatMul {
             let b_n_stride = b_strides[b_n_known_idx];
             let input_b = if b_k_stride == n_u64 && b_n_stride == 1 {
                 // Row-major B: simple affine.
-                InputRef::Affine {
-                    base: b_base,
-                    stride: 1,
-                }
+                InputRef::affine(b_base, 1)
             } else {
                 // Non-row-major B: build explicit mapping.
                 let mut ids = Vec::with_capacity(merged_mul_count as usize);
@@ -1191,10 +1184,7 @@ impl MatMul {
                     compute_dtype: accumulate_dtype,
                 },
                 out_sym_dims.clone(),
-                vec![InputRef::Affine {
-                    base: row_mul_base,
-                    stride: 1,
-                }],
+                vec![InputRef::affine(row_mul_base, 1)],
             );
 
             if reduce_base_id.is_none() {

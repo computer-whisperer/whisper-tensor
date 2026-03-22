@@ -760,16 +760,12 @@ fn input_ref_range(input: &InputRef, count: u64, atom_offset: u64) -> (u64, u64)
     }
     match input {
         InputRef::Broadcast(base) => (base.0, base.0),
-        InputRef::Affine { .. } | InputRef::StridedBroadcast { .. } => {
+        InputRef::Strided { .. } => {
             let first = input.resolve(atom_offset);
             let last = input.resolve(atom_offset + count - 1);
             (first.0.min(last.0), first.0.max(last.0))
         }
-        InputRef::Modular {
-            base,
-            stride,
-            modulus,
-        } => {
+        InputRef::Strided { base, stride_inner: stride, modulus, .. } => {
             let a = base.0;
             let b = (base.0 as i64 + *stride * (*modulus as i64 - 1)) as u64;
             (a.min(b), a.max(b))
@@ -1149,10 +1145,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine {
-                base: lit,
-                stride: 1,
-            }],
+            vec![InputRef::affine(lit, 1)],
         );
         let exp = g.push_group(
             1000,
@@ -1162,10 +1155,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine {
-                base: neg,
-                stride: 1,
-            }],
+            vec![InputRef::affine(neg, 1)],
         );
         g.outputs.push(exp);
 
@@ -1227,10 +1217,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine {
-                base: lit,
-                stride: 1,
-            }],
+            vec![InputRef::affine(lit, 1)],
         );
         let exp = g.push_group(
             1000,
@@ -1240,10 +1227,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine {
-                base: lit,
-                stride: 1,
-            }],
+            vec![InputRef::affine(lit, 1)],
         );
         let add = g.push_group(
             1000,
@@ -1254,14 +1238,8 @@ mod tests {
             },
             vec![],
             vec![
-                InputRef::Affine {
-                    base: neg,
-                    stride: 1,
-                },
-                InputRef::Affine {
-                    base: exp,
-                    stride: 1,
-                },
+                InputRef::affine(neg, 1),
+                InputRef::affine(exp, 1),
             ],
         );
         g.outputs.push(add);
@@ -1327,15 +1305,8 @@ mod tests {
             },
             vec![],
             vec![
-                InputRef::Affine {
-                    base: a_base,
-                    stride: 1,
-                },
-                InputRef::Modular {
-                    base: b_base,
-                    stride: 1,
-                    modulus: k,
-                },
+                InputRef::affine(a_base, 1),
+                InputRef::modular(b_base, 1, k),
             ],
         );
 
@@ -1350,10 +1321,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine {
-                base: mul_base,
-                stride: k as i64,
-            }],
+            vec![InputRef::affine(mul_base, k as i64)],
         );
         g.outputs.push(red_base);
 
@@ -1457,10 +1425,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine {
-                base: lit,
-                stride: 1,
-            }],
+            vec![InputRef::affine(lit, 1)],
         );
 
         // Single-atom ReduceSum over all 1000 Neg atoms.
@@ -1474,10 +1439,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine {
-                base: neg,
-                stride: 1,
-            }],
+            vec![InputRef::affine(neg, 1)],
         );
         g.outputs.push(red);
 
@@ -1531,10 +1493,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine {
-                base: source,
-                stride: k as i64,
-            }],
+            vec![InputRef::affine(source, k as i64)],
         );
         g.outputs.push(red);
 
@@ -1584,14 +1543,8 @@ mod tests {
             },
             vec![],
             vec![
-                InputRef::Affine {
-                    base: lit_a,
-                    stride: 1,
-                },
-                InputRef::Affine {
-                    base: lit_b,
-                    stride: 1,
-                },
+                InputRef::affine(lit_a, 1),
+                InputRef::affine(lit_b, 1),
             ],
         );
 
@@ -1612,14 +1565,8 @@ mod tests {
             },
             vec![],
             vec![
-                InputRef::Affine {
-                    base: sub,
-                    stride: 1,
-                },
-                InputRef::Affine {
-                    base: lit_c,
-                    stride: 1,
-                },
+                InputRef::affine(sub, 1),
+                InputRef::affine(lit_c, 1),
             ],
         );
 
@@ -1640,14 +1587,8 @@ mod tests {
             },
             vec![],
             vec![
-                InputRef::Affine {
-                    base: pow,
-                    stride: 1,
-                },
-                InputRef::Affine {
-                    base: lit_d,
-                    stride: 1,
-                },
+                InputRef::affine(pow, 1),
+                InputRef::affine(lit_d, 1),
             ],
         );
         g.outputs.push(div);
@@ -1714,10 +1655,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine {
-                base: lit,
-                stride: 1,
-            }],
+            vec![InputRef::affine(lit, 1)],
         );
 
         // ReduceSum over all 1000 neg outputs → 1 atom.
@@ -1731,10 +1669,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine {
-                base: neg,
-                stride: 1,
-            }],
+            vec![InputRef::affine(neg, 1)],
         );
 
         // Div: each of 1000 atoms divides Neg by the ReduceSum scalar.
@@ -1747,10 +1682,7 @@ mod tests {
             },
             vec![],
             vec![
-                InputRef::Affine {
-                    base: neg,
-                    stride: 1,
-                },
+                InputRef::affine(neg, 1),
                 InputRef::Broadcast(red),
             ],
         );
@@ -1806,10 +1738,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine {
-                base: lit,
-                stride: 1,
-            }],
+            vec![InputRef::affine(lit, 1)],
         );
         g.outputs.push(neg);
 
@@ -1835,10 +1764,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine {
-                base: inp,
-                stride: 1,
-            }],
+            vec![InputRef::affine(inp, 1)],
         );
         g.outputs.push(neg);
 
@@ -1886,10 +1812,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine {
-                base: lit,
-                stride: 1,
-            }],
+            vec![InputRef::affine(lit, 1)],
         );
         g.outputs.push(neg);
 
@@ -1936,10 +1859,7 @@ mod tests {
             DType::F32,
             ScalarOp::IndirectLoad { table_base: table },
             vec![],
-            vec![InputRef::Affine {
-                base: indices,
-                stride: 1,
-            }],
+            vec![InputRef::affine(indices, 1)],
         );
         g.outputs.push(load);
 

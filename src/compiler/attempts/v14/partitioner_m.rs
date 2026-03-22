@@ -302,7 +302,7 @@ fn is_lane_local_access(consumer: &AtomGroup, producer: &AtomGroup, num_lanes: u
                 // → Not lane-local (need barrier or duplication).
                 return false;
             }
-            InputRef::Affine { base, stride } => {
+            InputRef::Strided { base, stride_inner: stride, .. } => {
                 // For lane-local access with chunked splitting:
                 // Consumer atom i (at offset i + atom_offset) reads producer atom at
                 // base + stride * (i + atom_offset).
@@ -366,11 +366,7 @@ fn is_lane_local_access(consumer: &AtomGroup, producer: &AtomGroup, num_lanes: u
                 // Not lane-local.
                 return false;
             }
-            InputRef::StridedBroadcast {
-                base,
-                stride,
-                repeat,
-            } => {
+            InputRef::Strided { base, stride_outer: stride, modulus: repeat, .. } => {
                 // StridedBroadcast: atom i reads base + stride * (i / repeat).
                 // This is used in matmul Mul groups where chunks of K atoms
                 // share the same A element.
@@ -414,11 +410,7 @@ fn is_lane_local_access(consumer: &AtomGroup, producer: &AtomGroup, num_lanes: u
 
                 return false;
             }
-            InputRef::Modular {
-                base,
-                stride,
-                modulus,
-            } => {
+            InputRef::Strided { base, stride_inner: stride, modulus, .. } => {
                 // Modular: atom i reads base + stride * (i % modulus).
                 // This tiles/repeats — every lane needs the same modulus-sized
                 // range. NOT lane-local unless the producer is duplicated.
@@ -461,7 +453,7 @@ fn input_refs_group(
 
     match input {
         InputRef::Broadcast(id) => id.0 >= pb && id.0 < pe,
-        InputRef::Affine { base, stride } => {
+        InputRef::Strided { base, stride_inner: stride, .. } => {
             let first = base
                 .0
                 .wrapping_add((*stride * consumer_offset as i64) as u64);
@@ -472,11 +464,7 @@ fn input_refs_group(
             let hi = first.max(last);
             lo < pe && hi >= pb
         }
-        InputRef::StridedBroadcast {
-            base,
-            stride,
-            repeat,
-        } => {
+        InputRef::Strided { base, stride_outer: stride, modulus: repeat, .. } => {
             let first_block = consumer_offset / repeat;
             let last_block = (consumer_offset + consumer_count - 1) / repeat;
             let first = base.0.wrapping_add((*stride * first_block as i64) as u64);
@@ -485,11 +473,7 @@ fn input_refs_group(
             let hi = first.max(last);
             lo < pe && hi >= pb
         }
-        InputRef::Modular {
-            base,
-            stride,
-            modulus,
-        } => {
+        InputRef::Strided { base, stride_inner: stride, modulus, .. } => {
             let a = base.0;
             let b = base
                 .0
@@ -573,9 +557,9 @@ fn collect_input_atom_ranges(group: &AtomGroup, graph: &NanoGraph) -> Vec<(AtomI
     for input in &group.inputs {
         match input {
             InputRef::Broadcast(id)
-            | InputRef::Affine { base: id, .. }
-            | InputRef::StridedBroadcast { base: id, .. }
-            | InputRef::Modular { base: id, .. } => {
+            | InputRef::Strided { base: id, .. }
+            | InputRef::Strided { base: id, .. }
+            | InputRef::Strided { base: id, .. } => {
                 if let Some((idx, _)) = graph.find_input_idx(*id) {
                     let it = &graph.input_tensors()[idx];
                     if seen_bases.insert(it.base_id.0) {
@@ -764,7 +748,7 @@ fn build_phase(
             let cons = &all_groups[ci];
             if let ScalarOp::Reduce { .. } = &cons.op {
                 for inp in &cons.inputs {
-                    if let InputRef::Affine { base, stride } = inp {
+                    if let InputRef::Strided { base, stride_inner: stride, .. } = inp {
                         let abs_stride = (*stride).unsigned_abs();
                         if abs_stride > 0
                             && abs_stride * cons.count == group.count
@@ -1157,25 +1141,17 @@ fn ensure_inputs_declared(
             InputRef::Broadcast(id) => {
                 ranges_to_cover.push((id.0, id.0));
             }
-            InputRef::Affine { base, stride } => {
+            InputRef::Strided { base, stride_inner: stride, .. } => {
                 let first = input.resolve(atom_offset).0;
                 let last = input.resolve(atom_offset + count - 1).0;
                 ranges_to_cover.push((first.min(last), first.max(last)));
             }
-            InputRef::StridedBroadcast {
-                base,
-                stride,
-                repeat,
-            } => {
+            InputRef::Strided { base, stride_outer: stride, modulus: repeat, .. } => {
                 let first = input.resolve(atom_offset).0;
                 let last = input.resolve(atom_offset + count - 1).0;
                 ranges_to_cover.push((first.min(last), first.max(last)));
             }
-            InputRef::Modular {
-                base,
-                stride,
-                modulus,
-            } => {
+            InputRef::Strided { base, stride_inner: stride, modulus, .. } => {
                 let a = base.0;
                 let b = (base.0 as i64 + *stride * (*modulus as i64 - 1)) as u64;
                 ranges_to_cover.push((a.min(b), a.max(b)));
@@ -1421,14 +1397,8 @@ mod tests {
             },
             vec![],
             vec![
-                InputRef::Affine {
-                    base: lit,
-                    stride: 1,
-                },
-                InputRef::Affine {
-                    base: lit,
-                    stride: 1,
-                },
+                InputRef::affine(lit, 1),
+                InputRef::affine(lit, 1),
             ],
         );
 
@@ -1441,10 +1411,7 @@ mod tests {
             },
             vec![],
             vec![
-                InputRef::Affine {
-                    base: sub,
-                    stride: 1,
-                },
+                InputRef::affine(sub, 1),
                 InputRef::Broadcast(lit), // broadcast a literal atom
             ],
         );
@@ -1458,14 +1425,8 @@ mod tests {
             },
             vec![],
             vec![
-                InputRef::Affine {
-                    base: pow,
-                    stride: 1,
-                },
-                InputRef::Affine {
-                    base: sub,
-                    stride: 1,
-                },
+                InputRef::affine(pow, 1),
+                InputRef::affine(sub, 1),
             ],
         );
 
@@ -1532,7 +1493,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine { base: a, stride: 1 }],
+            vec![InputRef::affine(a, 1)],
         );
 
         let c = g.push_group(
@@ -1543,7 +1504,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine { base: a, stride: 1 }],
+            vec![InputRef::affine(a, 1)],
         );
 
         let d = g.push_group(
@@ -1555,8 +1516,8 @@ mod tests {
             },
             vec![],
             vec![
-                InputRef::Affine { base: b, stride: 1 },
-                InputRef::Affine { base: c, stride: 1 },
+                InputRef::affine(b, 1),
+                InputRef::affine(c, 1),
             ],
         );
 
@@ -1635,15 +1596,8 @@ mod tests {
             },
             vec![],
             vec![
-                InputRef::Affine {
-                    base: weights,
-                    stride: 1,
-                },
-                InputRef::Modular {
-                    base: inp,
-                    stride: 1,
-                    modulus: k,
-                },
+                InputRef::affine(weights, 1),
+                InputRef::modular(inp, 1, k),
             ],
         );
 
@@ -1658,10 +1612,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine {
-                base: mul,
-                stride: k as i64,
-            }],
+            vec![InputRef::affine(mul, k as i64)],
         );
 
         // Bias literal.
@@ -1683,14 +1634,8 @@ mod tests {
             },
             vec![],
             vec![
-                InputRef::Affine {
-                    base: reduce,
-                    stride: 1,
-                },
-                InputRef::Affine {
-                    base: bias,
-                    stride: 1,
-                },
+                InputRef::affine(reduce, 1),
+                InputRef::affine(bias, 1),
             ],
         );
 
@@ -1772,10 +1717,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine {
-                base: lit,
-                stride: 1,
-            }],
+            vec![InputRef::affine(lit, 1)],
         );
 
         g.outputs = vec![neg];
@@ -1848,10 +1790,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine {
-                base: data,
-                stride: 1,
-            }],
+            vec![InputRef::affine(data, 1)],
         );
 
         // Use the scalar result in a large group (broadcast).
@@ -1926,10 +1865,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine {
-                base: data,
-                stride: k as i64,
-            }],
+            vec![InputRef::affine(data, k as i64)],
         );
 
         g.outputs = vec![reduced];
@@ -1981,10 +1917,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine {
-                base: lit,
-                stride: 1,
-            }],
+            vec![InputRef::affine(lit, 1)],
         );
 
         g.outputs = vec![op];
@@ -2054,10 +1987,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine {
-                base: inp,
-                stride: 1,
-            }],
+            vec![InputRef::affine(inp, 1)],
         );
 
         g.outputs = vec![neg];
@@ -2154,14 +2084,8 @@ mod tests {
             },
             vec![],
             vec![
-                InputRef::Affine {
-                    base: lit,
-                    stride: 1,
-                },
-                InputRef::Affine {
-                    base: lit,
-                    stride: 1,
-                },
+                InputRef::affine(lit, 1),
+                InputRef::affine(lit, 1),
             ],
         );
         let pow = g.push_group(
@@ -2173,10 +2097,7 @@ mod tests {
             },
             vec![],
             vec![
-                InputRef::Affine {
-                    base: sub,
-                    stride: 1,
-                },
+                InputRef::affine(sub, 1),
                 InputRef::Broadcast(lit),
             ],
         );
@@ -2189,14 +2110,8 @@ mod tests {
             },
             vec![],
             vec![
-                InputRef::Affine {
-                    base: pow,
-                    stride: 1,
-                },
-                InputRef::Affine {
-                    base: sub,
-                    stride: 1,
-                },
+                InputRef::affine(pow, 1),
+                InputRef::affine(sub, 1),
             ],
         );
         g.outputs = vec![add];
@@ -2227,15 +2142,8 @@ mod tests {
             },
             vec![],
             vec![
-                InputRef::Affine {
-                    base: weights,
-                    stride: 1,
-                },
-                InputRef::Modular {
-                    base: inp,
-                    stride: 1,
-                    modulus: k,
-                },
+                InputRef::affine(weights, 1),
+                InputRef::modular(inp, 1, k),
             ],
         );
         let reduce = g.push_group(
@@ -2248,10 +2156,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine {
-                base: mul,
-                stride: k as i64,
-            }],
+            vec![InputRef::affine(mul, k as i64)],
         );
         let bias = g.push_group(
             m,
@@ -2269,14 +2174,8 @@ mod tests {
             },
             vec![],
             vec![
-                InputRef::Affine {
-                    base: reduce,
-                    stride: 1,
-                },
-                InputRef::Affine {
-                    base: bias,
-                    stride: 1,
-                },
+                InputRef::affine(reduce, 1),
+                InputRef::affine(bias, 1),
             ],
         );
         g.outputs = vec![add];
@@ -2318,10 +2217,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine {
-                base: x,
-                stride: d as i64,
-            }],
+            vec![InputRef::affine(x, d as i64)],
         );
 
         // Step 2: Divide by D to get mean. Broadcast a literal 1/D.
@@ -2341,10 +2237,7 @@ mod tests {
             },
             vec![],
             vec![
-                InputRef::Affine {
-                    base: sum,
-                    stride: 1,
-                },
+                InputRef::affine(sum, 1),
                 InputRef::Broadcast(inv_d),
             ],
         );
@@ -2359,12 +2252,8 @@ mod tests {
             },
             vec![],
             vec![
-                InputRef::Affine { base: x, stride: 1 },
-                InputRef::StridedBroadcast {
-                    base: mean,
-                    stride: 1,
-                    repeat: d,
-                },
+                InputRef::affine(x, 1),
+                InputRef::strided_broadcast(mean, 1, d),
             ],
         );
 
@@ -2385,10 +2274,7 @@ mod tests {
             },
             vec![],
             vec![
-                InputRef::Affine {
-                    base: x_centered,
-                    stride: 1,
-                },
+                InputRef::affine(x_centered, 1),
                 InputRef::Broadcast(two),
             ],
         );
@@ -2404,10 +2290,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine {
-                base: pow2,
-                stride: d as i64,
-            }],
+            vec![InputRef::affine(pow2, d as i64)],
         );
 
         // Step 6: Divide by D and add epsilon, then rsqrt.
@@ -2420,10 +2303,7 @@ mod tests {
             },
             vec![],
             vec![
-                InputRef::Affine {
-                    base: var_sum,
-                    stride: 1,
-                },
+                InputRef::affine(var_sum, 1),
                 InputRef::Broadcast(inv_d),
             ],
         );
@@ -2443,10 +2323,7 @@ mod tests {
             },
             vec![],
             vec![
-                InputRef::Affine {
-                    base: var_mean,
-                    stride: 1,
-                },
+                InputRef::affine(var_mean, 1),
                 InputRef::Broadcast(eps),
             ],
         );
@@ -2458,10 +2335,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine {
-                base: var_eps,
-                stride: 1,
-            }],
+            vec![InputRef::affine(var_eps, 1)],
         );
         let rsqrt = g.push_group(
             m,
@@ -2471,10 +2345,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine {
-                base: sqrt_var,
-                stride: 1,
-            }],
+            vec![InputRef::affine(sqrt_var, 1)],
         );
 
         // Step 7: Normalize: x_centered * rsqrt (StridedBroadcast).
@@ -2487,15 +2358,8 @@ mod tests {
             },
             vec![],
             vec![
-                InputRef::Affine {
-                    base: x_centered,
-                    stride: 1,
-                },
-                InputRef::StridedBroadcast {
-                    base: rsqrt,
-                    stride: 1,
-                    repeat: d,
-                },
+                InputRef::affine(x_centered, 1),
+                InputRef::strided_broadcast(rsqrt, 1, d),
             ],
         );
 
@@ -2567,11 +2431,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::StridedBroadcast {
-                base: source,
-                stride: 1,
-                repeat: d,
-            }],
+            vec![InputRef::strided_broadcast(source, 1, d)],
         );
 
         g.outputs = vec![consumer];
@@ -2609,11 +2469,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::StridedBroadcast {
-                base: source,
-                stride: 1,
-                repeat: d,
-            }],
+            vec![InputRef::strided_broadcast(source, 1, d)],
         );
 
         g.outputs = vec![consumer];
@@ -2653,15 +2509,8 @@ mod tests {
             },
             vec![],
             vec![
-                InputRef::Affine {
-                    base: w1,
-                    stride: 1,
-                },
-                InputRef::Modular {
-                    base: inp,
-                    stride: 1,
-                    modulus: k1,
-                },
+                InputRef::affine(w1, 1),
+                InputRef::modular(inp, 1, k1),
             ],
         );
         let red1 = g.push_group(
@@ -2674,10 +2523,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine {
-                base: mul1,
-                stride: k1 as i64,
-            }],
+            vec![InputRef::affine(mul1, k1 as i64)],
         );
 
         // Activation (elementwise).
@@ -2689,10 +2535,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine {
-                base: red1,
-                stride: 1,
-            }],
+            vec![InputRef::affine(red1, 1)],
         );
 
         // MatMul 2: [K2, M] @ act[M] → output[K2]
@@ -2712,15 +2555,8 @@ mod tests {
             },
             vec![],
             vec![
-                InputRef::Affine {
-                    base: w2,
-                    stride: 1,
-                },
-                InputRef::Modular {
-                    base: act,
-                    stride: 1,
-                    modulus: m,
-                },
+                InputRef::affine(w2, 1),
+                InputRef::modular(act, 1, m),
             ],
         );
         let red2 = g.push_group(
@@ -2733,10 +2569,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine {
-                base: mul2,
-                stride: m as i64,
-            }],
+            vec![InputRef::affine(mul2, m as i64)],
         );
 
         g.outputs = vec![red2];
@@ -2774,10 +2607,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine {
-                base: data,
-                stride: 1,
-            }],
+            vec![InputRef::affine(data, 1)],
         );
         // Scalar reduce: reads ALL 1000 atoms of neg.
         let reduced = g.push_group(
@@ -2790,10 +2620,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine {
-                base: neg,
-                stride: 1,
-            }],
+            vec![InputRef::affine(neg, 1)],
         );
         // Broadcast reduced to large output.
         let output = g.push_group(
@@ -2849,10 +2676,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine {
-                base: lit,
-                stride: 1,
-            }],
+            vec![InputRef::affine(lit, 1)],
         );
 
         // Consumer: 100 atoms reading source via StridedBroadcast(repeat=10).
@@ -2866,11 +2690,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::StridedBroadcast {
-                base: source,
-                stride: 1,
-                repeat: 10,
-            }],
+            vec![InputRef::strided_broadcast(source, 1, 10)],
         );
 
         g.outputs = vec![consumer];
@@ -2904,10 +2724,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine {
-                base: lit,
-                stride: 1,
-            }],
+            vec![InputRef::affine(lit, 1)],
         );
         let exp = g.push_group(
             103,
@@ -2917,10 +2734,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine {
-                base: neg,
-                stride: 1,
-            }],
+            vec![InputRef::affine(neg, 1)],
         );
 
         g.outputs = vec![exp];
@@ -2955,15 +2769,8 @@ mod tests {
             },
             vec![],
             vec![
-                InputRef::Affine {
-                    base: weights,
-                    stride: 1,
-                },
-                InputRef::Modular {
-                    base: inp,
-                    stride: 1,
-                    modulus: k,
-                },
+                InputRef::affine(weights, 1),
+                InputRef::modular(inp, 1, k),
             ],
         );
         let reduce = g.push_group(
@@ -2976,10 +2783,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine {
-                base: mul,
-                stride: k as i64,
-            }],
+            vec![InputRef::affine(mul, k as i64)],
         );
 
         g.outputs = vec![reduce];
@@ -3031,11 +2835,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::StridedBroadcast {
-                base: src1,
-                stride: 1,
-                repeat: d1,
-            }],
+            vec![InputRef::strided_broadcast(src1, 1, d1)],
         );
 
         // Apply StridedBroadcast with repeat=64.
@@ -3047,11 +2847,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::StridedBroadcast {
-                base: src2,
-                stride: 1,
-                repeat: d2,
-            }],
+            vec![InputRef::strided_broadcast(src2, 1, d2)],
         );
 
         g.outputs = vec![expanded1, expanded2];
@@ -3085,10 +2881,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine {
-                base: data,
-                stride: 1,
-            }],
+            vec![InputRef::affine(data, 1)],
         );
 
         // Whole group with Explicit input (reverse order).
@@ -3110,10 +2903,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine {
-                base: reversed,
-                stride: 1,
-            }],
+            vec![InputRef::affine(reversed, 1)],
         );
 
         g.outputs = vec![output];

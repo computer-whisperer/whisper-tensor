@@ -561,10 +561,7 @@ mod tests {
             },
             vec![],
             vec![
-                InputRef::Affine {
-                    base: inp,
-                    stride: 1,
-                },
+                InputRef::affine(inp, 1),
                 InputRef::Broadcast(two),
             ],
         );
@@ -586,14 +583,8 @@ mod tests {
             },
             vec![],
             vec![
-                InputRef::Affine {
-                    base: mul,
-                    stride: 1,
-                },
-                InputRef::Affine {
-                    base: bias,
-                    stride: 1,
-                },
+                InputRef::affine(mul, 1),
+                InputRef::affine(bias, 1),
             ],
         );
 
@@ -626,10 +617,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine {
-                base: inp,
-                stride: 4,
-            }],
+            vec![InputRef::affine(inp, 4)],
         );
 
         let input_data = make_f32_tensor(&[1.0, 2.0, 3.0, 4.0, 10.0, 20.0, 30.0, 40.0]);
@@ -659,10 +647,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine {
-                base: inp,
-                stride: 1,
-            }],
+            vec![InputRef::affine(inp, 1)],
         );
 
         let exp = g.push_group(
@@ -673,10 +658,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine {
-                base: neg,
-                stride: 1,
-            }],
+            vec![InputRef::affine(neg, 1)],
         );
 
         let _dead = g.push_group(
@@ -723,10 +705,7 @@ mod tests {
             DType::F32,
             ScalarOp::IndirectLoad { table_base: table },
             vec![],
-            vec![InputRef::Affine {
-                base: indices,
-                stride: 1,
-            }],
+            vec![InputRef::affine(indices, 1)],
         );
 
         let table_data = make_f32_tensor(&[10.0, 20.0, 30.0, 40.0]);

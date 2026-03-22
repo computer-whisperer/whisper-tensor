@@ -419,20 +419,12 @@ fn format_input_ref(ir: &crate::nano_graph::InputRef) -> String {
     use crate::nano_graph::InputRef;
     match ir {
         InputRef::Broadcast(id) => format!("Broadcast({})", id),
-        InputRef::Affine { base, stride } => format!("Affine(base={}, stride={})", base, stride),
-        InputRef::StridedBroadcast {
-            base,
-            stride,
-            repeat,
-        } => format!(
+        InputRef::Strided { base, stride_inner: stride, .. } => format!("Affine(base={}, stride={})", base, stride),
+        InputRef::Strided { base, stride_outer: stride, modulus: repeat, .. } => format!(
             "StridedBroadcast(base={}, stride={}, repeat={})",
             base, stride, repeat
         ),
-        InputRef::Modular {
-            base,
-            stride,
-            modulus,
-        } => format!(
+        InputRef::Strided { base, stride_inner: stride, modulus, .. } => format!(
             "Modular(base={}, stride={}, modulus={})",
             base, stride, modulus
         ),
