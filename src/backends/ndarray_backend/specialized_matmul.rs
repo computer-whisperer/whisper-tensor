@@ -39,17 +39,16 @@ impl NDArrayNumericTensor<DynRank> {
             }
             (NDArrayNumericTensor::BF16(a), NDArrayNumericTensor::BF16(b)) => {
                 match accumulate_dtype {
-                    Some(DType::BF16) => NDArrayNumericTensor::BF16(
-                        generic_matmul_accum_same_type(a, b, mode)?,
-                    ),
-                    Some(DType::F32) => {
-                        matmul_bf16_fp32_accumulate(a, b, output_dtype, mode)?
+                    Some(DType::BF16) => {
+                        NDArrayNumericTensor::BF16(generic_matmul_accum_same_type(a, b, mode)?)
                     }
-                    _ => NDArrayNumericTensor::BF16(
-                        full_generic_matmul::matmul_with_accum_dtype(
-                            a, b, accumulate_dtype, mode,
-                        )?,
-                    ),
+                    Some(DType::F32) => matmul_bf16_fp32_accumulate(a, b, output_dtype, mode)?,
+                    _ => NDArrayNumericTensor::BF16(full_generic_matmul::matmul_with_accum_dtype(
+                        a,
+                        b,
+                        accumulate_dtype,
+                        mode,
+                    )?),
                 }
             }
             (NDArrayNumericTensor::F16(a), NDArrayNumericTensor::F16(b)) => {

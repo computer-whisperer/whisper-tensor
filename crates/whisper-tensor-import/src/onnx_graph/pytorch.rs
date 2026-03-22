@@ -36,9 +36,13 @@ pub fn linear(
             ]);
             let shape_const = Constant::new(
                 None,
-                TensorData::new(vec![-1i64, in_features as i64].into(), Shape::from(&[2usize][..]))?,
+                TensorData::new(
+                    vec![-1i64, in_features as i64].into(),
+                    Shape::from(&[2usize][..]),
+                )?,
             );
-            let flat = Reshape::new_with_forced_output(None, input.clone(), shape_const, flat_shape)?;
+            let flat =
+                Reshape::new_with_forced_output(None, input.clone(), shape_const, flat_shape)?;
             (flat as Arc<dyn Tensor>, Some(leading))
         } else {
             (input.clone(), None)
@@ -72,8 +76,10 @@ pub fn linear(
                 None,
                 TensorData::new(shape_data.into(), Shape::from(&[leading.len() + 1][..]))?,
             );
-            Ok(Reshape::new_with_forced_output(None, gemm_out, shape_const, out_shape)?
-                as Arc<dyn Tensor>)
+            Ok(
+                Reshape::new_with_forced_output(None, gemm_out, shape_const, out_shape)?
+                    as Arc<dyn Tensor>,
+            )
         } else {
             Ok(gemm_out as Arc<dyn Tensor>)
         }

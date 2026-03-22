@@ -307,7 +307,11 @@ pub fn load_llama3(
         layer_output = Add::new(None, attention_output, hidden_layer)?;
     }
 
-    let h = rms_norm(&model_weight_manager.prefix("norm"), layer_output, Some(config.rms_norm_eps))?;
+    let h = rms_norm(
+        &model_weight_manager.prefix("norm"),
+        layer_output,
+        Some(config.rms_norm_eps),
+    )?;
     let out = linear(&weight_manager.prefix("lm_head"), h)?;
     output_tensors.push(("logits".to_string(), out));
 

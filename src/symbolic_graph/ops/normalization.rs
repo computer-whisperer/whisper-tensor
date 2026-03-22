@@ -491,8 +491,7 @@ impl Operation for RMSNormalizationOperation {
         let normalized =
             milli_graph::ops::CastLike::push_new(&mut graph, normalized, input_data, rng);
 
-        let out =
-            milli_graph::ops::SimpleBinary::mul(&mut graph, normalized, input_scale, rng);
+        let out = milli_graph::ops::SimpleBinary::mul(&mut graph, normalized, input_scale, rng);
 
         let out = if let Some(bias) = self.bias {
             let bias = input_map[&bias];
@@ -701,8 +700,7 @@ impl Operation for LayerNormalizationOperation {
         let normalized =
             milli_graph::ops::CastLike::push_new(&mut graph, normalized, input_data, rng);
 
-        let out =
-            milli_graph::ops::SimpleBinary::mul(&mut graph, normalized, input_scale, rng);
+        let out = milli_graph::ops::SimpleBinary::mul(&mut graph, normalized, input_scale, rng);
 
         let out = if let Some(bias) = self.bias {
             let bias = input_map[&bias];
@@ -1071,11 +1069,18 @@ mod tests {
         // PyTorch result: [0.1826171875, 0.365234375, 0.546875, 0.73046875]
         let mut rng = wyrand::WyRand::new(42);
 
-        let x_vals: Vec<bf16> = [1.0f32, 2.0, 3.0, 4.0].iter().map(|v| bf16::from_f32(*v)).collect();
-        let w_vals: Vec<bf16> = [0.5f32, 0.5, 0.5, 0.5].iter().map(|v| bf16::from_f32(*v)).collect();
+        let x_vals: Vec<bf16> = [1.0f32, 2.0, 3.0, 4.0]
+            .iter()
+            .map(|v| bf16::from_f32(*v))
+            .collect();
+        let w_vals: Vec<bf16> = [0.5f32, 0.5, 0.5, 0.5]
+            .iter()
+            .map(|v| bf16::from_f32(*v))
+            .collect();
         let expected: Vec<f32> = vec![0.1826171875, 0.365234375, 0.546875, 0.73046875];
 
-        let x_tensor = NDArrayNumericTensor::<DynRank>::from_vec_shape(x_vals, &vec![1, 4]).unwrap();
+        let x_tensor =
+            NDArrayNumericTensor::<DynRank>::from_vec_shape(x_vals, &vec![1, 4]).unwrap();
         let w_tensor = NDArrayNumericTensor::<DynRank>::from_vec_shape(w_vals, &vec![4]).unwrap();
 
         let x_id = GlobalId::new(&mut rng);
@@ -1125,11 +1130,18 @@ mod tests {
     #[test]
     fn test_rmsnorm_bf16_rank3() {
         let mut rng = wyrand::WyRand::new(42);
-        let x_vals: Vec<bf16> = [1.0f32, 2.0, 3.0, 4.0].iter().map(|v| bf16::from_f32(*v)).collect();
-        let w_vals: Vec<bf16> = [0.5f32, 0.5, 0.5, 0.5].iter().map(|v| bf16::from_f32(*v)).collect();
+        let x_vals: Vec<bf16> = [1.0f32, 2.0, 3.0, 4.0]
+            .iter()
+            .map(|v| bf16::from_f32(*v))
+            .collect();
+        let w_vals: Vec<bf16> = [0.5f32, 0.5, 0.5, 0.5]
+            .iter()
+            .map(|v| bf16::from_f32(*v))
+            .collect();
         let expected: Vec<f32> = vec![0.1826171875, 0.365234375, 0.546875, 0.73046875];
 
-        let x_tensor = NDArrayNumericTensor::<DynRank>::from_vec_shape(x_vals, &vec![1, 1, 4]).unwrap();
+        let x_tensor =
+            NDArrayNumericTensor::<DynRank>::from_vec_shape(x_vals, &vec![1, 1, 4]).unwrap();
         let w_tensor = NDArrayNumericTensor::<DynRank>::from_vec_shape(w_vals, &vec![4]).unwrap();
 
         let x_id = GlobalId::new(&mut rng);
@@ -1138,9 +1150,15 @@ mod tests {
 
         let op = RMSNormalizationOperation {
             global_id: GlobalId::new(&mut rng),
-            input: x_id, scale: w_id, bias: None,
-            output: out_id, mean_output: None, inv_std_dev_output: None,
-            axis: -1, epsilon: 1e-6, stash_type: DType::F32,
+            input: x_id,
+            scale: w_id,
+            bias: None,
+            output: out_id,
+            mean_output: None,
+            inv_std_dev_output: None,
+            axis: -1,
+            epsilon: 1e-6,
+            stash_type: DType::F32,
         };
 
         let tensor_dtypes = HashMap::from([(x_id, DType::BF16), (w_id, DType::BF16)]);
@@ -1152,7 +1170,10 @@ mod tests {
         inputs.insert(w_id, NumericTensor::NDArray(w_tensor));
 
         let mut backend = EvalBackend::NDArray;
-        let results: HashMap<_, _> = milli_graph.eval(&inputs, &mut (), &mut backend).unwrap().collect();
+        let results: HashMap<_, _> = milli_graph
+            .eval(&inputs, &mut (), &mut backend)
+            .unwrap()
+            .collect();
         let result = &results[&out_id];
         assert_eq!(result.shape(), &[1, 1, 4]);
 
@@ -1160,7 +1181,10 @@ mod tests {
         let result_f32: Vec<f32> = result_nd.flatten().try_into().unwrap();
 
         for (i, (got, want)) in result_f32.iter().zip(expected.iter()).enumerate() {
-            assert!((*got - *want).abs() < 1e-6, "element {i}: got {got} want {want}");
+            assert!(
+                (*got - *want).abs() < 1e-6,
+                "element {i}: got {got} want {want}"
+            );
         }
     }
 }

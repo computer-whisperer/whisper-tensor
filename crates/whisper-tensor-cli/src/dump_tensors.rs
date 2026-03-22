@@ -39,7 +39,8 @@ fn read_npy(path: &Path) -> Result<NumericTensor<DynRank>, String> {
     };
     let header_start = if major >= 2 { 12 } else { 10 };
     let header_end = header_start + header_len;
-    let header = std::str::from_utf8(&data[header_start..header_end]).map_err(|e| format!("{e}"))?;
+    let header =
+        std::str::from_utf8(&data[header_start..header_end]).map_err(|e| format!("{e}"))?;
 
     let dtype = parse_npy_dtype(header)?;
     let shape = parse_npy_shape(header)?;
@@ -51,7 +52,9 @@ fn read_npy(path: &Path) -> Result<NumericTensor<DynRank>, String> {
 }
 
 fn parse_npy_dtype(header: &str) -> Result<DType, String> {
-    let descr_start = header.find("'descr'").or_else(|| header.find("\"descr\""))
+    let descr_start = header
+        .find("'descr'")
+        .or_else(|| header.find("\"descr\""))
         .ok_or("no 'descr' in npy header")?;
     let rest = &header[descr_start..];
     let colon = rest.find(':').ok_or("no colon after descr")?;
@@ -78,14 +81,21 @@ fn parse_npy_dtype(header: &str) -> Result<DType, String> {
 }
 
 fn parse_npy_shape(header: &str) -> Result<Vec<u64>, String> {
-    let start = header.find("'shape'").or_else(|| header.find("\"shape\""))
+    let start = header
+        .find("'shape'")
+        .or_else(|| header.find("\"shape\""))
         .ok_or("no 'shape'")?;
     let rest = &header[start..];
     let open = rest.find('(').ok_or("no '('")?;
     let close = rest.find(')').ok_or("no ')'")?;
     let inner = rest[open + 1..close].trim();
-    if inner.is_empty() { return Ok(vec![]); }
-    inner.split(',').map(|s| s.trim()).filter(|s| !s.is_empty())
+    if inner.is_empty() {
+        return Ok(vec![]);
+    }
+    inner
+        .split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
         .map(|s| s.parse::<u64>().map_err(|e| format!("bad dim '{s}': {e}")))
         .collect()
 }
@@ -95,21 +105,34 @@ fn parse_npy_shape(header: &str) -> Result<Vec<u64>, String> {
 // ---------------------------------------------------------------------------
 
 fn write_npy(path: &Path, tensor: &NumericTensor<DynRank>) -> Result<(), String> {
-    let nd = tensor.to_ndarray().map_err(|e| format!("to_ndarray: {e}"))?;
+    let nd = tensor
+        .to_ndarray()
+        .map_err(|e| format!("to_ndarray: {e}"))?;
     let shape = nd.shape().to_vec();
 
     // Cast to F32 for .npy compatibility, then extract raw f32 values
     let nd = if nd.dtype() != DType::F32 {
-        nd.cast(DType::F32).map_err(|e| format!("cast to f32: {e}"))?
+        nd.cast(DType::F32)
+            .map_err(|e| format!("cast to f32: {e}"))?
     } else {
         nd
     };
-    let flat: Vec<f32> = nd.flatten().try_to_vec()
+    let flat: Vec<f32> = nd
+        .flatten()
+        .try_to_vec()
         .map_err(|e| format!("flatten to vec: {e}"))?;
 
     // Write .npy v1 format
-    let shape_str = shape.iter().map(|d| d.to_string()).collect::<Vec<_>>().join(", ");
-    let shape_str = if shape.len() == 1 { format!("{},", shape_str) } else { shape_str };
+    let shape_str = shape
+        .iter()
+        .map(|d| d.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let shape_str = if shape.len() == 1 {
+        format!("{},", shape_str)
+    } else {
+        shape_str
+    };
     let header = format!(
         "{{'descr': '<f4', 'fortran_order': False, 'shape': ({}), }}",
         shape_str
@@ -197,7 +220,11 @@ impl SymbolicGraphObserver for TensorDumpObserver {
                 let n = preview.len().min(3);
                 eprintln!(
                     "  captured '{}': shape={:?} dtype={:?} first{}={:.6?}",
-                    name, tensor.shape(), tensor.dtype(), n, &preview[..n]
+                    name,
+                    tensor.shape(),
+                    tensor.dtype(),
+                    n,
+                    &preview[..n]
                 );
                 self.captured.insert(name.clone(), tensor.clone());
             }
@@ -228,16 +255,19 @@ pub fn cmd_dump_tensors(
         std::process::exit(1);
     });
 
-    eprintln!("ONNX export: {:.1}s, {} bytes", t0.elapsed().as_secs_f32(), onnx_data.len());
+    eprintln!(
+        "ONNX export: {:.1}s, {} bytes",
+        t0.elapsed().as_secs_f32(),
+        onnx_data.len()
+    );
     use std::io::Write;
     std::io::stderr().flush().ok();
     let t1 = std::time::Instant::now();
     let mut rng = rand::rng();
-    let model = Model::new_from_onnx(&onnx_data, &mut rng, Some(&model_path))
-        .unwrap_or_else(|e| {
-            eprintln!("Failed to load ONNX: {e}");
-            std::process::exit(1);
-        });
+    let model = Model::new_from_onnx(&onnx_data, &mut rng, Some(&model_path)).unwrap_or_else(|e| {
+        eprintln!("Failed to load ONNX: {e}");
+        std::process::exit(1);
+    });
     eprintln!("ONNX parse: {:.1}s", t1.elapsed().as_secs_f32());
     std::io::stderr().flush().ok();
 
@@ -270,7 +300,11 @@ pub fn cmd_dump_tensors(
     // Load explicitly provided .npy inputs
     for (name, path) in &input_npys {
         let tensor = read_npy(path).unwrap_or_else(|e| {
-            eprintln!("Failed to read input '{}' from {}: {e}", name, path.display());
+            eprintln!(
+                "Failed to read input '{}' from {}: {e}",
+                name,
+                path.display()
+            );
             std::process::exit(1);
         });
         inputs.insert(name.clone(), tensor);
@@ -278,14 +312,21 @@ pub fn cmd_dump_tensors(
 
     // Auto-fill missing inputs with zeros (same as accuracy test)
     for (name, (dtype, shape)) in &model_input_info {
-        if inputs.contains_key(name) { continue; }
+        if inputs.contains_key(name) {
+            continue;
+        }
         let concrete_shape: Vec<u64> = shape.iter().map(|d| d.unwrap_or(0)).collect();
         let numel: usize = concrete_shape.iter().product::<u64>() as usize;
         if let Some(elem_size) = dtype.bytes_per_element() {
             let zeros = vec![0u8; numel * elem_size];
-            if let Ok(nd) = NDArrayNumericTensor::from_raw_data(&zeros, *dtype, concrete_shape.clone()) {
+            if let Ok(nd) =
+                NDArrayNumericTensor::from_raw_data(&zeros, *dtype, concrete_shape.clone())
+            {
                 inputs.insert(name.clone(), NumericTensor::NDArray(nd));
-                eprintln!("  Auto-filled '{}': dtype={:?} shape={:?}", name, dtype, concrete_shape);
+                eprintln!(
+                    "  Auto-filled '{}': dtype={:?} shape={:?}",
+                    name, dtype, concrete_shape
+                );
             }
         }
     }
@@ -300,9 +341,18 @@ pub fn cmd_dump_tensors(
             std::process::exit(1);
         });
 
-    eprintln!("Eval complete. {} outputs, observer called {} times", outputs.len(), observer.call_count);
+    eprintln!(
+        "Eval complete. {} outputs, observer called {} times",
+        outputs.len(),
+        observer.call_count
+    );
     for (name, t) in &outputs {
-        eprintln!("  output '{}': shape={:?} dtype={:?}", name, t.shape(), t.dtype());
+        eprintln!(
+            "  output '{}': shape={:?} dtype={:?}",
+            name,
+            t.shape(),
+            t.dtype()
+        );
     }
 
     // Write captured tensors

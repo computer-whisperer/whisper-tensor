@@ -7,13 +7,13 @@ use crate::onnx_graph::operators::{
 use crate::onnx_graph::pytorch::{
     div_scalar, linear, reshape, rms_norm, silu, transpose, unsqueeze,
 };
-use std::collections::HashMap;
 use crate::onnx_graph::tensor::{
     DType, Dimension, InputTensor, InputTensorInitialized, Shape, Tensor, TensorData,
     TensorDataValue,
 };
 use crate::onnx_graph::weights::WeightManager;
 use prost::Message;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 pub struct Qwen2Config {
@@ -152,9 +152,9 @@ pub fn load_qwen2(
         TensorData::new(TensorDataValue::BF16(sin_values), cos_sin_cache_shape)?,
     );
 
-    let mut tensor_names: HashMap<*const dyn Tensor, String> = HashMap::new();
+    let mut tensor_names: HashMap<usize, String> = HashMap::new();
 
-    tensor_names.insert(Arc::as_ptr(&x) as *const dyn Tensor, "embed_output".to_string());
+    tensor_names.insert(Arc::as_ptr(&x).addr(), "embed_output".to_string());
     let mut layer_output: Arc<dyn Tensor> = x;
     for i in 0..config.num_hidden_layers {
         let layer_weight_manager = model_weight_manager.prefix(&format!("layers.{i}"));
@@ -164,7 +164,10 @@ pub fn load_qwen2(
             layer_input.clone(),
             Some(config.rms_norm_eps),
         )?;
-        tensor_names.insert(Arc::as_ptr(&att_norm) as *const dyn Tensor, format!("layers.{i}.input_layernorm.output"));
+        tensor_names.insert(
+            Arc::as_ptr(&att_norm).addr(),
+            format!("layers.{i}.input_layernorm.output"),
+        );
 
         // Multi-head Attention (QKV projections have bias in Qwen2, handled by linear())
         let q = linear(
@@ -176,9 +179,18 @@ pub fn load_qwen2(
             att_norm.clone(),
         )?;
         let v = linear(&layer_weight_manager.prefix("self_attn.v_proj"), att_norm)?;
-        tensor_names.insert(Arc::as_ptr(&q) as *const dyn Tensor, format!("layers.{i}.self_attn.q_proj.output"));
-        tensor_names.insert(Arc::as_ptr(&k) as *const dyn Tensor, format!("layers.{i}.self_attn.k_proj.output"));
-        tensor_names.insert(Arc::as_ptr(&v) as *const dyn Tensor, format!("layers.{i}.self_attn.v_proj.output"));
+        tensor_names.insert(
+            Arc::as_ptr(&q).addr(),
+            format!("layers.{i}.self_attn.q_proj.output"),
+        );
+        tensor_names.insert(
+            Arc::as_ptr(&k).addr(),
+            format!("layers.{i}.self_attn.k_proj.output"),
+        );
+        tensor_names.insert(
+            Arc::as_ptr(&v).addr(),
+            format!("layers.{i}.self_attn.v_proj.output"),
+        );
 
         let q: Arc<dyn Tensor> = Transpose::new(
             None,
@@ -308,40 +320,68 @@ pub fn load_qwen2(
         let output = Transpose::new(None, output, Some(vec![0, 2, 1, 3]));
         let output = reshape(output, vec![0, 0, -1])?;
 
-        tensor_names.insert(Arc::as_ptr(&output) as *const dyn Tensor, format!("layers.{i}.self_attn.pre_o_proj"));
+        tensor_names.insert(
+            Arc::as_ptr(&output).addr(),
+            format!("layers.{i}.self_attn.pre_o_proj"),
+        );
         let hidden_layer = linear(&layer_weight_manager.prefix("self_attn.o_proj"), output)?;
-        tensor_names.insert(Arc::as_ptr(&hidden_layer) as *const dyn Tensor, format!("layers.{i}.self_attn.o_proj.output"));
+        tensor_names.insert(
+            Arc::as_ptr(&hidden_layer).addr(),
+            format!("layers.{i}.self_attn.o_proj.output"),
+        );
 
         let attention_output = Add::new(None, layer_input, hidden_layer)?;
-        tensor_names.insert(Arc::as_ptr(&attention_output) as *const dyn Tensor, format!("layers.{i}.attn_residual"));
+        tensor_names.insert(
+            Arc::as_ptr(&attention_output).addr(),
+            format!("layers.{i}.attn_residual"),
+        );
         let ffn_norm = rms_norm(
             &layer_weight_manager.prefix("post_attention_layernorm"),
             attention_output.clone(),
             Some(config.rms_norm_eps),
         )?;
-        tensor_names.insert(Arc::as_ptr(&ffn_norm) as *const dyn Tensor, format!("layers.{i}.post_attention_layernorm.output"));
+        tensor_names.insert(
+            Arc::as_ptr(&ffn_norm).addr(),
+            format!("layers.{i}.post_attention_layernorm.output"),
+        );
 
         // SwiGLU Feed-Forward
         let gate = linear(
             &layer_weight_manager.prefix("mlp.gate_proj"),
             ffn_norm.clone(),
         )?;
-        tensor_names.insert(Arc::as_ptr(&gate) as *const dyn Tensor, format!("layers.{i}.mlp.gate_proj.output"));
+        tensor_names.insert(
+            Arc::as_ptr(&gate).addr(),
+            format!("layers.{i}.mlp.gate_proj.output"),
+        );
         let gate = silu(gate)?;
         let up = linear(
             &layer_weight_manager.prefix("mlp.up_proj"),
             ffn_norm.clone(),
         )?;
         let hidden_layer = Mul::new(None, gate, up)?;
-        tensor_names.insert(Arc::as_ptr(&hidden_layer) as *const dyn Tensor, format!("layers.{i}.mlp.gate_up_mul"));
+        tensor_names.insert(
+            Arc::as_ptr(&hidden_layer).addr(),
+            format!("layers.{i}.mlp.gate_up_mul"),
+        );
         let hidden_layer = linear(&layer_weight_manager.prefix("mlp.down_proj"), hidden_layer)?;
-        tensor_names.insert(Arc::as_ptr(&hidden_layer) as *const dyn Tensor, format!("layers.{i}.mlp.down_proj.output"));
+        tensor_names.insert(
+            Arc::as_ptr(&hidden_layer).addr(),
+            format!("layers.{i}.mlp.down_proj.output"),
+        );
 
         layer_output = Add::new(None, attention_output, hidden_layer)?;
-        tensor_names.insert(Arc::as_ptr(&layer_output) as *const dyn Tensor, format!("layers.{i}.output"));
+        tensor_names.insert(
+            Arc::as_ptr(&layer_output).addr(),
+            format!("layers.{i}.output"),
+        );
     }
 
-    let h = rms_norm(&model_weight_manager.prefix("norm"), layer_output, Some(config.rms_norm_eps))?;
+    let h = rms_norm(
+        &model_weight_manager.prefix("norm"),
+        layer_output,
+        Some(config.rms_norm_eps),
+    )?;
 
     // Qwen2 can tie word embeddings: reuse embed_tokens.weight as the output projection
     let out = if config.tie_word_embeddings {
