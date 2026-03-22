@@ -374,6 +374,55 @@ impl<T: SingleOutputNode> Tensor for T {
     }
 }
 
+/// Wrapper that assigns an ONNX tensor name to any tensor.
+/// Used to label intermediate results for debugging/introspection.
+pub struct NamedTensor {
+    inner: Arc<dyn Tensor>,
+    name: String,
+}
+
+impl NamedTensor {
+    pub fn new(inner: Arc<dyn Tensor>, name: String) -> Arc<Self> {
+        Arc::new(Self { inner, name })
+    }
+}
+
+impl Tensor for NamedTensor {
+    fn dtype(&self) -> DType {
+        self.inner.dtype()
+    }
+    fn shape(&self) -> &Shape {
+        self.inner.shape()
+    }
+    fn get_name(&self) -> Option<&str> {
+        Some(&self.name)
+    }
+    fn get_nodes<'a>(&'a self, table: &mut HashSet<&'a dyn Node>) {
+        self.inner.get_nodes(table);
+    }
+    fn get_sub_tensors<'a>(&'a self, table: &mut HashSet<&'a dyn Tensor>) {
+        table.insert(self.inner.as_ref());
+        self.inner.get_sub_tensors(table);
+    }
+    fn gather_weights<'a>(&'a self, manager: &mut dyn WeightExternalOutputManager<'a>) {
+        self.inner.gather_weights(manager);
+    }
+    fn get_initializer<'a>(
+        &'a self,
+        _name: String,
+        _manager: &mut dyn WeightExternalOutputManager<'a>,
+    ) -> Result<Option<onnx::TensorProto>, Error> {
+        Ok(None)
+    }
+    fn resolve_data(&self) -> Option<TensorData> {
+        self.inner.resolve_data()
+    }
+
+    fn is_input(&self) -> bool {
+        self.inner.is_input()
+    }
+}
+
 pub struct InputTensor {
     data_type: DType,
     name: String,

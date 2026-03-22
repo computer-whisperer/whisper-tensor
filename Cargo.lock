@@ -7127,6 +7127,8 @@ dependencies = [
  "half",
  "hound",
  "image",
+ "ndarray 0.16.1",
+ "ndarray-npy",
  "rand 0.10.0",
  "serde_json",
  "tracing-subscriber",

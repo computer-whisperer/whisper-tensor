@@ -5,7 +5,7 @@ use crate::onnx_graph::operators::{
     Transpose,
 };
 use crate::onnx_graph::pytorch::{
-    div_scalar, linear, reshape, rms_norm, silu, transpose, unsqueeze,
+    div_scalar, linear, named, reshape, rms_norm, silu, transpose, unsqueeze,
 };
 use crate::onnx_graph::tensor::{
     DType, Dimension, InputTensor, InputTensorInitialized, Shape, Tensor, TensorData,
@@ -145,7 +145,7 @@ pub fn load_qwen2(
         TensorData::new(TensorDataValue::BF16(sin_values), cos_sin_cache_shape)?,
     );
 
-    let mut layer_output: Arc<dyn Tensor> = x;
+    let mut layer_output: Arc<dyn Tensor> = named(x, "embed_output");
     for i in 0..config.num_hidden_layers {
         let layer_weight_manager = model_weight_manager.prefix(&format!("layers.{i}"));
         let layer_input = layer_output.clone();
@@ -154,6 +154,7 @@ pub fn load_qwen2(
             layer_input.clone(),
             None,
         )?;
+        let att_norm = named(att_norm, format!("layers.{i}.input_layernorm.output"));
 
         // Multi-head Attention (QKV projections have bias in Qwen2, handled by linear())
         let q = linear(
@@ -297,11 +298,13 @@ pub fn load_qwen2(
         let hidden_layer = linear(&layer_weight_manager.prefix("self_attn.o_proj"), output)?;
 
         let attention_output = Add::new(None, layer_input, hidden_layer)?;
+        let attention_output = named(attention_output, format!("layers.{i}.attn_residual"));
         let ffn_norm = rms_norm(
             &layer_weight_manager.prefix("post_attention_layernorm"),
             attention_output.clone(),
             None,
         )?;
+        let ffn_norm = named(ffn_norm, format!("layers.{i}.post_attention_layernorm.output"));
 
         // SwiGLU Feed-Forward
         let x = linear(
@@ -316,7 +319,10 @@ pub fn load_qwen2(
         let hidden_layer = Mul::new(None, x, x2)?;
         let hidden_layer = linear(&layer_weight_manager.prefix("mlp.down_proj"), hidden_layer)?;
 
-        layer_output = Add::new(None, attention_output, hidden_layer)?;
+        layer_output = named(
+            Add::new(None, attention_output, hidden_layer)?,
+            format!("layers.{i}.output"),
+        );
     }
 
     let h = rms_norm(&model_weight_manager.prefix("norm"), layer_output, None)?;
