@@ -224,6 +224,7 @@ impl Operation for LstmOperation {
                     &x_t,
                     &w_t,
                     None,
+                    x_t.dtype(),
                     crate::milli_graph::ops::AccumulationMode::default(),
                     backend,
                 )?;
@@ -231,6 +232,7 @@ impl Operation for LstmOperation {
                     &h_t,
                     &r_t,
                     None,
+                    x_t.dtype(),
                     crate::milli_graph::ops::AccumulationMode::default(),
                     backend,
                 )?;

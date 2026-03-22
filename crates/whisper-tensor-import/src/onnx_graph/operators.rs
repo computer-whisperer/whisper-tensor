@@ -661,6 +661,8 @@ impl Gemm {
             return Err(Error::InputShapeError(b_shape.clone()));
         }
         if a_shape[1].as_ref() != b_shape[0].as_ref() {
+            eprintln!("Gemm inner dim mismatch: a[1]={:?} vs b[0]={:?}", a_shape[1], b_shape[0]);
+            eprintln!("  a_shape={:?} b_shape={:?} transA={} transB={}", a_shape, b_shape, trans_a, trans_b);
             return Err(Error::InvalidInputError);
         }
         let output_shape = Shape::new(vec![a_shape[0].clone(), b_shape[1].clone()]);

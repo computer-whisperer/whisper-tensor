@@ -538,6 +538,7 @@ impl MilliOp for Conv {
                         &w_2d,
                         &in_2d,
                         Some(DType::F32),
+                        DType::F32,
                         crate::milli_graph::ops::AccumulationMode::default(),
                         backend,
                     )?;
@@ -600,6 +601,7 @@ impl MilliOp for Conv {
                         &w_2d,
                         &col_tensor,
                         Some(DType::F32),
+                        DType::F32,
                         crate::milli_graph::ops::AccumulationMode::default(),
                         backend,
                     )?;
@@ -942,6 +944,7 @@ impl MilliOp for ConvInputGrad {
                     &w_t,
                     &grad_tensor,
                     Some(DType::F32),
+                    DType::F32,
                     crate::milli_graph::ops::AccumulationMode::default(),
                     backend,
                 )?;
@@ -1201,6 +1204,7 @@ impl MilliOp for ConvWeightGrad {
                     &grad_tensor,
                     &col_t,
                     Some(DType::F32),
+                    DType::F32,
                     crate::milli_graph::ops::AccumulationMode::default(),
                     backend,
                 )?;

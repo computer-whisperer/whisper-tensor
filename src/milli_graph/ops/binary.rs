@@ -1355,8 +1355,14 @@ impl MilliOp for MatMul {
         } else {
             self.accumulation_mode
         };
-        let out =
-            NumericTensor::<DynRank>::matmul(a_input, b_input, accumulate_dtype, mode, backend)?;
+        let out = NumericTensor::<DynRank>::matmul(
+            a_input,
+            b_input,
+            accumulate_dtype,
+            self.output_dtype,
+            mode,
+            backend,
+        )?;
         Ok(Box::new([(self.output, out)].into_iter()))
     }
 

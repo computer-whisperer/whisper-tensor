@@ -263,6 +263,7 @@ impl Operation for SimpleRnnOperation {
                     &x_t,
                     &w_t,
                     None,
+                    x_t.dtype(),
                     crate::milli_graph::ops::AccumulationMode::default(),
                     backend,
                 )?;
@@ -270,6 +271,7 @@ impl Operation for SimpleRnnOperation {
                     &h_t,
                     &r_t,
                     None,
+                    x_t.dtype(),
                     crate::milli_graph::ops::AccumulationMode::default(),
                     backend,
                 )?;
@@ -527,6 +529,7 @@ impl Operation for GruOperation {
                     &x_t,
                     &w_t,
                     None,
+                    x_t.dtype(),
                     crate::milli_graph::ops::AccumulationMode::default(),
                     backend,
                 )?;
@@ -541,6 +544,7 @@ impl Operation for GruOperation {
                     &h_t,
                     &rz_t,
                     None,
+                    x_t.dtype(),
                     crate::milli_graph::ops::AccumulationMode::default(),
                     backend,
                 )?;
@@ -558,6 +562,7 @@ impl Operation for GruOperation {
                     &h_t,
                     &rr_t,
                     None,
+                    x_t.dtype(),
                     crate::milli_graph::ops::AccumulationMode::default(),
                     backend,
                 )?;
@@ -577,6 +582,7 @@ impl Operation for GruOperation {
                         &h_t,
                         &rh_t,
                         None,
+                        x_t.dtype(),
                         crate::milli_graph::ops::AccumulationMode::default(),
                         backend,
                     )?;
@@ -597,6 +603,7 @@ impl Operation for GruOperation {
                         &r_h,
                         &rh_t,
                         None,
+                        x_t.dtype(),
                         crate::milli_graph::ops::AccumulationMode::default(),
                         backend,
                     )?;

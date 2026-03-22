@@ -426,6 +426,20 @@ fn validate_onnx_model(
         }
     }
 
+    // Dump named output tensors for debugging
+    if std::env::var("DUMP_GRAPH").is_ok() {
+        let graph = model.get_symbolic_graph();
+        let names = graph.get_tensors_by_name();
+        let mut names_vec: Vec<_> = names.iter().collect();
+        names_vec.sort_by_key(|(n, _)| n.clone());
+        eprintln!("Named tensors ({}):", names_vec.len());
+        for (name, _id) in &names_vec {
+            if !name.contains("kv_cache") {
+                eprintln!("  {}", name);
+            }
+        }
+    }
+
     // Run eval
     let mut runtime = ModelExecutionRuntime::Eval(EvalBackend::NDArray);
     let actual_outputs = model

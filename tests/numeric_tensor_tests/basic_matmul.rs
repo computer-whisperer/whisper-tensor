@@ -21,6 +21,7 @@ pub fn test_matmul_2_3_bf16(backend: &mut EvalBackend) {
         &tensor_a,
         &tensor_b,
         Some(DType::F32),
+        tensor_a.dtype(),
         AccumulationMode::default(),
         backend,
     )
@@ -51,6 +52,7 @@ pub fn test_matmul_2_3_f16(backend: &mut EvalBackend) {
         &tensor_a,
         &tensor_b,
         Some(DType::F32),
+        tensor_a.dtype(),
         AccumulationMode::default(),
         backend,
     )
@@ -81,6 +83,7 @@ pub fn test_matmul_2_3_fp32(backend: &mut EvalBackend) {
         &tensor_a,
         &tensor_b,
         Some(DType::F32),
+        tensor_a.dtype(),
         AccumulationMode::default(),
         backend,
     )
@@ -123,6 +126,7 @@ pub fn test_matmul_3_3_bf16(backend: &mut EvalBackend) {
         &tensor_a,
         &tensor_b,
         Some(DType::F32),
+        tensor_a.dtype(),
         AccumulationMode::default(),
         backend,
     )
@@ -175,6 +179,7 @@ pub fn test_matmul_3_3_f16(backend: &mut EvalBackend) {
         &tensor_a,
         &tensor_b,
         Some(DType::F32),
+        tensor_a.dtype(),
         AccumulationMode::default(),
         backend,
     )
@@ -227,6 +232,7 @@ pub fn test_matmul_3_3_fp32(backend: &mut EvalBackend) {
         &tensor_a,
         &tensor_b,
         Some(DType::F32),
+        tensor_a.dtype(),
         AccumulationMode::default(),
         backend,
     )
@@ -267,6 +273,7 @@ pub fn test_matmul_1_4_4_1_fp32(backend: &mut EvalBackend) {
         &tensor_a,
         &tensor_b,
         Some(DType::F32),
+        tensor_a.dtype(),
         AccumulationMode::default(),
         backend,
     )
@@ -297,6 +304,7 @@ pub fn test_matmul_1_4_4_1_f16(backend: &mut EvalBackend) {
         &tensor_a,
         &tensor_b,
         Some(DType::F32),
+        tensor_a.dtype(),
         AccumulationMode::default(),
         backend,
     )
@@ -327,6 +335,7 @@ pub fn test_matmul_1_4_4_1_bf16(backend: &mut EvalBackend) {
         &tensor_a,
         &tensor_b,
         Some(DType::F32),
+        tensor_a.dtype(),
         AccumulationMode::default(),
         backend,
     )
@@ -357,6 +366,7 @@ pub fn test_matmul_4_1_1_4_fp32(backend: &mut EvalBackend) {
         &tensor_a,
         &tensor_b,
         Some(DType::F32),
+        tensor_a.dtype(),
         AccumulationMode::default(),
         backend,
     )
@@ -404,6 +414,7 @@ pub fn test_matmul_4_1_1_4_f16(backend: &mut EvalBackend) {
         &tensor_a,
         &tensor_b,
         Some(DType::F32),
+        tensor_a.dtype(),
         AccumulationMode::default(),
         backend,
     )
@@ -451,6 +462,7 @@ pub fn test_matmul_4_1_1_4_bf16(backend: &mut EvalBackend) {
         &tensor_a,
         &tensor_b,
         Some(DType::F32),
+        tensor_a.dtype(),
         AccumulationMode::default(),
         backend,
     )
@@ -498,6 +510,7 @@ pub fn test_matmul_2_2_2_2_fp32(backend: &mut EvalBackend) {
         &tensor_a,
         &tensor_b,
         Some(DType::F32),
+        tensor_a.dtype(),
         AccumulationMode::default(),
         backend,
     )
@@ -528,6 +541,7 @@ pub fn test_matmul_2_2_2_2_bf16(backend: &mut EvalBackend) {
         &tensor_a,
         &tensor_b,
         Some(DType::F32),
+        tensor_a.dtype(),
         AccumulationMode::default(),
         backend,
     )
@@ -558,6 +572,7 @@ pub fn test_matmul_2_2_2_2_f16(backend: &mut EvalBackend) {
         &tensor_a,
         &tensor_b,
         Some(DType::F32),
+        tensor_a.dtype(),
         AccumulationMode::default(),
         backend,
     )
@@ -671,6 +686,7 @@ pub fn test_matmul_rank4_fp32(backend: &mut EvalBackend) {
         &tensor_a_tgt.neg(backend).unwrap(),
         &tensor_b_tgt,
         Some(DType::F32),
+        tensor_a.dtype(),
         AccumulationMode::default(),
         backend,
     )
@@ -679,6 +695,7 @@ pub fn test_matmul_rank4_fp32(backend: &mut EvalBackend) {
         &tensor_a.neg(backend).unwrap(),
         &tensor_b,
         Some(DType::F32),
+        tensor_a.dtype(),
         AccumulationMode::default(),
         &mut EvalBackend::NDArray,
     )

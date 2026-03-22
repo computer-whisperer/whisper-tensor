@@ -840,11 +840,15 @@ impl NumericTensor<DynRank> {
     ///
     /// - Supports broadcasting of leading batch dims.
     /// - accumulate_dtype selects accumulator precision when supported; None uses default.
+    /// - output_dtype controls the dtype of the returned tensor. When it differs from
+    ///   the input dtype (e.g. F32 output from BF16 inputs), the F32 accumulator result
+    ///   is preserved without truncation. This is needed for Gemm's fused bias path.
     /// - Errors if inner dimensions are incompatible after broadcasting.
     pub fn matmul(
         a: &Self,
         b: &Self,
         accumulate_dtype: Option<DType>,
+        output_dtype: DType,
         mode: AccumulationMode,
         backend: &mut EvalBackend,
     ) -> Result<Self, NumericTensorError> {
@@ -878,6 +882,7 @@ impl NumericTensor<DynRank> {
             &a.try_into()?,
             &b.try_into()?,
             accumulate_dtype,
+            output_dtype,
             mode,
         )?))
     }

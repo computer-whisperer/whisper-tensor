@@ -484,24 +484,22 @@ impl Operation for RMSNormalizationOperation {
 
         let normalized = milli_graph::ops::SimpleBinary::mul(&mut graph, input_f32, rms_inv, rng);
 
-        let input_scale_cast =
-            milli_graph::ops::Cast::push_new(&mut graph, input_scale, self.stash_type, rng);
+        // Cast normalized result back to input dtype before scaling, matching
+        // PyTorch's RMSNorm which does `weight * normalized.to(input_dtype)`.
+        // This ensures the scale multiply happens in the original precision,
+        // preventing accumulated rounding divergence through many layers.
+        let normalized =
+            milli_graph::ops::CastLike::push_new(&mut graph, normalized, input_data, rng);
+
         let out =
-            milli_graph::ops::SimpleBinary::mul(&mut graph, normalized, input_scale_cast, rng);
+            milli_graph::ops::SimpleBinary::mul(&mut graph, normalized, input_scale, rng);
 
         let out = if let Some(bias) = self.bias {
-            let bias_cast = milli_graph::ops::Cast::push_new(
-                &mut graph,
-                input_map[&bias],
-                self.stash_type,
-                rng,
-            );
-            milli_graph::ops::SimpleBinary::add(&mut graph, out, bias_cast, rng)
+            let bias = input_map[&bias];
+            milli_graph::ops::SimpleBinary::add(&mut graph, out, bias, rng)
         } else {
             out
         };
-
-        let out = milli_graph::ops::CastLike::push_new(&mut graph, out, input_data, rng);
 
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);
@@ -698,24 +696,20 @@ impl Operation for LayerNormalizationOperation {
 
         let normalized = milli_graph::ops::SimpleBinary::mul(&mut graph, d, inv_stddev, rng);
 
-        let input_scale_cast =
-            milli_graph::ops::Cast::push_new(&mut graph, input_scale, self.stash_type, rng);
+        // Cast normalized result back to input dtype before scaling, matching
+        // PyTorch's LayerNorm which does `weight * normalized.to(input_dtype) + bias`.
+        let normalized =
+            milli_graph::ops::CastLike::push_new(&mut graph, normalized, input_data, rng);
+
         let out =
-            milli_graph::ops::SimpleBinary::mul(&mut graph, normalized, input_scale_cast, rng);
+            milli_graph::ops::SimpleBinary::mul(&mut graph, normalized, input_scale, rng);
 
         let out = if let Some(bias) = self.bias {
-            let bias_cast = milli_graph::ops::Cast::push_new(
-                &mut graph,
-                input_map[&bias],
-                self.stash_type,
-                rng,
-            );
-            milli_graph::ops::SimpleBinary::add(&mut graph, out, bias_cast, rng)
+            let bias = input_map[&bias];
+            milli_graph::ops::SimpleBinary::add(&mut graph, out, bias, rng)
         } else {
             out
         };
-
-        let out = milli_graph::ops::CastLike::push_new(&mut graph, out, input_data, rng);
 
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);

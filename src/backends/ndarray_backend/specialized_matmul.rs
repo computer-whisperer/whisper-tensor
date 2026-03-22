@@ -15,6 +15,7 @@ impl NDArrayNumericTensor<DynRank> {
         outer_a: &Self,
         outer_b: &Self,
         accumulate_dtype: Option<DType>,
+        output_dtype: DType,
         mode: crate::milli_graph::ops::AccumulationMode,
     ) -> Result<Self, NDArrayNumericTensorError> {
         Ok(match (outer_a, outer_b) {
@@ -37,13 +38,19 @@ impl NDArrayNumericTensor<DynRank> {
                 )
             }
             (NDArrayNumericTensor::BF16(a), NDArrayNumericTensor::BF16(b)) => {
-                NDArrayNumericTensor::BF16(match accumulate_dtype {
-                    Some(DType::BF16) => generic_matmul_accum_same_type(a, b, mode)?,
-                    Some(DType::F32) => matmul_bf16_fp32_accumulate(a, b, mode)?,
-                    _ => {
-                        full_generic_matmul::matmul_with_accum_dtype(a, b, accumulate_dtype, mode)?
+                match accumulate_dtype {
+                    Some(DType::BF16) => NDArrayNumericTensor::BF16(
+                        generic_matmul_accum_same_type(a, b, mode)?,
+                    ),
+                    Some(DType::F32) => {
+                        matmul_bf16_fp32_accumulate(a, b, output_dtype, mode)?
                     }
-                })
+                    _ => NDArrayNumericTensor::BF16(
+                        full_generic_matmul::matmul_with_accum_dtype(
+                            a, b, accumulate_dtype, mode,
+                        )?,
+                    ),
+                }
             }
             (NDArrayNumericTensor::F16(a), NDArrayNumericTensor::F16(b)) => {
                 NDArrayNumericTensor::F16(
@@ -103,8 +110,9 @@ impl NDArrayNumericTensor<DynRank> {
 pub fn matmul_bf16_fp32_accumulate(
     a: &ArcArray<bf16, IxDyn>,
     b: &ArcArray<bf16, IxDyn>,
+    output_dtype: DType,
     mode: crate::milli_graph::ops::AccumulationMode,
-) -> Result<ArcArray<bf16, IxDyn>, NDArrayOperationError> {
+) -> Result<NDArrayNumericTensor<DynRank>, NDArrayOperationError> {
     // 0: cast to fp32
     let a = a.mapv(|x| x.to_f32());
     let b = b.mapv(|x| x.to_f32());
@@ -229,10 +237,14 @@ pub fn matmul_bf16_fp32_accumulate(
         result = result.index_axis_move(Axis(0), 0);
     }
 
-    // Cast back to bf16
-    let result: Array<bf16, IxDyn> = result.mapv(bf16::from_f32);
-
-    Ok(result.into_shared())
+    // Cast to output dtype: BF16 (default) or F32 (for Gemm fused bias path)
+    match output_dtype {
+        DType::F32 => Ok(NDArrayNumericTensor::F32(result.into_shared())),
+        _ => {
+            let result: Array<bf16, IxDyn> = result.mapv(bf16::from_f32);
+            Ok(NDArrayNumericTensor::BF16(result.into_shared()))
+        }
+    }
 }
 
 /// ONNX-style batched/broadcasted matrix multiplication.

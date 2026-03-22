@@ -13,26 +13,80 @@ pub fn linear(
     input: Arc<dyn Tensor>,
 ) -> Result<Arc<dyn Tensor>, Error> {
     let weight = weight_manager.get_tensor("weight")?;
-    let weight = transpose(weight);
-
     let bias = weight_manager.get_tensor("bias").ok();
     let input_rank = input.rank();
-    let input = unsqueeze(input, (input_rank as i64) - 1)?;
 
-    //let weight = unsqueeze(weight, weight_rank as i64)?;
-    let mat_out = operators::MatMul::new(
-        weight_manager.get_prefix().map(|x| x.to_string()),
-        input,
-        weight,
-    )?;
-    let mat_out = squeeze(mat_out, (input_rank as i64) - 1)?;
     if let Some(bias) = bias {
-        Ok(operators::Add::new(
-            Some(format!("{}.bias", weight_manager.get_prefix().unwrap())),
-            mat_out,
-            bias,
-        )?)
+        // Use ONNX Gemm op: Y = alpha*A@B + beta*C (fused matmul+bias).
+        // Gemm requires 2-D inputs. For rank > 2, flatten leading dims into
+        // one, apply Gemm, then reshape back. This correctly captures PyTorch
+        // addmm semantics: the Gemm lowering keeps the F32 accumulator live
+        // through the bias add.
+        let in_features = weight.shape().dims.last().unwrap().resolve()?;
+        let out_features = weight.shape().dims[0].resolve()?;
+
+        let (input_2d, leading_dims) = if input_rank > 2 {
+            let leading = input.shape().dims[..input_rank - 1].to_vec();
+            // Flatten to [product_of_leading_dims, in_features] using forced output shape.
+            // The leading product is symbolic (e.g. batch*seq_len), so we use a
+            // Dimension without a concrete value.
+            let flat_shape = Shape::new(vec![
+                Dimension::new(None, Some("flat_batch".to_string()), None),
+                Dimension::new(Some(in_features), None, None),
+            ]);
+            let shape_const = Constant::new(
+                None,
+                TensorData::new(vec![-1i64, in_features as i64].into(), Shape::from(&[2usize][..]))?,
+            );
+            let flat = Reshape::new_with_forced_output(None, input.clone(), shape_const, flat_shape)?;
+            (flat as Arc<dyn Tensor>, Some(leading))
+        } else {
+            (input.clone(), None)
+        };
+
+        let gemm_out = operators::Gemm::new(
+            weight_manager.get_prefix().map(|x| x.to_string()),
+            input_2d,
+            weight,
+            Some(bias),
+            false,
+            true, // transB: weight is [out_features, in_features]
+            1.0,
+            1.0,
+        )?;
+
+        if let Some(leading) = leading_dims {
+            // Reshape back to [...leading_dims, out_features].
+            // Use 0 for concrete leading dims (copy from input) and -1 for the
+            // first symbolic dim (infer from total size).
+            let mut out_dims = leading.clone();
+            out_dims.push(Dimension::new(Some(out_features), None, None));
+            let out_shape = Shape::new(out_dims);
+
+            let mut shape_data: Vec<i64> = leading
+                .iter()
+                .map(|d| d.resolve().map(|v| v as i64).unwrap_or(-1))
+                .collect();
+            shape_data.push(out_features as i64);
+            let shape_const = Constant::new(
+                None,
+                TensorData::new(shape_data.into(), Shape::from(&[leading.len() + 1][..]))?,
+            );
+            Ok(Reshape::new_with_forced_output(None, gemm_out, shape_const, out_shape)?
+                as Arc<dyn Tensor>)
+        } else {
+            Ok(gemm_out as Arc<dyn Tensor>)
+        }
     } else {
+        // No bias: use MatMul (supports N-D natively)
+        let weight = transpose(weight);
+        let input = unsqueeze(input, (input_rank as i64) - 1)?;
+        let mat_out = operators::MatMul::new(
+            weight_manager.get_prefix().map(|x| x.to_string()),
+            input,
+            weight,
+        )?;
+        let mat_out = squeeze(mat_out, (input_rank as i64) - 1)?;
         Ok(mat_out)
     }
 }

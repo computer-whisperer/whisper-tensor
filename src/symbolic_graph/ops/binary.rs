@@ -320,22 +320,14 @@ impl Operation for GemmOperation {
         let a = input_map[&self.input_a];
         let b = input_map[&self.input_b];
 
-        let a = if let Some(trans_a) = self.trans_a {
-            if trans_a {
-                milli_graph::ops::Transpose::push_new(&mut graph, a, None, rng)
-            } else {
-                a
-            }
+        let a = if let Some(true) = self.trans_a {
+            milli_graph::ops::Transpose::push_new(&mut graph, a, None, rng)
         } else {
             a
         };
 
-        let b = if let Some(trans_b) = self.trans_b {
-            if trans_b {
-                milli_graph::ops::Transpose::push_new(&mut graph, b, None, rng)
-            } else {
-                b
-            }
+        let b = if let Some(true) = self.trans_b {
+            milli_graph::ops::Transpose::push_new(&mut graph, b, None, rng)
         } else {
             b
         };
@@ -345,15 +337,34 @@ impl Operation for GemmOperation {
             .get(&self.input_a)
             .copied()
             .unwrap_or(DType::F32);
-        let x = milli_graph::ops::MatMul::push_new_default_precision(
+        let (prod_dt, acc_dt, out_dt) =
+            milli_graph::ops::MatMul::default_precision_for(input_dtype);
+
+        // Gemm fuses matmul + bias add. To match PyTorch's addmm semantics,
+        // the matmul accumulator (F32 for BF16 inputs) must stay live through
+        // the alpha scaling and bias (C) addition. Only cast to the final
+        // output dtype after all arithmetic is done.
+        let effective_alpha = self.alpha.filter(|&a| a != 1.0);
+        let effective_beta = self.beta.filter(|&b| b != 1.0);
+        let has_post_matmul_ops = effective_alpha.is_some() || self.input_c.is_some();
+        let matmul_out_dt = if has_post_matmul_ops && acc_dt != out_dt {
+            acc_dt // keep in F32 for now
+        } else {
+            out_dt
+        };
+
+        let x = milli_graph::ops::MatMul::push_new(
             &mut graph,
             a,
             b,
             input_dtype,
+            prod_dt,
+            acc_dt,
+            matmul_out_dt,
             rng,
         );
 
-        let x = if let Some(alpha) = self.alpha {
+        let x = if let Some(alpha) = effective_alpha {
             let alpha_tid = milli_graph::ops::Constant::new_scalar(&mut graph, alpha, rng);
             let alpha_const = milli_graph::ops::CastLike::push_new(&mut graph, alpha_tid, x, rng);
             milli_graph::ops::SimpleBinary::mul(&mut graph, x, alpha_const, rng)
@@ -363,7 +374,9 @@ impl Operation for GemmOperation {
 
         let x = if let Some(c) = self.input_c {
             let c = input_map[&c];
-            let c = if let Some(beta) = self.beta {
+            // Cast C to match the matmul output dtype (F32 for BF16 inputs)
+            let c = milli_graph::ops::CastLike::push_new(&mut graph, c, x, rng);
+            let c = if let Some(beta) = effective_beta {
                 let beta_tid = milli_graph::ops::Constant::new_scalar(&mut graph, beta, rng);
                 let beta_const = milli_graph::ops::CastLike::push_new(&mut graph, beta_tid, c, rng);
                 milli_graph::ops::SimpleBinary::mul(&mut graph, c, beta_const, rng)
@@ -371,6 +384,13 @@ impl Operation for GemmOperation {
                 c
             };
             milli_graph::ops::SimpleBinary::add(&mut graph, x, c, rng)
+        } else {
+            x
+        };
+
+        // Cast to final output dtype if we deferred it
+        let x = if matmul_out_dt != out_dt {
+            milli_graph::ops::Cast::push_new(&mut graph, x, out_dt, rng)
         } else {
             x
         };
