@@ -279,18 +279,14 @@ fn main() {
     // ── Partitioner tests ──────────────────────────────────────────────────
 
     {
-        use whisper_tensor::compiler::attempts::v14::{
-            partitioner_a, partitioner_b, partitioner_c, partitioner_d, partitioner_e,
-            partitioner_f, partitioner_g, partitioner_h,
-        };
+        use whisper_tensor::compiler::attempts::v14::partitioner_b;
         use whisper_tensor::nano_graph::AtomId as AId;
 
         let input_ts = result.graph.input_tensors();
         let output_ids: Vec<AId> = model_outputs.iter().map(|om| om.range.base).collect();
         let num_lanes = 8;
 
-        // Skip structural tests by default — they take ~60s for all 8.
-        // Set RUN_STRUCTURAL=1 to enable.
+        // Structural partitioner tests. Set RUN_STRUCTURAL=1 to enable.
         let partitioners: Vec<(
             &str,
             fn(
@@ -300,16 +296,7 @@ fn main() {
                 &[AId],
             ) -> Vec<Phase>,
         )> = if std::env::var("RUN_STRUCTURAL").is_ok() {
-            vec![
-                ("A (pinch-point)", partitioner_a::plan),
-                ("B (wavefront)", partitioner_b::plan),
-                ("C (greedy lane)", partitioner_c::plan),
-                ("D (hierarchical)", partitioner_d::plan),
-                ("E (annealing)", partitioner_e::plan),
-                ("F (creative)", partitioner_f::plan),
-                ("G (row-aware)", partitioner_g::plan),
-                ("H (correct-then-balance)", partitioner_h::plan),
-            ]
+            vec![("B (wavefront)", partitioner_b::plan)]
         } else {
             vec![]
         };
