@@ -212,8 +212,19 @@ fn f32_scalar_matching(value: f32, input: &dyn Tensor) -> Arc<dyn Tensor> {
 }
 
 pub fn silu(input: Arc<dyn Tensor>) -> Result<Arc<dyn Tensor>, Error> {
-    let x = Sigmoid::new(None, input.clone());
-    Ok(Mul::new(None, input.clone(), x)?)
+    let input_dtype = input.dtype();
+    if input_dtype != DType::F32 {
+        // Compute silu in F32 to match PyTorch's fused F.silu which internally
+        // upcasts to F32. Without this, the intermediate sigmoid result gets
+        // truncated to BF16 before the multiply, causing per-element divergence.
+        let x = cast(input, DType::F32);
+        let sig = Sigmoid::new(None, x.clone());
+        let result = Mul::new(None, x, sig)?;
+        Ok(cast(result, input_dtype))
+    } else {
+        let x = Sigmoid::new(None, input.clone());
+        Ok(Mul::new(None, input.clone(), x)?)
+    }
 }
 
 pub fn gelu(input: Arc<dyn Tensor>) -> Result<Arc<dyn Tensor>, Error> {

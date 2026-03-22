@@ -184,15 +184,21 @@ impl SymbolicGraphObserver for TensorDumpObserver {
         _backend: &mut EvalBackend,
     ) {
         if let Some(id) = tensor_path.last() {
-            if self.watched_ids.contains_key(id) {
-                // Match found
-            } else if self.captured.len() == 0 && self.call_count < 5 {
-                // Debug: print first few unmatched IDs
-                eprintln!("  observer: tensor_id={:?} (no match in {} watched)", id, self.watched_ids.len());
-            }
             self.call_count += 1;
             if let Some(name) = self.watched_ids.get(id) {
-                eprintln!("  captured '{}': shape={:?} dtype={:?}", name, tensor.shape(), tensor.dtype());
+                let preview: Vec<f32> = tensor
+                    .to_ndarray()
+                    .and_then(|nd| Ok(nd.cast(DType::F32)?))
+                    .map(|nd: NDArrayNumericTensor<DynRank>| {
+                        let v: Result<Vec<f32>, _> = nd.flatten().try_into();
+                        v.unwrap_or_default()
+                    })
+                    .unwrap_or_default();
+                let n = preview.len().min(3);
+                eprintln!(
+                    "  captured '{}': shape={:?} dtype={:?} first{}={:.6?}",
+                    name, tensor.shape(), tensor.dtype(), n, &preview[..n]
+                );
                 self.captured.insert(name.clone(), tensor.clone());
             }
         }
