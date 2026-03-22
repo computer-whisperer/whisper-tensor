@@ -1064,9 +1064,10 @@ fn emit_group_body(
                 buffer_ptr,
                 i_val,
                 i_const,
+                group.atom_offset,
                 table_counter,
             )?;
-            let src_repr = input_slot_dtype(&group.inputs[0], layout)
+            let src_repr = input_slot_dtype(&group.inputs[0], layout, group.atom_offset)
                 .map(repr_of)
                 .unwrap_or(ReprKind::Float);
             let result = emit_cast_to_output(builder, src, src_repr, output_dtype);
@@ -1092,9 +1093,10 @@ fn emit_group_body(
                 buffer_ptr,
                 i_val,
                 i_const,
+                group.atom_offset,
                 table_counter,
             )?;
-            let a_repr = input_slot_dtype(&group.inputs[0], layout)
+            let a_repr = input_slot_dtype(&group.inputs[0], layout, group.atom_offset)
                 .map(repr_of)
                 .unwrap_or(compute_repr);
             let a = emit_repr_cast(builder, a_raw, a_repr, compute_repr);
@@ -1107,9 +1109,10 @@ fn emit_group_body(
                 buffer_ptr,
                 i_val,
                 i_const,
+                group.atom_offset,
                 table_counter,
             )?;
-            let b_repr = input_slot_dtype(&group.inputs[1], layout)
+            let b_repr = input_slot_dtype(&group.inputs[1], layout, group.atom_offset)
                 .map(repr_of)
                 .unwrap_or(compute_repr);
             let b = emit_repr_cast(builder, b_raw, b_repr, compute_repr);
@@ -1138,9 +1141,10 @@ fn emit_group_body(
                 buffer_ptr,
                 i_val,
                 i_const,
+                group.atom_offset,
                 table_counter,
             )?;
-            let x_repr = input_slot_dtype(&group.inputs[0], layout)
+            let x_repr = input_slot_dtype(&group.inputs[0], layout, group.atom_offset)
                 .map(repr_of)
                 .unwrap_or(compute_repr);
             let x = emit_repr_cast(builder, x_raw, x_repr, compute_repr);
@@ -1169,9 +1173,10 @@ fn emit_group_body(
                 buffer_ptr,
                 i_val,
                 i_const,
+                group.atom_offset,
                 table_counter,
             )?;
-            let cond_repr = input_slot_dtype(&group.inputs[0], layout)
+            let cond_repr = input_slot_dtype(&group.inputs[0], layout, group.atom_offset)
                 .map(repr_of)
                 .unwrap_or(ReprKind::Float);
 
@@ -1195,9 +1200,10 @@ fn emit_group_body(
                 buffer_ptr,
                 i_val,
                 i_const,
+                group.atom_offset,
                 table_counter,
             )?;
-            let x_repr = input_slot_dtype(&group.inputs[1], layout)
+            let x_repr = input_slot_dtype(&group.inputs[1], layout, group.atom_offset)
                 .map(repr_of)
                 .unwrap_or(output_repr);
             let x = emit_cast_to_output(builder, x_raw, x_repr, output_dtype);
@@ -1210,9 +1216,10 @@ fn emit_group_body(
                 buffer_ptr,
                 i_val,
                 i_const,
+                group.atom_offset,
                 table_counter,
             )?;
-            let y_repr = input_slot_dtype(&group.inputs[2], layout)
+            let y_repr = input_slot_dtype(&group.inputs[2], layout, group.atom_offset)
                 .map(repr_of)
                 .unwrap_or(output_repr);
             let y = emit_cast_to_output(builder, y_raw, y_repr, output_dtype);
@@ -1263,9 +1270,10 @@ fn emit_group_body(
                 buffer_ptr,
                 i_val,
                 i_const,
+                group.atom_offset,
                 table_counter,
             )?;
-            let idx_repr = input_slot_dtype(&group.inputs[0], layout)
+            let idx_repr = input_slot_dtype(&group.inputs[0], layout, group.atom_offset)
                 .map(repr_of)
                 .unwrap_or(ReprKind::Int);
             let idx_i64 = emit_repr_cast(builder, idx_raw, idx_repr, ReprKind::Int);
@@ -1305,15 +1313,68 @@ fn emit_group_body(
 // ─── Input loading ──────────────────────────────────────────────────────────
 
 /// Determine the storage dtype that `load_input` will load from for a given InputRef.
-fn input_slot_dtype(input: &InputRef, layout: &BufferLayout) -> Option<DType> {
+fn input_slot_dtype(input: &InputRef, layout: &BufferLayout, atom_offset: u64) -> Option<DType> {
+    // Try the InputRef's base first, then fall back to the first accessed atom.
+    let try_find = |atom: AtomId| layout.find(atom).map(|(s, _)| s.dtype);
     match input {
-        InputRef::Broadcast(atom_id) => layout.find(*atom_id).map(|(s, _)| s.dtype),
-        InputRef::Affine { base, .. } => layout.find(*base).map(|(s, _)| s.dtype),
-        InputRef::StridedBroadcast { base, .. } => layout.find(*base).map(|(s, _)| s.dtype),
-        InputRef::Modular { base, .. } => layout.find(*base).map(|(s, _)| s.dtype),
-        InputRef::Explicit(ids) if !ids.is_empty() => layout.find(ids[0]).map(|(s, _)| s.dtype),
+        InputRef::Broadcast(atom_id) => try_find(*atom_id),
+        InputRef::Affine { base, stride } => try_find(*base).or_else(|| {
+            let first = AtomId((base.0 as i64 + stride * atom_offset as i64) as u64);
+            try_find(first)
+        }),
+        InputRef::StridedBroadcast {
+            base,
+            stride,
+            repeat,
+        } => try_find(*base).or_else(|| {
+            let block = atom_offset / repeat;
+            let first = AtomId((base.0 as i64 + stride * block as i64) as u64);
+            try_find(first)
+        }),
+        InputRef::Modular { base, .. } => try_find(*base),
+        InputRef::Explicit(ids) if !ids.is_empty() => {
+            let idx = (atom_offset as usize).min(ids.len() - 1);
+            try_find(ids[idx])
+        }
         _ => None,
     }
+}
+
+/// Resolve an Affine-like InputRef base to a byte offset in the buffer.
+///
+/// For unsplit groups, `base` is directly in the layout. For split groups,
+/// `base` may point to the original (unsplit) group's start which isn't in
+/// this span. In that case, we look up the first atom this fragment actually
+/// accesses (`base + stride * atom_offset`) and back-compute the equivalent
+/// base_byte.
+///
+/// Returns `(base_byte, elem_bytes, load_dtype)` where address of atom `i` is
+/// `base_byte + stride * elem_bytes * i`.
+fn resolve_affine_base(
+    layout: &BufferLayout,
+    base: AtomId,
+    stride: i64,
+    atom_offset: u64,
+    label: &str,
+) -> Result<(i64, usize, DType), String> {
+    // Fast path: base is in the layout (unsplit or atom_offset == 0).
+    if let Some((slot, elem)) = layout.find(base) {
+        let base_byte = slot.byte_offset as i64 + elem as i64 * slot.elem_bytes as i64;
+        return Ok((base_byte, slot.elem_bytes, slot.dtype));
+    }
+
+    // Split path: look up the first atom this fragment accesses.
+    let first_atom = AtomId((base.0 as i64 + stride * atom_offset as i64) as u64);
+    let (slot, elem) = layout.find(first_atom).ok_or_else(|| {
+        format!(
+            "no slot for {} base={} (first_atom={}, atom_offset={})",
+            label, base, first_atom, atom_offset
+        )
+    })?;
+    // base_byte + stride * elem_bytes * atom_offset = slot.byte_offset + elem * elem_bytes
+    let first_byte = slot.byte_offset as i64 + elem as i64 * slot.elem_bytes as i64;
+    let base_byte = first_byte - stride * atom_offset as i64 * slot.elem_bytes as i64;
+    Ok((base_byte, slot.elem_bytes, slot.dtype))
 }
 
 /// Load a value from an InputRef, resolving to a buffer byte address.
@@ -1328,6 +1389,7 @@ fn load_input(
     buffer_ptr: Value,
     i_val: Option<Value>,
     i_const: u64,
+    atom_offset: u64,
     table_counter: &mut usize,
 ) -> Result<Value, String> {
     match input {
@@ -1341,13 +1403,9 @@ fn load_input(
         }
 
         InputRef::Affine { base, stride } => {
-            let (slot, slot_elem_base) = layout
-                .find(*base)
-                .ok_or_else(|| format!("no slot for Affine base={}", base))?;
-            let base_byte =
-                slot.byte_offset as i64 + slot_elem_base as i64 * slot.elem_bytes as i64;
-            let byte_stride = *stride * slot.elem_bytes as i64;
-            let load_dtype = slot.dtype;
+            let (base_byte, elem_bytes, load_dtype) =
+                resolve_affine_base(layout, *base, *stride, atom_offset, "Affine")?;
+            let byte_stride = *stride * elem_bytes as i64;
 
             let addr = match i_val {
                 Some(iv) => {
@@ -1369,11 +1427,26 @@ fn load_input(
             stride,
             repeat,
         } => {
-            let (slot, slot_elem_base) = layout
+            // StridedBroadcast: atom i reads base + stride * (i / repeat).
+            // For split groups, first accessed = base + stride * (atom_offset / repeat).
+            let first_block = atom_offset / repeat;
+            let first_atom = AtomId((base.0 as i64 + *stride * first_block as i64) as u64);
+            let (slot, elem) = layout
                 .find(*base)
-                .ok_or_else(|| format!("no slot for StridedBroadcast base={}", base))?;
-            let base_byte =
-                slot.byte_offset as i64 + slot_elem_base as i64 * slot.elem_bytes as i64;
+                .or_else(|| layout.find(first_atom))
+                .ok_or_else(|| {
+                    format!(
+                        "no slot for StridedBroadcast base={} first_atom={}",
+                        base, first_atom
+                    )
+                })?;
+            let base_byte = if layout.find(*base).is_some() {
+                slot.byte_offset as i64 + elem as i64 * slot.elem_bytes as i64
+            } else {
+                // Back-compute: base_byte + stride * first_block * elem_bytes = slot.byte_offset + elem * elem_bytes
+                let first_byte = slot.byte_offset as i64 + elem as i64 * slot.elem_bytes as i64;
+                first_byte - *stride * first_block as i64 * slot.elem_bytes as i64
+            };
             let byte_stride = *stride * slot.elem_bytes as i64;
             let load_dtype = slot.dtype;
 
@@ -1405,9 +1478,14 @@ fn load_input(
             stride,
             modulus,
         } => {
-            let (slot, slot_elem_base) = layout
-                .find(*base)
-                .ok_or_else(|| format!("no slot for Modular base={}", base))?;
+            // Modular: atom i reads base + stride * (i % modulus). The full
+            // modular range [base..base+stride*modulus) must be in the buffer.
+            let (slot, slot_elem_base) = layout.find(*base).ok_or_else(|| {
+                format!(
+                    "no slot for Modular base={} (atom_offset={})",
+                    base, atom_offset
+                )
+            })?;
             let base_byte =
                 slot.byte_offset as i64 + slot_elem_base as i64 * slot.elem_bytes as i64;
             let byte_stride = *stride as i64 * slot.elem_bytes as i64;
@@ -1718,13 +1796,11 @@ fn emit_reduce(
     // Resolve the source slot. Reduce input must be Affine.
     let (base_byte, input_byte_stride, reduce_byte_stride, src_dtype) = match &group.inputs[0] {
         InputRef::Affine { base, stride } => {
-            let (slot, elem) = layout
-                .find(*base)
-                .ok_or_else(|| format!("no slot for reduce input base={}", base))?;
-            let base_byte = slot.byte_offset as i64 + elem as i64 * slot.elem_bytes as i64;
-            let byte_stride = *stride * slot.elem_bytes as i64;
-            let red_stride = reduce_stride * slot.elem_bytes as i64;
-            (base_byte, byte_stride, red_stride, slot.dtype)
+            let (base_byte, elem_bytes, src_dtype) =
+                resolve_affine_base(layout, *base, *stride, group.atom_offset, "reduce input")?;
+            let byte_stride = *stride * elem_bytes as i64;
+            let red_stride = reduce_stride * elem_bytes as i64;
+            (base_byte, byte_stride, red_stride, src_dtype)
         }
         other => {
             return Err(format!(

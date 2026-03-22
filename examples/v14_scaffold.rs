@@ -280,8 +280,7 @@ fn main() {
 
     {
         use whisper_tensor::compiler::attempts::v14::{
-            partitioner_b, partitioner_i, partitioner_j,
-            partitioner_l, partitioner_m,
+            partitioner_b, partitioner_i, partitioner_j, partitioner_l, partitioner_m,
         };
         use whisper_tensor::nano_graph::AtomId as AId;
 

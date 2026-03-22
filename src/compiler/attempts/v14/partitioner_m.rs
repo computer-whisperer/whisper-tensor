@@ -82,7 +82,10 @@ fn classify_group(group: &AtomGroup, num_lanes: usize) -> GroupKind {
             // InputRef::Explicit stores a Vec<AtomId> that must have exactly
             // group.count entries, and the atom_offset mechanism doesn't compose
             // with sliced Explicit vectors. Keep these whole.
-            let has_explicit = group.inputs.iter().any(|inp| matches!(inp, InputRef::Explicit(_)));
+            let has_explicit = group
+                .inputs
+                .iter()
+                .any(|inp| matches!(inp, InputRef::Explicit(_)));
             if has_explicit {
                 GroupKind::Whole
             } else {
@@ -184,9 +187,8 @@ fn assign_phases(
             let cons_kind = kinds[gi];
 
             // Determine if we need a barrier between producer and consumer.
-            let needs_barrier = needs_barrier_between(
-                pi, gi, prod_kind, cons_kind, groups, graph, num_lanes,
-            );
+            let needs_barrier =
+                needs_barrier_between(pi, gi, prod_kind, cons_kind, groups, graph, num_lanes);
 
             if needs_barrier {
                 min_phase = min_phase.max(prod_phase + 1);
@@ -329,9 +331,11 @@ fn is_lane_local_access(consumer: &AtomGroup, producer: &AtomGroup, num_lanes: u
                     // Verify base alignment: first consumer atom should read from
                     // producer start (or start of producer + some lane-aligned offset).
                     let first_read = if *stride >= 0 {
-                        base.0.wrapping_add((abs_stride * consumer.atom_offset) as u64)
+                        base.0
+                            .wrapping_add((abs_stride * consumer.atom_offset) as u64)
                     } else {
-                        base.0.wrapping_sub((abs_stride * consumer.atom_offset) as u64)
+                        base.0
+                            .wrapping_sub((abs_stride * consumer.atom_offset) as u64)
                     };
 
                     if first_read == prod_base {
@@ -344,7 +348,9 @@ fn is_lane_local_access(consumer: &AtomGroup, producer: &AtomGroup, num_lanes: u
                 // Special case: stride=1, same count (elementwise 1:1).
                 if *stride == 1 && consumer.count == producer.count {
                     let first_read = base.0.wrapping_add(consumer.atom_offset);
-                    let last_read = base.0.wrapping_add(consumer.atom_offset + consumer.count - 1);
+                    let last_read = base
+                        .0
+                        .wrapping_add(consumer.atom_offset + consumer.count - 1);
                     if first_read == prod_base && last_read == prod_end - 1 {
                         continue; // lane-local
                     }
@@ -356,7 +362,11 @@ fn is_lane_local_access(consumer: &AtomGroup, producer: &AtomGroup, num_lanes: u
                 // Not lane-local.
                 return false;
             }
-            InputRef::StridedBroadcast { base, stride, repeat } => {
+            InputRef::StridedBroadcast {
+                base,
+                stride,
+                repeat,
+            } => {
                 // StridedBroadcast: atom i reads base + stride * (i / repeat).
                 // This is used in matmul Mul groups where chunks of K atoms
                 // share the same A element.
@@ -390,9 +400,9 @@ fn is_lane_local_access(consumer: &AtomGroup, producer: &AtomGroup, num_lanes: u
                     && producer.count % num_lanes as u64 == 0
                 {
                     // Check base alignment: first consumer atom reads from producer base.
-                    let first_read = base.0.wrapping_add(
-                        (abs_stride * (consumer.atom_offset / repeat)) as u64,
-                    );
+                    let first_read = base
+                        .0
+                        .wrapping_add((abs_stride * (consumer.atom_offset / repeat)) as u64);
                     if first_read == prod_base {
                         continue; // lane-local
                     }
@@ -400,7 +410,11 @@ fn is_lane_local_access(consumer: &AtomGroup, producer: &AtomGroup, num_lanes: u
 
                 return false;
             }
-            InputRef::Modular { base, stride, modulus } => {
+            InputRef::Modular {
+                base,
+                stride,
+                modulus,
+            } => {
                 // Modular: atom i reads base + stride * (i % modulus).
                 // This tiles/repeats — every lane needs the same modulus-sized
                 // range. NOT lane-local unless the producer is duplicated.
@@ -444,13 +458,21 @@ fn input_refs_group(
     match input {
         InputRef::Broadcast(id) => id.0 >= pb && id.0 < pe,
         InputRef::Affine { base, stride } => {
-            let first = base.0.wrapping_add((*stride * consumer_offset as i64) as u64);
-            let last = base.0.wrapping_add((*stride * (consumer_offset + consumer_count - 1) as i64) as u64);
+            let first = base
+                .0
+                .wrapping_add((*stride * consumer_offset as i64) as u64);
+            let last = base
+                .0
+                .wrapping_add((*stride * (consumer_offset + consumer_count - 1) as i64) as u64);
             let lo = first.min(last);
             let hi = first.max(last);
             lo < pe && hi >= pb
         }
-        InputRef::StridedBroadcast { base, stride, repeat } => {
+        InputRef::StridedBroadcast {
+            base,
+            stride,
+            repeat,
+        } => {
             let first_block = consumer_offset / repeat;
             let last_block = (consumer_offset + consumer_count - 1) / repeat;
             let first = base.0.wrapping_add((*stride * first_block as i64) as u64);
@@ -459,19 +481,24 @@ fn input_refs_group(
             let hi = first.max(last);
             lo < pe && hi >= pb
         }
-        InputRef::Modular { base, stride, modulus } => {
+        InputRef::Modular {
+            base,
+            stride,
+            modulus,
+        } => {
             let a = base.0;
-            let b = base.0.wrapping_add((*stride * (*modulus as i64 - 1)) as u64);
+            let b = base
+                .0
+                .wrapping_add((*stride * (*modulus as i64 - 1)) as u64);
             let lo = a.min(b);
             let hi = a.max(b);
             lo < pe && hi >= pb
         }
-        InputRef::Explicit(ids) => {
-            ids.iter()
-                .skip(consumer_offset as usize)
-                .take(consumer_count as usize)
-                .any(|id| id.0 >= pb && id.0 < pe)
-        }
+        InputRef::Explicit(ids) => ids
+            .iter()
+            .skip(consumer_offset as usize)
+            .take(consumer_count as usize)
+            .any(|id| id.0 >= pb && id.0 < pe),
     }
 }
 
@@ -489,10 +516,7 @@ fn split_range(group: &AtomGroup, lane: usize, num_lanes: usize) -> (u64, u64) {
 
 /// Collect all atom ranges that a group's inputs reference, including
 /// reduce stride ranges and indirect load tables.
-fn collect_input_atom_ranges(
-    group: &AtomGroup,
-    graph: &NanoGraph,
-) -> Vec<(AtomId, u64, DType)> {
+fn collect_input_atom_ranges(group: &AtomGroup, graph: &NanoGraph) -> Vec<(AtomId, u64, DType)> {
     let mut ranges = Vec::new();
     let mut seen_bases = HashSet::new();
 
@@ -514,7 +538,8 @@ fn collect_input_atom_ranges(
     // Also check input tensors
     for input in &group.inputs {
         match input {
-            InputRef::Broadcast(id) | InputRef::Affine { base: id, .. }
+            InputRef::Broadcast(id)
+            | InputRef::Affine { base: id, .. }
             | InputRef::StridedBroadcast { base: id, .. }
             | InputRef::Modular { base: id, .. } => {
                 if let Some((idx, _)) = graph.find_input_idx(*id) {
@@ -577,7 +602,10 @@ pub fn plan(
     }
 
     // Step 1: Classify groups.
-    let kinds: Vec<GroupKind> = groups.iter().map(|g| classify_group(g, num_lanes)).collect();
+    let kinds: Vec<GroupKind> = groups
+        .iter()
+        .map(|g| classify_group(g, num_lanes))
+        .collect();
 
     // Step 2: Build dependency DAG.
     let (producers, successors) = build_dependency_dag(graph);
@@ -679,9 +707,7 @@ fn build_phase(
     // Determine which groups in this phase need their output to be in span outputs.
     let groups_needing_output: HashSet<usize> = phase_group_indices
         .iter()
-        .filter(|&&gi| {
-            output_group_set.contains(&gi) || cross_phase_consumed.contains(&gi)
-        })
+        .filter(|&&gi| output_group_set.contains(&gi) || cross_phase_consumed.contains(&gi))
         .copied()
         .collect();
 
@@ -697,20 +723,36 @@ fn build_phase(
         match kind {
             GroupKind::Split => {
                 emit_split_group(
-                    graph, group, gi, num_lanes,
-                    &mut span_graphs, &mut span_inputs, &mut span_outputs,
-                    &mut declared_inputs, &mut produced_in_span,
-                    phase_of, kinds, all_groups,
+                    graph,
+                    group,
+                    gi,
+                    num_lanes,
+                    &mut span_graphs,
+                    &mut span_inputs,
+                    &mut span_outputs,
+                    &mut declared_inputs,
+                    &mut produced_in_span,
+                    phase_of,
+                    kinds,
+                    all_groups,
                     groups_needing_output.contains(&gi),
                     input_tensor_set,
                 );
             }
             GroupKind::Duplicate => {
                 emit_duplicate_group(
-                    graph, group, gi, num_lanes,
-                    &mut span_graphs, &mut span_inputs, &mut span_outputs,
-                    &mut declared_inputs, &mut produced_in_span,
-                    phase_of, kinds, all_groups,
+                    graph,
+                    group,
+                    gi,
+                    num_lanes,
+                    &mut span_graphs,
+                    &mut span_inputs,
+                    &mut span_outputs,
+                    &mut declared_inputs,
+                    &mut produced_in_span,
+                    phase_of,
+                    kinds,
+                    all_groups,
                     groups_needing_output.contains(&gi),
                     input_tensor_set,
                     phase_idx,
@@ -718,10 +760,18 @@ fn build_phase(
             }
             GroupKind::Whole => {
                 emit_whole_group(
-                    graph, group, gi, num_lanes,
-                    &mut span_graphs, &mut span_inputs, &mut span_outputs,
-                    &mut declared_inputs, &mut produced_in_span,
-                    phase_of, kinds, all_groups,
+                    graph,
+                    group,
+                    gi,
+                    num_lanes,
+                    &mut span_graphs,
+                    &mut span_inputs,
+                    &mut span_outputs,
+                    &mut declared_inputs,
+                    &mut produced_in_span,
+                    phase_of,
+                    kinds,
+                    all_groups,
                     groups_needing_output.contains(&gi),
                     input_tensor_set,
                 );
@@ -782,8 +832,16 @@ fn emit_split_group(
 
         // Ensure all dependencies are declared as inputs to this span.
         ensure_inputs_declared(
-            graph, &inputs, &group.op, atom_offset, count,
-            lane, span_graphs, span_inputs, declared_inputs, produced_in_span,
+            graph,
+            &inputs,
+            &group.op,
+            atom_offset,
+            count,
+            lane,
+            span_graphs,
+            span_inputs,
+            declared_inputs,
+            produced_in_span,
             input_tensor_set,
         );
 
@@ -850,8 +908,16 @@ fn emit_duplicate_group(
     for lane in 0..num_lanes {
         // Ensure all dependencies are declared.
         ensure_inputs_declared(
-            graph, &group.inputs, &group.op, group.atom_offset, group.count,
-            lane, span_graphs, span_inputs, declared_inputs, produced_in_span,
+            graph,
+            &group.inputs,
+            &group.op,
+            group.atom_offset,
+            group.count,
+            lane,
+            span_graphs,
+            span_inputs,
+            declared_inputs,
+            produced_in_span,
             input_tensor_set,
         );
 
@@ -899,8 +965,16 @@ fn emit_whole_group(
     let lane = 0;
 
     ensure_inputs_declared(
-        graph, &group.inputs, &group.op, group.atom_offset, group.count,
-        lane, span_graphs, span_inputs, declared_inputs, produced_in_span,
+        graph,
+        &group.inputs,
+        &group.op,
+        group.atom_offset,
+        group.count,
+        lane,
+        span_graphs,
+        span_inputs,
+        declared_inputs,
+        produced_in_span,
         input_tensor_set,
     );
 
@@ -953,8 +1027,12 @@ fn ensure_inputs_declared(
     // Helper: declare a range as a span input if not already present.
     // `access_lo` and `access_hi` describe the actual atom range accessed
     // (may be a subset of the full group range).
-    let mut declare_range = |base: AtomId, cnt: u64, dtype: DType, tensor_id: Option<GlobalId>,
-                             access_lo: u64, access_hi: u64| {
+    let mut declare_range = |base: AtomId,
+                             cnt: u64,
+                             dtype: DType,
+                             tensor_id: Option<GlobalId>,
+                             access_lo: u64,
+                             access_hi: u64| {
         let key = base.0;
         if declared_inputs[lane].contains(&key) {
             return;
@@ -976,7 +1054,11 @@ fn ensure_inputs_declared(
             return;
         }
         declared_inputs[lane].insert(key);
-        span_inputs[lane].push(AtomRange { base, count: cnt, dtype });
+        span_inputs[lane].push(AtomRange {
+            base,
+            count: cnt,
+            dtype,
+        });
         span_graphs[lane].insert_input_tensor_at(
             base,
             tensor_id.unwrap_or(GlobalId(0)),
@@ -1003,12 +1085,20 @@ fn ensure_inputs_declared(
                 let last = input.resolve(atom_offset + count - 1).0;
                 ranges_to_cover.push((first.min(last), first.max(last)));
             }
-            InputRef::StridedBroadcast { base, stride, repeat } => {
+            InputRef::StridedBroadcast {
+                base,
+                stride,
+                repeat,
+            } => {
                 let first = input.resolve(atom_offset).0;
                 let last = input.resolve(atom_offset + count - 1).0;
                 ranges_to_cover.push((first.min(last), first.max(last)));
             }
-            InputRef::Modular { base, stride, modulus } => {
+            InputRef::Modular {
+                base,
+                stride,
+                modulus,
+            } => {
                 let a = base.0;
                 let b = (base.0 as i64 + *stride * (*modulus as i64 - 1)) as u64;
                 ranges_to_cover.push((a.min(b), a.max(b)));
@@ -1208,10 +1298,23 @@ mod tests {
     /// Full plan verification: span validation + cross-lane checks.
     fn verify_plan_full(phases: &[Phase]) {
         let errors = validate_all_spans(phases);
-        assert!(errors.is_empty(), "Validation errors:\n{}", errors.join("\n"));
+        assert!(
+            errors.is_empty(),
+            "Validation errors:\n{}",
+            errors.join("\n")
+        );
         let violations = check_cross_lane_reads(phases);
-        assert!(violations.is_empty(), "Cross-lane violations ({}):\n{}",
-            violations.len(), violations.iter().take(10).cloned().collect::<Vec<_>>().join("\n"));
+        assert!(
+            violations.is_empty(),
+            "Cross-lane violations ({}):\n{}",
+            violations.len(),
+            violations
+                .iter()
+                .take(10)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
     }
 
     // ─── Test: Linear chain splitting ────────────────────────────────────
@@ -1241,8 +1344,14 @@ mod tests {
             },
             vec![],
             vec![
-                InputRef::Affine { base: lit, stride: 1 },
-                InputRef::Affine { base: lit, stride: 1 },
+                InputRef::Affine {
+                    base: lit,
+                    stride: 1,
+                },
+                InputRef::Affine {
+                    base: lit,
+                    stride: 1,
+                },
             ],
         );
 
@@ -1255,7 +1364,10 @@ mod tests {
             },
             vec![],
             vec![
-                InputRef::Affine { base: sub, stride: 1 },
+                InputRef::Affine {
+                    base: sub,
+                    stride: 1,
+                },
                 InputRef::Broadcast(lit), // broadcast a literal atom
             ],
         );
@@ -1269,8 +1381,14 @@ mod tests {
             },
             vec![],
             vec![
-                InputRef::Affine { base: pow, stride: 1 },
-                InputRef::Affine { base: sub, stride: 1 },
+                InputRef::Affine {
+                    base: pow,
+                    stride: 1,
+                },
+                InputRef::Affine {
+                    base: sub,
+                    stride: 1,
+                },
             ],
         );
 
@@ -1370,7 +1488,12 @@ mod tests {
         let phases = plan(&g, num_lanes, &[], &g.outputs.clone());
 
         // Should be 1 phase — all lane-local.
-        assert_eq!(phases.len(), 1, "Diamond should be 1 phase, got {}", phases.len());
+        assert_eq!(
+            phases.len(),
+            1,
+            "Diamond should be 1 phase, got {}",
+            phases.len()
+        );
 
         // All lanes active.
         assert_eq!(active_lanes(&phases[0]), num_lanes);
@@ -1435,8 +1558,15 @@ mod tests {
             },
             vec![],
             vec![
-                InputRef::Affine { base: weights, stride: 1 },
-                InputRef::Modular { base: inp, stride: 1, modulus: k },
+                InputRef::Affine {
+                    base: weights,
+                    stride: 1,
+                },
+                InputRef::Modular {
+                    base: inp,
+                    stride: 1,
+                    modulus: k,
+                },
             ],
         );
 
@@ -1451,7 +1581,10 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine { base: mul, stride: k as i64 }],
+            vec![InputRef::Affine {
+                base: mul,
+                stride: k as i64,
+            }],
         );
 
         // Bias literal.
@@ -1473,8 +1606,14 @@ mod tests {
             },
             vec![],
             vec![
-                InputRef::Affine { base: reduce, stride: 1 },
-                InputRef::Affine { base: bias, stride: 1 },
+                InputRef::Affine {
+                    base: reduce,
+                    stride: 1,
+                },
+                InputRef::Affine {
+                    base: bias,
+                    stride: 1,
+                },
             ],
         );
 
@@ -1508,7 +1647,13 @@ mod tests {
                     if !matches!(g.op, ScalarOp::Literal(_)) {
                         total_non_lit += g.count;
                     }
-                    if matches!(g.op, ScalarOp::Binary { op: ScalarBinOp::Mul, .. }) {
+                    if matches!(
+                        g.op,
+                        ScalarOp::Binary {
+                            op: ScalarBinOp::Mul,
+                            ..
+                        }
+                    ) {
                         has_mul = true;
                     }
                 }
@@ -1550,7 +1695,10 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine { base: lit, stride: 1 }],
+            vec![InputRef::Affine {
+                base: lit,
+                stride: 1,
+            }],
         );
 
         g.outputs = vec![neg];
@@ -1623,7 +1771,10 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine { base: data, stride: 1 }],
+            vec![InputRef::Affine {
+                base: data,
+                stride: 1,
+            }],
         );
 
         // Use the scalar result in a large group (broadcast).
@@ -1651,10 +1802,15 @@ mod tests {
             .spans
             .iter()
             .filter(|s| {
-                s.graph
-                    .groups()
-                    .iter()
-                    .any(|g| matches!(g.op, ScalarOp::Unary { op: ScalarUnaryOp::Neg, .. }))
+                s.graph.groups().iter().any(|g| {
+                    matches!(
+                        g.op,
+                        ScalarOp::Unary {
+                            op: ScalarUnaryOp::Neg,
+                            ..
+                        }
+                    )
+                })
             })
             .count();
         assert!(
@@ -1693,7 +1849,10 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine { base: data, stride: k as i64 }],
+            vec![InputRef::Affine {
+                base: data,
+                stride: k as i64,
+            }],
         );
 
         g.outputs = vec![reduced];
@@ -1745,7 +1904,10 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine { base: lit, stride: 1 }],
+            vec![InputRef::Affine {
+                base: lit,
+                stride: 1,
+            }],
         );
 
         g.outputs = vec![op];
@@ -1776,7 +1938,10 @@ mod tests {
         // Sort by base and verify contiguous coverage.
         fragments.sort_by_key(|f| f.0);
         let op_base = lit.0 + 400; // op starts after lit
-        assert_eq!(fragments[0].0, op_base, "First fragment should start at op base");
+        assert_eq!(
+            fragments[0].0, op_base,
+            "First fragment should start at op base"
+        );
 
         let mut total = 0u64;
         let mut prev_end = op_base;
@@ -1785,7 +1950,10 @@ mod tests {
             total += count;
             prev_end = base + count;
         }
-        assert_eq!(total, 400, "Total fragment atoms should equal original group count");
+        assert_eq!(
+            total, 400,
+            "Total fragment atoms should equal original group count"
+        );
 
         let errors = validate_all_spans(&phases);
         assert!(errors.is_empty(), "Validation errors: {:?}", errors);
@@ -1809,7 +1977,10 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine { base: inp, stride: 1 }],
+            vec![InputRef::Affine {
+                base: inp,
+                stride: 1,
+            }],
         );
 
         g.outputs = vec![neg];
@@ -1835,7 +2006,12 @@ mod tests {
         // Neg should be split across all 4 lanes.
         let mut neg_lanes = 0;
         for span in &phases[0].spans {
-            if span.graph.groups().iter().any(|g| matches!(g.op, ScalarOp::Unary { .. })) {
+            if span
+                .graph
+                .groups()
+                .iter()
+                .any(|g| matches!(g.op, ScalarOp::Unary { .. }))
+            {
                 neg_lanes += 1;
             }
         }
@@ -1885,10 +2061,67 @@ mod tests {
     #[test]
     fn test_linear_chain_no_cross_lane() {
         let mut g = NanoGraph::new();
-        let lit = g.push_group(8000, DType::F32, ScalarOp::Literal(NumericScalar::F32(1.0)), vec![], vec![]);
-        let sub = g.push_group(8000, DType::F32, ScalarOp::Binary { op: ScalarBinOp::Sub, compute_dtype: DType::F32 }, vec![], vec![InputRef::Affine { base: lit, stride: 1 }, InputRef::Affine { base: lit, stride: 1 }]);
-        let pow = g.push_group(8000, DType::F32, ScalarOp::Binary { op: ScalarBinOp::Pow, compute_dtype: DType::F32 }, vec![], vec![InputRef::Affine { base: sub, stride: 1 }, InputRef::Broadcast(lit)]);
-        let add = g.push_group(8000, DType::F32, ScalarOp::Binary { op: ScalarBinOp::Add, compute_dtype: DType::F32 }, vec![], vec![InputRef::Affine { base: pow, stride: 1 }, InputRef::Affine { base: sub, stride: 1 }]);
+        let lit = g.push_group(
+            8000,
+            DType::F32,
+            ScalarOp::Literal(NumericScalar::F32(1.0)),
+            vec![],
+            vec![],
+        );
+        let sub = g.push_group(
+            8000,
+            DType::F32,
+            ScalarOp::Binary {
+                op: ScalarBinOp::Sub,
+                compute_dtype: DType::F32,
+            },
+            vec![],
+            vec![
+                InputRef::Affine {
+                    base: lit,
+                    stride: 1,
+                },
+                InputRef::Affine {
+                    base: lit,
+                    stride: 1,
+                },
+            ],
+        );
+        let pow = g.push_group(
+            8000,
+            DType::F32,
+            ScalarOp::Binary {
+                op: ScalarBinOp::Pow,
+                compute_dtype: DType::F32,
+            },
+            vec![],
+            vec![
+                InputRef::Affine {
+                    base: sub,
+                    stride: 1,
+                },
+                InputRef::Broadcast(lit),
+            ],
+        );
+        let add = g.push_group(
+            8000,
+            DType::F32,
+            ScalarOp::Binary {
+                op: ScalarBinOp::Add,
+                compute_dtype: DType::F32,
+            },
+            vec![],
+            vec![
+                InputRef::Affine {
+                    base: pow,
+                    stride: 1,
+                },
+                InputRef::Affine {
+                    base: sub,
+                    stride: 1,
+                },
+            ],
+        );
         g.outputs = vec![add];
         let phases = plan(&g, 4, &[], &g.outputs.clone());
         verify_plan_full(&phases);
@@ -1901,13 +2134,81 @@ mod tests {
         let m = 32u64;
         let k = 64u64;
         let inp = g.add_input_tensor(GlobalId(0), k, DType::F32);
-        let weights = g.push_group(m * k, DType::F32, ScalarOp::Literal(NumericScalar::F32(0.5)), vec![], vec![]);
-        let mul = g.push_group(m * k, DType::F32, ScalarOp::Binary { op: ScalarBinOp::Mul, compute_dtype: DType::F32 }, vec![], vec![InputRef::Affine { base: weights, stride: 1 }, InputRef::Modular { base: inp, stride: 1, modulus: k }]);
-        let reduce = g.push_group(m, DType::F32, ScalarOp::Reduce { kind: ReduceKind::Sum, reduce_count: k, reduce_stride: 1, compute_dtype: DType::F32 }, vec![], vec![InputRef::Affine { base: mul, stride: k as i64 }]);
-        let bias = g.push_group(m, DType::F32, ScalarOp::Literal(NumericScalar::F32(0.1)), vec![], vec![]);
-        let add = g.push_group(m, DType::F32, ScalarOp::Binary { op: ScalarBinOp::Add, compute_dtype: DType::F32 }, vec![], vec![InputRef::Affine { base: reduce, stride: 1 }, InputRef::Affine { base: bias, stride: 1 }]);
+        let weights = g.push_group(
+            m * k,
+            DType::F32,
+            ScalarOp::Literal(NumericScalar::F32(0.5)),
+            vec![],
+            vec![],
+        );
+        let mul = g.push_group(
+            m * k,
+            DType::F32,
+            ScalarOp::Binary {
+                op: ScalarBinOp::Mul,
+                compute_dtype: DType::F32,
+            },
+            vec![],
+            vec![
+                InputRef::Affine {
+                    base: weights,
+                    stride: 1,
+                },
+                InputRef::Modular {
+                    base: inp,
+                    stride: 1,
+                    modulus: k,
+                },
+            ],
+        );
+        let reduce = g.push_group(
+            m,
+            DType::F32,
+            ScalarOp::Reduce {
+                kind: ReduceKind::Sum,
+                reduce_count: k,
+                reduce_stride: 1,
+                compute_dtype: DType::F32,
+            },
+            vec![],
+            vec![InputRef::Affine {
+                base: mul,
+                stride: k as i64,
+            }],
+        );
+        let bias = g.push_group(
+            m,
+            DType::F32,
+            ScalarOp::Literal(NumericScalar::F32(0.1)),
+            vec![],
+            vec![],
+        );
+        let add = g.push_group(
+            m,
+            DType::F32,
+            ScalarOp::Binary {
+                op: ScalarBinOp::Add,
+                compute_dtype: DType::F32,
+            },
+            vec![],
+            vec![
+                InputRef::Affine {
+                    base: reduce,
+                    stride: 1,
+                },
+                InputRef::Affine {
+                    base: bias,
+                    stride: 1,
+                },
+            ],
+        );
         g.outputs = vec![add];
-        let it = vec![InputTensor { tensor_id: GlobalId(0), base_id: inp, count: k, dtype: DType::F32 }];
+        let it = vec![InputTensor {
+            tensor_id: GlobalId(0),
+            base_id: inp,
+            count: k,
+            dtype: DType::F32,
+        }];
         let phases = plan(&g, num_lanes, &it, &g.outputs.clone());
         verify_plan_full(&phases);
     }
@@ -1922,8 +2223,8 @@ mod tests {
         let mut g = NanoGraph::new();
         let num_lanes = 8;
         let d = 768u64; // hidden dim
-        let m = 8u64;   // batch*seq (must be divisible by num_lanes)
-        let n = m * d;  // total elements
+        let m = 8u64; // batch*seq (must be divisible by num_lanes)
+        let n = m * d; // total elements
 
         // Input: external tensor of size N.
         let x = g.add_input_tensor(GlobalId(0), n, DType::F32);
@@ -1931,81 +2232,203 @@ mod tests {
         // Step 1: ReduceSum over D elements → M outputs.
         // reduce(M) reads x via Affine(stride=D).
         let sum = g.push_group(
-            m, DType::F32,
-            ScalarOp::Reduce { kind: ReduceKind::Sum, reduce_count: d, reduce_stride: 1, compute_dtype: DType::F32 },
-            vec![], vec![InputRef::Affine { base: x, stride: d as i64 }],
+            m,
+            DType::F32,
+            ScalarOp::Reduce {
+                kind: ReduceKind::Sum,
+                reduce_count: d,
+                reduce_stride: 1,
+                compute_dtype: DType::F32,
+            },
+            vec![],
+            vec![InputRef::Affine {
+                base: x,
+                stride: d as i64,
+            }],
         );
 
         // Step 2: Divide by D to get mean. Broadcast a literal 1/D.
-        let inv_d = g.push_group(1, DType::F32, ScalarOp::Literal(NumericScalar::F32(1.0 / d as f32)), vec![], vec![]);
+        let inv_d = g.push_group(
+            1,
+            DType::F32,
+            ScalarOp::Literal(NumericScalar::F32(1.0 / d as f32)),
+            vec![],
+            vec![],
+        );
         let mean = g.push_group(
-            m, DType::F32,
-            ScalarOp::Binary { op: ScalarBinOp::Mul, compute_dtype: DType::F32 },
-            vec![], vec![InputRef::Affine { base: sum, stride: 1 }, InputRef::Broadcast(inv_d)],
+            m,
+            DType::F32,
+            ScalarOp::Binary {
+                op: ScalarBinOp::Mul,
+                compute_dtype: DType::F32,
+            },
+            vec![],
+            vec![
+                InputRef::Affine {
+                    base: sum,
+                    stride: 1,
+                },
+                InputRef::Broadcast(inv_d),
+            ],
         );
 
         // Step 3: x - mean. Uses StridedBroadcast to broadcast each mean value across D elements.
         let x_centered = g.push_group(
-            n, DType::F32,
-            ScalarOp::Binary { op: ScalarBinOp::Sub, compute_dtype: DType::F32 },
+            n,
+            DType::F32,
+            ScalarOp::Binary {
+                op: ScalarBinOp::Sub,
+                compute_dtype: DType::F32,
+            },
             vec![],
             vec![
                 InputRef::Affine { base: x, stride: 1 },
-                InputRef::StridedBroadcast { base: mean, stride: 1, repeat: d },
+                InputRef::StridedBroadcast {
+                    base: mean,
+                    stride: 1,
+                    repeat: d,
+                },
             ],
         );
 
         // Step 4: x_centered^2
-        let two = g.push_group(1, DType::F32, ScalarOp::Literal(NumericScalar::F32(2.0)), vec![], vec![]);
+        let two = g.push_group(
+            1,
+            DType::F32,
+            ScalarOp::Literal(NumericScalar::F32(2.0)),
+            vec![],
+            vec![],
+        );
         let pow2 = g.push_group(
-            n, DType::F32,
-            ScalarOp::Binary { op: ScalarBinOp::Pow, compute_dtype: DType::F32 },
-            vec![], vec![InputRef::Affine { base: x_centered, stride: 1 }, InputRef::Broadcast(two)],
+            n,
+            DType::F32,
+            ScalarOp::Binary {
+                op: ScalarBinOp::Pow,
+                compute_dtype: DType::F32,
+            },
+            vec![],
+            vec![
+                InputRef::Affine {
+                    base: x_centered,
+                    stride: 1,
+                },
+                InputRef::Broadcast(two),
+            ],
         );
 
         // Step 5: ReduceSum of pow2 → M variance values.
         let var_sum = g.push_group(
-            m, DType::F32,
-            ScalarOp::Reduce { kind: ReduceKind::Sum, reduce_count: d, reduce_stride: 1, compute_dtype: DType::F32 },
-            vec![], vec![InputRef::Affine { base: pow2, stride: d as i64 }],
+            m,
+            DType::F32,
+            ScalarOp::Reduce {
+                kind: ReduceKind::Sum,
+                reduce_count: d,
+                reduce_stride: 1,
+                compute_dtype: DType::F32,
+            },
+            vec![],
+            vec![InputRef::Affine {
+                base: pow2,
+                stride: d as i64,
+            }],
         );
 
         // Step 6: Divide by D and add epsilon, then rsqrt.
         let var_mean = g.push_group(
-            m, DType::F32,
-            ScalarOp::Binary { op: ScalarBinOp::Mul, compute_dtype: DType::F32 },
-            vec![], vec![InputRef::Affine { base: var_sum, stride: 1 }, InputRef::Broadcast(inv_d)],
+            m,
+            DType::F32,
+            ScalarOp::Binary {
+                op: ScalarBinOp::Mul,
+                compute_dtype: DType::F32,
+            },
+            vec![],
+            vec![
+                InputRef::Affine {
+                    base: var_sum,
+                    stride: 1,
+                },
+                InputRef::Broadcast(inv_d),
+            ],
         );
-        let eps = g.push_group(1, DType::F32, ScalarOp::Literal(NumericScalar::F32(1e-5)), vec![], vec![]);
+        let eps = g.push_group(
+            1,
+            DType::F32,
+            ScalarOp::Literal(NumericScalar::F32(1e-5)),
+            vec![],
+            vec![],
+        );
         let var_eps = g.push_group(
-            m, DType::F32,
-            ScalarOp::Binary { op: ScalarBinOp::Add, compute_dtype: DType::F32 },
-            vec![], vec![InputRef::Affine { base: var_mean, stride: 1 }, InputRef::Broadcast(eps)],
+            m,
+            DType::F32,
+            ScalarOp::Binary {
+                op: ScalarBinOp::Add,
+                compute_dtype: DType::F32,
+            },
+            vec![],
+            vec![
+                InputRef::Affine {
+                    base: var_mean,
+                    stride: 1,
+                },
+                InputRef::Broadcast(eps),
+            ],
         );
         let sqrt_var = g.push_group(
-            m, DType::F32,
-            ScalarOp::Unary { op: ScalarUnaryOp::Sqrt, compute_dtype: DType::F32 },
-            vec![], vec![InputRef::Affine { base: var_eps, stride: 1 }],
+            m,
+            DType::F32,
+            ScalarOp::Unary {
+                op: ScalarUnaryOp::Sqrt,
+                compute_dtype: DType::F32,
+            },
+            vec![],
+            vec![InputRef::Affine {
+                base: var_eps,
+                stride: 1,
+            }],
         );
         let rsqrt = g.push_group(
-            m, DType::F32,
-            ScalarOp::Unary { op: ScalarUnaryOp::Reciprocal, compute_dtype: DType::F32 },
-            vec![], vec![InputRef::Affine { base: sqrt_var, stride: 1 }],
+            m,
+            DType::F32,
+            ScalarOp::Unary {
+                op: ScalarUnaryOp::Reciprocal,
+                compute_dtype: DType::F32,
+            },
+            vec![],
+            vec![InputRef::Affine {
+                base: sqrt_var,
+                stride: 1,
+            }],
         );
 
         // Step 7: Normalize: x_centered * rsqrt (StridedBroadcast).
         let normalized = g.push_group(
-            n, DType::F32,
-            ScalarOp::Binary { op: ScalarBinOp::Mul, compute_dtype: DType::F32 },
+            n,
+            DType::F32,
+            ScalarOp::Binary {
+                op: ScalarBinOp::Mul,
+                compute_dtype: DType::F32,
+            },
             vec![],
             vec![
-                InputRef::Affine { base: x_centered, stride: 1 },
-                InputRef::StridedBroadcast { base: rsqrt, stride: 1, repeat: d },
+                InputRef::Affine {
+                    base: x_centered,
+                    stride: 1,
+                },
+                InputRef::StridedBroadcast {
+                    base: rsqrt,
+                    stride: 1,
+                    repeat: d,
+                },
             ],
         );
 
         g.outputs = vec![normalized];
-        let it = vec![InputTensor { tensor_id: GlobalId(0), base_id: x, count: n, dtype: DType::F32 }];
+        let it = vec![InputTensor {
+            tensor_id: GlobalId(0),
+            base_id: x,
+            count: n,
+            dtype: DType::F32,
+        }];
         let phases = plan(&g, num_lanes, &it, &g.outputs.clone());
 
         // Check no cross-lane violations.
@@ -2016,15 +2439,24 @@ mod tests {
         for phase in &phases {
             for span in &phase.spans {
                 if span.graph.groups().iter().any(|g| {
-                    matches!(g.op, ScalarOp::Binary { op: ScalarBinOp::Mul, .. })
-                        && g.count > 1
+                    matches!(
+                        g.op,
+                        ScalarOp::Binary {
+                            op: ScalarBinOp::Mul,
+                            ..
+                        }
+                    ) && g.count > 1
                         && g.count < n
                 }) {
                     lanes_with_norm += 1;
                 }
             }
         }
-        assert!(lanes_with_norm >= 2, "Normalized output should be split across lanes, found on {} lanes", lanes_with_norm);
+        assert!(
+            lanes_with_norm >= 2,
+            "Normalized output should be split across lanes, found on {} lanes",
+            lanes_with_norm
+        );
     }
 
     // ─── Test: StridedBroadcast cross-lane edge case ─────────────────────
@@ -2036,19 +2468,33 @@ mod tests {
         let mut g = NanoGraph::new();
         let num_lanes = 4;
         let m = 16u64;
-        let d = 8u64;  // repeat value
-        let n = m * d;  // 128 total elements
+        let d = 8u64; // repeat value
+        let n = m * d; // 128 total elements
 
         // Source: split group of M elements.
-        let source = g.push_group(m, DType::F32, ScalarOp::Literal(NumericScalar::F32(1.0)), vec![], vec![]);
+        let source = g.push_group(
+            m,
+            DType::F32,
+            ScalarOp::Literal(NumericScalar::F32(1.0)),
+            vec![],
+            vec![],
+        );
 
         // Consumer: N elements reading source via StridedBroadcast(repeat=D).
         // Each chunk of D consecutive consumer atoms reads the same source atom.
         let consumer = g.push_group(
-            n, DType::F32,
-            ScalarOp::Unary { op: ScalarUnaryOp::Neg, compute_dtype: DType::F32 },
+            n,
+            DType::F32,
+            ScalarOp::Unary {
+                op: ScalarUnaryOp::Neg,
+                compute_dtype: DType::F32,
+            },
             vec![],
-            vec![InputRef::StridedBroadcast { base: source, stride: 1, repeat: d }],
+            vec![InputRef::StridedBroadcast {
+                base: source,
+                stride: 1,
+                repeat: d,
+            }],
         );
 
         g.outputs = vec![consumer];
@@ -2065,18 +2511,32 @@ mod tests {
         let mut g = NanoGraph::new();
         let num_lanes = 4;
         let m = 12u64;
-        let d = 7u64;  // repeat that doesn't divide chunk
-        let n = m * d;  // 84 total elements
+        let d = 7u64; // repeat that doesn't divide chunk
+        let n = m * d; // 84 total elements
 
         // Source: split group of M elements.
-        let source = g.push_group(m, DType::F32, ScalarOp::Literal(NumericScalar::F32(1.0)), vec![], vec![]);
+        let source = g.push_group(
+            m,
+            DType::F32,
+            ScalarOp::Literal(NumericScalar::F32(1.0)),
+            vec![],
+            vec![],
+        );
 
         // Consumer: N elements reading source via StridedBroadcast(repeat=D).
         let consumer = g.push_group(
-            n, DType::F32,
-            ScalarOp::Unary { op: ScalarUnaryOp::Neg, compute_dtype: DType::F32 },
+            n,
+            DType::F32,
+            ScalarOp::Unary {
+                op: ScalarUnaryOp::Neg,
+                compute_dtype: DType::F32,
+            },
             vec![],
-            vec![InputRef::StridedBroadcast { base: source, stride: 1, repeat: d }],
+            vec![InputRef::StridedBroadcast {
+                base: source,
+                stride: 1,
+                repeat: d,
+            }],
         );
 
         g.outputs = vec![consumer];
@@ -2100,20 +2560,115 @@ mod tests {
         let inp = g.add_input_tensor(GlobalId(0), k1, DType::F32);
 
         // MatMul 1: [M, K1] @ input[K1] → output[M]
-        let w1 = g.push_group(m * k1, DType::F32, ScalarOp::Literal(NumericScalar::F32(0.1)), vec![], vec![]);
-        let mul1 = g.push_group(m * k1, DType::F32, ScalarOp::Binary { op: ScalarBinOp::Mul, compute_dtype: DType::F32 }, vec![], vec![InputRef::Affine { base: w1, stride: 1 }, InputRef::Modular { base: inp, stride: 1, modulus: k1 }]);
-        let red1 = g.push_group(m, DType::F32, ScalarOp::Reduce { kind: ReduceKind::Sum, reduce_count: k1, reduce_stride: 1, compute_dtype: DType::F32 }, vec![], vec![InputRef::Affine { base: mul1, stride: k1 as i64 }]);
+        let w1 = g.push_group(
+            m * k1,
+            DType::F32,
+            ScalarOp::Literal(NumericScalar::F32(0.1)),
+            vec![],
+            vec![],
+        );
+        let mul1 = g.push_group(
+            m * k1,
+            DType::F32,
+            ScalarOp::Binary {
+                op: ScalarBinOp::Mul,
+                compute_dtype: DType::F32,
+            },
+            vec![],
+            vec![
+                InputRef::Affine {
+                    base: w1,
+                    stride: 1,
+                },
+                InputRef::Modular {
+                    base: inp,
+                    stride: 1,
+                    modulus: k1,
+                },
+            ],
+        );
+        let red1 = g.push_group(
+            m,
+            DType::F32,
+            ScalarOp::Reduce {
+                kind: ReduceKind::Sum,
+                reduce_count: k1,
+                reduce_stride: 1,
+                compute_dtype: DType::F32,
+            },
+            vec![],
+            vec![InputRef::Affine {
+                base: mul1,
+                stride: k1 as i64,
+            }],
+        );
 
         // Activation (elementwise).
-        let act = g.push_group(m, DType::F32, ScalarOp::Unary { op: ScalarUnaryOp::Tanh, compute_dtype: DType::F32 }, vec![], vec![InputRef::Affine { base: red1, stride: 1 }]);
+        let act = g.push_group(
+            m,
+            DType::F32,
+            ScalarOp::Unary {
+                op: ScalarUnaryOp::Tanh,
+                compute_dtype: DType::F32,
+            },
+            vec![],
+            vec![InputRef::Affine {
+                base: red1,
+                stride: 1,
+            }],
+        );
 
         // MatMul 2: [K2, M] @ act[M] → output[K2]
-        let w2 = g.push_group(k2 * m, DType::F32, ScalarOp::Literal(NumericScalar::F32(0.2)), vec![], vec![]);
-        let mul2 = g.push_group(k2 * m, DType::F32, ScalarOp::Binary { op: ScalarBinOp::Mul, compute_dtype: DType::F32 }, vec![], vec![InputRef::Affine { base: w2, stride: 1 }, InputRef::Modular { base: act, stride: 1, modulus: m }]);
-        let red2 = g.push_group(k2, DType::F32, ScalarOp::Reduce { kind: ReduceKind::Sum, reduce_count: m, reduce_stride: 1, compute_dtype: DType::F32 }, vec![], vec![InputRef::Affine { base: mul2, stride: m as i64 }]);
+        let w2 = g.push_group(
+            k2 * m,
+            DType::F32,
+            ScalarOp::Literal(NumericScalar::F32(0.2)),
+            vec![],
+            vec![],
+        );
+        let mul2 = g.push_group(
+            k2 * m,
+            DType::F32,
+            ScalarOp::Binary {
+                op: ScalarBinOp::Mul,
+                compute_dtype: DType::F32,
+            },
+            vec![],
+            vec![
+                InputRef::Affine {
+                    base: w2,
+                    stride: 1,
+                },
+                InputRef::Modular {
+                    base: act,
+                    stride: 1,
+                    modulus: m,
+                },
+            ],
+        );
+        let red2 = g.push_group(
+            k2,
+            DType::F32,
+            ScalarOp::Reduce {
+                kind: ReduceKind::Sum,
+                reduce_count: m,
+                reduce_stride: 1,
+                compute_dtype: DType::F32,
+            },
+            vec![],
+            vec![InputRef::Affine {
+                base: mul2,
+                stride: m as i64,
+            }],
+        );
 
         g.outputs = vec![red2];
-        let it = vec![InputTensor { tensor_id: GlobalId(0), base_id: inp, count: k1, dtype: DType::F32 }];
+        let it = vec![InputTensor {
+            tensor_id: GlobalId(0),
+            base_id: inp,
+            count: k1,
+            dtype: DType::F32,
+        }];
         let phases = plan(&g, num_lanes, &it, &g.outputs.clone());
         verify_plan_full(&phases);
     }
@@ -2127,19 +2682,64 @@ mod tests {
         let mut g = NanoGraph::new();
         let num_lanes = 4;
 
-        let data = g.push_group(1000, DType::F32, ScalarOp::Literal(NumericScalar::F32(1.0)), vec![], vec![]);
-        let neg = g.push_group(1000, DType::F32, ScalarOp::Unary { op: ScalarUnaryOp::Neg, compute_dtype: DType::F32 }, vec![], vec![InputRef::Affine { base: data, stride: 1 }]);
+        let data = g.push_group(
+            1000,
+            DType::F32,
+            ScalarOp::Literal(NumericScalar::F32(1.0)),
+            vec![],
+            vec![],
+        );
+        let neg = g.push_group(
+            1000,
+            DType::F32,
+            ScalarOp::Unary {
+                op: ScalarUnaryOp::Neg,
+                compute_dtype: DType::F32,
+            },
+            vec![],
+            vec![InputRef::Affine {
+                base: data,
+                stride: 1,
+            }],
+        );
         // Scalar reduce: reads ALL 1000 atoms of neg.
-        let reduced = g.push_group(1, DType::F32, ScalarOp::Reduce { kind: ReduceKind::Sum, reduce_count: 1000, reduce_stride: 1, compute_dtype: DType::F32 }, vec![], vec![InputRef::Affine { base: neg, stride: 1 }]);
+        let reduced = g.push_group(
+            1,
+            DType::F32,
+            ScalarOp::Reduce {
+                kind: ReduceKind::Sum,
+                reduce_count: 1000,
+                reduce_stride: 1,
+                compute_dtype: DType::F32,
+            },
+            vec![],
+            vec![InputRef::Affine {
+                base: neg,
+                stride: 1,
+            }],
+        );
         // Broadcast reduced to large output.
-        let output = g.push_group(1000, DType::F32, ScalarOp::Unary { op: ScalarUnaryOp::Neg, compute_dtype: DType::F32 }, vec![], vec![InputRef::Broadcast(reduced)]);
+        let output = g.push_group(
+            1000,
+            DType::F32,
+            ScalarOp::Unary {
+                op: ScalarUnaryOp::Neg,
+                compute_dtype: DType::F32,
+            },
+            vec![],
+            vec![InputRef::Broadcast(reduced)],
+        );
 
         g.outputs = vec![output];
         let phases = plan(&g, num_lanes, &[], &g.outputs.clone());
         verify_plan_full(&phases);
 
         // Should need multiple phases: neg split, then barrier, then reduce, then output.
-        assert!(phases.len() >= 2, "Should need at least 2 phases for reduce from split source, got {}", phases.len());
+        assert!(
+            phases.len() >= 2,
+            "Should need at least 2 phases for reduce from split source, got {}",
+            phases.len()
+        );
     }
 
     // ─── Test: StridedBroadcast FALSE lane-local (distinct fits but misaligned) ──
@@ -2157,20 +2757,43 @@ mod tests {
         let num_lanes = 4;
 
         // Producer: 40 computed atoms.
-        let lit = g.push_group(40, DType::F32, ScalarOp::Literal(NumericScalar::F32(1.0)), vec![], vec![]);
+        let lit = g.push_group(
+            40,
+            DType::F32,
+            ScalarOp::Literal(NumericScalar::F32(1.0)),
+            vec![],
+            vec![],
+        );
         let source = g.push_group(
-            40, DType::F32,
-            ScalarOp::Unary { op: ScalarUnaryOp::Neg, compute_dtype: DType::F32 },
-            vec![], vec![InputRef::Affine { base: lit, stride: 1 }],
+            40,
+            DType::F32,
+            ScalarOp::Unary {
+                op: ScalarUnaryOp::Neg,
+                compute_dtype: DType::F32,
+            },
+            vec![],
+            vec![InputRef::Affine {
+                base: lit,
+                stride: 1,
+            }],
         );
 
         // Consumer: 100 atoms reading source via StridedBroadcast(repeat=10).
         // chunk=25, distinct_per_chunk=ceil(25/10)=3, prod_chunk=10.
         // 3 <= 10 → would pass the simple check. But the access is NOT lane-local!
         let consumer = g.push_group(
-            100, DType::F32,
-            ScalarOp::Unary { op: ScalarUnaryOp::Neg, compute_dtype: DType::F32 },
-            vec![], vec![InputRef::StridedBroadcast { base: source, stride: 1, repeat: 10 }],
+            100,
+            DType::F32,
+            ScalarOp::Unary {
+                op: ScalarUnaryOp::Neg,
+                compute_dtype: DType::F32,
+            },
+            vec![],
+            vec![InputRef::StridedBroadcast {
+                base: source,
+                stride: 1,
+                repeat: 10,
+            }],
         );
 
         g.outputs = vec![consumer];
@@ -2189,16 +2812,38 @@ mod tests {
         let num_lanes = 4;
 
         // count=103 doesn't divide evenly by 4 (25+25+25+28 or 26+26+26+25).
-        let lit = g.push_group(103, DType::F32, ScalarOp::Literal(NumericScalar::F32(1.0)), vec![], vec![]);
+        let lit = g.push_group(
+            103,
+            DType::F32,
+            ScalarOp::Literal(NumericScalar::F32(1.0)),
+            vec![],
+            vec![],
+        );
         let neg = g.push_group(
-            103, DType::F32,
-            ScalarOp::Unary { op: ScalarUnaryOp::Neg, compute_dtype: DType::F32 },
-            vec![], vec![InputRef::Affine { base: lit, stride: 1 }],
+            103,
+            DType::F32,
+            ScalarOp::Unary {
+                op: ScalarUnaryOp::Neg,
+                compute_dtype: DType::F32,
+            },
+            vec![],
+            vec![InputRef::Affine {
+                base: lit,
+                stride: 1,
+            }],
         );
         let exp = g.push_group(
-            103, DType::F32,
-            ScalarOp::Unary { op: ScalarUnaryOp::Exp, compute_dtype: DType::F32 },
-            vec![], vec![InputRef::Affine { base: neg, stride: 1 }],
+            103,
+            DType::F32,
+            ScalarOp::Unary {
+                op: ScalarUnaryOp::Exp,
+                compute_dtype: DType::F32,
+            },
+            vec![],
+            vec![InputRef::Affine {
+                base: neg,
+                stride: 1,
+            }],
         );
 
         g.outputs = vec![exp];
@@ -2213,28 +2858,60 @@ mod tests {
     fn test_attention_matmul() {
         let mut g = NanoGraph::new();
         let num_lanes = 8;
-        let m = 64u64;   // seq_len
-        let k = 64u64;   // head_dim
+        let m = 64u64; // seq_len
+        let k = 64u64; // head_dim
 
         let inp = g.add_input_tensor(GlobalId(0), k, DType::F32);
-        let weights = g.push_group(m * k, DType::F32, ScalarOp::Literal(NumericScalar::F32(0.1)), vec![], vec![]);
+        let weights = g.push_group(
+            m * k,
+            DType::F32,
+            ScalarOp::Literal(NumericScalar::F32(0.1)),
+            vec![],
+            vec![],
+        );
         let mul = g.push_group(
-            m * k, DType::F32,
-            ScalarOp::Binary { op: ScalarBinOp::Mul, compute_dtype: DType::F32 },
+            m * k,
+            DType::F32,
+            ScalarOp::Binary {
+                op: ScalarBinOp::Mul,
+                compute_dtype: DType::F32,
+            },
             vec![],
             vec![
-                InputRef::Affine { base: weights, stride: 1 },
-                InputRef::Modular { base: inp, stride: 1, modulus: k },
+                InputRef::Affine {
+                    base: weights,
+                    stride: 1,
+                },
+                InputRef::Modular {
+                    base: inp,
+                    stride: 1,
+                    modulus: k,
+                },
             ],
         );
         let reduce = g.push_group(
-            m, DType::F32,
-            ScalarOp::Reduce { kind: ReduceKind::Sum, reduce_count: k, reduce_stride: 1, compute_dtype: DType::F32 },
-            vec![], vec![InputRef::Affine { base: mul, stride: k as i64 }],
+            m,
+            DType::F32,
+            ScalarOp::Reduce {
+                kind: ReduceKind::Sum,
+                reduce_count: k,
+                reduce_stride: 1,
+                compute_dtype: DType::F32,
+            },
+            vec![],
+            vec![InputRef::Affine {
+                base: mul,
+                stride: k as i64,
+            }],
         );
 
         g.outputs = vec![reduce];
-        let it = vec![InputTensor { tensor_id: GlobalId(0), base_id: inp, count: k, dtype: DType::F32 }];
+        let it = vec![InputTensor {
+            tensor_id: GlobalId(0),
+            base_id: inp,
+            count: k,
+            dtype: DType::F32,
+        }];
         let phases = plan(&g, num_lanes, &it, &g.outputs.clone());
         verify_plan_full(&phases);
     }
@@ -2249,25 +2926,55 @@ mod tests {
         let m = 8u64;
         let d1 = 768u64;
         let d2 = 64u64;
-        let n1 = m * d1;  // 6144
-        let n2 = m * d2;  // 512
+        let n1 = m * d1; // 6144
+        let n2 = m * d2; // 512
 
         // Two source vectors of different sizes.
-        let src1 = g.push_group(m, DType::F32, ScalarOp::Literal(NumericScalar::F32(1.0)), vec![], vec![]);
-        let src2 = g.push_group(m, DType::F32, ScalarOp::Literal(NumericScalar::F32(2.0)), vec![], vec![]);
+        let src1 = g.push_group(
+            m,
+            DType::F32,
+            ScalarOp::Literal(NumericScalar::F32(1.0)),
+            vec![],
+            vec![],
+        );
+        let src2 = g.push_group(
+            m,
+            DType::F32,
+            ScalarOp::Literal(NumericScalar::F32(2.0)),
+            vec![],
+            vec![],
+        );
 
         // Apply StridedBroadcast with repeat=768.
         let expanded1 = g.push_group(
-            n1, DType::F32,
-            ScalarOp::Unary { op: ScalarUnaryOp::Neg, compute_dtype: DType::F32 },
-            vec![], vec![InputRef::StridedBroadcast { base: src1, stride: 1, repeat: d1 }],
+            n1,
+            DType::F32,
+            ScalarOp::Unary {
+                op: ScalarUnaryOp::Neg,
+                compute_dtype: DType::F32,
+            },
+            vec![],
+            vec![InputRef::StridedBroadcast {
+                base: src1,
+                stride: 1,
+                repeat: d1,
+            }],
         );
 
         // Apply StridedBroadcast with repeat=64.
         let expanded2 = g.push_group(
-            n2, DType::F32,
-            ScalarOp::Unary { op: ScalarUnaryOp::Neg, compute_dtype: DType::F32 },
-            vec![], vec![InputRef::StridedBroadcast { base: src2, stride: 1, repeat: d2 }],
+            n2,
+            DType::F32,
+            ScalarOp::Unary {
+                op: ScalarUnaryOp::Neg,
+                compute_dtype: DType::F32,
+            },
+            vec![],
+            vec![InputRef::StridedBroadcast {
+                base: src2,
+                stride: 1,
+                repeat: d2,
+            }],
         );
 
         g.outputs = vec![expanded1, expanded2];
@@ -2286,15 +2993,51 @@ mod tests {
         let n = 100u64;
 
         // Split input.
-        let data = g.push_group(n, DType::F32, ScalarOp::Literal(NumericScalar::F32(1.0)), vec![], vec![]);
-        let neg = g.push_group(n, DType::F32, ScalarOp::Unary { op: ScalarUnaryOp::Neg, compute_dtype: DType::F32 }, vec![], vec![InputRef::Affine { base: data, stride: 1 }]);
+        let data = g.push_group(
+            n,
+            DType::F32,
+            ScalarOp::Literal(NumericScalar::F32(1.0)),
+            vec![],
+            vec![],
+        );
+        let neg = g.push_group(
+            n,
+            DType::F32,
+            ScalarOp::Unary {
+                op: ScalarUnaryOp::Neg,
+                compute_dtype: DType::F32,
+            },
+            vec![],
+            vec![InputRef::Affine {
+                base: data,
+                stride: 1,
+            }],
+        );
 
         // Whole group with Explicit input (reverse order).
         let explicit_ids: Vec<AtomId> = (0..n).rev().map(|i| AtomId(neg.0 + i)).collect();
-        let reversed = g.push_group(n, DType::F32, ScalarOp::Identity, vec![], vec![InputRef::Explicit(explicit_ids)]);
+        let reversed = g.push_group(
+            n,
+            DType::F32,
+            ScalarOp::Identity,
+            vec![],
+            vec![InputRef::Explicit(explicit_ids)],
+        );
 
         // Split output reading from whole.
-        let output = g.push_group(n, DType::F32, ScalarOp::Unary { op: ScalarUnaryOp::Neg, compute_dtype: DType::F32 }, vec![], vec![InputRef::Affine { base: reversed, stride: 1 }]);
+        let output = g.push_group(
+            n,
+            DType::F32,
+            ScalarOp::Unary {
+                op: ScalarUnaryOp::Neg,
+                compute_dtype: DType::F32,
+            },
+            vec![],
+            vec![InputRef::Affine {
+                base: reversed,
+                stride: 1,
+            }],
+        );
 
         g.outputs = vec![output];
         let phases = plan(&g, num_lanes, &[], &g.outputs.clone());

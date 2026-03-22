@@ -110,10 +110,7 @@ enum GroupKind {
     TooSmall,
 }
 
-fn classify_groups(
-    graph: &NanoGraph,
-    producers: &[Vec<usize>],
-) -> Vec<GroupKind> {
+fn classify_groups(graph: &NanoGraph, producers: &[Vec<usize>]) -> Vec<GroupKind> {
     let groups = graph.groups();
     groups
         .iter()
@@ -122,11 +119,7 @@ fn classify_groups(
         .collect()
 }
 
-fn classify_one(
-    group: &AtomGroup,
-    all_groups: &[AtomGroup],
-    my_producers: &[usize],
-) -> GroupKind {
+fn classify_one(group: &AtomGroup, all_groups: &[AtomGroup], my_producers: &[usize]) -> GroupKind {
     // Literals: duplicate.
     if matches!(group.op, ScalarOp::Literal(_)) {
         return GroupKind::Literal;
@@ -231,7 +224,13 @@ fn assign_phases(
 
         // Check if we need a new phase (barrier) after our producers.
         let needs_barrier = needs_barrier_before(
-            gi, group, kind, &producers[gi], classifications, groups, num_lanes,
+            gi,
+            group,
+            kind,
+            &producers[gi],
+            classifications,
+            groups,
+            num_lanes,
         );
 
         if needs_barrier {
@@ -380,7 +379,8 @@ fn input_crosses_lane_boundary(
             let source_atoms_per_lane = abs_stride.saturating_mul(consumer_chunk);
 
             // Find the source group to check its count.
-            if let Some((source_group, _)) = groups.iter()
+            if let Some((source_group, _)) = groups
+                .iter()
                 .enumerate()
                 .find(|(_, g)| g.contains(AtomId(base.0)))
                 .map(|(_, g)| (g, 0))
@@ -418,7 +418,11 @@ fn input_crosses_lane_boundary(
             // Source not found as a group (might be an input tensor) → no crossing.
             false
         }
-        InputRef::StridedBroadcast { base, stride, repeat } => {
+        InputRef::StridedBroadcast {
+            base,
+            stride,
+            repeat,
+        } => {
             // StridedBroadcast: atom i reads base + stride * (i / repeat).
             // When we split the consumer, lane k gets atoms [k*C..(k+1)*C).
             // Those atoms read source atoms at base + stride * (k*C/repeat)
@@ -649,7 +653,7 @@ fn split_group_across_lanes(
             gi,
             group,
             lane,
-            start,   // atom_offset for this fragment
+            start, // atom_offset for this fragment
             count,
             lane_graphs,
             lane_inputs,
@@ -675,7 +679,15 @@ fn split_group_across_lanes(
         lane_group_set[lane].insert(gi);
 
         // Determine if this fragment needs to be in outputs.
-        if needs_output(gi, group, successors, phase_assignments, output_group_set, phase_idx, num_phases) {
+        if needs_output(
+            gi,
+            group,
+            successors,
+            phase_assignments,
+            output_group_set,
+            phase_idx,
+            num_phases,
+        ) {
             lane_outputs[lane].push(AtomRange {
                 base: fragment_base,
                 count,
@@ -763,7 +775,15 @@ fn place_whole_group_on_lane(
     lane_group_set[lane].insert(gi);
 
     // Output if needed.
-    if needs_output(gi, group, successors, phase_assignments, output_group_set, phase_idx, num_phases) {
+    if needs_output(
+        gi,
+        group,
+        successors,
+        phase_assignments,
+        output_group_set,
+        phase_idx,
+        num_phases,
+    ) {
         lane_outputs[lane].push(AtomRange {
             base: group.base_id,
             count: group.count,
@@ -780,7 +800,7 @@ fn ensure_inputs_for_group(
     gi: usize,
     group: &AtomGroup,
     lane: usize,
-    fragment_offset: u64,   // where this fragment starts within the group
+    fragment_offset: u64, // where this fragment starts within the group
     fragment_count: u64,
     lane_graphs: &mut [NanoGraph],
     lane_inputs: &mut [Vec<AtomRange>],
@@ -878,8 +898,16 @@ fn ensure_input_ref(
 
     // Ensure all groups/input tensors in [lo, hi] are available.
     ensure_range_available(
-        graph, lo, hi, lane, lane_graphs, lane_inputs, lane_input_atoms,
-        lane_group_set, phase_gi_set, input_tensors,
+        graph,
+        lo,
+        hi,
+        lane,
+        lane_graphs,
+        lane_inputs,
+        lane_input_atoms,
+        lane_group_set,
+        phase_gi_set,
+        input_tensors,
     );
 }
 
@@ -915,8 +943,16 @@ fn ensure_reduce_stride_range(
     let hi = *endpoints.iter().max().unwrap();
 
     ensure_range_available(
-        graph, lo, hi, lane, lane_graphs, lane_inputs, lane_input_atoms,
-        lane_group_set, phase_gi_set, input_tensors,
+        graph,
+        lo,
+        hi,
+        lane,
+        lane_graphs,
+        lane_inputs,
+        lane_input_atoms,
+        lane_group_set,
+        phase_gi_set,
+        input_tensors,
     );
 }
 
@@ -937,33 +973,35 @@ fn ensure_range_available(
 
     // Check input tensors first.
     for it in input_tensors {
-        if it.count == 0 { continue; }
+        if it.count == 0 {
+            continue;
+        }
         let it_lo = it.base_id.0;
         let it_hi = it_lo + it.count - 1;
         if it_hi >= lo && it_lo <= hi {
             // This input tensor overlaps our range.
-            declare_input_tensor_in_lane(
-                it, lane, lane_graphs, lane_inputs, lane_input_atoms,
-            );
+            declare_input_tensor_in_lane(it, lane, lane_graphs, lane_inputs, lane_input_atoms);
         }
     }
 
     // Check graph input tensors.
     for it in graph.input_tensors() {
-        if it.count == 0 { continue; }
+        if it.count == 0 {
+            continue;
+        }
         let it_lo = it.base_id.0;
         let it_hi = it_lo + it.count - 1;
         if it_hi >= lo && it_lo <= hi {
-            declare_input_tensor_in_lane(
-                it, lane, lane_graphs, lane_inputs, lane_input_atoms,
-            );
+            declare_input_tensor_in_lane(it, lane, lane_graphs, lane_inputs, lane_input_atoms);
         }
     }
 
     // Check groups in the range that are not in this phase (external deps).
     // These need to be declared as span inputs.
     for (gi, g) in groups.iter().enumerate() {
-        if g.count == 0 { continue; }
+        if g.count == 0 {
+            continue;
+        }
         let g_lo = g.base_id.0;
         let g_hi = g_lo + g.count - 1;
         if g_lo > hi {
@@ -975,9 +1013,7 @@ fn ensure_range_available(
         // This group overlaps our range.
         if !phase_gi_set.contains(&gi) {
             // External group: declare as input.
-            declare_group_as_input(
-                g, lane, lane_graphs, lane_inputs, lane_input_atoms,
-            );
+            declare_group_as_input(g, lane, lane_graphs, lane_inputs, lane_input_atoms);
         }
         // If it's in this phase but not yet in this lane, and it's a literal,
         // we may need to wait (it will be placed later in topo order, which is fine
@@ -997,8 +1033,16 @@ fn ensure_atom_available(
     input_tensors: &[InputTensor],
 ) {
     ensure_range_available(
-        graph, atom_id, atom_id, lane, lane_graphs, lane_inputs, lane_input_atoms,
-        lane_group_set, phase_gi_set, input_tensors,
+        graph,
+        atom_id,
+        atom_id,
+        lane,
+        lane_graphs,
+        lane_inputs,
+        lane_input_atoms,
+        lane_group_set,
+        phase_gi_set,
+        input_tensors,
     );
 }
 
@@ -1013,12 +1057,7 @@ fn declare_input_tensor_in_lane(
         return; // Already declared.
     }
     lane_input_atoms[lane].insert(it.base_id.0);
-    lane_graphs[lane].insert_input_tensor_at(
-        it.base_id,
-        it.tensor_id,
-        it.count,
-        it.dtype,
-    );
+    lane_graphs[lane].insert_input_tensor_at(it.base_id, it.tensor_id, it.count, it.dtype);
     lane_inputs[lane].push(AtomRange {
         base: it.base_id,
         count: it.count,
@@ -1099,12 +1138,20 @@ fn input_ref_source_range(input: &InputRef, count: u64, atom_offset: u64) -> (u6
             let last = input.resolve(atom_offset + count - 1);
             (first.0.min(last.0), first.0.max(last.0))
         }
-        InputRef::StridedBroadcast { base, stride, repeat } => {
+        InputRef::StridedBroadcast {
+            base,
+            stride,
+            repeat,
+        } => {
             let first = input.resolve(atom_offset);
             let last = input.resolve(atom_offset + count - 1);
             (first.0.min(last.0), first.0.max(last.0))
         }
-        InputRef::Modular { base, stride, modulus } => {
+        InputRef::Modular {
+            base,
+            stride,
+            modulus,
+        } => {
             let a = base.0;
             let b = (base.0 as i64 + *stride * (*modulus as i64 - 1)) as u64;
             (a.min(b), a.max(b))
@@ -1125,9 +1172,9 @@ mod tests {
     use super::*;
     use crate::dtype::DType;
     use crate::graph::GlobalId;
-    use crate::nano_graph::{AtomId, InputRef, NanoGraph, ScalarOp};
-    use crate::nano_graph::ops::{ScalarBinOp, ScalarUnaryOp, ReduceKind};
+    use crate::nano_graph::ops::{ReduceKind, ScalarBinOp, ScalarUnaryOp};
     use crate::nano_graph::pattern::InputTensor;
+    use crate::nano_graph::{AtomId, InputRef, NanoGraph, ScalarOp};
     use crate::numeric_scalar::NumericScalar;
 
     /// Helper: create an input tensor in the graph.
@@ -1147,11 +1194,20 @@ mod tests {
     }
 
     /// Helper: create a binary op group.
-    fn add_binary(graph: &mut NanoGraph, count: u64, a: AtomId, b: AtomId, op: ScalarBinOp) -> AtomId {
+    fn add_binary(
+        graph: &mut NanoGraph,
+        count: u64,
+        a: AtomId,
+        b: AtomId,
+        op: ScalarBinOp,
+    ) -> AtomId {
         graph.push_group(
             count,
             DType::F32,
-            ScalarOp::Binary { op, compute_dtype: DType::F32 },
+            ScalarOp::Binary {
+                op,
+                compute_dtype: DType::F32,
+            },
             vec![],
             vec![
                 InputRef::Affine { base: a, stride: 1 },
@@ -1165,14 +1221,25 @@ mod tests {
         graph.push_group(
             count,
             DType::F32,
-            ScalarOp::Unary { op, compute_dtype: DType::F32 },
+            ScalarOp::Unary {
+                op,
+                compute_dtype: DType::F32,
+            },
             vec![],
-            vec![InputRef::Affine { base: input, stride: 1 }],
+            vec![InputRef::Affine {
+                base: input,
+                stride: 1,
+            }],
         )
     }
 
     /// Helper: create a reduce group.
-    fn add_reduce(graph: &mut NanoGraph, out_count: u64, input: AtomId, reduce_count: u64) -> AtomId {
+    fn add_reduce(
+        graph: &mut NanoGraph,
+        out_count: u64,
+        input: AtomId,
+        reduce_count: u64,
+    ) -> AtomId {
         graph.push_group(
             out_count,
             DType::F32,
@@ -1183,20 +1250,29 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine { base: input, stride: reduce_count as i64 }],
+            vec![InputRef::Affine {
+                base: input,
+                stride: reduce_count as i64,
+            }],
         )
     }
 
     /// Count the total atoms across all lanes in a phase.
     fn phase_atom_counts(phase: &Phase) -> Vec<u64> {
-        phase.spans.iter().map(|s| {
-            s.graph.groups().iter().map(|g| g.count).sum()
-        }).collect()
+        phase
+            .spans
+            .iter()
+            .map(|s| s.graph.groups().iter().map(|g| g.count).sum())
+            .collect()
     }
 
     /// Count how many lanes are active (non-empty) in a phase.
     fn active_lanes(phase: &Phase) -> usize {
-        phase.spans.iter().filter(|s| s.graph.num_groups() > 0).count()
+        phase
+            .spans
+            .iter()
+            .filter(|s| s.graph.num_groups() > 0)
+            .count()
     }
 
     // ── Test: linear chain splitting ──────────────────────────────────
@@ -1215,7 +1291,12 @@ mod tests {
         let phases = plan(&g, 4, &input_tensors, &output_ids);
 
         // Should be a single phase (no barriers needed for elementwise chain).
-        assert_eq!(phases.len(), 1, "Linear chain should be 1 phase, got {}", phases.len());
+        assert_eq!(
+            phases.len(),
+            1,
+            "Linear chain should be 1 phase, got {}",
+            phases.len()
+        );
 
         let counts = phase_atom_counts(&phases[0]);
         // All 4 lanes should be active.
@@ -1225,7 +1306,9 @@ mod tests {
         for (lane, &count) in counts.iter().enumerate() {
             assert!(
                 count >= 400 && count <= 600,
-                "Lane {} has {} atoms, expected ~512", lane, count,
+                "Lane {} has {} atoms, expected ~512",
+                lane,
+                count,
             );
         }
     }
@@ -1249,7 +1332,12 @@ mod tests {
         let phases = plan(&g, 4, &input_tensors, &output_ids);
 
         // Single phase.
-        assert_eq!(phases.len(), 1, "Diamond should be 1 phase, got {}", phases.len());
+        assert_eq!(
+            phases.len(),
+            1,
+            "Diamond should be 1 phase, got {}",
+            phases.len()
+        );
         assert_eq!(active_lanes(&phases[0]), 4, "All 4 lanes should be active");
 
         // Each lane gets 1/4 of each of the 4 groups = 4*256 = 1024 atoms.
@@ -1257,7 +1345,9 @@ mod tests {
         for (lane, &count) in counts.iter().enumerate() {
             assert!(
                 count >= 800 && count <= 1200,
-                "Lane {} has {} atoms, expected ~1024", lane, count,
+                "Lane {} has {} atoms, expected ~1024",
+                lane,
+                count,
             );
         }
     }
@@ -1284,8 +1374,15 @@ mod tests {
             },
             vec![],
             vec![
-                InputRef::StridedBroadcast { base: input, stride: 1, repeat: 128 },
-                InputRef::Affine { base: weights, stride: 1 },
+                InputRef::StridedBroadcast {
+                    base: input,
+                    stride: 1,
+                    repeat: 128,
+                },
+                InputRef::Affine {
+                    base: weights,
+                    stride: 1,
+                },
             ],
         );
         let reduce = g.push_group(
@@ -1298,7 +1395,10 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine { base: mul, stride: 128 }],
+            vec![InputRef::Affine {
+                base: mul,
+                stride: 128,
+            }],
         );
         g.outputs = vec![reduce];
 
@@ -1312,7 +1412,11 @@ mod tests {
         // With 4 lanes, each lane gets 8192/4 = 2048 mul atoms and 16 reduce atoms.
 
         // Should be a small number of phases.
-        assert!(phases.len() <= 3, "MatMul should have <= 3 phases, got {}", phases.len());
+        assert!(
+            phases.len() <= 3,
+            "MatMul should have <= 3 phases, got {}",
+            phases.len()
+        );
 
         // At least 2 lanes should be active in the first phase.
         let total_active: usize = phases.iter().map(|p| active_lanes(p)).sum();
@@ -1330,7 +1434,11 @@ mod tests {
             }
         }
         // Weights should be in all lanes that do the Mul.
-        assert!(lanes_with_weights >= 2, "Weights should be duplicated to multiple lanes, got {}", lanes_with_weights);
+        assert!(
+            lanes_with_weights >= 2,
+            "Weights should be duplicated to multiple lanes, got {}",
+            lanes_with_weights
+        );
     }
 
     // ── Test: literal duplication ─────────────────────────────────────
@@ -1350,8 +1458,15 @@ mod tests {
             },
             vec![],
             vec![
-                InputRef::Affine { base: input, stride: 1 },
-                InputRef::Modular { base: lit, stride: 1, modulus: 100 },
+                InputRef::Affine {
+                    base: input,
+                    stride: 1,
+                },
+                InputRef::Modular {
+                    base: lit,
+                    stride: 1,
+                    modulus: 100,
+                },
             ],
         );
         g.outputs = vec![add];
@@ -1380,7 +1495,9 @@ mod tests {
             // Each lane: 100 (literal) + 200 (split add) = 300
             assert!(
                 count >= 250 && count <= 350,
-                "Lane {} has {} atoms, expected ~300", lane, count,
+                "Lane {} has {} atoms, expected ~300",
+                lane,
+                count,
             );
         }
     }
@@ -1405,7 +1522,10 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine { base: neg, stride: 1 }],
+            vec![InputRef::Affine {
+                base: neg,
+                stride: 1,
+            }],
         );
         // Downstream: broadcast the reduce result to 1024 atoms.
         let broadcast = g.push_group(
@@ -1417,7 +1537,10 @@ mod tests {
             },
             vec![],
             vec![
-                InputRef::Affine { base: input, stride: 1 },
+                InputRef::Affine {
+                    base: input,
+                    stride: 1,
+                },
                 InputRef::Broadcast(reduce),
             ],
         );
@@ -1431,10 +1554,17 @@ mod tests {
         // Phase 1: neg split across 4 lanes
         // Phase 2: reduce on one lane (needs barrier to read all lanes' neg output)
         // Phase 3: broadcast div split across 4 lanes (needs barrier to read reduce output)
-        assert!(phases.len() >= 2, "Should have >= 2 phases due to reduce barrier, got {}", phases.len());
+        assert!(
+            phases.len() >= 2,
+            "Should have >= 2 phases due to reduce barrier, got {}",
+            phases.len()
+        );
 
         // First phase should have good utilization (neg split).
-        assert!(active_lanes(&phases[0]) >= 2, "First phase should have multiple active lanes");
+        assert!(
+            active_lanes(&phases[0]) >= 2,
+            "First phase should have multiple active lanes"
+        );
     }
 
     // ── Test: groups are actually split (not just assigned whole) ─────
@@ -1458,11 +1588,21 @@ mod tests {
         let mut lanes_with_neg = 0;
         for span in &phases[0].spans {
             for grp in span.graph.groups() {
-                if matches!(grp.op, ScalarOp::Unary { op: ScalarUnaryOp::Neg, .. }) {
+                if matches!(
+                    grp.op,
+                    ScalarOp::Unary {
+                        op: ScalarUnaryOp::Neg,
+                        ..
+                    }
+                ) {
                     total_neg_atoms += grp.count;
                     lanes_with_neg += 1;
                     // Each fragment should have count=250 (1000/4).
-                    assert_eq!(grp.count, 250, "Fragment should have 250 atoms, got {}", grp.count);
+                    assert_eq!(
+                        grp.count, 250,
+                        "Fragment should have 250 atoms, got {}",
+                        grp.count
+                    );
                     // atom_offset should be set correctly.
                     assert_eq!(
                         grp.atom_offset,
@@ -1473,7 +1613,10 @@ mod tests {
             }
         }
         assert_eq!(lanes_with_neg, 4, "Neg should be split into 4 fragments");
-        assert_eq!(total_neg_atoms, 1000, "Total atoms should equal original count");
+        assert_eq!(
+            total_neg_atoms, 1000,
+            "Total atoms should equal original count"
+        );
     }
 
     // ── Test: split preserves atom IDs ────────────────────────────────
@@ -1494,7 +1637,13 @@ mod tests {
         let mut fragment_ranges: Vec<(u64, u64)> = vec![];
         for span in &phases[0].spans {
             for grp in span.graph.groups() {
-                if matches!(grp.op, ScalarOp::Unary { op: ScalarUnaryOp::Exp, .. }) {
+                if matches!(
+                    grp.op,
+                    ScalarOp::Unary {
+                        op: ScalarUnaryOp::Exp,
+                        ..
+                    }
+                ) {
                     fragment_ranges.push((grp.base_id.0, grp.base_id.0 + grp.count));
                 }
             }
@@ -1503,10 +1652,14 @@ mod tests {
 
         // Fragments should cover the entire original range contiguously.
         assert_eq!(fragment_ranges.len(), 4);
-        assert_eq!(fragment_ranges[0].0, add_id.0, "First fragment should start at original base");
+        assert_eq!(
+            fragment_ranges[0].0, add_id.0,
+            "First fragment should start at original base"
+        );
         for i in 1..fragment_ranges.len() {
             assert_eq!(
-                fragment_ranges[i].0, fragment_ranges[i - 1].1,
+                fragment_ranges[i].0,
+                fragment_ranges[i - 1].1,
                 "Fragments should be contiguous"
             );
         }
@@ -1574,7 +1727,10 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine { base: input, stride: 128 }],
+            vec![InputRef::Affine {
+                base: input,
+                stride: 128,
+            }],
         );
         g.outputs = vec![reduce];
 
@@ -1595,7 +1751,10 @@ mod tests {
                 }
             }
         }
-        assert_eq!(lanes_with_reduce, 4, "Reduce should be split across 4 lanes");
+        assert_eq!(
+            lanes_with_reduce, 4,
+            "Reduce should be split across 4 lanes"
+        );
         assert_eq!(total_reduce_atoms, 64, "Total reduce atoms should be 64");
     }
 
@@ -1621,7 +1780,9 @@ mod tests {
                 assert!(
                     errors.is_empty(),
                     "Phase {} lane {} validation errors: {:?}",
-                    pi, li, errors
+                    pi,
+                    li,
+                    errors
                 );
             }
         }
@@ -1658,7 +1819,8 @@ mod tests {
         for i in 0..256 {
             assert!(
                 output_atoms.contains(&(b.0 + i)),
-                "Output atom {} not produced by any span", b.0 + i,
+                "Output atom {} not produced by any span",
+                b.0 + i,
             );
         }
     }
@@ -1682,7 +1844,12 @@ mod tests {
         let output_ids = g.outputs.clone();
         let phases = plan(&g, 8, &input_tensors, &output_ids);
 
-        assert_eq!(phases.len(), 1, "Long elementwise chain should be 1 phase, got {}", phases.len());
+        assert_eq!(
+            phases.len(),
+            1,
+            "Long elementwise chain should be 1 phase, got {}",
+            phases.len()
+        );
         assert_eq!(active_lanes(&phases[0]), 8, "All 8 lanes should be active");
 
         // Each lane should have 5 groups of 256 atoms each = 1280 atoms.
@@ -1690,7 +1857,9 @@ mod tests {
         for (lane, &count) in counts.iter().enumerate() {
             assert!(
                 count >= 1100 && count <= 1500,
-                "Lane {} has {} atoms, expected ~1280", lane, count,
+                "Lane {} has {} atoms, expected ~1280",
+                lane,
+                count,
             );
         }
     }

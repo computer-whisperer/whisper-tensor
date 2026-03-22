@@ -114,10 +114,7 @@ enum GroupClass {
 }
 
 fn classify_groups(groups: &[AtomGroup], num_lanes: usize) -> Vec<GroupClass> {
-    groups
-        .iter()
-        .map(|g| classify_one(g, num_lanes))
-        .collect()
+    groups.iter().map(|g| classify_one(g, num_lanes)).collect()
 }
 
 fn classify_one(g: &AtomGroup, num_lanes: usize) -> GroupClass {
@@ -334,8 +331,7 @@ fn build_phase(
                             GroupClass::Whole => {
                                 // Find which lane has this whole group.
                                 for (l, items) in lane_items.iter().enumerate() {
-                                    if items.iter().any(|w| w.group_idx == pi && !w.is_duplicate)
-                                    {
+                                    if items.iter().any(|w| w.group_idx == pi && !w.is_duplicate) {
                                         producer_lanes.insert(l);
                                     }
                                 }
@@ -525,14 +521,24 @@ fn build_span(
                 let pg = &groups[pi];
                 if let Some(fragments) = span_compute.get(&pi) {
                     // Check if the entire table group is covered by local fragments.
-                    let gaps = uncovered_ranges(pg.base_id.0, pg.base_id.0 + pg.count - 1, pg.base_id.0, fragments);
+                    let gaps = uncovered_ranges(
+                        pg.base_id.0,
+                        pg.base_id.0 + pg.count - 1,
+                        pg.base_id.0,
+                        fragments,
+                    );
                     for (gap_base, gap_count) in gaps {
                         record_external(&mut needed_external, gap_base, gap_count, pg.output_dtype);
                     }
                 } else if is_literal_group(pg) && pg.count < LITERAL_INLINE_THRESHOLD {
                     needed_literals.insert(pi);
                 } else {
-                    record_external(&mut needed_external, pg.base_id.0, pg.count, pg.output_dtype);
+                    record_external(
+                        &mut needed_external,
+                        pg.base_id.0,
+                        pg.count,
+                        pg.output_dtype,
+                    );
                 }
             } else if let Some((ti, _)) = graph.find_input_idx(*table_base) {
                 let it = &input_tensors[ti];
@@ -545,7 +551,14 @@ fn build_span(
     for &li in &needed_literals.clone() {
         let g = &groups[li];
         for input in &g.inputs {
-            collect_input_tensor_deps(input, g.count, g.atom_offset, graph, input_tensors, &mut needed_external);
+            collect_input_tensor_deps(
+                input,
+                g.count,
+                g.atom_offset,
+                graph,
+                input_tensors,
+                &mut needed_external,
+            );
         }
     }
 
@@ -914,12 +927,7 @@ fn collect_input_tensor_deps(
     }
 }
 
-fn record_external(
-    ranges: &mut BTreeMap<u64, (u64, DType)>,
-    base: u64,
-    count: u64,
-    dtype: DType,
-) {
+fn record_external(ranges: &mut BTreeMap<u64, (u64, DType)>, base: u64, count: u64, dtype: DType) {
     ranges
         .entry(base)
         .and_modify(|(existing_count, _)| {
@@ -971,7 +979,7 @@ fn would_overlap(inserted: &[(u64, u64)], start: u64, count: u64) -> bool {
 /// return the sub-ranges of [need_lo, need_hi] NOT covered by any fragment.
 fn uncovered_ranges(
     need_lo: u64,
-    need_hi: u64,  // inclusive
+    need_hi: u64, // inclusive
     group_base: u64,
     fragments: &[(u64, u64)],
 ) -> Vec<(u64, u64)> {
@@ -1069,8 +1077,7 @@ mod tests {
                     let g_hi = g_lo + g.count;
                     let orig_lo = base_id.0;
                     let orig_hi = orig_lo + total_count;
-                    if g_lo >= orig_lo && g_hi <= orig_hi && !matches!(g.op, ScalarOp::Literal(_))
-                    {
+                    if g_lo >= orig_lo && g_hi <= orig_hi && !matches!(g.op, ScalarOp::Literal(_)) {
                         lanes_with_fragment += 1;
                     }
                 }
@@ -1407,9 +1414,11 @@ mod tests {
 
         // Check that the literal appears in every lane's span.
         for (lane_idx, span) in phases[0].spans.iter().enumerate() {
-            let has_literal = span.graph.groups().iter().any(|g| {
-                g.base_id == lit && matches!(g.op, ScalarOp::Literal(_))
-            });
+            let has_literal = span
+                .graph
+                .groups()
+                .iter()
+                .any(|g| g.base_id == lit && matches!(g.op, ScalarOp::Literal(_)));
             assert!(
                 has_literal,
                 "Lane {} should have a copy of the literal",
@@ -1925,9 +1934,7 @@ mod tests {
         let load = g.push_group(
             100,
             DType::F32,
-            ScalarOp::IndirectLoad {
-                table_base: table,
-            },
+            ScalarOp::IndirectLoad { table_base: table },
             vec![],
             vec![InputRef::Affine {
                 base: indices,

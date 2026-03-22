@@ -379,12 +379,7 @@ fn collect_external_in_range(
                 let range_hi = it_hi.min(*unc_hi);
                 let range_count = range_hi - range_lo;
                 if range_count > 0 {
-                    record_external_range(
-                        needed_external,
-                        AtomId(range_lo),
-                        range_count,
-                        it.dtype,
-                    );
+                    record_external_range(needed_external, AtomId(range_lo), range_count, it.dtype);
                 }
             }
         }
@@ -392,17 +387,15 @@ fn collect_external_in_range(
 }
 
 /// Merge overlapping/adjacent external ranges.
-fn merge_external_ranges(
-    ranges: &BTreeMap<u64, (u64, DType)>,
-) -> Vec<(AtomId, u64, DType)> {
+fn merge_external_ranges(ranges: &BTreeMap<u64, (u64, DType)>) -> Vec<(AtomId, u64, DType)> {
     let mut merged: Vec<(AtomId, u64, DType)> = Vec::new();
     for (&base, &(count, dtype)) in ranges {
         if let Some(last) = merged.last_mut() {
-            let last_end = last.0 .0 + last.1;
+            let last_end = last.0.0 + last.1;
             if base <= last_end && dtype == last.2 {
                 // Extend the last range.
                 let new_end = (base + count).max(last_end);
-                last.1 = new_end - last.0 .0;
+                last.1 = new_end - last.0.0;
                 continue;
             }
         }
@@ -587,12 +580,7 @@ fn build_span(
             if !is_internal {
                 if let Some(pi) = graph.find_group_idx(*table_base) {
                     let g = &groups[pi];
-                    record_external_range(
-                        &mut needed_external,
-                        g.base_id,
-                        g.count,
-                        g.output_dtype,
-                    );
+                    record_external_range(&mut needed_external, g.base_id, g.count, g.output_dtype);
                 } else if let Some((ti, _)) = graph.find_input_idx(*table_base) {
                     let it = &input_tensors[ti];
                     record_external_range(&mut needed_external, it.base_id, it.count, it.dtype);
@@ -628,10 +616,7 @@ fn build_span(
     }
 
     for &li in &needed_literals {
-        items.push((
-            groups[li].base_id.0,
-            InsertItem::InlineLiteral { gi: li },
-        ));
+        items.push((groups[li].base_id.0, InsertItem::InlineLiteral { gi: li }));
     }
 
     for item in work_items {
@@ -816,7 +801,14 @@ pub fn plan(
     }
 
     // Step 3: Assign phases.
-    let phase_of = assign_phases(groups, &strategies, &producers, &successors, num_lanes, graph);
+    let phase_of = assign_phases(
+        groups,
+        &strategies,
+        &producers,
+        &successors,
+        num_lanes,
+        graph,
+    );
 
     // Step 4: Identify output groups.
     let output_group_set = identify_output_groups(graph, output_atom_ids);
@@ -899,19 +891,15 @@ pub fn plan(
 
         // Sort each lane's work items by base_id for topological correctness.
         for lane in 0..num_lanes {
-            lane_work[lane].sort_by_key(|item| {
-                groups[item.group_idx].base_id.0 + item.atom_offset
-            });
+            lane_work[lane].sort_by_key(|item| groups[item.group_idx].base_id.0 + item.atom_offset);
         }
 
         // Build spans.
         let mut spans = Vec::with_capacity(num_lanes);
         for lane in 0..num_lanes {
             // Compute which group indices are internal to this lane.
-            let lane_internal: HashSet<usize> = lane_work[lane]
-                .iter()
-                .map(|item| item.group_idx)
-                .collect();
+            let lane_internal: HashSet<usize> =
+                lane_work[lane].iter().map(|item| item.group_idx).collect();
 
             let span = build_span(
                 graph,
@@ -974,13 +962,7 @@ mod tests {
         phase
             .spans
             .iter()
-            .map(|s| {
-                s.graph
-                    .groups()
-                    .iter()
-                    .map(|g| g.count)
-                    .sum::<u64>()
-            })
+            .map(|s| s.graph.groups().iter().map(|g| g.count).sum::<u64>())
             .sum()
     }
 
@@ -989,13 +971,7 @@ mod tests {
         phase
             .spans
             .iter()
-            .map(|s| {
-                s.graph
-                    .groups()
-                    .iter()
-                    .map(|g| g.count)
-                    .sum::<u64>()
-            })
+            .map(|s| s.graph.groups().iter().map(|g| g.count).sum::<u64>())
             .collect()
     }
 
@@ -1205,11 +1181,7 @@ mod tests {
         // Every lane should have work.
         let compute = lane_compute_atoms(&phases[0]);
         for (lane, &atoms) in compute.iter().enumerate() {
-            assert!(
-                atoms > 0,
-                "Lane {} has no compute atoms — not split!",
-                lane
-            );
+            assert!(atoms > 0, "Lane {} has no compute atoms — not split!", lane);
         }
 
         // Each lane should have roughly 3 * (49152/8) = 18432 compute atoms.
@@ -1253,10 +1225,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine {
-                base: a,
-                stride: 1,
-            }],
+            vec![InputRef::Affine { base: a, stride: 1 }],
         );
 
         let c = graph.push_group(
@@ -1267,10 +1236,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine {
-                base: a,
-                stride: 1,
-            }],
+            vec![InputRef::Affine { base: a, stride: 1 }],
         );
 
         let d = graph.push_group(
@@ -1282,14 +1248,8 @@ mod tests {
             },
             vec![],
             vec![
-                InputRef::Affine {
-                    base: b,
-                    stride: 1,
-                },
-                InputRef::Affine {
-                    base: c,
-                    stride: 1,
-                },
+                InputRef::Affine { base: b, stride: 1 },
+                InputRef::Affine { base: c, stride: 1 },
             ],
         );
 
@@ -1308,11 +1268,7 @@ mod tests {
         // All lanes active.
         let compute = lane_compute_atoms(&phases[0]);
         for (lane, &atoms) in compute.iter().enumerate() {
-            assert!(
-                atoms > 0,
-                "Lane {} has no compute atoms in diamond",
-                lane
-            );
+            assert!(atoms > 0, "Lane {} has no compute atoms in diamond", lane);
         }
 
         // Each lane: 3 groups * 4 atoms = 12 compute atoms.
@@ -1881,7 +1837,15 @@ mod tests {
                 .graph
                 .groups()
                 .iter()
-                .filter(|g| matches!(g.op, ScalarOp::Binary { op: ScalarBinOp::Add, .. }))
+                .filter(|g| {
+                    matches!(
+                        g.op,
+                        ScalarOp::Binary {
+                            op: ScalarBinOp::Add,
+                            ..
+                        }
+                    )
+                })
                 .collect();
 
             assert_eq!(
@@ -2029,7 +1993,13 @@ mod tests {
         for (pi, phase) in phases.iter().enumerate() {
             for (li, span) in phase.spans.iter().enumerate() {
                 for g in span.graph.groups() {
-                    if matches!(g.op, ScalarOp::Unary { op: ScalarUnaryOp::Exp, .. }) {
+                    if matches!(
+                        g.op,
+                        ScalarOp::Unary {
+                            op: ScalarUnaryOp::Exp,
+                            ..
+                        }
+                    ) {
                         assert!(
                             g.count < count,
                             "Phase {} Lane {} has a full Exp group ({} atoms) — NOT SPLIT!",
