@@ -1,4 +1,4 @@
-# Partitioner Agent Prompt — v14
+# Partitioner Agent Prompt — v14 gen-2
 
 This document is the prompt template for multi-agent partitioner attempts.
 Each agent receives this plus a unique creative direction section.
@@ -8,135 +8,195 @@ Each agent receives this plus a unique creative direction section.
 ## The Problem
 
 You are building a scheduler for a dataflow graph that must execute
-efficiently across multiple processor cores. This is the core scheduling
-problem in any parallel compiler: given a DAG of operations with data
-dependencies, partition the work across N execution lanes (threads/cores)
-while respecting dependencies and maximizing throughput.
+efficiently across multiple processor cores. Given a DAG of scalar
+operations with data dependencies, partition the work across N execution
+lanes while respecting dependencies and maximizing throughput.
 
 The input is a **NanoGraph** — a compressed scalar DAG where all tensor
-operations have been dissolved into individual scalar computations grouped
-by structural regularity. The output is an **ExecutionPlan**: a sequence
-of phases separated by barrier sync points, where each phase contains
-independent spans (one per lane) that execute in parallel.
+operations have been dissolved into individual scalar atoms grouped by
+structural regularity. The output is a sequence of **Phases** separated
+by barrier sync points, where each phase contains independent **Spans**
+(one per lane) that execute in parallel.
 
-### The execution model
+## CRITICAL: Groups Must Be Split
 
-- **Lanes** are persistent threads, each pinned to a core. A lane runs
-  through all phases of the model, hitting barrier sync points between them.
-- **Phases** are separated by barriers. Within a phase, all lanes execute
-  independently — no cross-lane communication.
-- **Spans** are one lane's work within one phase. Each span is a
-  self-contained NanoGraph fragment that can be compiled and executed
-  independently, given its declared input data.
+**This is the single most important requirement.** AtomGroups are a
+compression artifact — they are NOT execution boundaries. A group of
+49,152 atoms running on a single lane while 7 other lanes sit idle is a
+failure, not a valid plan.
 
-The key scheduling tension: fewer barriers means less synchronization
-overhead, but requires more work to be truly independent within each phase.
-More barriers means easier independence but more sync cost and less
-opportunity for cross-op fusion.
+The partitioner MUST split groups across lanes. A group with count=N
+should become N/num_lanes pieces, each assigned to a different lane.
+The infrastructure for this is fully built and tested:
 
-### What makes this hard
+- `atom_offset` on AtomGroup: the second half of a split group uses
+  `atom_offset = split_point` so InputRef resolution still works correctly
+- `insert_group_at(base_id, count, atom_offset, ...)`: places a split
+  fragment in a span NanoGraph at the correct atom IDs
+- The eval loop uses `i + group.atom_offset` for all InputRef resolution
+- The JIT codegen loops from `atom_offset..atom_offset+count`
+- The value store handles split outputs: if group [0..1000) is split
+  into spans producing [0..500) and [500..1000), downstream phases find
+  both entries via overlap-based range matching
 
-The NanoGraph for GPT-2 has **45,921 groups representing 8.1 billion
-scalar atoms**. The dominant structure is matmuls (~73 of them), each
-decomposed into M independent row computations. The rows share weight
-data but produce independent outputs — this is the primary source of
-within-phase parallelism.
+**Every prior attempt disabled splitting and produced plans where serial
+chains of operations each occupied an entire phase on a single lane.**
+This is the primary failure mode to avoid.
 
-### Scale considerations
+### How splitting works
 
-The primary constraint is **memory**, not compute. Modern CPUs can scan
-billions of values quickly if the working set fits in cache and nothing
-gets written out to lower memory tiers. What kills you is allocating
-per-atom data structures — a `HashMap<AtomId, ...>` with 8.1B entries
-is ~200GB.
-
-Rules of thumb for 45K groups / 8.1B atoms:
-- **O(groups)** or **O(groups²)**: fine, groups are the natural unit
-- **O(groups · log(groups))**: fine
-- **O(atoms)** read-only scan: can work if the per-atom expression is
-  trivial (a few comparisons, no allocation) and the data stays in cache.
-  Scanning 8.1B atoms at L1 speed ≈ a few seconds.
-- **O(atoms) with allocation**: will OOM. Don't build `Vec<T>` or
-  `HashMap` indexed by atom ID at full scale.
-
-The test suite uses small graphs where everything is fast. Scale issues
-only appear on real models. Design your data structures around groups
-and ranges, but don't be afraid to do a linear scan over atoms for
-analysis if the per-element work is trivially cheap.
-
-## Your Task
-
-Implement a partitioner in a single file:
-`src/compiler/attempts/v14/partitioner.rs`
-
-The core function:
+To split group `g` (base_id=B, count=N) across K lanes:
 
 ```rust
-pub fn plan(
-    graph: &NanoGraph,
-    num_lanes: usize,
-    input_tensors: &[InputTensor],
-    output_atom_ids: &[AtomId],
-) -> Vec<Phase>
+let chunk = N / K;
+for lane in 0..K {
+    let start = lane as u64 * chunk;
+    let count = if lane == K-1 { N - start } else { chunk };
+    // In lane's span NanoGraph:
+    span_graph.insert_group_at(
+        AtomId(B + start),  // base_id of this fragment
+        count,               // atoms in this fragment
+        start,               // atom_offset for InputRef resolution
+        g.output_dtype,
+        g.op.clone(),
+        g.sym_dims.clone(),
+        g.inputs.clone(),    // inputs stay the same — atom_offset handles it
+    );
+    // Declare output range for this fragment:
+    span.outputs.push(AtomRange { base: AtomId(B + start), count, dtype: g.output_dtype });
+}
 ```
 
-The caller wraps your `Vec<Phase>` into the full `ExecutionPlan` with
-metadata. Your job is the scheduling: where barriers go, which groups
-each lane executes, and how to split or duplicate groups for balance
-and independence.
+The inputs vector is the SAME for all fragments. The `atom_offset` parameter
+tells the eval/codegen to resolve `input.resolve(i + atom_offset)` instead of
+`input.resolve(i)`, which produces the correct source atom IDs for each fragment.
+
+### When NOT to split
+
+- **Literal groups**: all atoms have the same value. Duplicate into each
+  span rather than splitting — each lane needs the full literal.
+- **Reduce groups** reading from split sources: a ReduceSum over atoms
+  [0..K) cannot be split if K is the reduction dimension. The reduce
+  itself must stay whole. But the *output* of the reduce (which is
+  typically small) can be broadcast or duplicated for downstream consumers.
+- **Very small groups** (count < num_lanes): not worth splitting.
+
+### What MUST be split
+
+- **Elementwise ops** (Binary, Unary, Select, Identity) with large count:
+  these are embarrassingly parallel. Split across all lanes.
+- **MatMul Mul groups** (count = M*K with StridedBroadcast input): each
+  row's K products are independent. Split by rows across lanes.
+- **MatMul ReduceSum groups** (count = M): each output element is an
+  independent reduction. Split across lanes.
+- **IndirectLoad groups**: each lookup is independent. Split across lanes.
+
+## Gen-1 Postmortem: What Went Wrong
+
+Eight partitioner attempts were built and tested. ALL of them failed to
+split groups. The "best" result (partitioner B) produced 65 phases for
+GPT-2 where the vast majority were single-lane:
+
+```
+Phase  3: 1 group, 49152 atoms, ALL on lane 7 (Sub)
+Phase  4: 2 groups, 49153 atoms, ALL on lane 6 (Pow)
+Phase  7: 16 groups, 26.6M atoms, ALL on lane 4 (MatMul+Add)
+Phase 12: 38 groups, 52.2M atoms, ALL on lane 7 (MatMul+pointwise chain)
+Phase 63: 3692 groups, 1.27B atoms, ALL on lane 7 (MatMul+Mul+Add+Pow chain)
+```
+
+The result: JIT execution took 68s vs 13.5s for the single-threaded
+ndarray interpreter. The 8-lane "parallel" plan was 5x SLOWER than
+sequential because:
+
+1. **No group splitting** — each group was assigned whole to one lane
+2. **Serial chains became single-lane phases** — a chain of ops where
+   each depends on the previous got assigned to one lane per phase,
+   with 7 lanes idle
+3. **Lane jumping** — the chain bounced between lanes across phases
+   (lane 7 → lane 6 → lane 4 → lane 0 → ...) creating unnecessary
+   barriers with no parallelism benefit
+
+The root cause in every attempt was treating groups as atomic scheduling
+units. The "split large groups" step was either not implemented or was
+explicitly disabled with comments like "split outputs create a mismatch
+with how later phases look up data in the value store" — which was false.
+The store handles split outputs correctly.
+
+## The Execution Model
+
+- **Lanes** are persistent threads. A lane runs through all phases,
+  hitting barrier sync points between them.
+- **Phases** are separated by barriers. Within a phase, all lanes
+  execute independently — no cross-lane communication.
+- **Spans** are one lane's work within one phase. Each span is a
+  self-contained NanoGraph fragment compiled and executed independently.
+
+### Cache affinity (lane pinning)
+
+A lane's cache is persistent across phases. If lane 0 handles atoms
+[0..6144) of a MatMul output, it should handle the same atom range of
+the downstream Add, Sub, Div, etc. This keeps data hot in L1/L2.
+
+**Lane assignment IS tiling.** Lane 0 gets the first 1/8 of every
+splittable group across the entire model. This is not an optimization —
+it's the fundamental scheduling strategy.
+
+### Where barriers go
+
+Barriers are needed when a downstream op reads atoms produced by
+multiple lanes. The canonical example: a ReduceSum that contracts
+across a dimension where the source data was split across lanes.
+
+Barriers are NOT needed between every op in a serial chain. If
+Sub→Pow→ReduceMean→Sqrt→Div is split identically across 8 lanes
+(each lane gets the same 1/8 slice), the chain runs within each lane
+with zero barriers.
 
 ## The NanoGraph
 
 A NanoGraph is a compressed scalar DAG. Every tensor operation has been
-dissolved into individual scalar atoms. Atoms are grouped into `AtomGroup`s
-for compression — structurally identical atoms doing the same operation
-with regular addressing patterns.
+dissolved into scalar atoms, grouped into `AtomGroup`s for compression.
 
 **AtomGroups are compression artifacts, not semantic boundaries.** The
-scheduler is free to split groups, duplicate groups, or rearrange them
-as needed.
+scheduler splits, duplicates, or rearranges groups freely.
 
 ### Key Types
 
 ```rust
-struct AtomId(pub u64);  // unique scalar atom identifier
-impl AtomId { pub fn offset(self, n: u64) -> Self; }
-
+struct AtomId(pub u64);
 struct AtomRange { pub base: AtomId, pub count: u64, pub dtype: DType }
+struct SymDim(pub u16);
 
-struct SymDim(pub u16);  // symbolic runtime dimension (batch, seq_len)
-
-// How atoms in a group address their source atoms
 enum InputRef {
-    Broadcast(AtomId),           // all atoms read same source
-    Affine { base: AtomId, stride: i64 },  // atom i reads base + stride*i
+    Broadcast(AtomId),
+    Affine { base: AtomId, stride: i64 },
     StridedBroadcast { base: AtomId, stride: i64, repeat: u64 },
     Modular { base: AtomId, stride: i64, modulus: u64 },
-    Explicit(Vec<AtomId>),       // arbitrary per-atom (rare)
+    Explicit(Vec<AtomId>),
 }
 impl InputRef {
     pub fn resolve(&self, i: u64) -> AtomId;
-    pub fn distinct_sources(&self, count: u64) -> usize;
 }
 
 enum ScalarOp {
-    Literal(NumericScalar),      // constant, no inputs
-    Identity,                    // dtype cast, 1 input
-    Binary { op, compute_dtype },// 2 inputs
-    Unary { op, compute_dtype }, // 1 input
-    Select,                      // 3 inputs: [cond, x, y]
+    Literal(NumericScalar),
+    Identity,
+    Binary { op, compute_dtype },
+    Unary { op, compute_dtype },
+    Select,
     Reduce { kind, reduce_count: u64, reduce_stride: i64, compute_dtype },
     IndirectLoad { table_base: AtomId },
 }
 
 struct AtomGroup {
-    pub base_id: AtomId,     // first atom ID in this group
-    pub count: u64,          // number of atoms
+    pub base_id: AtomId,
+    pub count: u64,
     pub atom_offset: u64,    // nonzero for split groups
     pub output_dtype: DType,
     pub op: ScalarOp,
     pub sym_dims: Vec<SymDim>,
-    pub inputs: Vec<InputRef>,  // how atoms address their sources
+    pub inputs: Vec<InputRef>,
 }
 
 struct InputTensor {
@@ -169,33 +229,21 @@ impl NanoGraph {
 
     // Construction (sequential ID allocation)
     pub fn new() -> Self;
-    pub fn push_group(&mut self, count: u64, output_dtype: DType, op: ScalarOp,
-                       sym_dims: Vec<SymDim>, inputs: Vec<InputRef>) -> AtomId;
-    pub fn add_input_tensor(&mut self, tensor_id: GlobalId,
-                             count: u64, dtype: DType) -> AtomId;
-    pub fn alloc_placeholder(&mut self, count: u64, output_dtype: DType) -> AtomId;
-    pub fn fill_placeholder(&mut self, base_id: AtomId, count: u64,
-                             output_dtype: DType, op: ScalarOp,
-                             sym_dims: Vec<SymDim>, inputs: Vec<InputRef>);
+    pub fn push_group(...) -> AtomId;
+    pub fn add_input_tensor(...) -> AtomId;
 
-    // Construction (specific ID placement — for building span NanoGraphs)
+    // Construction (specific ID placement — for span NanoGraphs)
     pub fn insert_group_at(&mut self, base_id: AtomId, count: u64,
                             atom_offset: u64, output_dtype: DType, op: ScalarOp,
                             sym_dims: Vec<SymDim>, inputs: Vec<InputRef>);
     pub fn insert_input_tensor_at(&mut self, base_id: AtomId, tensor_id: GlobalId,
                                    count: u64, dtype: DType);
 
-    // Fields
     pub sym_dim_names: HashMap<String, SymDim>,
     pub sym_dim_bounds: HashMap<SymDim, u64>,
     pub outputs: Vec<AtomId>,
 }
 ```
-
-**Span NanoGraph construction:** Use `insert_group_at` and
-`insert_input_tensor_at` to place groups and input ranges at specific
-atom IDs in span NanoGraphs. These insert into the internal RangeMap
-at arbitrary positions without requiring sequential allocation.
 
 ## Output Types
 
@@ -205,15 +253,14 @@ pub struct Phase {
 }
 
 pub struct Span {
-    pub graph: NanoGraph,        // fragment using main graph's atom ID space
-    pub inputs: Vec<AtomRange>,  // reads from shared value store
-    pub outputs: Vec<AtomRange>, // writes to shared value store
+    pub graph: NanoGraph,
+    pub inputs: Vec<AtomRange>,
+    pub outputs: Vec<AtomRange>,
 }
 ```
 
 **Atom ID invariant:** Span NanoGraphs use the same atom ID space as the
 main graph. Atom X in a span is the same atom as atom X in the main graph.
-No remapping tables.
 
 ## Structural Invariants
 
@@ -224,20 +271,71 @@ No remapping tables.
 3. **All model output atoms are produced by some span.**
 4. **Groups within each span are in valid topological order.**
 
+## Your Task
+
+Implement a partitioner in a single file:
+`src/compiler/attempts/v14/partitioner_X.rs` (where X is your letter)
+
+```rust
+pub fn plan(
+    graph: &NanoGraph,
+    num_lanes: usize,
+    input_tensors: &[InputTensor],
+    output_atom_ids: &[AtomId],
+) -> Vec<Phase>
+```
+
+Add `pub mod partitioner_X;` to `src/compiler/attempts/v14/mod.rs`.
+
+The file must compile. Run `cargo check -p whisper-tensor` to verify.
+Write unit tests in a `#[cfg(test)] mod tests` block at the bottom.
+
+### What a correct plan looks like
+
+For a serial chain Sub(49152) → Pow(49152) → ReduceMean → Sqrt → Div(49152)
+with 8 lanes:
+
+- **ONE phase** (not five separate phases)
+- Each lane gets 1/8 of the Sub, Pow, and Div groups
+- The ReduceMean stays whole (it's a reduction) — or gets duplicated
+  into each lane if the downstream ops need its output
+- Sqrt similarly stays whole or gets duplicated
+- Zero barriers needed because each lane's slice is independent
+
+For a MatMul (M=768, K=768, producing M ReduceSum groups of count=1 each):
+- The M ReduceSum groups are independent — split across lanes
+- The M Mul groups (each count=K) are independent — split across lanes
+- Each lane gets M/8 rows of both Mul and ReduceSum
+- Weights (Literal groups) are duplicated into each lane's span
+
+### Quality metrics
+
+1. **Utilization**: all lanes should have work in every phase. A phase
+   where only 1 of 8 lanes is active wastes 87.5% of available compute.
+2. **Balance**: within each phase, lane atom counts should be within 2x.
+3. **Few phases**: fewer barriers = less sync overhead. A serial chain
+   of elementwise ops split across lanes needs ZERO barriers between them.
+4. **Lane affinity**: the same atom range slice should stay on the same
+   lane across consecutive operations (cache locality).
+
 ## GPT-2 Profile (concrete target)
 
-- 45,921 groups, 8.1B atoms
-- 21,801 Mul + 21,630 ReduceSum (matmuls dominate)
-- 2,082 Literal (weights/constants)
-- ~400 other compute ops, 12 Identity, 1 IndirectLoad
+- 98,567 groups, 8.1B atoms (after lowering with full weight data)
+- MatMul dominates: 43,136 groups, 7.9B atoms
+- 52,552 Gather groups (embedding lookups, 1 atom each)
+- Elementwise ops: Mul(182g), Add(148g), Pow(37g), Reshape(48g), etc.
 - 10 transformer layers, ~73 matmuls
-- Elementwise ops: single groups with count=49,152
-- Matmul structure: M Mul groups (count=K*N) + M ReduceSum groups per matmul;
-  rows are independent, share weight inputs
-- Inter-layer pinch points: only ~768 residual values live between layers
+- Elementwise ops typically have count=49,152 (= 4×4×4×768/batch dims)
+- Inter-layer pinch points: residual stream (~768 values)
 
-**Performance target: < 30 seconds on GPT-2 (45K groups, 8 lanes).**
-Faster is better, but correctness matters more than speed.
+**Performance target: < 30 seconds on GPT-2 (98K groups, 8 lanes).**
+
+## Scale Considerations
+
+- **O(groups)** or **O(groups²)**: fine (98K groups)
+- **O(atoms)** with allocation: will OOM (8.1B atoms × 8 bytes = 65GB)
+- Work at group granularity for scheduling decisions. Only touch atoms
+  when computing split points within a group.
 
 ## Module Setup
 
@@ -256,46 +354,13 @@ use crate::dtype::DType;
 use super::types::{Phase, Span};
 ```
 
-Add `pub mod partitioner;` to `src/compiler/attempts/v14/mod.rs`.
-
-The file must compile. Run `cargo check -p whisper-tensor` to verify.
-Write unit tests in a `#[cfg(test)] mod tests` block at the bottom.
-
 ## Independence Requirement
 
-**Your implementation must be completely self-contained.** Do not call,
-import, or depend on any code in `src/compiler/attempts/v13_claude/` or
-any other attempt directory. Do not reuse planners, helpers, or utilities
-from prior attempts. Everything you need is in the NanoGraph API and the
-v14 types module. Build your solution from scratch.
+**Your implementation must be completely self-contained.** Do not call
+or depend on any code in other partitioner files or attempt directories.
+Everything you need is in the NanoGraph API and the v14 types module.
 
 The only imports from the compiler module should be `super::types::{Phase, Span}`.
-Everything else comes from `crate::nano_graph::*`, `crate::graph::*`,
-and `crate::dtype::*`.
-
-## Gen-1 Results on GPT-2 (47,887 groups, 8 lanes)
-
-Four prior attempts were tested. Here are their results:
-
-| Attempt | Phases | Validation | Cross-lane violations | Imbalance | Time |
-|---------|--------|------------|----------------------|-----------|------|
-| A (pinch-point liveness) | 27 | 0 errors | 0 | 694M x | <5min |
-| B (wavefront/depth) | 173 | 0 errors | 0 | 11.3x | <5min |
-| C (greedy lane sim) | 175 | 0 errors | 0 | 76M x | 250ms |
-| D (hierarchical super-groups) | 2 | 0 errors | 24 | 37K x | <5min |
-
-Key observations:
-- **B had the best overall result**: 0 violations with 11.3x imbalance.
-  Its depth-based wavefront approach gives provable independence for free.
-  Too many phases (173) — could be reduced by more aggressive merging.
-- **A and C achieved 0 violations but catastrophic imbalance** — most work
-  ended up on lane 0. The lane assignment heuristics failed to distribute
-  matmul rows across lanes.
-- **D had only 2 phases** (not enough barriers) and 24 cross-lane violations.
-- **The dependency DAG build** (using `collect_all_producer_indices`) takes
-  ~140ms for 48K groups — fast and not a bottleneck.
-- **Span NanoGraph construction** takes ~80ms per partitioner — also fast.
-- **The hard problem is lane assignment + balance**, not phase detection.
 
 ## Creative Direction
 

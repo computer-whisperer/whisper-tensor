@@ -37,8 +37,8 @@ pub fn elementwise_binary(n: u64, op: ScalarBinOp) -> (NanoGraph, AtomId, AtomId
         },
         vec![],
         vec![
-            InputRef::Affine { base: a, stride: 1 },
-            InputRef::Affine { base: b, stride: 1 },
+            InputRef::affine(a, 1),
+            InputRef::affine(b, 1),
         ],
     );
     g.outputs = vec![c];
@@ -66,10 +66,7 @@ pub fn unary_chain(n: u64, ops: &[ScalarUnaryOp]) -> (NanoGraph, AtomId, AtomId)
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine {
-                base: prev,
-                stride: 1,
-            }],
+            vec![InputRef::affine(prev, 1)],
         );
     }
     g.outputs = vec![prev];
@@ -102,7 +99,7 @@ pub fn broadcast_add(n: u64) -> (NanoGraph, AtomId, AtomId, AtomId) {
         },
         vec![],
         vec![
-            InputRef::Affine { base: a, stride: 1 },
+            InputRef::affine(a, 1),
             InputRef::Broadcast(b),
         ],
     );
@@ -158,10 +155,7 @@ pub fn matmul(m: u64, k: u64, n: u64) -> (NanoGraph, AtomId, AtomId, AtomId) {
                 vec![],
                 vec![
                     InputRef::Broadcast(a_atom),
-                    InputRef::Affine {
-                        base: b_row_start,
-                        stride: 1,
-                    },
+                    InputRef::affine(b_row_start, 1),
                 ],
             );
             if mul_base.is_none() {
@@ -186,10 +180,7 @@ pub fn matmul(m: u64, k: u64, n: u64) -> (NanoGraph, AtomId, AtomId, AtomId) {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine {
-                base: row_mul_base,
-                stride: 1,
-            }],
+            vec![InputRef::affine(row_mul_base, 1)],
         );
         if reduce_base.is_none() {
             reduce_base = Some(base);
@@ -241,10 +232,7 @@ pub fn matmul_activation(
                 vec![],
                 vec![
                     InputRef::Broadcast(a_atom),
-                    InputRef::Affine {
-                        base: b_row_start,
-                        stride: 1,
-                    },
+                    InputRef::affine(b_row_start, 1),
                 ],
             );
             if mul_base.is_none() {
@@ -267,10 +255,7 @@ pub fn matmul_activation(
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine {
-                base: row_mul_base,
-                stride: 1,
-            }],
+            vec![InputRef::affine(row_mul_base, 1)],
         );
         if reduce_base.is_none() {
             reduce_base = Some(base);
@@ -287,10 +272,7 @@ pub fn matmul_activation(
             compute_dtype: DType::F32,
         },
         vec![],
-        vec![InputRef::Affine {
-            base: reduce_base,
-            stride: 1,
-        }],
+        vec![InputRef::affine(reduce_base, 1)],
     );
     g.outputs = vec![out];
 
@@ -357,10 +339,7 @@ pub fn matmul_chain(
                 vec![],
                 vec![
                     InputRef::Broadcast(a_atom),
-                    InputRef::Affine {
-                        base: b_row_start,
-                        stride: 1,
-                    },
+                    InputRef::affine(b_row_start, 1),
                 ],
             );
             if mul1_base.is_none() {
@@ -383,10 +362,7 @@ pub fn matmul_chain(
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine {
-                base: row_mul_base,
-                stride: 1,
-            }],
+            vec![InputRef::affine(row_mul_base, 1)],
         );
         if ab_base.is_none() {
             ab_base = Some(base);
@@ -412,10 +388,7 @@ pub fn matmul_chain(
                 vec![],
                 vec![
                     InputRef::Broadcast(ab_atom),
-                    InputRef::Affine {
-                        base: c_row_start,
-                        stride: 1,
-                    },
+                    InputRef::affine(c_row_start, 1),
                 ],
             );
             if mul2_base.is_none() {
@@ -438,10 +411,7 @@ pub fn matmul_chain(
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine {
-                base: row_mul_base,
-                stride: 1,
-            }],
+            vec![InputRef::affine(row_mul_base, 1)],
         );
         if out_base.is_none() {
             out_base = Some(base);

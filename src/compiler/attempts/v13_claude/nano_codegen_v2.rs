@@ -636,9 +636,10 @@ fn emit_reduce(
 
     // Compute the base index for this atom's input (at k=0).
     let base_idx = match &group.inputs[0] {
-        InputRef::Affine {
+        InputRef::Strided {
             base: input_base,
-            stride,
+            stride_inner: stride,
+            ..
         } => match i_val {
             Some(iv) => {
                 let si = builder.ins().imul_imm(iv, *stride as i64);
@@ -747,7 +748,7 @@ fn load_input_ref(
             }
         }
 
-        InputRef::Affine { base, stride } => {
+        InputRef::Strided { base, stride_inner: stride, .. } => {
             let atom_idx = match i_val {
                 Some(iv) => {
                     if *stride == 1 {
@@ -813,11 +814,7 @@ fn load_input_ref(
                 .load(types::F32, MemFlags::new(), data_addr, 0))
         }
 
-        InputRef::StridedBroadcast {
-            base,
-            stride,
-            repeat,
-        } => {
+        InputRef::Strided { base, stride_outer: stride, modulus: repeat, .. } => {
             let atom_idx = match i_val {
                 Some(iv) => {
                     let block_idx = if repeat.is_power_of_two() {
@@ -841,11 +838,7 @@ fn load_input_ref(
             Ok(builder.ins().load(types::F32, MemFlags::new(), addr, 0))
         }
 
-        InputRef::Modular {
-            base,
-            stride,
-            modulus,
-        } => {
+        InputRef::Strided { base, stride_inner: stride, modulus, .. } => {
             let atom_idx = match i_val {
                 Some(iv) => {
                     let modval = builder.ins().iconst(types::I64, *modulus as i64);
@@ -2585,8 +2578,8 @@ mod tests {
             },
             vec![],
             vec![
-                InputRef::Affine { base: a, stride: 1 },
-                InputRef::Affine { base: b, stride: 1 },
+                InputRef::affine(a, 1),
+                InputRef::affine(b, 1),
             ],
         );
 
@@ -2632,8 +2625,8 @@ mod tests {
             },
             vec![],
             vec![
-                InputRef::Affine { base: a, stride: 1 },
-                InputRef::Affine { base: b, stride: 1 },
+                InputRef::affine(a, 1),
+                InputRef::affine(b, 1),
             ],
         );
         let d = g.push_group(
@@ -2644,7 +2637,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine { base: c, stride: 1 }],
+            vec![InputRef::affine(c, 1)],
         );
 
         for i in 0..4 {
@@ -2689,8 +2682,8 @@ mod tests {
             },
             vec![],
             vec![
-                InputRef::Affine { base: a, stride: 1 },
-                InputRef::Affine { base: b, stride: 1 },
+                InputRef::affine(a, 1),
+                InputRef::affine(b, 1),
             ],
         );
 
@@ -2731,7 +2724,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine { base: a, stride: 0 }],
+            vec![InputRef::affine(a, 0)],
         );
 
         g.outputs.push(c);
@@ -2761,7 +2754,7 @@ mod tests {
             DType::F32,
             ScalarOp::Identity,
             vec![],
-            vec![InputRef::Affine { base: a, stride: 1 }],
+            vec![InputRef::affine(a, 1)],
         );
 
         for i in 0..4 {
@@ -2845,12 +2838,9 @@ mod tests {
             ScalarOp::Select,
             vec![],
             vec![
-                InputRef::Affine {
-                    base: cond,
-                    stride: 1,
-                },
-                InputRef::Affine { base: x, stride: 1 },
-                InputRef::Affine { base: y, stride: 1 },
+                InputRef::affine(cond, 1),
+                InputRef::affine(x, 1),
+                InputRef::affine(y, 1),
             ],
         );
 
@@ -2895,7 +2885,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![InputRef::Affine { base: a, stride: 0 }],
+            vec![InputRef::affine(a, 0)],
         );
 
         g.outputs.push(c);

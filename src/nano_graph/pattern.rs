@@ -26,7 +26,7 @@ pub struct SymDim(pub u16);
 ///
 /// Within an `AtomGroup`, atoms have contiguous ids from `base_id` to
 /// `base_id + count - 1`. The offset within the group determines how
-/// `InputRef::Affine` strides are applied.
+/// `InputRef::Strided` strides are applied.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct AtomId(pub u64);
 
@@ -58,57 +58,53 @@ pub struct AtomRange {
 pub enum InputRef {
     /// Every atom in this group reads the same source atom (broadcast).
     Broadcast(AtomId),
-    /// Atom at offset `i` in this group reads source atom `base + stride * i`.
-    /// Covers elementwise (stride=1), strided views, and reversed access.
-    Affine { base: AtomId, stride: i64 },
+    /// Unified strided access pattern. Atom at offset `i` reads:
+    ///   base + stride_inner * (i % modulus) + stride_outer * (i / modulus)
+    ///
+    /// Subsumes the former Affine, Modular, and StridedBroadcast variants:
+    /// - Affine{stride}:              stride_inner=stride, stride_outer=0, modulus=u64::MAX
+    /// - Modular{stride, modulus}:    stride_inner=stride, stride_outer=0, modulus=modulus
+    /// - StridedBroadcast{stride, repeat}: stride_inner=0, stride_outer=stride, modulus=repeat
+    Strided {
+        base: AtomId,
+        stride_inner: i64,
+        stride_outer: i64,
+        modulus: u64,
+    },
     /// Arbitrary per-atom source mapping. Used when no regular pattern exists
     /// (e.g., Gather with compile-time-known indices, irregular Concat).
     /// Length must equal the group's `count`.
     Explicit(Vec<AtomId>),
-    /// Strided broadcast: each block of `repeat` consecutive atoms shares one
-    /// source atom. Atom at offset `i` reads `base + stride * (i / repeat)`.
-    /// Used for merged matmul Mul groups where chunks of N atoms broadcast the
-    /// same A element.
-    StridedBroadcast {
-        base: AtomId,
-        stride: i64,
-        repeat: u64,
-    },
-    /// Modular/tiling access: atom at offset `i` reads `base + stride * (i % modulus)`.
-    /// Used when a smaller tensor tiles/repeats to fill a larger consumer
-    /// (e.g., bias broadcast along batch dimension).
-    Modular {
-        base: AtomId,
-        stride: i64,
-        modulus: u64,
-    },
 }
 
 impl InputRef {
+    /// Linear access: atom i reads base + stride * i.
+    pub fn affine(base: AtomId, stride: i64) -> Self {
+        InputRef::Strided { base, stride_inner: stride, stride_outer: 0, modulus: u64::MAX }
+    }
+
+    /// Modular access: atom i reads base + stride * (i % modulus).
+    pub fn modular(base: AtomId, stride: i64, modulus: u64) -> Self {
+        InputRef::Strided { base, stride_inner: stride, stride_outer: 0, modulus }
+    }
+
+    /// Strided broadcast: atom i reads base + stride * (i / repeat).
+    pub fn strided_broadcast(base: AtomId, stride: i64, repeat: u64) -> Self {
+        InputRef::Strided { base, stride_inner: 0, stride_outer: stride, modulus: repeat }
+    }
+
     /// Resolve the source atom for the `i`-th atom in the group.
     pub fn resolve(&self, i: u64) -> AtomId {
         match self {
             InputRef::Broadcast(id) => *id,
-            InputRef::Affine { base, stride } => {
-                AtomId(base.0.wrapping_add((*stride * i as i64) as u64))
+            InputRef::Strided { base, stride_inner, stride_outer, modulus } => {
+                let inner = i % modulus;
+                let outer = i / modulus;
+                AtomId(base.0.wrapping_add(
+                    (*stride_inner * inner as i64 + *stride_outer * outer as i64) as u64
+                ))
             }
             InputRef::Explicit(ids) => ids[i as usize],
-            InputRef::StridedBroadcast {
-                base,
-                stride,
-                repeat,
-            } => {
-                let block = i / repeat;
-                AtomId(base.0.wrapping_add((*stride * block as i64) as u64))
-            }
-            InputRef::Modular {
-                base,
-                stride,
-                modulus,
-            } => {
-                let wrapped = i % modulus;
-                AtomId(base.0.wrapping_add((*stride * wrapped as i64) as u64))
-            }
         }
     }
 
@@ -116,18 +112,24 @@ impl InputRef {
     pub fn distinct_sources(&self, count: u64) -> usize {
         match self {
             InputRef::Broadcast(_) => 1,
-            InputRef::Affine { .. } => count as usize,
+            InputRef::Strided { stride_outer, modulus, .. } => {
+                if *stride_outer == 0 && *modulus == u64::MAX {
+                    // Affine case
+                    count as usize
+                } else if *stride_outer == 0 {
+                    // Modular case
+                    *modulus as usize
+                } else {
+                    // StridedBroadcast case
+                    count.div_ceil(*modulus) as usize
+                }
+            }
             InputRef::Explicit(ids) => {
                 let mut seen = ids.clone();
                 seen.sort();
                 seen.dedup();
                 seen.len()
             }
-            InputRef::StridedBroadcast { repeat, .. } => {
-                // Each block of `repeat` atoms shares one source.
-                count.div_ceil(*repeat) as usize
-            }
-            InputRef::Modular { modulus, .. } => *modulus as usize,
         }
     }
 }
@@ -472,6 +474,10 @@ impl NanoGraph {
         self.groups.values()
     }
 
+    pub fn groups_mut(&mut self) -> &mut [AtomGroup] {
+        self.groups.values_mut()
+    }
+
     /// Access the input tensors.
     pub fn input_tensors(&self) -> &[InputTensor] {
         self.input_ranges.values()
@@ -664,21 +670,20 @@ impl NanoGraph {
                     out.insert(gi);
                 }
             }
-            InputRef::Affine { .. } | InputRef::StridedBroadcast { .. } => {
-                let first = input.resolve(atom_offset);
-                let last = input.resolve(atom_offset + count - 1);
-                let lo = first.0.min(last.0);
-                let hi = first.0.max(last.0);
-                self.insert_groups_in_id_range(lo, hi, out);
-            }
-            InputRef::Modular {
-                base,
-                stride,
-                modulus,
-            } => {
-                let a = base.0;
-                let b = (base.0 as i64 + *stride * (*modulus as i64 - 1)) as u64;
-                self.insert_groups_in_id_range(a.min(b), a.max(b), out);
+            InputRef::Strided { base, stride_inner, stride_outer, modulus } => {
+                if *stride_outer == 0 && *modulus != u64::MAX {
+                    // Modular case: range is base..base+stride*(modulus-1)
+                    let a = base.0;
+                    let b = (base.0 as i64 + *stride_inner * (*modulus as i64 - 1)) as u64;
+                    self.insert_groups_in_id_range(a.min(b), a.max(b), out);
+                } else {
+                    // Affine or StridedBroadcast case
+                    let first = input.resolve(atom_offset);
+                    let last = input.resolve(atom_offset + count - 1);
+                    let lo = first.0.min(last.0);
+                    let hi = first.0.max(last.0);
+                    self.insert_groups_in_id_range(lo, hi, out);
+                }
             }
             InputRef::Explicit(ids) => {
                 let mut prev_gi: Option<usize> = None;
@@ -919,8 +924,8 @@ mod tests {
             },
             vec![],
             vec![
-                InputRef::Affine { base: a, stride: 1 },
-                InputRef::Affine { base: b, stride: 1 },
+                InputRef::affine(a, 1),
+                InputRef::affine(b, 1),
             ],
         );
 
@@ -961,7 +966,7 @@ mod tests {
             },
             vec![],
             vec![
-                InputRef::Affine { base: a, stride: 1 },
+                InputRef::affine(a, 1),
                 InputRef::Broadcast(b),
             ],
         );
@@ -999,8 +1004,8 @@ mod tests {
             },
             vec![batch],
             vec![
-                InputRef::Affine { base: a, stride: 1 },
-                InputRef::Affine { base: b, stride: 1 },
+                InputRef::affine(a, 1),
+                InputRef::affine(b, 1),
             ],
         );
 
@@ -1035,10 +1040,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![], // seq is reduced away
-            vec![InputRef::Affine {
-                base: input,
-                stride: 1,
-            }],
+            vec![InputRef::affine(input, 1)],
         );
 
         assert!(g.validate().is_empty(), "{:?}", g.validate());
@@ -1107,7 +1109,7 @@ mod tests {
         assert_eq!(broadcast.resolve(0), AtomId(5));
         assert_eq!(broadcast.resolve(99), AtomId(5));
 
-        let affine = InputRef::Affine { base, stride: 2 };
+        let affine = InputRef::affine(base, 2);
         assert_eq!(affine.resolve(0), AtomId(100));
         assert_eq!(affine.resolve(1), AtomId(102));
         assert_eq!(affine.resolve(3), AtomId(106));
@@ -1119,11 +1121,7 @@ mod tests {
 
         // StridedBroadcast: base=200, stride=1, repeat=4
         // Blocks of 4 atoms share the same source.
-        let sb = InputRef::StridedBroadcast {
-            base: AtomId(200),
-            stride: 1,
-            repeat: 4,
-        };
+        let sb = InputRef::strided_broadcast(AtomId(200), 1, 4);
         assert_eq!(sb.resolve(0), AtomId(200)); // block 0
         assert_eq!(sb.resolve(1), AtomId(200)); // block 0
         assert_eq!(sb.resolve(3), AtomId(200)); // block 0
