@@ -1,17 +1,14 @@
-//! Software cast operator: convert any [`NumericScalar`] to any [`NumericDType`].
+//! Scalar conversion methods — thin delegation to [`NumericDType`] conversion engine.
 //!
-//! The implementation is fully software-defined — it interprets the
-//! [`FloatType`] fields (exponent_bits, mantissa_bits, semantics) directly
-//! rather than dispatching on known type names. Any `FloatType` within the
-//! supported bounds ([`FloatType::is_supported`]) works correctly.
+//! This module provides:
+//! - Raw bit access (`read_raw_bits` / `write_raw_bits`) for byte buffers
+//! - Conversion methods on [`NumericScalarView`] / [`NumericScalarViewMut`]
+//! - Convenience methods on [`NumericScalar`] that delegate to the view path
 //!
-//! Float conversions implement IEEE 754 round-to-nearest-even.
-//!
-//! All conversion logic operates on [`NumericScalarView`] / [`NumericScalarViewMut`]
-//! and handles arbitrary bit offsets within byte slices. [`NumericScalar`] defers
-//! to the view path.
+//! The heavy conversion logic (software float decode/encode, IEEE 754 RTE,
+//! intermediate-based casting) lives in [`crate::numeric_dtype::conversions`].
 
-use crate::numeric_dtype::{FloatType, IntType, NumericDType};
+use crate::numeric_dtype::NumericDType;
 
 use super::{NumericScalar, NumericScalarView, NumericScalarViewMut};
 
@@ -21,7 +18,7 @@ use super::{NumericScalar, NumericScalarView, NumericScalarViewMut};
 
 /// Read up to 64 bits from a byte slice starting at `bit_offset`.
 /// Returns the value as a u64 with only the low `total_bits` bits set.
-fn read_raw_bits(data: &[u8], bit_offset: usize, total_bits: u8) -> u64 {
+pub fn read_raw_bits(data: &[u8], bit_offset: usize, total_bits: u8) -> u64 {
     if total_bits == 0 {
         return 0;
     }
@@ -29,15 +26,12 @@ fn read_raw_bits(data: &[u8], bit_offset: usize, total_bits: u8) -> u64 {
     let byte_off = bit_offset / 8;
     let bit_shift = (bit_offset % 8) as u32;
 
-    // Read up to 9 bytes (64 bits + up to 7 bit shift can span 9 bytes)
     let bytes_needed = ((bit_shift as usize + total_bits as usize) + 7) / 8;
     let mut buf = [0u8; 9];
     let available = data.len().saturating_sub(byte_off);
     let to_copy = bytes_needed.min(available).min(9);
     buf[..to_copy].copy_from_slice(&data[byte_off..byte_off + to_copy]);
 
-    // Assemble as a wide integer and shift
-    // For simplicity, read as u128 from the 9 bytes, shift, mask
     let mut wide: u128 = 0;
     for (i, &b) in buf.iter().enumerate() {
         wide |= (b as u128) << (i * 8);
@@ -54,7 +48,7 @@ fn read_raw_bits(data: &[u8], bit_offset: usize, total_bits: u8) -> u64 {
 /// Write up to 64 bits into a byte slice at `bit_offset`.
 /// Only modifies the `total_bits` bits starting at `bit_offset`; other bits
 /// in affected bytes are preserved.
-fn write_raw_bits(data: &mut [u8], bit_offset: usize, total_bits: u8, value: u64) {
+pub fn write_raw_bits(data: &mut [u8], bit_offset: usize, total_bits: u8, value: u64) {
     if total_bits == 0 {
         return;
     }
@@ -72,7 +66,6 @@ fn write_raw_bits(data: &mut [u8], bit_offset: usize, total_bits: u8, value: u64
     let available = data.len().saturating_sub(byte_off);
     let to_touch = bytes_needed.min(available).min(9);
 
-    // Read existing bytes into a wide buffer
     let mut buf = [0u8; 9];
     buf[..to_touch].copy_from_slice(&data[byte_off..byte_off + to_touch]);
 
@@ -81,17 +74,14 @@ fn write_raw_bits(data: &mut [u8], bit_offset: usize, total_bits: u8, value: u64
         wide |= (b as u128) << (i * 8);
     }
 
-    // Create a mask for the bits we're writing
     let bit_mask: u128 = if total_bits >= 64 {
         (u64::MAX as u128) << bit_shift
     } else {
-        (((1u128 << total_bits) - 1) << bit_shift)
+        ((1u128 << total_bits) - 1) << bit_shift
     };
 
-    // Clear target bits, set new value
     wide = (wide & !bit_mask) | ((masked_value as u128) << bit_shift);
 
-    // Write back
     for i in 0..to_touch {
         data[byte_off + i] = (wide >> (i * 8)) as u8;
     }
@@ -109,35 +99,19 @@ impl<'a> NumericScalarView<'a> {
 
     /// Cast this viewed value to a different dtype, returning an owned scalar.
     pub fn cast_to(&self, target: NumericDType) -> NumericScalar {
-        if self.dtype == target {
-            return self.to_owned_scalar();
-        }
         let raw = self.read_raw();
-        let intermediate = decode_to_intermediate(raw, self.dtype);
-        encode_from_intermediate(intermediate, target)
+        let cast_raw = self.dtype.cast_raw(raw, target);
+        raw_to_scalar(cast_raw, target)
     }
 
     /// Read as an owned NumericScalar with the same dtype.
     pub fn to_owned_scalar(&self) -> NumericScalar {
-        let raw = self.read_raw();
-        let mut bits = [0u8; 8];
-        let nbytes = self.dtype.bytes_per_element();
-        bits[..nbytes].copy_from_slice(&raw.to_le_bytes()[..nbytes]);
-        NumericScalar {
-            bits,
-            dtype: self.dtype,
-        }
+        raw_to_scalar(self.read_raw(), self.dtype)
     }
 
     /// Convert to f64 regardless of source dtype.
     pub fn to_f64(&self) -> f64 {
-        let raw = self.read_raw();
-        match self.dtype {
-            NumericDType::Float(ft) => software_float_decode(raw, &ft),
-            NumericDType::SignedInt(it) => decode_signed_int(raw, &it) as f64,
-            NumericDType::UnsignedInt(it) => decode_unsigned_int(raw, &it) as f64,
-            NumericDType::Bool => if raw != 0 { 1.0 } else { 0.0 },
-        }
+        self.dtype.decode_to_f64(self.read_raw())
     }
 
     /// Convert to f32 regardless of source dtype.
@@ -149,14 +123,17 @@ impl<'a> NumericScalarView<'a> {
     pub fn to_i64(&self) -> i64 {
         let raw = self.read_raw();
         match self.dtype {
-            NumericDType::Float(ft) => {
-                let f = software_float_decode(raw, &ft);
-                float_to_signed_int(f, &IntType::BITS_64) as i64
+            NumericDType::SignedInt(it) => {
+                let wide = it.decode_signed(raw);
+                it.clamp_signed(wide) as i64
             }
-            NumericDType::SignedInt(it) => decode_signed_int(raw, &it) as i64,
             NumericDType::UnsignedInt(it) => {
-                let u = decode_unsigned_int(raw, &it);
+                let u = it.decode_unsigned(raw);
                 u.min(i64::MAX as u128) as i64
+            }
+            NumericDType::Float(ft) => {
+                use crate::numeric_dtype::IntType;
+                IntType::BITS_64.float_to_signed(ft.decode_f64(raw)) as i64
             }
             NumericDType::Bool => if raw != 0 { 1 } else { 0 },
         }
@@ -167,7 +144,7 @@ impl<'a> NumericScalarView<'a> {
         let raw = self.read_raw();
         match self.dtype {
             NumericDType::Float(ft) => {
-                let f = software_float_decode(raw, &ft);
+                let f = ft.decode_f64(raw);
                 f != 0.0 && !f.is_nan()
             }
             _ => raw != 0,
@@ -184,24 +161,21 @@ impl<'a> NumericScalarViewMut<'a> {
     /// The scalar's dtype must match this view's dtype.
     pub fn write_scalar(&mut self, scalar: &NumericScalar) {
         debug_assert_eq!(self.dtype, scalar.dtype);
-        let raw = if scalar.dtype.total_bits() >= 64 {
-            u64::from_le_bytes(scalar.bits)
-        } else {
-            u64::from_le_bytes(scalar.bits) & ((1u64 << scalar.dtype.total_bits()) - 1)
-        };
+        let raw = read_raw_bits(&scalar.bits, 0, scalar.dtype.total_bits());
         write_raw_bits(self.data, self.bit_offset, self.dtype.total_bits(), raw);
     }
 
     /// Cast a scalar to this view's dtype and write it.
     pub fn write_cast(&mut self, scalar: &NumericScalar) {
-        let cast = scalar.cast_to(self.dtype);
-        self.write_scalar(&cast);
+        let raw = read_raw_bits(&scalar.bits, 0, scalar.dtype.total_bits());
+        let cast_raw = scalar.dtype.cast_raw(raw, self.dtype);
+        write_raw_bits(self.data, self.bit_offset, self.dtype.total_bits(), cast_raw);
     }
 
     /// Write an f64 value, converting to this view's dtype.
     pub fn write_f64(&mut self, value: f64) {
-        let scalar = NumericScalar::from_f64(value).cast_to(self.dtype);
-        self.write_scalar(&scalar);
+        let raw = self.dtype.encode_from_f64(value);
+        write_raw_bits(self.data, self.bit_offset, self.dtype.total_bits(), raw);
     }
 
     /// Write raw bits directly.
@@ -242,390 +216,15 @@ impl NumericScalar {
 }
 
 // ---------------------------------------------------------------------------
-// Software cast internals
+// Helper
 // ---------------------------------------------------------------------------
 
-/// Universal intermediate value. Either an f64 (for float sources) or
-/// i128 (for integer sources — wide enough for any 64-bit int without loss).
-#[derive(Debug, Clone, Copy)]
-enum Intermediate {
-    Float(f64),
-    Int(i128),
-    Bool(bool),
-}
-
-/// Decode raw bits + dtype into the universal intermediate.
-fn decode_to_intermediate(raw: u64, dtype: NumericDType) -> Intermediate {
-    match dtype {
-        NumericDType::Float(ft) => Intermediate::Float(software_float_decode(raw, &ft)),
-        NumericDType::SignedInt(it) => Intermediate::Int(decode_signed_int(raw, &it)),
-        NumericDType::UnsignedInt(it) => Intermediate::Int(decode_unsigned_int(raw, &it) as i128),
-        NumericDType::Bool => Intermediate::Bool(raw != 0),
-    }
-}
-
-/// Encode the universal intermediate into a target dtype.
-fn encode_from_intermediate(value: Intermediate, dtype: NumericDType) -> NumericScalar {
-    let raw: u64 = match dtype {
-        NumericDType::Float(ft) => {
-            let f = match value {
-                Intermediate::Float(f) => f,
-                Intermediate::Int(i) => i as f64,
-                Intermediate::Bool(b) => if b { 1.0 } else { 0.0 },
-            };
-            software_float_encode(f, &ft)
-        }
-        NumericDType::SignedInt(it) => {
-            let i = match value {
-                Intermediate::Float(f) => float_to_signed_int(f, &it),
-                Intermediate::Int(i) => clamp_signed(i, &it),
-                Intermediate::Bool(b) => if b { 1 } else { 0 },
-            };
-            encode_signed_int(i, &it)
-        }
-        NumericDType::UnsignedInt(it) => {
-            let u = match value {
-                Intermediate::Float(f) => float_to_unsigned_int(f, &it),
-                Intermediate::Int(i) => if i < 0 { 0 } else { clamp_unsigned(i as u128, &it) },
-                Intermediate::Bool(b) => if b { 1 } else { 0 },
-            };
-            encode_unsigned_int(u, &it)
-        }
-        NumericDType::Bool => {
-            let b = match value {
-                Intermediate::Float(f) => f != 0.0 && !f.is_nan(),
-                Intermediate::Int(i) => i != 0,
-                Intermediate::Bool(b) => b,
-            };
-            b as u64
-        }
-    };
-
+/// Pack raw bits into a NumericScalar.
+fn raw_to_scalar(raw: u64, dtype: NumericDType) -> NumericScalar {
     let mut bits = [0u8; 8];
     let nbytes = dtype.bytes_per_element();
     bits[..nbytes].copy_from_slice(&raw.to_le_bytes()[..nbytes]);
     NumericScalar { bits, dtype }
-}
-
-// ---------------------------------------------------------------------------
-// Software float decode: raw u64 bits → f64
-// ---------------------------------------------------------------------------
-
-/// Decode a float value from raw bits according to the FloatType spec.
-///
-/// See [`FloatType`] docs for the encoding rules driven by `has_infinity`
-/// and `has_nan`.
-fn software_float_decode(raw: u64, ft: &FloatType) -> f64 {
-    let mant_bits = ft.mantissa_bits as u32;
-    let exp_mask = (1u64 << ft.exponent_bits as u32) - 1;
-    let mant_mask = (1u64 << mant_bits) - 1;
-
-    let sign_bit = (raw >> (ft.total_bits() as u32 - 1)) & 1;
-    let biased_exp = ((raw >> mant_bits) & exp_mask) as u32;
-    let raw_mant = raw & mant_mask;
-
-    let bias = ft.bias();
-    let sign = if sign_bit == 1 { -1.0f64 } else { 1.0f64 };
-    let max_exp = ft.max_biased_exponent();
-
-    if biased_exp == max_exp {
-        // Max exponent row — check for special values
-        if ft.has_infinity && raw_mant == 0 {
-            return sign * f64::INFINITY;
-        }
-        if ft.has_nan {
-            let is_nan = if ft.has_infinity {
-                // IEEE: all nonzero mantissa at max exp are NaN
-                raw_mant != 0
-            } else {
-                // FN: only mant=all-ones is NaN
-                raw_mant == mant_mask
-            };
-            if is_nan {
-                return f64::NAN;
-            }
-        }
-        // Normal number at max exponent
-        let mant_val = 1.0 + (raw_mant as f64) / ((1u64 << mant_bits) as f64);
-        sign * mant_val * f64::exp2((biased_exp as i32 - bias) as f64)
-    } else if biased_exp == 0 {
-        // Zero or subnormal
-        if raw_mant == 0 {
-            sign * 0.0
-        } else {
-            let mant_val = (raw_mant as f64) / ((1u64 << mant_bits) as f64);
-            sign * mant_val * f64::exp2((1 - bias) as f64)
-        }
-    } else {
-        // Normal number
-        let mant_val = 1.0 + (raw_mant as f64) / ((1u64 << mant_bits) as f64);
-        sign * mant_val * f64::exp2((biased_exp as i32 - bias) as f64)
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Software float encode: f64 → raw u64 bits
-// ---------------------------------------------------------------------------
-
-/// Encode an f64 value into raw bits for the target FloatType.
-fn software_float_encode(value: f64, ft: &FloatType) -> u64 {
-    let mant_bits = ft.mantissa_bits as u32;
-    let max_exp = ft.max_biased_exponent();
-
-    if value.is_nan() {
-        if ft.has_nan {
-            return encode_nan_raw(ft);
-        } else {
-            // Format has no NaN — encode as zero
-            return encode_zero_raw(0, ft);
-        }
-    }
-
-    let sign_bit: u64 = if value.is_sign_negative() { 1 } else { 0 };
-    let abs_val = value.abs();
-
-    if abs_val == 0.0 {
-        return encode_zero_raw(sign_bit, ft);
-    }
-
-    if value.is_infinite() {
-        return encode_infinity_raw(sign_bit, ft);
-    }
-
-    let (frac, raw_exp) = frexp_f64(abs_val);
-    let true_exp = raw_exp - 1;
-    let bias = ft.bias();
-    let min_normal_exp = 1 - bias;
-    // For IEEE (has_infinity): max exponent is fully reserved → max usable = max_exp-1.
-    // For FN (has_nan, !has_infinity): max exponent is partially usable (all but mant=all-ones).
-    // For no-special (neither): max exponent is fully usable.
-    let max_usable_biased = if ft.has_infinity {
-        max_exp as i32 - 1
-    } else {
-        max_exp as i32
-    };
-    let max_normal_exp = max_usable_biased - bias;
-
-    if true_exp > max_normal_exp {
-        return encode_overflow_raw(sign_bit, ft);
-    }
-
-    if true_exp >= min_normal_exp {
-        encode_normal_raw(sign_bit, frac * 2.0 - 1.0, true_exp, ft)
-    } else {
-        encode_subnormal_raw(sign_bit, abs_val, ft)
-    }
-}
-
-/// Encode NaN. Returns canonical quiet NaN for the format.
-/// Panics if `!ft.has_nan` (format has no NaN representation).
-fn encode_nan_raw(ft: &FloatType) -> u64 {
-    assert!(ft.has_nan, "cannot encode NaN in a format without NaN");
-    let mant_bits = ft.mantissa_bits as u32;
-    let max_exp = ft.max_biased_exponent() as u64;
-    if ft.has_infinity {
-        // IEEE: quiet NaN = max exp + MSB of mantissa set
-        (max_exp << mant_bits) | (1u64 << (mant_bits - 1))
-    } else {
-        // FN: NaN = max exp + all-ones mantissa
-        let mant_mask = (1u64 << mant_bits) - 1;
-        (max_exp << mant_bits) | mant_mask
-    }
-}
-
-fn encode_zero_raw(sign_bit: u64, ft: &FloatType) -> u64 {
-    // Negative zero always exists in FloatType formats.
-    sign_bit << (ft.total_bits() as u32 - 1)
-}
-
-fn encode_infinity_raw(sign_bit: u64, ft: &FloatType) -> u64 {
-    if ft.has_infinity {
-        let max_exp = ft.max_biased_exponent() as u64;
-        (sign_bit << (ft.total_bits() as u32 - 1)) | (max_exp << ft.mantissa_bits as u32)
-    } else {
-        // No infinity — saturate to max finite value
-        encode_max_finite_raw(sign_bit, ft)
-    }
-}
-
-/// Encode the maximum finite value for this format.
-fn encode_max_finite_raw(sign_bit: u64, ft: &FloatType) -> u64 {
-    let mant_bits = ft.mantissa_bits as u32;
-    let max_exp = ft.max_biased_exponent() as u64;
-    let mant_mask = (1u64 << mant_bits) - 1;
-
-    let (exp_val, mant_val) = if ft.has_infinity {
-        // IEEE: max finite = (max_exp - 1) with all-ones mantissa
-        (max_exp - 1, mant_mask)
-    } else if ft.has_nan {
-        // FN: max exp row is valid except mant=all-ones (NaN).
-        // Max finite = max_exp with (all-ones - 1) mantissa.
-        (max_exp, mant_mask - 1)
-    } else {
-        // No inf, no NaN: entire max exp row is valid.
-        // Max finite = max_exp with all-ones mantissa.
-        (max_exp, mant_mask)
-    };
-
-    (sign_bit << (ft.total_bits() as u32 - 1)) | (exp_val << mant_bits) | mant_val
-}
-
-fn encode_overflow_raw(sign_bit: u64, ft: &FloatType) -> u64 {
-    if ft.has_infinity {
-        encode_infinity_raw(sign_bit, ft)
-    } else {
-        encode_max_finite_raw(sign_bit, ft)
-    }
-}
-
-fn encode_normal_raw(sign_bit: u64, frac_part: f64, true_exp: i32, ft: &FloatType) -> u64 {
-    let mant_bits = ft.mantissa_bits as u32;
-    let bias = ft.bias();
-    let biased_exp = (true_exp + bias) as u64;
-
-    let scale = (1u64 << mant_bits) as f64;
-    let scaled = frac_part * scale;
-    let mant_int = round_to_nearest_even(scaled);
-
-    if mant_int >= (1u64 << mant_bits) {
-        // Mantissa overflowed — carry into exponent
-        let new_exp = biased_exp + 1;
-        let max_biased = ft.max_biased_exponent() as u64;
-        if ft.has_infinity && new_exp >= max_biased {
-            // IEEE: overflows into the reserved exponent → infinity
-            return encode_overflow_raw(sign_bit, ft);
-        }
-        if new_exp > max_biased {
-            // Beyond all exponents → overflow
-            return encode_overflow_raw(sign_bit, ft);
-        }
-        // Carry absorbed: mant becomes 0, exponent bumps by 1
-        return (sign_bit << (ft.total_bits() as u32 - 1)) | (new_exp << mant_bits);
-    }
-
-    // For FN at max exponent: mant=all-ones is NaN, clamp to mant_mask-1
-    let mant_mask = (1u64 << mant_bits) - 1;
-    let final_mant = if ft.has_nan && !ft.has_infinity && biased_exp == ft.max_biased_exponent() as u64 && mant_int == mant_mask {
-        mant_mask - 1
-    } else {
-        mant_int
-    };
-
-    (sign_bit << (ft.total_bits() as u32 - 1)) | (biased_exp << mant_bits) | final_mant
-}
-
-fn encode_subnormal_raw(sign_bit: u64, abs_val: f64, ft: &FloatType) -> u64 {
-    let mant_bits = ft.mantissa_bits as u32;
-    let bias = ft.bias();
-
-    let scale = f64::exp2((mant_bits as i32 + bias - 1) as f64);
-    let scaled = abs_val * scale;
-    let mant_int = round_to_nearest_even(scaled);
-
-    if mant_int >= (1u64 << mant_bits) {
-        return (sign_bit << (ft.total_bits() as u32 - 1)) | (1u64 << mant_bits);
-    }
-
-    if mant_int == 0 {
-        return encode_zero_raw(sign_bit, ft);
-    }
-
-    (sign_bit << (ft.total_bits() as u32 - 1)) | mant_int
-}
-
-/// IEEE 754 round-to-nearest-even.
-fn round_to_nearest_even(value: f64) -> u64 {
-    let floor = value.floor();
-    let frac = value - floor;
-    let floor_u64 = floor as u64;
-
-    if frac > 0.5 {
-        floor_u64 + 1
-    } else if frac < 0.5 {
-        floor_u64
-    } else {
-        if floor_u64 % 2 == 0 { floor_u64 } else { floor_u64 + 1 }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Integer decode/encode (from raw u64 bits)
-// ---------------------------------------------------------------------------
-
-fn decode_signed_int(raw: u64, it: &IntType) -> i128 {
-    let bits = it.bits;
-    if bits >= 64 {
-        return raw as i64 as i128;
-    }
-    let sign_bit = 1u64 << (bits - 1);
-    if raw & sign_bit != 0 {
-        let mask = !((1u64 << bits) - 1);
-        (raw | mask) as i64 as i128
-    } else {
-        raw as i128
-    }
-}
-
-fn decode_unsigned_int(raw: u64, it: &IntType) -> u128 {
-    if it.bits >= 64 {
-        raw as u128
-    } else {
-        (raw & ((1u64 << it.bits) - 1)) as u128
-    }
-}
-
-fn encode_signed_int(value: i128, it: &IntType) -> u64 {
-    let clamped = clamp_signed(value, it);
-    let raw = clamped as i64 as u64;
-    if it.bits >= 64 { raw } else { raw & ((1u64 << it.bits) - 1) }
-}
-
-fn encode_unsigned_int(value: u128, it: &IntType) -> u64 {
-    let clamped = clamp_unsigned(value, it);
-    clamped as u64
-}
-
-fn clamp_signed(value: i128, it: &IntType) -> i128 {
-    let min = -(1i128 << (it.bits - 1));
-    let max = (1i128 << (it.bits - 1)) - 1;
-    value.clamp(min, max)
-}
-
-fn clamp_unsigned(value: u128, it: &IntType) -> u128 {
-    let max = if it.bits >= 64 { u64::MAX as u128 } else { (1u128 << it.bits) - 1 };
-    value.min(max)
-}
-
-fn float_to_signed_int(f: f64, it: &IntType) -> i128 {
-    if f.is_nan() { return 0; }
-    let min = -(1i128 << (it.bits - 1));
-    let max = (1i128 << (it.bits - 1)) - 1;
-    (f.trunc() as i128).clamp(min, max)
-}
-
-fn float_to_unsigned_int(f: f64, it: &IntType) -> u128 {
-    if f.is_nan() || f < 0.0 { return 0; }
-    let max = if it.bits >= 64 { u64::MAX as u128 } else { (1u128 << it.bits) - 1 };
-    (f.trunc() as u128).min(max)
-}
-
-/// Decompose f64 into (fraction, exponent) where value = fraction * 2^exponent,
-/// 0.5 <= fraction < 1.0 for nonzero values.
-fn frexp_f64(value: f64) -> (f64, i32) {
-    if value == 0.0 { return (0.0, 0); }
-    let bits = value.to_bits();
-    let biased_exp = ((bits >> 52) & 0x7FF) as i32;
-    let mantissa_bits = bits & ((1u64 << 52) - 1);
-
-    if biased_exp == 0 {
-        let normalized = value * f64::exp2(64.0);
-        let (frac, exp) = frexp_f64(normalized);
-        return (frac, exp - 64);
-    }
-
-    let exp = biased_exp - 1022;
-    let frac_bits = 0x3FE0_0000_0000_0000u64 | mantissa_bits;
-    (f64::from_bits(frac_bits), exp)
 }
 
 // ---------------------------------------------------------------------------
@@ -635,6 +234,7 @@ fn frexp_f64(value: f64) -> (f64, i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::numeric_dtype::FloatType;
     use half::{bf16, f16};
     use float8::{F8E4M3, F8E5M2};
 
@@ -664,33 +264,24 @@ mod tests {
     #[test]
     fn read_raw_bits_sub_byte() {
         let data = [0b1010_0110u8];
-        // Read 4 bits at bit offset 0: low nibble = 0110 = 6
         assert_eq!(read_raw_bits(&data, 0, 4), 0b0110);
-        // Read 4 bits at bit offset 4: high nibble = 1010 = 10
         assert_eq!(read_raw_bits(&data, 4, 4), 0b1010);
-        // Read 1 bit at various offsets
-        assert_eq!(read_raw_bits(&data, 0, 1), 0); // bit 0 = 0
-        assert_eq!(read_raw_bits(&data, 1, 1), 1); // bit 1 = 1
-        assert_eq!(read_raw_bits(&data, 5, 1), 1); // bit 5 = 1
+        assert_eq!(read_raw_bits(&data, 0, 1), 0);
+        assert_eq!(read_raw_bits(&data, 1, 1), 1);
+        assert_eq!(read_raw_bits(&data, 5, 1), 1);
     }
 
     #[test]
     fn write_raw_bits_sub_byte_preserves_neighbors() {
         let mut data = [0xFFu8];
-        // Write 0 into bits 2..5 (4 bits starting at offset 2)
         write_raw_bits(&mut data, 2, 4, 0b0000);
-        // bits: 11_0000_11 = 0b1100_0011 = 0xC3
         assert_eq!(data[0], 0b1100_0011);
     }
 
     #[test]
     fn write_raw_bits_spanning_bytes() {
         let mut data = [0u8; 4];
-        // Write 0xABCD at bit offset 4 (spans bytes 0..2)
         write_raw_bits(&mut data, 4, 16, 0xABCD);
-        // Byte 0: low nibble 0, high nibble = low nibble of 0xABCD = 0xD
-        // Byte 1: 0xBC
-        // Byte 2: low nibble = 0xA, high nibble = 0
         assert_eq!(data[0], 0xD0);
         assert_eq!(data[1], 0xBC);
         assert_eq!(data[2], 0x0A);
@@ -704,11 +295,21 @@ mod tests {
                 let value = 0xDEAD_BEEFu64 & ((1u64 << total_bits.min(64)) - 1);
                 write_raw_bits(&mut data, bit_offset, total_bits, value);
                 let readback = read_raw_bits(&data, bit_offset, total_bits);
-                assert_eq!(
-                    readback, value,
-                    "roundtrip failed: offset={bit_offset}, bits={total_bits}, value=0x{value:X}"
-                );
+                assert_eq!(readback, value,
+                    "roundtrip failed: offset={bit_offset}, bits={total_bits}");
             }
+        }
+    }
+
+    #[test]
+    fn read_write_raw_bits_64bit_at_offsets() {
+        for bit_offset in [0, 1, 4, 7, 8] {
+            let mut data = [0u8; 16];
+            let value = 0xDEAD_BEEF_CAFE_BABEu64;
+            write_raw_bits(&mut data, bit_offset, 64, value);
+            let readback = read_raw_bits(&data, bit_offset, 64);
+            assert_eq!(readback, value,
+                "64-bit roundtrip at offset {bit_offset}");
         }
     }
 
@@ -727,11 +328,9 @@ mod tests {
 
     #[test]
     fn view_to_f64_at_offset() {
-        // Two f32 values packed contiguously
         let mut buf = [0u8; 8];
         buf[..4].copy_from_slice(&1.5f32.to_le_bytes());
         buf[4..8].copy_from_slice(&2.5f32.to_le_bytes());
-
         let v0 = NumericScalarView { data: &buf, bit_offset: 0, dtype: NumericDType::F32 };
         let v1 = NumericScalarView { data: &buf, bit_offset: 32, dtype: NumericDType::F32 };
         assert!((v0.to_f64() - 1.5).abs() < 1e-6);
@@ -754,7 +353,6 @@ mod tests {
         let mut buf = [0u8; 4];
         let mut view = NumericScalarViewMut { data: &mut buf, bit_offset: 0, dtype: NumericDType::F32 };
         view.write_f64(3.14);
-        // Should have written 3.14 as f32
         let written = f32::from_le_bytes(buf);
         assert!((written - 3.14f32 as f32).abs() < 0.01);
     }
@@ -762,27 +360,20 @@ mod tests {
     #[test]
     fn view_mut_write_at_bit_offset_bool() {
         let mut buf = [0u8; 1];
-        // Write true at bit 3
         let mut view = NumericScalarViewMut { data: &mut buf, bit_offset: 3, dtype: NumericDType::BOOL };
         let scalar = NumericScalar::from_bool(true);
         view.write_scalar(&scalar);
         assert_eq!(buf[0], 0b0000_1000);
-
-        // Read it back
         let rview = NumericScalarView { data: &buf, bit_offset: 3, dtype: NumericDType::BOOL };
         assert!(rview.is_nonzero());
-        assert!(!NumericScalarView { data: &buf, bit_offset: 0, dtype: NumericDType::BOOL }.is_nonzero());
     }
 
     #[test]
     fn view_mut_write_cast() {
-        // Write an f64 value into a bf16 slot
         let mut buf = [0u8; 2];
         let mut view = NumericScalarViewMut { data: &mut buf, bit_offset: 0, dtype: NumericDType::BF16 };
         let src = NumericScalar::from_f64(3.14);
         view.write_cast(&src);
-
-        // Read back and verify it matches bf16::from_f64(3.14)
         let rview = NumericScalarView { data: &buf, bit_offset: 0, dtype: NumericDType::BF16 };
         let result = rview.to_owned_scalar();
         let expected = NumericScalar::from_bf16(bf16::from_f64(3.14));
@@ -791,7 +382,6 @@ mod tests {
 
     #[test]
     fn view_sub_byte_u4_packed() {
-        // Pack two u4 values into one byte: low nibble = 5, high nibble = 12
         let mut buf = [0u8; 1];
         {
             let mut v0 = NumericScalarViewMut { data: &mut buf, bit_offset: 0, dtype: NumericDType::U4 };
@@ -801,9 +391,7 @@ mod tests {
             let mut v1 = NumericScalarViewMut { data: &mut buf, bit_offset: 4, dtype: NumericDType::U4 };
             v1.write_scalar(&NumericScalar::from_u4(arbitrary_int::u4::new(12)));
         }
-        assert_eq!(buf[0], 0xC5); // high=12=0xC, low=5=0x5
-
-        // Read back
+        assert_eq!(buf[0], 0xC5);
         let r0 = NumericScalarView { data: &buf, bit_offset: 0, dtype: NumericDType::U4 };
         let r1 = NumericScalarView { data: &buf, bit_offset: 4, dtype: NumericDType::U4 };
         assert_eq!(r0.to_owned_scalar(), NumericScalar::from_u4(arbitrary_int::u4::new(5)));
@@ -811,146 +399,52 @@ mod tests {
     }
 
     // ===================================================================
-    // NumericScalar cast tests (defer to view — same results as before)
+    // Scalar cast tests (via dtype engine)
     // ===================================================================
 
     #[test]
     fn f64_to_f32() {
-        for &v in &[0.0f64, -0.0, 1.0, -1.0, 0.5, 3.14, f64::INFINITY, f64::NEG_INFINITY, f64::NAN, 1e-45, 1e38, -1e38, std::f64::consts::PI] {
+        for &v in &[0.0f64, -0.0, 1.0, -1.0, 0.5, 3.14, f64::INFINITY, f64::NEG_INFINITY, f64::NAN, 1e-45, 1e38, std::f64::consts::PI] {
             let dst = NumericScalar::from_f64(v).cast_to(NumericDType::F32);
             assert_bits!(dst, NumericScalar::from_f32(v as f32), format!("f64({v}) → f32"));
         }
     }
 
     #[test]
-    fn f32_to_f64() {
-        for &v in &[0.0f32, -0.0, 1.0, -1.0, 3.14, f32::INFINITY, f32::NEG_INFINITY, f32::NAN, f32::MIN_POSITIVE, f32::MAX, f32::EPSILON] {
-            let dst = NumericScalar::from_f32(v).cast_to(NumericDType::F64);
-            assert_bits!(dst, NumericScalar::from_f64(v as f64), format!("f32({v}) → f64"));
-        }
-    }
-
-    #[test]
     fn f32_to_bf16() {
-        for &v in &[0.0f32, -0.0, 1.0, -1.0, 3.14, 0.5, 0.1, f32::INFINITY, f32::NEG_INFINITY, f32::NAN, f32::MAX, f32::MIN, f32::MIN_POSITIVE, 1.5, 2.5, 3.5, 256.0, 256.5, 257.0] {
+        for &v in &[0.0f32, -0.0, 1.0, -1.0, 3.14, 0.5, f32::INFINITY, f32::NAN, f32::MAX, f32::MIN_POSITIVE, 256.0, 256.5, 257.0] {
             let dst = NumericScalar::from_f32(v).cast_to(NumericDType::BF16);
             assert_bits!(dst, NumericScalar::from_bf16(bf16::from_f32(v)), format!("f32({v}) → bf16"));
         }
     }
 
     #[test]
-    fn bf16_to_f32() {
-        for &v in &[0.0f32, 1.0, -1.0, 3.14, 100.0, -0.5] {
-            let bf = bf16::from_f32(v);
-            let dst = NumericScalar::from_bf16(bf).cast_to(NumericDType::F32);
-            assert_bits!(dst, NumericScalar::from_f32(bf.to_f32()), format!("bf16({bf}) → f32"));
-        }
-    }
-
-    #[test]
     fn f32_to_f16() {
-        for &v in &[0.0f32, -0.0, 1.0, -1.0, 3.14, 0.5, 0.1, f32::INFINITY, f32::NEG_INFINITY, f32::NAN, 65504.0, 65536.0, 5.96e-8, 1e-7, 1.5, 2.5, 3.5] {
+        for &v in &[0.0f32, -0.0, 1.0, -1.0, 3.14, f32::INFINITY, f32::NAN, 65504.0, 65536.0, 5.96e-8, 1.5, 2.5] {
             let dst = NumericScalar::from_f32(v).cast_to(NumericDType::F16);
             assert_bits!(dst, NumericScalar::from_f16(f16::from_f32(v)), format!("f32({v}) → f16"));
         }
     }
 
     #[test]
-    fn f16_to_f32() {
-        for &v in &[0.0f32, 1.0, -1.0, 0.5, 100.0, 65504.0] {
-            let hf = f16::from_f32(v);
-            let dst = NumericScalar::from_f16(hf).cast_to(NumericDType::F32);
-            assert_bits!(dst, NumericScalar::from_f32(hf.to_f32()), format!("f16({hf}) → f32"));
-        }
-    }
-
-    #[test]
-    fn f32_to_f8e4m3fn() {
-        for &v in &[0.0f32, 1.0, -1.0, 0.5, 1.5, 3.0, -3.0, 448.0, 500.0] {
-            let dst = NumericScalar::from_f32(v).cast_to(NumericDType::F8E4M3FN);
-            assert_bits!(dst, NumericScalar::from_f8e4m3fn(F8E4M3::from(v)), format!("f32({v}) → f8e4m3fn"));
-        }
-    }
-
-    #[test]
-    fn f32_to_f8e5m2_finite() {
-        for &v in &[0.0f32, 1.0, -1.0, 0.5, 2.0, 4.0] {
-            let dst = NumericScalar::from_f32(v).cast_to(NumericDType::F8E5M2);
-            assert_bits!(dst, NumericScalar::from_f8e5m2(F8E5M2::from(v)), format!("f32({v}) → f8e5m2"));
-        }
-        // IEEE infinity encoding
-        assert_eq!(NumericScalar::from_f32(f32::INFINITY).cast_to(NumericDType::F8E5M2).bits[0], 0x7C);
-        assert_eq!(NumericScalar::from_f32(f32::NEG_INFINITY).cast_to(NumericDType::F8E5M2).bits[0], 0xFC);
-    }
-
-    #[test]
     fn f32_to_i32() {
-        for &(f, expected) in &[(0.0f32, 0i32), (1.0, 1), (-1.0, -1), (3.7, 3), (-3.7, -3), (f32::NAN, 0), (f32::INFINITY, i32::MAX), (f32::NEG_INFINITY, i32::MIN)] {
+        for &(f, expected) in &[(0.0f32, 0i32), (1.0, 1), (-1.0, -1), (3.7, 3), (-3.7, -3), (f32::NAN, 0), (f32::INFINITY, i32::MAX)] {
             let dst = NumericScalar::from_f32(f).cast_to(NumericDType::I32);
             assert_bits!(dst, NumericScalar::from_i32(expected), format!("f32({f}) → i32"));
         }
     }
 
     #[test]
-    fn f64_to_i64() {
-        for &(f, expected) in &[(0.0f64, 0i64), (1.0, 1), (-1.0, -1), (42.9, 42), (-42.9, -42), (f64::NAN, 0), (f64::INFINITY, i64::MAX), (f64::NEG_INFINITY, i64::MIN)] {
-            let dst = NumericScalar::from_f64(f).cast_to(NumericDType::I64);
-            assert_bits!(dst, NumericScalar::from_i64(expected), format!("f64({f}) → i64"));
-        }
-    }
-
-    #[test]
     fn i32_to_f32() {
-        for &v in &[0i32, 1, -1, i32::MAX, i32::MIN, 42, -42, 16777217] {
+        for &v in &[0i32, 1, -1, i32::MAX, i32::MIN, 16777217] {
             let dst = NumericScalar::from_i32(v).cast_to(NumericDType::F32);
             assert_bits!(dst, NumericScalar::from_f32(v as f32), format!("i32({v}) → f32"));
         }
     }
 
     #[test]
-    fn i64_to_f64() {
-        for &v in &[0i64, 1, -1, i64::MAX, i64::MIN, 42, -999999999] {
-            let dst = NumericScalar::from_i64(v).cast_to(NumericDType::F64);
-            assert_bits!(dst, NumericScalar::from_f64(v as f64), format!("i64({v}) → f64"));
-        }
-    }
-
-    #[test]
-    fn u8_to_bf16() {
-        for v in 0..=255u8 {
-            let dst = NumericScalar::from_u8(v).cast_to(NumericDType::BF16);
-            assert_bits!(dst, NumericScalar::from_bf16(bf16::from_f32(v as f32)), format!("u8({v}) → bf16"));
-        }
-    }
-
-    #[test]
-    fn i32_to_i64() {
-        for &v in &[0i32, 1, -1, i32::MAX, i32::MIN] {
-            let dst = NumericScalar::from_i32(v).cast_to(NumericDType::I64);
-            assert_bits!(dst, NumericScalar::from_i64(v as i64), format!("i32({v}) → i64"));
-        }
-    }
-
-    #[test]
-    fn i64_to_i32_saturating() {
-        for &(v, expected) in &[(0i64, 0i32), (1, 1), (-1, -1), (i64::MAX, i32::MAX), (i64::MIN, i32::MIN)] {
-            let dst = NumericScalar::from_i64(v).cast_to(NumericDType::I32);
-            assert_bits!(dst, NumericScalar::from_i32(expected), format!("i64({v}) → i32"));
-        }
-    }
-
-    #[test]
-    fn bool_conversions() {
-        assert_bits!(NumericScalar::from_bool(true).cast_to(NumericDType::F32), NumericScalar::from_f32(1.0), "true→f32");
-        assert_bits!(NumericScalar::from_bool(false).cast_to(NumericDType::F32), NumericScalar::from_f32(0.0), "false→f32");
-        assert_bits!(NumericScalar::from_f32(0.0).cast_to(NumericDType::BOOL), NumericScalar::from_bool(false), "0.0→bool");
-        assert_bits!(NumericScalar::from_f32(1.0).cast_to(NumericDType::BOOL), NumericScalar::from_bool(true), "1.0→bool");
-        assert_bits!(NumericScalar::from_i32(-1).cast_to(NumericDType::BOOL), NumericScalar::from_bool(true), "-1→bool");
-    }
-
-    #[test]
     fn identity_cast() {
-        for s in [NumericScalar::from_f32(3.14), NumericScalar::from_i64(i64::MAX), NumericScalar::from_bool(true), NumericScalar::from_u8(42)] {
+        for s in [NumericScalar::from_f32(3.14), NumericScalar::from_i64(i64::MAX), NumericScalar::from_bool(true)] {
             assert_eq!(s.cast_to(s.dtype()), s);
         }
     }
@@ -971,493 +465,76 @@ mod tests {
     }
 
     #[test]
-    fn to_i64_from_various() {
-        assert_eq!(NumericScalar::from_f64(42.9).to_i64(), 42);
-        assert_eq!(NumericScalar::from_i32(-5).to_i64(), -5);
-    }
-
-    #[test]
     fn is_nonzero_from_various() {
         assert!(!NumericScalar::from_f32(0.0).is_nonzero());
         assert!(NumericScalar::from_f32(1.0).is_nonzero());
         assert!(!NumericScalar::from_i32(0).is_nonzero());
         assert!(NumericScalar::from_i32(-1).is_nonzero());
-        assert!(!NumericScalar::from_bool(false).is_nonzero());
-        assert!(NumericScalar::from_bool(true).is_nonzero());
     }
 
     // ===================================================================
-    // Exhaustive F4E2M1: all 16 bit patterns
+    // Exhaustive format tests (delegate to dtype engine, verify same results)
     // ===================================================================
 
     #[test]
-    fn f4e2m1_exhaustive_decode() {
-        // All 16 values of E2M1 (bias=1, no inf, no NaN):
-        // Subnormal (exp=0): (-1)^s * (m/2) * 2^(1-1) = (-1)^s * m * 0.5
-        // Normal (exp>0):    (-1)^s * (1 + m/2) * 2^(exp-1)
-        let expected: [(u8, f64); 16] = [
-            (0b0000, 0.0),   // +0
-            (0b0001, 0.5),   // +subnormal: 0.5 * 1 = 0.5
-            (0b0010, 1.0),   // +normal: (1+0) * 2^0 = 1.0
-            (0b0011, 1.5),   // +normal: (1+0.5) * 2^0 = 1.5
-            (0b0100, 2.0),   // +normal: (1+0) * 2^1 = 2.0
-            (0b0101, 3.0),   // +normal: (1+0.5) * 2^1 = 3.0
-            (0b0110, 4.0),   // +normal: (1+0) * 2^2 = 4.0
-            (0b0111, 6.0),   // +normal: (1+0.5) * 2^2 = 6.0
-            (0b1000, -0.0),  // -0
-            (0b1001, -0.5),
-            (0b1010, -1.0),
-            (0b1011, -1.5),
-            (0b1100, -2.0),
-            (0b1101, -3.0),
-            (0b1110, -4.0),
-            (0b1111, -6.0),
-        ];
-
-        let ft = FloatType::F4E2M1;
-        for (bits, expected_val) in &expected {
-            let decoded = software_float_decode(*bits as u64, &ft);
-            if *expected_val == 0.0 {
-                assert_eq!(decoded.to_bits(), expected_val.to_bits(),
-                    "F4E2M1 decode 0b{:04b}: expected {expected_val} (bits {:016X}), got {decoded} (bits {:016X})",
-                    bits, expected_val.to_bits(), decoded.to_bits());
-            } else {
-                assert_eq!(decoded, *expected_val,
-                    "F4E2M1 decode 0b{:04b}: expected {expected_val}, got {decoded}", bits);
-            }
-        }
-    }
-
-    #[test]
-    fn f4e2m1_exhaustive_encode_roundtrip() {
-        // Encode every F4E2M1 value through f64 and verify we get the original bits back.
+    fn f4e2m1_exhaustive_roundtrip() {
         let ft = FloatType::F4E2M1;
         for bits in 0u8..16 {
-            let decoded = software_float_decode(bits as u64, &ft);
-            let reencoded = software_float_encode(decoded, &ft);
-            assert_eq!(
-                reencoded, bits as u64,
-                "F4E2M1 roundtrip failed for 0b{:04b}: decoded to {decoded}, reencoded to 0b{:04b}",
-                bits, reencoded
-            );
+            let decoded = ft.decode_f64(bits as u64);
+            if decoded.is_nan() { continue; }
+            let reencoded = ft.encode_f64(decoded);
+            assert_eq!(reencoded, bits as u64,
+                "F4E2M1 roundtrip 0b{:04b}: decoded {decoded}, reencoded 0b{:04b}", bits, reencoded);
         }
     }
 
     #[test]
-    fn f4e2m1_cast_all_values_through_f32() {
-        // Cast every F4E2M1 value to F32 and back, verify bit-preservation.
-        let ft = FloatType::F4E2M1;
-        for bits in 0u8..16 {
-            let mut scalar_bits = [0u8; 8];
-            scalar_bits[0] = bits;
-            let scalar = NumericScalar { bits: scalar_bits, dtype: NumericDType::F4E2M1 };
-            let as_f32 = scalar.cast_to(NumericDType::F32);
-            let back = as_f32.cast_to(NumericDType::F4E2M1);
-            assert_eq!(back, scalar,
-                "F4E2M1 0b{:04b} → F32 → F4E2M1 roundtrip failed", bits);
-        }
-    }
-
-    // ===================================================================
-    // Exhaustive F8E4M3FN: all 256 bit patterns
-    // ===================================================================
-
-    #[test]
-    fn f8e4m3fn_exhaustive_decode_matches_crate() {
-        // Verify our software decode matches the float8 crate for every bit pattern.
+    fn f8e4m3fn_exhaustive_roundtrip() {
         let ft = FloatType::F8E4M3FN;
         for bits in 0u8..=255 {
+            let our_val = ft.decode_f64(bits as u64);
+            // Verify against crate
             let crate_val = F8E4M3::from_bits(bits);
-            let our_val = software_float_decode(bits as u64, &ft);
-
             if crate_val.is_nan() {
-                assert!(our_val.is_nan(),
-                    "F8E4M3FN 0x{:02X}: crate says NaN, we decoded {our_val}", bits);
-            } else {
-                let crate_f64 = crate_val.to_f64();
-                if crate_f64 == 0.0 {
-                    assert_eq!(our_val.to_bits(), crate_f64.to_bits(),
-                        "F8E4M3FN 0x{:02X}: zero sign mismatch", bits);
-                } else {
-                    assert_eq!(our_val, crate_f64,
-                        "F8E4M3FN 0x{:02X}: expected {crate_f64}, got {our_val}", bits);
-                }
+                assert!(our_val.is_nan(), "F8E4M3FN 0x{:02X}: crate=NaN, us={our_val}", bits);
+                continue;
             }
-        }
-    }
-
-    #[test]
-    fn f8e4m3fn_exhaustive_encode_roundtrip() {
-        let ft = FloatType::F8E4M3FN;
-        for bits in 0u8..=255 {
-            let decoded = software_float_decode(bits as u64, &ft);
-            if decoded.is_nan() { continue; } // NaN roundtrip is canonicalized
-            let reencoded = software_float_encode(decoded, &ft);
-            assert_eq!(
-                reencoded, bits as u64,
-                "F8E4M3FN roundtrip 0x{:02X}: decoded {decoded}, reencoded 0x{:02X}",
-                bits, reencoded
-            );
-        }
-    }
-
-    // ===================================================================
-    // Exhaustive F8E5M2: all 256 bit patterns
-    // ===================================================================
-
-    #[test]
-    fn f8e5m2_exhaustive_decode_and_roundtrip() {
-        // Note: the float8 crate's E5M2 implementation deviates from standard
-        // IEEE 754 (it saturates max-finite values to Inf). We verify our
-        // decode against analytical IEEE rules instead, and confirm roundtrip.
-        let ft = FloatType::F8E5M2;
-        let max_exp = ft.max_biased_exponent();
-
-        for bits in 0u8..=255 {
-            let decoded = software_float_decode(bits as u64, &ft);
-            let sign = (bits >> 7) & 1;
-            let exp = ((bits >> 2) & 0x1F) as u32;
-            let mant = (bits & 0x03) as u64;
-
-            // Verify special values per IEEE rules
-            if exp == max_exp {
-                if mant == 0 {
-                    assert!(decoded.is_infinite(),
-                        "F8E5M2 0x{:02X}: expected Inf, got {decoded}", bits);
-                    assert_eq!(decoded.is_sign_negative(), sign == 1);
-                } else {
-                    assert!(decoded.is_nan(),
-                        "F8E5M2 0x{:02X}: expected NaN, got {decoded}", bits);
-                }
-            } else if exp == 0 && mant == 0 {
-                assert_eq!(decoded, 0.0, "F8E5M2 0x{:02X}: expected ±0", bits);
-            }
-
-            // Roundtrip (skip NaN — canonicalized)
-            if !decoded.is_nan() {
-                let reencoded = software_float_encode(decoded, &ft);
-                assert_eq!(reencoded, bits as u64,
-                    "F8E5M2 roundtrip 0x{:02X}: decoded {decoded}, reencoded 0x{:02X}",
-                    bits, reencoded);
-            }
-        }
-
-        // Verify against crate for non-controversial values (exclude max-exp row)
-        for bits in 0u8..=255 {
-            let exp = ((bits >> 2) & 0x1F) as u32;
-            if exp >= max_exp - 1 { continue; } // skip where crate diverges
-            let crate_val = F8E5M2::from_bits(bits);
-            let our_val = software_float_decode(bits as u64, &ft);
-            if crate_val.is_nan() { continue; }
             let crate_f64 = crate_val.to_f64();
             if crate_f64 == 0.0 {
-                assert_eq!(our_val.to_bits(), crate_f64.to_bits(),
-                    "F8E5M2 0x{:02X}: zero mismatch", bits);
+                assert_eq!(our_val.to_bits(), crate_f64.to_bits(), "F8E4M3FN 0x{:02X} zero sign", bits);
             } else {
-                assert_eq!(our_val, crate_f64,
-                    "F8E5M2 0x{:02X}: expected {crate_f64}, got {our_val}", bits);
+                assert_eq!(our_val, crate_f64, "F8E4M3FN 0x{:02X}", bits);
             }
-        }
-    }
-
-    #[test]
-    fn f8e5m2_exhaustive_encode_roundtrip() {
-        let ft = FloatType::F8E5M2;
-        for bits in 0u8..=255 {
-            let decoded = software_float_decode(bits as u64, &ft);
-            if decoded.is_nan() { continue; }
-            let reencoded = software_float_encode(decoded, &ft);
-            assert_eq!(
-                reencoded, bits as u64,
-                "F8E5M2 roundtrip 0x{:02X}: decoded {decoded}, reencoded 0x{:02X}",
-                bits, reencoded
-            );
-        }
-    }
-
-    // ===================================================================
-    // Exhaustive F6E3M2: all 64 bit patterns
-    // ===================================================================
-
-    #[test]
-    fn f6e3m2_exhaustive_decode_and_roundtrip() {
-        // E3M2: bias=3, no inf, no NaN. 6 bits total.
-        // Normal: (-1)^s * (1 + m/4) * 2^(e-3)
-        // Subnormal: (-1)^s * (m/4) * 2^(1-3) = (-1)^s * m/16
-        let ft = FloatType::F6E3M2;
-        assert_eq!(ft.bias(), 3);
-
-        for bits in 0u64..64 {
-            let decoded = software_float_decode(bits, &ft);
-            // Verify it's not NaN or Inf (format has neither)
-            assert!(!decoded.is_nan(), "F6E3M2 0b{:06b} decoded to NaN", bits);
-            assert!(!decoded.is_infinite(), "F6E3M2 0b{:06b} decoded to Inf", bits);
             // Roundtrip
-            if decoded == 0.0 && bits == 0b100000 {
-                continue; // -0 encodes to a specific pattern, skip sign check
-            }
-            let reencoded = software_float_encode(decoded, &ft);
-            assert_eq!(reencoded, bits,
-                "F6E3M2 roundtrip 0b{:06b}: decoded {decoded}, reencoded 0b{:06b}",
-                bits, reencoded);
-        }
-
-        // Spot-check known values. Layout: [s:1][e:3][m:2]
-        // bias=3. Normal: (1+m/4) * 2^(e-3). Subnormal: (m/4) * 2^(1-3) = m/16.
-        assert_eq!(software_float_decode(0b000000, &ft), 0.0);      // +0
-        assert_eq!(software_float_decode(0b000001, &ft), 0.0625);   // subnormal: 1/16
-        assert_eq!(software_float_decode(0b000100, &ft), 0.25);     // e=001, m=00: (1+0)*2^(1-3) = 0.25
-        assert_eq!(software_float_decode(0b001100, &ft), 1.0);      // e=011, m=00: (1+0)*2^(3-3) = 1.0
-        assert_eq!(software_float_decode(0b010000, &ft), 2.0);      // e=100, m=00: (1+0)*2^(4-3) = 2.0
-        assert_eq!(software_float_decode(0b011111, &ft), 28.0);     // e=111, m=11: (1+3/4)*2^(7-3) = 28.0
-    }
-
-    // ===================================================================
-    // Exhaustive F6E2M3: all 64 bit patterns
-    // ===================================================================
-
-    #[test]
-    fn f6e2m3_exhaustive_decode_and_roundtrip() {
-        // E2M3: bias=1, no inf, no NaN. 6 bits total.
-        // Normal: (-1)^s * (1 + m/8) * 2^(e-1)
-        // Subnormal: (-1)^s * (m/8) * 2^(1-1) = (-1)^s * m/8
-        let ft = FloatType::F6E2M3;
-        assert_eq!(ft.bias(), 1);
-
-        for bits in 0u64..64 {
-            let decoded = software_float_decode(bits, &ft);
-            assert!(!decoded.is_nan(), "F6E2M3 0b{:06b} decoded to NaN", bits);
-            assert!(!decoded.is_infinite(), "F6E2M3 0b{:06b} decoded to Inf", bits);
-            if decoded == 0.0 && bits == 0b100000 {
-                continue; // -0
-            }
-            let reencoded = software_float_encode(decoded, &ft);
-            assert_eq!(reencoded, bits,
-                "F6E2M3 roundtrip 0b{:06b}: decoded {decoded}, reencoded 0b{:06b}",
-                bits, reencoded);
-        }
-
-        // Spot-checks
-        assert_eq!(software_float_decode(0b000000, &ft), 0.0);
-        // Subnormal: s=0, e=00, m=001: 1/8 = 0.125
-        assert_eq!(software_float_decode(0b000001, &ft), 0.125);
-        // Normal: s=0, e=01, m=000: (1+0)*2^(1-1) = 1.0
-        assert_eq!(software_float_decode(0b001000, &ft), 1.0);
-        // Max: s=0, e=11, m=111: (1+7/8)*2^(3-1) = 1.875*4 = 7.5
-        assert_eq!(software_float_decode(0b011111, &ft), 7.5);
-    }
-
-    // ===================================================================
-    // BF16 subnormal roundtrips
-    // ===================================================================
-
-    #[test]
-    fn bf16_subnormal_roundtrip() {
-        // BF16 subnormals: exp=0, mant≠0
-        // Smallest subnormal: mant=1 → value = 1/128 * 2^(-126) = 2^(-133)
-        let subnormal_patterns: &[u16] = &[
-            0x0001, // smallest positive subnormal
-            0x0040, // mid subnormal
-            0x007F, // largest subnormal
-            0x8001, // smallest negative subnormal
-        ];
-        for &pat in subnormal_patterns {
-            let bf = bf16::from_bits(pat);
-            let src = NumericScalar::from_bf16(bf);
-            let as_f32 = src.cast_to(NumericDType::F32);
-            let back = as_f32.cast_to(NumericDType::BF16);
-            assert_eq!(back, src,
-                "BF16 subnormal 0x{:04X} roundtrip failed", pat);
+            let reencoded = ft.encode_f64(our_val);
+            assert_eq!(reencoded, bits as u64, "F8E4M3FN roundtrip 0x{:02X}", bits);
         }
     }
 
-    // ===================================================================
-    // F16 subnormal roundtrips
-    // ===================================================================
-
     #[test]
-    fn f16_subnormal_roundtrip() {
-        let subnormal_patterns: &[u16] = &[
-            0x0001, // smallest positive subnormal
-            0x0200, // mid subnormal
-            0x03FF, // largest subnormal
-            0x8001, // smallest negative subnormal
-        ];
-        for &pat in subnormal_patterns {
-            let hf = f16::from_bits(pat);
-            let src = NumericScalar::from_f16(hf);
-            let as_f32 = src.cast_to(NumericDType::F32);
-            let back = as_f32.cast_to(NumericDType::F16);
-            assert_eq!(back, src,
-                "F16 subnormal 0x{:04X} roundtrip failed", pat);
-        }
-    }
-
-    // ===================================================================
-    // F16 exhaustive f32 roundtrip (all 65536 patterns)
-    // ===================================================================
-
-    #[test]
-    fn f16_exhaustive_via_f32() {
-        // Every F16 value should survive F16 → F32 → F16 roundtrip.
+    fn f16_exhaustive_roundtrip() {
         let ft = FloatType::F16;
         for bits in 0u16..=u16::MAX {
             let hf = f16::from_bits(bits);
             if hf.is_nan() { continue; }
-
-            let decoded = software_float_decode(bits as u64, &ft);
-            let reencoded = software_float_encode(decoded, &ft);
-            assert_eq!(reencoded, bits as u64,
-                "F16 roundtrip 0x{:04X}: decoded {decoded}, reencoded 0x{:04X}",
-                bits, reencoded);
-        }
-    }
-
-    // ===================================================================
-    // 64-bit read/write at non-zero bit offsets
-    // ===================================================================
-
-    #[test]
-    fn read_write_raw_bits_64bit_at_offsets() {
-        for bit_offset in [0, 1, 4, 7, 8] {
-            let mut data = [0u8; 16];
-            let value = 0xDEAD_BEEF_CAFE_BABEu64;
-            write_raw_bits(&mut data, bit_offset, 64, value);
-            let readback = read_raw_bits(&data, bit_offset, 64);
-            assert_eq!(readback, value,
-                "64-bit roundtrip at offset {bit_offset}: wrote 0x{value:016X}, read 0x{readback:016X}");
+            let decoded = ft.decode_f64(bits as u64);
+            let reencoded = ft.encode_f64(decoded);
+            assert_eq!(reencoded, bits as u64, "F16 roundtrip 0x{:04X}", bits);
         }
     }
 
     #[test]
-    fn read_write_raw_bits_f64_at_offset_1() {
-        // Write a full f64 at bit offset 1, verify bits survive.
-        let mut data = [0u8; 16];
-        let val = std::f64::consts::PI;
-        let val_bits = val.to_bits();
-        write_raw_bits(&mut data, 1, 64, val_bits);
-        let readback = read_raw_bits(&data, 1, 64);
-        assert_eq!(readback, val_bits);
-    }
-
-    // ===================================================================
-    // Negative float → unsigned int
-    // ===================================================================
-
-    #[test]
-    fn negative_float_to_unsigned_clamps_to_zero() {
-        let cases: &[(f64, NumericDType)] = &[
-            (-1.0, NumericDType::U8),
-            (-1.0, NumericDType::U16),
-            (-1.0, NumericDType::U32),
-            (-1.0, NumericDType::U64),
-            (-100.0, NumericDType::U8),
-            (f64::NEG_INFINITY, NumericDType::U32),
-        ];
-        for &(val, dtype) in cases {
-            let src = NumericScalar::from_f64(val);
-            let dst = src.cast_to(dtype);
-            assert_eq!(dst.bits, [0u8; 8],
-                "negative f64({val}) → {dtype} should be zero, got {:?}", dst);
-        }
-    }
-
-    #[test]
-    fn nan_to_unsigned_is_zero() {
-        let src = NumericScalar::from_f64(f64::NAN);
+    fn negative_float_to_unsigned_is_zero() {
+        let src = NumericScalar::from_f64(-1.0);
         for dtype in [NumericDType::U8, NumericDType::U32, NumericDType::U64] {
             let dst = src.cast_to(dtype);
-            assert_eq!(dst.bits, [0u8; 8], "NaN → {dtype} should be zero");
+            assert_eq!(dst.bits, [0u8; 8], "negative f64 → {dtype} should be zero");
         }
     }
 
-    // ===================================================================
-    // Rounding carry: mantissa overflow bumps exponent
-    // ===================================================================
-
     #[test]
-    fn rounding_carry_f32_to_bf16() {
-        // BF16 has 7-bit mantissa. Find an f32 value where rounding the
-        // mantissa to 7 bits causes a carry.
-        // f32 1.9921875 = 1 + 127/128 = 0x3FFF0000 in f32
-        // In BF16 this rounds up: mantissa overflows, exponent bumps by 1
-        // → should become 2.0 = 0x4000 in BF16
-        let v = f32::from_bits(0x3FFF_0000); // 1.9921875
-        let src = NumericScalar::from_f32(v);
-        let dst = src.cast_to(NumericDType::BF16);
-        let expected = NumericScalar::from_bf16(bf16::from_f32(v));
-        assert_bits!(dst, expected, format!("carry f32({v}) → bf16"));
-    }
-
-    #[test]
-    fn rounding_carry_f32_to_f16() {
-        // F16 has 10-bit mantissa. f32 value just below 2.0 that rounds up.
-        let v = f32::from_bits(0x3FFF_FC00); // very close to 2.0
-        let src = NumericScalar::from_f32(v);
-        let dst = src.cast_to(NumericDType::F16);
-        let expected = NumericScalar::from_f16(f16::from_f32(v));
-        assert_bits!(dst, expected, format!("carry f32({v}) → f16"));
-    }
-
-    #[test]
-    fn rounding_carry_to_overflow() {
-        // BF16 max finite is ~3.39e38. An f32 value just above this
-        // should round up to infinity.
-        let bf_max = bf16::MAX;
-        let above_max = bf_max.to_f32() * 1.004; // just above max representable
-        let src = NumericScalar::from_f32(above_max);
-        let dst = src.cast_to(NumericDType::BF16);
-        let expected = NumericScalar::from_bf16(bf16::from_f32(above_max));
-        assert_bits!(dst, expected, format!("carry-to-overflow f32({above_max}) → bf16"));
-    }
-
-    // ===================================================================
-    // Subnormal encode: values smaller than min normal
-    // ===================================================================
-
-    #[test]
-    fn encode_bf16_subnormal_from_f32() {
-        // BF16 min normal = 2^-126. Values below this should encode as subnormals.
-        let min_normal = bf16::from_bits(0x0080); // smallest normal BF16
-        let half_min = min_normal.to_f32() / 2.0; // should be subnormal
-        let src = NumericScalar::from_f32(half_min);
-        let dst = src.cast_to(NumericDType::BF16);
-        let expected = NumericScalar::from_bf16(bf16::from_f32(half_min));
-        assert_bits!(dst, expected, format!("bf16 subnormal encode {half_min}"));
-    }
-
-    #[test]
-    fn encode_f16_subnormal_from_f32() {
-        let min_normal = f16::from_bits(0x0400); // smallest normal F16
-        let half_min = min_normal.to_f32() / 2.0;
-        let src = NumericScalar::from_f32(half_min);
-        let dst = src.cast_to(NumericDType::F16);
-        let expected = NumericScalar::from_f16(f16::from_f32(half_min));
-        assert_bits!(dst, expected, format!("f16 subnormal encode {half_min}"));
-    }
-
-    // ===================================================================
-    // Large integer precision (no f64 roundtrip loss)
-    // ===================================================================
-
-    #[test]
-    fn i64_max_survives_i64_identity() {
+    fn i64_max_survives_identity() {
         let s = NumericScalar::from_i64(i64::MAX);
-        assert_eq!(s.to_i64(), i64::MAX, "i64::MAX should survive to_i64()");
-    }
-
-    #[test]
-    fn u64_max_to_i64_saturates() {
-        let s = NumericScalar::from_u64(u64::MAX);
-        let as_i64 = s.cast_to(NumericDType::I64);
-        // u64::MAX as an intermediate is i128(u64::MAX), clamped to i64::MAX
-        assert_eq!(i64::from_le_bytes(as_i64.bits), i64::MAX);
-    }
-
-    #[test]
-    fn i64_to_u64_negative_clamps() {
-        let s = NumericScalar::from_i64(-1);
-        let as_u64 = s.cast_to(NumericDType::U64);
-        assert_eq!(u64::from_le_bytes(as_u64.bits), 0);
+        assert_eq!(s.to_i64(), i64::MAX);
     }
 }

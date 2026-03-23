@@ -5,6 +5,12 @@
 //! - [`NumericDType`] — what a numeric value IS (its mathematical interpretation)
 //! - [`FloatType`] / [`IntType`] — parameterized by bit layout, not named variants
 //! - [`ONNXDType`] — bridges ONNX's type system to ours (includes String)
+//!
+//! The [`conversions`] submodule provides the software conversion engine:
+//! decode/encode raw bits, cast between dtypes — all as pure functions on
+//! the dtype types themselves.
+
+pub mod conversions;
 
 use std::fmt;
 
