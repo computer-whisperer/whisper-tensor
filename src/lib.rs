@@ -16,6 +16,7 @@ pub mod milli_graph;
 pub mod model;
 pub mod nano_graph;
 pub mod numeric_dtype;
+pub mod numeric_scalar;
 pub mod packed_format;
 pub mod packed_tensor;
 pub mod phonemization;
