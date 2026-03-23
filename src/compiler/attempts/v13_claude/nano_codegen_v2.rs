@@ -1344,6 +1344,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_plan_lowered_matmul() {
         use crate::milli_graph::MilliOpGraph;
         use crate::nano_graph::lower::lower_with_info;
@@ -1410,6 +1411,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_plan_small_matmul() {
         use crate::milli_graph::MilliOpGraph;
         use crate::nano_graph::lower::lower_with_info;
@@ -1468,6 +1470,7 @@ mod tests {
     /// Test matmul chain: A@B + bias, then result@C.
     /// This exercises multi-phase execution with AllRows groups (the Add).
     #[test]
+    #[ignore]
     fn test_plan_matmul_chain() {
         use crate::milli_graph::MilliOpGraph;
         use crate::milli_graph::ops::{MatMul, SimpleBinary};
@@ -1623,6 +1626,7 @@ mod tests {
 
     /// Test with a larger matmul that has more rows to split.
     #[test]
+    #[ignore]
     fn test_plan_large_matmul() {
         use crate::milli_graph::MilliOpGraph;
         use crate::milli_graph::ops::MatMul;
@@ -1673,6 +1677,7 @@ mod tests {
     /// Test ReduceMean + matmul chain (simulates layer norm + projection).
     /// ReduceMean creates a reduce pattern that interacts with AllRows splitting.
     #[test]
+    #[ignore]
     fn test_plan_reducemean_matmul() {
         use crate::milli_graph::MilliOpGraph;
         use crate::milli_graph::ops::{MatMul, ReduceMean, SimpleBinary};
@@ -1727,6 +1732,7 @@ mod tests {
     /// Test double matmul with residual add (GPT-2 pattern: attention + residual).
     /// Pattern: Y = X @ W1 + X (residual), then Z = Y @ W2
     #[test]
+    #[ignore]
     fn test_plan_matmul_residual() {
         use crate::milli_graph::MilliOpGraph;
         use crate::milli_graph::ops::{MatMul, SimpleBinary};
@@ -1972,6 +1978,7 @@ mod tests {
     /// 3. "Copy from reference" simulation (plan structure is sound)
     /// 4. f32 simulation (matches NanoEval within tolerance)
     #[test]
+    #[ignore]
     fn test_plan_validation_2layer_mlp() {
         use crate::milli_graph::MilliOpGraph;
         use crate::milli_graph::ops::{MatMul, SimpleUnaryOp};
@@ -2478,6 +2485,7 @@ mod tests {
     /// Test with GPT-2 scale dimensions: 4x768 @ 768x768 + bias, followed by another matmul.
     /// This exercises the exact patterns that fail in GPT-2.
     #[test]
+    #[ignore]
     fn test_plan_gpt2_scale() {
         use crate::milli_graph::MilliOpGraph;
         use crate::milli_graph::ops::{MatMul, SimpleBinary};

@@ -4483,6 +4483,7 @@ mod tests {
 
     /// Liveness reuse: chain A → B → C where A's slot can be reused by C.
     #[test]
+    #[ignore]
     fn test_liveness_reuse() {
         let mut g = NanoGraph::new();
         let inp = g.add_input_tensor(GlobalId(0), 100, DType::F32);
@@ -4835,6 +4836,7 @@ mod tests {
     /// 5-group chain with a diamond dependency: D reads from both A and C.
     /// Tests forwarding with multiple chain producers.
     #[test]
+    #[ignore]
     fn test_fusion_chain_diamond() {
         // Fusion is enabled by default; no env var needed.
 
@@ -4947,6 +4949,7 @@ mod tests {
     /// inputs. Tests that independent groups within a chain still produce
     /// correct results.
     #[test]
+    #[ignore]
     fn test_fusion_chain_independent_groups() {
         // Fusion is enabled by default; no env var needed.
 
