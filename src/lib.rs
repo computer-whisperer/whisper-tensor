@@ -18,7 +18,7 @@ pub mod nano_graph;
 pub mod numeric_dtype;
 pub mod numeric_scalar;
 pub mod numeric_tensor;
-pub mod ops;
+pub mod scalar_ops;
 pub mod packed_tensor;
 pub mod phonemization;
 pub mod pool;

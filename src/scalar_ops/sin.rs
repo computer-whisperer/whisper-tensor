@@ -1,16 +1,11 @@
-//! Unary sine.
+//! Unary sine — re-exports from [`trig`](super::trig).
 
-use crate::numeric_dtype::FloatType;
-
-/// Compute the sine of a float value.
-/// Decoded to f64, computed, encoded back to the source FloatType.
-pub fn float_sin(raw: u64, ft: &FloatType) -> u64 {
-    ft.encode_f64(ft.decode_f64(raw).sin())
-}
+pub use super::trig::float_sin;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::numeric_dtype::FloatType;
 
     #[test]
     fn float_sin_f64() {
