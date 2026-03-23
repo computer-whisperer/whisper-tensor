@@ -400,6 +400,9 @@ impl NumericDType {
     }
 
     /// Convert back to the legacy `DType` enum.
+    ///
+    /// Panics if this type has no legacy equivalent (e.g. F6E3M2, F6E2M3,
+    /// or custom FloatType/IntType configurations).
     pub fn to_legacy(self) -> DType {
         match self {
             Self::F64 => DType::F64,
@@ -420,28 +423,7 @@ impl NumericDType {
             Self::U8 => DType::U8,
             Self::U4 => DType::U4,
             Self::BOOL => DType::BOOL,
-            NumericDType::Float(ft) => match ft.total_bits() {
-                64 => DType::F64,
-                32 => DType::F32,
-                16 => DType::F16,
-                _ => DType::F32,
-            },
-            NumericDType::SignedInt(it) => match it.bits {
-                64 => DType::I64,
-                32 => DType::I32,
-                16 => DType::I16,
-                8 => DType::I8,
-                4 => DType::I4,
-                _ => DType::I32,
-            },
-            NumericDType::UnsignedInt(it) => match it.bits {
-                64 => DType::U64,
-                32 => DType::U32,
-                16 => DType::U16,
-                8 => DType::U8,
-                4 => DType::U4,
-                _ => DType::U32,
-            },
+            other => panic!("NumericDType {other} has no legacy DType equivalent"),
         }
     }
 }

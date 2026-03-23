@@ -20,6 +20,7 @@ impl FloatType {
     /// The input `raw` should contain the float's bits in the low
     /// `total_bits()` positions. See [`FloatType`] docs for encoding rules.
     pub fn decode_f64(&self, raw: u64) -> f64 {
+        debug_assert!(self.is_supported(), "FloatType {:?} is not supported", self);
         let mant_bits = self.mantissa_bits as u32;
         let exp_mask = (1u64 << self.exponent_bits as u32) - 1;
         let mant_mask = (1u64 << mant_bits) - 1;
@@ -64,6 +65,7 @@ impl FloatType {
     /// Encode an f64 value into raw bits for this float type.
     /// Implements IEEE 754 round-to-nearest-even.
     pub fn encode_f64(&self, value: f64) -> u64 {
+        debug_assert!(self.is_supported(), "FloatType {:?} is not supported", self);
         let max_exp = self.max_biased_exponent();
 
         if value.is_nan() {
