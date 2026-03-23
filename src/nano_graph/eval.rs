@@ -560,10 +560,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![
-                InputRef::affine(inp, 1),
-                InputRef::Broadcast(two),
-            ],
+            vec![InputRef::affine(inp, 1), InputRef::Broadcast(two)],
         );
 
         let bias = g.push_group(
@@ -582,10 +579,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![
-                InputRef::affine(mul, 1),
-                InputRef::affine(bias, 1),
-            ],
+            vec![InputRef::affine(mul, 1), InputRef::affine(bias, 1)],
         );
 
         let input_data = make_f32_tensor(&[1.0, 2.0, 3.0, 4.0]);

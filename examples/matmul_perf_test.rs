@@ -115,6 +115,7 @@ fn main() {
             &tensor_a_tgt,
             &live_vec,
             Some(DType::F32),
+            DType::F32,
             Default::default(),
             &mut backend,
         )
@@ -128,6 +129,7 @@ fn main() {
             &tensor_a_tgt,
             &live_vec,
             Some(DType::F32),
+            DType::F32,
             Default::default(),
             &mut backend,
         )

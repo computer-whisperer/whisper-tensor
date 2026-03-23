@@ -200,7 +200,11 @@ fn build_group_deps(groups: &[AtomGroup]) -> (Vec<Vec<usize>>, Vec<Vec<usize>>) 
 fn resolve_producer_groups(input: &InputRef, count: u64, groups: &[AtomGroup]) -> Vec<usize> {
     match input {
         InputRef::Broadcast(atom_id) => find_group_idx(groups, *atom_id).into_iter().collect(),
-        InputRef::Strided { base, stride_inner: stride, .. } => {
+        InputRef::Strided {
+            base,
+            stride_inner: stride,
+            ..
+        } => {
             if count == 0 {
                 return vec![];
             }
@@ -222,7 +226,12 @@ fn resolve_producer_groups(input: &InputRef, count: u64, groups: &[AtomGroup]) -
             }
             result
         }
-        InputRef::Strided { base, stride_outer: stride, modulus: repeat, .. } => {
+        InputRef::Strided {
+            base,
+            stride_outer: stride,
+            modulus: repeat,
+            ..
+        } => {
             if count == 0 {
                 return vec![];
             }
@@ -233,7 +242,12 @@ fn resolve_producer_groups(input: &InputRef, count: u64, groups: &[AtomGroup]) -
             let hi = base.0.max(last.0);
             find_groups_in_range(groups, lo, hi)
         }
-        InputRef::Strided { base, stride_inner: stride, modulus, .. } => {
+        InputRef::Strided {
+            base,
+            stride_inner: stride,
+            modulus,
+            ..
+        } => {
             if *modulus == 0 {
                 return vec![];
             }
@@ -554,7 +568,10 @@ fn is_allrows_chain_lane_local_samephase(
 
         // Check the access pattern for lane-locality.
         match input {
-            InputRef::Strided { stride_inner: stride, .. } => {
+            InputRef::Strided {
+                stride_inner: stride,
+                ..
+            } => {
                 if *stride != 1 {
                     return false; // Non-unit stride can cross lane boundaries.
                 }
@@ -916,14 +933,23 @@ fn resolve_producer_groups_with_reduce(
     let max_reduce_ext = 0i64.max(reduce_stride * (reduce_count as i64 - 1));
 
     match input {
-        InputRef::Strided { base, stride_inner: stride, .. } => {
+        InputRef::Strided {
+            base,
+            stride_inner: stride,
+            ..
+        } => {
             let first_base = base.0 as i64;
             let last_base = base.0 as i64 + *stride as i64 * (count as i64 - 1);
             let lo = first_base.min(last_base) + min_reduce_ext;
             let hi = first_base.max(last_base) + max_reduce_ext;
             find_groups_in_range(groups, lo as u64, hi as u64)
         }
-        InputRef::Strided { base, stride_outer: stride, modulus: repeat, .. } => {
+        InputRef::Strided {
+            base,
+            stride_outer: stride,
+            modulus: repeat,
+            ..
+        } => {
             let first_block = 0i64;
             let last_block = ((count - 1) / repeat) as i64;
             let first_read = base.0 as i64 + stride * first_block;
@@ -1683,10 +1709,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![
-                InputRef::affine(a, 1),
-                InputRef::affine(b, 1),
-            ],
+            vec![InputRef::affine(a, 1), InputRef::affine(b, 1)],
         );
         for i in 0..count {
             g.outputs.push(AtomId(c.0 + i));
@@ -1903,7 +1926,11 @@ mod tests {
                     vec![]
                 }
             }
-            InputRef::Strided { base, stride_inner: stride, .. } => {
+            InputRef::Strided {
+                base,
+                stride_inner: stride,
+                ..
+            } => {
                 let first_read = base.0 as i64 + *stride as i64 * first_i as i64;
                 let last_read = base.0 as i64 + *stride as i64 * last_i as i64;
                 let lo = first_read.min(last_read) as u64;
@@ -1922,7 +1949,12 @@ mod tests {
                     })
                     .collect()
             }
-            InputRef::Strided { base, stride_outer: stride, modulus: repeat, .. } => {
+            InputRef::Strided {
+                base,
+                stride_outer: stride,
+                modulus: repeat,
+                ..
+            } => {
                 let first_block = first_i / repeat;
                 let last_block = last_i / repeat;
                 let first_read = base.0 as i64 + *stride * first_block as i64;
@@ -1942,7 +1974,12 @@ mod tests {
                     })
                     .collect()
             }
-            InputRef::Strided { base, stride_inner: stride, modulus, .. } => {
+            InputRef::Strided {
+                base,
+                stride_inner: stride,
+                modulus,
+                ..
+            } => {
                 // Modular wraps, so the full range of the modulus is accessed.
                 let lo = base.0;
                 let span = (*stride as i64).unsigned_abs() * (*modulus - 1);
@@ -2000,7 +2037,11 @@ mod tests {
         // the reduce reads: resolved_input(i) + k*reduce_stride for k in 0..reduce_count.
         // The min/max offsets across all i and k determine the accessed range.
         match input {
-            InputRef::Strided { base, stride_inner: stride, .. } => {
+            InputRef::Strided {
+                base,
+                stride_inner: stride,
+                ..
+            } => {
                 let first_i = atom_offset;
                 let last_i = atom_offset + atom_count - 1;
                 let first_base = base.0 as i64 + *stride as i64 * first_i as i64;
@@ -2693,10 +2734,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![
-                InputRef::affine(a, 1),
-                InputRef::Broadcast(mean),
-            ],
+            vec![InputRef::affine(a, 1), InputRef::Broadcast(mean)],
         );
 
         // C: AllRows unary reading from B via Affine{stride=1}

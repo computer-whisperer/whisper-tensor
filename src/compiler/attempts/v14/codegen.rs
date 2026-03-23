@@ -385,7 +385,12 @@ pub fn compute_layout(graph: &NanoGraph, output_ranges: &[AtomRange]) -> BufferL
     let input_ref_range = |ir: &InputRef, count: u64, atom_offset: u64| -> Option<(u64, u64)> {
         match ir {
             InputRef::Broadcast(_) | InputRef::Explicit(_) => None,
-            InputRef::Strided { base, stride_inner, stride_outer, modulus } => {
+            InputRef::Strided {
+                base,
+                stride_inner,
+                stride_outer,
+                modulus,
+            } => {
                 // Sample all corner positions to find the bounding range.
                 let mut lo = i64::MAX;
                 let mut hi = i64::MIN;
@@ -433,7 +438,12 @@ pub fn compute_layout(graph: &NanoGraph, output_ranges: &[AtomRange]) -> BufferL
         } = &group.op
         {
             if *reduce_count > 1 && *reduce_stride != 0 {
-                if let Some(InputRef::Strided { base, stride_inner: stride, .. }) = group.inputs.first() {
+                if let Some(InputRef::Strided {
+                    base,
+                    stride_inner: stride,
+                    ..
+                }) = group.inputs.first()
+                {
                     let first_i = base.0 as i64 + *stride * group.atom_offset as i64;
                     let last_i =
                         base.0 as i64 + *stride * (group.atom_offset + group.count - 1) as i64;
@@ -981,7 +991,11 @@ pub fn validate_layout(graph: &NanoGraph, layout: &BufferLayout) -> Vec<String> 
     for (gi, group) in graph.groups().iter().enumerate() {
         for (ii, ir) in group.inputs.iter().enumerate() {
             match ir {
-                InputRef::Strided { base, stride_inner: stride, .. } if *stride != 0 => {
+                InputRef::Strided {
+                    base,
+                    stride_inner: stride,
+                    ..
+                } if *stride != 0 => {
                     let first_atom = (base.0 as i64 + *stride * group.atom_offset as i64) as u64;
                     let last_atom = (base.0 as i64
                         + *stride * (group.atom_offset + group.count - 1) as i64)
@@ -1023,7 +1037,12 @@ pub fn validate_layout(graph: &NanoGraph, layout: &BufferLayout) -> Vec<String> 
             } = &group.op
             {
                 if *reduce_count > 1 && *reduce_stride != 0 {
-                    if let InputRef::Strided { base, stride_inner: stride, .. } = ir {
+                    if let InputRef::Strided {
+                        base,
+                        stride_inner: stride,
+                        ..
+                    } = ir
+                    {
                         let first = (base.0 as i64 + *stride * group.atom_offset as i64) as u64;
                         let last = (base.0 as i64
                             + *stride * (group.atom_offset + group.count - 1) as i64)
@@ -1083,10 +1102,14 @@ struct FusionChain {
 fn build_fusion_chains(groups: &[AtomGroup], layout: &BufferLayout) -> Vec<FusionChain> {
     // Fusion is opt-out. Disable with FUSION=0.
     if std::env::var("FUSION").as_deref() == Ok("0") {
-        return groups.iter().enumerate()
-            .filter(|(gi, g)| !matches!(&g.op, ScalarOp::Literal(_))
-                && !(*gi < layout.group_use_counts.len() && layout.group_use_counts[*gi] == 0)
-                && g.count > 0)
+        return groups
+            .iter()
+            .enumerate()
+            .filter(|(gi, g)| {
+                !matches!(&g.op, ScalarOp::Literal(_))
+                    && !(*gi < layout.group_use_counts.len() && layout.group_use_counts[*gi] == 0)
+                    && g.count > 0
+            })
             .map(|(gi, g)| FusionChain {
                 group_indices: vec![gi],
                 count: g.count,
@@ -1164,7 +1187,9 @@ fn inputs_fusable_with_chain(group: &AtomGroup, chain_ranges: &[(u64, u64)]) -> 
                         // This input overlaps a chain producer's range.
                         // Fusion is only safe if it reads the SAME iteration's atom:
                         // - Affine stride=1 with base == producer's base_id (exact alignment)
-                        if *stride_inner != 1 || *stride_outer != 0 || *modulus != u64::MAX
+                        if *stride_inner != 1
+                            || *stride_outer != 0
+                            || *modulus != u64::MAX
                             || base.0 != range_lo
                         {
                             return false;
@@ -1217,7 +1242,14 @@ fn emit_chain(
     if chain.group_indices.len() == 1 {
         let gi = chain.group_indices[0];
         return emit_group(
-            builder, module, &groups[gi], layout, buffer_ptr, math, var_counter, table_counter,
+            builder,
+            module,
+            &groups[gi],
+            layout,
+            buffer_ptr,
+            math,
+            var_counter,
+            table_counter,
         );
     }
 
@@ -1234,8 +1266,17 @@ fn emit_chain(
         for &gi in &chain.group_indices {
             let group = &groups[gi];
             emit_group_body_forwarded(
-                builder, module, group, layout, buffer_ptr, None, atom_offset,
-                math, var_counter, table_counter, &mut forwarded,
+                builder,
+                module,
+                group,
+                layout,
+                buffer_ptr,
+                None,
+                atom_offset,
+                math,
+                var_counter,
+                table_counter,
+                &mut forwarded,
             )?;
         }
         return Ok(());
@@ -1247,7 +1288,9 @@ fn emit_chain(
     let loop_exit = builder.create_block();
 
     let start = builder.ins().iconst(types::I64, atom_offset as i64);
-    let end = builder.ins().iconst(types::I64, (atom_offset + count) as i64);
+    let end = builder
+        .ins()
+        .iconst(types::I64, (atom_offset + count) as i64);
 
     builder.ins().jump(loop_header, &[start]);
 
@@ -1267,8 +1310,17 @@ fn emit_chain(
     for &gi in &chain.group_indices {
         let group = &groups[gi];
         emit_group_body_forwarded(
-            builder, module, group, layout, buffer_ptr, Some(i_val), 0,
-            math, var_counter, table_counter, &mut forwarded,
+            builder,
+            module,
+            group,
+            layout,
+            buffer_ptr,
+            Some(i_val),
+            0,
+            math,
+            var_counter,
+            table_counter,
+            &mut forwarded,
         )?;
     }
 
@@ -1315,27 +1367,54 @@ fn emit_group_body_forwarded(
 
         ScalarOp::Identity => {
             let src = load_input_forwarded(
-                builder, module, &group.inputs[0], layout, buffer_ptr,
-                i_val, i_const, group.atom_offset, table_counter, forwarded,
+                builder,
+                module,
+                &group.inputs[0],
+                layout,
+                buffer_ptr,
+                i_val,
+                i_const,
+                group.atom_offset,
+                table_counter,
+                forwarded,
             )?;
-            let src_repr = forwarded_or_slot_repr(&group.inputs[0], layout, group.atom_offset, forwarded);
+            let src_repr =
+                forwarded_or_slot_repr(&group.inputs[0], layout, group.atom_offset, forwarded);
             emit_cast_to_output(builder, src, src_repr, output_dtype)
         }
 
         ScalarOp::Binary { op, compute_dtype } => {
             let compute_repr = repr_of(*compute_dtype);
             let a_raw = load_input_forwarded(
-                builder, module, &group.inputs[0], layout, buffer_ptr,
-                i_val, i_const, group.atom_offset, table_counter, forwarded,
+                builder,
+                module,
+                &group.inputs[0],
+                layout,
+                buffer_ptr,
+                i_val,
+                i_const,
+                group.atom_offset,
+                table_counter,
+                forwarded,
             )?;
-            let a_repr = forwarded_or_slot_repr(&group.inputs[0], layout, group.atom_offset, forwarded);
+            let a_repr =
+                forwarded_or_slot_repr(&group.inputs[0], layout, group.atom_offset, forwarded);
             let a = emit_repr_cast(builder, a_raw, a_repr, compute_repr);
 
             let b_raw = load_input_forwarded(
-                builder, module, &group.inputs[1], layout, buffer_ptr,
-                i_val, i_const, group.atom_offset, table_counter, forwarded,
+                builder,
+                module,
+                &group.inputs[1],
+                layout,
+                buffer_ptr,
+                i_val,
+                i_const,
+                group.atom_offset,
+                table_counter,
+                forwarded,
             )?;
-            let b_repr = forwarded_or_slot_repr(&group.inputs[1], layout, group.atom_offset, forwarded);
+            let b_repr =
+                forwarded_or_slot_repr(&group.inputs[1], layout, group.atom_offset, forwarded);
             let b = emit_repr_cast(builder, b_raw, b_repr, compute_repr);
 
             let result = emit_binop(builder, module, math, *op, a, b, compute_repr)?;
@@ -1345,10 +1424,19 @@ fn emit_group_body_forwarded(
         ScalarOp::Unary { op, compute_dtype } => {
             let compute_repr = repr_of(*compute_dtype);
             let x_raw = load_input_forwarded(
-                builder, module, &group.inputs[0], layout, buffer_ptr,
-                i_val, i_const, group.atom_offset, table_counter, forwarded,
+                builder,
+                module,
+                &group.inputs[0],
+                layout,
+                buffer_ptr,
+                i_val,
+                i_const,
+                group.atom_offset,
+                table_counter,
+                forwarded,
             )?;
-            let x_repr = forwarded_or_slot_repr(&group.inputs[0], layout, group.atom_offset, forwarded);
+            let x_repr =
+                forwarded_or_slot_repr(&group.inputs[0], layout, group.atom_offset, forwarded);
             let x = emit_repr_cast(builder, x_raw, x_repr, compute_repr);
 
             let result = emit_unop(builder, module, math, *op, x, compute_repr)?;
@@ -1357,10 +1445,19 @@ fn emit_group_body_forwarded(
 
         ScalarOp::Select => {
             let cond = load_input_forwarded(
-                builder, module, &group.inputs[0], layout, buffer_ptr,
-                i_val, i_const, group.atom_offset, table_counter, forwarded,
+                builder,
+                module,
+                &group.inputs[0],
+                layout,
+                buffer_ptr,
+                i_val,
+                i_const,
+                group.atom_offset,
+                table_counter,
+                forwarded,
             )?;
-            let cond_repr = forwarded_or_slot_repr(&group.inputs[0], layout, group.atom_offset, forwarded);
+            let cond_repr =
+                forwarded_or_slot_repr(&group.inputs[0], layout, group.atom_offset, forwarded);
 
             let is_nonzero = match cond_repr {
                 ReprKind::Float => {
@@ -1374,17 +1471,35 @@ fn emit_group_body_forwarded(
             };
 
             let x_raw = load_input_forwarded(
-                builder, module, &group.inputs[1], layout, buffer_ptr,
-                i_val, i_const, group.atom_offset, table_counter, forwarded,
+                builder,
+                module,
+                &group.inputs[1],
+                layout,
+                buffer_ptr,
+                i_val,
+                i_const,
+                group.atom_offset,
+                table_counter,
+                forwarded,
             )?;
-            let x_repr = forwarded_or_slot_repr(&group.inputs[1], layout, group.atom_offset, forwarded);
+            let x_repr =
+                forwarded_or_slot_repr(&group.inputs[1], layout, group.atom_offset, forwarded);
             let x = emit_cast_to_output(builder, x_raw, x_repr, output_dtype);
 
             let y_raw = load_input_forwarded(
-                builder, module, &group.inputs[2], layout, buffer_ptr,
-                i_val, i_const, group.atom_offset, table_counter, forwarded,
+                builder,
+                module,
+                &group.inputs[2],
+                layout,
+                buffer_ptr,
+                i_val,
+                i_const,
+                group.atom_offset,
+                table_counter,
+                forwarded,
             )?;
-            let y_repr = forwarded_or_slot_repr(&group.inputs[2], layout, group.atom_offset, forwarded);
+            let y_repr =
+                forwarded_or_slot_repr(&group.inputs[2], layout, group.atom_offset, forwarded);
             let y = emit_cast_to_output(builder, y_raw, y_repr, output_dtype);
 
             builder.ins().select(is_nonzero, x, y)
@@ -1395,15 +1510,31 @@ fn emit_group_body_forwarded(
             // ensures they always start their own chain). Fall through to
             // emit_group_body for safety.
             return emit_group_body(
-                builder, module, group, layout, buffer_ptr, i_val, i_const,
-                math, var_counter, table_counter,
+                builder,
+                module,
+                group,
+                layout,
+                buffer_ptr,
+                i_val,
+                i_const,
+                math,
+                var_counter,
+                table_counter,
             );
         }
     };
 
     // Always store to buffer (safe approach — avoids needing to track
     // whether any out-of-chain consumer reads this group).
-    store_result(builder, buffer_ptr, &out_slot, group.atom_offset, i_val, i_const, result_val);
+    store_result(
+        builder,
+        buffer_ptr,
+        &out_slot,
+        group.atom_offset,
+        i_val,
+        i_const,
+        result_val,
+    );
 
     // Register in forwarding map for downstream groups in the same chain.
     // Apply the store→load round-trip in registers so the forwarded value
@@ -1420,11 +1551,7 @@ fn emit_group_body_forwarded(
 ///
 /// This preserves the dtype truncation contract: BF16 outputs must lose
 /// precision between steps, I32 values must be sign-extended to I64, etc.
-fn emit_store_load_roundtrip(
-    builder: &mut FunctionBuilder,
-    val: Value,
-    dtype: DType,
-) -> Value {
+fn emit_store_load_roundtrip(builder: &mut FunctionBuilder, val: Value, dtype: DType) -> Value {
     match dtype {
         DType::BF16 => {
             // F32 → BF16 round-to-nearest-even → F32
@@ -1482,7 +1609,13 @@ fn forwarded_or_slot_repr(
     atom_offset: u64,
     forwarded: &HashMap<u64, (Value, DType)>,
 ) -> ReprKind {
-    if let InputRef::Strided { base, stride_inner, stride_outer, modulus } = input {
+    if let InputRef::Strided {
+        base,
+        stride_inner,
+        stride_outer,
+        modulus,
+    } = input
+    {
         if *stride_inner == 1 && *stride_outer == 0 && *modulus == u64::MAX {
             if let Some((_val, dtype)) = forwarded.get(&base.0) {
                 return repr_of(*dtype);
@@ -1512,7 +1645,13 @@ fn load_input_forwarded(
     forwarded: &HashMap<u64, (Value, DType)>,
 ) -> Result<Value, String> {
     // Check for forwarding: Affine stride=1 with a forwarded producer.
-    if let InputRef::Strided { base, stride_inner, stride_outer, modulus } = input {
+    if let InputRef::Strided {
+        base,
+        stride_inner,
+        stride_outer,
+        modulus,
+    } = input
+    {
         if *stride_inner == 1 && *stride_outer == 0 && *modulus == u64::MAX {
             if let Some((fwd_val, _fwd_dtype)) = forwarded.get(&base.0) {
                 // The forwarded value has already been through
@@ -1524,13 +1663,26 @@ fn load_input_forwarded(
     }
 
     // Not forwarded — normal memory load.
-    load_input(builder, module, input, layout, buffer_ptr, i_val, i_const, atom_offset, table_counter)
+    load_input(
+        builder,
+        module,
+        input,
+        layout,
+        buffer_ptr,
+        i_val,
+        i_const,
+        atom_offset,
+        table_counter,
+    )
 }
 
 /// Compile a span, but validate by also compiling without fusion and
 /// comparing the output byte-for-byte on a zero-initialized buffer.
 /// Only active when FUSION_VALIDATE env var is set.
-pub fn compile_span_validated(graph: &NanoGraph, layout: &BufferLayout) -> Result<CompiledSpan, String> {
+pub fn compile_span_validated(
+    graph: &NanoGraph,
+    layout: &BufferLayout,
+) -> Result<CompiledSpan, String> {
     let has_multi = {
         let chains = build_fusion_chains(graph.groups(), layout);
         chains.iter().any(|c| c.group_indices.len() > 1)
@@ -1544,10 +1696,14 @@ pub fn compile_span_validated(graph: &NanoGraph, layout: &BufferLayout) -> Resul
 
     // Also compile without fusion.
     let saved = std::env::var("FUSION").ok();
-    unsafe { std::env::remove_var("FUSION"); }
+    unsafe {
+        std::env::remove_var("FUSION");
+    }
     let unfused = compile_span(graph, layout)?;
     if let Some(val) = saved {
-        unsafe { std::env::set_var("FUSION", val); }
+        unsafe {
+            std::env::set_var("FUSION", val);
+        }
     }
 
     // Run both on a zero+literals buffer and compare.
@@ -1601,13 +1757,28 @@ pub fn compile_span_validated(graph: &NanoGraph, layout: &BufferLayout) -> Resul
                         let elem_off = (off - start) / slot.elem_bytes;
                         eprintln!(
                             "    first mismatch in group[{}] base={} {:?} dtype={:?} atom_offset={} count={} slot_byte={} elem_offset={}",
-                            gi, group.base_id, op_name_short(&group.op),
-                            group.output_dtype, group.atom_offset, group.count,
-                            start, elem_off
+                            gi,
+                            group.base_id,
+                            op_name_short(&group.op),
+                            group.output_dtype,
+                            group.atom_offset,
+                            group.count,
+                            start,
+                            elem_off
                         );
                         // Show the actual values
-                        let f_val = f32::from_le_bytes([buf_fused[off], buf_fused[off+1], buf_fused[off+2], buf_fused[off+3]]);
-                        let u_val = f32::from_le_bytes([buf_unfused[off], buf_unfused[off+1], buf_unfused[off+2], buf_unfused[off+3]]);
+                        let f_val = f32::from_le_bytes([
+                            buf_fused[off],
+                            buf_fused[off + 1],
+                            buf_fused[off + 2],
+                            buf_fused[off + 3],
+                        ]);
+                        let u_val = f32::from_le_bytes([
+                            buf_unfused[off],
+                            buf_unfused[off + 1],
+                            buf_unfused[off + 2],
+                            buf_unfused[off + 3],
+                        ]);
                         eprintln!("    fused={} unfused={}", f_val, u_val);
                         // Show inputs
                         for (ii, inp) in group.inputs.iter().enumerate() {
@@ -1676,7 +1847,6 @@ pub fn compile_span(graph: &NanoGraph, layout: &BufferLayout) -> Result<Compiled
 
         builder.ins().return_(&[]);
         builder.finalize();
-
     }
 
     module
@@ -2069,11 +2239,16 @@ fn input_slot_dtype(input: &InputRef, layout: &BufferLayout, atom_offset: u64) -
     let try_find = |atom: AtomId| layout.find(atom).map(|(s, _)| s.dtype);
     match input {
         InputRef::Broadcast(atom_id) => try_find(*atom_id),
-        InputRef::Strided { base, stride_inner, stride_outer, modulus } => try_find(*base).or_else(|| {
+        InputRef::Strided {
+            base,
+            stride_inner,
+            stride_outer,
+            modulus,
+        } => try_find(*base).or_else(|| {
             let inner = atom_offset % modulus;
             let outer = atom_offset / modulus;
             let first = AtomId(base.0.wrapping_add(
-                (*stride_inner * inner as i64 + *stride_outer * outer as i64) as u64
+                (*stride_inner * inner as i64 + *stride_outer * outer as i64) as u64,
             ));
             try_find(first)
         }),
@@ -2147,7 +2322,12 @@ fn load_input(
             Ok(emit_typed_load(builder, addr, slot.dtype))
         }
 
-        InputRef::Strided { base, stride_inner, stride_outer, modulus } => {
+        InputRef::Strided {
+            base,
+            stride_inner,
+            stride_outer,
+            modulus,
+        } => {
             // General strided: atom i reads base + stride_inner*(i%modulus) + stride_outer*(i/modulus).
             //
             // Special cases for fast paths:
@@ -2160,7 +2340,8 @@ fn load_input(
             // Find the buffer slot by resolving the first accessed atom.
             let first_inner = atom_offset % modulus;
             let first_outer = atom_offset / modulus;
-            let first_offset = *stride_inner * first_inner as i64 + *stride_outer * first_outer as i64;
+            let first_offset =
+                *stride_inner * first_inner as i64 + *stride_outer * first_outer as i64;
             let first_atom = AtomId((base.0 as i64 + first_offset) as u64);
 
             let (slot, elem) = layout
@@ -2533,7 +2714,11 @@ fn emit_reduce(
 
     // Resolve the source slot. Reduce input must be Affine.
     let (base_byte, input_byte_stride, reduce_byte_stride, src_dtype) = match &group.inputs[0] {
-        InputRef::Strided { base, stride_inner: stride, .. } => {
+        InputRef::Strided {
+            base,
+            stride_inner: stride,
+            ..
+        } => {
             let (base_byte, elem_bytes, src_dtype) =
                 resolve_affine_base(layout, *base, *stride, group.atom_offset, "reduce input")?;
             let byte_stride = *stride * elem_bytes as i64;
@@ -3240,8 +3425,11 @@ impl CompiledPlan {
                                             ..
                                         } = &group.op
                                         {
-                                            if let Some(InputRef::Strided { base, stride_inner: stride, .. }) =
-                                                group.inputs.first()
+                                            if let Some(InputRef::Strided {
+                                                base,
+                                                stride_inner: stride,
+                                                ..
+                                            }) = group.inputs.first()
                                             {
                                                 let elem = (atom.0 - group.base_id.0) as u64;
                                                 let src_base = (base.0 as i64
@@ -4150,10 +4338,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![
-                InputRef::affine(inp, 1),
-                InputRef::Broadcast(lit),
-            ],
+            vec![InputRef::affine(inp, 1), InputRef::Broadcast(lit)],
         );
 
         let outputs = vec![AtomRange {
@@ -4262,10 +4447,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![
-                InputRef::affine(inp, 1),
-                InputRef::Broadcast(lit3),
-            ],
+            vec![InputRef::affine(inp, 1), InputRef::Broadcast(lit3)],
         );
         let exp = g.push_group(
             2,
@@ -4529,34 +4711,83 @@ mod tests {
         let n = 8u64;
         let inp = g.add_input_tensor(GlobalId(0), n, DType::F32);
 
-        let lit2 = g.push_group(1, DType::F32, ScalarOp::Literal(NumericScalar::F32(2.0)), vec![], vec![]);
-        let lit3 = g.push_group(1, DType::F32, ScalarOp::Literal(NumericScalar::F32(3.0)), vec![], vec![]);
+        let lit2 = g.push_group(
+            1,
+            DType::F32,
+            ScalarOp::Literal(NumericScalar::F32(2.0)),
+            vec![],
+            vec![],
+        );
+        let lit3 = g.push_group(
+            1,
+            DType::F32,
+            ScalarOp::Literal(NumericScalar::F32(3.0)),
+            vec![],
+            vec![],
+        );
 
         // Group 1: identity (copy input)
-        let g1 = g.push_group(n, DType::F32, ScalarOp::Identity, vec![],
-            vec![InputRef::affine(inp, 1)]);
+        let g1 = g.push_group(
+            n,
+            DType::F32,
+            ScalarOp::Identity,
+            vec![],
+            vec![InputRef::affine(inp, 1)],
+        );
 
         // Group 2: g1 + 2.0
-        let g2 = g.push_group(n, DType::F32,
-            ScalarOp::Binary { op: ScalarBinOp::Add, compute_dtype: DType::F32 }, vec![],
-            vec![InputRef::affine(g1, 1), InputRef::Broadcast(lit2)]);
+        let g2 = g.push_group(
+            n,
+            DType::F32,
+            ScalarOp::Binary {
+                op: ScalarBinOp::Add,
+                compute_dtype: DType::F32,
+            },
+            vec![],
+            vec![InputRef::affine(g1, 1), InputRef::Broadcast(lit2)],
+        );
 
         // Group 3: g2 * 3.0
-        let g3 = g.push_group(n, DType::F32,
-            ScalarOp::Binary { op: ScalarBinOp::Mul, compute_dtype: DType::F32 }, vec![],
-            vec![InputRef::affine(g2, 1), InputRef::Broadcast(lit3)]);
+        let g3 = g.push_group(
+            n,
+            DType::F32,
+            ScalarOp::Binary {
+                op: ScalarBinOp::Mul,
+                compute_dtype: DType::F32,
+            },
+            vec![],
+            vec![InputRef::affine(g2, 1), InputRef::Broadcast(lit3)],
+        );
 
         // Group 4: -g3
-        let g4 = g.push_group(n, DType::F32,
-            ScalarOp::Unary { op: ScalarUnaryOp::Neg, compute_dtype: DType::F32 }, vec![],
-            vec![InputRef::affine(g3, 1)]);
+        let g4 = g.push_group(
+            n,
+            DType::F32,
+            ScalarOp::Unary {
+                op: ScalarUnaryOp::Neg,
+                compute_dtype: DType::F32,
+            },
+            vec![],
+            vec![InputRef::affine(g3, 1)],
+        );
 
         // Group 5: exp(g4)
-        let g5 = g.push_group(n, DType::F32,
-            ScalarOp::Unary { op: ScalarUnaryOp::Exp, compute_dtype: DType::F32 }, vec![],
-            vec![InputRef::affine(g4, 1)]);
+        let g5 = g.push_group(
+            n,
+            DType::F32,
+            ScalarOp::Unary {
+                op: ScalarUnaryOp::Exp,
+                compute_dtype: DType::F32,
+            },
+            vec![],
+            vec![InputRef::affine(g4, 1)],
+        );
 
-        let outputs = vec![AtomRange { base: g5, count: n, dtype: DType::F32 }];
+        let outputs = vec![AtomRange {
+            base: g5,
+            count: n,
+            dtype: DType::F32,
+        }];
         let layout = compute_layout(&g, &outputs);
 
         // Verify chain was built (should be 1 chain of 5 groups)
@@ -4564,7 +4795,11 @@ mod tests {
         let multi = chains.iter().filter(|c| c.group_indices.len() > 1).count();
         assert!(multi > 0, "expected at least one multi-group fusion chain");
         let max_len = chains.iter().map(|c| c.group_indices.len()).max().unwrap();
-        assert!(max_len >= 4, "expected chain of 4+ groups, got max {}", max_len);
+        assert!(
+            max_len >= 4,
+            "expected chain of 4+ groups, got max {}",
+            max_len
+        );
 
         let compiled = compile_span(&g, &layout).unwrap();
 
@@ -4576,19 +4811,25 @@ mod tests {
         compiled.execute(&mut buffer);
 
         let result = layout.read_f32_output(&outputs[0], &buffer);
-        let expected: Vec<f32> = input_data.iter()
+        let expected: Vec<f32> = input_data
+            .iter()
             .map(|x| (-((*x + 2.0) * 3.0)).exp())
             .collect();
 
         for (i, (got, want)) in result.iter().zip(expected.iter()).enumerate() {
             assert!(
                 (got - want).abs() < 1e-5 * want.abs().max(1.0),
-                "mismatch at [{}]: got {}, expected {}", i, got, want
+                "mismatch at [{}]: got {}, expected {}",
+                i,
+                got,
+                want
             );
         }
 
         // Disable fusion for unfused comparison.
-        unsafe { std::env::set_var("FUSION", "0"); }
+        unsafe {
+            std::env::set_var("FUSION", "0");
+        }
     }
 
     /// 5-group chain with a diamond dependency: D reads from both A and C.
@@ -4602,35 +4843,76 @@ mod tests {
         let inp = g.add_input_tensor(GlobalId(0), n, DType::F32);
 
         // A: identity(input)
-        let a = g.push_group(n, DType::F32, ScalarOp::Identity, vec![],
-            vec![InputRef::affine(inp, 1)]);
+        let a = g.push_group(
+            n,
+            DType::F32,
+            ScalarOp::Identity,
+            vec![],
+            vec![InputRef::affine(inp, 1)],
+        );
 
         // B: A + A = 2*input
-        let b = g.push_group(n, DType::F32,
-            ScalarOp::Binary { op: ScalarBinOp::Add, compute_dtype: DType::F32 }, vec![],
-            vec![InputRef::affine(a, 1), InputRef::affine(a, 1)]);
+        let b = g.push_group(
+            n,
+            DType::F32,
+            ScalarOp::Binary {
+                op: ScalarBinOp::Add,
+                compute_dtype: DType::F32,
+            },
+            vec![],
+            vec![InputRef::affine(a, 1), InputRef::affine(a, 1)],
+        );
 
         // C: -B
-        let c = g.push_group(n, DType::F32,
-            ScalarOp::Unary { op: ScalarUnaryOp::Neg, compute_dtype: DType::F32 }, vec![],
-            vec![InputRef::affine(b, 1)]);
+        let c = g.push_group(
+            n,
+            DType::F32,
+            ScalarOp::Unary {
+                op: ScalarUnaryOp::Neg,
+                compute_dtype: DType::F32,
+            },
+            vec![],
+            vec![InputRef::affine(b, 1)],
+        );
 
         // D: A + C (reads from first AND third group in chain)
-        let d = g.push_group(n, DType::F32,
-            ScalarOp::Binary { op: ScalarBinOp::Add, compute_dtype: DType::F32 }, vec![],
-            vec![InputRef::affine(a, 1), InputRef::affine(c, 1)]);
+        let d = g.push_group(
+            n,
+            DType::F32,
+            ScalarOp::Binary {
+                op: ScalarBinOp::Add,
+                compute_dtype: DType::F32,
+            },
+            vec![],
+            vec![InputRef::affine(a, 1), InputRef::affine(c, 1)],
+        );
 
         // E: exp(D)
-        let e = g.push_group(n, DType::F32,
-            ScalarOp::Unary { op: ScalarUnaryOp::Exp, compute_dtype: DType::F32 }, vec![],
-            vec![InputRef::affine(d, 1)]);
+        let e = g.push_group(
+            n,
+            DType::F32,
+            ScalarOp::Unary {
+                op: ScalarUnaryOp::Exp,
+                compute_dtype: DType::F32,
+            },
+            vec![],
+            vec![InputRef::affine(d, 1)],
+        );
 
-        let outputs = vec![AtomRange { base: e, count: n, dtype: DType::F32 }];
+        let outputs = vec![AtomRange {
+            base: e,
+            count: n,
+            dtype: DType::F32,
+        }];
         let layout = compute_layout(&g, &outputs);
 
         let chains = build_fusion_chains(g.groups(), &layout);
         let max_len = chains.iter().map(|c| c.group_indices.len()).max().unwrap();
-        assert!(max_len >= 4, "expected chain of 4+ groups, got max {}", max_len);
+        assert!(
+            max_len >= 4,
+            "expected chain of 4+ groups, got max {}",
+            max_len
+        );
 
         let compiled = compile_span(&g, &layout).unwrap();
 
@@ -4643,19 +4925,22 @@ mod tests {
 
         let result = layout.read_f32_output(&outputs[0], &buffer);
         // A=x, B=2x, C=-2x, D=x+(-2x)=-x, E=exp(-x)
-        let expected: Vec<f32> = input_data.iter()
-            .map(|x| (-x).exp())
-            .collect();
+        let expected: Vec<f32> = input_data.iter().map(|x| (-x).exp()).collect();
 
         for (i, (got, want)) in result.iter().zip(expected.iter()).enumerate() {
             assert!(
                 (got - want).abs() < 1e-5 * want.abs().max(1.0),
-                "mismatch at [{}]: got {}, expected {}", i, got, want
+                "mismatch at [{}]: got {}, expected {}",
+                i,
+                got,
+                want
             );
         }
 
         // Disable fusion for unfused comparison.
-        unsafe { std::env::set_var("FUSION", "0"); }
+        unsafe {
+            std::env::set_var("FUSION", "0");
+        }
     }
 
     /// Chain where not all groups are connected — some read only from external
@@ -4671,24 +4956,57 @@ mod tests {
         let inp2 = g.add_input_tensor(GlobalId(1), n, DType::F32);
 
         // A: identity(inp1)
-        let a = g.push_group(n, DType::F32, ScalarOp::Identity, vec![],
-            vec![InputRef::affine(inp1, 1)]);
+        let a = g.push_group(
+            n,
+            DType::F32,
+            ScalarOp::Identity,
+            vec![],
+            vec![InputRef::affine(inp1, 1)],
+        );
         // B: identity(inp2) — reads ONLY from external, NOT from A
-        let b = g.push_group(n, DType::F32, ScalarOp::Identity, vec![],
-            vec![InputRef::affine(inp2, 1)]);
+        let b = g.push_group(
+            n,
+            DType::F32,
+            ScalarOp::Identity,
+            vec![],
+            vec![InputRef::affine(inp2, 1)],
+        );
         // C: identity(inp1) — another independent group
-        let c = g.push_group(n, DType::F32, ScalarOp::Identity, vec![],
-            vec![InputRef::affine(inp1, 1)]);
+        let c = g.push_group(
+            n,
+            DType::F32,
+            ScalarOp::Identity,
+            vec![],
+            vec![InputRef::affine(inp1, 1)],
+        );
         // D: A + B — reads from chain members A and B
-        let d = g.push_group(n, DType::F32,
-            ScalarOp::Binary { op: ScalarBinOp::Add, compute_dtype: DType::F32 }, vec![],
-            vec![InputRef::affine(a, 1), InputRef::affine(b, 1)]);
+        let d = g.push_group(
+            n,
+            DType::F32,
+            ScalarOp::Binary {
+                op: ScalarBinOp::Add,
+                compute_dtype: DType::F32,
+            },
+            vec![],
+            vec![InputRef::affine(a, 1), InputRef::affine(b, 1)],
+        );
         // E: D * C — reads from chain members D and C
-        let e_group = g.push_group(n, DType::F32,
-            ScalarOp::Binary { op: ScalarBinOp::Mul, compute_dtype: DType::F32 }, vec![],
-            vec![InputRef::affine(d, 1), InputRef::affine(c, 1)]);
+        let e_group = g.push_group(
+            n,
+            DType::F32,
+            ScalarOp::Binary {
+                op: ScalarBinOp::Mul,
+                compute_dtype: DType::F32,
+            },
+            vec![],
+            vec![InputRef::affine(d, 1), InputRef::affine(c, 1)],
+        );
 
-        let outputs = vec![AtomRange { base: e_group, count: n, dtype: DType::F32 }];
+        let outputs = vec![AtomRange {
+            base: e_group,
+            count: n,
+            dtype: DType::F32,
+        }];
         let layout = compute_layout(&g, &outputs);
 
         let chains = build_fusion_chains(g.groups(), &layout);
@@ -4707,19 +5025,22 @@ mod tests {
 
         let result = layout.read_f32_output(&outputs[0], &buffer);
         // A=inp1, B=inp2, C=inp1, D=inp1+inp2, E=(inp1+inp2)*inp1
-        let expected: Vec<f32> = d1.iter().zip(d2.iter())
-            .map(|(x, y)| (x + y) * x)
-            .collect();
+        let expected: Vec<f32> = d1.iter().zip(d2.iter()).map(|(x, y)| (x + y) * x).collect();
 
         for (i, (got, want)) in result.iter().zip(expected.iter()).enumerate() {
             assert!(
                 (got - want).abs() < 1e-4,
-                "mismatch at [{}]: got {}, expected {}", i, got, want
+                "mismatch at [{}]: got {}, expected {}",
+                i,
+                got,
+                want
             );
         }
 
         // Disable fusion for unfused comparison.
-        unsafe { std::env::set_var("FUSION", "0"); }
+        unsafe {
+            std::env::set_var("FUSION", "0");
+        }
     }
 
     /// Chain starting with ReduceSum: models LayerNorm pattern.
@@ -4733,43 +5054,86 @@ mod tests {
 
         // Input: 4 vectors of 8 elements each (32 total)
         let inp = g.add_input_tensor(GlobalId(0), 32, DType::F32);
-        let lit_n_inv = g.push_group(1, DType::F32,
-            ScalarOp::Literal(NumericScalar::F32(0.125)), vec![], vec![]); // 1/8
-        let lit2 = g.push_group(1, DType::F32,
-            ScalarOp::Literal(NumericScalar::F32(2.0)), vec![], vec![]);
+        let lit_n_inv = g.push_group(
+            1,
+            DType::F32,
+            ScalarOp::Literal(NumericScalar::F32(0.125)),
+            vec![],
+            vec![],
+        ); // 1/8
+        let lit2 = g.push_group(
+            1,
+            DType::F32,
+            ScalarOp::Literal(NumericScalar::F32(2.0)),
+            vec![],
+            vec![],
+        );
 
         // 4 ReduceSum groups, each summing 8 elements → 4 outputs
-        let red = g.push_group(4, DType::F32,
+        let red = g.push_group(
+            4,
+            DType::F32,
             ScalarOp::Reduce {
                 kind: ReduceKind::Sum,
                 reduce_count: 8,
                 reduce_stride: 1,
                 compute_dtype: DType::F32,
-            }, vec![],
-            vec![InputRef::affine(inp, 8)]);
+            },
+            vec![],
+            vec![InputRef::affine(inp, 8)],
+        );
 
         // Bin: red * (1/8) = mean
-        let mean = g.push_group(4, DType::F32,
-            ScalarOp::Binary { op: ScalarBinOp::Mul, compute_dtype: DType::F32 }, vec![],
-            vec![InputRef::affine(red, 1), InputRef::Broadcast(lit_n_inv)]);
+        let mean = g.push_group(
+            4,
+            DType::F32,
+            ScalarOp::Binary {
+                op: ScalarBinOp::Mul,
+                compute_dtype: DType::F32,
+            },
+            vec![],
+            vec![InputRef::affine(red, 1), InputRef::Broadcast(lit_n_inv)],
+        );
 
         // Bin: mean + 2.0
-        let biased = g.push_group(4, DType::F32,
-            ScalarOp::Binary { op: ScalarBinOp::Add, compute_dtype: DType::F32 }, vec![],
-            vec![InputRef::affine(mean, 1), InputRef::Broadcast(lit2)]);
+        let biased = g.push_group(
+            4,
+            DType::F32,
+            ScalarOp::Binary {
+                op: ScalarBinOp::Add,
+                compute_dtype: DType::F32,
+            },
+            vec![],
+            vec![InputRef::affine(mean, 1), InputRef::Broadcast(lit2)],
+        );
 
         // Un: sqrt(biased)
-        let result = g.push_group(4, DType::F32,
-            ScalarOp::Unary { op: ScalarUnaryOp::Sqrt, compute_dtype: DType::F32 }, vec![],
-            vec![InputRef::affine(biased, 1)]);
+        let result = g.push_group(
+            4,
+            DType::F32,
+            ScalarOp::Unary {
+                op: ScalarUnaryOp::Sqrt,
+                compute_dtype: DType::F32,
+            },
+            vec![],
+            vec![InputRef::affine(biased, 1)],
+        );
 
-        let outputs = vec![AtomRange { base: result, count: 4, dtype: DType::F32 }];
+        let outputs = vec![AtomRange {
+            base: result,
+            count: 4,
+            dtype: DType::F32,
+        }];
         let layout = compute_layout(&g, &outputs);
 
         // Check that fusion creates a chain of 4+ groups
         let chains = build_fusion_chains(g.groups(), &layout);
         let max_len = chains.iter().map(|c| c.group_indices.len()).max().unwrap();
-        eprintln!("  reduce_head: chains={}, max_len={}", chains.len(), max_len);
+        eprintln!(
+            "  reduce_head: chains={}, max_len={}",
+            chains.len(),
+            max_len
+        );
 
         // Compile with fusion
         let compiled_fused = compile_span(&g, &layout).unwrap();
@@ -4782,7 +5146,9 @@ mod tests {
 
         // Compile without fusion
         // Disable fusion for unfused comparison.
-        unsafe { std::env::set_var("FUSION", "0"); }
+        unsafe {
+            std::env::set_var("FUSION", "0");
+        }
         let compiled_unfused = compile_span(&g, &layout).unwrap();
         let mut buf_unfused = vec![0u8; layout.total_bytes];
         layout.populate_literals(&g, &mut buf_unfused);
@@ -4796,7 +5162,10 @@ mod tests {
         for (i, (f, u)) in result_fused.iter().zip(result_unfused.iter()).enumerate() {
             assert!(
                 (f - u).abs() < 1e-6,
-                "reduce_head mismatch at [{}]: fused={}, unfused={}", i, f, u
+                "reduce_head mismatch at [{}]: fused={}, unfused={}",
+                i,
+                f,
+                u
             );
         }
     }
@@ -4817,38 +5186,73 @@ mod tests {
 
         // External input (large enough for the reduce to read from)
         let inp = g.add_input_tensor(GlobalId(0), 128, DType::F32);
-        let lit_inv = g.push_group(1, DType::F32,
-            ScalarOp::Literal(NumericScalar::F32(0.125)), vec![], vec![]);
-        let lit2 = g.push_group(1, DType::F32,
-            ScalarOp::Literal(NumericScalar::F32(2.0)), vec![], vec![]);
+        let lit_inv = g.push_group(
+            1,
+            DType::F32,
+            ScalarOp::Literal(NumericScalar::F32(0.125)),
+            vec![],
+            vec![],
+        );
+        let lit2 = g.push_group(
+            1,
+            DType::F32,
+            ScalarOp::Literal(NumericScalar::F32(2.0)),
+            vec![],
+            vec![],
+        );
 
         // Create groups at ORIGINAL size first, then we'll split them.
         // g0: ReduceSum, reads from input with stride=8 (each output sums 8 elements)
-        let g0 = g.push_group(n_original, DType::F32,
+        let g0 = g.push_group(
+            n_original,
+            DType::F32,
             ScalarOp::Reduce {
                 kind: ReduceKind::Sum,
                 reduce_count: 8,
                 reduce_stride: 1,
                 compute_dtype: DType::F32,
-            }, vec![],
-            vec![InputRef::affine(inp, 8)]);
+            },
+            vec![],
+            vec![InputRef::affine(inp, 8)],
+        );
         let g0_original_base = g0;
 
         // g1: g0 * (1/8)
-        let g1 = g.push_group(n_original, DType::F32,
-            ScalarOp::Binary { op: ScalarBinOp::Mul, compute_dtype: DType::F32 }, vec![],
-            vec![InputRef::affine(g0, 1), InputRef::Broadcast(lit_inv)]);
+        let g1 = g.push_group(
+            n_original,
+            DType::F32,
+            ScalarOp::Binary {
+                op: ScalarBinOp::Mul,
+                compute_dtype: DType::F32,
+            },
+            vec![],
+            vec![InputRef::affine(g0, 1), InputRef::Broadcast(lit_inv)],
+        );
         let g1_original_base = g1;
 
         // g2: g1 + 2.0
-        let g2 = g.push_group(n_original, DType::F32,
-            ScalarOp::Binary { op: ScalarBinOp::Add, compute_dtype: DType::F32 }, vec![],
-            vec![InputRef::affine(g1, 1), InputRef::Broadcast(lit2)]);
+        let g2 = g.push_group(
+            n_original,
+            DType::F32,
+            ScalarOp::Binary {
+                op: ScalarBinOp::Add,
+                compute_dtype: DType::F32,
+            },
+            vec![],
+            vec![InputRef::affine(g1, 1), InputRef::Broadcast(lit2)],
+        );
 
         // g3: sqrt(g2)
-        let g3 = g.push_group(n_original, DType::F32,
-            ScalarOp::Unary { op: ScalarUnaryOp::Sqrt, compute_dtype: DType::F32 }, vec![],
-            vec![InputRef::affine(g2, 1)]);
+        let g3 = g.push_group(
+            n_original,
+            DType::F32,
+            ScalarOp::Unary {
+                op: ScalarUnaryOp::Sqrt,
+                compute_dtype: DType::F32,
+            },
+            vec![],
+            vec![InputRef::affine(g2, 1)],
+        );
 
         // Now simulate splitting: modify groups to be the second portion.
         // This mimics what the partitioner does.
@@ -4865,7 +5269,11 @@ mod tests {
             }
         }
 
-        let outputs = vec![AtomRange { base: AtomId(g3.0 + split_offset), count: split_count, dtype: DType::F32 }];
+        let outputs = vec![AtomRange {
+            base: AtomId(g3.0 + split_offset),
+            count: split_count,
+            dtype: DType::F32,
+        }];
         let layout = compute_layout(&g, &outputs);
 
         // Check fusion chains
@@ -4874,7 +5282,9 @@ mod tests {
             if chain.group_indices.len() > 1 {
                 eprintln!(
                     "  split_test: chain len={} offset={} count={}",
-                    chain.group_indices.len(), chain.atom_offset, chain.count
+                    chain.group_indices.len(),
+                    chain.atom_offset,
+                    chain.count
                 );
             }
         }
@@ -4890,7 +5300,9 @@ mod tests {
 
         // Compile WITHOUT fusion
         // Disable fusion for unfused comparison.
-        unsafe { std::env::set_var("FUSION", "0"); }
+        unsafe {
+            std::env::set_var("FUSION", "0");
+        }
         let compiled_unfused = compile_span(&g, &layout).unwrap();
         let mut buf_unfused = vec![0u8; layout.total_bytes];
         layout.populate_literals(&g, &mut buf_unfused);
@@ -4904,7 +5316,10 @@ mod tests {
         for (i, (f, u)) in result_fused.iter().zip(result_unfused.iter()).enumerate() {
             assert!(
                 (f - u).abs() < 1e-6,
-                "split_group mismatch at [{}]: fused={}, unfused={}", i, f, u
+                "split_group mismatch at [{}]: fused={}, unfused={}",
+                i,
+                f,
+                u
             );
         }
     }
@@ -4919,30 +5334,74 @@ mod tests {
         let n = 8u64;
         let inp = g.add_input_tensor(GlobalId(0), n, DType::F32);
 
-        let lit2 = g.push_group(1, DType::F32, ScalarOp::Literal(NumericScalar::F32(2.0)), vec![], vec![]);
+        let lit2 = g.push_group(
+            1,
+            DType::F32,
+            ScalarOp::Literal(NumericScalar::F32(2.0)),
+            vec![],
+            vec![],
+        );
 
         // A: identity F32 → BF16 cast
-        let a = g.push_group(n, DType::BF16, ScalarOp::Identity, vec![],
-            vec![InputRef::affine(inp, 1)]);
+        let a = g.push_group(
+            n,
+            DType::BF16,
+            ScalarOp::Identity,
+            vec![],
+            vec![InputRef::affine(inp, 1)],
+        );
         // B: identity BF16 → F32 cast
-        let b = g.push_group(n, DType::F32, ScalarOp::Identity, vec![],
-            vec![InputRef::affine(a, 1)]);
+        let b = g.push_group(
+            n,
+            DType::F32,
+            ScalarOp::Identity,
+            vec![],
+            vec![InputRef::affine(a, 1)],
+        );
         // C: B + 2.0
-        let c = g.push_group(n, DType::F32,
-            ScalarOp::Binary { op: ScalarBinOp::Add, compute_dtype: DType::F32 }, vec![],
-            vec![InputRef::affine(b, 1), InputRef::Broadcast(lit2)]);
+        let c = g.push_group(
+            n,
+            DType::F32,
+            ScalarOp::Binary {
+                op: ScalarBinOp::Add,
+                compute_dtype: DType::F32,
+            },
+            vec![],
+            vec![InputRef::affine(b, 1), InputRef::Broadcast(lit2)],
+        );
         // D: cast F32 → BF16
-        let d = g.push_group(n, DType::BF16, ScalarOp::Identity, vec![],
-            vec![InputRef::affine(c, 1)]);
+        let d = g.push_group(
+            n,
+            DType::BF16,
+            ScalarOp::Identity,
+            vec![],
+            vec![InputRef::affine(c, 1)],
+        );
         // E: cast BF16 → F32
-        let e_group = g.push_group(n, DType::F32, ScalarOp::Identity, vec![],
-            vec![InputRef::affine(d, 1)]);
+        let e_group = g.push_group(
+            n,
+            DType::F32,
+            ScalarOp::Identity,
+            vec![],
+            vec![InputRef::affine(d, 1)],
+        );
         // F: E * 2.0
-        let f = g.push_group(n, DType::F32,
-            ScalarOp::Binary { op: ScalarBinOp::Mul, compute_dtype: DType::F32 }, vec![],
-            vec![InputRef::affine(e_group, 1), InputRef::Broadcast(lit2)]);
+        let f = g.push_group(
+            n,
+            DType::F32,
+            ScalarOp::Binary {
+                op: ScalarBinOp::Mul,
+                compute_dtype: DType::F32,
+            },
+            vec![],
+            vec![InputRef::affine(e_group, 1), InputRef::Broadcast(lit2)],
+        );
 
-        let outputs = vec![AtomRange { base: f, count: n, dtype: DType::F32 }];
+        let outputs = vec![AtomRange {
+            base: f,
+            count: n,
+            dtype: DType::F32,
+        }];
         let layout = compute_layout(&g, &outputs);
 
         // Compare fused vs unfused results
@@ -4957,7 +5416,9 @@ mod tests {
 
         // Now compile without fusion and compare
         // Disable fusion for unfused comparison.
-        unsafe { std::env::set_var("FUSION", "0"); }
+        unsafe {
+            std::env::set_var("FUSION", "0");
+        }
         let compiled_unfused = compile_span(&g, &layout).unwrap();
         let mut buf_unfused = vec![0u8; layout.total_bytes];
         layout.populate_literals(&g, &mut buf_unfused);
@@ -4968,7 +5429,8 @@ mod tests {
         for (i, (fused, unfused)) in result_fused.iter().zip(result_unfused.iter()).enumerate() {
             assert_eq!(
                 fused, unfused,
-                "fused/unfused mismatch at [{}]: fused={}, unfused={}", i, fused, unfused
+                "fused/unfused mismatch at [{}]: fused={}, unfused={}",
+                i, fused, unfused
             );
         }
     }

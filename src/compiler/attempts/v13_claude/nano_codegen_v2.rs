@@ -748,7 +748,11 @@ fn load_input_ref(
             }
         }
 
-        InputRef::Strided { base, stride_inner: stride, .. } => {
+        InputRef::Strided {
+            base,
+            stride_inner: stride,
+            ..
+        } => {
             let atom_idx = match i_val {
                 Some(iv) => {
                     if *stride == 1 {
@@ -814,7 +818,12 @@ fn load_input_ref(
                 .load(types::F32, MemFlags::new(), data_addr, 0))
         }
 
-        InputRef::Strided { base, stride_outer: stride, modulus: repeat, .. } => {
+        InputRef::Strided {
+            base,
+            stride_outer: stride,
+            modulus: repeat,
+            ..
+        } => {
             let atom_idx = match i_val {
                 Some(iv) => {
                     let block_idx = if repeat.is_power_of_two() {
@@ -838,7 +847,12 @@ fn load_input_ref(
             Ok(builder.ins().load(types::F32, MemFlags::new(), addr, 0))
         }
 
-        InputRef::Strided { base, stride_inner: stride, modulus, .. } => {
+        InputRef::Strided {
+            base,
+            stride_inner: stride,
+            modulus,
+            ..
+        } => {
             let atom_idx = match i_val {
                 Some(iv) => {
                     let modval = builder.ins().iconst(types::I64, *modulus as i64);
@@ -2577,10 +2591,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![
-                InputRef::affine(a, 1),
-                InputRef::affine(b, 1),
-            ],
+            vec![InputRef::affine(a, 1), InputRef::affine(b, 1)],
         );
 
         for i in 0..4 {
@@ -2624,10 +2635,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![
-                InputRef::affine(a, 1),
-                InputRef::affine(b, 1),
-            ],
+            vec![InputRef::affine(a, 1), InputRef::affine(b, 1)],
         );
         let d = g.push_group(
             4,
@@ -2681,10 +2689,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![
-                InputRef::affine(a, 1),
-                InputRef::affine(b, 1),
-            ],
+            vec![InputRef::affine(a, 1), InputRef::affine(b, 1)],
         );
 
         for i in 0..4 {

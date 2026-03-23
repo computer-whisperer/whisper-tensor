@@ -80,28 +80,48 @@ pub enum InputRef {
 impl InputRef {
     /// Linear access: atom i reads base + stride * i.
     pub fn affine(base: AtomId, stride: i64) -> Self {
-        InputRef::Strided { base, stride_inner: stride, stride_outer: 0, modulus: u64::MAX }
+        InputRef::Strided {
+            base,
+            stride_inner: stride,
+            stride_outer: 0,
+            modulus: u64::MAX,
+        }
     }
 
     /// Modular access: atom i reads base + stride * (i % modulus).
     pub fn modular(base: AtomId, stride: i64, modulus: u64) -> Self {
-        InputRef::Strided { base, stride_inner: stride, stride_outer: 0, modulus }
+        InputRef::Strided {
+            base,
+            stride_inner: stride,
+            stride_outer: 0,
+            modulus,
+        }
     }
 
     /// Strided broadcast: atom i reads base + stride * (i / repeat).
     pub fn strided_broadcast(base: AtomId, stride: i64, repeat: u64) -> Self {
-        InputRef::Strided { base, stride_inner: 0, stride_outer: stride, modulus: repeat }
+        InputRef::Strided {
+            base,
+            stride_inner: 0,
+            stride_outer: stride,
+            modulus: repeat,
+        }
     }
 
     /// Resolve the source atom for the `i`-th atom in the group.
     pub fn resolve(&self, i: u64) -> AtomId {
         match self {
             InputRef::Broadcast(id) => *id,
-            InputRef::Strided { base, stride_inner, stride_outer, modulus } => {
+            InputRef::Strided {
+                base,
+                stride_inner,
+                stride_outer,
+                modulus,
+            } => {
                 let inner = i % modulus;
                 let outer = i / modulus;
                 AtomId(base.0.wrapping_add(
-                    (*stride_inner * inner as i64 + *stride_outer * outer as i64) as u64
+                    (*stride_inner * inner as i64 + *stride_outer * outer as i64) as u64,
                 ))
             }
             InputRef::Explicit(ids) => ids[i as usize],
@@ -112,7 +132,11 @@ impl InputRef {
     pub fn distinct_sources(&self, count: u64) -> usize {
         match self {
             InputRef::Broadcast(_) => 1,
-            InputRef::Strided { stride_outer, modulus, .. } => {
+            InputRef::Strided {
+                stride_outer,
+                modulus,
+                ..
+            } => {
                 if *stride_outer == 0 && *modulus == u64::MAX {
                     // Affine case
                     count as usize
@@ -670,7 +694,12 @@ impl NanoGraph {
                     out.insert(gi);
                 }
             }
-            InputRef::Strided { base, stride_inner, stride_outer, modulus } => {
+            InputRef::Strided {
+                base,
+                stride_inner,
+                stride_outer,
+                modulus,
+            } => {
                 if *stride_outer == 0 && *modulus != u64::MAX {
                     // Modular case: range is base..base+stride*(modulus-1)
                     let a = base.0;
@@ -923,10 +952,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![
-                InputRef::affine(a, 1),
-                InputRef::affine(b, 1),
-            ],
+            vec![InputRef::affine(a, 1), InputRef::affine(b, 1)],
         );
 
         assert!(g.validate().is_empty(), "{:?}", g.validate());
@@ -965,10 +991,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![
-                InputRef::affine(a, 1),
-                InputRef::Broadcast(b),
-            ],
+            vec![InputRef::affine(a, 1), InputRef::Broadcast(b)],
         );
 
         assert!(g.validate().is_empty(), "{:?}", g.validate());
@@ -1003,10 +1026,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![batch],
-            vec![
-                InputRef::affine(a, 1),
-                InputRef::affine(b, 1),
-            ],
+            vec![InputRef::affine(a, 1), InputRef::affine(b, 1)],
         );
 
         assert!(g.validate().is_empty(), "{:?}", g.validate());

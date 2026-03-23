@@ -268,7 +268,12 @@ fn input_ref_source_range(input: &InputRef, count: u64, atom_offset: u64) -> (u6
             let last = input.resolve(atom_offset + count - 1);
             (first.0.min(last.0), first.0.max(last.0))
         }
-        InputRef::Strided { base, stride_inner: stride, modulus, .. } => {
+        InputRef::Strided {
+            base,
+            stride_inner: stride,
+            modulus,
+            ..
+        } => {
             let a = base.0;
             let b = (base.0 as i64 + *stride * (*modulus as i64 - 1)) as u64;
             (a.min(b), a.max(b))
@@ -1014,10 +1019,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![
-                InputRef::affine(lit_id, 1),
-                InputRef::affine(lit_id, 1),
-            ],
+            vec![InputRef::affine(lit_id, 1), InputRef::affine(lit_id, 1)],
         );
 
         let mul_id = graph.push_group(
@@ -1028,10 +1030,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![
-                InputRef::affine(add_id, 1),
-                InputRef::affine(add_id, 1),
-            ],
+            vec![InputRef::affine(add_id, 1), InputRef::affine(add_id, 1)],
         );
 
         graph.outputs = vec![mul_id];
@@ -1104,10 +1103,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![
-                InputRef::affine(lit, 1),
-                InputRef::affine(lit, 1),
-            ],
+            vec![InputRef::affine(lit, 1), InputRef::affine(lit, 1)],
         );
 
         let pow_id = graph.push_group(
@@ -1118,10 +1114,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![
-                InputRef::affine(sub_id, 1),
-                InputRef::Broadcast(lit),
-            ],
+            vec![InputRef::affine(sub_id, 1), InputRef::Broadcast(lit)],
         );
 
         let div_id = graph.push_group(
@@ -1132,10 +1125,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![
-                InputRef::affine(pow_id, 1),
-                InputRef::Broadcast(lit),
-            ],
+            vec![InputRef::affine(pow_id, 1), InputRef::Broadcast(lit)],
         );
 
         graph.outputs = vec![div_id];
@@ -1219,10 +1209,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![
-                InputRef::affine(b, 1),
-                InputRef::affine(c, 1),
-            ],
+            vec![InputRef::affine(b, 1), InputRef::affine(c, 1)],
         );
 
         graph.outputs = vec![d];
@@ -1392,10 +1379,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![
-                InputRef::affine(lit, 1),
-                InputRef::affine(lit, 1),
-            ],
+            vec![InputRef::affine(lit, 1), InputRef::affine(lit, 1)],
         );
 
         graph.outputs = vec![mul];
@@ -1471,10 +1455,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![
-                InputRef::affine(lit, 0),
-                InputRef::affine(lit, 0),
-            ],
+            vec![InputRef::affine(lit, 0), InputRef::affine(lit, 0)],
         );
 
         // Reduce all 32 atoms to 1 output.
@@ -1544,10 +1525,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![
-                InputRef::affine(lit, 1),
-                InputRef::affine(lit, 1),
-            ],
+            vec![InputRef::affine(lit, 1), InputRef::affine(lit, 1)],
         );
 
         graph.outputs = vec![add];
@@ -1605,10 +1583,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![
-                InputRef::affine(lit, 1),
-                InputRef::affine(lit, 1),
-            ],
+            vec![InputRef::affine(lit, 1), InputRef::affine(lit, 1)],
         );
 
         let mul = graph.push_group(
@@ -1619,10 +1594,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![
-                InputRef::affine(add, 1),
-                InputRef::Broadcast(lit),
-            ],
+            vec![InputRef::affine(add, 1), InputRef::Broadcast(lit)],
         );
 
         graph.outputs = vec![mul];
@@ -1671,10 +1643,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![
-                InputRef::affine(lit, 1),
-                InputRef::affine(lit, 1),
-            ],
+            vec![InputRef::affine(lit, 1), InputRef::affine(lit, 1)],
         );
 
         graph.outputs = vec![add];
@@ -1735,10 +1704,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![
-                InputRef::affine(lit, 1),
-                InputRef::affine(lit, 1),
-            ],
+            vec![InputRef::affine(lit, 1), InputRef::affine(lit, 1)],
         );
 
         graph.outputs = vec![add];

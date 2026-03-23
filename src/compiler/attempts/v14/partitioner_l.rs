@@ -765,7 +765,12 @@ fn input_ref_range(input: &InputRef, count: u64, atom_offset: u64) -> (u64, u64)
             let last = input.resolve(atom_offset + count - 1);
             (first.0.min(last.0), first.0.max(last.0))
         }
-        InputRef::Strided { base, stride_inner: stride, modulus, .. } => {
+        InputRef::Strided {
+            base,
+            stride_inner: stride,
+            modulus,
+            ..
+        } => {
             let a = base.0;
             let b = (base.0 as i64 + *stride * (*modulus as i64 - 1)) as u64;
             (a.min(b), a.max(b))
@@ -1237,10 +1242,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![
-                InputRef::affine(neg, 1),
-                InputRef::affine(exp, 1),
-            ],
+            vec![InputRef::affine(neg, 1), InputRef::affine(exp, 1)],
         );
         g.outputs.push(add);
 
@@ -1304,10 +1306,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![
-                InputRef::affine(a_base, 1),
-                InputRef::modular(b_base, 1, k),
-            ],
+            vec![InputRef::affine(a_base, 1), InputRef::modular(b_base, 1, k)],
         );
 
         // ReduceSum group: M atoms, each reduces K products.
@@ -1542,10 +1541,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![
-                InputRef::affine(lit_a, 1),
-                InputRef::affine(lit_b, 1),
-            ],
+            vec![InputRef::affine(lit_a, 1), InputRef::affine(lit_b, 1)],
         );
 
         let lit_c = g.push_group(
@@ -1564,10 +1560,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![
-                InputRef::affine(sub, 1),
-                InputRef::affine(lit_c, 1),
-            ],
+            vec![InputRef::affine(sub, 1), InputRef::affine(lit_c, 1)],
         );
 
         let lit_d = g.push_group(
@@ -1586,10 +1579,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![
-                InputRef::affine(pow, 1),
-                InputRef::affine(lit_d, 1),
-            ],
+            vec![InputRef::affine(pow, 1), InputRef::affine(lit_d, 1)],
         );
         g.outputs.push(div);
 
@@ -1681,10 +1671,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![
-                InputRef::affine(neg, 1),
-                InputRef::Broadcast(red),
-            ],
+            vec![InputRef::affine(neg, 1), InputRef::Broadcast(red)],
         );
         g.outputs.push(div);
 

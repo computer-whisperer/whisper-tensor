@@ -335,7 +335,11 @@ fn input_crosses_lane_boundary(
             // Broadcast: every atom reads the same source. No crossing.
             false
         }
-        InputRef::Strided { base, stride_inner: stride, .. } => {
+        InputRef::Strided {
+            base,
+            stride_inner: stride,
+            ..
+        } => {
             if *stride == 0 {
                 // Degenerate broadcast-like: all atoms read the same source.
                 return false;
@@ -418,7 +422,12 @@ fn input_crosses_lane_boundary(
             // Source not found as a group (might be an input tensor) → no crossing.
             false
         }
-        InputRef::Strided { base, stride_outer: stride, modulus: repeat, .. } => {
+        InputRef::Strided {
+            base,
+            stride_outer: stride,
+            modulus: repeat,
+            ..
+        } => {
             // StridedBroadcast: atom i reads base + stride * (i / repeat).
             // When we split the consumer, lane k gets atoms [k*C..(k+1)*C).
             // Those atoms read source atoms at base + stride * (k*C/repeat)
@@ -426,7 +435,12 @@ fn input_crosses_lane_boundary(
             // As long as the source range is contiguous per lane, this is fine.
             false
         }
-        InputRef::Strided { modulus, stride_inner: _, stride_outer: 0, .. } => {
+        InputRef::Strided {
+            modulus,
+            stride_inner: _,
+            stride_outer: 0,
+            ..
+        } => {
             // Modular: every lane reads from the full modular range.
             // The source is typically a small bias/weight that gets duplicated
             // (classified as Literal) or provided as input. No barrier needed
@@ -1129,17 +1143,31 @@ fn input_ref_source_range(input: &InputRef, count: u64, atom_offset: u64) -> (u6
     }
     match input {
         InputRef::Broadcast(base) => (base.0, base.0),
-        InputRef::Strided { base, stride_inner: stride, .. } => {
+        InputRef::Strided {
+            base,
+            stride_inner: stride,
+            ..
+        } => {
             let first = input.resolve(atom_offset);
             let last = input.resolve(atom_offset + count - 1);
             (first.0.min(last.0), first.0.max(last.0))
         }
-        InputRef::Strided { base, stride_outer: stride, modulus: repeat, .. } => {
+        InputRef::Strided {
+            base,
+            stride_outer: stride,
+            modulus: repeat,
+            ..
+        } => {
             let first = input.resolve(atom_offset);
             let last = input.resolve(atom_offset + count - 1);
             (first.0.min(last.0), first.0.max(last.0))
         }
-        InputRef::Strided { base, stride_inner: stride, modulus, .. } => {
+        InputRef::Strided {
+            base,
+            stride_inner: stride,
+            modulus,
+            ..
+        } => {
             let a = base.0;
             let b = (base.0 as i64 + *stride * (*modulus as i64 - 1)) as u64;
             (a.min(b), a.max(b))
@@ -1197,10 +1225,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![
-                InputRef::affine(a, 1),
-                InputRef::affine(b, 1),
-            ],
+            vec![InputRef::affine(a, 1), InputRef::affine(b, 1)],
         )
     }
 
@@ -1429,10 +1454,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![
-                InputRef::affine(input, 1),
-                InputRef::modular(lit, 1, 100),
-            ],
+            vec![InputRef::affine(input, 1), InputRef::modular(lit, 1, 100)],
         );
         g.outputs = vec![add];
 
@@ -1498,10 +1520,7 @@ mod tests {
                 compute_dtype: DType::F32,
             },
             vec![],
-            vec![
-                InputRef::affine(input, 1),
-                InputRef::Broadcast(reduce),
-            ],
+            vec![InputRef::affine(input, 1), InputRef::Broadcast(reduce)],
         );
         g.outputs = vec![broadcast];
 

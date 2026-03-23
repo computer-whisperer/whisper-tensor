@@ -36,10 +36,7 @@ pub fn elementwise_binary(n: u64, op: ScalarBinOp) -> (NanoGraph, AtomId, AtomId
             compute_dtype: DType::F32,
         },
         vec![],
-        vec![
-            InputRef::affine(a, 1),
-            InputRef::affine(b, 1),
-        ],
+        vec![InputRef::affine(a, 1), InputRef::affine(b, 1)],
     );
     g.outputs = vec![c];
     (g, a, b, c)
@@ -98,10 +95,7 @@ pub fn broadcast_add(n: u64) -> (NanoGraph, AtomId, AtomId, AtomId) {
             compute_dtype: DType::F32,
         },
         vec![],
-        vec![
-            InputRef::affine(a, 1),
-            InputRef::Broadcast(b),
-        ],
+        vec![InputRef::affine(a, 1), InputRef::Broadcast(b)],
     );
     g.outputs = vec![c];
     (g, a, b, c)
