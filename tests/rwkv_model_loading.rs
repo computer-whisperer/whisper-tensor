@@ -200,52 +200,6 @@ fn rwkv01b_model_loads_with_binfile() {
     std::env::set_current_dir(old_cwd).expect("restore cwd");
 }
 
-#[cfg(feature = "candle")]
-#[test]
-fn rwkv01b_model_loads_with_origin_reference() {
-    // Validate that the OriginReference strategy works by keeping weights in the original .pth
-    let Some(pth_path) = find_rwkv_pth() else {
-        eprintln!("Skipping: no RWKV .pth found under test_models/");
-        return;
-    };
-    if !is_real_model_file(&pth_path) {
-        eprintln!(
-            "Skipping: {} is a Git LFS pointer, not the real model",
-            pth_path.display()
-        );
-        return;
-    }
-
-    // Build ONNX with external_data entries pointing to the original .pth tensors
-    let onnx_bytes = whisper_tensor_import::identify_and_load(
-        &pth_path,
-        whisper_tensor_import::onnx_graph::WeightStorageStrategy::OriginReference,
-    )
-    .expect("import rwkv7 to onnx (OriginReference)");
-
-    // No cwd or symlink manipulation needed: location is absolute inside ONNX now
-    let mut rng = rand::rng();
-    let model =
-        Model::new_from_onnx(&onnx_bytes, &mut rng, None).expect("model loads from onnx bytes");
-
-    // Trigger lazy tensor loading via the eval path (fetch tensors from the .pth via candle)
-    let mut eval = EvalBackend::NDArray;
-    let mut cache = whisper_tensor::backends::ModelLoadedTensorCache::default();
-    model
-        .load_tensors(&mut cache, &mut eval)
-        .expect("tensors load (origin reference pth)");
-
-    // Basic sanity checks
-    assert!(
-        !model.get_symbolic_graph().get_inputs().is_empty(),
-        "model has inputs"
-    );
-    assert!(
-        !model.get_symbolic_graph().get_outputs().is_empty(),
-        "model has outputs"
-    );
-}
-
 /// Full end-to-end integrity check: evaluate the RWKV 0.1B model through
 /// both the MilliOpGraph interpreter and the NanoGraph scalar eval, then
 /// compare every output element.

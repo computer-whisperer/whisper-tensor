@@ -11,24 +11,6 @@ fn run_ndarray_test(test: impl FnOnce(&mut EvalBackend)) {
     test(&mut EvalBackend::NDArray)
 }
 
-// tch uses system libtorch (linked against MKL) while the `blas` feature links
-// OpenBLAS for ndarray.  Having both in the same process causes BLAS symbol
-// collisions and segfaults, so tch tests are gated on `not(feature = "blas")`.
-#[cfg(all(feature = "tch", not(feature = "blas")))]
-fn run_tch_test(test: impl FnOnce(&mut EvalBackend)) {
-    test(&mut EvalBackend::TCH)
-}
-
-#[cfg(feature = "vulkan")]
-fn run_vulkan_test(test: impl FnOnce(&mut EvalBackend)) {
-    use whisper_tensor::backends::vulkan_backend::{VulkanContext, VulkanImmediateExecutor};
-    let vulkan_context = VulkanContext::new().unwrap();
-    let mut vulkan_runtime = VulkanImmediateExecutor::new(vulkan_context).unwrap();
-
-    let mut eval_backend = EvalBackend::Vulkan(&mut vulkan_runtime);
-    test(&mut eval_backend)
-}
-
 macro_rules! do_test {
     ($runner_fn:expr, $runner_name:ident, $test_name:ident) => {
         paste! {
@@ -125,7 +107,3 @@ macro_rules! do_tests {
 }
 
 do_tests!(run_ndarray_test, ndarray);
-#[cfg(feature = "vulkan")]
-do_tests!(run_vulkan_test, vulkan);
-#[cfg(all(feature = "tch", not(feature = "blas")))]
-do_tests!(run_tch_test, tch);

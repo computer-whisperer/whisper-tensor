@@ -9,8 +9,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Once;
 use whisper_tensor::backends::eval_backend::EvalBackend;
 use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
-#[cfg(feature = "vulkan")]
-use whisper_tensor::backends::vulkan_backend::{VulkanContext, VulkanImmediateExecutor};
 use whisper_tensor::dtype::{DType, DTypeError};
 use whisper_tensor::model::Model;
 use whisper_tensor::numeric_tensor::NumericTensor;
@@ -379,23 +377,6 @@ fn onnx_dtype_code(dtype: DType) -> i32 {
 fn run_ndarray_test(path: &Path) {
     let test = OnnxNodeTest::from_directory(path).unwrap();
     test.run(&mut EvalBackend::NDArray).unwrap()
-}
-
-/*
-#[cfg(feature = "candle")]
-fn run_candle_test(path: &Path) {
-    let test = OnnxNodeTest::from_directory(&path).unwrap();
-    test.run(&mut EvalBackend::Candle(candle_core::Device::Cpu)).unwrap()
-}*/
-
-#[cfg(feature = "vulkan")]
-fn run_vulkan_test(path: &Path) {
-    let vulkan_context = VulkanContext::new().unwrap();
-    let mut vulkan_runtime = VulkanImmediateExecutor::new(vulkan_context).unwrap();
-    let mut eval_backend = EvalBackend::Vulkan(&mut vulkan_runtime);
-
-    let test = OnnxNodeTest::from_directory(path).unwrap();
-    test.run(&mut eval_backend).unwrap()
 }
 
 macro_rules! do_test {
@@ -3594,8 +3575,3 @@ macro_rules! do_tests {
 }
 
 do_tests!(run_ndarray_test, ndarray);
-#[cfg(feature = "vulkan")]
-do_tests!(run_vulkan_test, vulkan);
-
-//#[cfg(feature = "candle")]
-//do_tests!(run_candle_test, candle);

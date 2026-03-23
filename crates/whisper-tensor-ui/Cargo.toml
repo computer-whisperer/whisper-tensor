@@ -14,7 +14,6 @@ path = "src/main.rs"
 default = []
 native = ["import", "cranelift", "http", "safetensors"]
 import = ["whisper-tensor-server/import"]
-vulkan = ["whisper-tensor-server/vulkan"]
 cranelift = ["whisper-tensor-server/cranelift"]
 http = ["whisper-tensor/http", "whisper-tensor-server/http"]
 safetensors = ["whisper-tensor/safetensors", "whisper-tensor-server/safetensors"]

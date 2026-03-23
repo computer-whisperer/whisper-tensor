@@ -427,25 +427,10 @@ pub async fn scheduler(
     cancellation_registry: Arc<Mutex<HashSet<u64>>>,
     observer_settings_registry: ObserverSettingsRegistry,
 ) {
-    #[cfg(feature = "vulkan")]
-    let vulkan_runtime = {
-        use whisper_tensor::backends::vulkan_backend::{VulkanContext, VulkanImmediateExecutor};
-        let vulkan_context = VulkanContext::new().unwrap();
-        Arc::new(Mutex::new(
-            VulkanImmediateExecutor::new(vulkan_context).unwrap(),
-        ))
-    };
     let caches = Arc::new(Mutex::new(HashMap::new()));
-    #[cfg(feature = "vulkan")]
-    let vulkan_tensor_load_caches: Arc<Mutex<HashMap<LoadedModelId, ModelLoadedTensorCache>>> =
-        Arc::new(Mutex::new(HashMap::new()));
     loop {
         if let Some(x) = input.recv().await {
-            #[cfg(feature = "vulkan")]
-            let vulkan_runtime = vulkan_runtime.clone();
             let caches = caches.clone();
-            #[cfg(feature = "vulkan")]
-            let vulkan_tensor_load_caches = vulkan_tensor_load_caches.clone();
             let ndarray_tensor_load_caches = Arc::new(Mutex::new(HashMap::new()));
             match x {
                 SchedulerJob::CompileModelRequest { model_id } => {
@@ -499,28 +484,9 @@ pub async fn scheduler(
                     // Dispatch tight loop
                     let result = tokio::task::spawn_blocking(move || {
                         let mut ndarray_backend = EvalBackend::NDArray;
-                        #[cfg(feature = "vulkan")]
-                        let mut vulkan_runtime = vulkan_runtime.lock().unwrap();
-                        #[cfg(feature = "vulkan")]
-                        let mut vulkan_backend = EvalBackend::Vulkan(&mut vulkan_runtime);
-                        let mut use_compiler = false;
-                        let backend: Result<&mut EvalBackend, String> = match req.backend_mode {
-                            SuperGraphRequestBackendMode::NDArray => Ok(&mut ndarray_backend),
-                            SuperGraphRequestBackendMode::Vulkan => {
-                                #[cfg(feature = "vulkan")]
-                                let res = Ok(&mut vulkan_backend);
-                                #[cfg(not(feature = "vulkan"))]
-                                let res = Err("Vulkan feature not enabled!".to_string());
-                                res
-                            }
-                            SuperGraphRequestBackendMode::Compiler => {
-                                use_compiler = true;
-                                Ok(&mut ndarray_backend)
-                            }
-                        };
-
-                        match backend {
-                            Ok(backend) => {
+                        let use_compiler = matches!(req.backend_mode, SuperGraphRequestBackendMode::Compiler);
+                        let backend = &mut ndarray_backend;
+                        {
                                 let mut super_graph_data = SuperGraphData::new();
                                 for (link, tensor) in req.tensor_inputs {
                                     super_graph_data
@@ -561,47 +527,22 @@ pub async fn scheduler(
                                     Some(observer_settings_registry_for_request.clone()),
                                 );
                                 let mut caches = caches.lock().unwrap();
-                                #[cfg(feature = "vulkan")]
-                                let mut vulkan_tensor_load_caches =
-                                    vulkan_tensor_load_caches.lock().unwrap();
                                 let mut ndarray_tensor_load_caches =
                                     ndarray_tensor_load_caches.lock().unwrap();
                                 // setup tensor caches
                                 let res = {
                                     let mut super_graph_tensor_cache = {
                                         let mut res = SuperGraphTensorCache::new();
-                                        match backend {
-                                            EvalBackend::NDArray => {
-                                                for (a, b) in &model_id_map {
-                                                    if let Some(x) =
-                                                        ndarray_tensor_load_caches.remove(a)
-                                                    {
-                                                        res.caches.push((b.get_tensor_store(), x));
-                                                    } else {
-                                                        res.caches.push((
-                                                            b.get_tensor_store(),
-                                                            ModelLoadedTensorCache::default(),
-                                                        ));
-                                                    }
-                                                }
-                                            }
-                                            #[cfg(feature = "vulkan")]
-                                            EvalBackend::Vulkan(_) => {
-                                                for (a, b) in &model_id_map {
-                                                    if let Some(x) =
-                                                        vulkan_tensor_load_caches.remove(a)
-                                                    {
-                                                        res.caches.push((b.get_tensor_store(), x));
-                                                    } else {
-                                                        res.caches.push((
-                                                            b.get_tensor_store(),
-                                                            ModelLoadedTensorCache::default(),
-                                                        ));
-                                                    }
-                                                }
-                                            }
-                                            _ => {
-                                                // No caching
+                                        for (a, b) in &model_id_map {
+                                            if let Some(x) =
+                                                ndarray_tensor_load_caches.remove(a)
+                                            {
+                                                res.caches.push((b.get_tensor_store(), x));
+                                            } else {
+                                                res.caches.push((
+                                                    b.get_tensor_store(),
+                                                    ModelLoadedTensorCache::default(),
+                                                ));
                                             }
                                         }
                                         res
@@ -639,30 +580,12 @@ pub async fn scheduler(
                                         .run(super_graph_data, &mut context)
                                         .map_err(|x| x.to_string())?;
                                     // Re-pack tensor caches
-                                    match backend {
-                                        EvalBackend::NDArray => {
-                                            for (a, b) in super_graph_tensor_cache.caches {
-                                                for (aa, bb) in &model_id_map {
-                                                    if ptr::addr_eq(a, bb.as_ref()) {
-                                                        ndarray_tensor_load_caches.insert(*aa, b);
-                                                        break;
-                                                    }
-                                                }
+                                    for (a, b) in super_graph_tensor_cache.caches {
+                                        for (aa, bb) in &model_id_map {
+                                            if ptr::addr_eq(a, bb.as_ref()) {
+                                                ndarray_tensor_load_caches.insert(*aa, b);
+                                                break;
                                             }
-                                        }
-                                        #[cfg(feature = "vulkan")]
-                                        EvalBackend::Vulkan(_) => {
-                                            for (a, b) in super_graph_tensor_cache.caches {
-                                                for (aa, bb) in &model_id_map {
-                                                    if ptr::addr_eq(a, bb.as_ref()) {
-                                                        vulkan_tensor_load_caches.insert(*aa, b);
-                                                        break;
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        _ => {
-                                            // No caching
                                         }
                                     }
                                     ret
@@ -693,8 +616,6 @@ pub async fn scheduler(
                                     string_outputs: strings,
                                     hash_outputs: hashes,
                                 })
-                            }
-                            Err(e) => Err(e),
                         }
                     })
                     .await

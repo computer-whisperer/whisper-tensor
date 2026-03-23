@@ -7,7 +7,7 @@ impl GraphExplorerApp {
         loaded_models: &mut LoadedModels,
         loaded_tokenizers: &mut LoadedTokenizers,
         server_request_manager: &mut ServerRequestManager,
-        server_config_report: &ServerConfigReport,
+        _server_config_report: &ServerConfigReport,
         ui: &mut Ui,
     ) {
         let mut models_to_load = HashSet::<LoadedModelId>::new();
@@ -870,12 +870,7 @@ impl GraphExplorerApp {
                                                                 &mut text_inference_data.selected_mode,
                                                                 SuperGraphRequestBackendMode::NDArray,
                                                                 SuperGraphRequestBackendMode::NDArray.to_string());
-                                                            if server_config_report.vulkan_available {
-                                                                ui.selectable_value(
-                                                                    &mut text_inference_data.selected_mode,
-                                                                    SuperGraphRequestBackendMode::Vulkan,
-                                                                    SuperGraphRequestBackendMode::Vulkan.to_string());
-                                                            }
+
                                                             ui.selectable_value(
                                                                 &mut text_inference_data.selected_mode,
                                                                 SuperGraphRequestBackendMode::Compiler,
@@ -1153,14 +1148,7 @@ impl GraphExplorerApp {
                                                         SuperGraphRequestBackendMode::NDArray
                                                             .to_string(),
                                                     );
-                                                    if server_config_report.vulkan_available {
-                                                        ui.selectable_value(
-                                                            &mut sd_data.selected_mode,
-                                                            SuperGraphRequestBackendMode::Vulkan,
-                                                            SuperGraphRequestBackendMode::Vulkan
-                                                                .to_string(),
-                                                        );
-                                                    }
+
                                                     ui.selectable_value(
                                                         &mut sd_data.selected_mode,
                                                         SuperGraphRequestBackendMode::Compiler,
@@ -1607,14 +1595,7 @@ impl GraphExplorerApp {
                                                     SuperGraphRequestBackendMode::NDArray,
                                                     SuperGraphRequestBackendMode::NDArray.to_string(),
                                                 );
-                                                if server_config_report.vulkan_available {
-                                                    ui.selectable_value(
-                                                        &mut tts_data.selected_mode,
-                                                        SuperGraphRequestBackendMode::Vulkan,
-                                                        SuperGraphRequestBackendMode::Vulkan
-                                                            .to_string(),
-                                                    );
-                                                }
+
                                                 ui.selectable_value(
                                                     &mut tts_data.selected_mode,
                                                     SuperGraphRequestBackendMode::Compiler,
@@ -2173,14 +2154,7 @@ impl GraphExplorerApp {
                                                         SuperGraphRequestBackendMode::NDArray
                                                             .to_string(),
                                                     );
-                                                    if server_config_report.vulkan_available {
-                                                        ui.selectable_value(
-                                                            &mut stt_data.selected_mode,
-                                                            SuperGraphRequestBackendMode::Vulkan,
-                                                            SuperGraphRequestBackendMode::Vulkan
-                                                                .to_string(),
-                                                        );
-                                                    }
+
                                                     ui.selectable_value(
                                                         &mut stt_data.selected_mode,
                                                         SuperGraphRequestBackendMode::Compiler,

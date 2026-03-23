@@ -1,6 +1,4 @@
 use crate::backends::ModelLoadedTensorCache;
-#[cfg(feature = "vulkan")]
-use crate::backends::vulkan_backend::VulkanImmediateExecutor;
 use crate::dtype::{DType, DTypeError};
 use crate::graph::{GlobalId, Link, Node};
 use crate::numeric_tensor::NumericTensor;
@@ -16,13 +14,7 @@ use std::time::Instant;
 #[derive(Debug)]
 #[allow(unused_lifetimes)]
 pub enum EvalBackend<'a> {
-    #[cfg(feature = "candle")]
-    Candle(candle_core::Device),
     NDArray,
-    #[cfg(feature = "vulkan")]
-    Vulkan(&'a mut VulkanImmediateExecutor),
-    #[cfg(feature = "tch")]
-    TCH,
     NotUsed(PhantomData<&'a ()>),
 }
 
@@ -35,44 +27,7 @@ impl<'a> core::fmt::Display for EvalBackend<'a> {
 impl<'a> EvalBackend<'a> {
     pub fn supports_dtype(&self, _dtype: DType) -> bool {
         match self {
-            #[cfg(feature = "candle")]
-            EvalBackend::Candle(_) => matches!(
-                _dtype,
-                DType::F32
-                    | DType::F64
-                    | DType::BF16
-                    | DType::F16
-                    | DType::U32
-                    | DType::I64
-                    | DType::U8
-            ),
             EvalBackend::NDArray => !_dtype.is_packed(),
-            #[cfg(feature = "vulkan")]
-            EvalBackend::Vulkan(_) => {
-                !matches!(
-                    _dtype,
-                    DType::STRING
-                        | DType::F64
-                        | DType::F8E4M3FN
-                        | DType::F8E5M2
-                        | DType::I4
-                        | DType::U4
-                ) && !_dtype.is_packed()
-            }
-            #[cfg(feature = "tch")]
-            EvalBackend::TCH => matches!(
-                _dtype,
-                DType::F64
-                    | DType::F32
-                    | DType::BF16
-                    | DType::F16
-                    | DType::I64
-                    | DType::I32
-                    | DType::I16
-                    | DType::I8
-                    | DType::U8
-                    | DType::BOOL
-            ),
             _ => false,
         }
     }
@@ -83,13 +38,7 @@ impl<'a> EvalBackend<'a> {
             return tensor.clone();
         }
         match self {
-            #[cfg(feature = "candle")]
-            EvalBackend::Candle(x) => tensor.to_candle(x).unwrap().into(),
             EvalBackend::NDArray => tensor.to_ndarray().unwrap().into(),
-            #[cfg(feature = "vulkan")]
-            EvalBackend::Vulkan(x) => NumericTensor::Vulkan(tensor.to_vulkan(x).unwrap()),
-            #[cfg(feature = "tch")]
-            EvalBackend::TCH => NumericTensor::TCH(tensor.to_tch()),
             _ => {
                 unimplemented!()
             }
@@ -99,14 +48,6 @@ impl<'a> EvalBackend<'a> {
     pub fn is_on_backend<R: Rank>(&self, tensor: &NumericTensor<R>) -> bool {
         match (self, tensor) {
             (EvalBackend::NDArray, NumericTensor::NDArray(_)) => true,
-            #[cfg(feature = "candle")]
-            (EvalBackend::Candle(_), NumericTensor::Candle(_)) => true,
-            #[cfg(feature = "vulkan")]
-            (EvalBackend::Vulkan(vk_executor), NumericTensor::Vulkan(vk_tensor)) => {
-                vk_executor.context.device == *vk_tensor.get_device()
-            }
-            #[cfg(feature = "tch")]
-            (EvalBackend::TCH, NumericTensor::TCH(_)) => true,
             _ => false,
         }
     }

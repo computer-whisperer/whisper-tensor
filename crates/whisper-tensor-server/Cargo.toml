@@ -33,8 +33,6 @@ tokenizers = {version="0.22.2", default-features = false, features = ["unstable_
 [features]
 default = ["whisper-tensor/default", "import"]
 import = ["dep:whisper-tensor-import"]
-vulkan = ["whisper-tensor/vulkan"]
-candle = ["whisper-tensor/candle"]
 cranelift = ["whisper-tensor/cranelift"]
 http = ["whisper-tensor/http"]
 safetensors = ["whisper-tensor/safetensors"]

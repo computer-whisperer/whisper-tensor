@@ -10,8 +10,6 @@ readme = "README.md"
 prost = "0.14.3"
 vulkano = { version = "0.35.2", optional=true, default-features = false, features = ["serde"] }
 vulkano-shaders = {version = "0.35.0", optional=true}
-candle-core = {optional=true, workspace=true, default-features=false}
-candle-onnx = {optional=true, workspace=true, default-features=false}
 serde = { version = "1.0.210", features = ["derive"] }
 thiserror = "2.0.12"
 anyhow = "1.0.102"
@@ -20,10 +18,8 @@ half = { version="2.5.0", features = ["serde", "num-traits", "zerocopy"] }
 tracing-subscriber = { version = "0.3", features = [ "env-filter", "fmt" ] }
 tempfile = "3.27.0"
 zerocopy = "0.8.42"
-pyo3 = {optional=true, version = "0.28.2", features = ["auto-initialize"]}
 tokenizers = {optional=true, version="0.22.1", default-features = false, features = ["unstable_wasm"]}
 rspirv = "0.13.0"
-tch = {optional=true, version="0.23.0"}
 safetensors = {optional=true, version="0.7.0"}
 memmap2 = {optional=true, version="0.9"}
 wyrand = "0.4.1"
@@ -62,13 +58,10 @@ whisper-tensor-import = {workspace=true}
 default = ["tokenizers", "rwkv-tokenizer", "http", "blas", "safetensors"]
 safetensors = ["dep:safetensors", "dep:memmap2"]
 blas = ["ndarray/blas", "dep:blas-src", "dep:openblas-src"]
-onnx-reference = ["pyo3"]
-candle = ["candle-onnx", "candle-core"]
 tokenizers = ["dep:tokenizers"]
 http = ["tokenizers?/http"]
 rwkv-tokenizer = ["dep:rwkv-tokenizer"]
 vulkan = ["dep:vulkano", "dep:vulkano-shaders"]
-tch = ["dep:tch"]
 cranelift = ["dep:cranelift-codegen", "dep:cranelift-frontend", "dep:cranelift-module", "dep:cranelift-jit", "dep:cranelift-native"]
 espeak = ["dep:espeak-rs"]
 
@@ -84,21 +77,4 @@ whisper-tensor = {path = "", default-features=false}
 whisper-tensor-ui = {path = "crates/whisper-tensor-ui"}
 whisper-tensor-import = {path = "crates/whisper-tensor-import"}
 whisper-tensor-server = {path = "crates/whisper-tensor-server", default-features=false}
-candle-core = {version="0.9.0", default-features=false}
-candle-onnx = {version="0.9.0", default-features=false}
 
-[[example]]
-name = "vulkan_test"
-path = "examples/vulkan_test.rs"
-required-features = ["vulkan"]
-
-[[example]]
-name = "super_graph_test_3"
-path = "examples/super_graph_test_3.rs"
-required-features = ["vulkan"]
-
-
-[[example]]
-name = "matmul_perf_test"
-path = "examples/matmul_perf_test.rs"
-required-features = ["vulkan"]

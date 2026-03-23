@@ -40,7 +40,6 @@ pub struct AbbreviatedTensorReportSettings {
 pub enum SuperGraphRequestBackendMode {
     #[default]
     NDArray,
-    Vulkan,
     Compiler,
 }
 
@@ -48,7 +47,6 @@ impl Display for SuperGraphRequestBackendMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             SuperGraphRequestBackendMode::NDArray => write!(f, "NDArray"),
-            SuperGraphRequestBackendMode::Vulkan => write!(f, "Vulkan"),
             SuperGraphRequestBackendMode::Compiler => write!(f, "Compiler"),
         }
     }
@@ -389,9 +387,7 @@ impl CurrentModelsAndInterfacesReport {
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct ServerConfigReport {
-    pub vulkan_available: bool,
-}
+pub struct ServerConfigReport {}
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum WebsocketServerClientMessage {

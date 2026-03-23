@@ -24,7 +24,7 @@
 ///   - Adam/AdamW optimizer: all F32 constants vs BF16 state
 ///
 /// Usage:
-///   cargo run --example rwkv_lora_train --release --features candle -- <path-to-rwkv7.pth>
+///   cargo run --example rwkv_lora_train --release -- <path-to-rwkv7.pth>
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 

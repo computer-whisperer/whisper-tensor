@@ -1,12 +1,5 @@
-pub mod ops;
 mod spirv_helpers;
-pub mod tensor;
 
-use crate::backends::vulkan_backend::ops::binary::BinaryCacheKey;
-use crate::backends::vulkan_backend::ops::cumsum::CumSumCacheKey;
-use crate::backends::vulkan_backend::ops::gather::GatherCacheKey;
-use crate::backends::vulkan_backend::ops::matmul::MatMulCacheKey;
-use crate::backends::vulkan_backend::ops::unary::UnaryCacheKey;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -29,7 +22,6 @@ use vulkano::memory::allocator::{
     AllocationCreateInfo, AllocationType, DeviceLayout, FreeListAllocator, MemoryTypeFilter,
     StandardMemoryAllocator, Suballocation, Suballocator,
 };
-use vulkano::pipeline::{ComputePipeline, PipelineLayout};
 use vulkano::shader::ShaderStages;
 
 #[derive(Debug, thiserror::Error)]
@@ -157,27 +149,6 @@ pub struct VulkanImmediateExecutorBuffer {
     allocator: FreeListAllocator,
 }
 
-#[derive(Debug, Default)]
-pub struct PipelineCache {
-    pub(crate) unary_op: HashMap<UnaryCacheKey, (Arc<PipelineLayout>, Arc<ComputePipeline>)>,
-    pub(crate) binary_op: HashMap<BinaryCacheKey, (Arc<PipelineLayout>, Arc<ComputePipeline>)>,
-    pub(crate) matmul_op: HashMap<MatMulCacheKey, (Arc<PipelineLayout>, Arc<ComputePipeline>)>,
-    pub(crate) gather_op: HashMap<GatherCacheKey, (Arc<PipelineLayout>, Arc<ComputePipeline>)>,
-    pub(crate) cumsum_op: HashMap<CumSumCacheKey, (Arc<PipelineLayout>, Arc<ComputePipeline>)>,
-}
-
-impl PipelineCache {
-    pub fn new() -> Self {
-        Self {
-            unary_op: HashMap::new(),
-            binary_op: HashMap::new(),
-            matmul_op: HashMap::new(),
-            gather_op: HashMap::new(),
-            cumsum_op: HashMap::new(),
-        }
-    }
-}
-
 #[derive(Debug)]
 pub struct VulkanImmediateExecutor {
     pub(crate) context: VulkanContext,
@@ -185,7 +156,6 @@ pub struct VulkanImmediateExecutor {
     host_transfer_buffer: Option<Subbuffer<[u8]>>,
     descriptor_set_layouts: HashMap<BTreeSet<u32>, Arc<DescriptorSetLayout>>,
     descriptor_set_cache: HashMap<BTreeMap<u32, Subbuffer<[u8]>>, Arc<DescriptorSet>>,
-    pipeline_cache: PipelineCache,
 }
 
 impl VulkanImmediateExecutor {
@@ -196,7 +166,6 @@ impl VulkanImmediateExecutor {
             descriptor_set_layouts: HashMap::new(),
             descriptor_set_cache: HashMap::new(),
             buffers: Vec::new(),
-            pipeline_cache: PipelineCache::new(),
         })
     }
 

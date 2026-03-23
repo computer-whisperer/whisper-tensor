@@ -7,15 +7,7 @@ use std::ops::{Neg, Range};
 use typenum::P1;
 
 use crate::TrigOp;
-#[cfg(feature = "candle")]
-use crate::backends::candle_backend;
 use crate::backends::ndarray_backend::conversions::NDArrayNumericTensorType;
-#[cfg(feature = "tch")]
-use crate::backends::tch_backend::{self, TCHNumericTensor};
-#[cfg(feature = "vulkan")]
-use crate::backends::vulkan_backend::tensor::VulkanTensor;
-#[cfg(feature = "vulkan")]
-use crate::backends::vulkan_backend::{VulkanError, VulkanImmediateExecutor};
 use crate::numeric_scalar::NumericScalar;
 use crate::numeric_tensor_typed::NumericTensorTyped;
 use crate::packed_tensor::PackedTensor;
@@ -27,32 +19,12 @@ pub enum NumericTensorError {
     DTypeError(#[from] DTypeError),
     #[error(transparent)]
     NDArrayNumericTensorError(#[from] NDArrayNumericTensorError),
-    #[cfg(feature = "candle")]
-    #[error(transparent)]
-    Candle(#[from] candle_core::Error),
-    #[cfg(feature = "onnx-reference")]
-    #[error(transparent)]
-    ONNXReference(#[from] crate::backends::onnx_reference_backend::ONNXReferenceError),
-    #[cfg(feature = "vulkan")]
-    #[error(transparent)]
-    Vulkan(#[from] VulkanError),
-    #[cfg(feature = "tch")]
-    #[error(transparent)]
-    TCH(#[from] tch_backend::TCHNumericTensorError),
 }
 
 #[derive(Debug, Clone)]
 pub enum NumericTensor<R: Rank> {
     NDArray(NDArrayNumericTensor<R>),
     Packed(PackedTensor<R>),
-    #[cfg(feature = "onnx-reference")]
-    ONNXReference(crate::backends::onnx_reference_backend::ONNXReferenceTensor),
-    #[cfg(feature = "candle")]
-    Candle(candle_core::Tensor),
-    #[cfg(feature = "vulkan")]
-    Vulkan(VulkanTensor<R>),
-    #[cfg(feature = "tch")]
-    TCH(tch_backend::TCHNumericTensor<R>),
 }
 
 impl<R: Rank> NumericTensor<R> {
@@ -67,14 +39,6 @@ impl<R: Rank> NumericTensor<R> {
         match self {
             NumericTensor::NDArray(x) => Ok(x.clone()),
             NumericTensor::Packed(x) => Ok(x.dequantize()),
-            #[cfg(feature = "onnx-reference")]
-            NumericTensor::ONNXReference(x) => Ok(x.to_ndarray()?),
-            #[cfg(feature = "candle")]
-            NumericTensor::Candle(x) => Ok(x.try_into()?),
-            #[cfg(feature = "vulkan")]
-            NumericTensor::Vulkan(x) => Ok(x.to_ndarray()),
-            #[cfg(feature = "tch")]
-            NumericTensor::TCH(x) => Ok(x.to_ndarray()?),
         }
     }
 
@@ -87,60 +51,6 @@ impl<R: Rank> NumericTensor<R> {
         match self {
             NumericTensor::NDArray(x) => Ok(x.clone()),
             NumericTensor::Packed(x) => Ok(x.dequantize()),
-            #[cfg(feature = "onnx-reference")]
-            NumericTensor::ONNXReference(x) => Ok(x.to_ndarray()?),
-            #[cfg(feature = "candle")]
-            NumericTensor::Candle(x) => Ok(x.try_into()?),
-            #[cfg(feature = "vulkan")]
-            NumericTensor::Vulkan(x) => Ok(x.to_ndarray()),
-            #[cfg(feature = "tch")]
-            NumericTensor::TCH(x) => Ok(x.to_ndarray()?),
-        }
-    }
-
-    #[cfg(feature = "candle")]
-    /// Convert or move this tensor to a Candle tensor on the given device.
-    ///
-    /// - If already Candle, this will move/copy to the target device if needed.
-    /// - Otherwise converts from the current backend to Candle, preserving dtype and shape.
-    pub fn to_candle(
-        &self,
-        device: &candle_core::Device,
-    ) -> Result<candle_core::Tensor, NumericTensorError> {
-        if let NumericTensor::Candle(x) = self {
-            Ok(x.to_device(device)?)
-        } else {
-            Ok(candle_backend::load_to_device(&self.to_ndarray()?, device)?)
-        }
-    }
-
-    #[cfg(feature = "vulkan")]
-    /// Convert this tensor to a Vulkan backend tensor using the provided immediate executor.
-    ///
-    /// - If already Vulkan, returns a clone.
-    /// - Otherwise uploads/converts from host/backend to Vulkan, preserving dtype and shape.
-    pub fn to_vulkan(
-        &self,
-        vulkan_immediate_executor: &mut VulkanImmediateExecutor,
-    ) -> Result<VulkanTensor<R>, NumericTensorError> {
-        if let NumericTensor::Vulkan(x) = self {
-            Ok(x.clone())
-        } else {
-            Ok(VulkanTensor::from_ndarray(
-                self.to_ndarray()?,
-                vulkan_immediate_executor,
-            )?)
-        }
-    }
-
-    #[cfg(feature = "tch")]
-    /// Convert this tensor to the tch backend tensor, preserving shape and dtype.
-    /// If already tch, returns a clone of the handle.
-    pub fn to_tch(&self) -> TCHNumericTensor<R> {
-        if let NumericTensor::TCH(x) = self {
-            x.clone()
-        } else {
-            TCHNumericTensor::<R>::from_ndarray(self.to_ndarray().unwrap()).unwrap()
         }
     }
 
@@ -154,12 +64,6 @@ impl<R: Rank> NumericTensor<R> {
         new_shape: R::KnownDims,
         _backend: &mut EvalBackend,
     ) -> Result<Self, NumericTensorError> {
-        #[cfg(feature = "vulkan")]
-        if let EvalBackend::Vulkan(executor) = _backend {
-            return Ok(NumericTensor::Vulkan(
-                self.to_vulkan(executor)?.reshape(new_shape, executor)?,
-            ));
-        }
         Ok(NumericTensor::NDArray(
             self.to_ndarray()?.reshape(&new_shape)?,
         ))
@@ -201,14 +105,6 @@ impl<R: Rank> NumericTensor<R> {
         match self {
             NumericTensor::NDArray(x) => x.dtype(),
             NumericTensor::Packed(x) => x.dtype(),
-            #[cfg(feature = "onnx-reference")]
-            NumericTensor::ONNXReference(x) => x.dtype(),
-            #[cfg(feature = "candle")]
-            NumericTensor::Candle(x) => x.dtype().try_into().unwrap(),
-            #[cfg(feature = "vulkan")]
-            NumericTensor::Vulkan(x) => x.dtype(),
-            #[cfg(feature = "tch")]
-            NumericTensor::TCH(x) => x.dtype(),
         }
     }
 
@@ -217,22 +113,6 @@ impl<R: Rank> NumericTensor<R> {
         match self {
             NumericTensor::NDArray(x) => x.shape(),
             NumericTensor::Packed(x) => x.shape().clone(),
-            #[cfg(feature = "onnx-reference")]
-            NumericTensor::ONNXReference(x) => {
-                let s = x.shape();
-                let s2 = s.iter().map(|x| *x as u64).collect::<Vec<_>>();
-                R::KnownDims::try_from_slice(s2.as_slice()).unwrap()
-            }
-            #[cfg(feature = "candle")]
-            NumericTensor::Candle(x) => {
-                let s = x.shape().dims().to_vec();
-                let s2 = s.iter().map(|x| *x as u64).collect::<Vec<_>>();
-                R::KnownDims::try_from_slice(s2.as_slice()).unwrap()
-            }
-            #[cfg(feature = "vulkan")]
-            NumericTensor::Vulkan(x) => x.shape().clone(),
-            #[cfg(feature = "tch")]
-            NumericTensor::TCH(x) => x.shape(),
         }
     }
 
@@ -241,14 +121,6 @@ impl<R: Rank> NumericTensor<R> {
         match self {
             NumericTensor::NDArray(x) => x.rank(),
             NumericTensor::Packed(x) => x.rank(),
-            #[cfg(feature = "onnx-reference")]
-            NumericTensor::ONNXReference(x) => x.rank(),
-            #[cfg(feature = "candle")]
-            NumericTensor::Candle(x) => x.rank(),
-            #[cfg(feature = "vulkan")]
-            NumericTensor::Vulkan(x) => x.rank(),
-            #[cfg(feature = "tch")]
-            NumericTensor::TCH(x) => x.rank(),
         }
     }
 
@@ -268,57 +140,17 @@ impl<R: Rank> NumericTensor<R> {
     }
 
     /// Element-wise negation (x -> -x).
-    pub fn neg(&self, backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
-        if backend.supports_dtype(self.dtype()) {
-            #[cfg(feature = "candle")]
-            if let EvalBackend::Candle(device) = backend {
-                return Ok(NumericTensor::Candle(self.to_candle(device)?.neg()?));
-            }
-            #[cfg(feature = "vulkan")]
-            if let EvalBackend::Vulkan(executor) = backend {
-                return Ok(NumericTensor::Vulkan(
-                    self.to_vulkan(executor)?.neg(executor)?,
-                ));
-            }
-        }
+    pub fn neg(&self, _backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
         Ok(NumericTensor::NDArray(self.to_ndarray()?.neg()?))
     }
 
     /// Element-wise natural exponential.
-    pub fn exp(&self, backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
-        if backend.supports_dtype(self.dtype()) {
-            #[cfg(feature = "candle")]
-            if let EvalBackend::Candle(device) = backend {
-                return Ok(NumericTensor::Candle(self.to_candle(device)?.exp()?));
-            }
-            #[cfg(feature = "vulkan")]
-            if let EvalBackend::Vulkan(executor) = backend {
-                return Ok(NumericTensor::Vulkan(
-                    self.to_vulkan(executor)?.exp(executor)?,
-                ));
-            }
-            #[cfg(feature = "tch")]
-            if let EvalBackend::TCH = backend {
-                return Ok(NumericTensor::TCH(self.to_tch().exp()?));
-            }
-        }
+    pub fn exp(&self, _backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
         Ok(NumericTensor::NDArray(self.to_ndarray()?.exp()?))
     }
 
     /// Element-wise natural logarithm.
-    pub fn ln(&self, backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
-        if backend.supports_dtype(self.dtype()) {
-            #[cfg(feature = "vulkan")]
-            if let EvalBackend::Vulkan(executor) = backend {
-                return Ok(NumericTensor::Vulkan(
-                    self.to_vulkan(executor)?.ln(executor)?,
-                ));
-            }
-            #[cfg(feature = "tch")]
-            if let EvalBackend::TCH = backend {
-                return Ok(NumericTensor::TCH(self.to_tch().ln()?));
-            }
-        }
+    pub fn ln(&self, _backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
         Ok(NumericTensor::NDArray(self.to_ndarray()?.ln()?))
     }
 
@@ -333,53 +165,17 @@ impl<R: Rank> NumericTensor<R> {
     }
 
     /// Element-wise floor (round toward negative infinity).
-    pub fn floor(&self, backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
-        if backend.supports_dtype(self.dtype()) {
-            #[cfg(feature = "vulkan")]
-            if let EvalBackend::Vulkan(executor) = backend {
-                return Ok(NumericTensor::Vulkan(
-                    self.to_vulkan(executor)?.floor(executor)?,
-                ));
-            }
-            #[cfg(feature = "tch")]
-            if let EvalBackend::TCH = backend {
-                return Ok(NumericTensor::TCH(self.to_tch().floor()?));
-            }
-        }
+    pub fn floor(&self, _backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
         Ok(NumericTensor::NDArray(self.to_ndarray()?.floor()?))
     }
 
     /// Element-wise ceil (round toward positive infinity).
-    pub fn ceil(&self, backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
-        if backend.supports_dtype(self.dtype()) {
-            #[cfg(feature = "vulkan")]
-            if let EvalBackend::Vulkan(executor) = backend {
-                return Ok(NumericTensor::Vulkan(
-                    self.to_vulkan(executor)?.ceil(executor)?,
-                ));
-            }
-            #[cfg(feature = "tch")]
-            if let EvalBackend::TCH = backend {
-                return Ok(NumericTensor::TCH(self.to_tch().ceil()?));
-            }
-        }
+    pub fn ceil(&self, _backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
         Ok(NumericTensor::NDArray(self.to_ndarray()?.ceil()?))
     }
 
     /// Element-wise round to nearest integer. Ties are resolved to the nearest even integer.
-    pub fn round(&self, backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
-        if backend.supports_dtype(self.dtype()) {
-            #[cfg(feature = "vulkan")]
-            if let EvalBackend::Vulkan(executor) = backend {
-                return Ok(NumericTensor::Vulkan(
-                    self.to_vulkan(executor)?.round(executor)?,
-                ));
-            }
-            #[cfg(feature = "tch")]
-            if let EvalBackend::TCH = backend {
-                return Ok(NumericTensor::TCH(self.to_tch().round()?));
-            }
-        }
+    pub fn round(&self, _backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
         Ok(NumericTensor::NDArray(self.to_ndarray()?.round()?))
     }
 
@@ -389,23 +185,7 @@ impl<R: Rank> NumericTensor<R> {
     }
 
     /// Element-wise absolute value.
-    pub fn abs(&self, backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
-        if backend.supports_dtype(self.dtype()) {
-            #[cfg(feature = "candle")]
-            if let EvalBackend::Candle(device) = backend {
-                return Ok(NumericTensor::Candle(self.to_candle(device)?.abs()?));
-            }
-            #[cfg(feature = "vulkan")]
-            if let EvalBackend::Vulkan(executor) = backend {
-                return Ok(NumericTensor::Vulkan(
-                    self.to_vulkan(executor)?.abs(executor)?,
-                ));
-            }
-            #[cfg(feature = "tch")]
-            if let EvalBackend::TCH = backend {
-                return Ok(NumericTensor::TCH(self.to_tch().abs()?));
-            }
-        }
+    pub fn abs(&self, _backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
         Ok(NumericTensor::NDArray(self.to_ndarray()?.abs()?))
     }
 
@@ -415,66 +195,27 @@ impl<R: Rank> NumericTensor<R> {
     }
 
     /// Apply a trigonometric operation element-wise (sin, cos, tan, etc.), as specified by op.
-    ///
-    /// Always uses NDArray (CPU) to avoid precision issues with Vulkan
-    /// transcendentals on software renderers (lavapipe).
     pub fn trig(&self, op: TrigOp, _backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
         Ok(NumericTensor::NDArray(self.to_ndarray()?.trig(op)?))
     }
 
     /// Element-wise reciprocal (1/x).
-    pub fn reciprocal(&self, backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
-        if backend.supports_dtype(self.dtype()) {
-            #[cfg(feature = "vulkan")]
-            if let EvalBackend::Vulkan(executor) = backend {
-                return Ok(NumericTensor::Vulkan(
-                    self.to_vulkan(executor)?.reciprocal(executor)?,
-                ));
-            }
-        }
+    pub fn reciprocal(&self, _backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
         Ok(NumericTensor::NDArray(self.to_ndarray()?.reciprocal()?))
     }
 
     /// Element-wise square root.
-    pub fn sqrt(&self, backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
-        if backend.supports_dtype(self.dtype()) {
-            #[cfg(feature = "candle")]
-            if let EvalBackend::Candle(device) = backend {
-                return Ok(NumericTensor::Candle(self.to_candle(device)?.sqrt()?));
-            }
-            #[cfg(feature = "vulkan")]
-            if let EvalBackend::Vulkan(executor) = backend {
-                return Ok(NumericTensor::Vulkan(
-                    self.to_vulkan(executor)?.sqrt(executor)?,
-                ));
-            }
-        }
+    pub fn sqrt(&self, _backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
         Ok(NumericTensor::NDArray(self.to_ndarray()?.sqrt()?))
     }
 
     /// Logical NOT for boolean tensors (element-wise). For non-boolean tensors, elements are compared to zero and the result is logical negation of that predicate.
-    pub fn not(&self, backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
-        if backend.supports_dtype(self.dtype()) {
-            #[cfg(feature = "vulkan")]
-            if let EvalBackend::Vulkan(executor) = backend {
-                return Ok(NumericTensor::Vulkan(
-                    self.to_vulkan(executor)?.not(executor)?,
-                ));
-            }
-        }
+    pub fn not(&self, _backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
         Ok(NumericTensor::NDArray(self.to_ndarray()?.not()?))
     }
 
     /// Bitwise NOT for integer tensors (element-wise).
-    pub fn bitwise_not(&self, backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
-        if backend.supports_dtype(self.dtype()) {
-            #[cfg(feature = "vulkan")]
-            if let EvalBackend::Vulkan(executor) = backend {
-                return Ok(NumericTensor::Vulkan(
-                    self.to_vulkan(executor)?.bitwise_not(executor)?,
-                ));
-            }
-        }
+    pub fn bitwise_not(&self, _backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
         Ok(NumericTensor::NDArray(self.to_ndarray()?.bitwise_not()?))
     }
 
@@ -495,30 +236,8 @@ impl NumericTensor<DynRank> {
         axis: Option<isize>,
         exclusive: bool,
         reverse: bool,
-        backend: &mut EvalBackend,
+        _backend: &mut EvalBackend,
     ) -> Result<Self, NumericTensorError> {
-        if backend.supports_dtype(self.dtype()) {
-            #[cfg(feature = "tch")]
-            if let EvalBackend::TCH = backend {
-                let ax = axis.unwrap_or(0) as i64;
-                return Ok(NumericTensor::TCH(
-                    self.to_tch().cumsum_full(ax, exclusive, reverse)?,
-                ));
-            }
-            #[cfg(feature = "vulkan")]
-            if let EvalBackend::Vulkan(executor) = backend {
-                match self
-                    .to_vulkan(executor)?
-                    .cumsum(axis, exclusive, reverse, executor)
-                {
-                    Ok(vk) => return Ok(NumericTensor::Vulkan(vk)),
-                    Err(VulkanError::UnsupportedByBackendError) => {
-                        // Fallback to NDArray for unsupported dtypes on Vulkan
-                    }
-                    Err(e) => return Err(e.into()),
-                }
-            }
-        }
         Ok(NumericTensor::NDArray(
             self.to_ndarray()?.cumsum(axis, exclusive, reverse)?,
         ))
@@ -590,19 +309,13 @@ impl NumericTensor<DynRank> {
         indices: &[Range<u64>],
         _backend: &EvalBackend,
     ) -> Result<Self, NumericTensorError> {
-        Ok(match self {
-            #[cfg(feature = "vulkan")]
-            NumericTensor::Vulkan(tensor) => NumericTensor::Vulkan(tensor.slice(indices)?),
-            _ => {
-                let indices = indices
-                    .iter()
-                    .map(|x| x.start as usize..x.end as usize)
-                    .collect::<Vec<_>>();
-                NumericTensor::NDArray(
-                    NDArrayNumericTensor::<DynRank>::try_from(self)?.slice(indices.as_slice())?,
-                )
-            }
-        })
+        let indices = indices
+            .iter()
+            .map(|x| x.start as usize..x.end as usize)
+            .collect::<Vec<_>>();
+        Ok(NumericTensor::NDArray(
+            NDArrayNumericTensor::<DynRank>::try_from(self)?.slice(indices.as_slice())?,
+        ))
     }
 
     /// Slice with per-axis start/end/step (supports negative steps for reversal).
@@ -621,30 +334,18 @@ impl NumericTensor<DynRank> {
     /// - axis is zero-based and may be equal to rank to append a new trailing dim.
     /// - Errors if axis > rank.
     pub fn unsqueeze(&self, axis: usize) -> Result<Self, NumericTensorError> {
-        Ok(match self {
-            #[cfg(feature = "candle")]
-            NumericTensor::Candle(x) => NumericTensor::Candle(x.unsqueeze(axis)?),
-            #[cfg(feature = "vulkan")]
-            NumericTensor::Vulkan(x) => NumericTensor::Vulkan(x.unsqueeze(axis)?),
-            _ => NumericTensor::NDArray(
-                NDArrayNumericTensor::<DynRank>::try_from(self)?.unsqueeze(axis)?,
-            ),
-        })
+        Ok(NumericTensor::NDArray(
+            NDArrayNumericTensor::<DynRank>::try_from(self)?.unsqueeze(axis)?,
+        ))
     }
 
     /// Remove a dimension of size 1 at the given axis.
     ///
     /// - Errors if the axis is out of bounds or the dimension is not 1.
     pub fn squeeze(&self, axis: usize) -> Result<Self, NumericTensorError> {
-        Ok(match self {
-            #[cfg(feature = "candle")]
-            NumericTensor::Candle(x) => NumericTensor::Candle(x.squeeze(axis)?),
-            #[cfg(feature = "vulkan")]
-            NumericTensor::Vulkan(x) => NumericTensor::Vulkan(x.squeeze(axis)?),
-            _ => NumericTensor::NDArray(
-                NDArrayNumericTensor::<DynRank>::try_from(self)?.squeeze(axis)?,
-            ),
-        })
+        Ok(NumericTensor::NDArray(
+            NDArrayNumericTensor::<DynRank>::try_from(self)?.squeeze(axis)?,
+        ))
     }
 
     /// Element-wise addition with NumPy-style broadcasting.
@@ -652,30 +353,7 @@ impl NumericTensor<DynRank> {
     /// - Shapes must be broadcast-compatible.
     /// - DType promotion follows standard broadcasting and type-promotion rules; result dtype is the common type of the inputs.
     /// - Errors if dtypes are unsupported or broadcasting fails.
-    pub fn add(a: &Self, b: &Self, backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
-        if backend.supports_dtype(a.dtype()) && backend.supports_dtype(b.dtype()) {
-            #[cfg(feature = "candle")]
-            if let EvalBackend::Candle(device) = backend {
-                return Ok(NumericTensor::Candle(
-                    a.to_candle(device)?.broadcast_add(&b.to_candle(device)?)?,
-                ));
-            }
-            #[cfg(feature = "vulkan")]
-            if let EvalBackend::Vulkan(executor) = backend {
-                return Ok(NumericTensor::Vulkan(VulkanTensor::add(
-                    &a.to_vulkan(executor)?,
-                    &b.to_vulkan(executor)?,
-                    executor,
-                )?));
-            }
-            #[cfg(feature = "tch")]
-            if let EvalBackend::TCH = backend {
-                return Ok(NumericTensor::TCH(TCHNumericTensor::add(
-                    &a.to_tch(),
-                    &b.to_tch(),
-                )?));
-            }
-        }
+    pub fn add(a: &Self, b: &Self, _backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::add(
             &a.try_into()?,
             &b.try_into()?,
@@ -687,30 +365,7 @@ impl NumericTensor<DynRank> {
     /// - Shapes must be broadcast-compatible.
     /// - DType promotion follows standard type-promotion rules to a common result type.
     /// - Behavior with NaN/Inf follows IEEE-754: NaN propagates; Inf - Inf = NaN of corresponding sign rules.
-    pub fn sub(a: &Self, b: &Self, backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
-        if backend.supports_dtype(a.dtype()) && backend.supports_dtype(b.dtype()) {
-            #[cfg(feature = "candle")]
-            if let EvalBackend::Candle(device) = backend {
-                return Ok(NumericTensor::Candle(
-                    a.to_candle(device)?.broadcast_sub(&b.to_candle(device)?)?,
-                ));
-            }
-            #[cfg(feature = "vulkan")]
-            if let EvalBackend::Vulkan(executor) = backend {
-                return Ok(NumericTensor::Vulkan(VulkanTensor::sub(
-                    &a.to_vulkan(executor)?,
-                    &b.to_vulkan(executor)?,
-                    executor,
-                )?));
-            }
-            #[cfg(feature = "tch")]
-            if let EvalBackend::TCH = backend {
-                return Ok(NumericTensor::TCH(TCHNumericTensor::sub(
-                    &a.to_tch(),
-                    &b.to_tch(),
-                )?));
-            }
-        }
+    pub fn sub(a: &Self, b: &Self, _backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::sub(
             &a.try_into()?,
             &b.try_into()?,
@@ -726,30 +381,7 @@ impl NumericTensor<DynRank> {
     /// - Division by zero:
     ///   - For floating inputs: x/0 -> +/-inf depending on sign; 0/0 -> NaN.
     ///   - For integer inputs: behavior is to raise error in typical runtimes; if supported here, results are implementation-defined and should not be relied upon.
-    pub fn div(a: &Self, b: &Self, backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
-        if backend.supports_dtype(a.dtype()) && backend.supports_dtype(b.dtype()) {
-            #[cfg(feature = "candle")]
-            if let EvalBackend::Candle(device) = backend {
-                return Ok(NumericTensor::Candle(
-                    a.to_candle(device)?.broadcast_div(&b.to_candle(device)?)?,
-                ));
-            }
-            #[cfg(feature = "vulkan")]
-            if let EvalBackend::Vulkan(executor) = backend {
-                return Ok(NumericTensor::Vulkan(VulkanTensor::div(
-                    &a.to_vulkan(executor)?,
-                    &b.to_vulkan(executor)?,
-                    executor,
-                )?));
-            }
-            #[cfg(feature = "tch")]
-            if let EvalBackend::TCH = backend {
-                return Ok(NumericTensor::TCH(TCHNumericTensor::div(
-                    &a.to_tch(),
-                    &b.to_tch(),
-                )?));
-            }
-        }
+    pub fn div(a: &Self, b: &Self, _backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::div(
             &a.try_into()?,
             &b.try_into()?,
@@ -761,30 +393,7 @@ impl NumericTensor<DynRank> {
     /// - Shapes must be broadcast-compatible.
     /// - DType promotion follows standard rules; result is the common type.
     /// - Overflows in integer types wrap per two's-complement arithmetic.
-    pub fn mul(a: &Self, b: &Self, backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
-        if backend.supports_dtype(a.dtype()) && backend.supports_dtype(b.dtype()) {
-            #[cfg(feature = "candle")]
-            if let EvalBackend::Candle(device) = backend {
-                return Ok(NumericTensor::Candle(
-                    a.to_candle(device)?.broadcast_mul(&b.to_candle(device)?)?,
-                ));
-            }
-            #[cfg(feature = "vulkan")]
-            if let EvalBackend::Vulkan(executor) = backend {
-                return Ok(NumericTensor::Vulkan(VulkanTensor::mul(
-                    &a.to_vulkan(executor)?,
-                    &b.to_vulkan(executor)?,
-                    executor,
-                )?));
-            }
-            #[cfg(feature = "tch")]
-            if let EvalBackend::TCH = backend {
-                return Ok(NumericTensor::TCH(TCHNumericTensor::mul(
-                    &a.to_tch(),
-                    &b.to_tch(),
-                )?));
-            }
-        }
+    pub fn mul(a: &Self, b: &Self, _backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::mul(
             &a.try_into()?,
             &b.try_into()?,
@@ -797,17 +406,7 @@ impl NumericTensor<DynRank> {
     /// - For floating types, result has the same sign as a and magnitude less than |b|.
     /// - For integer inputs, values are computed in floating domain when necessary to match ONNX behavior, then cast back as needed by the implementation.
     /// - Division by zero yields NaN for floating inputs. For integer inputs, results are undefined and may error.
-    pub fn fmod(a: &Self, b: &Self, backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
-        if backend.supports_dtype(a.dtype()) && backend.supports_dtype(b.dtype()) {
-            #[cfg(feature = "vulkan")]
-            if let EvalBackend::Vulkan(executor) = backend {
-                return Ok(NumericTensor::Vulkan(VulkanTensor::fmod(
-                    &a.to_vulkan(executor)?,
-                    &b.to_vulkan(executor)?,
-                    executor,
-                )?));
-            }
-        }
+    pub fn fmod(a: &Self, b: &Self, _backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::fmod(
             &a.try_into()?,
             &b.try_into()?,
@@ -819,17 +418,7 @@ impl NumericTensor<DynRank> {
     /// - The sign of the result follows ONNX: r = a - trunc(a/b)*b, so r has the same sign as a and |r| < |b| when b != 0.
     /// - Division by zero is an error.
     /// - Mixed dtypes are promoted to an integer common type when possible; otherwise integers may be promoted to float and the result cast as needed by the implementation.
-    pub fn imod(a: &Self, b: &Self, backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
-        if backend.supports_dtype(a.dtype()) && backend.supports_dtype(b.dtype()) {
-            #[cfg(feature = "vulkan")]
-            if let EvalBackend::Vulkan(executor) = backend {
-                return Ok(NumericTensor::Vulkan(VulkanTensor::imod(
-                    &a.to_vulkan(executor)?,
-                    &b.to_vulkan(executor)?,
-                    executor,
-                )?));
-            }
-        }
+    pub fn imod(a: &Self, b: &Self, _backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::imod(
             &a.try_into()?,
             &b.try_into()?,
@@ -850,34 +439,8 @@ impl NumericTensor<DynRank> {
         accumulate_dtype: Option<DType>,
         output_dtype: DType,
         mode: AccumulationMode,
-        backend: &mut EvalBackend,
+        _backend: &mut EvalBackend,
     ) -> Result<Self, NumericTensorError> {
-        if backend.supports_dtype(a.dtype()) && backend.supports_dtype(b.dtype()) {
-            #[cfg(feature = "candle")]
-            if let EvalBackend::Candle(device) = backend {
-                // Candle always uses its own BLAS/accelerated path.
-                return Ok(NumericTensor::Candle(
-                    (a.to_candle(device)?.broadcast_matmul(&b.to_candle(device)?))?,
-                ));
-            }
-            #[cfg(feature = "vulkan")]
-            if let EvalBackend::Vulkan(executor) = backend {
-                return Ok(NumericTensor::Vulkan(VulkanTensor::matmul(
-                    &a.to_vulkan(executor)?,
-                    &b.to_vulkan(executor)?,
-                    accumulate_dtype,
-                    executor,
-                )?));
-            }
-            #[cfg(feature = "tch")]
-            if let EvalBackend::TCH = backend {
-                return Ok(NumericTensor::TCH(TCHNumericTensor::matmul(
-                    &a.to_tch(),
-                    &b.to_tch(),
-                    accumulate_dtype,
-                )?));
-            }
-        }
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::matmul(
             &a.try_into()?,
             &b.try_into()?,
@@ -891,17 +454,7 @@ impl NumericTensor<DynRank> {
     ///
     /// - Non-boolean inputs are first compared to zero to obtain a boolean view.
     /// - Broadcasting rules apply.
-    pub fn and(a: &Self, b: &Self, backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
-        if backend.supports_dtype(a.dtype()) && backend.supports_dtype(b.dtype()) {
-            #[cfg(feature = "vulkan")]
-            if let EvalBackend::Vulkan(executor) = backend {
-                return Ok(NumericTensor::Vulkan(VulkanTensor::and(
-                    &a.to_vulkan(executor)?,
-                    &b.to_vulkan(executor)?,
-                    executor,
-                )?));
-            }
-        }
+    pub fn and(a: &Self, b: &Self, _backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::and(
             &a.try_into()?,
             &b.try_into()?,
@@ -912,17 +465,7 @@ impl NumericTensor<DynRank> {
     ///
     /// - Non-boolean inputs are first compared to zero to obtain a boolean view.
     /// - Broadcasting rules apply.
-    pub fn or(a: &Self, b: &Self, backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
-        if backend.supports_dtype(a.dtype()) && backend.supports_dtype(b.dtype()) {
-            #[cfg(feature = "vulkan")]
-            if let EvalBackend::Vulkan(executor) = backend {
-                return Ok(NumericTensor::Vulkan(VulkanTensor::or(
-                    &a.to_vulkan(executor)?,
-                    &b.to_vulkan(executor)?,
-                    executor,
-                )?));
-            }
-        }
+    pub fn or(a: &Self, b: &Self, _backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::or(
             &a.try_into()?,
             &b.try_into()?,
@@ -933,17 +476,7 @@ impl NumericTensor<DynRank> {
     ///
     /// - Non-boolean inputs are first compared to zero to obtain a boolean view.
     /// - Broadcasting rules apply.
-    pub fn xor(a: &Self, b: &Self, backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
-        if backend.supports_dtype(a.dtype()) && backend.supports_dtype(b.dtype()) {
-            #[cfg(feature = "vulkan")]
-            if let EvalBackend::Vulkan(executor) = backend {
-                return Ok(NumericTensor::Vulkan(VulkanTensor::xor(
-                    &a.to_vulkan(executor)?,
-                    &b.to_vulkan(executor)?,
-                    executor,
-                )?));
-            }
-        }
+    pub fn xor(a: &Self, b: &Self, _backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::xor(
             &a.try_into()?,
             &b.try_into()?,
@@ -957,18 +490,8 @@ impl NumericTensor<DynRank> {
     pub fn bitwise_and(
         a: &Self,
         b: &Self,
-        backend: &mut EvalBackend,
+        _backend: &mut EvalBackend,
     ) -> Result<Self, NumericTensorError> {
-        if backend.supports_dtype(a.dtype()) && backend.supports_dtype(b.dtype()) {
-            #[cfg(feature = "vulkan")]
-            if let EvalBackend::Vulkan(executor) = backend {
-                return Ok(NumericTensor::Vulkan(VulkanTensor::bitwise_and(
-                    &a.to_vulkan(executor)?,
-                    &b.to_vulkan(executor)?,
-                    executor,
-                )?));
-            }
-        }
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::bitwise_and(
             &a.try_into()?,
             &b.try_into()?,
@@ -982,18 +505,8 @@ impl NumericTensor<DynRank> {
     pub fn bitwise_or(
         a: &Self,
         b: &Self,
-        backend: &mut EvalBackend,
+        _backend: &mut EvalBackend,
     ) -> Result<Self, NumericTensorError> {
-        if backend.supports_dtype(a.dtype()) && backend.supports_dtype(b.dtype()) {
-            #[cfg(feature = "vulkan")]
-            if let EvalBackend::Vulkan(executor) = backend {
-                return Ok(NumericTensor::Vulkan(VulkanTensor::bitwise_or(
-                    &a.to_vulkan(executor)?,
-                    &b.to_vulkan(executor)?,
-                    executor,
-                )?));
-            }
-        }
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::bitwise_or(
             &a.try_into()?,
             &b.try_into()?,
@@ -1007,18 +520,8 @@ impl NumericTensor<DynRank> {
     pub fn bitwise_xor(
         a: &Self,
         b: &Self,
-        backend: &mut EvalBackend,
+        _backend: &mut EvalBackend,
     ) -> Result<Self, NumericTensorError> {
-        if backend.supports_dtype(a.dtype()) && backend.supports_dtype(b.dtype()) {
-            #[cfg(feature = "vulkan")]
-            if let EvalBackend::Vulkan(executor) = backend {
-                return Ok(NumericTensor::Vulkan(VulkanTensor::bitwise_xor(
-                    &a.to_vulkan(executor)?,
-                    &b.to_vulkan(executor)?,
-                    executor,
-                )?));
-            }
-        }
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::bitwise_xor(
             &a.try_into()?,
             &b.try_into()?,
@@ -1053,17 +556,7 @@ impl NumericTensor<DynRank> {
     /// ONNX semantics:
     /// - If either operand is NaN at a position, the result is NaN (NaN propagates).
     /// - Inputs are cast to a common type when necessary.
-    pub fn max(a: &Self, b: &Self, backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
-        if backend.supports_dtype(a.dtype()) && backend.supports_dtype(b.dtype()) {
-            #[cfg(feature = "vulkan")]
-            if let EvalBackend::Vulkan(executor) = backend {
-                return Ok(NumericTensor::Vulkan(VulkanTensor::max(
-                    &a.to_vulkan(executor)?,
-                    &b.to_vulkan(executor)?,
-                    executor,
-                )?));
-            }
-        }
+    pub fn max(a: &Self, b: &Self, _backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::max(
             &a.try_into()?,
             &b.try_into()?,
@@ -1075,17 +568,7 @@ impl NumericTensor<DynRank> {
     /// ONNX semantics:
     /// - If either operand is NaN at a position, the result is NaN (NaN propagates).
     /// - Inputs are cast to a common type when necessary.
-    pub fn min(a: &Self, b: &Self, backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
-        if backend.supports_dtype(a.dtype()) && backend.supports_dtype(b.dtype()) {
-            #[cfg(feature = "vulkan")]
-            if let EvalBackend::Vulkan(executor) = backend {
-                return Ok(NumericTensor::Vulkan(VulkanTensor::min(
-                    &a.to_vulkan(executor)?,
-                    &b.to_vulkan(executor)?,
-                    executor,
-                )?));
-            }
-        }
+    pub fn min(a: &Self, b: &Self, _backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::min(
             &a.try_into()?,
             &b.try_into()?,
@@ -1101,18 +584,8 @@ impl NumericTensor<DynRank> {
     pub fn equal(
         a: &Self,
         b: &Self,
-        backend: &mut EvalBackend,
+        _backend: &mut EvalBackend,
     ) -> Result<Self, NumericTensorError> {
-        if backend.supports_dtype(a.dtype()) && backend.supports_dtype(b.dtype()) {
-            #[cfg(feature = "vulkan")]
-            if let EvalBackend::Vulkan(executor) = backend {
-                return Ok(NumericTensor::Vulkan(VulkanTensor::equal(
-                    &a.to_vulkan(executor)?,
-                    &b.to_vulkan(executor)?,
-                    executor,
-                )?));
-            }
-        }
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::equal(
             &a.try_into()?,
             &b.try_into()?,
@@ -1127,18 +600,8 @@ impl NumericTensor<DynRank> {
     pub fn greater(
         a: &Self,
         b: &Self,
-        backend: &mut EvalBackend,
+        _backend: &mut EvalBackend,
     ) -> Result<Self, NumericTensorError> {
-        if backend.supports_dtype(a.dtype()) && backend.supports_dtype(b.dtype()) {
-            #[cfg(feature = "vulkan")]
-            if let EvalBackend::Vulkan(executor) = backend {
-                return Ok(NumericTensor::Vulkan(VulkanTensor::greater(
-                    &a.to_vulkan(executor)?,
-                    &b.to_vulkan(executor)?,
-                    executor,
-                )?));
-            }
-        }
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::greater(
             &a.try_into()?,
             &b.try_into()?,
@@ -1153,18 +616,8 @@ impl NumericTensor<DynRank> {
     pub fn greater_or_equal(
         a: &Self,
         b: &Self,
-        backend: &mut EvalBackend,
+        _backend: &mut EvalBackend,
     ) -> Result<Self, NumericTensorError> {
-        if backend.supports_dtype(a.dtype()) && backend.supports_dtype(b.dtype()) {
-            #[cfg(feature = "vulkan")]
-            if let EvalBackend::Vulkan(executor) = backend {
-                return Ok(NumericTensor::Vulkan(VulkanTensor::greater_or_equal(
-                    &a.to_vulkan(executor)?,
-                    &b.to_vulkan(executor)?,
-                    executor,
-                )?));
-            }
-        }
         Ok(NumericTensor::NDArray(
             NDArrayNumericTensor::greater_or_equal(&a.try_into()?, &b.try_into()?)?,
         ))
@@ -1175,17 +628,7 @@ impl NumericTensor<DynRank> {
     /// ONNX semantics:
     /// - Returns a boolean tensor.
     /// - Any comparison involving NaN yields false.
-    pub fn less(a: &Self, b: &Self, backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
-        if backend.supports_dtype(a.dtype()) && backend.supports_dtype(b.dtype()) {
-            #[cfg(feature = "vulkan")]
-            if let EvalBackend::Vulkan(executor) = backend {
-                return Ok(NumericTensor::Vulkan(VulkanTensor::less(
-                    &a.to_vulkan(executor)?,
-                    &b.to_vulkan(executor)?,
-                    executor,
-                )?));
-            }
-        }
+    pub fn less(a: &Self, b: &Self, _backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::less(
             &a.try_into()?,
             &b.try_into()?,
@@ -1200,18 +643,8 @@ impl NumericTensor<DynRank> {
     pub fn less_or_equal(
         a: &Self,
         b: &Self,
-        backend: &mut EvalBackend,
+        _backend: &mut EvalBackend,
     ) -> Result<Self, NumericTensorError> {
-        if backend.supports_dtype(a.dtype()) && backend.supports_dtype(b.dtype()) {
-            #[cfg(feature = "vulkan")]
-            if let EvalBackend::Vulkan(executor) = backend {
-                return Ok(NumericTensor::Vulkan(VulkanTensor::less_or_equal(
-                    &a.to_vulkan(executor)?,
-                    &b.to_vulkan(executor)?,
-                    executor,
-                )?));
-            }
-        }
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::less_or_equal(
             &a.try_into()?,
             &b.try_into()?,
@@ -1232,25 +665,8 @@ impl NumericTensor<DynRank> {
     pub fn pow(
         &self,
         exponent: &Self,
-        backend: &mut EvalBackend,
+        _backend: &mut EvalBackend,
     ) -> Result<Self, NumericTensorError> {
-        if backend.supports_dtype(self.dtype()) {
-            #[cfg(feature = "candle")]
-            if let EvalBackend::Candle(device) = backend {
-                return Ok(NumericTensor::Candle(
-                    self.to_candle(device)?
-                        .broadcast_pow(&exponent.to_candle(device)?)?,
-                ));
-            }
-            #[cfg(feature = "vulkan")]
-            if let EvalBackend::Vulkan(executor) = backend {
-                return Ok(NumericTensor::Vulkan(
-                    self.to_vulkan(executor)?
-                        .pow(&exponent.to_vulkan(executor)?, executor)?,
-                ));
-            }
-        }
-
         Ok(NumericTensor::NDArray(
             NDArrayNumericTensor::<DynRank>::try_from(self)?.pow(&NDArrayNumericTensor::<
                 DynRank,
@@ -1270,31 +686,13 @@ impl NumericTensor<DynRank> {
         axes: Option<Vec<i64>>,
         _backend: &EvalBackend,
     ) -> Result<Self, NumericTensorError> {
-        Ok(match self {
-            #[cfg(feature = "vulkan")]
-            NumericTensor::Vulkan(tensor) => {
-                let axes = match axes {
-                    Some(axes) => axes.iter().map(|x| *x as usize).collect::<Vec<_>>(),
-                    None => (0..tensor.shape().len()).rev().collect::<Vec<_>>(),
-                };
-                NumericTensor::Vulkan(tensor.transpose(&axes)?)
-            }
-            _ => NumericTensor::NDArray(
-                NDArrayNumericTensor::<DynRank>::try_from(self)?.transpose(axes)?,
-            ),
-        })
+        Ok(NumericTensor::NDArray(
+            NDArrayNumericTensor::<DynRank>::try_from(self)?.transpose(axes)?,
+        ))
     }
 
     /// Return a boolean tensor marking NaNs in self (element-wise).
-    pub fn is_nan(&self, backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
-        if backend.supports_dtype(self.dtype()) {
-            #[cfg(feature = "vulkan")]
-            if let EvalBackend::Vulkan(executor) = backend {
-                return Ok(NumericTensor::Vulkan(
-                    self.to_vulkan(executor)?.is_nan(executor)?,
-                ));
-            }
-        }
+    pub fn is_nan(&self, _backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
         Ok(NumericTensor::NDArray(self.to_ndarray()?.is_nan()?))
     }
 
@@ -1314,12 +712,6 @@ impl NumericTensor<DynRank> {
 
     /// Element-wise sign: returns -1, 0, or 1 for negative, zero, positive. For floating tensors, returns -1.0, 0.0, or 1.0.
     pub fn sign(&self, _backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
-        #[cfg(feature = "vulkan")]
-        if let EvalBackend::Vulkan(executor) = _backend {
-            return Ok(NumericTensor::Vulkan(
-                self.to_vulkan(executor)?.sign(executor)?,
-            ));
-        }
         Ok(NumericTensor::NDArray(self.to_ndarray()?.sign()?))
     }
 
@@ -1345,15 +737,6 @@ impl NumericTensor<DynRank> {
         axis: i64,
         _backend: &mut EvalBackend,
     ) -> Result<Self, NumericTensorError> {
-        #[cfg(feature = "vulkan")]
-        if let EvalBackend::Vulkan(executor) = _backend {
-            return Ok(NumericTensor::Vulkan(VulkanTensor::gather(
-                &data.to_vulkan(executor)?,
-                &indices.to_vulkan(executor)?,
-                axis,
-                executor,
-            )?));
-        }
         Ok(NumericTensor::NDArray(
             NDArrayNumericTensor::<DynRank>::gather(&data.try_into()?, &indices.try_into()?, axis)?,
         ))
@@ -1519,22 +902,8 @@ impl NumericTensor<DynRank> {
     pub fn cast(
         &self,
         dtype: DType,
-        backend: &mut EvalBackend,
+        _backend: &mut EvalBackend,
     ) -> Result<Self, NumericTensorError> {
-        if backend.supports_dtype(self.dtype()) && backend.supports_dtype(dtype) {
-            #[cfg(feature = "candle")]
-            if let EvalBackend::Candle(device) = backend {
-                return Ok(NumericTensor::Candle(
-                    self.to_candle(device)?.to_dtype(dtype.try_into()?)?,
-                ));
-            }
-            #[cfg(feature = "vulkan")]
-            if let EvalBackend::Vulkan(executor) = backend {
-                return Ok(NumericTensor::Vulkan(
-                    self.to_vulkan(executor)?.cast(executor, dtype)?,
-                ));
-            }
-        }
         Ok(NumericTensor::NDArray(self.to_ndarray()?.cast(dtype)?))
     }
 

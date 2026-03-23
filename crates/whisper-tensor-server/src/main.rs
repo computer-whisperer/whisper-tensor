@@ -395,12 +395,7 @@ async fn main() {
     let cancellation_registry = Arc::new(StdMutex::new(HashSet::<u64>::new()));
     let observer_settings_registry = Arc::new(std::sync::Mutex::new(HashMap::new()));
 
-    #[cfg(feature = "vulkan")]
-    let vulkan_available = true;
-    #[cfg(not(feature = "vulkan"))]
-    let vulkan_available = false;
-
-    let server_config_report = ServerConfigReport { vulkan_available };
+    let server_config_report = ServerConfigReport {};
 
     tokio::spawn(scheduler(
         scheduler_rx,

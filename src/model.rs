@@ -22,20 +22,13 @@ pub enum ModelError {
     ONNXDecodingError(#[from] ONNXDecodingError),
     #[error(transparent)]
     EvalRuntimeError(#[from] EvalRuntimeError),
-    #[cfg(feature = "candle")]
-    #[error(transparent)]
-    Candle(#[from] candle_core::Error),
     #[error(transparent)]
     DecodeError(#[from] DecodeError),
     #[error("Unconfigured Backend")]
     UnconfiguredBackend,
 }
 
-#[allow(clippy::large_enum_variant)]
 pub enum ModelExecutionRuntime<'a> {
-    ONNXReference,
-    ORT,
-    Candle,
     Eval(EvalBackend<'a>),
 }
 
@@ -116,19 +109,15 @@ impl Model {
         observer: &mut impl SymbolicGraphObserver,
         selected_runtime: &mut ModelExecutionRuntime,
     ) -> Result<HashMap<String, NumericTensor<DynRank>>, ModelError> {
-        Ok(match selected_runtime {
-            ModelExecutionRuntime::Eval(eval_backend) => eval_backend::run(
-                &self.graph,
-                &self.tensor_store,
-                None,
-                eval_backend,
-                observer,
-                inputs,
-            )?,
-            _ => {
-                panic!("Unsupported backend")
-            }
-        })
+        let ModelExecutionRuntime::Eval(eval_backend) = selected_runtime;
+        Ok(eval_backend::run(
+            &self.graph,
+            &self.tensor_store,
+            None,
+            eval_backend,
+            observer,
+            inputs,
+        )?)
     }
 
     pub fn eval<T: SymbolicGraphObserver>(
