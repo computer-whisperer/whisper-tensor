@@ -11,7 +11,7 @@
 //! and handles arbitrary bit offsets within byte slices. [`NumericScalar`] defers
 //! to the view path.
 
-use crate::numeric_dtype::{FloatSemantics, FloatType, IntType, NumericDType};
+use crate::numeric_dtype::{FloatType, IntType, NumericDType};
 
 use super::{NumericScalar, NumericScalarView, NumericScalarViewMut};
 
@@ -312,6 +312,9 @@ fn encode_from_intermediate(value: Intermediate, dtype: NumericDType) -> Numeric
 // ---------------------------------------------------------------------------
 
 /// Decode a float value from raw bits according to the FloatType spec.
+///
+/// See [`FloatType`] docs for the encoding rules driven by `has_infinity`
+/// and `has_nan`.
 fn software_float_decode(raw: u64, ft: &FloatType) -> f64 {
     let mant_bits = ft.mantissa_bits as u32;
     let exp_mask = (1u64 << ft.exponent_bits as u32) - 1;
@@ -326,42 +329,35 @@ fn software_float_decode(raw: u64, ft: &FloatType) -> f64 {
     let max_exp = ft.max_biased_exponent();
 
     if biased_exp == max_exp {
-        match ft.semantics {
-            FloatSemantics::IEEE => {
-                if raw_mant == 0 { sign * f64::INFINITY } else { f64::NAN }
-            }
-            FloatSemantics::FN => {
-                if raw_mant == mant_mask {
-                    f64::NAN
-                } else {
-                    let mant_val = 1.0 + (raw_mant as f64) / ((1u64 << mant_bits) as f64);
-                    sign * mant_val * f64::exp2((biased_exp as i32 - bias) as f64)
-                }
-            }
-            FloatSemantics::FNUZ => f64::NAN,
+        // Max exponent row — check for special values
+        if ft.has_infinity && raw_mant == 0 {
+            return sign * f64::INFINITY;
         }
+        if ft.has_nan {
+            let is_nan = if ft.has_infinity {
+                // IEEE: all nonzero mantissa at max exp are NaN
+                raw_mant != 0
+            } else {
+                // FN: only mant=all-ones is NaN
+                raw_mant == mant_mask
+            };
+            if is_nan {
+                return f64::NAN;
+            }
+        }
+        // Normal number at max exponent
+        let mant_val = 1.0 + (raw_mant as f64) / ((1u64 << mant_bits) as f64);
+        sign * mant_val * f64::exp2((biased_exp as i32 - bias) as f64)
     } else if biased_exp == 0 {
-        match ft.semantics {
-            FloatSemantics::IEEE | FloatSemantics::FN => {
-                if raw_mant == 0 {
-                    sign * 0.0
-                } else {
-                    let mant_val = (raw_mant as f64) / ((1u64 << mant_bits) as f64);
-                    sign * mant_val * f64::exp2((1 - bias) as f64)
-                }
-            }
-            FloatSemantics::FNUZ => {
-                if raw_mant == 0 && sign_bit == 0 {
-                    0.0
-                } else if raw_mant == 0 && sign_bit == 1 {
-                    f64::NAN
-                } else {
-                    let mant_val = (raw_mant as f64) / ((1u64 << mant_bits) as f64);
-                    sign * mant_val * f64::exp2((1 - bias) as f64)
-                }
-            }
+        // Zero or subnormal
+        if raw_mant == 0 {
+            sign * 0.0
+        } else {
+            let mant_val = (raw_mant as f64) / ((1u64 << mant_bits) as f64);
+            sign * mant_val * f64::exp2((1 - bias) as f64)
         }
     } else {
+        // Normal number
         let mant_val = 1.0 + (raw_mant as f64) / ((1u64 << mant_bits) as f64);
         sign * mant_val * f64::exp2((biased_exp as i32 - bias) as f64)
     }
@@ -377,7 +373,12 @@ fn software_float_encode(value: f64, ft: &FloatType) -> u64 {
     let max_exp = ft.max_biased_exponent();
 
     if value.is_nan() {
-        return encode_nan_raw(ft);
+        if ft.has_nan {
+            return encode_nan_raw(ft);
+        } else {
+            // Format has no NaN — encode as zero
+            return encode_zero_raw(0, ft);
+        }
     }
 
     let sign_bit: u64 = if value.is_sign_negative() { 1 } else { 0 };
@@ -395,7 +396,15 @@ fn software_float_encode(value: f64, ft: &FloatType) -> u64 {
     let true_exp = raw_exp - 1;
     let bias = ft.bias();
     let min_normal_exp = 1 - bias;
-    let max_normal_exp = (max_exp as i32 - 1) - bias;
+    // For formats with reserved max exponent (has_infinity or has_nan),
+    // max_exp-1 is the highest usable biased exponent for normal numbers.
+    // For formats with no reserved patterns, max_exp itself is usable.
+    let max_usable_biased = if ft.has_infinity || ft.has_nan {
+        max_exp as i32 - 1
+    } else {
+        max_exp as i32
+    };
+    let max_normal_exp = max_usable_biased - bias;
 
     if true_exp > max_normal_exp {
         return encode_overflow_raw(sign_bit, ft);
@@ -408,60 +417,64 @@ fn software_float_encode(value: f64, ft: &FloatType) -> u64 {
     }
 }
 
+/// Encode NaN. Returns canonical quiet NaN for the format.
+/// Panics if `!ft.has_nan` (format has no NaN representation).
 fn encode_nan_raw(ft: &FloatType) -> u64 {
+    assert!(ft.has_nan, "cannot encode NaN in a format without NaN");
     let mant_bits = ft.mantissa_bits as u32;
     let max_exp = ft.max_biased_exponent() as u64;
-    match ft.semantics {
-        FloatSemantics::IEEE => {
-            (max_exp << mant_bits) | (1u64 << (mant_bits - 1))
-        }
-        FloatSemantics::FN => {
-            let mant_mask = (1u64 << mant_bits) - 1;
-            (max_exp << mant_bits) | mant_mask
-        }
-        FloatSemantics::FNUZ => {
-            1u64 << (ft.total_bits() as u32 - 1)
-        }
+    if ft.has_infinity {
+        // IEEE: quiet NaN = max exp + MSB of mantissa set
+        (max_exp << mant_bits) | (1u64 << (mant_bits - 1))
+    } else {
+        // FN: NaN = max exp + all-ones mantissa
+        let mant_mask = (1u64 << mant_bits) - 1;
+        (max_exp << mant_bits) | mant_mask
     }
 }
 
 fn encode_zero_raw(sign_bit: u64, ft: &FloatType) -> u64 {
-    match ft.semantics {
-        FloatSemantics::IEEE | FloatSemantics::FN => {
-            sign_bit << (ft.total_bits() as u32 - 1)
-        }
-        FloatSemantics::FNUZ => 0,
-    }
+    // Negative zero always exists in FloatType formats.
+    sign_bit << (ft.total_bits() as u32 - 1)
 }
 
 fn encode_infinity_raw(sign_bit: u64, ft: &FloatType) -> u64 {
-    match ft.semantics {
-        FloatSemantics::IEEE => {
-            let max_exp = ft.max_biased_exponent() as u64;
-            (sign_bit << (ft.total_bits() as u32 - 1)) | (max_exp << ft.mantissa_bits as u32)
-        }
-        FloatSemantics::FN | FloatSemantics::FNUZ => encode_max_finite_raw(sign_bit, ft),
+    if ft.has_infinity {
+        let max_exp = ft.max_biased_exponent() as u64;
+        (sign_bit << (ft.total_bits() as u32 - 1)) | (max_exp << ft.mantissa_bits as u32)
+    } else {
+        // No infinity — saturate to max finite value
+        encode_max_finite_raw(sign_bit, ft)
     }
 }
 
+/// Encode the maximum finite value for this format.
 fn encode_max_finite_raw(sign_bit: u64, ft: &FloatType) -> u64 {
     let mant_bits = ft.mantissa_bits as u32;
     let max_exp = ft.max_biased_exponent() as u64;
     let mant_mask = (1u64 << mant_bits) - 1;
 
-    let (exp_val, mant_val) = match ft.semantics {
-        FloatSemantics::IEEE => (max_exp - 1, mant_mask),
-        FloatSemantics::FN => (max_exp, mant_mask - 1),
-        FloatSemantics::FNUZ => (max_exp - 1, mant_mask),
+    let (exp_val, mant_val) = if ft.has_infinity {
+        // IEEE: max finite = (max_exp - 1) with all-ones mantissa
+        (max_exp - 1, mant_mask)
+    } else if ft.has_nan {
+        // FN: max exp row is valid except mant=all-ones (NaN).
+        // Max finite = max_exp with (all-ones - 1) mantissa.
+        (max_exp, mant_mask - 1)
+    } else {
+        // No inf, no NaN: entire max exp row is valid.
+        // Max finite = max_exp with all-ones mantissa.
+        (max_exp, mant_mask)
     };
 
     (sign_bit << (ft.total_bits() as u32 - 1)) | (exp_val << mant_bits) | mant_val
 }
 
 fn encode_overflow_raw(sign_bit: u64, ft: &FloatType) -> u64 {
-    match ft.semantics {
-        FloatSemantics::IEEE => encode_infinity_raw(sign_bit, ft),
-        FloatSemantics::FN | FloatSemantics::FNUZ => encode_max_finite_raw(sign_bit, ft),
+    if ft.has_infinity {
+        encode_infinity_raw(sign_bit, ft)
+    } else {
+        encode_max_finite_raw(sign_bit, ft)
     }
 }
 
@@ -476,7 +489,12 @@ fn encode_normal_raw(sign_bit: u64, frac_part: f64, true_exp: i32, ft: &FloatTyp
 
     if mant_int >= (1u64 << mant_bits) {
         let new_exp = biased_exp + 1;
-        if new_exp >= ft.max_biased_exponent() as u64 {
+        let max_usable = if ft.has_infinity || ft.has_nan {
+            ft.max_biased_exponent() as u64 - 1
+        } else {
+            ft.max_biased_exponent() as u64
+        };
+        if new_exp > max_usable {
             return encode_overflow_raw(sign_bit, ft);
         }
         return (sign_bit << (ft.total_bits() as u32 - 1)) | (new_exp << mant_bits);

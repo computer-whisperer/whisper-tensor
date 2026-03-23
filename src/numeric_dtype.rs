@@ -11,74 +11,139 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
-// FloatSemantics
-// ---------------------------------------------------------------------------
-
-/// Distinguishes float formats that share the same exponent/mantissa bit widths
-/// but differ in NaN, Inf, or negative-zero behavior.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum FloatSemantics {
-    /// Standard IEEE 754 — NaN, Inf, negative zero all present.
-    /// Covers F64, F32, F16, BF16, F8E5M2.
-    IEEE,
-    /// Finite, no infinities, special NaN encoding.
-    /// Covers F8E4M3FN, F4E2M1.
-    FN,
-    /// Finite, no negative zero, unsigned zero, different NaN.
-    /// Covers F8E4M3FNUZ, F8E5M2FNUZ.
-    FNUZ,
-}
-
-// ---------------------------------------------------------------------------
 // FloatType
 // ---------------------------------------------------------------------------
 
-/// A floating-point type, parameterized by exponent and mantissa width.
+/// An IEEE-like floating-point type, fully described by four properties.
 ///
-/// Total bits = 1 (sign) + exponent_bits + mantissa_bits.
+/// # Bit layout
+///
+/// Every value is encoded as: `[sign: 1 bit] [exponent: exponent_bits] [mantissa: mantissa_bits]`
+///
+/// # Value interpretation
+///
+/// Given raw fields `(sign_bit, biased_exp, raw_mant)`:
+///
+/// **Normal numbers** (`0 < biased_exp < max_biased_exp`, plus max-exp
+/// patterns not reserved for inf/NaN):
+/// ```text
+/// value = (-1)^sign * (1 + raw_mant / 2^mantissa_bits) * 2^(biased_exp - bias)
+/// ```
+///
+/// **Subnormal numbers** (`biased_exp == 0, raw_mant != 0`):
+/// ```text
+/// value = (-1)^sign * (raw_mant / 2^mantissa_bits) * 2^(1 - bias)
+/// ```
+///
+/// **Zero** (`biased_exp == 0, raw_mant == 0`): `±0.0` (both signs valid;
+/// negative zero always exists).
+///
+/// **Bias**: always `2^(exponent_bits - 1) - 1` (standard IEEE formula).
+///
+/// # Max-exponent encoding (`biased_exp == max_biased_exp`)
+///
+/// The `has_infinity` and `has_nan` flags uniquely determine how the
+/// max-exponent row is partitioned:
+///
+/// | `has_infinity` | `has_nan` | `mant == 0` | `0 < mant < all-ones` | `mant == all-ones` |
+/// |----------------|-----------|-------------|-----------------------|--------------------|
+/// | true           | true      | ±Infinity   | NaN                   | NaN                |
+/// | true           | false     | ±Infinity   | normal                | normal             |
+/// | false          | true      | normal      | normal                | NaN                |
+/// | false          | false     | normal      | normal                | normal             |
+///
+/// When `has_nan=true && has_infinity=true` (IEEE): all nonzero mantissa
+/// values at max exponent are NaN, `mant=0` is infinity.
+///
+/// When `has_nan=true && has_infinity=false` (FN): only `mant=all-ones`
+/// at max exponent is NaN; all other max-exponent patterns (including
+/// `mant=0`) are normal numbers.
+///
+/// When `has_nan=false`: the entire max-exponent row is normal numbers.
+/// No NaN representation exists in the format.
+///
+/// # Formats not covered
+///
+/// FNUZ formats (non-standard bias, negative-zero-as-NaN) and signless
+/// formats (E8M0) do not fit this decomposition and belong in separate
+/// [`NumericDType`] arms if needed.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct FloatType {
     pub exponent_bits: u8,
     pub mantissa_bits: u8,
-    pub semantics: FloatSemantics,
+    /// Whether `biased_exp=max, mant=0` encodes ±infinity.
+    /// If false, that bit pattern is a normal number.
+    pub has_infinity: bool,
+    /// Whether NaN exists in this format. The NaN encoding is determined
+    /// jointly with `has_infinity` — see the table in the struct docs.
+    pub has_nan: bool,
 }
 
 impl FloatType {
+    // -- Standard IEEE types --
+
     pub const F64: Self = FloatType {
         exponent_bits: 11,
         mantissa_bits: 52,
-        semantics: FloatSemantics::IEEE,
+        has_infinity: true,
+        has_nan: true,
     };
     pub const F32: Self = FloatType {
         exponent_bits: 8,
         mantissa_bits: 23,
-        semantics: FloatSemantics::IEEE,
+        has_infinity: true,
+        has_nan: true,
     };
     pub const F16: Self = FloatType {
         exponent_bits: 5,
         mantissa_bits: 10,
-        semantics: FloatSemantics::IEEE,
+        has_infinity: true,
+        has_nan: true,
     };
     pub const BF16: Self = FloatType {
         exponent_bits: 8,
         mantissa_bits: 7,
-        semantics: FloatSemantics::IEEE,
-    };
-    pub const F8E4M3FN: Self = FloatType {
-        exponent_bits: 4,
-        mantissa_bits: 3,
-        semantics: FloatSemantics::FN,
+        has_infinity: true,
+        has_nan: true,
     };
     pub const F8E5M2: Self = FloatType {
         exponent_bits: 5,
         mantissa_bits: 2,
-        semantics: FloatSemantics::IEEE,
+        has_infinity: true,
+        has_nan: true,
     };
+
+    // -- FN types (no infinity, single NaN) --
+
+    pub const F8E4M3FN: Self = FloatType {
+        exponent_bits: 4,
+        mantissa_bits: 3,
+        has_infinity: false,
+        has_nan: true,
+    };
+
+    // -- No-special-value types (no infinity, no NaN) --
+
     pub const F4E2M1: Self = FloatType {
         exponent_bits: 2,
         mantissa_bits: 1,
-        semantics: FloatSemantics::FN,
+        has_infinity: false,
+        has_nan: false,
     };
+    pub const F6E3M2: Self = FloatType {
+        exponent_bits: 3,
+        mantissa_bits: 2,
+        has_infinity: false,
+        has_nan: false,
+    };
+    pub const F6E2M3: Self = FloatType {
+        exponent_bits: 2,
+        mantissa_bits: 3,
+        has_infinity: false,
+        has_nan: false,
+    };
+
+    // -- Bounds --
 
     /// Maximum exponent bits supported. Bounded by f64's 11-bit exponent,
     /// which we use as the intermediate representation for software arithmetic.
@@ -87,12 +152,14 @@ impl FloatType {
     /// Maximum mantissa bits supported. Bounded by f64's 52-bit mantissa.
     pub const MAX_MANTISSA_BITS: u8 = 52;
 
+    // -- Derived properties --
+
     /// Total bits for one value: 1 (sign) + exponent + mantissa.
     pub const fn total_bits(&self) -> u8 {
         1 + self.exponent_bits + self.mantissa_bits
     }
 
-    /// The exponent bias: 2^(exponent_bits - 1) - 1.
+    /// The exponent bias: `2^(exponent_bits - 1) - 1`.
     pub const fn bias(&self) -> i32 {
         (1 << (self.exponent_bits - 1)) - 1
     }
@@ -106,24 +173,14 @@ impl FloatType {
     pub const fn is_supported(&self) -> bool {
         self.exponent_bits >= 1
             && self.exponent_bits <= Self::MAX_EXPONENT_BITS
+            && self.mantissa_bits >= 1
             && self.mantissa_bits <= Self::MAX_MANTISSA_BITS
             && self.total_bits() <= 64
     }
 }
 
-impl IntType {
-    /// Maximum bit width supported for integer types.
-    pub const MAX_BITS: u8 = 64;
-
-    /// Whether this configuration is within the supported bounds.
-    pub const fn is_supported(&self) -> bool {
-        self.bits >= 1 && self.bits <= Self::MAX_BITS
-    }
-}
-
 impl fmt::Display for FloatType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Use well-known names for standard types
         match *self {
             Self::F64 => write!(f, "F64"),
             Self::F32 => write!(f, "F32"),
@@ -132,10 +189,15 @@ impl fmt::Display for FloatType {
             Self::F8E4M3FN => write!(f, "F8E4M3FN"),
             Self::F8E5M2 => write!(f, "F8E5M2"),
             Self::F4E2M1 => write!(f, "F4E2M1"),
+            Self::F6E3M2 => write!(f, "F6E3M2"),
+            Self::F6E2M3 => write!(f, "F6E2M3"),
             _ => write!(
                 f,
-                "Float(e{}m{}{:?})",
-                self.exponent_bits, self.mantissa_bits, self.semantics
+                "Float(e{}m{}{}{})",
+                self.exponent_bits,
+                self.mantissa_bits,
+                if self.has_infinity { "" } else { "_noinf" },
+                if self.has_nan { "" } else { "_nonan" },
             ),
         }
     }
@@ -157,6 +219,14 @@ impl IntType {
     pub const BITS_16: Self = IntType { bits: 16 };
     pub const BITS_32: Self = IntType { bits: 32 };
     pub const BITS_64: Self = IntType { bits: 64 };
+
+    /// Maximum bit width supported for integer types.
+    pub const MAX_BITS: u8 = 64;
+
+    /// Whether this configuration is within the supported bounds.
+    pub const fn is_supported(&self) -> bool {
+        self.bits >= 1 && self.bits <= Self::MAX_BITS
+    }
 }
 
 impl fmt::Display for IntType {
@@ -190,6 +260,8 @@ impl NumericDType {
     pub const F8E4M3FN: Self = NumericDType::Float(FloatType::F8E4M3FN);
     pub const F8E5M2: Self = NumericDType::Float(FloatType::F8E5M2);
     pub const F4E2M1: Self = NumericDType::Float(FloatType::F4E2M1);
+    pub const F6E3M2: Self = NumericDType::Float(FloatType::F6E3M2);
+    pub const F6E2M3: Self = NumericDType::Float(FloatType::F6E2M3);
 
     pub const I64: Self = NumericDType::SignedInt(IntType::BITS_64);
     pub const I32: Self = NumericDType::SignedInt(IntType::BITS_32);
@@ -342,8 +414,6 @@ impl NumericDType {
             Self::U8 => DType::U8,
             Self::U4 => DType::U4,
             Self::BOOL => DType::BOOL,
-            // Non-standard float types have no legacy equivalent; convert to
-            // the closest named type by bit width, or fall back to F32.
             NumericDType::Float(ft) => match ft.total_bits() {
                 64 => DType::F64,
                 32 => DType::F32,
@@ -377,8 +447,6 @@ impl ONNXDType {
             DType::STRING => ONNXDType::String,
             other => match NumericDType::from_legacy(other) {
                 Some(ndt) => ONNXDType::Numeric(ndt),
-                // Packed types don't have an ONNXDType equivalent.
-                // This shouldn't happen in practice — Packed comes from GGUF, not ONNX.
                 None => panic!("DType::Packed has no ONNXDType representation"),
             },
         }
@@ -402,6 +470,21 @@ mod tests {
         assert_eq!(FloatType::F8E4M3FN.total_bits(), 8);
         assert_eq!(FloatType::F8E5M2.total_bits(), 8);
         assert_eq!(FloatType::F4E2M1.total_bits(), 4);
+        assert_eq!(FloatType::F6E3M2.total_bits(), 6);
+        assert_eq!(FloatType::F6E2M3.total_bits(), 6);
+    }
+
+    #[test]
+    fn float_type_bias() {
+        assert_eq!(FloatType::F64.bias(), 1023);
+        assert_eq!(FloatType::F32.bias(), 127);
+        assert_eq!(FloatType::F16.bias(), 15);
+        assert_eq!(FloatType::BF16.bias(), 127);
+        assert_eq!(FloatType::F8E5M2.bias(), 15);
+        assert_eq!(FloatType::F8E4M3FN.bias(), 7);
+        assert_eq!(FloatType::F4E2M1.bias(), 1);
+        assert_eq!(FloatType::F6E3M2.bias(), 3);
+        assert_eq!(FloatType::F6E2M3.bias(), 1);
     }
 
     #[test]
@@ -431,6 +514,8 @@ mod tests {
         assert_eq!(NumericDType::I64.to_string(), "I64");
         assert_eq!(NumericDType::U8.to_string(), "U8");
         assert_eq!(NumericDType::BOOL.to_string(), "Bool");
+        assert_eq!(NumericDType::F6E3M2.to_string(), "F6E3M2");
+        assert_eq!(NumericDType::F6E2M3.to_string(), "F6E2M3");
     }
 
     #[test]
@@ -442,23 +527,10 @@ mod tests {
     #[test]
     fn legacy_roundtrip() {
         let types = [
-            DType::F64,
-            DType::F32,
-            DType::BF16,
-            DType::F16,
-            DType::F8E4M3FN,
-            DType::F8E5M2,
-            DType::F4E2M1,
-            DType::I64,
-            DType::I32,
-            DType::I16,
-            DType::I8,
-            DType::I4,
-            DType::U64,
-            DType::U32,
-            DType::U16,
-            DType::U8,
-            DType::U4,
+            DType::F64, DType::F32, DType::BF16, DType::F16,
+            DType::F8E4M3FN, DType::F8E5M2, DType::F4E2M1,
+            DType::I64, DType::I32, DType::I16, DType::I8, DType::I4,
+            DType::U64, DType::U32, DType::U16, DType::U8, DType::U4,
             DType::BOOL,
         ];
         for dt in types {
@@ -497,13 +569,24 @@ mod tests {
 
     #[test]
     fn equality_by_structure() {
-        // Two FloatTypes with same fields are equal, even if not a named constant
         let custom = FloatType {
             exponent_bits: 8,
             mantissa_bits: 23,
-            semantics: FloatSemantics::IEEE,
+            has_infinity: true,
+            has_nan: true,
         };
         assert_eq!(custom, FloatType::F32);
         assert_eq!(NumericDType::Float(custom), NumericDType::F32);
+    }
+
+    #[test]
+    fn is_supported() {
+        assert!(FloatType::F32.is_supported());
+        assert!(FloatType::F4E2M1.is_supported());
+        assert!(FloatType::F6E3M2.is_supported());
+        // mantissa_bits=0 is unsupported
+        assert!(!(FloatType { exponent_bits: 8, mantissa_bits: 0, has_infinity: false, has_nan: false }).is_supported());
+        // exponent_bits > 11 is unsupported
+        assert!(!(FloatType { exponent_bits: 12, mantissa_bits: 4, has_infinity: true, has_nan: true }).is_supported());
     }
 }
