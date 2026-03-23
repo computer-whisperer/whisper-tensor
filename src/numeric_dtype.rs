@@ -543,7 +543,7 @@ mod tests {
     #[test]
     fn legacy_string_and_packed_return_none() {
         assert!(NumericDType::from_legacy(DType::STRING).is_none());
-        use crate::packed_format::PackedFormat;
+        use crate::migration::packed_format::PackedFormat;
         assert!(NumericDType::from_legacy(DType::Packed(PackedFormat::Q4_0)).is_none());
     }
 

@@ -9,11 +9,72 @@
 
 use std::fmt;
 
+use serde::{Deserialize, Serialize};
+
 use crate::numeric_dtype::NumericDType;
 use crate::numeric_scalar::{NumericScalar, NumericScalarView, NumericScalarViewMut};
-use crate::packed_format::PackedFormat;
 use crate::pool::Pool;
 use crate::tensor_rank::{DimContainer, Rank};
+
+// ---------------------------------------------------------------------------
+// KQuantVariant
+// ---------------------------------------------------------------------------
+
+/// K-quant format variant. Each has a unique internal block structure
+/// (hierarchical sub-blocks with format-specific bit packing).
+///
+/// All variants use 256-element super-blocks.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum KQuantVariant {
+    Q2_K,
+    Q3_K,
+    Q4_K,
+    Q5_K,
+    Q6_K,
+    Q8_K,
+}
+
+impl KQuantVariant {
+    /// Super-block size (always 256 for K-quants).
+    pub const BLOCK_SIZE: usize = 256;
+
+    /// Bytes per 256-element super-block.
+    pub fn block_bytes(self) -> usize {
+        match self {
+            KQuantVariant::Q2_K => 84,
+            KQuantVariant::Q3_K => 110,
+            KQuantVariant::Q4_K => 144,
+            KQuantVariant::Q5_K => 176,
+            KQuantVariant::Q6_K => 210,
+            KQuantVariant::Q8_K => 292,
+        }
+    }
+
+    /// Nominal bits per weight (for display/comparison, not exact).
+    pub fn weight_bits(self) -> u8 {
+        match self {
+            KQuantVariant::Q2_K => 2,
+            KQuantVariant::Q3_K => 3,
+            KQuantVariant::Q4_K => 4,
+            KQuantVariant::Q5_K => 5,
+            KQuantVariant::Q6_K => 6,
+            KQuantVariant::Q8_K => 8,
+        }
+    }
+}
+
+impl fmt::Display for KQuantVariant {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            KQuantVariant::Q2_K => write!(f, "Q2_K"),
+            KQuantVariant::Q3_K => write!(f, "Q3_K"),
+            KQuantVariant::Q4_K => write!(f, "Q4_K"),
+            KQuantVariant::Q5_K => write!(f, "Q5_K"),
+            KQuantVariant::Q6_K => write!(f, "Q6_K"),
+            KQuantVariant::Q8_K => write!(f, "Q8_K"),
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // TensorLayout
@@ -21,9 +82,9 @@ use crate::tensor_rank::{DimContainer, Rank};
 
 /// Complete description of how a tensor is packed into a contiguous memory region.
 ///
-/// Each arm is fully self-contained — it carries shape, dtype, and all format-
-/// specific metadata needed to compute buffer sizes, element offsets, and
-/// read/write elements from a `&[u8]` span. No back-references needed.
+/// Each arm is fully self-contained — it carries shape, dtype/format info, and
+/// all metadata needed to compute buffer sizes, element offsets, and read/write
+/// elements from a `&[u8]` span. No back-references needed.
 ///
 /// All core access methods live here. [`NumericTensor`] and [`NumericTensorView`]
 /// simply delegate to these methods, passing their data pointer.
@@ -34,15 +95,42 @@ pub enum TensorLayout<R: Rank> {
     ElementStrided {
         shape: R::KnownDims,
         dtype: NumericDType,
-        /// Per-dimension strides in bits. Always positive (no negative stride support).
+        /// Per-dimension strides in bits. Always positive.
         strides: R::KnownDims,
     },
-    /// Block-quantized with per-block scales/offsets (GGUF Q4_K, etc.)
-    /// Access is by block index + element within block, not by strides.
-    BlockQuantized {
+
+    /// Simple block quantization (GGUF legacy Q-types).
+    ///
+    /// Block structure: `[f16 scale][optional f16 min][weight_bits × 32 packed weights]`
+    /// - Symmetric (`has_min=false`): `value = scale * (weight - 2^(weight_bits-1))`
+    /// - Asymmetric (`has_min=true`): `value = scale * weight + min`
+    ///
+    /// Covers Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q8_1.
+    SimpleBlockQuant {
         shape: R::KnownDims,
-        format: PackedFormat,
+        /// Bits per quantized weight (4, 5, or 8).
+        weight_bits: u8,
+        /// Whether each block has a per-block minimum (f16).
+        /// False = symmetric quantization, true = asymmetric.
+        has_min: bool,
     },
+
+    /// K-quant hierarchical block format (GGUF K-types).
+    ///
+    /// 256-element super-blocks with format-specific internal structure
+    /// (sub-block scales, mixed bit packing). Each variant has unique
+    /// internals that aren't parametrizable.
+    KQuant {
+        shape: R::KnownDims,
+        variant: KQuantVariant,
+    },
+}
+
+// -- SimpleBlockQuant constants --
+
+impl<R: Rank> TensorLayout<R> {
+    /// Block size for simple block quantization (always 32 elements).
+    const SIMPLE_BLOCK_SIZE: usize = 32;
 }
 
 // -- Constructors --
@@ -69,34 +157,59 @@ impl<R: Rank> TensorLayout<R> {
         }
     }
 
-    /// Create a block-quantized layout.
-    pub fn block_quantized(shape: R::KnownDims, format: PackedFormat) -> Self {
-        TensorLayout::BlockQuantized { shape, format }
+    /// Create a simple block quantization layout.
+    pub fn simple_block_quant(shape: R::KnownDims, weight_bits: u8, has_min: bool) -> Self {
+        assert!(
+            matches!(weight_bits, 4 | 5 | 8),
+            "SimpleBlockQuant weight_bits must be 4, 5, or 8, got {weight_bits}"
+        );
+        TensorLayout::SimpleBlockQuant {
+            shape,
+            weight_bits,
+            has_min,
+        }
+    }
+
+    /// Create a K-quant layout.
+    pub fn k_quant(shape: R::KnownDims, variant: KQuantVariant) -> Self {
+        TensorLayout::KQuant { shape, variant }
     }
 }
 
-// -- Universal accessors (dispatch into arms) --
+// -- Universal accessors --
 
 impl<R: Rank> TensorLayout<R> {
     pub fn shape(&self) -> &R::KnownDims {
         match self {
-            TensorLayout::ElementStrided { shape, .. } => shape,
-            TensorLayout::BlockQuantized { shape, .. } => shape,
+            TensorLayout::ElementStrided { shape, .. }
+            | TensorLayout::SimpleBlockQuant { shape, .. }
+            | TensorLayout::KQuant { shape, .. } => shape,
         }
     }
 
     /// The numeric dtype for element-wise access.
-    /// Block-quantized formats dequantize to F32.
+    /// Quantized formats dequantize to F32.
     pub fn element_dtype(&self) -> NumericDType {
         match self {
             TensorLayout::ElementStrided { dtype, .. } => *dtype,
-            TensorLayout::BlockQuantized { .. } => NumericDType::F32,
+            TensorLayout::SimpleBlockQuant { .. } | TensorLayout::KQuant { .. } => {
+                NumericDType::F32
+            }
         }
     }
 
     /// Total number of elements.
     pub fn numel(&self) -> usize {
         self.shape().as_slice().iter().product::<u64>() as usize
+    }
+
+    /// Block size for quantized formats, or 1 for element-strided.
+    pub fn block_size(&self) -> usize {
+        match self {
+            TensorLayout::ElementStrided { .. } => 1,
+            TensorLayout::SimpleBlockQuant { .. } => Self::SIMPLE_BLOCK_SIZE,
+            TensorLayout::KQuant { .. } => KQuantVariant::BLOCK_SIZE,
+        }
     }
 
     /// Total buffer size in bytes needed to hold this tensor.
@@ -109,11 +222,8 @@ impl<R: Rank> TensorLayout<R> {
             } => {
                 let dims = shape.as_slice();
                 if dims.is_empty() {
-                    // Scalar tensor: one element, no dimensions
                     return dtype.bytes_per_element();
                 }
-                // For row-major contiguous: stride[0] * shape[0] gives total bits.
-                // General case: sum of (dim_i - 1) * stride_i + element_bits
                 let element_bits = dtype.total_bits() as u64;
                 let extent: u64 = dims
                     .iter()
@@ -123,15 +233,33 @@ impl<R: Rank> TensorLayout<R> {
                     + element_bits;
                 ((extent + 7) / 8) as usize
             }
-            TensorLayout::BlockQuantized { shape, format } => {
-                let numel: u64 = shape.as_slice().iter().product();
-                format.storage_bytes(numel as usize)
+            TensorLayout::SimpleBlockQuant {
+                shape,
+                weight_bits,
+                has_min,
+            } => {
+                let numel: usize = shape.as_slice().iter().product::<u64>() as usize;
+                let block_bytes = simple_block_bytes(*weight_bits, *has_min);
+                (numel / Self::SIMPLE_BLOCK_SIZE) * block_bytes
+            }
+            TensorLayout::KQuant { shape, variant } => {
+                let numel: usize = shape.as_slice().iter().product::<u64>() as usize;
+                (numel / KQuantVariant::BLOCK_SIZE) * variant.block_bytes()
             }
         }
     }
 }
 
-// -- Element access (takes a byte span as argument) --
+/// Bytes per 32-element block for simple block quantization.
+/// Layout: `[f16 scale (2B)] [optional f16 min (2B)] [weight_bits * 32 / 8 bytes]`
+fn simple_block_bytes(weight_bits: u8, has_min: bool) -> usize {
+    let scale_bytes = 2; // f16
+    let min_bytes = if has_min { 2 } else { 0 }; // optional f16
+    let weight_bytes = (weight_bits as usize * 32) / 8;
+    scale_bytes + min_bytes + weight_bytes
+}
+
+// -- Element access --
 
 impl<R: Rank> TensorLayout<R> {
     /// Read a single element by flat index from a byte buffer.
@@ -142,7 +270,8 @@ impl<R: Rank> TensorLayout<R> {
                 dtype,
                 strides,
             } => {
-                let bit_offset = flat_to_bit_offset(flat_index, shape.as_slice(), strides.as_slice());
+                let bit_offset =
+                    flat_to_bit_offset(flat_index, shape.as_slice(), strides.as_slice());
                 NumericScalarView {
                     data,
                     bit_offset,
@@ -150,10 +279,10 @@ impl<R: Rank> TensorLayout<R> {
                 }
                 .to_owned_scalar()
             }
-            TensorLayout::BlockQuantized { .. } => {
-                panic!(
-                    "Per-element read_element not yet implemented for block-quantized formats"
-                );
+            TensorLayout::SimpleBlockQuant { .. } | TensorLayout::KQuant { .. } => {
+                // TODO: per-element dequantization.
+                // For v1, quantized tensors are dequantized in bulk via PackedTensor.
+                panic!("Per-element read_element not yet implemented for quantized formats");
             }
         }
     }
@@ -173,7 +302,8 @@ impl<R: Rank> TensorLayout<R> {
                     value.dtype(),
                     dtype
                 );
-                let bit_offset = flat_to_bit_offset(flat_index, shape.as_slice(), strides.as_slice());
+                let bit_offset =
+                    flat_to_bit_offset(flat_index, shape.as_slice(), strides.as_slice());
                 let mut view = NumericScalarViewMut {
                     data,
                     bit_offset,
@@ -181,8 +311,8 @@ impl<R: Rank> TensorLayout<R> {
                 };
                 view.write_scalar(&value);
             }
-            TensorLayout::BlockQuantized { .. } => {
-                panic!("write_element not supported for block-quantized formats");
+            TensorLayout::SimpleBlockQuant { .. } | TensorLayout::KQuant { .. } => {
+                panic!("write_element not supported for quantized formats");
             }
         }
     }
@@ -203,6 +333,60 @@ fn flat_to_bit_offset(flat_index: usize, dims: &[u64], strides: &[u64]) -> usize
         bit_offset += idx * strides[i];
     }
     bit_offset as usize
+}
+
+// ---------------------------------------------------------------------------
+// Conversion from legacy PackedFormat
+// ---------------------------------------------------------------------------
+
+use crate::migration::packed_format::PackedFormat;
+
+impl<R: Rank> TensorLayout<R> {
+    /// Convert a legacy PackedFormat + shape into the appropriate TensorLayout arm.
+    pub fn from_legacy_packed(shape: R::KnownDims, format: PackedFormat) -> Self {
+        match format {
+            PackedFormat::Q4_0 => Self::simple_block_quant(shape, 4, false),
+            PackedFormat::Q4_1 => Self::simple_block_quant(shape, 4, true),
+            PackedFormat::Q5_0 => Self::simple_block_quant(shape, 5, false),
+            PackedFormat::Q5_1 => Self::simple_block_quant(shape, 5, true),
+            PackedFormat::Q8_0 => Self::simple_block_quant(shape, 8, false),
+            PackedFormat::Q8_1 => Self::simple_block_quant(shape, 8, true),
+            PackedFormat::Q2_K => Self::k_quant(shape, KQuantVariant::Q2_K),
+            PackedFormat::Q3_K => Self::k_quant(shape, KQuantVariant::Q3_K),
+            PackedFormat::Q4_K => Self::k_quant(shape, KQuantVariant::Q4_K),
+            PackedFormat::Q5_K => Self::k_quant(shape, KQuantVariant::Q5_K),
+            PackedFormat::Q6_K => Self::k_quant(shape, KQuantVariant::Q6_K),
+            PackedFormat::Q8_K => Self::k_quant(shape, KQuantVariant::Q8_K),
+        }
+    }
+
+    /// Convert back to a legacy PackedFormat (for quantized arms only).
+    pub fn to_legacy_packed(&self) -> Option<PackedFormat> {
+        match self {
+            TensorLayout::ElementStrided { .. } => None,
+            TensorLayout::SimpleBlockQuant {
+                weight_bits,
+                has_min,
+                ..
+            } => match (*weight_bits, *has_min) {
+                (4, false) => Some(PackedFormat::Q4_0),
+                (4, true) => Some(PackedFormat::Q4_1),
+                (5, false) => Some(PackedFormat::Q5_0),
+                (5, true) => Some(PackedFormat::Q5_1),
+                (8, false) => Some(PackedFormat::Q8_0),
+                (8, true) => Some(PackedFormat::Q8_1),
+                _ => None,
+            },
+            TensorLayout::KQuant { variant, .. } => Some(match variant {
+                KQuantVariant::Q2_K => PackedFormat::Q2_K,
+                KQuantVariant::Q3_K => PackedFormat::Q3_K,
+                KQuantVariant::Q4_K => PackedFormat::Q4_K,
+                KQuantVariant::Q5_K => PackedFormat::Q5_K,
+                KQuantVariant::Q6_K => PackedFormat::Q6_K,
+                KQuantVariant::Q8_K => PackedFormat::Q8_K,
+            }),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -352,6 +536,8 @@ mod tests {
     use crate::tensor_rank::DynRank;
     use half::bf16;
 
+    // -- ElementStrided --
+
     #[test]
     fn row_major_strides_f32() {
         let layout = TensorLayout::<DynRank>::row_major(vec![2, 3], NumericDType::F32);
@@ -361,7 +547,7 @@ mod tests {
             }
             _ => panic!("expected ElementStrided"),
         }
-        assert_eq!(layout.buffer_size_bytes(), 24); // 2*3*4 bytes
+        assert_eq!(layout.buffer_size_bytes(), 24);
     }
 
     #[test]
@@ -373,17 +559,13 @@ mod tests {
             }
             _ => panic!("expected ElementStrided"),
         }
-        assert_eq!(layout.buffer_size_bytes(), 1); // 8 bits = 1 byte
+        assert_eq!(layout.buffer_size_bytes(), 1);
     }
 
     #[test]
     fn scalar_tensor_has_nonzero_size() {
         let layout = TensorLayout::<DynRank>::row_major(vec![], NumericDType::F32);
-        assert_eq!(layout.numel(), 1); // product of empty dims = 1... actually no
-        // Product of empty slice is 1 by convention for iter().product()
-        // But for a scalar tensor, numel should be 1.
-        // Let's verify buffer size:
-        assert_eq!(layout.buffer_size_bytes(), 4); // one f32 = 4 bytes
+        assert_eq!(layout.buffer_size_bytes(), 4);
     }
 
     #[test]
@@ -411,7 +593,6 @@ mod tests {
                 NumericScalar::from_f64(i as f64 * 1.5).cast_to(NumericDType::F32),
             );
         }
-
         for i in 0..6 {
             let expected = NumericScalar::from_f32((i as f64 * 1.5) as f32);
             assert_eq!(t.read_element(i), expected, "element {i} mismatch");
@@ -450,13 +631,11 @@ mod tests {
     #[test]
     fn tracked_pool_tensor() {
         use crate::pool::TrackedPool;
-
         let pool = TrackedPool::new(Some(1024));
         let t =
             NumericTensor::<DynRank, TrackedPool>::zeros(vec![4, 4], NumericDType::F32, &pool)
                 .unwrap();
         assert_eq!(pool.bytes_in_use(), 64);
-
         drop(t);
         assert_eq!(pool.bytes_in_use(), 0);
     }
@@ -464,7 +643,6 @@ mod tests {
     #[test]
     fn tracked_pool_budget_prevents_allocation() {
         use crate::pool::{AllocationError, TrackedPool};
-
         let pool = TrackedPool::new(Some(32));
         let result =
             NumericTensor::<DynRank, TrackedPool>::zeros(vec![100], NumericDType::F32, &pool);
@@ -478,30 +656,19 @@ mod tests {
             NumericTensor::<DynRank, SystemPool>::zeros(vec![2], NumericDType::BF16, &pool)
                 .unwrap();
         assert_eq!(t.buffer().len(), 4);
-
         t.write_element(0, NumericScalar::from_bf16(bf16::from_f32(1.5)));
         t.write_element(1, NumericScalar::from_bf16(bf16::from_f32(-2.0)));
-
-        assert_eq!(
-            t.read_element(0),
-            NumericScalar::from_bf16(bf16::from_f32(1.5))
-        );
-        assert_eq!(
-            t.read_element(1),
-            NumericScalar::from_bf16(bf16::from_f32(-2.0))
-        );
+        assert_eq!(t.read_element(0), NumericScalar::from_bf16(bf16::from_f32(1.5)));
+        assert_eq!(t.read_element(1), NumericScalar::from_bf16(bf16::from_f32(-2.0)));
     }
 
     #[test]
     fn layout_read_write_without_tensor() {
-        // TensorLayout can read/write from raw byte slices directly
         let layout = TensorLayout::<DynRank>::row_major(vec![3], NumericDType::F32);
         let mut buf = vec![0u8; layout.buffer_size_bytes()];
-
         layout.write_element(&mut buf, 0, NumericScalar::from_f32(1.0));
         layout.write_element(&mut buf, 1, NumericScalar::from_f32(2.0));
         layout.write_element(&mut buf, 2, NumericScalar::from_f32(3.0));
-
         assert_eq!(layout.read_element(&buf, 0), NumericScalar::from_f32(1.0));
         assert_eq!(layout.read_element(&buf, 1), NumericScalar::from_f32(2.0));
         assert_eq!(layout.read_element(&buf, 2), NumericScalar::from_f32(3.0));
@@ -513,7 +680,7 @@ mod tests {
         assert_eq!(layout.shape(), &vec![2, 3]);
         assert_eq!(layout.element_dtype(), NumericDType::BF16);
         assert_eq!(layout.numel(), 6);
-        assert_eq!(layout.buffer_size_bytes(), 12); // 6 * 2 bytes
+        assert_eq!(layout.buffer_size_bytes(), 12);
     }
 
     #[test]
@@ -521,7 +688,107 @@ mod tests {
     fn write_element_dtype_mismatch_panics() {
         let layout = TensorLayout::<DynRank>::row_major(vec![2], NumericDType::F32);
         let mut buf = vec![0u8; layout.buffer_size_bytes()];
-        // Writing an I32 scalar into an F32 layout should panic
         layout.write_element(&mut buf, 0, NumericScalar::from_i32(42));
+    }
+
+    // -- SimpleBlockQuant --
+
+    #[test]
+    fn simple_block_quant_buffer_sizes() {
+        // Verify parametric block_bytes matches the legacy PackedFormat values
+        assert_eq!(simple_block_bytes(4, false), 18);  // Q4_0
+        assert_eq!(simple_block_bytes(4, true), 20);   // Q4_1
+        assert_eq!(simple_block_bytes(5, false), 22);  // Q5_0
+        assert_eq!(simple_block_bytes(5, true), 24);   // Q5_1
+        assert_eq!(simple_block_bytes(8, false), 34);  // Q8_0
+        assert_eq!(simple_block_bytes(8, true), 36);   // Q8_1
+    }
+
+    #[test]
+    fn simple_block_quant_layout() {
+        // 1024 elements in Q4_0: 1024/32 = 32 blocks × 18 bytes = 576
+        let layout =
+            TensorLayout::<DynRank>::simple_block_quant(vec![1024], 4, false);
+        assert_eq!(layout.buffer_size_bytes(), 576);
+        assert_eq!(layout.element_dtype(), NumericDType::F32);
+        assert_eq!(layout.numel(), 1024);
+        assert_eq!(layout.block_size(), 32);
+    }
+
+    // -- KQuant --
+
+    #[test]
+    fn k_quant_buffer_sizes() {
+        // 256 elements = 1 block
+        let cases: &[(KQuantVariant, usize)] = &[
+            (KQuantVariant::Q2_K, 84),
+            (KQuantVariant::Q3_K, 110),
+            (KQuantVariant::Q4_K, 144),
+            (KQuantVariant::Q5_K, 176),
+            (KQuantVariant::Q6_K, 210),
+            (KQuantVariant::Q8_K, 292),
+        ];
+        for &(variant, expected_bytes) in cases {
+            let layout = TensorLayout::<DynRank>::k_quant(vec![256], variant);
+            assert_eq!(
+                layout.buffer_size_bytes(),
+                expected_bytes,
+                "{variant} buffer size"
+            );
+            assert_eq!(layout.block_size(), 256);
+        }
+    }
+
+    #[test]
+    fn k_quant_multi_block() {
+        // 512 elements = 2 blocks of Q4_K (144 bytes each)
+        let layout = TensorLayout::<DynRank>::k_quant(vec![512], KQuantVariant::Q4_K);
+        assert_eq!(layout.buffer_size_bytes(), 288);
+    }
+
+    // -- Legacy conversion --
+
+    #[test]
+    fn legacy_packed_format_roundtrip() {
+        let legacy_formats = [
+            PackedFormat::Q4_0,
+            PackedFormat::Q4_1,
+            PackedFormat::Q5_0,
+            PackedFormat::Q5_1,
+            PackedFormat::Q8_0,
+            PackedFormat::Q8_1,
+            PackedFormat::Q2_K,
+            PackedFormat::Q3_K,
+            PackedFormat::Q4_K,
+            PackedFormat::Q5_K,
+            PackedFormat::Q6_K,
+            PackedFormat::Q8_K,
+        ];
+        for fmt in legacy_formats {
+            let shape: Vec<u64> = vec![256]; // minimum for K-quants
+            let layout = TensorLayout::<DynRank>::from_legacy_packed(shape.clone(), fmt);
+            let back = layout.to_legacy_packed().unwrap();
+            assert_eq!(fmt, back, "roundtrip failed for {fmt}");
+        }
+    }
+
+    #[test]
+    fn legacy_buffer_size_matches() {
+        // Verify our buffer_size_bytes matches the legacy PackedFormat::storage_bytes
+        let cases: &[(PackedFormat, usize)] = &[
+            (PackedFormat::Q4_0, 1024),
+            (PackedFormat::Q4_K, 256),
+            (PackedFormat::Q6_K, 512),
+        ];
+        for &(fmt, numel) in cases {
+            let shape: Vec<u64> = vec![numel as u64];
+            let legacy_bytes = fmt.storage_bytes(numel);
+            let layout = TensorLayout::<DynRank>::from_legacy_packed(shape, fmt);
+            assert_eq!(
+                layout.buffer_size_bytes(),
+                legacy_bytes,
+                "buffer size mismatch for {fmt} with {numel} elements"
+            );
+        }
     }
 }

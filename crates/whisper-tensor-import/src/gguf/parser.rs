@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::io::{Read, Seek};
 use std::path::{Path, PathBuf};
 use whisper_tensor::dtype::DType;
-use whisper_tensor::packed_format::PackedFormat;
+use whisper_tensor::migration::packed_format::PackedFormat;
 
 const GGUF_MAGIC: u32 = 0x46554747; // "GGUF" as LE u32
 const GGUF_VERSION_3: u32 = 3;

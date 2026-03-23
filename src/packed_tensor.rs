@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::backends::ndarray_backend::NDArrayNumericTensor;
 use crate::dtype::DType;
-use crate::packed_format::PackedFormat;
+use crate::migration::packed_format::PackedFormat;
 use crate::tensor_rank::{DimContainer, DynRank, Rank};
 
 /// A block-packed tensor whose data is not element-addressable.

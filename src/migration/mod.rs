@@ -7,3 +7,4 @@
 pub mod numeric_scalar;
 pub mod numeric_tensor;
 pub mod numeric_tensor_typed;
+pub mod packed_format;
