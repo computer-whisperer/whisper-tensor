@@ -163,7 +163,7 @@ impl<'a, R: Rank> NumericTensorView<'a, R> {
                     bit_offset,
                     dtype: *dtype,
                 }
-                .to_owned()
+                .to_owned_scalar()
             }
             StorageFormat::BlockQuantized(_fmt) => {
                 // TODO: per-element dequantization for block-quantized formats.
@@ -367,7 +367,7 @@ mod tests {
 
         // Write values
         for i in 0..6 {
-            t.write_element(i, NumericScalar::from_f64_with_dtype(i as f64 * 1.5, NumericDType::F32));
+            t.write_element(i, NumericScalar::from_f64(i as f64 * 1.5).cast_to(NumericDType::F32));
         }
 
         // Read back — assert bit-equality with the expected f32 value
@@ -387,10 +387,10 @@ mod tests {
         let mut t =
             NumericTensor::<DynRank, SystemPool>::zeros(shape, NumericDType::I32, &pool).unwrap();
 
-        t.write_element(0, NumericScalar::from_f64_with_dtype(-100.0, NumericDType::I32));
-        t.write_element(1, NumericScalar::from_f64_with_dtype(0.0, NumericDType::I32));
-        t.write_element(2, NumericScalar::from_f64_with_dtype(42.0, NumericDType::I32));
-        t.write_element(3, NumericScalar::from_f64_with_dtype(1000.0, NumericDType::I32));
+        t.write_element(0, NumericScalar::from_f64(-100.0).cast_to(NumericDType::I32));
+        t.write_element(1, NumericScalar::from_f64(0.0).cast_to(NumericDType::I32));
+        t.write_element(2, NumericScalar::from_f64(42.0).cast_to(NumericDType::I32));
+        t.write_element(3, NumericScalar::from_f64(1000.0).cast_to(NumericDType::I32));
 
         assert_eq!(t.read_element(0), NumericScalar::from_i32(-100));
         assert_eq!(t.read_element(1), NumericScalar::from_i32(0));
@@ -404,7 +404,7 @@ mod tests {
         let shape: Vec<u64> = vec![3];
         let mut t =
             NumericTensor::<DynRank, SystemPool>::zeros(shape, NumericDType::F32, &pool).unwrap();
-        t.write_element(1, NumericScalar::from_f64_with_dtype(7.0, NumericDType::F32));
+        t.write_element(1, NumericScalar::from_f64(7.0).cast_to(NumericDType::F32));
 
         // View has no pool type parameter
         let view: NumericTensorView<'_, DynRank> = t.view();
@@ -445,8 +445,8 @@ mod tests {
             NumericTensor::<DynRank, SystemPool>::zeros(shape, NumericDType::BF16, &pool).unwrap();
         assert_eq!(t.buffer().len(), 4); // 2 * 2 bytes
 
-        t.write_element(0, NumericScalar::from_f64_with_dtype(1.5, NumericDType::BF16));
-        t.write_element(1, NumericScalar::from_f64_with_dtype(-2.0, NumericDType::BF16));
+        t.write_element(0, NumericScalar::from_f64(1.5).cast_to(NumericDType::BF16));
+        t.write_element(1, NumericScalar::from_f64(-2.0).cast_to(NumericDType::BF16));
 
         assert_eq!(t.read_element(0), NumericScalar::from_bf16(bf16::from_f32(1.5)));
         assert_eq!(t.read_element(1), NumericScalar::from_bf16(bf16::from_f32(-2.0)));

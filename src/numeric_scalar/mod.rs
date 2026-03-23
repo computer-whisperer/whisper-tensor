@@ -102,8 +102,17 @@ impl std::fmt::Debug for NumericScalar {
 
 impl std::fmt::Display for NumericScalar {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Delegate to core_conversions for a human-readable value
-        write!(f, "{}", core_conversions::display_scalar(self))
+        // Use the software decode path for display
+        match self.dtype {
+            NumericDType::Float(_) => write!(f, "{}", self.to_f64()),
+            NumericDType::SignedInt(_) => write!(f, "{}", self.to_i64()),
+            NumericDType::UnsignedInt(_) => {
+                // Read raw bits and display as unsigned
+                let raw = self.view().read_raw();
+                write!(f, "{raw}")
+            }
+            NumericDType::Bool => write!(f, "{}", self.is_nonzero()),
+        }
     }
 }
 

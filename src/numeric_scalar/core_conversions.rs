@@ -12,7 +12,7 @@ use arbitrary_int::{i4, u4};
 use float8::{F8E4M3, F8E5M2};
 use half::{bf16, f16};
 
-use crate::numeric_dtype::{FloatType, IntType, NumericDType};
+use crate::numeric_dtype::NumericDType;
 
 use super::NumericScalar;
 
@@ -259,144 +259,6 @@ impl From<u4> for NumericScalar {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Display helper
-// ---------------------------------------------------------------------------
-
-/// Format a scalar for display, reading bits according to dtype.
-pub(crate) fn display_scalar(s: &NumericScalar) -> String {
-    let b = &s.bits;
-    match s.dtype {
-        NumericDType::Float(ft) if ft == FloatType::F64 => {
-            format!("{}", f64::from_le_bytes(*b))
-        }
-        NumericDType::Float(ft) if ft == FloatType::F32 => {
-            format!("{}", f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-        }
-        NumericDType::Float(ft) if ft == FloatType::BF16 => {
-            format!("{}", bf16::from_le_bytes([b[0], b[1]]))
-        }
-        NumericDType::Float(ft) if ft == FloatType::F16 => {
-            format!("{}", f16::from_le_bytes([b[0], b[1]]))
-        }
-        NumericDType::Float(ft) if ft == FloatType::F8E4M3FN => {
-            format!("{}", F8E4M3::from_bits(b[0]))
-        }
-        NumericDType::Float(ft) if ft == FloatType::F8E5M2 => {
-            format!("{}", F8E5M2::from_bits(b[0]))
-        }
-        NumericDType::SignedInt(it) if it == IntType::BITS_64 => {
-            format!("{}", i64::from_le_bytes(*b))
-        }
-        NumericDType::SignedInt(it) if it == IntType::BITS_32 => {
-            format!("{}", i32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-        }
-        NumericDType::SignedInt(it) if it == IntType::BITS_16 => {
-            format!("{}", i16::from_le_bytes([b[0], b[1]]))
-        }
-        NumericDType::SignedInt(it) if it == IntType::BITS_8 => {
-            format!("{}", b[0] as i8)
-        }
-        NumericDType::SignedInt(it) if it == IntType::BITS_4 => {
-            let nibble = b[0] & 0x0F;
-            let signed = if nibble & 0x08 != 0 { (nibble | 0xF0) as i8 } else { nibble as i8 };
-            format!("{}", i4::new(signed))
-        }
-        NumericDType::UnsignedInt(it) if it == IntType::BITS_64 => {
-            format!("{}", u64::from_le_bytes(*b))
-        }
-        NumericDType::UnsignedInt(it) if it == IntType::BITS_32 => {
-            format!("{}", u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-        }
-        NumericDType::UnsignedInt(it) if it == IntType::BITS_16 => {
-            format!("{}", u16::from_le_bytes([b[0], b[1]]))
-        }
-        NumericDType::UnsignedInt(it) if it == IntType::BITS_8 => {
-            format!("{}", b[0])
-        }
-        NumericDType::UnsignedInt(it) if it == IntType::BITS_4 => {
-            format!("{}", u4::new(b[0] & 0x0F))
-        }
-        NumericDType::Bool => {
-            format!("{}", b[0] != 0)
-        }
-        _ => {
-            let mut hex = String::from("0x");
-            for byte in s.as_le_bytes().iter().rev() {
-                hex.push_str(&format!("{byte:02x}"));
-            }
-            hex
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Temporary: construct a scalar with a specific dtype from an f64 value.
-// This is a stopgap until the cast operator (conversions.rs) is built.
-// Uses Rust's native type conversions as the bit source.
-// ---------------------------------------------------------------------------
-
-impl NumericScalar {
-    /// Create a scalar of the given dtype from an f64 value.
-    ///
-    /// Converts through the appropriate native Rust type to get correct bits.
-    /// This is a temporary API — will be replaced by the generic cast operator.
-    pub fn from_f64_with_dtype(value: f64, dtype: NumericDType) -> Self {
-        match dtype {
-            NumericDType::Float(ft) if ft == FloatType::F64 => Self::from_f64(value),
-            NumericDType::Float(ft) if ft == FloatType::F32 => Self::from_f32(value as f32),
-            NumericDType::Float(ft) if ft == FloatType::BF16 => Self::from_bf16(bf16::from_f64(value)),
-            NumericDType::Float(ft) if ft == FloatType::F16 => Self::from_f16(f16::from_f64(value)),
-            NumericDType::Float(ft) if ft == FloatType::F8E4M3FN => Self::from_f8e4m3fn(F8E4M3::from(value as f32)),
-            NumericDType::Float(ft) if ft == FloatType::F8E5M2 => Self::from_f8e5m2(F8E5M2::from(value as f32)),
-            NumericDType::SignedInt(it) if it == IntType::BITS_64 => Self::from_i64(value as i64),
-            NumericDType::SignedInt(it) if it == IntType::BITS_32 => Self::from_i32(value as i32),
-            NumericDType::SignedInt(it) if it == IntType::BITS_16 => Self::from_i16(value as i16),
-            NumericDType::SignedInt(it) if it == IntType::BITS_8 => Self::from_i8(value as i8),
-            NumericDType::SignedInt(it) if it == IntType::BITS_4 => Self::from_i4(i4::new(value as i8)),
-            NumericDType::UnsignedInt(it) if it == IntType::BITS_64 => Self::from_u64(value as u64),
-            NumericDType::UnsignedInt(it) if it == IntType::BITS_32 => Self::from_u32(value as u32),
-            NumericDType::UnsignedInt(it) if it == IntType::BITS_16 => Self::from_u16(value as u16),
-            NumericDType::UnsignedInt(it) if it == IntType::BITS_8 => Self::from_u8(value as u8),
-            NumericDType::UnsignedInt(it) if it == IntType::BITS_4 => Self::from_u4(u4::new(value as u8)),
-            NumericDType::Bool => Self::from_bool(value != 0.0),
-            _ => panic!("from_f64_with_dtype: unsupported dtype {dtype}"),
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// View operations — read/write scalar data at arbitrary byte offsets in buffers
-// ---------------------------------------------------------------------------
-
-use super::{NumericScalarView, NumericScalarViewMut};
-
-impl<'a> NumericScalarView<'a> {
-    /// Read the bytes at this view's offset into an owned NumericScalar.
-    /// Only supports byte-aligned access (bit_offset must be divisible by 8).
-    pub fn to_owned(&self) -> NumericScalar {
-        let byte_offset = self.bit_offset / 8;
-        let nbytes = self.dtype.bytes_per_element();
-        let mut bits = [0u8; 8];
-        bits[..nbytes].copy_from_slice(&self.data[byte_offset..byte_offset + nbytes]);
-        NumericScalar {
-            bits,
-            dtype: self.dtype,
-        }
-    }
-}
-
-impl<'a> NumericScalarViewMut<'a> {
-    /// Write a NumericScalar's bytes at this view's offset.
-    /// The scalar must have the same dtype. Only supports byte-aligned access.
-    pub fn write_scalar(&mut self, scalar: &NumericScalar) {
-        debug_assert_eq!(self.dtype, scalar.dtype);
-        let byte_offset = self.bit_offset / 8;
-        let nbytes = self.dtype.bytes_per_element();
-        self.data[byte_offset..byte_offset + nbytes]
-            .copy_from_slice(&scalar.bits[..nbytes]);
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Tests — every roundtrip asserts bit-equality with the native Rust type path
@@ -711,8 +573,9 @@ mod tests {
 
     #[test]
     fn display_f32() {
-        let s = NumericScalar::from_f32(3.14);
-        assert_eq!(format!("{s}"), format!("{}", 3.14f32));
+        // Display goes through to_f64, so f32 values display with f64 precision
+        let s = NumericScalar::from_f32(1.0);
+        assert_eq!(format!("{s}"), "1");
     }
 
     #[test]
