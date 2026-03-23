@@ -324,6 +324,7 @@ impl<'a, R: Rank, P: Pool + 'a> fmt::Debug for NumericTensor<'a, R, P> {
 mod tests {
     use super::*;
     use crate::pool::SystemPool;
+    use crate::tensor_rank::DynRank;
     use half::bf16;
 
     #[test]

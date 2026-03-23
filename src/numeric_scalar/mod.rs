@@ -4,6 +4,7 @@
 //! [`NumericScalarView`] / [`NumericScalarViewMut`] provide zero-copy access
 //! into byte buffers at arbitrary bit offsets.
 
+pub mod conversions;
 pub mod core_conversions;
 
 use crate::numeric_dtype::NumericDType;

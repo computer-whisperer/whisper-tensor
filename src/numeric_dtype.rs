@@ -80,9 +80,44 @@ impl FloatType {
         semantics: FloatSemantics::FN,
     };
 
+    /// Maximum exponent bits supported. Bounded by f64's 11-bit exponent,
+    /// which we use as the intermediate representation for software arithmetic.
+    pub const MAX_EXPONENT_BITS: u8 = 11;
+
+    /// Maximum mantissa bits supported. Bounded by f64's 52-bit mantissa.
+    pub const MAX_MANTISSA_BITS: u8 = 52;
+
     /// Total bits for one value: 1 (sign) + exponent + mantissa.
     pub const fn total_bits(&self) -> u8 {
         1 + self.exponent_bits + self.mantissa_bits
+    }
+
+    /// The exponent bias: 2^(exponent_bits - 1) - 1.
+    pub const fn bias(&self) -> i32 {
+        (1 << (self.exponent_bits - 1)) - 1
+    }
+
+    /// Maximum biased exponent value (all exponent bits set).
+    pub const fn max_biased_exponent(&self) -> u32 {
+        (1u32 << self.exponent_bits) - 1
+    }
+
+    /// Whether this configuration is within the supported bounds.
+    pub const fn is_supported(&self) -> bool {
+        self.exponent_bits >= 1
+            && self.exponent_bits <= Self::MAX_EXPONENT_BITS
+            && self.mantissa_bits <= Self::MAX_MANTISSA_BITS
+            && self.total_bits() <= 64
+    }
+}
+
+impl IntType {
+    /// Maximum bit width supported for integer types.
+    pub const MAX_BITS: u8 = 64;
+
+    /// Whether this configuration is within the supported bounds.
+    pub const fn is_supported(&self) -> bool {
+        self.bits >= 1 && self.bits <= Self::MAX_BITS
     }
 }
 
