@@ -2,7 +2,7 @@ use crate::backends::ndarray_backend::NDArrayNumericTensor;
 use crate::graph::{GlobalId, Graph, Node, Property, PropertyValue};
 use crate::milli_graph::ops::*;
 use crate::milli_graph::{MilliLoweringContext, MilliOpGraph};
-use crate::numeric_scalar::NumericScalar;
+use crate::migration::numeric_scalar::NumericScalar;
 use crate::symbolic_graph::ops::Operation;
 use crate::symbolic_graph::{
     ONNXDecodingError, query_attribute_float, query_attribute_floats, query_attribute_int,

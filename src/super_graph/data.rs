@@ -1,5 +1,5 @@
 use crate::DynRank;
-use crate::numeric_tensor::NumericTensor;
+use crate::migration::numeric_tensor::NumericTensor;
 use crate::super_graph::links::{
     SuperGraphAnyLink, SuperGraphAtomicLinkKind, SuperGraphLink, SuperGraphLinkDouble,
     SuperGraphLinkKind,

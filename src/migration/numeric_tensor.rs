@@ -8,8 +8,8 @@ use typenum::P1;
 
 use crate::TrigOp;
 use crate::backends::ndarray_backend::conversions::NDArrayNumericTensorType;
-use crate::numeric_scalar::NumericScalar;
-use crate::numeric_tensor_typed::NumericTensorTyped;
+use crate::migration::numeric_scalar::NumericScalar;
+use crate::migration::numeric_tensor_typed::NumericTensorTyped;
 use crate::packed_tensor::PackedTensor;
 use crate::tensor_rank::{DimContainer, DynRank, Rank};
 

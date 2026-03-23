@@ -110,7 +110,7 @@ fn rwkv01b_single_step_runs_shape_sanity() {
     // Prepare zeroed inputs by introspecting model input tensor info
     let input_infos = model.get_input_tensor_info().expect("introspect inputs");
     use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
-    use whisper_tensor::{dtype::DType, numeric_tensor::NumericTensor};
+    use whisper_tensor::{dtype::DType, migration::numeric_tensor::NumericTensor};
 
     let mut inputs = std::collections::HashMap::new();
     for (name, (dtype, shape_desc)) in input_infos.into_iter() {
@@ -209,7 +209,7 @@ fn rwkv01b_nano_graph_integrity() {
     use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
     use whisper_tensor::graph::GlobalId;
     use whisper_tensor::nano_graph::{eval, lower, pattern::AtomRange};
-    use whisper_tensor::numeric_tensor::NumericTensor;
+    use whisper_tensor::migration::numeric_tensor::NumericTensor;
     use whisper_tensor::tensor_info::TensorInfo;
     use whisper_tensor::{DynRank, dtype::DType};
 

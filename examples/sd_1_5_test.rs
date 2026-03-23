@@ -6,7 +6,7 @@ use whisper_tensor::DynRank;
 use whisper_tensor::backends::eval_backend::EvalBackend;
 use whisper_tensor::interfaces::ImageGenerationInterface;
 use whisper_tensor::model::Model;
-use whisper_tensor::numeric_tensor::NumericTensor;
+use whisper_tensor::migration::numeric_tensor::NumericTensor;
 #[allow(unused_imports)]
 use whisper_tensor::symbolic_graph::observer::SymbolicGraphObserver;
 use whisper_tensor_import::identify_and_load;

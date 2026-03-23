@@ -10,8 +10,8 @@ use crate::dtype::DType;
 use crate::graph::{
     GlobalId, Graph, Link, LinkCategory, LinkMetadata, Node, NodeMetadata, Property,
 };
-use crate::numeric_scalar::NumericScalar;
-use crate::numeric_tensor::NumericTensor;
+use crate::migration::numeric_scalar::NumericScalar;
+use crate::migration::numeric_tensor::NumericTensor;
 use crate::scalar_info::ScalarInfoTyped;
 use crate::symbolic_graph::observer::SymbolicGraphObserver;
 use crate::symbolic_graph::ops::{AnyOperation, EvalError, Operation};
@@ -3116,7 +3116,7 @@ mod tests {
         let test_data_dir = dir_path.join("test_data_set_0");
         let mut user_inputs: HashMap<
             String,
-            crate::numeric_tensor::NumericTensor<crate::tensor_rank::DynRank>,
+            crate::migration::numeric_tensor::NumericTensor<crate::tensor_rank::DynRank>,
         > = HashMap::new();
         for entry in std::fs::read_dir(&test_data_dir).unwrap() {
             let entry = entry.unwrap();
@@ -3146,7 +3146,7 @@ mod tests {
         let initialized_tensors = graph.get_initialized_tensors(&tensor_store);
         let mut all_inputs: HashMap<
             GlobalId,
-            crate::numeric_tensor::NumericTensor<crate::tensor_rank::DynRank>,
+            crate::migration::numeric_tensor::NumericTensor<crate::tensor_rank::DynRank>,
         > = initialized_tensors;
         let tensors_by_name = graph.get_tensors_by_name();
         for (name, tensor) in &user_inputs {
@@ -3364,7 +3364,7 @@ mod tests {
             BackwardGenOptions, ExternalGradient, LossInputSource, LossWiring,
             MilliGraphGenOptions, MilliOpGraph,
         };
-        use crate::numeric_tensor::NumericTensor;
+        use crate::migration::numeric_tensor::NumericTensor;
         use crate::scalar_info::ScalarInfoTyped;
         use crate::tensor_rank::DynRank;
 
@@ -3506,7 +3506,7 @@ mod tests {
         // This simulates LoRA adapter injection.
         use crate::backends::eval_backend::EvalBackend;
         use crate::dtype::DType;
-        use crate::numeric_tensor::NumericTensor;
+        use crate::migration::numeric_tensor::NumericTensor;
         use crate::scalar_info::ScalarInfoTyped;
         use crate::tensor_rank::DynRank;
 

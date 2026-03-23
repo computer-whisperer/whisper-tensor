@@ -1059,7 +1059,7 @@ mod tests {
     use crate::backends::eval_backend::EvalBackend;
     use crate::backends::ndarray_backend::NDArrayNumericTensor;
     use crate::graph::GlobalId;
-    use crate::numeric_tensor::NumericTensor;
+    use crate::migration::numeric_tensor::NumericTensor;
     use crate::tensor_rank::DynRank;
     use half::bf16;
 

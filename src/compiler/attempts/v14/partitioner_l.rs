@@ -1045,7 +1045,7 @@ mod tests {
     use super::*;
     use crate::dtype::DType;
     use crate::nano_graph::ops::{ReduceKind, ScalarBinOp, ScalarUnaryOp};
-    use crate::numeric_scalar::NumericScalar;
+    use crate::migration::numeric_scalar::NumericScalar;
 
     const NUM_LANES: usize = 4;
 

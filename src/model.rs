@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use crate::backends::eval_backend::{EvalBackend, EvalRuntimeError};
 use crate::backends::{ModelLoadedTensorCache, eval_backend};
 use crate::dtype::DType;
-use crate::numeric_tensor::{NumericTensor, NumericTensorError};
+use crate::migration::numeric_tensor::{NumericTensor, NumericTensorError};
 use prost::DecodeError;
 use rand::Rng;
 

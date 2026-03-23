@@ -13,7 +13,7 @@ use crate::milli_graph::MilliOpGraph;
 use crate::milli_graph::ops::AnyMilliOp;
 use crate::nano_graph::ops::ScalarOp;
 use crate::nano_graph::pattern::{AtomId, InputRef, NanoGraph, SymDim};
-use crate::numeric_scalar::NumericScalar;
+use crate::migration::numeric_scalar::NumericScalar;
 use crate::tensor_info::TensorInfo;
 
 /// Common accessors for reduce ops (ReduceSum, ReduceMax, ReduceMean).
@@ -1586,7 +1586,7 @@ mod tests {
     use crate::milli_graph::ops::MilliOp;
     use crate::nano_graph::eval;
     use crate::nano_graph::pattern::AtomRange;
-    use crate::numeric_tensor::NumericTensor;
+    use crate::migration::numeric_tensor::NumericTensor;
 
     /// Extract flat values from a NumericTensor, returned as f64.
     fn tensor_to_f64(t: &NumericTensor<DynRank>) -> Vec<f64> {
@@ -1916,9 +1916,9 @@ mod tests {
             crate::dtype::DType::F32,
             &mut rng,
         );
-        let a_tensor: crate::numeric_tensor::NumericTensor<crate::DynRank> =
+        let a_tensor: crate::migration::numeric_tensor::NumericTensor<crate::DynRank> =
             NumericTensor::from_vec_shape(vec![1.0f32; 4 * 8], vec![4, 8]).unwrap();
-        let b_tensor: crate::numeric_tensor::NumericTensor<crate::DynRank> =
+        let b_tensor: crate::migration::numeric_tensor::NumericTensor<crate::DynRank> =
             NumericTensor::from_vec_shape(vec![1.0f32; 8 * 16], vec![8, 16]).unwrap();
 
         let mut info = std::collections::HashMap::new();
@@ -3176,7 +3176,7 @@ mod tests {
 
     #[test]
     fn test_constant_of_shape() {
-        use crate::numeric_scalar::NumericScalar;
+        use crate::migration::numeric_scalar::NumericScalar;
         // ConstantOfShape(shape=[2,3], val=7.0) → [2,3] of 7s.
         // Then add with an input to force nano eval of the constant.
         check_integrity(

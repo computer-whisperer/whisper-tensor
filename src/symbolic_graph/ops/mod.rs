@@ -100,7 +100,7 @@ use crate::backends::ndarray_backend::NDArrayNumericTensorError;
 use crate::dtype::{DType, DTypeError};
 use crate::graph::{GlobalId, Node, Property};
 use crate::milli_graph::{MilliLoweringContext, MilliOpGraph, MilliOpGraphError};
-use crate::numeric_tensor::{NumericTensor, NumericTensorError};
+use crate::migration::numeric_tensor::{NumericTensor, NumericTensorError};
 use crate::symbolic_graph::SymbolicGraph;
 use crate::tensor_rank::DynRank;
 use rand::Rng;

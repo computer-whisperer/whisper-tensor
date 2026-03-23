@@ -1,5 +1,5 @@
 use crate::dtype::DType;
-use crate::numeric_tensor::NumericTensor;
+use crate::migration::numeric_tensor::NumericTensor;
 use crate::packed_tensor::PackedTensor;
 use crate::tensor_rank::DynRank;
 use serde::{Deserialize, Serialize};

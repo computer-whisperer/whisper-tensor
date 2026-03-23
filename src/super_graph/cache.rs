@@ -1,6 +1,6 @@
 use crate::DynRank;
 use crate::backends::ModelLoadedTensorCache;
-use crate::numeric_tensor::NumericTensor;
+use crate::migration::numeric_tensor::NumericTensor;
 use crate::symbolic_graph::tensor_store::TensorStore;
 use std::collections::HashMap;
 

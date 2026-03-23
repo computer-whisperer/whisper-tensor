@@ -340,7 +340,7 @@ impl NanoGraph {
                 count,
                 atom_offset: 0,
                 output_dtype,
-                op: ScalarOp::Literal(crate::numeric_scalar::NumericScalar::F32(0.0)),
+                op: ScalarOp::Literal(crate::migration::numeric_scalar::NumericScalar::F32(0.0)),
                 sym_dims: vec![],
                 inputs: vec![],
             },
@@ -922,7 +922,7 @@ mod tests {
     use super::*;
     use crate::dtype::DType;
     use crate::nano_graph::ops::{ReduceKind, ScalarBinOp, ScalarOp, ScalarUnaryOp};
-    use crate::numeric_scalar::NumericScalar;
+    use crate::migration::numeric_scalar::NumericScalar;
 
     /// Build a tiny graph: c = a + b, elementwise over 1024 atoms.
     #[test]

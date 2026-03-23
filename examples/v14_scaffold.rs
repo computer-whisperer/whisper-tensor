@@ -283,22 +283,22 @@ fn main() {
         let num_elements: u64 = shape.iter().product();
         let shape_usize: Vec<usize> = shape.iter().map(|&d| d as usize).collect();
         println!("Input '{}': {:?} {:?}", name, dtype, shape);
-        let tensor: whisper_tensor::numeric_tensor::NumericTensor<whisper_tensor::DynRank> =
+        let tensor: whisper_tensor::migration::numeric_tensor::NumericTensor<whisper_tensor::DynRank> =
             match dtype {
                 DType::I64 => {
                     let data: Vec<i64> = (0..num_elements).map(|i| (i % 64) as i64).collect();
-                    whisper_tensor::numeric_tensor::NumericTensor::from_vec_shape(data, shape_usize)
+                    whisper_tensor::migration::numeric_tensor::NumericTensor::from_vec_shape(data, shape_usize)
                         .unwrap()
                 }
                 DType::F32 => {
                     let data: Vec<f32> =
                         (0..num_elements).map(|i| (i % 64) as f32 * 0.01).collect();
-                    whisper_tensor::numeric_tensor::NumericTensor::from_vec_shape(data, shape_usize)
+                    whisper_tensor::migration::numeric_tensor::NumericTensor::from_vec_shape(data, shape_usize)
                         .unwrap()
                 }
                 _ => {
                     let data: Vec<f32> = vec![0.0; num_elements as usize];
-                    whisper_tensor::numeric_tensor::NumericTensor::from_vec_shape(data, shape_usize)
+                    whisper_tensor::migration::numeric_tensor::NumericTensor::from_vec_shape(data, shape_usize)
                         .unwrap()
                 }
             };
@@ -842,14 +842,14 @@ fn main() {
                             let shape: Vec<u64> = shape_dims.iter().map(|d| d.unwrap_or(4)).collect();
                             let num_elements: u64 = shape.iter().product();
                             let shape_usize: Vec<usize> = shape.iter().map(|&d| d as usize).collect();
-                            let t: whisper_tensor::numeric_tensor::NumericTensor<whisper_tensor::DynRank> = match dtype {
+                            let t: whisper_tensor::migration::numeric_tensor::NumericTensor<whisper_tensor::DynRank> = match dtype {
                                 DType::I64 => {
                                     let data: Vec<i64> = (0..num_elements).map(|i| (i % 64) as i64).collect();
-                                    whisper_tensor::numeric_tensor::NumericTensor::from_vec_shape(data, shape_usize).unwrap()
+                                    whisper_tensor::migration::numeric_tensor::NumericTensor::from_vec_shape(data, shape_usize).unwrap()
                                 }
                                 _ => {
                                     let data: Vec<f32> = (0..num_elements).map(|i| (i % 64) as f32 * 0.01).collect();
-                                    whisper_tensor::numeric_tensor::NumericTensor::from_vec_shape(data, shape_usize).unwrap()
+                                    whisper_tensor::migration::numeric_tensor::NumericTensor::from_vec_shape(data, shape_usize).unwrap()
                                 }
                             };
                             t.to_ndarray().unwrap()
@@ -912,19 +912,19 @@ fn main() {
                                 let num_elements: u64 = shape.iter().product();
                                 let shape_usize: Vec<usize> =
                                     shape.iter().map(|&d| d as usize).collect();
-                                let t: whisper_tensor::numeric_tensor::NumericTensor<
+                                let t: whisper_tensor::migration::numeric_tensor::NumericTensor<
                                     whisper_tensor::DynRank,
                                 > = match dtype {
                                     DType::I64 => {
                                         let data: Vec<i64> =
                                             (0..num_elements).map(|i| (i % 64) as i64).collect();
-                                        whisper_tensor::numeric_tensor::NumericTensor::from_vec_shape(data, shape_usize).unwrap()
+                                        whisper_tensor::migration::numeric_tensor::NumericTensor::from_vec_shape(data, shape_usize).unwrap()
                                     }
                                     _ => {
                                         let data: Vec<f32> = (0..num_elements)
                                             .map(|i| (i % 64) as f32 * 0.01)
                                             .collect();
-                                        whisper_tensor::numeric_tensor::NumericTensor::from_vec_shape(data, shape_usize).unwrap()
+                                        whisper_tensor::migration::numeric_tensor::NumericTensor::from_vec_shape(data, shape_usize).unwrap()
                                     }
                                 };
                                 let idx = full_nd.len();
@@ -1015,12 +1015,12 @@ fn main() {
                                 shape_dims.iter().map(|d| d.unwrap_or(4)).collect();
                             let n: u64 = shape.iter().product();
                             let su: Vec<usize> = shape.iter().map(|&d| d as usize).collect();
-                            let t: whisper_tensor::numeric_tensor::NumericTensor<
+                            let t: whisper_tensor::migration::numeric_tensor::NumericTensor<
                                 whisper_tensor::DynRank,
                             > = match dtype {
                                 DType::I64 => {
                                     let d: Vec<i64> = (0..n).map(|i| (i % 64) as i64).collect();
-                                    whisper_tensor::numeric_tensor::NumericTensor::from_vec_shape(
+                                    whisper_tensor::migration::numeric_tensor::NumericTensor::from_vec_shape(
                                         d, su,
                                     )
                                     .unwrap()
@@ -1028,7 +1028,7 @@ fn main() {
                                 _ => {
                                     let d: Vec<f32> =
                                         (0..n).map(|i| (i % 64) as f32 * 0.01).collect();
-                                    whisper_tensor::numeric_tensor::NumericTensor::from_vec_shape(
+                                    whisper_tensor::migration::numeric_tensor::NumericTensor::from_vec_shape(
                                         d, su,
                                     )
                                     .unwrap()
@@ -1174,7 +1174,7 @@ fn main() {
     use whisper_tensor::backends::eval_backend::EvalBackend;
     use whisper_tensor::backends::ndarray_backend::numeric_tensor::NDArrayNumericTensor;
     use whisper_tensor::compiler::attempts::v14::execute;
-    use whisper_tensor::numeric_tensor::NumericTensor;
+    use whisper_tensor::migration::numeric_tensor::NumericTensor;
 
     // Build user input tensors with valid token IDs.
     // GPT-2 vocabulary: common tokens like "Hello" = 15496, "," = 11, " world" = 995.

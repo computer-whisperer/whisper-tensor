@@ -10,12 +10,12 @@ pub fn interpret_milli_graph(
     graph: &MilliOpGraph,
     inputs: &std::collections::HashMap<
         crate::graph::GlobalId,
-        crate::numeric_tensor::NumericTensor<crate::DynRank>,
+        crate::migration::numeric_tensor::NumericTensor<crate::DynRank>,
     >,
 ) -> Result<
     std::collections::HashMap<
         crate::graph::GlobalId,
-        crate::numeric_tensor::NumericTensor<crate::DynRank>,
+        crate::migration::numeric_tensor::NumericTensor<crate::DynRank>,
     >,
     crate::milli_graph::MilliOpGraphError,
 > {
@@ -29,12 +29,12 @@ pub fn interpret_milli_graph_all_intermediates(
     graph: &MilliOpGraph,
     inputs: &std::collections::HashMap<
         crate::graph::GlobalId,
-        crate::numeric_tensor::NumericTensor<crate::DynRank>,
+        crate::migration::numeric_tensor::NumericTensor<crate::DynRank>,
     >,
 ) -> Result<
     std::collections::HashMap<
         crate::graph::GlobalId,
-        crate::numeric_tensor::NumericTensor<crate::DynRank>,
+        crate::migration::numeric_tensor::NumericTensor<crate::DynRank>,
     >,
     crate::milli_graph::MilliOpGraphError,
 > {
@@ -123,7 +123,7 @@ use crate::DynRank;
 use crate::backends::eval_backend;
 use crate::backends::eval_backend::EvalBackend;
 use crate::graph::GlobalId;
-use crate::numeric_tensor::NumericTensor;
+use crate::migration::numeric_tensor::NumericTensor;
 use crate::symbolic_graph::SymbolicGraph;
 use crate::symbolic_graph::observer::SymbolicGraphObserver;
 use crate::symbolic_graph::tensor_store::TensorStore;

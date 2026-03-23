@@ -69,15 +69,19 @@ pub trait Pool: Send + Sync {
 /// Returns null on failure. Caller must not call this with size == 0.
 unsafe fn alloc_aligned_zeroed(size: usize) -> *mut u8 {
     debug_assert!(size > 0);
-    let layout = Layout::from_size_align_unchecked(size, POOL_ALIGNMENT);
-    unsafe { std::alloc::alloc_zeroed(layout) }
+    unsafe {
+        let layout = Layout::from_size_align_unchecked(size, POOL_ALIGNMENT);
+        std::alloc::alloc_zeroed(layout)
+    }
 }
 
 /// Deallocate a pointer previously returned by `alloc_aligned_zeroed`.
 unsafe fn dealloc_aligned(ptr: *mut u8, size: usize) {
     debug_assert!(size > 0);
-    let layout = Layout::from_size_align_unchecked(size, POOL_ALIGNMENT);
-    unsafe { std::alloc::dealloc(ptr, layout) }
+    unsafe {
+        let layout = Layout::from_size_align_unchecked(size, POOL_ALIGNMENT);
+        std::alloc::dealloc(ptr, layout)
+    }
 }
 
 // ---------------------------------------------------------------------------

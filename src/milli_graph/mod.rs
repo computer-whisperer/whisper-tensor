@@ -4,7 +4,7 @@ use crate::dtype::{DType, DTypeError};
 use crate::graph::{GlobalId, Graph, Link, Node, collect_disconnected_node_slots};
 use crate::milli_graph::observer::MilliOpGraphObserver;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
-use crate::numeric_tensor::NumericTensor;
+use crate::migration::numeric_tensor::NumericTensor;
 use crate::scalar_info::ScalarInfo;
 use crate::symbolic_scalar::{SymbolicResolver, SymbolicScalar, SymbolicScalarTyped};
 use crate::tensor_info::{MinimalTensor, TensorInfo, TensorInfoError};
@@ -41,7 +41,7 @@ impl MilliLoweringContext {
 #[derive(Debug, thiserror::Error)]
 pub enum MilliOpGraphError {
     #[error(transparent)]
-    NumericTensorError(#[from] crate::numeric_tensor::NumericTensorError),
+    NumericTensorError(#[from] crate::migration::numeric_tensor::NumericTensorError),
     #[error(transparent)]
     NDArrayNumericTensorError(#[from] crate::backends::ndarray_backend::NDArrayNumericTensorError),
     #[error("Unimplemented milli operator: {0}")]

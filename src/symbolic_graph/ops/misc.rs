@@ -4,7 +4,7 @@ use crate::dtype::DType;
 use crate::graph::{GlobalId, Graph, Node, Property, PropertyValue};
 use crate::milli_graph::ops::*;
 use crate::milli_graph::{MilliLoweringContext, MilliOpGraph};
-use crate::numeric_tensor::NumericTensor;
+use crate::migration::numeric_tensor::NumericTensor;
 use crate::symbolic_graph::ops::{EvalError, Operation};
 use crate::symbolic_graph::{
     ONNXDecodingError, SymbolicGraph, SymbolicGraphMutator, query_attribute_float,
@@ -715,7 +715,7 @@ impl Operation for TileOperation {
         let ones = {
             let op_id = crate::milli_graph::ops::ConstantOfShape::push_new(
                 &mut graph,
-                crate::numeric_scalar::NumericScalar::I64(1),
+                crate::migration::numeric_scalar::NumericScalar::I64(1),
                 shape_of_shape,
                 rng,
             );
@@ -920,7 +920,7 @@ impl Operation for GlobalAveragePoolOperation {
         let spatial_ones = {
             let op_id = crate::milli_graph::ops::ConstantOfShape::push_new(
                 &mut graph,
-                crate::numeric_scalar::NumericScalar::I64(1),
+                crate::migration::numeric_scalar::NumericScalar::I64(1),
                 n_spatial,
                 rng,
             );
@@ -1030,7 +1030,7 @@ impl Operation for GlobalMaxPoolOperation {
         let spatial_ones = {
             let op_id = crate::milli_graph::ops::ConstantOfShape::push_new(
                 &mut graph,
-                crate::numeric_scalar::NumericScalar::I64(1),
+                crate::migration::numeric_scalar::NumericScalar::I64(1),
                 n_spatial,
                 rng,
             );

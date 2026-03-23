@@ -149,7 +149,7 @@ impl Operation for CastOperation {
         backend: &mut crate::backends::eval_backend::EvalBackend,
         inputs: &HashMap<
             GlobalId,
-            crate::numeric_tensor::NumericTensor<crate::tensor_rank::DynRank>,
+            crate::migration::numeric_tensor::NumericTensor<crate::tensor_rank::DynRank>,
         >,
     ) -> super::OperationEvalRet {
         let input = inputs
@@ -157,8 +157,8 @@ impl Operation for CastOperation {
             .ok_or_else(|| super::EvalError::InvalidInput("Cast: missing input".into()))?;
 
         // Handle packed (quantized) inputs: dequantize to F32, then cast if needed
-        if let crate::numeric_tensor::NumericTensor::Packed(p) = input {
-            let f32_tensor = crate::numeric_tensor::NumericTensor::NDArray(p.dequantize());
+        if let crate::migration::numeric_tensor::NumericTensor::Packed(p) = input {
+            let f32_tensor = crate::migration::numeric_tensor::NumericTensor::NDArray(p.dequantize());
             let result = if self.to == crate::dtype::DType::F32 {
                 f32_tensor
             } else {

@@ -1497,7 +1497,7 @@ mod tests {
     use crate::graph::GlobalId;
     use crate::nano_graph::ops::{ReduceKind, ScalarBinOp, ScalarOp, ScalarUnaryOp};
     use crate::nano_graph::pattern::InputTensor;
-    use crate::numeric_scalar::NumericScalar;
+    use crate::migration::numeric_scalar::NumericScalar;
 
     /// Helper: count total atoms across all lanes in a phase.
     fn phase_total_atoms(phase: &Phase) -> u64 {

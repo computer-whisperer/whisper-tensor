@@ -2,7 +2,7 @@ use crate::backends::eval_backend::EvalBackend;
 use crate::backends::ndarray_backend::NDArrayNumericTensor;
 use crate::graph::{GlobalId, Node, Property, PropertyValue};
 use crate::milli_graph::{MilliLoweringContext, MilliOpGraph};
-use crate::numeric_tensor::NumericTensor;
+use crate::migration::numeric_tensor::NumericTensor;
 use crate::onnx::AttributeProto;
 use crate::symbolic_graph::ops::{EvalError, Operation};
 use crate::symbolic_graph::{ONNXDecodingError, query_attribute_float, query_attribute_int};

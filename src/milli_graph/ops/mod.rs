@@ -70,7 +70,7 @@ use crate::backends::eval_backend::EvalBackend;
 use crate::backends::ndarray_backend::NDArrayNumericTensor;
 use crate::graph::{GlobalId, Node, NodeMetadata, NodeSlotEditError, SlotDirection};
 use crate::milli_graph::MilliOpGraphError;
-use crate::numeric_tensor::NumericTensor;
+use crate::migration::numeric_tensor::NumericTensor;
 use crate::scalar_info::ScalarInfoTyped;
 use crate::symbolic_scalar::{SymbolicResolver, SymbolicScalarTyped};
 use crate::tensor_info::{TensorInfo, TensorInfoTypedRanked};

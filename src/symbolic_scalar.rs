@@ -1,5 +1,5 @@
 use crate::dtype::DType;
-use crate::numeric_scalar::NumericScalarType;
+use crate::migration::numeric_scalar::NumericScalarType;
 use serde::{Deserialize, Serialize};
 use std::marker::PhantomData;
 

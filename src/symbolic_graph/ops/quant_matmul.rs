@@ -1,7 +1,7 @@
 use crate::dtype::DType;
 use crate::graph::{GlobalId, Node, Property, PropertyValue};
 use crate::milli_graph::{self, MilliLoweringContext, MilliOpGraph};
-use crate::numeric_tensor::NumericTensor;
+use crate::migration::numeric_tensor::NumericTensor;
 use crate::symbolic_graph::ops::{EvalError, Operation, OperationEvalRet};
 use crate::tensor_rank::DynRank;
 use rand::Rng;

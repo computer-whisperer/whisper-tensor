@@ -1,6 +1,6 @@
 use crate::DynRank;
 use crate::graph::GlobalId;
-use crate::numeric_tensor::NumericTensor;
+use crate::migration::numeric_tensor::NumericTensor;
 use std::collections::HashMap;
 
 #[cfg(feature = "vulkan")]

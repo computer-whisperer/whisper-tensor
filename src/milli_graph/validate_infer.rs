@@ -10,7 +10,7 @@ use crate::dtype::DType;
 use crate::graph::{GlobalId, Node};
 use crate::milli_graph::ops::MilliOp;
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
-use crate::numeric_tensor::NumericTensor;
+use crate::migration::numeric_tensor::NumericTensor;
 use crate::scalar_info::{ScalarInfo, ScalarInfoTyped};
 use crate::symbolic_scalar::{SymbolicResolver, SymbolicScalar, SymbolicScalarTyped};
 use crate::tensor_info::{MinimalTensor, ShapedTensor, TensorInfo, TensorInfoRanked};

@@ -16,7 +16,7 @@ use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
 use whisper_tensor::dtype::DType;
 use whisper_tensor::graph::GlobalId;
 use whisper_tensor::model::{Model, ModelExecutionRuntime};
-use whisper_tensor::numeric_tensor::NumericTensor;
+use whisper_tensor::migration::numeric_tensor::NumericTensor;
 use whisper_tensor::symbolic_graph::observer::SymbolicGraphObserver;
 use whisper_tensor::tensor_rank::DynRank;
 

@@ -17,7 +17,7 @@ use whisper_tensor::milli_graph::{
     BackwardGenOptions, LossInputSource, LossWiring, MilliGraphGenOptions, MilliOpGraph,
     OptimizerGenOptions, OptimizerKind,
 };
-use whisper_tensor::numeric_tensor::NumericTensor;
+use whisper_tensor::migration::numeric_tensor::NumericTensor;
 use whisper_tensor::scalar_info::ScalarInfoTyped;
 use whisper_tensor::symbolic_graph::{SymbolicGraphMutator, TensorType};
 use whisper_tensor::tensor_rank::DynRank;

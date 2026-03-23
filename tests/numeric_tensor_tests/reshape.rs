@@ -1,6 +1,6 @@
 use crate::numeric_tensor_tests::test_eq_f32;
 use whisper_tensor::backends::eval_backend::EvalBackend;
-use whisper_tensor::numeric_tensor::NumericTensor;
+use whisper_tensor::migration::numeric_tensor::NumericTensor;
 
 pub fn get_test_vec() -> Vec<f32> {
     vec![

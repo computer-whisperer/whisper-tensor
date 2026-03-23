@@ -1,5 +1,5 @@
 use crate::backends::ndarray_backend::conversions::NDArrayNumericTensorType;
-use crate::numeric_tensor::NumericTensor;
+use crate::migration::numeric_tensor::NumericTensor;
 use crate::tensor_rank::{DimContainer, DynRank, Rank, RankError};
 use ndarray::ArcArray;
 use typenum::P1;

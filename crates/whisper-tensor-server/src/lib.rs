@@ -15,7 +15,7 @@ use whisper_tensor::dtype::DType;
 use whisper_tensor::graph::GlobalId;
 use whisper_tensor::interfaces::AnyInterface;
 use whisper_tensor::loader::{ConfigField, ConfigValues};
-use whisper_tensor::numeric_tensor::NumericTensor;
+use whisper_tensor::migration::numeric_tensor::NumericTensor;
 use whisper_tensor::super_graph::links::SuperGraphLink;
 use whisper_tensor::super_graph::{SuperGraph, SuperGraphHash};
 use whisper_tensor::symbolic_graph::tensor_store::TensorStoreTensorId;

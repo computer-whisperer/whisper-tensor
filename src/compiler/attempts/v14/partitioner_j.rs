@@ -1191,7 +1191,7 @@ mod tests {
     use crate::nano_graph::ops::{ReduceKind, ScalarBinOp, ScalarUnaryOp};
     use crate::nano_graph::pattern::InputTensor;
     use crate::nano_graph::{AtomId, InputRef, NanoGraph, ScalarOp};
-    use crate::numeric_scalar::NumericScalar;
+    use crate::migration::numeric_scalar::NumericScalar;
 
     /// Helper: create an input tensor in the graph.
     fn add_input(graph: &mut NanoGraph, id: u64, count: u64) -> AtomId {

@@ -6,7 +6,7 @@ use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
 use crate::nano_graph::lower::TensorAtomMap;
 use crate::nano_graph::ops::ScalarOp;
 use crate::nano_graph::pattern::AtomId;
-use crate::numeric_tensor::NumericTensor;
+use crate::migration::numeric_tensor::NumericTensor;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

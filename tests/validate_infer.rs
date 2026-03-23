@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
 use whisper_tensor::graph::GlobalId;
-use whisper_tensor::numeric_tensor::NumericTensor;
+use whisper_tensor::migration::numeric_tensor::NumericTensor;
 use whisper_tensor::onnx::TensorProto;
 use whisper_tensor::symbolic_graph::SymbolicGraphMutator;
 use whisper_tensor::tensor_rank::DynRank;

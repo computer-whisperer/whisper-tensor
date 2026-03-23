@@ -5,8 +5,8 @@ use crate::backends::ndarray_backend::conversions::NDArrayNumericTensorType;
 use crate::graph::{GlobalId, Node};
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
-use crate::numeric_scalar::NumericScalar;
-use crate::numeric_tensor::NumericTensor;
+use crate::migration::numeric_scalar::NumericScalar;
+use crate::migration::numeric_tensor::NumericTensor;
 
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -245,7 +245,7 @@ impl MilliOp for ConstantOfShape {
                     if let Some(crate::scalar_info::ScalarInfo::Numeric(n)) =
                         shape_info.get(&vec![i as u64], _symbolic_resolver)
                     {
-                        use crate::numeric_scalar::NumericScalar;
+                        use crate::migration::numeric_scalar::NumericScalar;
                         let v = match n {
                             NumericScalar::I64(x) => x as u64,
                             NumericScalar::I32(x) => x as u64,

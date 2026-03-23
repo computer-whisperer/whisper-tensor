@@ -9,8 +9,8 @@ use crate::compiler::{CompiledProgram, CompilerError};
 use crate::graph::{GlobalId, Graph, Link, collect_disconnected_node_slots};
 use crate::milli_graph::MilliOpGraphError;
 use crate::model::{Model, ModelError};
-use crate::numeric_tensor::NumericTensorError;
-use crate::numeric_tensor_typed::TypedNumericTensorError;
+use crate::migration::numeric_tensor::NumericTensorError;
+use crate::migration::numeric_tensor_typed::TypedNumericTensorError;
 use crate::super_graph::cache::{SuperGraphCache, SuperGraphTensorCache};
 use crate::super_graph::data::SuperGraphData;
 pub use crate::super_graph::links::{

@@ -8,7 +8,7 @@ use whisper_tensor::backends::ModelLoadedTensorCache;
 use whisper_tensor::backends::eval_backend::EvalBackend;
 use whisper_tensor::interfaces::AnyInterface;
 use whisper_tensor::loader::{ConfigValue, ConfigValues, Loader, LoaderOutput};
-use whisper_tensor::numeric_tensor::NumericTensor;
+use whisper_tensor::migration::numeric_tensor::NumericTensor;
 use whisper_tensor::super_graph::cache::SuperGraphCache;
 use whisper_tensor::tensor_rank::DynRank;
 use whisper_tensor::tokenizer::Tokenizer;

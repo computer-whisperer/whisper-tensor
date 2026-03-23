@@ -1,7 +1,7 @@
 //! Scalar operations for the nano graph.
 
 use crate::dtype::DType;
-use crate::numeric_scalar::NumericScalar;
+use crate::migration::numeric_scalar::NumericScalar;
 
 /// Binary scalar operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

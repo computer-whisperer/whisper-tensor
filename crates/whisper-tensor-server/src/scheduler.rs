@@ -15,7 +15,7 @@ use whisper_tensor::backends::eval_backend::EvalBackend;
 use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
 use whisper_tensor::compiler::CompilationSubject;
 use whisper_tensor::graph::GlobalId;
-use whisper_tensor::numeric_tensor::NumericTensor;
+use whisper_tensor::migration::numeric_tensor::NumericTensor;
 use whisper_tensor::super_graph::SuperGraphContext;
 use whisper_tensor::super_graph::cache::{SuperGraphCache, SuperGraphTensorCache};
 use whisper_tensor::super_graph::data::SuperGraphData;

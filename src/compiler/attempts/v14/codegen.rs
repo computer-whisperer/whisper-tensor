@@ -102,7 +102,7 @@ impl BufferLayout {
 
     /// Write literal group values into the buffer.
     pub fn populate_literals(&self, graph: &NanoGraph, buffer: &mut [u8]) {
-        use crate::numeric_scalar::NumericScalar;
+        use crate::migration::numeric_scalar::NumericScalar;
         for group in graph.groups() {
             if let ScalarOp::Literal(scalar) = &group.op {
                 if let Some((slot, _)) = self.find(group.base_id) {
@@ -120,7 +120,7 @@ impl BufferLayout {
     /// Write f32 input data into the buffer. Handles ranges spanning multiple slots.
     /// Used by unit tests (F32-only). Production code uses write_scalar_input.
     pub fn write_f32_input(&self, base: AtomId, data: &[f32], buffer: &mut [u8]) {
-        use crate::numeric_scalar::NumericScalar;
+        use crate::migration::numeric_scalar::NumericScalar;
         let mut written = 0usize;
         let mut atom = base.0;
         while written < data.len() {
@@ -146,7 +146,7 @@ impl BufferLayout {
     /// Read output data as f32 from the buffer. Handles ranges spanning multiple slots.
     /// Used by unit tests and diagnostics. Production extraction uses extract_outputs.
     pub fn read_f32_output(&self, range: &AtomRange, buffer: &[u8]) -> Vec<f32> {
-        use crate::numeric_scalar::NumericScalar;
+        use crate::migration::numeric_scalar::NumericScalar;
         let mut result = Vec::with_capacity(range.count as usize);
         let mut remaining = range.count;
         let mut atom = range.base.0;
@@ -176,8 +176,8 @@ impl BufferLayout {
 }
 
 /// Write a NumericScalar to `buffer[off..]` in its native byte format.
-fn write_scalar(buffer: &mut [u8], off: usize, val: &crate::numeric_scalar::NumericScalar) {
-    use crate::numeric_scalar::NumericScalar;
+fn write_scalar(buffer: &mut [u8], off: usize, val: &crate::migration::numeric_scalar::NumericScalar) {
+    use crate::migration::numeric_scalar::NumericScalar;
     match val {
         NumericScalar::F32(v) => buffer[off..off + 4].copy_from_slice(&v.to_le_bytes()),
         NumericScalar::F64(v) => buffer[off..off + 8].copy_from_slice(&v.to_le_bytes()),
@@ -201,8 +201,8 @@ fn write_scalar(buffer: &mut [u8], off: usize, val: &crate::numeric_scalar::Nume
 }
 
 /// Read a NumericScalar from `buffer[off..]` in the given storage dtype.
-fn read_scalar(buffer: &[u8], off: usize, dtype: DType) -> crate::numeric_scalar::NumericScalar {
-    use crate::numeric_scalar::NumericScalar;
+fn read_scalar(buffer: &[u8], off: usize, dtype: DType) -> crate::migration::numeric_scalar::NumericScalar {
+    use crate::migration::numeric_scalar::NumericScalar;
     match dtype {
         DType::F32 => {
             NumericScalar::F32(f32::from_le_bytes(buffer[off..off + 4].try_into().unwrap()))
@@ -965,8 +965,8 @@ fn read_buffer_to_typed(
 }
 
 /// Read a NumericScalar from raw bytes in a given dtype.
-fn read_scalar_raw(data: &[u8], dtype: DType) -> crate::numeric_scalar::NumericScalar {
-    use crate::numeric_scalar::NumericScalar;
+fn read_scalar_raw(data: &[u8], dtype: DType) -> crate::migration::numeric_scalar::NumericScalar {
+    use crate::migration::numeric_scalar::NumericScalar;
     match dtype {
         DType::F32 => NumericScalar::F32(f32::from_le_bytes(data[..4].try_into().unwrap())),
         DType::F64 => NumericScalar::F64(f64::from_le_bytes(data[..8].try_into().unwrap())),
@@ -4083,8 +4083,8 @@ fn tensor_slice_to_scalars(
     tensor: &NDArrayNumericTensor<DynRank>,
     skip: usize,
     count: usize,
-) -> Vec<crate::numeric_scalar::NumericScalar> {
-    use crate::numeric_scalar::NumericScalar;
+) -> Vec<crate::migration::numeric_scalar::NumericScalar> {
+    use crate::migration::numeric_scalar::NumericScalar;
     macro_rules! extract {
         ($arr:expr, $variant:ident) => {{
             $arr.iter()
@@ -4201,7 +4201,7 @@ fn extract_output_scalar(
     buffer: &[u8],
     len: usize,
 ) -> NDArrayNumericTensor<DynRank> {
-    use crate::numeric_scalar::{NumericScalar, NumericScalarType};
+    use crate::migration::numeric_scalar::{NumericScalar, NumericScalarType};
 
     let mut scalars = Vec::with_capacity(len);
     let mut remaining = range.count;
@@ -4316,7 +4316,7 @@ mod tests {
     use super::*;
     use crate::graph::GlobalId;
     use crate::nano_graph::ops::{ReduceKind, ScalarBinOp, ScalarOp, ScalarUnaryOp};
-    use crate::numeric_scalar::NumericScalar;
+    use crate::migration::numeric_scalar::NumericScalar;
 
     /// Build a graph: input[4] + broadcast(2.0) → output[4]
     #[test]

@@ -3,7 +3,7 @@ use crate::backends::eval_backend::EvalBackend;
 use crate::graph::{GlobalId, Node};
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
-use crate::numeric_tensor::NumericTensor;
+use crate::migration::numeric_tensor::NumericTensor;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

@@ -1,9 +1,9 @@
 use crate::backends::eval_backend::EvalBackend;
 use crate::backends::ndarray_backend::conversions::NDArrayNumericTensorType;
 use crate::dtype::DType;
-use crate::numeric_scalar::NumericScalarType;
-use crate::numeric_tensor::{NumericTensor, NumericTensorError};
-use crate::numeric_tensor_typed::NumericTensorTyped;
+use crate::migration::numeric_scalar::NumericScalarType;
+use crate::migration::numeric_tensor::{NumericTensor, NumericTensorError};
+use crate::migration::numeric_tensor_typed::NumericTensorTyped;
 use crate::scalar_info::{ScalarInfo, ScalarInfoTyped};
 use crate::symbolic_scalar::{SymbolicResolver, SymbolicScalar, SymbolicScalarTyped};
 use crate::tensor_rank::{DimContainer, DynRank, KnownRank, Rank, RankError};
@@ -1030,7 +1030,7 @@ impl TensorInfo {
     /// Create a TensorInfo from ScalarInfoTyped<u64> dims (as stored in ONNXTensorInfo).
     /// Dims that are Numeric become known; Symbolic dims remain unknown.
     pub fn from_shape_scalars(shape: &[ScalarInfoTyped<u64>]) -> Self {
-        use crate::numeric_scalar::NumericScalar;
+        use crate::migration::numeric_scalar::NumericScalar;
         let first_element = ScalarInfo::Numeric(NumericScalar::F32(0.0));
         TensorInfo::Ranked(TensorInfoRanked::Ranked(RankedTensor::new(
             first_element,
@@ -1040,7 +1040,7 @@ impl TensorInfo {
 
     /// Create a TensorInfo with known dtype and ScalarInfoTyped dims (may be symbolic).
     pub fn from_dtype_and_shape_scalars(dtype: DType, shape: &[ScalarInfoTyped<u64>]) -> Self {
-        use crate::numeric_scalar::NumericScalar;
+        use crate::migration::numeric_scalar::NumericScalar;
         let first_element = ScalarInfo::Numeric(NumericScalar::zero_of(dtype));
         TensorInfo::Ranked(TensorInfoRanked::Ranked(RankedTensor::new(
             first_element,
@@ -1051,7 +1051,7 @@ impl TensorInfo {
     /// Create a TensorInfo with known shape from a u64 slice. Dtype defaults to F32.
     /// Useful for broadcast analysis and tests.
     pub fn from_shape_u64(shape: &[u64]) -> Self {
-        use crate::numeric_scalar::NumericScalar;
+        use crate::migration::numeric_scalar::NumericScalar;
         let dims: Vec<ScalarInfoTyped<u64>> =
             shape.iter().map(|&v| ScalarInfoTyped::Numeric(v)).collect();
         let first_element = ScalarInfo::Numeric(NumericScalar::F32(0.0));
@@ -1063,7 +1063,7 @@ impl TensorInfo {
 
     /// Create a TensorInfo with known dtype and shape, but no concrete values.
     pub fn from_dtype_and_shape(dtype: DType, shape: &[u64]) -> Self {
-        use crate::numeric_scalar::NumericScalar;
+        use crate::migration::numeric_scalar::NumericScalar;
         let dims: Vec<ScalarInfoTyped<u64>> =
             shape.iter().map(|&v| ScalarInfoTyped::Numeric(v)).collect();
         let first_element = ScalarInfo::Numeric(NumericScalar::zero_of(dtype));

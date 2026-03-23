@@ -1,6 +1,6 @@
 use whisper_tensor::DynRank;
 use whisper_tensor::dtype::DType;
-use whisper_tensor::numeric_tensor::NumericTensor;
+use whisper_tensor::migration::numeric_tensor::NumericTensor;
 
 pub mod basic_arith;
 pub mod basic_matmul;

@@ -1,7 +1,7 @@
 use crate::backends::ModelLoadedTensorCache;
 use crate::dtype::{DType, DTypeError};
 use crate::graph::{GlobalId, Link, Node};
-use crate::numeric_tensor::NumericTensor;
+use crate::migration::numeric_tensor::NumericTensor;
 use crate::symbolic_graph::observer::SymbolicGraphObserver;
 use crate::symbolic_graph::ops::{EvalError, Operation};
 use crate::symbolic_graph::tensor_store::TensorStore;

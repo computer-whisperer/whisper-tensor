@@ -942,7 +942,7 @@ mod tests {
     use super::*;
     use crate::dtype::DType;
     use crate::nano_graph::ops::{ReduceKind, ScalarBinOp, ScalarUnaryOp};
-    use crate::numeric_scalar::NumericScalar;
+    use crate::migration::numeric_scalar::NumericScalar;
 
     /// Helper: assert that each phase has exactly `num_lanes` spans.
     fn assert_lane_count(phases: &[Phase], num_lanes: usize) {

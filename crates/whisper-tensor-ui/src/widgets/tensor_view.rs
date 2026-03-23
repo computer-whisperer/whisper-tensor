@@ -2,7 +2,7 @@ use egui::{self, Align, FontId, Id, Response, Ui};
 use egui_extras::{Column, TableBuilder};
 use whisper_tensor::DynRank;
 use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
-use whisper_tensor::numeric_scalar::NumericScalarType;
+use whisper_tensor::migration::numeric_scalar::NumericScalarType;
 
 /// State you should persist in your egui app.
 #[derive(Clone, Debug)]

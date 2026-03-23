@@ -5,7 +5,7 @@ use whisper_tensor::DynRank;
 use whisper_tensor::backends::eval_backend::EvalBackend;
 use whisper_tensor::dtype::DType;
 use whisper_tensor::loader::{ConfigValue, ConfigValues, Loader};
-use whisper_tensor::numeric_tensor::NumericTensor;
+use whisper_tensor::migration::numeric_tensor::NumericTensor;
 use whisper_tensor_import::loaders::SD15Loader;
 
 const CHECKPOINT: &str =

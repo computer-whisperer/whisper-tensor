@@ -3,7 +3,7 @@ use crate::backends::eval_backend::EvalBackend;
 use crate::compiler::CompiledProgram;
 use crate::metadata::TokenizerInfo;
 use crate::model::Model;
-use crate::numeric_tensor::NumericTensor;
+use crate::migration::numeric_tensor::NumericTensor;
 use crate::super_graph::cache::{SuperGraphCache, SuperGraphTensorCache};
 use crate::super_graph::data::{SuperGraphData, SuperGraphImage};
 use crate::super_graph::links::SuperGraphLink;

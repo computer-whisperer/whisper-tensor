@@ -10,8 +10,8 @@ use crate::graph::{
 use crate::metadata::TokenizerInfo;
 use crate::milli_graph::MilliOpGraph;
 use crate::milli_graph::observer::MilliOpGraphObserver;
-use crate::numeric_scalar::NumericScalar;
-use crate::numeric_tensor::NumericTensor;
+use crate::migration::numeric_scalar::NumericScalar;
+use crate::migration::numeric_tensor::NumericTensor;
 use crate::phonemization::{text_to_kokoro_phonemes, text_to_piper_phonemes};
 use crate::super_graph::data::{SuperGraphAudioClip, SuperGraphImage};
 use crate::super_graph::links::{

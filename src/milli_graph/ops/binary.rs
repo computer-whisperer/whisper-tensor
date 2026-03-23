@@ -4,7 +4,7 @@ use crate::backends::eval_backend::EvalBackend;
 use crate::dtype::DType;
 use crate::milli_graph::MilliOpGraphError;
 use crate::milli_graph::ops::MilliOp;
-use crate::numeric_tensor::NumericTensor;
+use crate::migration::numeric_tensor::NumericTensor;
 use crate::scalar_info::ScalarInfoTyped;
 use rand::Rng;
 use serde::{Deserialize, Serialize};

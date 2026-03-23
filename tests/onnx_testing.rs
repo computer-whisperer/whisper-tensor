@@ -11,7 +11,7 @@ use whisper_tensor::backends::eval_backend::EvalBackend;
 use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
 use whisper_tensor::dtype::{DType, DTypeError};
 use whisper_tensor::model::Model;
-use whisper_tensor::numeric_tensor::NumericTensor;
+use whisper_tensor::migration::numeric_tensor::NumericTensor;
 use whisper_tensor::onnx::TensorProto;
 use whisper_tensor::symbolic_graph::ONNXDecodingError;
 use whisper_tensor::tensor_rank::DynRank;

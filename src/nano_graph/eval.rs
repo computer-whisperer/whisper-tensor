@@ -11,7 +11,7 @@
 
 use crate::DynRank;
 use crate::backends::ndarray_backend::numeric_tensor::NDArrayNumericTensor;
-use crate::numeric_scalar::NumericScalar;
+use crate::migration::numeric_scalar::NumericScalar;
 
 use super::ops::{ReduceKind, ScalarBinOp, ScalarOp, ScalarUnaryOp};
 use super::pattern::{AtomId, NanoGraph};
@@ -517,7 +517,7 @@ mod tests {
     use crate::graph::GlobalId;
     use crate::nano_graph::ops::{ReduceKind, ScalarBinOp, ScalarOp, ScalarUnaryOp};
     use crate::nano_graph::pattern::{AtomRange, InputRef, NanoGraph};
-    use crate::numeric_scalar::NumericScalar;
+    use crate::migration::numeric_scalar::NumericScalar;
     use ndarray::{ArcArray, IxDyn};
 
     fn make_f32_tensor(data: &[f32]) -> NDArrayNumericTensor<DynRank> {

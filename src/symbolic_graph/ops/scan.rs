@@ -1,7 +1,7 @@
 use crate::backends::eval_backend::EvalBackend;
 use crate::graph::{GlobalId, Node, Property, PropertyValue};
 use crate::milli_graph::{MilliLoweringContext, MilliOpGraph};
-use crate::numeric_tensor::NumericTensor;
+use crate::migration::numeric_tensor::NumericTensor;
 use crate::symbolic_graph::ops::{EvalError, Operation};
 use crate::symbolic_graph::{
     ONNXDecodingError, SymbolicGraph, SymbolicGraphMutator, query_attribute_graph,

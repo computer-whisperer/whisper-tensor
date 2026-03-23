@@ -3,7 +3,7 @@ use crate::backends::ndarray_backend::NDArrayNumericTensor;
 use crate::dtype::DType;
 use crate::graph::{GlobalId, Node, Property, PropertyValue};
 use crate::milli_graph::{MilliLoweringContext, MilliOpGraph};
-use crate::numeric_tensor::NumericTensor;
+use crate::migration::numeric_tensor::NumericTensor;
 use crate::onnx;
 use crate::symbolic_graph::ONNXDecodingError;
 use crate::symbolic_graph::ops::{EvalError, Operation};

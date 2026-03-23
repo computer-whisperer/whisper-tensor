@@ -2,7 +2,7 @@ use crate::numeric_tensor_tests::{test_eq_bf16, test_eq_f16, test_eq_f32};
 use half::{bf16, f16};
 use whisper_tensor::backends::eval_backend::EvalBackend;
 use whisper_tensor::dtype::DType;
-use whisper_tensor::numeric_tensor::NumericTensor;
+use whisper_tensor::migration::numeric_tensor::NumericTensor;
 
 pub fn test_add_bf16(backend: &mut EvalBackend) {
     let tensor_a = NumericTensor::from_vec(vec![

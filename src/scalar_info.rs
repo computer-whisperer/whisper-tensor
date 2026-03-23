@@ -1,5 +1,5 @@
 use crate::dtype::{DType, DTypeOfPrimitive};
-use crate::numeric_scalar::{NumericScalar, NumericScalarType};
+use crate::migration::numeric_scalar::{NumericScalar, NumericScalarType};
 use crate::symbolic_scalar::{SymbolicScalar, SymbolicScalarTyped};
 use num_traits::AsPrimitive;
 use serde::{Deserialize, Serialize};

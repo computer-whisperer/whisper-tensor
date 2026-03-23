@@ -5,7 +5,7 @@ use crate::graph::GlobalId;
 use crate::milli_graph::MilliOpGraph;
 use crate::milli_graph::MilliOpGraphError;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
-use crate::numeric_tensor::NumericTensor;
+use crate::migration::numeric_tensor::NumericTensor;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
