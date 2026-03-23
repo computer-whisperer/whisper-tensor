@@ -1,11 +1,19 @@
 //! Scalar numeric operations on raw bits + dtype.
 //!
-//! Each op is a pure function: `(u64 raw bits, NumericDType) → Result<u64, OpError>`.
-//! Operations decode bits according to the dtype, perform the computation in
-//! the appropriate native type (f64 for floats, i128 for signed ints, u128 for
-//! unsigned ints), and encode the result back.
+//! Each op is a set of pure functions grouped by operation, with explicit
+//! naming for the type category and overflow semantics:
 //!
-//! No f64 roundtrip for integer operations — each category uses its native width.
+//! - `float_add(a, b, &FloatType)` — IEEE float addition
+//! - `signed_add_wrapping(a, b, &IntType)` — wrapping signed integer addition
+//! - `signed_add_saturating(a, b, &IntType)` — saturating signed integer addition
+//! - `unsigned_add_wrapping(a, b, &IntType)` — wrapping unsigned integer addition
+//! - `unsigned_add_saturating(a, b, &IntType)` — saturating unsigned integer addition
+//!
+//! Float ops have one semantic (IEEE). Integer ops have explicit wrapping vs
+//! saturating variants. The caller (e.g. nano-op eval) picks the right variant
+//! for the operation's semantics.
+//!
+//! Float-only ops (sin, cos, etc.) only have a `float_*` variant.
 
 pub mod add;
 pub mod mul;
@@ -16,7 +24,7 @@ use std::fmt;
 
 use crate::numeric_dtype::NumericDType;
 
-/// Error from a scalar operation.
+/// Error from a scalar operation dispatch.
 #[derive(Debug, Clone)]
 pub enum OpError {
     /// The operation does not support this dtype.
@@ -46,12 +54,3 @@ impl fmt::Display for OpError {
 }
 
 impl std::error::Error for OpError {}
-
-/// Check that two dtypes match for a binary op.
-fn check_dtype_match(op: &'static str, a: NumericDType, b: NumericDType) -> Result<(), OpError> {
-    if a != b {
-        Err(OpError::DTypeMismatch { op, a, b })
-    } else {
-        Ok(())
-    }
-}

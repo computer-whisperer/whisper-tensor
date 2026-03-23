@@ -1,142 +1,157 @@
 //! Binary multiplication.
 
-use crate::numeric_dtype::NumericDType;
-use super::{OpError, check_dtype_match};
+use crate::numeric_dtype::{FloatType, IntType};
 
-/// Multiply two scalar values of the same dtype.
-///
-/// - Float: IEEE multiplication via f64 intermediate, result encoded back.
-/// - SignedInt: multiplication in i128, clamped to type range.
-/// - UnsignedInt: multiplication in u128, clamped to type range.
-/// - Bool: unsupported.
-pub fn mul(a: u64, b: u64, dtype: NumericDType) -> Result<u64, OpError> {
-    check_dtype_match("mul", dtype, dtype)?;
-    match dtype {
-        NumericDType::Float(ft) => {
-            let va = ft.decode_f64(a);
-            let vb = ft.decode_f64(b);
-            Ok(ft.encode_f64(va * vb))
-        }
-        NumericDType::SignedInt(it) => {
-            let va = it.decode_signed(a);
-            let vb = it.decode_signed(b);
-            // i128 * i128 won't overflow for values that fit in i64
-            Ok(it.encode_signed(va * vb))
-        }
-        NumericDType::UnsignedInt(it) => {
-            let va = it.decode_unsigned(a);
-            let vb = it.decode_unsigned(b);
-            Ok(it.encode_unsigned(va * vb))
-        }
-        NumericDType::Bool => {
-            Err(OpError::UnsupportedDType { op: "mul", dtype })
-        }
+/// IEEE float multiplication. Result encoded back to the same FloatType.
+pub fn float_mul(a: u64, b: u64, ft: &FloatType) -> u64 {
+    ft.encode_f64(ft.decode_f64(a) * ft.decode_f64(b))
+}
+
+/// Signed integer multiplication with wrapping overflow.
+/// Computes in i128, truncates to type width.
+pub fn signed_mul_wrapping(a: u64, b: u64, it: &IntType) -> u64 {
+    let va = it.decode_signed(a);
+    let vb = it.decode_signed(b);
+    let product = va.wrapping_mul(vb);
+    let mask = if it.bits >= 64 {
+        u64::MAX
+    } else {
+        (1u64 << it.bits) - 1
+    };
+    (product as i64 as u64) & mask
+}
+
+/// Signed integer multiplication with saturating overflow.
+/// Computes in i128, clamps to type range.
+pub fn signed_mul_saturating(a: u64, b: u64, it: &IntType) -> u64 {
+    let va = it.decode_signed(a);
+    let vb = it.decode_signed(b);
+    it.encode_signed(va * vb)
+}
+
+/// Unsigned integer multiplication with wrapping overflow.
+/// Computes in u128, truncates to type width.
+pub fn unsigned_mul_wrapping(a: u64, b: u64, it: &IntType) -> u64 {
+    let va = it.decode_unsigned(a);
+    let vb = it.decode_unsigned(b);
+    let product = va.wrapping_mul(vb);
+    if it.bits >= 64 {
+        product as u64
+    } else {
+        (product as u64) & ((1u64 << it.bits) - 1)
     }
+}
+
+/// Unsigned integer multiplication with saturating overflow.
+/// Computes in u128, clamps to type range.
+pub fn unsigned_mul_saturating(a: u64, b: u64, it: &IntType) -> u64 {
+    let va = it.decode_unsigned(a);
+    let vb = it.decode_unsigned(b);
+    it.encode_unsigned(va * vb)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::numeric_dtype::{FloatType, IntType};
 
     // -- Float multiplication --
 
     #[test]
-    fn mul_f64() {
+    fn float_mul_f64() {
         let ft = FloatType::F64;
-        let dt = NumericDType::Float(ft);
-
         let a = ft.encode_f64(3.0);
         let b = ft.encode_f64(4.0);
-        assert_eq!(ft.decode_f64(mul(a, b, dt).unwrap()), 12.0);
+        assert_eq!(ft.decode_f64(float_mul(a, b, &ft)), 12.0);
     }
 
     #[test]
-    fn mul_f32() {
+    fn float_mul_f32() {
         let ft = FloatType::F32;
-        let dt = NumericDType::Float(ft);
-
         let a = ft.encode_f64(2.5);
         let b = ft.encode_f64(4.0);
-        let result = ft.decode_f64(mul(a, b, dt).unwrap());
-        assert!((result - 10.0).abs() < 1e-6);
+        assert!((ft.decode_f64(float_mul(a, b, &ft)) - 10.0).abs() < 1e-6);
     }
 
     #[test]
-    fn mul_f32_zero_times_inf() {
+    fn float_mul_zero_times_inf() {
         let ft = FloatType::F32;
-        let dt = NumericDType::Float(ft);
-
-        // 0 * Inf = NaN (IEEE)
         let zero = ft.encode_f64(0.0);
         let inf = ft.encode_f64(f64::INFINITY);
-        assert!(ft.decode_f64(mul(zero, inf, dt).unwrap()).is_nan());
+        assert!(ft.decode_f64(float_mul(zero, inf, &ft)).is_nan());
     }
 
     #[test]
-    fn mul_bf16() {
+    fn float_mul_bf16() {
         let ft = FloatType::BF16;
-        let dt = NumericDType::Float(ft);
-
         let a = ft.encode_f64(2.0);
         let b = ft.encode_f64(3.0);
-        let result = ft.decode_f64(mul(a, b, dt).unwrap());
-        assert!((result - 6.0).abs() < 0.1);
+        assert!((ft.decode_f64(float_mul(a, b, &ft)) - 6.0).abs() < 0.1);
     }
 
-    // -- Integer multiplication --
+    // -- Signed integer multiplication --
 
     #[test]
-    fn mul_i32() {
+    fn signed_mul_wrapping_basic() {
         let it = IntType::BITS_32;
-        let dt = NumericDType::SignedInt(it);
-
         let a = it.encode_signed(7);
         let b = it.encode_signed(6);
-        assert_eq!(it.decode_signed(mul(a, b, dt).unwrap()), 42);
+        assert_eq!(it.decode_signed(signed_mul_wrapping(a, b, &it)), 42);
 
         let a = it.encode_signed(-3);
         let b = it.encode_signed(4);
-        assert_eq!(it.decode_signed(mul(a, b, dt).unwrap()), -12);
+        assert_eq!(it.decode_signed(signed_mul_wrapping(a, b, &it)), -12);
     }
 
     #[test]
-    fn mul_i64_large() {
-        let it = IntType::BITS_64;
-        let dt = NumericDType::SignedInt(it);
-
-        // Values that would lose precision through f64
-        let a = it.encode_signed(1_000_000_007);
-        let b = it.encode_signed(2);
-        assert_eq!(it.decode_signed(mul(a, b, dt).unwrap()), 2_000_000_014);
+    fn signed_mul_wrapping_overflow() {
+        let it = IntType::BITS_8;
+        // 16 * 16 = 256 → wraps in i8 to 0
+        let a = it.encode_signed(16);
+        let b = it.encode_signed(16);
+        let result = it.decode_signed(signed_mul_wrapping(a, b, &it));
+        assert_eq!(result, (256i16 as i8) as i128); // 0
     }
 
     #[test]
-    fn mul_u32() {
+    fn signed_mul_saturating_overflow() {
         let it = IntType::BITS_32;
-        let dt = NumericDType::UnsignedInt(it);
-
-        let a = it.encode_unsigned(100);
-        let b = it.encode_unsigned(200);
-        assert_eq!(it.decode_unsigned(mul(a, b, dt).unwrap()), 20000);
-    }
-
-    #[test]
-    fn mul_i32_overflow_clamps() {
-        let it = IntType::BITS_32;
-        let dt = NumericDType::SignedInt(it);
-
-        // i32::MAX * 2 → clamped to i32::MAX by encode_signed
         let a = it.encode_signed(i32::MAX as i128);
         let b = it.encode_signed(2);
-        let result = it.decode_signed(mul(a, b, dt).unwrap());
-        assert_eq!(result, i32::MAX as i128);
+        assert_eq!(it.decode_signed(signed_mul_saturating(a, b, &it)), i32::MAX as i128);
     }
 
-    // -- Error cases --
+    #[test]
+    fn signed_mul_i64_large() {
+        let it = IntType::BITS_64;
+        let a = it.encode_signed(1_000_000_007);
+        let b = it.encode_signed(2);
+        assert_eq!(it.decode_signed(signed_mul_wrapping(a, b, &it)), 2_000_000_014);
+    }
+
+    // -- Unsigned integer multiplication --
 
     #[test]
-    fn mul_bool_errors() {
-        assert!(mul(1, 1, NumericDType::Bool).is_err());
+    fn unsigned_mul_wrapping_basic() {
+        let it = IntType::BITS_32;
+        let a = it.encode_unsigned(100);
+        let b = it.encode_unsigned(200);
+        assert_eq!(it.decode_unsigned(unsigned_mul_wrapping(a, b, &it)), 20000);
+    }
+
+    #[test]
+    fn unsigned_mul_wrapping_overflow() {
+        let it = IntType::BITS_8;
+        // 20 * 20 = 400 → wraps in u8 to 144
+        let a = it.encode_unsigned(20);
+        let b = it.encode_unsigned(20);
+        assert_eq!(it.decode_unsigned(unsigned_mul_wrapping(a, b, &it)), (400u16 as u8) as u128);
+    }
+
+    #[test]
+    fn unsigned_mul_saturating_overflow() {
+        let it = IntType::BITS_8;
+        let a = it.encode_unsigned(200);
+        let b = it.encode_unsigned(200);
+        assert_eq!(it.decode_unsigned(unsigned_mul_saturating(a, b, &it)), 255);
     }
 }
