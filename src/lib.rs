@@ -20,6 +20,7 @@ pub mod numeric_tensor_typed;
 pub mod packed_format;
 pub mod packed_tensor;
 pub mod phonemization;
+pub mod pool;
 pub mod pth;
 pub mod range_map;
 pub mod scalar_info;
