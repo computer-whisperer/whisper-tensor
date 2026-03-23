@@ -342,7 +342,17 @@ impl MilliOp for ReduceMean {
             .into_iter()
             .map(|x| (if x < 0 { x + data.rank() as i64 } else { x }) as usize)
             .collect::<Vec<_>>();
-        let out = data.reduce_mean(axes, self.keepdims, self.accumulation_mode, backend)?;
+        // Compute in F32 for BF16/F16 to match PyTorch's accumulation behavior.
+        let data_cast = match data.dtype() {
+            DType::BF16 | DType::F16 => data.cast(DType::F32, backend)?,
+            _ => data.clone(),
+        };
+        let out = data_cast.reduce_mean(axes, self.keepdims, self.accumulation_mode, backend)?;
+        let out = if out.dtype() != data.dtype() {
+            out.cast(data.dtype(), backend)?
+        } else {
+            out
+        };
         Ok(Box::new([(self.output, out)].into_iter()))
     }
 

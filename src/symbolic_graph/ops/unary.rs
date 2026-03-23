@@ -242,23 +242,33 @@ impl Operation for SoftmaxOperation {
     fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
 
+        let raw_input = input_map[&self.input];
+
+        // Upcast to F32 for the entire softmax computation.
+        // PyTorch's F.softmax internally computes in F32 for BF16/F16 inputs;
+        // without this, each intermediate (sub, exp, reduce_sum, div) truncates
+        // to BF16 causing compounding precision loss through every attention layer.
+        let input_f32 = milli_graph::ops::Cast::push_new(&mut graph, raw_input, DType::F32, rng);
+
         let axis_tid =
             milli_graph::ops::Constant::new_scalar(&mut graph, self.axis.unwrap_or(-1), rng);
-        // Subtract row max before exp to prevent overflow (critical for f16)
         let row_max = milli_graph::ops::ReduceMax::push_new(
             &mut graph,
-            input_map[&self.input],
+            input_f32,
             Some(axis_tid),
             true,
             false,
             rng,
         );
-        let shifted =
-            milli_graph::ops::SimpleBinary::sub(&mut graph, input_map[&self.input], row_max, rng);
+        let shifted = milli_graph::ops::SimpleBinary::sub(&mut graph, input_f32, row_max, rng);
         let e = milli_graph::ops::SimpleUnaryOp::exp(&mut graph, shifted, rng);
         let sum =
             milli_graph::ops::ReduceSum::push_new(&mut graph, e, Some(axis_tid), true, false, rng);
-        let out_tid = milli_graph::ops::SimpleBinary::div(&mut graph, e, sum, rng);
+        let out_f32 = milli_graph::ops::SimpleBinary::div(&mut graph, e, sum, rng);
+
+        // Cast back to input dtype (no-op if already F32).
+        let out_tid = milli_graph::ops::CastLike::push_new(&mut graph, out_f32, raw_input, rng);
+
         let mut output_map = HashMap::new();
         output_map.insert(out_tid, self.output);
         graph.set_output_map(output_map);
@@ -325,19 +335,22 @@ impl Operation for LogSoftmaxOperation {
     fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
 
+        let raw_input = input_map[&self.input];
+
+        // Upcast to F32 — same rationale as Softmax.
+        let input_f32 = milli_graph::ops::Cast::push_new(&mut graph, raw_input, DType::F32, rng);
+
         let axis_tid =
             milli_graph::ops::Constant::new_scalar(&mut graph, self.axis.unwrap_or(-1), rng);
-        // Subtract row max before exp to prevent overflow (critical for f16)
         let row_max = milli_graph::ops::ReduceMax::push_new(
             &mut graph,
-            input_map[&self.input],
+            input_f32,
             Some(axis_tid),
             true,
             false,
             rng,
         );
-        let shifted =
-            milli_graph::ops::SimpleBinary::sub(&mut graph, input_map[&self.input], row_max, rng);
+        let shifted = milli_graph::ops::SimpleBinary::sub(&mut graph, input_f32, row_max, rng);
         let e_tid = milli_graph::ops::SimpleUnaryOp::exp(&mut graph, shifted, rng);
         let sum_tid = milli_graph::ops::ReduceSum::push_new(
             &mut graph,
@@ -349,7 +362,10 @@ impl Operation for LogSoftmaxOperation {
         );
         let log_sum = milli_graph::ops::SimpleUnaryOp::ln(&mut graph, sum_tid, rng);
         // log_softmax(x) = (x - max) - log(sum(exp(x - max)))
-        let out_tid = milli_graph::ops::SimpleBinary::sub(&mut graph, shifted, log_sum, rng);
+        let out_f32 = milli_graph::ops::SimpleBinary::sub(&mut graph, shifted, log_sum, rng);
+
+        let out_tid = milli_graph::ops::CastLike::push_new(&mut graph, out_f32, raw_input, rng);
+
         let mut output_map = HashMap::new();
         output_map.insert(out_tid, self.output);
         graph.set_output_map(output_map);

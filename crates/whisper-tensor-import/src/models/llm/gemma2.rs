@@ -343,12 +343,24 @@ pub fn load_gemma2(
         if let Some(softcap) = config.attn_logit_softcapping
             && softcap > 0.0
         {
-            let s = div_scalar(scores, softcap)?;
+            // Compute softcapping in F32 for BF16 inputs to avoid truncation
+            // at each intermediate step (div → tanh → mul).
+            let input_dtype = scores.dtype();
+            let s: Arc<dyn Tensor> = if input_dtype != DType::F32 {
+                cast(scores, DType::F32)
+            } else {
+                scores
+            };
+            let s = div_scalar(s, softcap)?;
             let s = Tanh::new(None, s);
             let scale: Arc<dyn Tensor> =
                 Constant::new(None, TensorData::fill(Shape::from(&[1usize][..]), softcap)?);
-            let scale = cast(scale, s.dtype());
-            scores = Mul::new(None, s, scale)?;
+            let s: Arc<dyn Tensor> = Mul::new(None, s, scale)?;
+            scores = if input_dtype != DType::F32 {
+                cast(s, input_dtype)
+            } else {
+                s
+            };
         }
 
         let scores = Softmax::new(None, scores, Some(3));
@@ -418,12 +430,22 @@ pub fn load_gemma2(
     if let Some(softcap) = config.final_logit_softcapping
         && softcap > 0.0
     {
-        let o = div_scalar(out, softcap)?;
+        let input_dtype = out.dtype();
+        let o: Arc<dyn Tensor> = if input_dtype != DType::F32 {
+            cast(out, DType::F32)
+        } else {
+            out
+        };
+        let o = div_scalar(o, softcap)?;
         let o = Tanh::new(None, o);
         let scale: Arc<dyn Tensor> =
             Constant::new(None, TensorData::fill(Shape::from(&[1usize][..]), softcap)?);
-        let scale = cast(scale, o.dtype());
-        out = Mul::new(None, o, scale)?;
+        let o: Arc<dyn Tensor> = Mul::new(None, o, scale)?;
+        out = if input_dtype != DType::F32 {
+            cast(o, input_dtype)
+        } else {
+            o
+        };
     }
     output_tensors.push(("logits".to_string(), out));
 
