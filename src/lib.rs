@@ -19,6 +19,7 @@ pub mod numeric_dtype;
 pub mod numeric_scalar;
 pub mod numeric_tensor;
 pub mod scalar_ops;
+pub mod test_set;
 pub mod packed_tensor;
 pub mod phonemization;
 pub mod pool;
