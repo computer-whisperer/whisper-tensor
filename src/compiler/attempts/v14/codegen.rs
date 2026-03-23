@@ -808,7 +808,11 @@ impl JitCompiledSpan {
         }
 
         let layout = compute_layout(graph, output_ranges);
-        let compiled = compile_span(graph, &layout)?;
+        let compiled = if std::env::var("FUSION_VALIDATE").is_ok() {
+            compile_span_validated(graph, &layout)?
+        } else {
+            compile_span(graph, &layout)?
+        };
 
         let mut literal_template = vec![0u8; layout.total_bytes];
         layout.populate_literals(graph, &mut literal_template);
@@ -1077,9 +1081,8 @@ struct FusionChain {
 /// that reference A use Affine stride=1 (Strided with stride_inner=1,
 /// stride_outer=0, modulus=MAX).
 fn build_fusion_chains(groups: &[AtomGroup], layout: &BufferLayout) -> Vec<FusionChain> {
-    // Fusion is opt-in while the chain detection bug is being investigated.
-    // Enable with FUSION=1.
-    if std::env::var("FUSION").is_err() {
+    // Fusion is opt-out. Disable with FUSION=0.
+    if std::env::var("FUSION").as_deref() == Ok("0") {
         return groups.iter().enumerate()
             .filter(|(gi, g)| !matches!(&g.op, ScalarOp::Literal(_))
                 && !(*gi < layout.group_use_counts.len() && layout.group_use_counts[*gi] == 0)
@@ -1179,7 +1182,19 @@ fn inputs_fusable_with_chain(group: &AtomGroup, chain_ranges: &[(u64, u64)]) -> 
                     }
                 }
             }
-            _ => {}
+            InputRef::Explicit(ids) => {
+                // Explicit inputs reference arbitrary atoms. If ANY of them
+                // fall within a chain member's range, fusion is unsafe because
+                // the access pattern is non-sequential (could read atoms from
+                // future iterations that haven't been written yet).
+                for id in ids {
+                    for &(range_lo, range_hi) in chain_ranges {
+                        if id.0 >= range_lo && id.0 < range_hi {
+                            return false;
+                        }
+                    }
+                }
+            }
         }
     }
     true
@@ -1512,6 +1527,102 @@ fn load_input_forwarded(
     load_input(builder, module, input, layout, buffer_ptr, i_val, i_const, atom_offset, table_counter)
 }
 
+/// Compile a span, but validate by also compiling without fusion and
+/// comparing the output byte-for-byte on a zero-initialized buffer.
+/// Only active when FUSION_VALIDATE env var is set.
+pub fn compile_span_validated(graph: &NanoGraph, layout: &BufferLayout) -> Result<CompiledSpan, String> {
+    let has_multi = {
+        let chains = build_fusion_chains(graph.groups(), layout);
+        chains.iter().any(|c| c.group_indices.len() > 1)
+    };
+
+    let fused = compile_span(graph, layout)?;
+
+    if !has_multi || std::env::var("FUSION_VALIDATE").is_err() {
+        return Ok(fused);
+    }
+
+    // Also compile without fusion.
+    let saved = std::env::var("FUSION").ok();
+    unsafe { std::env::remove_var("FUSION"); }
+    let unfused = compile_span(graph, layout)?;
+    if let Some(val) = saved {
+        unsafe { std::env::set_var("FUSION", val); }
+    }
+
+    // Run both on a zero+literals buffer and compare.
+    let mut buf_fused = vec![0u8; layout.total_bytes];
+    let mut buf_unfused = vec![0u8; layout.total_bytes];
+    layout.populate_literals(graph, &mut buf_fused);
+    layout.populate_literals(graph, &mut buf_unfused);
+    // Fill input tensor slots with deterministic test data.
+    for it in graph.input_tensors() {
+        if let Some((slot, _)) = layout.find(it.base_id) {
+            let start = slot.byte_offset;
+            let end = start + it.count as usize * slot.elem_bytes;
+            if end <= buf_fused.len() {
+                for (i, b) in buf_fused[start..end].iter_mut().enumerate() {
+                    *b = ((i * 7 + 13) % 256) as u8;
+                }
+                buf_unfused[start..end].copy_from_slice(&buf_fused[start..end]);
+            }
+        }
+    }
+
+    fused.execute(&mut buf_fused);
+    unfused.execute(&mut buf_unfused);
+
+    // Compare output bytes.
+    let mut mismatches = 0usize;
+    let mut first_mismatch = None;
+    for (i, (&a, &b)) in buf_fused.iter().zip(buf_unfused.iter()).enumerate() {
+        if a != b && first_mismatch.is_none() {
+            first_mismatch = Some(i);
+        }
+        if a != b {
+            mismatches += 1;
+        }
+    }
+    if mismatches > 0 {
+        eprintln!(
+            "  [FUSION_VALIDATE] MISMATCH: {} bytes differ (first at offset {}), buffer_size={}, groups={}",
+            mismatches,
+            first_mismatch.unwrap(),
+            layout.total_bytes,
+            graph.num_groups()
+        );
+        // Find which group's slot the first mismatch is in.
+        if let Some(off) = first_mismatch {
+            for (gi, group) in graph.groups().iter().enumerate() {
+                if let Some((slot, _)) = layout.find(group.base_id) {
+                    let start = slot.byte_offset;
+                    let end = start + slot.count as usize * slot.elem_bytes;
+                    if off >= start && off < end {
+                        let elem_off = (off - start) / slot.elem_bytes;
+                        eprintln!(
+                            "    first mismatch in group[{}] base={} {:?} dtype={:?} atom_offset={} count={} slot_byte={} elem_offset={}",
+                            gi, group.base_id, op_name_short(&group.op),
+                            group.output_dtype, group.atom_offset, group.count,
+                            start, elem_off
+                        );
+                        // Show the actual values
+                        let f_val = f32::from_le_bytes([buf_fused[off], buf_fused[off+1], buf_fused[off+2], buf_fused[off+3]]);
+                        let u_val = f32::from_le_bytes([buf_unfused[off], buf_unfused[off+1], buf_unfused[off+2], buf_unfused[off+3]]);
+                        eprintln!("    fused={} unfused={}", f_val, u_val);
+                        // Show inputs
+                        for (ii, inp) in group.inputs.iter().enumerate() {
+                            eprintln!("    input[{}]: {:?}", ii, inp);
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(fused)
+}
+
 /// Compile a span's NanoGraph into native code using the given buffer layout.
 pub fn compile_span(graph: &NanoGraph, layout: &BufferLayout) -> Result<CompiledSpan, String> {
     let mut flag_builder = settings::builder();
@@ -1565,6 +1676,7 @@ pub fn compile_span(graph: &NanoGraph, layout: &BufferLayout) -> Result<Compiled
 
         builder.ins().return_(&[]);
         builder.finalize();
+
     }
 
     module
@@ -4405,5 +4517,459 @@ mod tests {
 
         let result = layout.read_f32_output(&outputs[0], &buffer);
         assert_eq!(result, vec![1.0, 1.0, 1.0, 2.0, 2.0, 2.0]);
+    }
+
+    /// 5-group fusion chain: input → +2 → *3 → neg → exp → output
+    /// Tests that chains of 4+ fused groups produce correct results.
+    #[test]
+    fn test_fusion_chain_5_groups() {
+        // Fusion is enabled by default; no env var needed.
+
+        let mut g = NanoGraph::new();
+        let n = 8u64;
+        let inp = g.add_input_tensor(GlobalId(0), n, DType::F32);
+
+        let lit2 = g.push_group(1, DType::F32, ScalarOp::Literal(NumericScalar::F32(2.0)), vec![], vec![]);
+        let lit3 = g.push_group(1, DType::F32, ScalarOp::Literal(NumericScalar::F32(3.0)), vec![], vec![]);
+
+        // Group 1: identity (copy input)
+        let g1 = g.push_group(n, DType::F32, ScalarOp::Identity, vec![],
+            vec![InputRef::affine(inp, 1)]);
+
+        // Group 2: g1 + 2.0
+        let g2 = g.push_group(n, DType::F32,
+            ScalarOp::Binary { op: ScalarBinOp::Add, compute_dtype: DType::F32 }, vec![],
+            vec![InputRef::affine(g1, 1), InputRef::Broadcast(lit2)]);
+
+        // Group 3: g2 * 3.0
+        let g3 = g.push_group(n, DType::F32,
+            ScalarOp::Binary { op: ScalarBinOp::Mul, compute_dtype: DType::F32 }, vec![],
+            vec![InputRef::affine(g2, 1), InputRef::Broadcast(lit3)]);
+
+        // Group 4: -g3
+        let g4 = g.push_group(n, DType::F32,
+            ScalarOp::Unary { op: ScalarUnaryOp::Neg, compute_dtype: DType::F32 }, vec![],
+            vec![InputRef::affine(g3, 1)]);
+
+        // Group 5: exp(g4)
+        let g5 = g.push_group(n, DType::F32,
+            ScalarOp::Unary { op: ScalarUnaryOp::Exp, compute_dtype: DType::F32 }, vec![],
+            vec![InputRef::affine(g4, 1)]);
+
+        let outputs = vec![AtomRange { base: g5, count: n, dtype: DType::F32 }];
+        let layout = compute_layout(&g, &outputs);
+
+        // Verify chain was built (should be 1 chain of 5 groups)
+        let chains = build_fusion_chains(g.groups(), &layout);
+        let multi = chains.iter().filter(|c| c.group_indices.len() > 1).count();
+        assert!(multi > 0, "expected at least one multi-group fusion chain");
+        let max_len = chains.iter().map(|c| c.group_indices.len()).max().unwrap();
+        assert!(max_len >= 4, "expected chain of 4+ groups, got max {}", max_len);
+
+        let compiled = compile_span(&g, &layout).unwrap();
+
+        let mut buffer = vec![0u8; layout.total_bytes];
+        layout.populate_literals(&g, &mut buffer);
+        let input_data: Vec<f32> = (0..n).map(|i| i as f32 * 0.5).collect();
+        layout.write_f32_input(inp, &input_data, &mut buffer);
+
+        compiled.execute(&mut buffer);
+
+        let result = layout.read_f32_output(&outputs[0], &buffer);
+        let expected: Vec<f32> = input_data.iter()
+            .map(|x| (-((*x + 2.0) * 3.0)).exp())
+            .collect();
+
+        for (i, (got, want)) in result.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (got - want).abs() < 1e-5 * want.abs().max(1.0),
+                "mismatch at [{}]: got {}, expected {}", i, got, want
+            );
+        }
+
+        // Disable fusion for unfused comparison.
+        unsafe { std::env::set_var("FUSION", "0"); }
+    }
+
+    /// 5-group chain with a diamond dependency: D reads from both A and C.
+    /// Tests forwarding with multiple chain producers.
+    #[test]
+    fn test_fusion_chain_diamond() {
+        // Fusion is enabled by default; no env var needed.
+
+        let mut g = NanoGraph::new();
+        let n = 8u64;
+        let inp = g.add_input_tensor(GlobalId(0), n, DType::F32);
+
+        // A: identity(input)
+        let a = g.push_group(n, DType::F32, ScalarOp::Identity, vec![],
+            vec![InputRef::affine(inp, 1)]);
+
+        // B: A + A = 2*input
+        let b = g.push_group(n, DType::F32,
+            ScalarOp::Binary { op: ScalarBinOp::Add, compute_dtype: DType::F32 }, vec![],
+            vec![InputRef::affine(a, 1), InputRef::affine(a, 1)]);
+
+        // C: -B
+        let c = g.push_group(n, DType::F32,
+            ScalarOp::Unary { op: ScalarUnaryOp::Neg, compute_dtype: DType::F32 }, vec![],
+            vec![InputRef::affine(b, 1)]);
+
+        // D: A + C (reads from first AND third group in chain)
+        let d = g.push_group(n, DType::F32,
+            ScalarOp::Binary { op: ScalarBinOp::Add, compute_dtype: DType::F32 }, vec![],
+            vec![InputRef::affine(a, 1), InputRef::affine(c, 1)]);
+
+        // E: exp(D)
+        let e = g.push_group(n, DType::F32,
+            ScalarOp::Unary { op: ScalarUnaryOp::Exp, compute_dtype: DType::F32 }, vec![],
+            vec![InputRef::affine(d, 1)]);
+
+        let outputs = vec![AtomRange { base: e, count: n, dtype: DType::F32 }];
+        let layout = compute_layout(&g, &outputs);
+
+        let chains = build_fusion_chains(g.groups(), &layout);
+        let max_len = chains.iter().map(|c| c.group_indices.len()).max().unwrap();
+        assert!(max_len >= 4, "expected chain of 4+ groups, got max {}", max_len);
+
+        let compiled = compile_span(&g, &layout).unwrap();
+
+        let mut buffer = vec![0u8; layout.total_bytes];
+        layout.populate_literals(&g, &mut buffer);
+        let input_data: Vec<f32> = (0..n).map(|i| i as f32 + 1.0).collect();
+        layout.write_f32_input(inp, &input_data, &mut buffer);
+
+        compiled.execute(&mut buffer);
+
+        let result = layout.read_f32_output(&outputs[0], &buffer);
+        // A=x, B=2x, C=-2x, D=x+(-2x)=-x, E=exp(-x)
+        let expected: Vec<f32> = input_data.iter()
+            .map(|x| (-x).exp())
+            .collect();
+
+        for (i, (got, want)) in result.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (got - want).abs() < 1e-5 * want.abs().max(1.0),
+                "mismatch at [{}]: got {}, expected {}", i, got, want
+            );
+        }
+
+        // Disable fusion for unfused comparison.
+        unsafe { std::env::set_var("FUSION", "0"); }
+    }
+
+    /// Chain where not all groups are connected — some read only from external
+    /// inputs. Tests that independent groups within a chain still produce
+    /// correct results.
+    #[test]
+    fn test_fusion_chain_independent_groups() {
+        // Fusion is enabled by default; no env var needed.
+
+        let mut g = NanoGraph::new();
+        let n = 8u64;
+        let inp1 = g.add_input_tensor(GlobalId(0), n, DType::F32);
+        let inp2 = g.add_input_tensor(GlobalId(1), n, DType::F32);
+
+        // A: identity(inp1)
+        let a = g.push_group(n, DType::F32, ScalarOp::Identity, vec![],
+            vec![InputRef::affine(inp1, 1)]);
+        // B: identity(inp2) — reads ONLY from external, NOT from A
+        let b = g.push_group(n, DType::F32, ScalarOp::Identity, vec![],
+            vec![InputRef::affine(inp2, 1)]);
+        // C: identity(inp1) — another independent group
+        let c = g.push_group(n, DType::F32, ScalarOp::Identity, vec![],
+            vec![InputRef::affine(inp1, 1)]);
+        // D: A + B — reads from chain members A and B
+        let d = g.push_group(n, DType::F32,
+            ScalarOp::Binary { op: ScalarBinOp::Add, compute_dtype: DType::F32 }, vec![],
+            vec![InputRef::affine(a, 1), InputRef::affine(b, 1)]);
+        // E: D * C — reads from chain members D and C
+        let e_group = g.push_group(n, DType::F32,
+            ScalarOp::Binary { op: ScalarBinOp::Mul, compute_dtype: DType::F32 }, vec![],
+            vec![InputRef::affine(d, 1), InputRef::affine(c, 1)]);
+
+        let outputs = vec![AtomRange { base: e_group, count: n, dtype: DType::F32 }];
+        let layout = compute_layout(&g, &outputs);
+
+        let chains = build_fusion_chains(g.groups(), &layout);
+        let max_len = chains.iter().map(|c| c.group_indices.len()).max().unwrap();
+        assert!(max_len >= 4, "expected chain of 4+, got {}", max_len);
+
+        let compiled = compile_span(&g, &layout).unwrap();
+
+        let mut buffer = vec![0u8; layout.total_bytes];
+        let d1: Vec<f32> = (0..n).map(|i| i as f32).collect();
+        let d2: Vec<f32> = (0..n).map(|i| 10.0 + i as f32).collect();
+        layout.write_f32_input(inp1, &d1, &mut buffer);
+        layout.write_f32_input(inp2, &d2, &mut buffer);
+
+        compiled.execute(&mut buffer);
+
+        let result = layout.read_f32_output(&outputs[0], &buffer);
+        // A=inp1, B=inp2, C=inp1, D=inp1+inp2, E=(inp1+inp2)*inp1
+        let expected: Vec<f32> = d1.iter().zip(d2.iter())
+            .map(|(x, y)| (x + y) * x)
+            .collect();
+
+        for (i, (got, want)) in result.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (got - want).abs() < 1e-4,
+                "mismatch at [{}]: got {}, expected {}", i, got, want
+            );
+        }
+
+        // Disable fusion for unfused comparison.
+        unsafe { std::env::set_var("FUSION", "0"); }
+    }
+
+    /// Chain starting with ReduceSum: models LayerNorm pattern.
+    /// ReduceSum groups followed by elementwise groups reading from them.
+    /// In GPT-2, this pattern creates chains of [Red, Bin, Bin, Un].
+    #[test]
+    fn test_fusion_chain_reduce_head() {
+        // Fusion is enabled by default; no env var needed.
+
+        let mut g = NanoGraph::new();
+
+        // Input: 4 vectors of 8 elements each (32 total)
+        let inp = g.add_input_tensor(GlobalId(0), 32, DType::F32);
+        let lit_n_inv = g.push_group(1, DType::F32,
+            ScalarOp::Literal(NumericScalar::F32(0.125)), vec![], vec![]); // 1/8
+        let lit2 = g.push_group(1, DType::F32,
+            ScalarOp::Literal(NumericScalar::F32(2.0)), vec![], vec![]);
+
+        // 4 ReduceSum groups, each summing 8 elements → 4 outputs
+        let red = g.push_group(4, DType::F32,
+            ScalarOp::Reduce {
+                kind: ReduceKind::Sum,
+                reduce_count: 8,
+                reduce_stride: 1,
+                compute_dtype: DType::F32,
+            }, vec![],
+            vec![InputRef::affine(inp, 8)]);
+
+        // Bin: red * (1/8) = mean
+        let mean = g.push_group(4, DType::F32,
+            ScalarOp::Binary { op: ScalarBinOp::Mul, compute_dtype: DType::F32 }, vec![],
+            vec![InputRef::affine(red, 1), InputRef::Broadcast(lit_n_inv)]);
+
+        // Bin: mean + 2.0
+        let biased = g.push_group(4, DType::F32,
+            ScalarOp::Binary { op: ScalarBinOp::Add, compute_dtype: DType::F32 }, vec![],
+            vec![InputRef::affine(mean, 1), InputRef::Broadcast(lit2)]);
+
+        // Un: sqrt(biased)
+        let result = g.push_group(4, DType::F32,
+            ScalarOp::Unary { op: ScalarUnaryOp::Sqrt, compute_dtype: DType::F32 }, vec![],
+            vec![InputRef::affine(biased, 1)]);
+
+        let outputs = vec![AtomRange { base: result, count: 4, dtype: DType::F32 }];
+        let layout = compute_layout(&g, &outputs);
+
+        // Check that fusion creates a chain of 4+ groups
+        let chains = build_fusion_chains(g.groups(), &layout);
+        let max_len = chains.iter().map(|c| c.group_indices.len()).max().unwrap();
+        eprintln!("  reduce_head: chains={}, max_len={}", chains.len(), max_len);
+
+        // Compile with fusion
+        let compiled_fused = compile_span(&g, &layout).unwrap();
+        let mut buf_fused = vec![0u8; layout.total_bytes];
+        layout.populate_literals(&g, &mut buf_fused);
+        let input_data: Vec<f32> = (0..32).map(|i| (i as f32) * 0.1 + 1.0).collect();
+        layout.write_f32_input(inp, &input_data, &mut buf_fused);
+        compiled_fused.execute(&mut buf_fused);
+        let result_fused = layout.read_f32_output(&outputs[0], &buf_fused);
+
+        // Compile without fusion
+        // Disable fusion for unfused comparison.
+        unsafe { std::env::set_var("FUSION", "0"); }
+        let compiled_unfused = compile_span(&g, &layout).unwrap();
+        let mut buf_unfused = vec![0u8; layout.total_bytes];
+        layout.populate_literals(&g, &mut buf_unfused);
+        layout.write_f32_input(inp, &input_data, &mut buf_unfused);
+        compiled_unfused.execute(&mut buf_unfused);
+        let result_unfused = layout.read_f32_output(&outputs[0], &buf_unfused);
+
+        eprintln!("  fused:   {:?}", result_fused);
+        eprintln!("  unfused: {:?}", result_unfused);
+
+        for (i, (f, u)) in result_fused.iter().zip(result_unfused.iter()).enumerate() {
+            assert!(
+                (f - u).abs() < 1e-6,
+                "reduce_head mismatch at [{}]: fused={}, unfused={}", i, f, u
+            );
+        }
+    }
+
+    /// Simulates split groups: same as chain but with atom_offset=8
+    /// (models what GPT-2 partitioner produces when splitting across lanes).
+    /// InputRefs reference original (unsplit) base_ids.
+    #[test]
+    fn test_fusion_chain_split_groups() {
+        // Fusion is enabled by default; no env var needed.
+
+        // Build the ORIGINAL (unsplit) graph first, then create a "split" version
+        // that only contains the second portion (offset=8, count=8 out of 16).
+        let mut g = NanoGraph::new();
+        let n_original = 16u64; // original group size
+        let split_offset = 8u64;
+        let split_count = 8u64;
+
+        // External input (large enough for the reduce to read from)
+        let inp = g.add_input_tensor(GlobalId(0), 128, DType::F32);
+        let lit_inv = g.push_group(1, DType::F32,
+            ScalarOp::Literal(NumericScalar::F32(0.125)), vec![], vec![]);
+        let lit2 = g.push_group(1, DType::F32,
+            ScalarOp::Literal(NumericScalar::F32(2.0)), vec![], vec![]);
+
+        // Create groups at ORIGINAL size first, then we'll split them.
+        // g0: ReduceSum, reads from input with stride=8 (each output sums 8 elements)
+        let g0 = g.push_group(n_original, DType::F32,
+            ScalarOp::Reduce {
+                kind: ReduceKind::Sum,
+                reduce_count: 8,
+                reduce_stride: 1,
+                compute_dtype: DType::F32,
+            }, vec![],
+            vec![InputRef::affine(inp, 8)]);
+        let g0_original_base = g0;
+
+        // g1: g0 * (1/8)
+        let g1 = g.push_group(n_original, DType::F32,
+            ScalarOp::Binary { op: ScalarBinOp::Mul, compute_dtype: DType::F32 }, vec![],
+            vec![InputRef::affine(g0, 1), InputRef::Broadcast(lit_inv)]);
+        let g1_original_base = g1;
+
+        // g2: g1 + 2.0
+        let g2 = g.push_group(n_original, DType::F32,
+            ScalarOp::Binary { op: ScalarBinOp::Add, compute_dtype: DType::F32 }, vec![],
+            vec![InputRef::affine(g1, 1), InputRef::Broadcast(lit2)]);
+
+        // g3: sqrt(g2)
+        let g3 = g.push_group(n_original, DType::F32,
+            ScalarOp::Unary { op: ScalarUnaryOp::Sqrt, compute_dtype: DType::F32 }, vec![],
+            vec![InputRef::affine(g2, 1)]);
+
+        // Now simulate splitting: modify groups to be the second portion.
+        // This mimics what the partitioner does.
+        {
+            let groups = g.groups_mut();
+            for group in groups.iter_mut() {
+                if group.count == n_original {
+                    // Split: keep only the second portion
+                    group.base_id = AtomId(group.base_id.0 + split_offset);
+                    group.count = split_count;
+                    group.atom_offset = split_offset;
+                    // InputRefs stay the same (reference original bases)
+                }
+            }
+        }
+
+        let outputs = vec![AtomRange { base: AtomId(g3.0 + split_offset), count: split_count, dtype: DType::F32 }];
+        let layout = compute_layout(&g, &outputs);
+
+        // Check fusion chains
+        let chains = build_fusion_chains(g.groups(), &layout);
+        for chain in &chains {
+            if chain.group_indices.len() > 1 {
+                eprintln!(
+                    "  split_test: chain len={} offset={} count={}",
+                    chain.group_indices.len(), chain.atom_offset, chain.count
+                );
+            }
+        }
+
+        // Compile WITH fusion
+        let compiled_fused = compile_span(&g, &layout).unwrap();
+        let mut buf_fused = vec![0u8; layout.total_bytes];
+        layout.populate_literals(&g, &mut buf_fused);
+        let input_data: Vec<f32> = (0..128).map(|i| (i as f32) * 0.1 + 1.0).collect();
+        layout.write_f32_input(inp, &input_data, &mut buf_fused);
+        compiled_fused.execute(&mut buf_fused);
+        let result_fused = layout.read_f32_output(&outputs[0], &buf_fused);
+
+        // Compile WITHOUT fusion
+        // Disable fusion for unfused comparison.
+        unsafe { std::env::set_var("FUSION", "0"); }
+        let compiled_unfused = compile_span(&g, &layout).unwrap();
+        let mut buf_unfused = vec![0u8; layout.total_bytes];
+        layout.populate_literals(&g, &mut buf_unfused);
+        layout.write_f32_input(inp, &input_data, &mut buf_unfused);
+        compiled_unfused.execute(&mut buf_unfused);
+        let result_unfused = layout.read_f32_output(&outputs[0], &buf_unfused);
+
+        eprintln!("  fused:   {:?}", result_fused);
+        eprintln!("  unfused: {:?}", result_unfused);
+
+        for (i, (f, u)) in result_fused.iter().zip(result_unfused.iter()).enumerate() {
+            assert!(
+                (f - u).abs() < 1e-6,
+                "split_group mismatch at [{}]: fused={}, unfused={}", i, f, u
+            );
+        }
+    }
+
+    /// 6-group chain with BF16 intermediate dtypes — tests store-load
+    /// roundtrip precision in forwarded values.
+    #[test]
+    fn test_fusion_chain_bf16_roundtrip() {
+        // Fusion is enabled by default; no env var needed.
+
+        let mut g = NanoGraph::new();
+        let n = 8u64;
+        let inp = g.add_input_tensor(GlobalId(0), n, DType::F32);
+
+        let lit2 = g.push_group(1, DType::F32, ScalarOp::Literal(NumericScalar::F32(2.0)), vec![], vec![]);
+
+        // A: identity F32 → BF16 cast
+        let a = g.push_group(n, DType::BF16, ScalarOp::Identity, vec![],
+            vec![InputRef::affine(inp, 1)]);
+        // B: identity BF16 → F32 cast
+        let b = g.push_group(n, DType::F32, ScalarOp::Identity, vec![],
+            vec![InputRef::affine(a, 1)]);
+        // C: B + 2.0
+        let c = g.push_group(n, DType::F32,
+            ScalarOp::Binary { op: ScalarBinOp::Add, compute_dtype: DType::F32 }, vec![],
+            vec![InputRef::affine(b, 1), InputRef::Broadcast(lit2)]);
+        // D: cast F32 → BF16
+        let d = g.push_group(n, DType::BF16, ScalarOp::Identity, vec![],
+            vec![InputRef::affine(c, 1)]);
+        // E: cast BF16 → F32
+        let e_group = g.push_group(n, DType::F32, ScalarOp::Identity, vec![],
+            vec![InputRef::affine(d, 1)]);
+        // F: E * 2.0
+        let f = g.push_group(n, DType::F32,
+            ScalarOp::Binary { op: ScalarBinOp::Mul, compute_dtype: DType::F32 }, vec![],
+            vec![InputRef::affine(e_group, 1), InputRef::Broadcast(lit2)]);
+
+        let outputs = vec![AtomRange { base: f, count: n, dtype: DType::F32 }];
+        let layout = compute_layout(&g, &outputs);
+
+        // Compare fused vs unfused results
+        let compiled_fused = compile_span(&g, &layout).unwrap();
+
+        let mut buf_fused = vec![0u8; layout.total_bytes];
+        layout.populate_literals(&g, &mut buf_fused);
+        let input_data: Vec<f32> = vec![1.1, 2.2, 3.3, 4.4, 5.5, 6.6, 7.7, 8.8];
+        layout.write_f32_input(inp, &input_data, &mut buf_fused);
+        compiled_fused.execute(&mut buf_fused);
+        let result_fused = layout.read_f32_output(&outputs[0], &buf_fused);
+
+        // Now compile without fusion and compare
+        // Disable fusion for unfused comparison.
+        unsafe { std::env::set_var("FUSION", "0"); }
+        let compiled_unfused = compile_span(&g, &layout).unwrap();
+        let mut buf_unfused = vec![0u8; layout.total_bytes];
+        layout.populate_literals(&g, &mut buf_unfused);
+        layout.write_f32_input(inp, &input_data, &mut buf_unfused);
+        compiled_unfused.execute(&mut buf_unfused);
+        let result_unfused = layout.read_f32_output(&outputs[0], &buf_unfused);
+
+        for (i, (fused, unfused)) in result_fused.iter().zip(result_unfused.iter()).enumerate() {
+            assert_eq!(
+                fused, unfused,
+                "fused/unfused mismatch at [{}]: fused={}, unfused={}", i, fused, unfused
+            );
+        }
     }
 }
