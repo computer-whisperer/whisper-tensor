@@ -19,7 +19,20 @@ use super::{TestCase, TestDataSet, TestTensor, Tolerance};
 use super::{tensor_f32, tensor_bf16, tensor_f16};
 
 pub fn build_cases() -> Vec<TestCase> {
-    vec![add_case(), mul_case(), neg_case(), exp_case()]
+    vec![
+        add_case(),
+        mul_case(),
+        neg_case(),
+        exp_case(),
+        sub_case(),
+        div_case(),
+        abs_case(),
+        sqrt_case(),
+        ln_case(),
+        floor_case(),
+        ceil_case(),
+        reciprocal_case(),
+    ]
 }
 
 // ---------------------------------------------------------------------------
@@ -224,6 +237,208 @@ fn exp_case() -> TestCase {
                 tensor_f32(&[0.0, 1.0, -1.0, 2.0]),
                 tensor_f32(&[1.0, std::f32::consts::E, 1.0 / std::f32::consts::E, std::f32::consts::E * std::f32::consts::E]),
                 Tolerance::for_dtype(NumericDType::F32),
+            ),
+        ],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Sub
+// ---------------------------------------------------------------------------
+
+fn sub_case() -> TestCase {
+    let (graph, ids) = build_binary_graph(SimpleBinary::sub);
+
+    TestCase {
+        name: "sub".to_string(),
+        graph,
+        data_sets: vec![
+            binary_data_set(
+                "f32", &ids,
+                tensor_f32(&[5.0, 3.0, -1.0, 0.0]),
+                tensor_f32(&[2.0, 3.0, -4.0, 7.5]),
+                tensor_f32(&[3.0, 0.0, 3.0, -7.5]),
+                Tolerance::for_dtype(NumericDType::F32),
+            ),
+            binary_data_set(
+                "bf16", &ids,
+                tensor_bf16(&[bf16::from_f32(10.0), bf16::from_f32(1.0), bf16::from_f32(0.5)]),
+                tensor_bf16(&[bf16::from_f32(3.0), bf16::from_f32(1.0), bf16::from_f32(0.25)]),
+                tensor_bf16(&[bf16::from_f32(7.0), bf16::from_f32(0.0), bf16::from_f32(0.25)]),
+                Tolerance::for_dtype(NumericDType::BF16),
+            ),
+        ],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Div
+// ---------------------------------------------------------------------------
+
+fn div_case() -> TestCase {
+    let (graph, ids) = build_binary_graph(SimpleBinary::div);
+
+    TestCase {
+        name: "div".to_string(),
+        graph,
+        data_sets: vec![
+            binary_data_set(
+                "f32", &ids,
+                tensor_f32(&[6.0, 1.0, -10.0, 1.0]),
+                tensor_f32(&[3.0, 4.0, 5.0, 1e-30]),
+                tensor_f32(&[2.0, 0.25, -2.0, 1e30]),
+                Tolerance::for_dtype(NumericDType::F32),
+            ),
+            binary_data_set(
+                "bf16", &ids,
+                tensor_bf16(&[bf16::from_f32(8.0), bf16::from_f32(1.0), bf16::from_f32(3.0)]),
+                tensor_bf16(&[bf16::from_f32(2.0), bf16::from_f32(4.0), bf16::from_f32(3.0)]),
+                tensor_bf16(&[bf16::from_f32(4.0), bf16::from_f32(0.25), bf16::from_f32(1.0)]),
+                Tolerance::for_dtype(NumericDType::BF16),
+            ),
+        ],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Abs
+// ---------------------------------------------------------------------------
+
+fn abs_case() -> TestCase {
+    let (graph, ids) = build_unary_graph(SimpleUnaryOp::abs);
+
+    TestCase {
+        name: "abs".to_string(),
+        graph,
+        data_sets: vec![
+            unary_data_set(
+                "f32", &ids,
+                tensor_f32(&[-3.5, 0.0, 2.0, -0.0, -100.0]),
+                tensor_f32(&[3.5, 0.0, 2.0, 0.0, 100.0]),
+                Tolerance::for_dtype(NumericDType::F32),
+            ),
+            unary_data_set(
+                "bf16", &ids,
+                tensor_bf16(&[bf16::from_f32(-2.0), bf16::from_f32(0.0), bf16::from_f32(5.0)]),
+                tensor_bf16(&[bf16::from_f32(2.0), bf16::from_f32(0.0), bf16::from_f32(5.0)]),
+                Tolerance::for_dtype(NumericDType::BF16),
+            ),
+        ],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Sqrt
+// ---------------------------------------------------------------------------
+
+fn sqrt_case() -> TestCase {
+    let (graph, ids) = build_unary_graph(SimpleUnaryOp::sqrt);
+
+    TestCase {
+        name: "sqrt".to_string(),
+        graph,
+        data_sets: vec![
+            unary_data_set(
+                "f32", &ids,
+                tensor_f32(&[0.0, 1.0, 4.0, 9.0, 16.0]),
+                tensor_f32(&[0.0, 1.0, 2.0, 3.0, 4.0]),
+                Tolerance::for_dtype(NumericDType::F32),
+            ),
+            unary_data_set(
+                "f32_non_perfect", &ids,
+                tensor_f32(&[2.0, 0.25]),
+                tensor_f32(&[std::f32::consts::SQRT_2, 0.5]),
+                Tolerance::for_dtype(NumericDType::F32),
+            ),
+        ],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Ln
+// ---------------------------------------------------------------------------
+
+fn ln_case() -> TestCase {
+    let (graph, ids) = build_unary_graph(SimpleUnaryOp::ln);
+
+    TestCase {
+        name: "ln".to_string(),
+        graph,
+        data_sets: vec![
+            unary_data_set(
+                "f32", &ids,
+                tensor_f32(&[1.0, std::f32::consts::E, 0.5, 10.0]),
+                tensor_f32(&[0.0, 1.0, -std::f32::consts::LN_2, std::f32::consts::LN_10]),
+                Tolerance::for_dtype(NumericDType::F32),
+            ),
+        ],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Floor
+// ---------------------------------------------------------------------------
+
+fn floor_case() -> TestCase {
+    let (graph, ids) = build_unary_graph(SimpleUnaryOp::floor);
+
+    TestCase {
+        name: "floor".to_string(),
+        graph,
+        data_sets: vec![
+            unary_data_set(
+                "f32", &ids,
+                tensor_f32(&[3.7, -3.7, 0.0, 2.0, -0.1]),
+                tensor_f32(&[3.0, -4.0, 0.0, 2.0, -1.0]),
+                Tolerance::for_dtype(NumericDType::F32),
+            ),
+        ],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Ceil
+// ---------------------------------------------------------------------------
+
+fn ceil_case() -> TestCase {
+    let (graph, ids) = build_unary_graph(SimpleUnaryOp::ceil);
+
+    TestCase {
+        name: "ceil".to_string(),
+        graph,
+        data_sets: vec![
+            unary_data_set(
+                "f32", &ids,
+                tensor_f32(&[3.2, -3.7, 0.0, 2.0, -0.1]),
+                tensor_f32(&[4.0, -3.0, 0.0, 2.0, 0.0]),
+                Tolerance::for_dtype(NumericDType::F32),
+            ),
+        ],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Reciprocal
+// ---------------------------------------------------------------------------
+
+fn reciprocal_case() -> TestCase {
+    let (graph, ids) = build_unary_graph(SimpleUnaryOp::reciprocal);
+
+    TestCase {
+        name: "reciprocal".to_string(),
+        graph,
+        data_sets: vec![
+            unary_data_set(
+                "f32", &ids,
+                tensor_f32(&[2.0, 0.5, -1.0, 4.0, 0.25]),
+                tensor_f32(&[0.5, 2.0, -1.0, 0.25, 4.0]),
+                Tolerance::for_dtype(NumericDType::F32),
+            ),
+            unary_data_set(
+                "bf16", &ids,
+                tensor_bf16(&[bf16::from_f32(2.0), bf16::from_f32(0.5), bf16::from_f32(-1.0)]),
+                tensor_bf16(&[bf16::from_f32(0.5), bf16::from_f32(2.0), bf16::from_f32(-1.0)]),
+                Tolerance::for_dtype(NumericDType::BF16),
             ),
         ],
     }

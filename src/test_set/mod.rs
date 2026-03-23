@@ -8,6 +8,7 @@
 //! via the tch crate as an independent oracle.
 
 pub mod elementwise;
+pub mod matmul;
 
 use std::collections::HashMap;
 
@@ -211,6 +212,7 @@ use crate::DynRank as LegacyDynRank;
 pub fn build_test_set() -> Vec<TestCase> {
     let mut cases = Vec::new();
     cases.extend(elementwise::build_cases());
+    cases.extend(matmul::build_cases());
     cases
 }
 
