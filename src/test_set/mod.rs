@@ -19,6 +19,10 @@ use crate::numeric_tensor::{NumericTensor, NumericTensorView};
 use crate::pool::SystemPool;
 use crate::tensor_rank::DynRank;
 
+/// Shared static SystemPool for all test/bridge allocations.
+/// SystemPool is stateless (unit struct) — a static ref is always valid.
+pub static POOL: SystemPool = SystemPool;
+
 /// Type alias for test tensors (SystemPool, 'static lifetime).
 pub type TestTensor = NumericTensor<'static, DynRank, SystemPool>;
 
@@ -32,9 +36,7 @@ pub struct TestCase {
 /// One input/output pair for a test case.
 pub struct TestDataSet {
     pub label: String,
-    /// Input tensors keyed by their external (pre-mapping) GlobalId.
     pub inputs: HashMap<GlobalId, TestTensor>,
-    /// Expected output tensors keyed by their internal output GlobalId.
     pub expected_outputs: HashMap<GlobalId, TestTensor>,
     pub tolerance: Tolerance,
 }
@@ -53,7 +55,10 @@ impl Tolerance {
             NumericDType::F32 => Tolerance { atol: 1e-5, rtol: 1.3e-6 },
             NumericDType::F16 => Tolerance { atol: 1e-3, rtol: 4e-3 },
             NumericDType::BF16 => Tolerance { atol: 1e-2, rtol: 1.6e-2 },
-            _ => Tolerance { atol: 0.0, rtol: 0.0 },
+            NumericDType::I64 | NumericDType::I32 | NumericDType::I16 | NumericDType::I8
+            | NumericDType::U64 | NumericDType::U32 | NumericDType::U16 | NumericDType::U8
+            | NumericDType::BOOL => Tolerance { atol: 0.0, rtol: 0.0 },
+            _ => Tolerance { atol: 1e-3, rtol: 1e-3 }, // conservative default for exotic types
         }
     }
 }
@@ -62,42 +67,97 @@ impl Tolerance {
 // Tensor construction helpers
 // ---------------------------------------------------------------------------
 
-/// Static SystemPool instance for test tensors.
-/// SystemPool is stateless (unit struct), so a static ref is fine.
-static TEST_POOL: SystemPool = SystemPool;
-
-/// Create a 1D test tensor from f32 values.
-pub fn tensor_f32(values: &[f32]) -> TestTensor {
-    let shape = vec![values.len() as u64];
-    let mut t = NumericTensor::zeros(shape, NumericDType::F32, &TEST_POOL).unwrap();
+/// Create a test tensor from f32 values with an explicit shape.
+pub fn tensor_f32_shaped(shape: Vec<u64>, values: &[f32]) -> TestTensor {
+    assert_eq!(
+        shape.iter().product::<u64>() as usize,
+        values.len(),
+        "shape product must match values length"
+    );
+    let mut t = NumericTensor::zeros(shape, NumericDType::F32, &POOL).unwrap();
     for (i, &v) in values.iter().enumerate() {
         t.write_element(i, NumericScalar::from_f32(v));
     }
     t
 }
 
-/// Create a 1D test tensor from bf16 values.
-pub fn tensor_bf16(values: &[half::bf16]) -> TestTensor {
-    let shape = vec![values.len() as u64];
-    let mut t = NumericTensor::zeros(shape, NumericDType::BF16, &TEST_POOL).unwrap();
+/// Create a 1D test tensor from f32 values.
+pub fn tensor_f32(values: &[f32]) -> TestTensor {
+    tensor_f32_shaped(vec![values.len() as u64], values)
+}
+
+/// Create a test tensor from f64 values with an explicit shape.
+pub fn tensor_f64_shaped(shape: Vec<u64>, values: &[f64]) -> TestTensor {
+    assert_eq!(shape.iter().product::<u64>() as usize, values.len());
+    let mut t = NumericTensor::zeros(shape, NumericDType::F64, &POOL).unwrap();
+    for (i, &v) in values.iter().enumerate() {
+        t.write_element(i, NumericScalar::from_f64(v));
+    }
+    t
+}
+
+/// Create a test tensor from bf16 values with an explicit shape.
+pub fn tensor_bf16_shaped(shape: Vec<u64>, values: &[half::bf16]) -> TestTensor {
+    assert_eq!(shape.iter().product::<u64>() as usize, values.len());
+    let mut t = NumericTensor::zeros(shape, NumericDType::BF16, &POOL).unwrap();
     for (i, &v) in values.iter().enumerate() {
         t.write_element(i, NumericScalar::from_bf16(v));
     }
     t
 }
 
-/// Create a 1D test tensor from f16 values.
-pub fn tensor_f16(values: &[half::f16]) -> TestTensor {
-    let shape = vec![values.len() as u64];
-    let mut t = NumericTensor::zeros(shape, NumericDType::F16, &TEST_POOL).unwrap();
+/// Create a 1D test tensor from bf16 values.
+pub fn tensor_bf16(values: &[half::bf16]) -> TestTensor {
+    tensor_bf16_shaped(vec![values.len() as u64], values)
+}
+
+/// Create a test tensor from f16 values with an explicit shape.
+pub fn tensor_f16_shaped(shape: Vec<u64>, values: &[half::f16]) -> TestTensor {
+    assert_eq!(shape.iter().product::<u64>() as usize, values.len());
+    let mut t = NumericTensor::zeros(shape, NumericDType::F16, &POOL).unwrap();
     for (i, &v) in values.iter().enumerate() {
         t.write_element(i, NumericScalar::from_f16(v));
     }
     t
 }
 
+/// Create a 1D test tensor from f16 values.
+pub fn tensor_f16(values: &[half::f16]) -> TestTensor {
+    tensor_f16_shaped(vec![values.len() as u64], values)
+}
+
+/// Create a test tensor from i32 values with an explicit shape.
+pub fn tensor_i32_shaped(shape: Vec<u64>, values: &[i32]) -> TestTensor {
+    assert_eq!(shape.iter().product::<u64>() as usize, values.len());
+    let mut t = NumericTensor::zeros(shape, NumericDType::I32, &POOL).unwrap();
+    for (i, &v) in values.iter().enumerate() {
+        t.write_element(i, NumericScalar::from_i32(v));
+    }
+    t
+}
+
+/// Create a 1D test tensor from i32 values.
+pub fn tensor_i32(values: &[i32]) -> TestTensor {
+    tensor_i32_shaped(vec![values.len() as u64], values)
+}
+
+/// Create a test tensor from i64 values with an explicit shape.
+pub fn tensor_i64_shaped(shape: Vec<u64>, values: &[i64]) -> TestTensor {
+    assert_eq!(shape.iter().product::<u64>() as usize, values.len());
+    let mut t = NumericTensor::zeros(shape, NumericDType::I64, &POOL).unwrap();
+    for (i, &v) in values.iter().enumerate() {
+        t.write_element(i, NumericScalar::from_i64(v));
+    }
+    t
+}
+
+/// Create a 1D test tensor from i64 values.
+pub fn tensor_i64(values: &[i64]) -> TestTensor {
+    tensor_i64_shaped(vec![values.len() as u64], values)
+}
+
 // ---------------------------------------------------------------------------
-// Comparison (using new types directly)
+// Comparison
 // ---------------------------------------------------------------------------
 
 /// Compare two new-type tensors element-wise within tolerance.
@@ -107,11 +167,10 @@ pub fn assert_tensors_close(
     tolerance: &Tolerance,
     context: &str,
 ) -> Result<(), String> {
-    let actual_shape = actual.shape();
-    let expected_shape = expected.shape();
-    if actual_shape != expected_shape {
+    if actual.shape() != expected.shape() {
         return Err(format!(
-            "{context}: shape mismatch: actual {actual_shape:?} vs expected {expected_shape:?}"
+            "{context}: shape mismatch: actual {:?} vs expected {:?}",
+            actual.shape(), expected.shape()
         ));
     }
     if actual.dtype() != expected.dtype() {
@@ -126,6 +185,7 @@ pub fn assert_tensors_close(
         let a = actual.read_element(i).to_f64();
         let e = expected.read_element(i).to_f64();
         if a.is_nan() && e.is_nan() { continue; }
+        if a.is_infinite() && e.is_infinite() && a.signum() == e.signum() { continue; }
         let err = (a - e).abs();
         let limit = tolerance.atol + tolerance.rtol * a.abs().max(e.abs());
         if err > limit {
@@ -139,13 +199,13 @@ pub fn assert_tensors_close(
     Ok(())
 }
 
-use crate::migration::bridge;
-use crate::migration::numeric_tensor::NumericTensor as LegacyNumericTensor;
-use crate::DynRank as LegacyDynRank;
-
 // ---------------------------------------------------------------------------
 // Test runners
 // ---------------------------------------------------------------------------
+
+use crate::migration::bridge;
+use crate::migration::numeric_tensor::NumericTensor as LegacyNumericTensor;
+use crate::DynRank as LegacyDynRank;
 
 /// Collect all test cases from all submodules.
 pub fn build_test_set() -> Vec<TestCase> {
@@ -161,7 +221,6 @@ pub fn run_case_via_milli_eval(case: &TestCase) -> Result<(), String> {
     let mut backend = EvalBackend::NDArray;
 
     for ds in &case.data_sets {
-        // Convert new-type inputs to legacy for the eval boundary
         let legacy_inputs: HashMap<GlobalId, LegacyNumericTensor<LegacyDynRank>> = ds
             .inputs
             .iter()
@@ -179,8 +238,6 @@ pub fn run_case_via_milli_eval(case: &TestCase) -> Result<(), String> {
             let legacy_actual = results.get(&expected_id).ok_or_else(|| {
                 format!("{}[{}]: missing output {expected_id}", case.name, ds.label)
             })?;
-
-            // Convert legacy output back to new type for comparison
             let actual = bridge::legacy_to_new(legacy_actual);
             let ctx = format!("{}[{}]", case.name, ds.label);
             assert_tensors_close(
