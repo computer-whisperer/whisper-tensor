@@ -332,10 +332,8 @@ pub fn run_case_via_pool_eval(case: &TestCase) -> Result<(), String> {
             .unwrap_or_default();
 
         let mut output_ranges: Vec<AtomRange> = Vec::new();
-        let mut output_id_order: Vec<GlobalId> = Vec::new();
         for &out_id in &output_ids {
             if let Some(tam) = lower_result.tensor_map.get(&out_id) {
-                // Collect all groups covering this output's atoms.
                 let mut seen = std::collections::HashSet::new();
                 for i in 0..tam.count {
                     let atom = tam.atom_id_for_element(i);
@@ -350,7 +348,6 @@ pub fn run_case_via_pool_eval(case: &TestCase) -> Result<(), String> {
                         }
                     }
                 }
-                output_id_order.push(out_id);
             }
         }
 
@@ -365,60 +362,46 @@ pub fn run_case_via_pool_eval(case: &TestCase) -> Result<(), String> {
 
         // Compare outputs.
         for (&expected_id, expected_tensor) in &ds.expected_outputs {
-            // Find the output in eval_results by matching against output_ids.
-            // The eval_results are ordered by output_ranges, which correspond to output_ids.
-            let out_idx = output_ids.iter().position(|&id| id == expected_id)
-                .ok_or_else(|| format!("{}[{}]: output {expected_id} not in output_ids", case.name, ds.label))?;
+            // Fail loudly if the output isn't in tensor_map (don't silently skip).
+            let tam = lower_result.tensor_map.get(&expected_id).ok_or_else(|| {
+                format!(
+                    "{}[{}]: output {expected_id} not in tensor_map — lowering may have failed",
+                    case.name, ds.label
+                )
+            })?;
 
-            // The output tensor from pool_eval is a 1D flat buffer. We need to
-            // reconstruct elements in the original tensor's logical order.
-            if let Some(tam) = lower_result.tensor_map.get(&expected_id) {
-                let numel = tam.count as usize;
-                let expected_dtype = expected_tensor.dtype();
-                let mut actual = NumericTensor::zeros(
-                    expected_tensor.shape().clone(),
-                    expected_dtype,
-                    &POOL,
-                ).unwrap();
+            let numel = tam.count as usize;
+            let expected_dtype = expected_tensor.dtype();
+            let mut actual = NumericTensor::zeros(
+                expected_tensor.shape().clone(),
+                expected_dtype,
+                &POOL,
+            ).unwrap();
 
-                for i in 0..numel {
-                    let atom = tam.atom_id_for_element(i as u64);
-                    // Find this atom in the eval_results
-                    let mut found = false;
-                    for result_tensor in &eval_results {
-                        let result_layout = result_tensor.layout();
-                        if let crate::numeric_tensor::TensorLayout::ElementStrided { shape, .. } = result_layout {
-                            // Check if this result covers the atom we need.
-                            // This is a simplification — for non-segmented outputs,
-                            // the result's base matches the atom range's base.
-                            let result_view = result_tensor.view();
-                            // Find the matching output range
-                            for range in &output_ranges {
-                                let range_base = range.base.0;
-                                let range_end = range_base + range.count;
-                                if atom.0 >= range_base && atom.0 < range_end {
-                                    let offset = (atom.0 - range_base) as usize;
-                                    // Find the result tensor for this range
-                                    if let Some(rt_idx) = output_ranges.iter().position(|r| r.base == range.base) {
-                                        let scalar = eval_results[rt_idx].read_element(offset);
-                                        let cast = scalar.cast_to(expected_dtype);
-                                        actual.write_element(i, cast);
-                                        found = true;
-                                        break;
-                                    }
-                                }
-                            }
-                            if found { break; }
+            // For each logical element, find its atom in the eval results.
+            for i in 0..numel {
+                let atom = tam.atom_id_for_element(i as u64);
+                let (rt_idx, offset) = output_ranges
+                    .iter()
+                    .enumerate()
+                    .find_map(|(idx, range)| {
+                        let range_end = range.base.0 + range.count;
+                        if atom.0 >= range.base.0 && atom.0 < range_end {
+                            Some((idx, (atom.0 - range.base.0) as usize))
+                        } else {
+                            None
                         }
-                    }
-                    if !found {
-                        return Err(format!("{}[{}]: atom {} not found in eval results", case.name, ds.label, atom));
-                    }
-                }
+                    })
+                    .ok_or_else(|| {
+                        format!("{}[{}]: atom {} not in any output range", case.name, ds.label, atom)
+                    })?;
 
-                let ctx = format!("{}[{}] pool_eval", case.name, ds.label);
-                assert_tensors_close(&actual.view(), &expected_tensor.view(), &ds.tolerance, &ctx)?;
+                let scalar = eval_results[rt_idx].read_element(offset);
+                actual.write_element(i, scalar.cast_to(expected_dtype));
             }
+
+            let ctx = format!("{}[{}] pool_eval", case.name, ds.label);
+            assert_tensors_close(&actual.view(), &expected_tensor.view(), &ds.tolerance, &ctx)?;
         }
     }
     Ok(())
