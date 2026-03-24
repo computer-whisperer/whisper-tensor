@@ -1,3 +1,4 @@
+use crate::pool::Pool;
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
 use crate::dtype::DType;
@@ -380,13 +381,13 @@ impl Node for Gather {
 }
 
 impl MilliOp for Gather {
-    fn infer(
+    fn infer<'p, P: Pool + 'p>(
         &self,
-        known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo>,
+        known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'p, P>>,
         _symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
-        backend: &mut EvalBackend,
+        pool: &'p P,
     ) -> Result<
-        Box<dyn Iterator<Item = (GlobalId, crate::tensor_info::TensorInfo)>>,
+        Vec<(GlobalId, crate::tensor_info::TensorInfo<'p, P>)>,
         crate::milli_graph::MilliOpGraphError,
     > {
         use crate::tensor_info::TensorInfo;
@@ -401,13 +402,13 @@ impl MilliOp for Gather {
         // If both inputs are concrete, fall back to eval for full precision.
         if data_info.as_numeric().is_some() && indices_info.as_numeric().is_some() {
             let mut resolved = HashMap::new();
-            resolved.insert(self.data, data_info.as_numeric().unwrap().clone());
-            resolved.insert(self.indices, indices_info.as_numeric().unwrap().clone());
-            let collected: Vec<(GlobalId, TensorInfo)> = self
-                .eval(&resolved, &super::MilliEvalConfig::default(), backend)?
-                .map(|(a, b)| (a, TensorInfo::from(b)))
+            resolved.insert(self.data, data_info.as_numeric().unwrap());
+            resolved.insert(self.indices, indices_info.as_numeric().unwrap());
+            let collected: Vec<(GlobalId, TensorInfo<'p, P>)> = self
+                .eval(&resolved, &super::MilliEvalConfig::default(), &mut crate::backends::eval_backend::EvalBackend::NDArray)?
+                .map(|(a, b)| (a, TensorInfo::from_legacy(&b, pool)))
                 .collect();
-            return Ok(Box::new(collected.into_iter()));
+            return Ok(collected);
         }
 
         // Shape-only inference: output_shape = data[:axis] + indices.shape + data[axis+1:]
@@ -436,7 +437,7 @@ impl MilliOp for Gather {
 
         let out_dtype = data_info.dtype();
         let out_info = TensorInfo::from_dtype_and_shape_scalars(out_dtype, &out_dims);
-        Ok(Box::new([(self.output, out_info)].into_iter()))
+        Ok(vec![((self.output, out_info))])
     }
 
     fn backward(

@@ -274,7 +274,7 @@ fn main() {
     let input_info = model.get_input_tensor_info().unwrap();
     let tensors_by_name = sym_graph.get_tensors_by_name();
 
-    let mut all_infos: HashMap<GlobalId, TensorInfo> = HashMap::new();
+    let mut all_infos: HashMap<GlobalId, TensorInfo<'_, whisper_tensor::pool::SystemPool>> = HashMap::new();
 
     // User inputs: build concrete tensors and insert as full-data TensorInfo.
     // The lowering's infer_all needs data for user inputs so that downstream

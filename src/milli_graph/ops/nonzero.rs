@@ -1,3 +1,4 @@
+use crate::pool::Pool;
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
 use crate::dtype::DType;
@@ -71,30 +72,30 @@ impl Node for NonZero {
 }
 
 impl MilliOp for NonZero {
-    fn infer(
+    fn infer<'p, P: Pool + 'p>(
         &self,
-        known_inputs: &HashMap<GlobalId, TensorInfo>,
+        known_inputs: &HashMap<GlobalId, TensorInfo<'p, P>>,
         symbolic_resolver: &mut SymbolicResolver,
-        backend: &mut EvalBackend,
-    ) -> Result<Box<dyn Iterator<Item = (GlobalId, TensorInfo)>>, MilliOpGraphError> {
+        pool: &'p P,
+    ) -> Result<Vec<(GlobalId, TensorInfo<'p, P>)>, MilliOpGraphError> {
         if let Some(input) = known_inputs.get(&self.input).and_then(|ti| ti.as_numeric()) {
             let inputs = HashMap::from([(self.input, input.clone())]);
             let out = self
-                .eval(&inputs, &super::MilliEvalConfig::default(), backend)?
+                .eval(&inputs, &super::MilliEvalConfig::default(), &mut crate::backends::eval_backend::EvalBackend::NDArray)?
                 .map(|(tid, t)| (tid, TensorInfo::from(t)))
                 .collect::<Vec<_>>();
-            return Ok(Box::new(out.into_iter()));
+            return Ok(out);
         }
         // Fallback minimal info if unknown: dtype I64 vector of unknown size
-        let minimal = TensorInfo::Minimal(MinimalTensor::new(
+        let minimal = TensorInfo::wrap(crate::tensor_info::TensorInfoData::Minimal(MinimalTensor::new(
             ScalarInfo::Symbolic(SymbolicScalar::new(
                 crate::numeric_dtype::NumericDType::from_legacy(DType::I64).unwrap(),
                 symbolic_resolver,
             )),
             SymbolicScalarTyped::new(symbolic_resolver),
-        ));
-        let v: Vec<(GlobalId, TensorInfo)> = vec![(self.output, minimal)];
-        Ok(Box::new(v.into_iter()))
+        )));
+        let v: Vec<(GlobalId, TensorInfo<'p, P>)> = vec![(self.output, minimal)];
+        Ok(v)
     }
 
     fn eval(

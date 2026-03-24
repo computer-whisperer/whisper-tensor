@@ -1,3 +1,4 @@
+use crate::pool::Pool;
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
 use crate::backends::ndarray_backend::NDArrayNumericTensor;
@@ -79,13 +80,13 @@ impl Node for Unsqueeze {
 }
 
 impl MilliOp for Unsqueeze {
-    fn infer(
+    fn infer<'p, P: Pool + 'p>(
         &self,
-        known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo>,
+        known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'p, P>>,
         symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
-        backend: &mut EvalBackend,
+        pool: &'p P,
     ) -> Result<
-        Box<dyn Iterator<Item = (GlobalId, crate::tensor_info::TensorInfo)>>,
+        Vec<(GlobalId, crate::tensor_info::TensorInfo<'p, P>)>,
         MilliOpGraphError,
     > {
         use crate::scalar_info::ScalarInfoTyped;
@@ -104,10 +105,10 @@ impl MilliOp for Unsqueeze {
             let inputs =
                 HashMap::from([(self.data, data_num.clone()), (self.axes, axes_num.clone())]);
             let out: Vec<_> = self
-                .eval(&inputs, &super::MilliEvalConfig::default(), backend)?
+                .eval(&inputs, &super::MilliEvalConfig::default(), &mut crate::backends::eval_backend::EvalBackend::NDArray)?
                 .map(|(id, t)| (id, TensorInfo::from(t)))
                 .collect();
-            return Ok(Box::new(out.into_iter()));
+            return Ok(out);
         }
 
         let first_elem = data_info.first_element();
@@ -116,7 +117,7 @@ impl MilliOp for Unsqueeze {
         if let (Some(data_ranked), Some(axes_num)) = (data_info.as_ranked(), axes_info.as_numeric())
         {
             let axes_values: Vec<i64> = axes_num
-                .cast(DType::I64, backend)?
+                .cast(DType::I64, &mut crate::backends::eval_backend::EvalBackend::NDArray)?
                 .try_to_rank::<P1>()?
                 .try_into()?;
 
@@ -146,18 +147,18 @@ impl MilliOp for Unsqueeze {
                 }
             }
 
-            let out = TensorInfo::Ranked(crate::tensor_info::TensorInfoRanked::new(
+            let out = TensorInfo::wrap(crate::tensor_info::TensorInfoData::Ranked(crate::tensor_info::TensorInfoRanked::new(
                 first_elem,
                 output_shape,
                 symbolic_resolver,
-            ));
-            return Ok(Box::new([(self.output, out)].into_iter()));
+            )));
+            return Ok(vec![((self.output, out))]);
         }
 
         // If axes are concrete, we can at least compute output rank
         if let Some(axes_num) = axes_info.as_numeric() {
             let axes_values: Vec<i64> = axes_num
-                .cast(DType::I64, backend)?
+                .cast(DType::I64, &mut crate::backends::eval_backend::EvalBackend::NDArray)?
                 .try_to_rank::<P1>()?
                 .try_into()?;
             let num_axes = axes_values.len() as u32;
@@ -169,7 +170,7 @@ impl MilliOp for Unsqueeze {
                     ScalarInfoTyped::Numeric(output_rank),
                     symbolic_resolver,
                 );
-                return Ok(Box::new([(self.output, out)].into_iter()));
+                return Ok(vec![((self.output, out))]);
             }
         }
 
@@ -179,7 +180,7 @@ impl MilliOp for Unsqueeze {
             ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(symbolic_resolver)),
             symbolic_resolver,
         );
-        Ok(Box::new([(self.output, out)].into_iter()))
+        Ok(vec![((self.output, out))])
     }
 
     fn backward(

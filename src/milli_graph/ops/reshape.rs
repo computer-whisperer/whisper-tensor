@@ -1,3 +1,4 @@
+use crate::pool::Pool;
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
 use crate::dtype::DType;
@@ -131,13 +132,13 @@ impl Node for Reshape {
 }
 
 impl MilliOp for Reshape {
-    fn infer(
+    fn infer<'p, P: Pool + 'p>(
         &self,
-        known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo>,
+        known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'p, P>>,
         symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
-        backend: &mut EvalBackend,
+        pool: &'p P,
     ) -> Result<
-        Box<dyn Iterator<Item = (GlobalId, crate::tensor_info::TensorInfo)>>,
+        Vec<(GlobalId, crate::tensor_info::TensorInfo<'p, P>)>,
         MilliOpGraphError,
     > {
         use crate::scalar_info::ScalarInfoTyped;
@@ -159,10 +160,10 @@ impl MilliOp for Reshape {
                 (self.shape, shape_num.clone()),
             ]);
             let out: Vec<_> = self
-                .eval(&inputs, &super::MilliEvalConfig::default(), backend)?
+                .eval(&inputs, &super::MilliEvalConfig::default(), &mut crate::backends::eval_backend::EvalBackend::NDArray)?
                 .map(|(id, t)| (id, TensorInfo::from(t)))
                 .collect();
-            return Ok(Box::new(out.into_iter()));
+            return Ok(out);
         }
 
         let first_elem = data_info.first_element();
@@ -170,7 +171,7 @@ impl MilliOp for Reshape {
         // If shape tensor is concrete, we can determine the output shape
         if let Some(shape_num) = shape_info.as_numeric() {
             let shape_values: Vec<i64> = shape_num
-                .cast(DType::I64, backend)?
+                .cast(DType::I64, &mut crate::backends::eval_backend::EvalBackend::NDArray)?
                 .try_to_rank::<P1>()?
                 .try_into()?;
 
@@ -234,12 +235,12 @@ impl MilliOp for Reshape {
                 }
             }
 
-            let out = TensorInfo::Ranked(crate::tensor_info::TensorInfoRanked::new(
+            let out = TensorInfo::wrap(crate::tensor_info::TensorInfoData::Ranked(crate::tensor_info::TensorInfoRanked::new(
                 first_elem,
                 output_dims,
                 symbolic_resolver,
-            ));
-            return Ok(Box::new([(self.output, out)].into_iter()));
+            )));
+            return Ok(vec![((self.output, out))]);
         }
 
         // Shape tensor is not concrete. Try to get output rank from shape tensor's
@@ -254,7 +255,7 @@ impl MilliOp for Reshape {
                     ScalarInfoTyped::Numeric(*output_rank as u32),
                     symbolic_resolver,
                 );
-                return Ok(Box::new([(self.output, out)].into_iter()));
+                return Ok(vec![((self.output, out))]);
             }
         }
 
@@ -264,7 +265,7 @@ impl MilliOp for Reshape {
             ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(symbolic_resolver)),
             symbolic_resolver,
         );
-        Ok(Box::new([(self.output, out)].into_iter()))
+        Ok(vec![((self.output, out))])
     }
 
     fn backward(

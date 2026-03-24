@@ -1,3 +1,4 @@
+use crate::pool::Pool;
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
 use crate::graph::GlobalId;
@@ -77,13 +78,13 @@ impl crate::graph::Node for CastLike {
 }
 
 impl MilliOp for CastLike {
-    fn infer(
+    fn infer<'p, P: Pool + 'p>(
         &self,
-        known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo>,
+        known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'p, P>>,
         symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
-        backend: &mut EvalBackend,
+        pool: &'p P,
     ) -> Result<
-        Box<dyn Iterator<Item = (GlobalId, crate::tensor_info::TensorInfo)>>,
+        Vec<(GlobalId, crate::tensor_info::TensorInfo<'p, P>)>,
         MilliOpGraphError,
     > {
         use crate::tensor_info::TensorInfo;
@@ -98,13 +99,13 @@ impl MilliOp for CastLike {
         // If data is concrete and we know target dtype, fall back to eval.
         if data_info.as_numeric().is_some() && target_info.as_numeric().is_some() {
             let mut resolved = HashMap::new();
-            resolved.insert(self.data, data_info.as_numeric().unwrap().clone());
-            resolved.insert(self.target_type, target_info.as_numeric().unwrap().clone());
-            let collected: Vec<(GlobalId, TensorInfo)> = self
-                .eval(&resolved, &super::MilliEvalConfig::default(), backend)?
-                .map(|(a, b)| (a, TensorInfo::from(b)))
+            resolved.insert(self.data, data_info.as_numeric().unwrap());
+            resolved.insert(self.target_type, target_info.as_numeric().unwrap());
+            let collected: Vec<(GlobalId, TensorInfo<'p, P>)> = self
+                .eval(&resolved, &super::MilliEvalConfig::default(), &mut crate::backends::eval_backend::EvalBackend::NDArray)?
+                .map(|(a, b)| (a, TensorInfo::from_legacy(&b, pool)))
                 .collect();
-            return Ok(Box::new(collected.into_iter()));
+            return Ok(collected);
         }
 
         // Same shape as data, dtype from target. Preserve per-dim shape info.
@@ -113,7 +114,7 @@ impl MilliOp for CastLike {
         if let Some(ranked) = data_info.as_ranked() {
             let dims = ranked.shape();
             let out_info = TensorInfo::from_dtype_and_shape_scalars(out_dtype, &dims);
-            return Ok(Box::new([(self.output, out_info)].into_iter()));
+            return Ok(vec![((self.output, out_info))]);
         }
 
         let first_elem = crate::scalar_info::ScalarInfo::Symbolic(
@@ -124,7 +125,7 @@ impl MilliOp for CastLike {
             data_info.rank(),
             symbolic_resolver,
         );
-        Ok(Box::new([(self.output, out_info)].into_iter()))
+        Ok(vec![((self.output, out_info))])
     }
 
     fn backward(

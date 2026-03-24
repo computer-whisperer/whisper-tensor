@@ -1,3 +1,4 @@
+use crate::pool::Pool;
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
 use crate::graph::{GlobalId, Node};
@@ -202,13 +203,13 @@ impl Node for Transpose {
 }
 
 impl MilliOp for Transpose {
-    fn infer(
+    fn infer<'p, P: Pool + 'p>(
         &self,
-        known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo>,
+        known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'p, P>>,
         symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
-        backend: &mut EvalBackend,
+        pool: &'p P,
     ) -> Result<
-        Box<dyn Iterator<Item = (GlobalId, crate::tensor_info::TensorInfo)>>,
+        Vec<(GlobalId, crate::tensor_info::TensorInfo<'p, P>)>,
         MilliOpGraphError,
     > {
         use crate::tensor_info::TensorInfo;
@@ -221,10 +222,10 @@ impl MilliOp for Transpose {
         if let Some(numeric) = input_info.as_numeric() {
             let inputs = HashMap::from([(self.data, numeric.clone())]);
             let out: Vec<_> = self
-                .eval(&inputs, &super::MilliEvalConfig::default(), backend)?
+                .eval(&inputs, &super::MilliEvalConfig::default(), &mut crate::backends::eval_backend::EvalBackend::NDArray)?
                 .map(|(id, t)| (id, TensorInfo::from(t)))
                 .collect();
-            return Ok(Box::new(out.into_iter()));
+            return Ok(out);
         }
 
         let first_elem = input_info.first_element();
@@ -268,18 +269,18 @@ impl MilliOp for Transpose {
                     s
                 }
             };
-            let out = TensorInfo::Ranked(crate::tensor_info::TensorInfoRanked::new(
+            let out = TensorInfo::wrap(crate::tensor_info::TensorInfoData::Ranked(crate::tensor_info::TensorInfoRanked::new(
                 first_elem,
                 output_shape,
                 symbolic_resolver,
-            ));
-            return Ok(Box::new([(self.output, out)].into_iter()));
+            )));
+            return Ok(vec![((self.output, out))]);
         }
 
         // At minimum: same rank, same dtype
         let rank = input_info.rank();
         let out = TensorInfo::new_from_first_element_and_rank(first_elem, rank, symbolic_resolver);
-        Ok(Box::new([(self.output, out)].into_iter()))
+        Ok(vec![((self.output, out))])
     }
 
     fn backward(

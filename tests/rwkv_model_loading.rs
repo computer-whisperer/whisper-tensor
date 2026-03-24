@@ -354,7 +354,7 @@ fn rwkv01b_nano_graph_integrity() {
     // Insert weights first, then user inputs on top — user inputs take precedence.
     // User inputs should be Shaped (not Numeric) so the lowering doesn't bake in
     // test values as constants; the test provides runtime overrides separately.
-    let mut lower_infos: HashMap<GlobalId, TensorInfo> = HashMap::new();
+    let mut lower_infos: HashMap<GlobalId, TensorInfo<'_, whisper_tensor::pool::SystemPool>> = HashMap::new();
     for (id, t) in &weight_tensors {
         lower_infos.insert(*id, TensorInfo::from(t.clone()));
     }

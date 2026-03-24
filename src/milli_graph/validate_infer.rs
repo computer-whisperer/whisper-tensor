@@ -10,9 +10,10 @@ use crate::graph::{GlobalId, Node};
 use crate::milli_graph::ops::MilliOp;
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
 use crate::migration::numeric_tensor::NumericTensor;
+use crate::pool::SystemPool;
 use crate::scalar_info::{ScalarInfo, ScalarInfoTyped};
 use crate::symbolic_scalar::{SymbolicResolver, SymbolicScalar, SymbolicScalarTyped};
-use crate::tensor_info::{MinimalTensor, ShapedTensor, TensorInfo, TensorInfoRanked};
+use crate::tensor_info::{MinimalTensor, ShapedTensor, TensorInfo, TensorInfoData, TensorInfoRanked};
 use crate::tensor_rank::DynRank;
 use std::collections::HashMap;
 use std::fmt;
@@ -111,7 +112,7 @@ impl GroundTruth {
 fn numeric_to_shaped(
     tensor: &NumericTensor<DynRank>,
     resolver: &mut SymbolicResolver,
-) -> TensorInfo {
+) -> TensorInfo<'static, SystemPool> {
     let dtype = crate::numeric_dtype::NumericDType::from_legacy(tensor.dtype())
         .expect("unsupported dtype for shaped ablation");
     let shape: Vec<u64> = tensor.shape();
@@ -128,7 +129,7 @@ fn numeric_to_shaped(
 fn numeric_to_ranked(
     tensor: &NumericTensor<DynRank>,
     resolver: &mut SymbolicResolver,
-) -> TensorInfo {
+) -> TensorInfo<'static, SystemPool> {
     let rank = tensor.rank();
     let ndt = crate::numeric_dtype::NumericDType::from_legacy(tensor.dtype())
         .expect("unsupported dtype for ranked ablation");
@@ -148,7 +149,7 @@ fn numeric_to_ranked(
 fn numeric_to_minimal(
     tensor: &NumericTensor<DynRank>,
     resolver: &mut SymbolicResolver,
-) -> TensorInfo {
+) -> TensorInfo<'static, SystemPool> {
     let ndt = crate::numeric_dtype::NumericDType::from_legacy(tensor.dtype())
         .expect("unsupported dtype for minimal ablation");
     let first_element = ScalarInfo::Symbolic(SymbolicScalar::new(ndt, resolver));
@@ -161,7 +162,7 @@ fn ablate_tensor(
     tensor: &NumericTensor<DynRank>,
     level: AblationLevel,
     resolver: &mut SymbolicResolver,
-) -> TensorInfo {
+) -> TensorInfo<'static, SystemPool> {
     match level {
         AblationLevel::Numeric => TensorInfo::from(tensor.clone()),
         AblationLevel::Shaped => numeric_to_shaped(tensor, resolver),
@@ -174,7 +175,7 @@ fn ablate_tensor(
 ///
 /// Returns `Ok(())` if every concrete claim in `inferred` matches `truth`.
 /// Returns `Err(message)` if any concrete claim is wrong.
-fn validate_against_ground_truth(inferred: &TensorInfo, truth: &GroundTruth) -> Result<(), String> {
+fn validate_against_ground_truth(inferred: &TensorInfo<'_, impl crate::pool::Pool>, truth: &GroundTruth) -> Result<(), String> {
     // Check dtype -- inferred dtype is always concrete in this type system
     let inferred_dtype = inferred.dtype();
     if inferred_dtype != truth.dtype {
@@ -184,12 +185,12 @@ fn validate_against_ground_truth(inferred: &TensorInfo, truth: &GroundTruth) -> 
         ));
     }
 
-    match inferred {
-        TensorInfo::Minimal(_) => {
+    match &inferred.0 {
+        TensorInfoData::Minimal(_) => {
             // Only dtype was claimed, already checked above. Pass.
             Ok(())
         }
-        TensorInfo::Ranked(ranked) => {
+        TensorInfoData::Ranked(ranked) => {
             // Check rank
             let inferred_rank = ranked.rank();
             if inferred_rank != truth.rank {
@@ -274,7 +275,8 @@ impl MilliOpGraph {
                 // except this op's inputs which are ablated.
                 let input_ids: Vec<GlobalId> = op.inputs().collect();
 
-                let mut known: HashMap<GlobalId, TensorInfo> = HashMap::new();
+                let pool = SystemPool;
+                let mut known: HashMap<GlobalId, TensorInfo<'_, SystemPool>> = HashMap::new();
 
                 // Insert all intermediate values as Numeric TensorInfo
                 for (id, tensor) in &intermediate_values {
@@ -289,7 +291,7 @@ impl MilliOpGraph {
                 }
 
                 // Call infer
-                let result = op.infer(&known, &mut resolver, &mut backend);
+                let result = op.infer(&known, &mut resolver, &pool);
 
                 match result {
                     Err(MilliOpGraphError::UnableToInfer) => {

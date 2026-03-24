@@ -15,7 +15,12 @@ use crate::nano_graph::ops::ScalarOp;
 use crate::nano_graph::pattern::{AtomId, InputRef, NanoGraph, SymDim};
 use crate::numeric_dtype::NumericDType;
 use crate::numeric_scalar::NumericScalar;
+use crate::pool::SystemPool;
 use crate::tensor_info::TensorInfo;
+
+/// Concrete LowerTensorInfo used during lowering. Uses SystemPool since lowering
+/// doesn't allocate pool-backed tensor data.
+type LowerTensorInfo = TensorInfo<'static, SystemPool>;
 
 /// Convert an old `migration::numeric_scalar::NumericScalar` to the new `NumericScalar`.
 ///
@@ -354,10 +359,11 @@ impl TensorAtomMap {
 /// and any ops that couldn't be lowered (boundary ops).
 pub fn lower(
     graph: &MilliOpGraph,
-    inputs: &HashMap<GlobalId, TensorInfo>,
+    inputs: &HashMap<GlobalId, LowerTensorInfo>,
 ) -> Result<LowerResult, LowerError> {
     let t0 = std::time::Instant::now();
-    let all_infos = graph.infer_all(inputs)?;
+    static POOL: SystemPool = SystemPool;
+    let all_infos = graph.infer_all(inputs, &POOL)?;
     eprintln!(
         "  [lower] infer_all: {:.1}ms",
         t0.elapsed().as_secs_f64() * 1e3
@@ -468,7 +474,7 @@ pub fn lower(
 /// sites are migrated.
 pub fn lower_with_info(
     graph: &MilliOpGraph,
-    inputs: &HashMap<GlobalId, TensorInfo>,
+    inputs: &HashMap<GlobalId, LowerTensorInfo>,
 ) -> Result<LowerResult, LowerError> {
     lower(graph, inputs)
 }
@@ -481,7 +487,7 @@ pub fn lower_with_info(
 pub struct NanoLoweringContext<'a> {
     pub nano: NanoGraph,
     pub tensor_map: HashMap<GlobalId, TensorAtomMap>,
-    pub all_infos: &'a HashMap<GlobalId, TensorInfo>,
+    pub all_infos: &'a HashMap<GlobalId, LowerTensorInfo>,
     next_anon_sym: usize,
     pub unsupported: Vec<(GlobalId, String)>,
     pub unsupported_details: Vec<String>,
@@ -491,7 +497,7 @@ pub struct NanoLoweringContext<'a> {
 }
 
 impl<'a> NanoLoweringContext<'a> {
-    pub fn new(all_infos: &'a HashMap<GlobalId, TensorInfo>) -> Self {
+    pub fn new(all_infos: &'a HashMap<GlobalId, LowerTensorInfo>) -> Self {
         Self {
             nano: NanoGraph::new(),
             tensor_map: HashMap::new(),
@@ -503,14 +509,14 @@ impl<'a> NanoLoweringContext<'a> {
         }
     }
 
-    /// Get the NumericDType from a TensorInfo.
-    pub fn ndt(info: &TensorInfo) -> NumericDType {
+    /// Get the NumericDType from a LowerTensorInfo.
+    pub fn ndt(info: &LowerTensorInfo) -> NumericDType {
         info.dtype()
     }
 
     /// Classify tensor dims and return layout info.
     /// Returns None if rank is unknown or atom count overflows u32.
-    pub fn classify_dims(&mut self, info: &TensorInfo) -> Option<DimClassification> {
+    pub fn classify_dims(&mut self, info: &LowerTensorInfo) -> Option<DimClassification> {
         let rank = info.rank_if_known()?;
         let mut layout = Vec::with_capacity(rank);
         let mut known_dims = Vec::new();
@@ -540,10 +546,10 @@ impl<'a> NanoLoweringContext<'a> {
 
     /// Register a known-value constant as Literal groups.
     ///
-    /// Extracts scalar values from the TensorInfo and creates Literal groups.
+    /// Extracts scalar values from the LowerTensorInfo and creates Literal groups.
     /// Runs of identical values are coalesced into single groups. If the
-    /// TensorInfo has no numeric data, falls back to `register_input`.
-    pub fn register_constant(&mut self, id: GlobalId, info: &TensorInfo) {
+    /// LowerTensorInfo has no numeric data, falls back to `register_input`.
+    pub fn register_constant(&mut self, id: GlobalId, info: &LowerTensorInfo) {
         let Some(numeric) = info.as_numeric() else {
             self.register_input(id, info);
             return;
@@ -609,7 +615,7 @@ impl<'a> NanoLoweringContext<'a> {
     /// For constant tensors whose values are known at lowering time, the
     /// Literal(0.0) placeholder is similarly overridden by the executor using
     /// the tensor data from `all_infos`.
-    pub fn register_input(&mut self, id: GlobalId, info: &TensorInfo) {
+    pub fn register_input(&mut self, id: GlobalId, info: &LowerTensorInfo) {
         let Some((layout, known_dims, sym_dims, count)) = self.classify_dims(info) else {
             // Unknown rank — register a single atom.
             let dt = Self::ndt(info);
@@ -635,7 +641,7 @@ impl<'a> NanoLoweringContext<'a> {
 
     /// Register a tensor as a boundary (opaque) group.
     /// Boundary atoms are leaves — they use Literal(0) with no inputs.
-    pub fn register_boundary(&mut self, output_id: GlobalId, info: &TensorInfo, _op_kind: &str) {
+    pub fn register_boundary(&mut self, output_id: GlobalId, info: &LowerTensorInfo, _op_kind: &str) {
         let dt = Self::ndt(info);
         let Some((layout, known_dims, sym_dims, count)) = self.classify_dims(info) else {
             let base_id = self.nano.push_atom(
@@ -673,8 +679,8 @@ impl<'a> NanoLoweringContext<'a> {
         &self,
         consumer: &TensorAtomMap,
         producer: &TensorAtomMap,
-        consumer_info: &TensorInfo,
-        producer_info: &TensorInfo,
+        consumer_info: &LowerTensorInfo,
+        producer_info: &LowerTensorInfo,
     ) -> InputRef {
         // Segmented producers (concat): always build via atom_id_for_element
         // since they can't be expressed as a single Affine/Broadcast pattern.
@@ -730,8 +736,8 @@ impl<'a> NanoLoweringContext<'a> {
         &self,
         consumer: &TensorAtomMap,
         producer: &TensorAtomMap,
-        consumer_info: &TensorInfo,
-        producer_info: &TensorInfo,
+        consumer_info: &LowerTensorInfo,
+        producer_info: &LowerTensorInfo,
     ) -> InputRef {
         let c_rank = consumer_info.rank_if_known().unwrap_or(0);
         let p_rank = producer_info.rank_if_known().unwrap_or(0);
@@ -961,8 +967,8 @@ impl<'a> NanoLoweringContext<'a> {
         &self,
         consumer: &TensorAtomMap,
         producer: &TensorAtomMap,
-        consumer_info: &TensorInfo,
-        producer_info: &TensorInfo,
+        consumer_info: &LowerTensorInfo,
+        producer_info: &LowerTensorInfo,
     ) -> InputRef {
         let c_rank = consumer_info.rank_if_known().unwrap_or(0);
         let p_rank = producer_info.rank_if_known().unwrap_or(0);
@@ -1254,7 +1260,7 @@ impl<'a> NanoLoweringContext<'a> {
 
     /// Extract concrete i64 values from a tensor in all_infos.
     pub fn extract_i64(
-        all_infos: &HashMap<GlobalId, TensorInfo>,
+        all_infos: &HashMap<GlobalId, LowerTensorInfo>,
         id: &GlobalId,
     ) -> Option<Vec<i64>> {
         let info = all_infos.get(id)?;
@@ -1571,7 +1577,7 @@ impl<'a> NanoLoweringContext<'a> {
         self.unsupported_details.push(detail);
     }
 
-    pub fn fmt_info(info: Option<&TensorInfo>) -> String {
+    pub fn fmt_info(info: Option<&LowerTensorInfo>) -> String {
         let Some(info) = info else {
             return "?".to_string();
         };
@@ -1659,10 +1665,10 @@ mod tests {
         assert_eq!(input_ids.len(), inputs.len());
 
         // Prepare inputs.
-        let mut info_inputs: HashMap<GlobalId, TensorInfo> = HashMap::new();
+        let mut info_inputs: HashMap<GlobalId, LowerTensorInfo> = HashMap::new();
         let mut intermediates: HashMap<GlobalId, NumericTensor<DynRank>> = HashMap::new();
         for (id, tensor) in input_ids.iter().zip(inputs.iter()) {
-            info_inputs.insert(*id, TensorInfo::from(tensor.clone()));
+            info_inputs.insert(*id, LowerTensorInfo::from(tensor.clone()));
             intermediates.insert(*id, tensor.clone());
         }
 
@@ -1950,8 +1956,8 @@ mod tests {
             NumericTensor::from_vec_shape(vec![1.0f32; 8 * 16], vec![8, 16]).unwrap();
 
         let mut info = std::collections::HashMap::new();
-        info.insert(a_id, crate::tensor_info::TensorInfo::from(a_tensor));
-        info.insert(b_id, crate::tensor_info::TensorInfo::from(b_tensor));
+        info.insert(a_id, LowerTensorInfo::from(a_tensor));
+        info.insert(b_id, LowerTensorInfo::from(b_tensor));
 
         let result = super::lower_with_info(&milli, &info).unwrap();
         let graph = &result.graph;
@@ -2086,7 +2092,7 @@ mod tests {
         let tensor: NumericTensor<DynRank> =
             NumericTensor::from_vec_shape(vec![1.0f32; 12], vec![4, 3]).unwrap();
         let mut info = std::collections::HashMap::new();
-        info.insert(data, TensorInfo::from(tensor));
+        info.insert(data, LowerTensorInfo::from(tensor));
         let result = super::lower_with_info(&milli, &info).unwrap();
         let identity_count = result
             .graph
@@ -2310,7 +2316,7 @@ mod tests {
         let tensor: NumericTensor<DynRank> =
             NumericTensor::from_vec_shape(vec![1.0f32; 6], vec![6]).unwrap();
         let mut info = std::collections::HashMap::new();
-        info.insert(data, TensorInfo::from(tensor));
+        info.insert(data, LowerTensorInfo::from(tensor));
         let result = super::lower_with_info(&milli, &info).unwrap();
         let identity_count = result
             .graph

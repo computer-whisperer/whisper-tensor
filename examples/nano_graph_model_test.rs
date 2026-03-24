@@ -116,7 +116,7 @@ fn main() {
     println!("  Total input tensors: {}", milli_inputs.len());
 
     // ---- Build TensorInfo for lowering (shapes only for user inputs, full data for weights) ----
-    let mut all_infos: HashMap<GlobalId, TensorInfo> = HashMap::new();
+    let mut all_infos: HashMap<GlobalId, TensorInfo<'_, whisper_tensor::pool::SystemPool>> = HashMap::new();
     for (id, tensor) in &milli_inputs {
         all_infos.insert(*id, TensorInfo::from(tensor.clone()));
     }

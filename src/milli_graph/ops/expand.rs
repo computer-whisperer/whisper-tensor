@@ -1,3 +1,4 @@
+use crate::pool::Pool;
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
 use crate::graph::{GlobalId, Node};
@@ -145,13 +146,13 @@ impl crate::graph::Node for Expand {
 }
 
 impl MilliOp for Expand {
-    fn infer(
+    fn infer<'p, P: Pool + 'p>(
         &self,
-        known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo>,
+        known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'p, P>>,
         symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
-        backend: &mut EvalBackend,
+        pool: &'p P,
     ) -> Result<
-        Box<dyn Iterator<Item = (GlobalId, crate::tensor_info::TensorInfo)>>,
+        Vec<(GlobalId, crate::tensor_info::TensorInfo<'p, P>)>,
         MilliOpGraphError,
     > {
         use crate::scalar_info::ScalarInfoTyped;
@@ -174,10 +175,10 @@ impl MilliOp for Expand {
                 (self.shape, shape_num.clone()),
             ]);
             let out: Vec<_> = self
-                .eval(&inputs, &super::MilliEvalConfig::default(), backend)?
+                .eval(&inputs, &super::MilliEvalConfig::default(), &mut crate::backends::eval_backend::EvalBackend::NDArray)?
                 .map(|(id, t)| (id, TensorInfo::from(t)))
                 .collect();
-            return Ok(Box::new(out.into_iter()));
+            return Ok(out);
         }
 
         let first_elem = input_info.first_element();
@@ -229,21 +230,21 @@ impl MilliOp for Expand {
                     final_shape.push(dim);
                 }
 
-                let out = TensorInfo::Ranked(crate::tensor_info::TensorInfoRanked::new(
+                let out = TensorInfo::wrap(crate::tensor_info::TensorInfoData::Ranked(crate::tensor_info::TensorInfoRanked::new(
                     first_elem,
                     final_shape,
                     symbolic_resolver,
-                ));
-                return Ok(Box::new([(self.output, out)].into_iter()));
+                )));
+                return Ok(vec![((self.output, out))]);
             }
 
             // Input shape not known, but target shape is
-            let out = TensorInfo::Ranked(crate::tensor_info::TensorInfoRanked::new(
+            let out = TensorInfo::wrap(crate::tensor_info::TensorInfoData::Ranked(crate::tensor_info::TensorInfoRanked::new(
                 first_elem,
                 output_shape,
                 symbolic_resolver,
-            ));
-            return Ok(Box::new([(self.output, out)].into_iter()));
+            )));
+            return Ok(vec![((self.output, out))]);
         }
 
         // Shape tensor not concrete. Try to get output rank from shape tensor length.
@@ -257,7 +258,7 @@ impl MilliOp for Expand {
                     ScalarInfoTyped::Numeric(output_rank as u32),
                     symbolic_resolver,
                 );
-                return Ok(Box::new([(self.output, out)].into_iter()));
+                return Ok(vec![((self.output, out))]);
             }
         }
 
@@ -267,7 +268,7 @@ impl MilliOp for Expand {
             ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(symbolic_resolver)),
             symbolic_resolver,
         );
-        Ok(Box::new([(self.output, out)].into_iter()))
+        Ok(vec![((self.output, out))])
     }
 
     fn eval(

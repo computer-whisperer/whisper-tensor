@@ -290,7 +290,7 @@ pub fn run_case_via_pool_eval(case: &TestCase) -> Result<(), String> {
             .map(|(&id, t)| (id, bridge::view_to_legacy(&t.view())))
             .collect();
 
-        let info_inputs: HashMap<GlobalId, TensorInfo> = legacy_inputs
+        let info_inputs: HashMap<GlobalId, TensorInfo<'_, crate::pool::SystemPool>> = legacy_inputs
             .iter()
             .map(|(&id, t)| (id, TensorInfo::from(t.clone())))
             .collect();

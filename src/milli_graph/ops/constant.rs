@@ -1,3 +1,4 @@
+use crate::pool::Pool;
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
 use crate::backends::ndarray_backend::NDArrayNumericTensor;
@@ -198,13 +199,13 @@ impl Node for ConstantOfShape {
 }
 
 impl MilliOp for ConstantOfShape {
-    fn infer(
+    fn infer<'p, P: Pool + 'p>(
         &self,
-        known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo>,
+        known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'p, P>>,
         _symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
-        backend: &mut EvalBackend,
+        pool: &'p P,
     ) -> Result<
-        Box<dyn Iterator<Item = (GlobalId, crate::tensor_info::TensorInfo)>>,
+        Vec<(GlobalId, crate::tensor_info::TensorInfo<'p, P>)>,
         MilliOpGraphError,
     > {
         use crate::scalar_info::ScalarInfoTyped;
@@ -217,12 +218,12 @@ impl MilliOp for ConstantOfShape {
         // If shape is concrete, fall back to eval.
         if shape_info.as_numeric().is_some() {
             let mut resolved = HashMap::new();
-            resolved.insert(self.shape, shape_info.as_numeric().unwrap().clone());
-            let collected: Vec<(GlobalId, TensorInfo)> = self
-                .eval(&resolved, &super::MilliEvalConfig::default(), backend)?
-                .map(|(a, b)| (a, TensorInfo::from(b)))
+            resolved.insert(self.shape, shape_info.as_numeric().unwrap());
+            let collected: Vec<(GlobalId, TensorInfo<'p, P>)> = self
+                .eval(&resolved, &super::MilliEvalConfig::default(), &mut crate::backends::eval_backend::EvalBackend::NDArray)?
+                .map(|(a, b)| (a, TensorInfo::from_legacy(&b, pool)))
                 .collect();
-            return Ok(Box::new(collected.into_iter()));
+            return Ok(collected);
         }
 
         // Shape-only inference: the shape tensor's VALUES are the output dims.
@@ -256,7 +257,7 @@ impl MilliOp for ConstantOfShape {
                     }
                 }
                 let out_info = TensorInfo::from_dtype_and_shape_scalars(out_dtype, &out_dims);
-                return Ok(Box::new([(self.output, out_info)].into_iter()));
+                return Ok(vec![((self.output, out_info))]);
             }
         }
 

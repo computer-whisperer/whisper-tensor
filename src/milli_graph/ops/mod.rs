@@ -66,6 +66,7 @@ pub use unary::*;
 pub use unsqueeze::*;
 pub use where_op::*;
 
+use crate::pool::Pool;
 use crate::backends::eval_backend::EvalBackend;
 use crate::backends::ndarray_backend::NDArrayNumericTensor;
 use crate::graph::{GlobalId, Node, NodeMetadata, NodeSlotEditError, SlotDirection};
@@ -140,12 +141,12 @@ pub struct MilliEvalConfig {
 pub type EvalResult =
     Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, MilliOpGraphError>;
 pub trait MilliOp: Node {
-    fn infer(
+    fn infer<'p, P: Pool + 'p>(
         &self,
-        known_inputs: &HashMap<GlobalId, TensorInfo>,
+        known_inputs: &HashMap<GlobalId, TensorInfo<'p, P>>,
         _symbolic_resolver: &mut SymbolicResolver,
-        backend: &mut EvalBackend,
-    ) -> Result<Box<dyn Iterator<Item = (GlobalId, TensorInfo)>>, MilliOpGraphError> {
+        pool: &'p P,
+    ) -> Result<Vec<(GlobalId, TensorInfo<'p, P>)>, MilliOpGraphError> {
         let mut resolved_inputs = HashMap::new();
         for input in self.inputs() {
             if let Some(tensor_info) = known_inputs.get(&input) {
@@ -159,11 +160,11 @@ pub trait MilliOp: Node {
             }
         }
 
-        let collected: Vec<(GlobalId, TensorInfo)> = self
-            .eval(&resolved_inputs, &MilliEvalConfig::default(), backend)?
-            .map(|(a, b)| (a, TensorInfo::from(b)))
+        let collected: Vec<(GlobalId, TensorInfo<'p, P>)> = self
+            .eval(&resolved_inputs, &MilliEvalConfig::default(), &mut crate::backends::eval_backend::EvalBackend::NDArray)?
+            .map(|(a, b)| (a, TensorInfo::from_legacy(&b, pool)))
             .collect();
-        Ok(Box::new(collected.into_iter()))
+        Ok(collected)
     }
 
     fn eval(
@@ -306,12 +307,12 @@ fn infer_multidirectional_broadcasting_shape(
 
 /// Compute per-dim output shape for a reduce op when input shape and axes are (partially) known.
 /// Returns None if we can't compute the shape (fall back to rank-only inference).
-fn infer_reduce_output_shape(
-    data_info: &crate::tensor_info::TensorInfo,
+fn infer_reduce_output_shape<'p, P: Pool + 'p>(
+    data_info: &crate::tensor_info::TensorInfo<'p, P>,
     axes_id: Option<GlobalId>,
     keepdims: bool,
     noop_with_empty_axes: bool,
-    known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo>,
+    known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'p, P>>,
     symbolic_resolver: &mut SymbolicResolver,
 ) -> Option<Vec<ScalarInfoTyped<u64>>> {
     use crate::dtype::DType;
@@ -608,14 +609,55 @@ impl MilliOp for AnyMilliOp {
         MilliOpGraphError,
     > );
 
-    delegate!(infer(
-        known_inputs: &HashMap<GlobalId, TensorInfo>,
+    fn infer<'p, P: Pool + 'p>(
+        &self,
+        known_inputs: &HashMap<GlobalId, TensorInfo<'p, P>>,
         symbolic_resolver: &mut SymbolicResolver,
-        backend: &mut EvalBackend
-    ) -> Result<
-        Box<dyn Iterator<Item = (GlobalId, TensorInfo)>>,
-        MilliOpGraphError,
-    > );
+        pool: &'p P,
+    ) -> Result<Vec<(GlobalId, TensorInfo<'p, P>)>, MilliOpGraphError> {
+        match self {
+            AnyMilliOp::Constant(x) => x.infer(known_inputs, symbolic_resolver, pool),
+            AnyMilliOp::ConstantOfShape(x) => x.infer(known_inputs, symbolic_resolver, pool),
+            AnyMilliOp::SimpleBinary(x) => x.infer(known_inputs, symbolic_resolver, pool),
+            AnyMilliOp::MatMul(x) => x.infer(known_inputs, symbolic_resolver, pool),
+            AnyMilliOp::Pow(x) => x.infer(known_inputs, symbolic_resolver, pool),
+            AnyMilliOp::SimpleUnary(x) => x.infer(known_inputs, symbolic_resolver, pool),
+            AnyMilliOp::ClampMin(x) => x.infer(known_inputs, symbolic_resolver, pool),
+            AnyMilliOp::NonZero(x) => x.infer(known_inputs, symbolic_resolver, pool),
+            AnyMilliOp::CumSum(x) => x.infer(known_inputs, symbolic_resolver, pool),
+            AnyMilliOp::Shape(x) => x.infer(known_inputs, symbolic_resolver, pool),
+            AnyMilliOp::Reshape(x) => x.infer(known_inputs, symbolic_resolver, pool),
+            AnyMilliOp::Slice(x) => x.infer(known_inputs, symbolic_resolver, pool),
+            AnyMilliOp::ReduceSum(x) => x.infer(known_inputs, symbolic_resolver, pool),
+            AnyMilliOp::ReduceMin(x) => x.infer(known_inputs, symbolic_resolver, pool),
+            AnyMilliOp::ReduceMax(x) => x.infer(known_inputs, symbolic_resolver, pool),
+            AnyMilliOp::ReduceProd(x) => x.infer(known_inputs, symbolic_resolver, pool),
+            AnyMilliOp::ReduceMean(x) => x.infer(known_inputs, symbolic_resolver, pool),
+            AnyMilliOp::Cast(x) => x.infer(known_inputs, symbolic_resolver, pool),
+            AnyMilliOp::CastLike(x) => x.infer(known_inputs, symbolic_resolver, pool),
+            AnyMilliOp::Transpose(x) => x.infer(known_inputs, symbolic_resolver, pool),
+            AnyMilliOp::Squeeze(x) => x.infer(known_inputs, symbolic_resolver, pool),
+            AnyMilliOp::Unsqueeze(x) => x.infer(known_inputs, symbolic_resolver, pool),
+            AnyMilliOp::Gather(x) => x.infer(known_inputs, symbolic_resolver, pool),
+            AnyMilliOp::GatherGrad(x) => x.infer(known_inputs, symbolic_resolver, pool),
+            AnyMilliOp::Concat(x) => x.infer(known_inputs, symbolic_resolver, pool),
+            AnyMilliOp::Split(x) => x.infer(known_inputs, symbolic_resolver, pool),
+            AnyMilliOp::Where(x) => x.infer(known_inputs, symbolic_resolver, pool),
+            AnyMilliOp::Range(x) => x.infer(known_inputs, symbolic_resolver, pool),
+            AnyMilliOp::Expand(x) => x.infer(known_inputs, symbolic_resolver, pool),
+            AnyMilliOp::SumTo(x) => x.infer(known_inputs, symbolic_resolver, pool),
+            AnyMilliOp::ArgMax(x) => x.infer(known_inputs, symbolic_resolver, pool),
+            AnyMilliOp::ArgMin(x) => x.infer(known_inputs, symbolic_resolver, pool),
+            AnyMilliOp::Resize(x) => x.infer(known_inputs, symbolic_resolver, pool),
+            AnyMilliOp::Conv(x) => x.infer(known_inputs, symbolic_resolver, pool),
+            AnyMilliOp::ConvInputGrad(x) => x.infer(known_inputs, symbolic_resolver, pool),
+            AnyMilliOp::ConvWeightGrad(x) => x.infer(known_inputs, symbolic_resolver, pool),
+            AnyMilliOp::ConvBiasGrad(x) => x.infer(known_inputs, symbolic_resolver, pool),
+            AnyMilliOp::Pad(x) => x.infer(known_inputs, symbolic_resolver, pool),
+            AnyMilliOp::TopK(x) => x.infer(known_inputs, symbolic_resolver, pool),
+            AnyMilliOp::RandomNormalLike(x) => x.infer(known_inputs, symbolic_resolver, pool),
+        }
+    }
 
     fn backward(
         &self,

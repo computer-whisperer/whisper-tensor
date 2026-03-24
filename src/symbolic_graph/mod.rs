@@ -964,7 +964,7 @@ impl SymbolicGraph {
                 }
 
                 // Build tensor shape map from ONNXTensorInfo
-                let tensor_shapes: HashMap<GlobalId, TensorInfo> = graph_op
+                let tensor_shapes: HashMap<GlobalId, TensorInfo<'static, crate::pool::SystemPool>> = graph_op
                     .op
                     .inputs()
                     .chain(graph_op.op.outputs())

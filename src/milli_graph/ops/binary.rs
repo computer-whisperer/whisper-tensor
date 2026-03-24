@@ -1,3 +1,4 @@
+use crate::pool::Pool;
 use super::AccumulationMode;
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
@@ -365,13 +366,13 @@ impl SimpleBinary {
 }
 
 impl MilliOp for SimpleBinary {
-    fn infer(
+    fn infer<'p, P: Pool + 'p>(
         &self,
-        known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo>,
+        known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'p, P>>,
         symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
-        backend: &mut EvalBackend,
+        pool: &'p P,
     ) -> Result<
-        Box<dyn Iterator<Item = (GlobalId, crate::tensor_info::TensorInfo)>>,
+        Vec<(GlobalId, crate::tensor_info::TensorInfo<'p, P>)>,
         MilliOpGraphError,
     > {
         use crate::tensor_info::TensorInfo;
@@ -386,13 +387,13 @@ impl MilliOp for SimpleBinary {
         // If both inputs are concrete, fall back to eval.
         if a_info.as_numeric().is_some() && b_info.as_numeric().is_some() {
             let mut resolved = HashMap::new();
-            resolved.insert(self.a, a_info.as_numeric().unwrap().clone());
-            resolved.insert(self.b, b_info.as_numeric().unwrap().clone());
-            let collected: Vec<(GlobalId, TensorInfo)> = self
-                .eval(&resolved, &super::MilliEvalConfig::default(), backend)?
-                .map(|(a, b)| (a, TensorInfo::from(b)))
+            resolved.insert(self.a, a_info.as_numeric().unwrap());
+            resolved.insert(self.b, b_info.as_numeric().unwrap());
+            let collected: Vec<(GlobalId, TensorInfo<'p, P>)> = self
+                .eval(&resolved, &super::MilliEvalConfig::default(), &mut crate::backends::eval_backend::EvalBackend::NDArray)?
+                .map(|(a, b)| (a, TensorInfo::from_legacy(&b, pool)))
                 .collect();
-            return Ok(Box::new(collected.into_iter()));
+            return Ok(collected);
         }
 
         // Determine output dtype: comparison ops produce Bool, others match input.
@@ -419,7 +420,7 @@ impl MilliOp for SimpleBinary {
                 symbolic_resolver,
             ) {
                 let out_info = TensorInfo::from_dtype_and_shape_scalars(out_dtype, &out_dims);
-                return Ok(Box::new([(self.output, out_info)].into_iter()));
+                return Ok(vec![((self.output, out_info))]);
             }
         }
 
@@ -437,7 +438,7 @@ impl MilliOp for SimpleBinary {
         let out_info =
             TensorInfo::new_from_first_element_and_rank(first_elem, out_rank, symbolic_resolver);
 
-        Ok(Box::new([(self.output, out_info)].into_iter()))
+        Ok(vec![((self.output, out_info))])
     }
 
     fn eval(
@@ -666,13 +667,13 @@ impl Pow {
 }
 
 impl MilliOp for Pow {
-    fn infer(
+    fn infer<'p, P: Pool + 'p>(
         &self,
-        known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo>,
+        known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'p, P>>,
         symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
-        backend: &mut EvalBackend,
+        pool: &'p P,
     ) -> Result<
-        Box<dyn Iterator<Item = (GlobalId, crate::tensor_info::TensorInfo)>>,
+        Vec<(GlobalId, crate::tensor_info::TensorInfo<'p, P>)>,
         MilliOpGraphError,
     > {
         use crate::tensor_info::TensorInfo;
@@ -687,13 +688,13 @@ impl MilliOp for Pow {
         // If both inputs are concrete, fall back to eval.
         if a_info.as_numeric().is_some() && b_info.as_numeric().is_some() {
             let mut resolved = HashMap::new();
-            resolved.insert(self.a, a_info.as_numeric().unwrap().clone());
-            resolved.insert(self.b, b_info.as_numeric().unwrap().clone());
-            let collected: Vec<(GlobalId, TensorInfo)> = self
-                .eval(&resolved, &super::MilliEvalConfig::default(), backend)?
-                .map(|(a, b)| (a, TensorInfo::from(b)))
+            resolved.insert(self.a, a_info.as_numeric().unwrap());
+            resolved.insert(self.b, b_info.as_numeric().unwrap());
+            let collected: Vec<(GlobalId, TensorInfo<'p, P>)> = self
+                .eval(&resolved, &super::MilliEvalConfig::default(), &mut crate::backends::eval_backend::EvalBackend::NDArray)?
+                .map(|(a, b)| (a, TensorInfo::from_legacy(&b, pool)))
                 .collect();
-            return Ok(Box::new(collected.into_iter()));
+            return Ok(collected);
         }
 
         // Output dtype = input dtype.
@@ -710,7 +711,7 @@ impl MilliOp for Pow {
                 symbolic_resolver,
             ) {
                 let out_info = TensorInfo::from_dtype_and_shape_scalars(out_dtype, &out_dims);
-                return Ok(Box::new([(self.output, out_info)].into_iter()));
+                return Ok(vec![((self.output, out_info))]);
             }
         }
 
@@ -728,7 +729,7 @@ impl MilliOp for Pow {
         let out_info =
             TensorInfo::new_from_first_element_and_rank(first_elem, out_rank, symbolic_resolver);
 
-        Ok(Box::new([(self.output, out_info)].into_iter()))
+        Ok(vec![((self.output, out_info))])
     }
 
     fn eval(
@@ -1224,13 +1225,13 @@ impl MatMul {
 }
 
 impl MilliOp for MatMul {
-    fn infer(
+    fn infer<'p, P: Pool + 'p>(
         &self,
-        known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo>,
+        known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'p, P>>,
         symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
-        backend: &mut EvalBackend,
+        pool: &'p P,
     ) -> Result<
-        Box<dyn Iterator<Item = (GlobalId, crate::tensor_info::TensorInfo)>>,
+        Vec<(GlobalId, crate::tensor_info::TensorInfo<'p, P>)>,
         MilliOpGraphError,
     > {
         use crate::tensor_info::TensorInfo;
@@ -1245,13 +1246,13 @@ impl MilliOp for MatMul {
         // If both inputs are concrete, fall back to eval.
         if a_info.as_numeric().is_some() && b_info.as_numeric().is_some() {
             let mut resolved = HashMap::new();
-            resolved.insert(self.a, a_info.as_numeric().unwrap().clone());
-            resolved.insert(self.b, b_info.as_numeric().unwrap().clone());
-            let collected: Vec<(GlobalId, TensorInfo)> = self
-                .eval(&resolved, &super::MilliEvalConfig::default(), backend)?
-                .map(|(a, b)| (a, TensorInfo::from(b)))
+            resolved.insert(self.a, a_info.as_numeric().unwrap());
+            resolved.insert(self.b, b_info.as_numeric().unwrap());
+            let collected: Vec<(GlobalId, TensorInfo<'p, P>)> = self
+                .eval(&resolved, &super::MilliEvalConfig::default(), &mut crate::backends::eval_backend::EvalBackend::NDArray)?
+                .map(|(a, b)| (a, TensorInfo::from_legacy(&b, pool)))
                 .collect();
-            return Ok(Box::new(collected.into_iter()));
+            return Ok(collected);
         }
 
         // MatMul output dtype comes from the struct's explicit field.
@@ -1298,7 +1299,7 @@ impl MilliOp for MatMul {
 
                 if let Some(out_dims) = out_dims {
                     let out_info = TensorInfo::from_dtype_and_shape_scalars(out_dtype, &out_dims);
-                    return Ok(Box::new([(self.output, out_info)].into_iter()));
+                    return Ok(vec![((self.output, out_info))]);
                 }
             }
         }
@@ -1331,7 +1332,7 @@ impl MilliOp for MatMul {
         let out_info =
             TensorInfo::new_from_first_element_and_rank(first_elem, out_rank, symbolic_resolver);
 
-        Ok(Box::new([(self.output, out_info)].into_iter()))
+        Ok(vec![((self.output, out_info))])
     }
 
     fn eval(

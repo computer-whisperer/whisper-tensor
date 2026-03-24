@@ -1,3 +1,4 @@
+use crate::pool::Pool;
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
 use crate::dtype::DType;
@@ -317,13 +318,13 @@ impl crate::graph::Node for Slice {
 }
 
 impl MilliOp for Slice {
-    fn infer(
+    fn infer<'p, P: Pool + 'p>(
         &self,
-        known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo>,
+        known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'p, P>>,
         _symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
-        backend: &mut EvalBackend,
+        pool: &'p P,
     ) -> Result<
-        Box<dyn Iterator<Item = (GlobalId, crate::tensor_info::TensorInfo)>>,
+        Vec<(GlobalId, crate::tensor_info::TensorInfo<'p, P>)>,
         MilliOpGraphError,
     > {
         use crate::scalar_info::ScalarInfoTyped;
@@ -356,13 +357,13 @@ impl MilliOp for Slice {
                 let info = known_inputs
                     .get(&id)
                     .ok_or(MilliOpGraphError::UnableToInfer)?;
-                resolved.insert(id, info.as_numeric().unwrap().clone());
+                resolved.insert(id, info.as_numeric().unwrap());
             }
-            let collected: Vec<(GlobalId, TensorInfo)> = self
-                .eval(&resolved, &super::MilliEvalConfig::default(), backend)?
-                .map(|(a, b)| (a, TensorInfo::from(b)))
+            let collected: Vec<(GlobalId, TensorInfo<'p, P>)> = self
+                .eval(&resolved, &super::MilliEvalConfig::default(), &mut crate::backends::eval_backend::EvalBackend::NDArray)?
+                .map(|(a, b)| (a, TensorInfo::from_legacy(&b, pool)))
                 .collect();
-            return Ok(Box::new(collected.into_iter()));
+            return Ok(collected);
         }
 
         // Shape-only inference: compute output shape from data shape + slice params.
@@ -452,7 +453,7 @@ impl MilliOp for Slice {
 
         let out_dtype = data_info.dtype();
         let out_info = TensorInfo::from_dtype_and_shape_scalars(out_dtype, &out_dims);
-        Ok(Box::new([(self.output, out_info)].into_iter()))
+        Ok(vec![((self.output, out_info))])
     }
 
     fn eval(

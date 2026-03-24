@@ -5,10 +5,12 @@ use crate::migration::numeric_tensor::{NumericTensor, NumericTensorError};
 use crate::migration::numeric_tensor_typed::NumericTensorTyped;
 use crate::numeric_dtype::NumericDType;
 use crate::numeric_scalar::NumericScalar as NewNumericScalar;
+use crate::pool::Pool;
 use crate::scalar_info::{ScalarInfo, ScalarInfoTyped};
 use crate::symbolic_scalar::{SymbolicResolver, SymbolicScalar, SymbolicScalarTyped};
 use crate::tensor_rank::{DimContainer, DynRank, KnownRank, Rank, RankError};
 use ndarray::{ArcArray, ShapeError};
+use std::marker::PhantomData;
 use typenum::P1;
 
 #[derive(Debug, thiserror::Error)]
@@ -709,13 +711,34 @@ impl<R: Rank> TensorInfoRanked<R> {
     }
 }
 
+/// Non-generic inner storage for TensorInfo.
 #[derive(Clone, Debug)]
-pub enum TensorInfo {
+pub(crate) enum TensorInfoData {
     Ranked(TensorInfoRanked<DynRank>),
     Minimal(MinimalTensor),
 }
 
-impl TensorInfo {
+/// Pool-generic tensor info.
+///
+/// The pool parameter (`P`) is carried through the type system for future use when
+/// `TensorInfoShaped::Numeric` switches from legacy `NumericTensor` to pool-backed storage.
+/// Currently, `P` is phantom — the internal data is the same regardless of pool type.
+#[derive(Debug)]
+pub struct TensorInfo<'p, P: Pool + 'p>(pub(crate) TensorInfoData, PhantomData<&'p P>);
+
+// Manual Clone impl: P doesn't need to be Clone since it's only in PhantomData.
+impl<'p, P: Pool + 'p> Clone for TensorInfo<'p, P> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone(), PhantomData)
+    }
+}
+
+impl<'p, P: Pool + 'p> TensorInfo<'p, P> {
+    /// Wrap inner data with pool phantom.
+    pub(crate) fn wrap(data: TensorInfoData) -> Self {
+        Self(data, PhantomData)
+    }
+
     #[allow(dead_code)]
     pub(crate) fn new_from_first_element_and_rank(
         first_element: ScalarInfo,
@@ -730,9 +753,9 @@ impl TensorInfo {
                         symbolic_resolver,
                     )));
                 }
-                Self::from(RankedTensor::<DynRank>::new(first_element, new_dims))
+                Self::wrap(TensorInfoData::Ranked(TensorInfoRanked::Ranked(RankedTensor::<DynRank>::new(first_element, new_dims))))
             }
-            ScalarInfoTyped::Symbolic(x) => Self::from(MinimalTensor::new(first_element, x)),
+            ScalarInfoTyped::Symbolic(x) => Self::wrap(TensorInfoData::Minimal(MinimalTensor::new(first_element, x))),
         }
     }
 
@@ -746,14 +769,14 @@ impl TensorInfo {
             TensorInfoTypedRanked::Shaped(shape) => match shape {
                 TensorInfoTypedShaped::Numeric(shape) => {
                     let shape = shape.to_vec();
-                    Self::from(ShapedTensor::<DynRank>::new_symbolic(
+                    Self::wrap(TensorInfoData::Ranked(TensorInfoRanked::Shaped(TensorInfoShaped::Symbolic(ShapedTensor::<DynRank>::new_symbolic(
                         first_element,
                         shape,
                         symbolic_resolver,
-                    ))
+                    )))))
                 }
                 TensorInfoTypedShaped::Shaped(shape) => {
-                    Self::from(RankedTensor::<DynRank>::new(first_element, shape.values))
+                    Self::wrap(TensorInfoData::Ranked(TensorInfoRanked::Ranked(RankedTensor::<DynRank>::new(first_element, shape.values))))
                 }
             },
             TensorInfoTypedRanked::Ranked(shape) => Self::new_from_first_element_and_rank(
@@ -765,9 +788,9 @@ impl TensorInfo {
     }
 
     pub(crate) fn dtype(&self) -> NumericDType {
-        match self {
-            Self::Ranked(x) => x.dtype(),
-            Self::Minimal(x) => x.dtype(),
+        match &self.0 {
+            TensorInfoData::Ranked(x) => x.dtype(),
+            TensorInfoData::Minimal(x) => x.dtype(),
         }
     }
 
@@ -776,8 +799,8 @@ impl TensorInfo {
         &self,
         symbolic_resolver: &mut SymbolicResolver,
     ) -> TensorInfoTypedRanked<u64, P1> {
-        match self {
-            Self::Ranked(x) => {
+        match &self.0 {
+            TensorInfoData::Ranked(x) => {
                 let shape = x.shape();
                 TensorInfoTypedRanked::Shaped(
                     TensorInfoTypedShaped::new_from_scalar_infos(
@@ -787,21 +810,21 @@ impl TensorInfo {
                     .unwrap(),
                 )
             }
-            Self::Minimal(x) => TensorInfoTypedRanked::Ranked(x.shape(symbolic_resolver)),
+            TensorInfoData::Minimal(x) => TensorInfoTypedRanked::Ranked(x.shape(symbolic_resolver)),
         }
     }
 
     #[allow(dead_code)]
     pub(crate) fn rank(&self) -> ScalarInfoTyped<u32> {
-        match self {
-            Self::Ranked(x) => ScalarInfoTyped::Numeric(x.rank() as u32),
-            Self::Minimal(x) => ScalarInfoTyped::Symbolic(x.rank.clone()),
+        match &self.0 {
+            TensorInfoData::Ranked(x) => ScalarInfoTyped::Numeric(x.rank() as u32),
+            TensorInfoData::Minimal(x) => ScalarInfoTyped::Symbolic(x.rank.clone()),
         }
     }
     pub(crate) fn first_element(&self) -> ScalarInfo {
-        match self {
-            TensorInfo::Ranked(tensor) => tensor.first_element(),
-            TensorInfo::Minimal(tensor) => tensor.first_element().clone(),
+        match &self.0 {
+            TensorInfoData::Ranked(tensor) => tensor.first_element(),
+            TensorInfoData::Minimal(tensor) => tensor.first_element().clone(),
         }
     }
 
@@ -814,9 +837,9 @@ impl TensorInfo {
         if index.iter().all(|x| *x == 0) {
             return Some(self.first_element());
         }
-        match self {
-            TensorInfo::Ranked(tensor) => tensor.get(index, symbolic_resolver),
-            TensorInfo::Minimal(_) => Some(ScalarInfo::Symbolic(SymbolicScalar::new(
+        match &self.0 {
+            TensorInfoData::Ranked(tensor) => tensor.get(index, symbolic_resolver),
+            TensorInfoData::Minimal(_) => Some(ScalarInfo::Symbolic(SymbolicScalar::new(
                 self.dtype(),
                 symbolic_resolver,
             ))),
@@ -825,40 +848,50 @@ impl TensorInfo {
 
     #[allow(dead_code)]
     pub(crate) fn as_ranked(&self) -> Option<&TensorInfoRanked<DynRank>> {
-        match self {
-            TensorInfo::Ranked(tensor) => Some(tensor),
-            TensorInfo::Minimal(_) => None,
+        match &self.0 {
+            TensorInfoData::Ranked(tensor) => Some(tensor),
+            TensorInfoData::Minimal(_) => None,
         }
     }
 
     #[allow(dead_code)]
     pub(crate) fn as_shaped(&self) -> Option<&TensorInfoShaped<DynRank>> {
-        match self {
-            TensorInfo::Ranked(tensor) => tensor.as_shaped(),
-            TensorInfo::Minimal(_) => None,
+        match &self.0 {
+            TensorInfoData::Ranked(tensor) => tensor.as_shaped(),
+            TensorInfoData::Minimal(_) => None,
         }
     }
 
-    pub(crate) fn as_numeric(&self) -> Option<&NumericTensor<DynRank>> {
-        match self {
-            TensorInfo::Ranked(tensor) => tensor.as_numeric(),
-            TensorInfo::Minimal(_) => None,
+    /// Returns the concrete legacy NumericTensor if this TensorInfo holds concrete numeric data.
+    /// Returns an owned value (cloned from internal storage).
+    pub(crate) fn as_numeric(&self) -> Option<NumericTensor<DynRank>> {
+        match &self.0 {
+            TensorInfoData::Ranked(tensor) => tensor.as_numeric().cloned(),
+            TensorInfoData::Minimal(_) => None,
         }
+    }
+
+    /// Backward-compat constructor: wrap a legacy NumericTensor into a TensorInfo.
+    /// The pool parameter is for future use when storage switches to pool-backed.
+    pub fn from_legacy(tensor: &NumericTensor<DynRank>, _pool: &'p P) -> Self {
+        Self::wrap(TensorInfoData::Ranked(TensorInfoRanked::Shaped(TensorInfoShaped::Numeric(
+            tensor.to_dyn_rank(),
+        ))))
     }
 
     /// Returns the rank if statically known.
     pub fn rank_if_known(&self) -> Option<usize> {
-        match self {
-            TensorInfo::Ranked(tensor) => Some(tensor.rank()),
-            TensorInfo::Minimal(_) => None,
+        match &self.0 {
+            TensorInfoData::Ranked(tensor) => Some(tensor.rank()),
+            TensorInfoData::Minimal(_) => None,
         }
     }
 
     /// Returns the size of dimension `i` if statically known as a concrete value.
     /// Returns `None` if the rank is unknown, `i` is out of bounds, or the dim is symbolic.
     pub fn dim_if_known(&self, i: usize) -> Option<u64> {
-        match self {
-            TensorInfo::Ranked(tensor) => {
+        match &self.0 {
+            TensorInfoData::Ranked(tensor) => {
                 let shape = tensor.shape();
                 let dim = shape.get(i)?;
                 match dim {
@@ -866,7 +899,7 @@ impl TensorInfo {
                     ScalarInfoTyped::Symbolic(_) => None,
                 }
             }
-            TensorInfo::Minimal(_) => None,
+            TensorInfoData::Minimal(_) => None,
         }
     }
 
@@ -874,19 +907,19 @@ impl TensorInfo {
     /// Dims that are Numeric become known; Symbolic dims remain unknown.
     pub fn from_shape_scalars(shape: &[ScalarInfoTyped<u64>]) -> Self {
         let first_element = ScalarInfo::Numeric(NewNumericScalar::from_f32(0.0));
-        TensorInfo::Ranked(TensorInfoRanked::Ranked(RankedTensor::new(
+        Self::wrap(TensorInfoData::Ranked(TensorInfoRanked::Ranked(RankedTensor::new(
             first_element,
             shape.to_vec(),
-        )))
+        ))))
     }
 
     /// Create a TensorInfo with known dtype and ScalarInfoTyped dims (may be symbolic).
     pub fn from_dtype_and_shape_scalars(dtype: NumericDType, shape: &[ScalarInfoTyped<u64>]) -> Self {
         let first_element = ScalarInfo::Numeric(NewNumericScalar::zero(dtype));
-        TensorInfo::Ranked(TensorInfoRanked::Ranked(RankedTensor::new(
+        Self::wrap(TensorInfoData::Ranked(TensorInfoRanked::Ranked(RankedTensor::new(
             first_element,
             shape.to_vec(),
-        )))
+        ))))
     }
 
     /// Create a TensorInfo with known shape from a u64 slice. Dtype defaults to F32.
@@ -895,10 +928,10 @@ impl TensorInfo {
         let dims: Vec<ScalarInfoTyped<u64>> =
             shape.iter().map(|&v| ScalarInfoTyped::Numeric(v)).collect();
         let first_element = ScalarInfo::Numeric(NewNumericScalar::from_f32(0.0));
-        TensorInfo::Ranked(TensorInfoRanked::Ranked(RankedTensor::new(
+        Self::wrap(TensorInfoData::Ranked(TensorInfoRanked::Ranked(RankedTensor::new(
             first_element,
             dims,
-        )))
+        ))))
     }
 
     /// Create a TensorInfo with known dtype and shape, but no concrete values.
@@ -906,10 +939,10 @@ impl TensorInfo {
         let dims: Vec<ScalarInfoTyped<u64>> =
             shape.iter().map(|&v| ScalarInfoTyped::Numeric(v)).collect();
         let first_element = ScalarInfo::Numeric(NewNumericScalar::zero(dtype));
-        TensorInfo::Ranked(TensorInfoRanked::Ranked(RankedTensor::new(
+        Self::wrap(TensorInfoData::Ranked(TensorInfoRanked::Ranked(RankedTensor::new(
             first_element,
             dims,
-        )))
+        ))))
     }
 
     #[allow(dead_code)]
@@ -917,9 +950,9 @@ impl TensorInfo {
         &self,
         symbolic_resolver: &mut SymbolicResolver,
     ) -> Result<TensorInfoRanked<R>, TensorInfoError> {
-        match self {
-            TensorInfo::Ranked(tensor) => tensor.try_to_rank(),
-            TensorInfo::Minimal(tensor) => {
+        match &self.0 {
+            TensorInfoData::Ranked(tensor) => tensor.try_to_rank(),
+            TensorInfoData::Minimal(tensor) => {
                 // Optimistically cast to new rank
                 let mut new_shape = vec![];
                 for _ in 0..R::KNOWN_LEN {
@@ -937,76 +970,76 @@ impl TensorInfo {
     }
 }
 
-impl<R: Rank, T: Clone + PartialEq + Copy + NumericScalarType + NDArrayNumericTensorType> From<TensorInfoTypedShaped<T, R>> for TensorInfo {
+impl<'p, P: Pool + 'p, R: Rank, T: Clone + PartialEq + Copy + NumericScalarType + NDArrayNumericTensorType> From<TensorInfoTypedShaped<T, R>> for TensorInfo<'p, P> {
     fn from(tensor: TensorInfoTypedShaped<T, R>) -> Self {
-        Self::Ranked(TensorInfoRanked::Shaped(tensor.to_dyn_rank().to_dyn_type()))
+        Self::wrap(TensorInfoData::Ranked(TensorInfoRanked::Shaped(tensor.to_dyn_rank().to_dyn_type())))
     }
 }
 
-impl<R: Rank> From<TensorInfoShaped<R>> for TensorInfo {
+impl<'p, P: Pool + 'p, R: Rank> From<TensorInfoShaped<R>> for TensorInfo<'p, P> {
     fn from(tensor: TensorInfoShaped<R>) -> Self {
-        Self::Ranked(TensorInfoRanked::Shaped(tensor.to_dyn_rank()))
+        Self::wrap(TensorInfoData::Ranked(TensorInfoRanked::Shaped(tensor.to_dyn_rank())))
     }
 }
 
-impl<R: Rank, T: Clone + PartialEq + Copy + NumericScalarType + NDArrayNumericTensorType> From<TensorInfoTypedRanked<T, R>> for TensorInfo {
+impl<'p, P: Pool + 'p, R: Rank, T: Clone + PartialEq + Copy + NumericScalarType + NDArrayNumericTensorType> From<TensorInfoTypedRanked<T, R>> for TensorInfo<'p, P> {
     fn from(tensor: TensorInfoTypedRanked<T, R>) -> Self {
-        Self::Ranked(tensor.to_dyn_rank().to_dyn_type())
+        Self::wrap(TensorInfoData::Ranked(tensor.to_dyn_rank().to_dyn_type()))
     }
 }
 
-impl<R: Rank> From<TensorInfoRanked<R>> for TensorInfo {
+impl<'p, P: Pool + 'p, R: Rank> From<TensorInfoRanked<R>> for TensorInfo<'p, P> {
     fn from(tensor: TensorInfoRanked<R>) -> Self {
-        Self::Ranked(tensor.to_dyn_rank())
+        Self::wrap(TensorInfoData::Ranked(tensor.to_dyn_rank()))
     }
 }
 
-impl<R: Rank, T: Clone + PartialEq + Copy + NumericScalarType + NDArrayNumericTensorType> From<NumericTensorTyped<T, R>> for TensorInfo {
+impl<'p, P: Pool + 'p, R: Rank, T: Clone + PartialEq + Copy + NumericScalarType + NDArrayNumericTensorType> From<NumericTensorTyped<T, R>> for TensorInfo<'p, P> {
     fn from(tensor: NumericTensorTyped<T, R>) -> Self {
-        Self::Ranked(TensorInfoRanked::Shaped(TensorInfoShaped::Numeric(
+        Self::wrap(TensorInfoData::Ranked(TensorInfoRanked::Shaped(TensorInfoShaped::Numeric(
             tensor.to_dyn_rank().to_dyn_type(),
-        )))
+        ))))
     }
 }
 
-impl<R: Rank, T: Clone + PartialEq + Copy + NumericScalarType + NDArrayNumericTensorType> From<ShapedTensorTyped<T, R>> for TensorInfo {
+impl<'p, P: Pool + 'p, R: Rank, T: Clone + PartialEq + Copy + NumericScalarType + NDArrayNumericTensorType> From<ShapedTensorTyped<T, R>> for TensorInfo<'p, P> {
     fn from(tensor: ShapedTensorTyped<T, R>) -> Self {
-        Self::Ranked(TensorInfoRanked::Shaped(TensorInfoShaped::Symbolic(
+        Self::wrap(TensorInfoData::Ranked(TensorInfoRanked::Shaped(TensorInfoShaped::Symbolic(
             tensor.to_dyn_rank().to_dyn_type(),
-        )))
+        ))))
     }
 }
 
-impl<R: Rank, T: Clone + PartialEq + Copy + NumericScalarType + NDArrayNumericTensorType> From<RankedTensorTyped<T, R>> for TensorInfo {
+impl<'p, P: Pool + 'p, R: Rank, T: Clone + PartialEq + Copy + NumericScalarType + NDArrayNumericTensorType> From<RankedTensorTyped<T, R>> for TensorInfo<'p, P> {
     fn from(tensor: RankedTensorTyped<T, R>) -> Self {
-        Self::Ranked(TensorInfoRanked::Ranked(tensor.to_dyn_rank().to_dyn_type()))
+        Self::wrap(TensorInfoData::Ranked(TensorInfoRanked::Ranked(tensor.to_dyn_rank().to_dyn_type())))
     }
 }
 
-impl<R: Rank> From<NumericTensor<R>> for TensorInfo {
+impl<'p, P: Pool + 'p, R: Rank> From<NumericTensor<R>> for TensorInfo<'p, P> {
     fn from(tensor: NumericTensor<R>) -> Self {
-        Self::Ranked(TensorInfoRanked::Shaped(TensorInfoShaped::Numeric(
+        Self::wrap(TensorInfoData::Ranked(TensorInfoRanked::Shaped(TensorInfoShaped::Numeric(
             tensor.to_dyn_rank(),
-        )))
+        ))))
     }
 }
 
-impl<R: Rank> From<ShapedTensor<R>> for TensorInfo {
+impl<'p, P: Pool + 'p, R: Rank> From<ShapedTensor<R>> for TensorInfo<'p, P> {
     fn from(tensor: ShapedTensor<R>) -> Self {
-        Self::Ranked(TensorInfoRanked::Shaped(TensorInfoShaped::Symbolic(
+        Self::wrap(TensorInfoData::Ranked(TensorInfoRanked::Shaped(TensorInfoShaped::Symbolic(
             tensor.to_dyn_rank(),
-        )))
+        ))))
     }
 }
 
-impl<R: Rank> From<RankedTensor<R>> for TensorInfo {
+impl<'p, P: Pool + 'p, R: Rank> From<RankedTensor<R>> for TensorInfo<'p, P> {
     fn from(tensor: RankedTensor<R>) -> Self {
-        Self::Ranked(TensorInfoRanked::Ranked(tensor.to_dyn_rank()))
+        Self::wrap(TensorInfoData::Ranked(TensorInfoRanked::Ranked(tensor.to_dyn_rank())))
     }
 }
 
-impl From<MinimalTensor> for TensorInfo {
+impl<'p, P: Pool + 'p> From<MinimalTensor> for TensorInfo<'p, P> {
     fn from(tensor: MinimalTensor) -> Self {
-        Self::Minimal(tensor)
+        Self::wrap(TensorInfoData::Minimal(tensor))
     }
 }

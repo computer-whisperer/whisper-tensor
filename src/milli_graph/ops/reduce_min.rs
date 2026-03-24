@@ -1,3 +1,4 @@
+use crate::pool::Pool;
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
 use crate::graph::{GlobalId, Node};
@@ -65,13 +66,13 @@ impl ReduceMin {
 }
 
 impl MilliOp for ReduceMin {
-    fn infer(
+    fn infer<'p, P: Pool + 'p>(
         &self,
-        known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo>,
+        known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'p, P>>,
         symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
-        backend: &mut EvalBackend,
+        pool: &'p P,
     ) -> Result<
-        Box<dyn Iterator<Item = (GlobalId, crate::tensor_info::TensorInfo)>>,
+        Vec<(GlobalId, crate::tensor_info::TensorInfo<'p, P>)>,
         MilliOpGraphError,
     > {
         use crate::scalar_info::ScalarInfoTyped;
@@ -85,7 +86,7 @@ impl MilliOp for ReduceMin {
         let axes_concrete = self.axes.map(|ax_id| {
             known_inputs
                 .get(&ax_id)
-                .and_then(|info| info.as_numeric().cloned())
+                .and_then(|info| info.as_numeric())
         });
         if data_info.as_numeric().is_some() {
             let axes_ok = match axes_concrete {
@@ -94,15 +95,15 @@ impl MilliOp for ReduceMin {
             };
             if axes_ok {
                 let mut resolved = HashMap::new();
-                resolved.insert(self.data, data_info.as_numeric().unwrap().clone());
+                resolved.insert(self.data, data_info.as_numeric().unwrap());
                 if let Some(ax_id) = self.axes {
                     resolved.insert(ax_id, axes_concrete.unwrap().unwrap());
                 }
-                let collected: Vec<(GlobalId, TensorInfo)> = self
-                    .eval(&resolved, &super::MilliEvalConfig::default(), backend)?
-                    .map(|(a, b)| (a, TensorInfo::from(b)))
+                let collected: Vec<(GlobalId, TensorInfo<'p, P>)> = self
+                    .eval(&resolved, &super::MilliEvalConfig::default(), &mut crate::backends::eval_backend::EvalBackend::NDArray)?
+                    .map(|(a, b)| (a, TensorInfo::from_legacy(&b, pool)))
                     .collect();
-                return Ok(Box::new(collected.into_iter()));
+                return Ok(collected);
             }
         }
 
@@ -118,7 +119,7 @@ impl MilliOp for ReduceMin {
             symbolic_resolver,
         ) {
             let out_info = TensorInfo::from_dtype_and_shape_scalars(out_dtype, &out_dims);
-            return Ok(Box::new([(self.output, out_info)].into_iter()));
+            return Ok(vec![((self.output, out_info))]);
         }
 
         // Fallback: rank-only inference.
@@ -164,7 +165,7 @@ impl MilliOp for ReduceMin {
         );
         let out_info =
             TensorInfo::new_from_first_element_and_rank(first_elem, out_rank, symbolic_resolver);
-        Ok(Box::new([(self.output, out_info)].into_iter()))
+        Ok(vec![((self.output, out_info))])
     }
 
     fn eval(

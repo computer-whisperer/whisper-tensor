@@ -1,3 +1,4 @@
+use crate::pool::Pool;
 use crate::backends::eval_backend::EvalBackend;
 use crate::graph::{GlobalId, Node};
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
@@ -355,12 +356,12 @@ impl Node for SimpleUnaryOp {
 }
 
 impl MilliOp for SimpleUnaryOp {
-    fn infer(
+    fn infer<'p, P: Pool + 'p>(
         &self,
-        known_inputs: &HashMap<GlobalId, TensorInfo>,
+        known_inputs: &HashMap<GlobalId, TensorInfo<'p, P>>,
         symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
-        backend: &mut EvalBackend,
-    ) -> Result<Box<dyn Iterator<Item = (GlobalId, TensorInfo)>>, MilliOpGraphError> {
+        pool: &'p P,
+    ) -> Result<Vec<(GlobalId, TensorInfo<'p, P>)>, MilliOpGraphError> {
         let input_info = known_inputs
             .get(&self.input)
             .ok_or(MilliOpGraphError::UnableToInfer)?;
@@ -368,12 +369,12 @@ impl MilliOp for SimpleUnaryOp {
         // If input is concrete, fall back to eval.
         if input_info.as_numeric().is_some() {
             let mut resolved = HashMap::new();
-            resolved.insert(self.input, input_info.as_numeric().unwrap().clone());
-            let collected: Vec<(GlobalId, TensorInfo)> = self
-                .eval(&resolved, &super::MilliEvalConfig::default(), backend)?
-                .map(|(a, b)| (a, TensorInfo::from(b)))
+            resolved.insert(self.input, input_info.as_numeric().unwrap());
+            let collected: Vec<(GlobalId, TensorInfo<'p, P>)> = self
+                .eval(&resolved, &super::MilliEvalConfig::default(), &mut crate::backends::eval_backend::EvalBackend::NDArray)?
+                .map(|(a, b)| (a, TensorInfo::from_legacy(&b, pool)))
                 .collect();
-            return Ok(Box::new(collected.into_iter()));
+            return Ok(collected);
         }
 
         // Unary ops preserve shape and dtype (except IsNan/IsInf which produce Bool).
@@ -397,7 +398,7 @@ impl MilliOp for SimpleUnaryOp {
                 input_info.clone()
             }
         };
-        Ok(Box::new([(self.output, out_info)].into_iter()))
+        Ok(vec![((self.output, out_info))])
     }
 
     fn eval(
@@ -596,28 +597,28 @@ impl Node for ClampMin {
 }
 
 impl MilliOp for ClampMin {
-    fn infer(
+    fn infer<'p, P: Pool + 'p>(
         &self,
-        known_inputs: &HashMap<GlobalId, TensorInfo>,
+        known_inputs: &HashMap<GlobalId, TensorInfo<'p, P>>,
         _symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
-        backend: &mut EvalBackend,
-    ) -> Result<Box<dyn Iterator<Item = (GlobalId, TensorInfo)>>, MilliOpGraphError> {
+        pool: &'p P,
+    ) -> Result<Vec<(GlobalId, TensorInfo<'p, P>)>, MilliOpGraphError> {
         let input_info = known_inputs
             .get(&self.input)
             .ok_or(MilliOpGraphError::UnableToInfer)?;
 
         if input_info.as_numeric().is_some() {
             let mut resolved = HashMap::new();
-            resolved.insert(self.input, input_info.as_numeric().unwrap().clone());
-            let collected: Vec<(GlobalId, TensorInfo)> = self
-                .eval(&resolved, &super::MilliEvalConfig::default(), backend)?
-                .map(|(a, b)| (a, TensorInfo::from(b)))
+            resolved.insert(self.input, input_info.as_numeric().unwrap());
+            let collected: Vec<(GlobalId, TensorInfo<'p, P>)> = self
+                .eval(&resolved, &super::MilliEvalConfig::default(), &mut crate::backends::eval_backend::EvalBackend::NDArray)?
+                .map(|(a, b)| (a, TensorInfo::from_legacy(&b, pool)))
                 .collect();
-            return Ok(Box::new(collected.into_iter()));
+            return Ok(collected);
         }
 
         // ClampMin preserves shape and dtype.
-        Ok(Box::new([(self.output, input_info.clone())].into_iter()))
+        Ok(vec![((self.output, input_info.clone()))])
     }
 
     fn eval(

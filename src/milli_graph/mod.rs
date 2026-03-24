@@ -308,7 +308,7 @@ pub struct BackwardGenContext {
     pub forward_outputs: Vec<GlobalId>,
     /// Shape information for forward tensors (from SymbolicGraph TensorInfo).
     /// Keyed by SymbolicGraph tensor ID. Used for broadcast analysis.
-    pub tensor_shapes: HashMap<GlobalId, TensorInfo>,
+    pub tensor_shapes: HashMap<GlobalId, TensorInfo<'static, crate::pool::SystemPool>>,
 }
 
 /// Result of backward op generation from `Operation::get_backward_milli_ops()`.
@@ -1244,10 +1244,11 @@ impl MilliOpGraph {
     /// inputs are concrete, so constants and weight-dependent metadata ops
     /// resolve automatically. Ops with custom `infer()` overrides can
     /// propagate shapes through symbolic inputs.
-    pub fn infer_all(
+    pub fn infer_all<'p, P: crate::pool::Pool + 'p>(
         &self,
-        inputs: &HashMap<GlobalId, TensorInfo>,
-    ) -> Result<HashMap<GlobalId, TensorInfo>, MilliOpGraphError> {
+        inputs: &HashMap<GlobalId, TensorInfo<'p, P>>,
+        pool: &'p P,
+    ) -> Result<HashMap<GlobalId, TensorInfo<'p, P>>, MilliOpGraphError> {
         if let Some(first_issue) = collect_disconnected_node_slots(self).into_iter().next() {
             return Err(MilliOpGraphError::InvalidGraph(first_issue.describe()));
         }
@@ -1256,9 +1257,8 @@ impl MilliOpGraph {
             return Err(MilliOpGraphError::InvalidGraph(first_issue));
         }
 
-        let mut backend = EvalBackend::NDArray;
         let mut resolver = SymbolicResolver::new();
-        let mut known: HashMap<GlobalId, TensorInfo> = HashMap::new();
+        let mut known: HashMap<GlobalId, TensorInfo<'p, P>> = HashMap::new();
 
         // Map external input IDs to internal IDs.
         for (ext_id, info) in inputs {
@@ -1275,7 +1275,7 @@ impl MilliOpGraph {
             let op = self.ops.get(op_id).ok_or_else(|| {
                 MilliOpGraphError::InvalidGraph(format!("missing op {op_id} in op_ordering"))
             })?;
-            match op.infer(&known, &mut resolver, &mut backend) {
+            match op.infer(&known, &mut resolver, pool) {
                 Ok(outputs) => {
                     for (tensor_id, info) in outputs {
                         known.insert(tensor_id, info);
@@ -1287,13 +1287,13 @@ impl MilliOpGraph {
                     // eprintln!("[infer-fail] {}", op.op_kind());
                     for out_id in op.outputs() {
                         known.entry(out_id).or_insert_with(|| {
-                            TensorInfo::Minimal(MinimalTensor::new(
+                            TensorInfo::wrap(crate::tensor_info::TensorInfoData::Minimal(MinimalTensor::new(
                                 ScalarInfo::Symbolic(SymbolicScalar::new(
                                     crate::numeric_dtype::NumericDType::from_legacy(DType::F32).unwrap(),
                                     &mut resolver,
                                 )),
                                 SymbolicScalarTyped::new(&mut resolver),
-                            ))
+                            )))
                         });
                     }
                 }
@@ -1406,7 +1406,7 @@ pub struct BroadcastAnalysis {
 ///
 /// Returns `None` if rank is unknown for either input.
 /// Used at generation time to insert correct ReduceSum ops in backward pass.
-pub fn analyze_broadcast(a_shape: &TensorInfo, b_shape: &TensorInfo) -> Option<BroadcastAnalysis> {
+pub fn analyze_broadcast(a_shape: &TensorInfo<'_, impl crate::pool::Pool>, b_shape: &TensorInfo<'_, impl crate::pool::Pool>) -> Option<BroadcastAnalysis> {
     let a_rank = a_shape.rank_if_known()?;
     let b_rank = b_shape.rank_if_known()?;
     let target_rank = a_rank.max(b_rank);
@@ -2045,8 +2045,8 @@ mod tests {
     fn test_broadcast_analysis_same_shape() {
         // Both [batch, hidden] — no broadcasting
         use crate::tensor_info::TensorInfo;
-        let a = TensorInfo::from_shape_u64(&[32, 256]);
-        let b = TensorInfo::from_shape_u64(&[32, 256]);
+        let a: TensorInfo<'_, crate::pool::SystemPool> = TensorInfo::from_shape_u64(&[32, 256]);
+        let b: TensorInfo<'_, crate::pool::SystemPool> = TensorInfo::from_shape_u64(&[32, 256]);
         let result = analyze_broadcast(&a, &b).unwrap();
         assert!(result.a_broadcast_axes.is_empty());
         assert!(result.b_broadcast_axes.is_empty());
@@ -2058,8 +2058,8 @@ mod tests {
     fn test_broadcast_analysis_bias_add() {
         // a=[batch, hidden], b=[1, hidden] — b broadcasts axis 0
         use crate::tensor_info::TensorInfo;
-        let a = TensorInfo::from_shape_u64(&[32, 256]);
-        let b = TensorInfo::from_shape_u64(&[1, 256]);
+        let a: TensorInfo<'_, crate::pool::SystemPool> = TensorInfo::from_shape_u64(&[32, 256]);
+        let b: TensorInfo<'_, crate::pool::SystemPool> = TensorInfo::from_shape_u64(&[1, 256]);
         let result = analyze_broadcast(&a, &b).unwrap();
         assert!(result.a_broadcast_axes.is_empty());
         assert_eq!(result.b_broadcast_axes, vec![0]);
@@ -2069,8 +2069,8 @@ mod tests {
     fn test_broadcast_analysis_rank_mismatch() {
         // a=[batch, seq, hidden], b=[hidden] — b left-padded to [1, 1, hidden]
         use crate::tensor_info::TensorInfo;
-        let a = TensorInfo::from_shape_u64(&[32, 128, 256]);
-        let b = TensorInfo::from_shape_u64(&[256]);
+        let a: TensorInfo<'_, crate::pool::SystemPool> = TensorInfo::from_shape_u64(&[32, 128, 256]);
+        let b: TensorInfo<'_, crate::pool::SystemPool> = TensorInfo::from_shape_u64(&[256]);
         let result = analyze_broadcast(&a, &b).unwrap();
         assert!(result.a_broadcast_axes.is_empty());
         assert_eq!(result.b_broadcast_axes, vec![0, 1]);
@@ -2082,8 +2082,8 @@ mod tests {
     fn test_broadcast_analysis_both_broadcast() {
         // a=[batch, 1, hidden], b=[1, seq, hidden]
         use crate::tensor_info::TensorInfo;
-        let a = TensorInfo::from_shape_u64(&[32, 1, 256]);
-        let b = TensorInfo::from_shape_u64(&[1, 128, 256]);
+        let a: TensorInfo<'_, crate::pool::SystemPool> = TensorInfo::from_shape_u64(&[32, 1, 256]);
+        let b: TensorInfo<'_, crate::pool::SystemPool> = TensorInfo::from_shape_u64(&[1, 128, 256]);
         let result = analyze_broadcast(&a, &b).unwrap();
         assert_eq!(result.a_broadcast_axes, vec![1]); // a's dim 1 is 1
         assert_eq!(result.b_broadcast_axes, vec![0]); // b's dim 0 is 1
@@ -2093,8 +2093,8 @@ mod tests {
     fn test_broadcast_analysis_scalar() {
         // a=[batch, hidden], b=[] (scalar) — b broadcasts all axes
         use crate::tensor_info::TensorInfo;
-        let a = TensorInfo::from_shape_u64(&[32, 256]);
-        let b = TensorInfo::from_shape_u64(&[]);
+        let a: TensorInfo<'_, crate::pool::SystemPool> = TensorInfo::from_shape_u64(&[32, 256]);
+        let b: TensorInfo<'_, crate::pool::SystemPool> = TensorInfo::from_shape_u64(&[]);
         let result = analyze_broadcast(&a, &b).unwrap();
         assert!(result.a_broadcast_axes.is_empty());
         // scalar left-padded to [1, 1], both broadcast
@@ -4482,9 +4482,9 @@ mod tests {
         // Provide a concrete tensor as TensorInfo for input x.
         let x_tensor = NumericTensor::<DynRank>::from_vec_shape(vec![3.0f32], vec![1]).unwrap();
         let mut inputs = HashMap::new();
-        inputs.insert(ext_x, TensorInfo::from(x_tensor));
+        inputs.insert(ext_x, TensorInfo::<'_, crate::pool::SystemPool>::from(x_tensor));
 
-        let result = graph.infer_all(&inputs).unwrap();
+        let result = graph.infer_all(&inputs, &crate::pool::SystemPool).unwrap();
 
         // The output tensor should be inferred as Numeric (concrete).
         let out_info = &result[&out];
@@ -4523,17 +4523,17 @@ mod tests {
         for ext_id in [ext_x, ext_y] {
             inputs.insert(
                 ext_id,
-                TensorInfo::Minimal(MinimalTensor::new(
+                TensorInfo::wrap(crate::tensor_info::TensorInfoData::Minimal(MinimalTensor::new(
                     ScalarInfo::Symbolic(SymbolicScalar::new(
                         crate::numeric_dtype::NumericDType::from_legacy(crate::dtype::DType::F32).unwrap(),
                         &mut resolver,
                     )),
                     SymbolicScalarTyped::new(&mut resolver),
-                )),
+                ))),
             );
         }
 
-        let result = graph.infer_all(&inputs).unwrap();
+        let result = graph.infer_all(&inputs, &crate::pool::SystemPool).unwrap();
 
         // Output should exist and have F32 dtype.
         let neg_info = &result[&neg];
@@ -4560,9 +4560,9 @@ mod tests {
         let x_tensor =
             NumericTensor::<DynRank>::from_vec_shape(vec![1.0f32; 6], vec![2, 3]).unwrap();
         let mut inputs = HashMap::new();
-        inputs.insert(ext_x, TensorInfo::from(x_tensor));
+        inputs.insert(ext_x, TensorInfo::<'_, crate::pool::SystemPool>::from(x_tensor));
 
-        let result = graph.infer_all(&inputs).unwrap();
+        let result = graph.infer_all(&inputs, &crate::pool::SystemPool).unwrap();
 
         let shape_info = &result[&shape_out];
         assert!(shape_info.as_numeric().is_some());

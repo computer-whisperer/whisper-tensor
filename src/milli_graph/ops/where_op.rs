@@ -1,3 +1,4 @@
+use crate::pool::Pool;
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
 use crate::graph::{GlobalId, Node};
@@ -140,13 +141,13 @@ impl Node for Where {
 }
 
 impl MilliOp for Where {
-    fn infer(
+    fn infer<'p, P: Pool + 'p>(
         &self,
-        known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo>,
+        known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'p, P>>,
         symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
-        backend: &mut EvalBackend,
+        pool: &'p P,
     ) -> Result<
-        Box<dyn Iterator<Item = (GlobalId, crate::tensor_info::TensorInfo)>>,
+        Vec<(GlobalId, crate::tensor_info::TensorInfo<'p, P>)>,
         MilliOpGraphError,
     > {
         use crate::tensor_info::TensorInfo;
@@ -167,14 +168,14 @@ impl MilliOp for Where {
             && y_info.as_numeric().is_some()
         {
             let mut resolved = HashMap::new();
-            resolved.insert(self.condition, cond_info.as_numeric().unwrap().clone());
-            resolved.insert(self.x, x_info.as_numeric().unwrap().clone());
-            resolved.insert(self.y, y_info.as_numeric().unwrap().clone());
-            let collected: Vec<(GlobalId, TensorInfo)> = self
-                .eval(&resolved, &super::MilliEvalConfig::default(), backend)?
-                .map(|(a, b)| (a, TensorInfo::from(b)))
+            resolved.insert(self.condition, cond_info.as_numeric().unwrap());
+            resolved.insert(self.x, x_info.as_numeric().unwrap());
+            resolved.insert(self.y, y_info.as_numeric().unwrap());
+            let collected: Vec<(GlobalId, TensorInfo<'p, P>)> = self
+                .eval(&resolved, &super::MilliEvalConfig::default(), &mut crate::backends::eval_backend::EvalBackend::NDArray)?
+                .map(|(a, b)| (a, TensorInfo::from_legacy(&b, pool)))
                 .collect();
-            return Ok(Box::new(collected.into_iter()));
+            return Ok(collected);
         }
 
         let out_dtype = x_info.dtype();
@@ -189,7 +190,7 @@ impl MilliOp for Where {
             symbolic_resolver,
         ) {
             let out_info = TensorInfo::from_dtype_and_shape_scalars(out_dtype, &out_dims);
-            return Ok(Box::new([(self.output, out_info)].into_iter()));
+            return Ok(vec![((self.output, out_info))]);
         }
 
         // Fallback: rank-only inference.
@@ -205,7 +206,7 @@ impl MilliOp for Where {
         );
         let out_info =
             TensorInfo::new_from_first_element_and_rank(first_elem, out_rank, symbolic_resolver);
-        Ok(Box::new([(self.output, out_info)].into_iter()))
+        Ok(vec![((self.output, out_info))])
     }
 
     fn eval(

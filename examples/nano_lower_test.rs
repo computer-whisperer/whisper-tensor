@@ -49,7 +49,7 @@ fn main() {
     let tensor_store = model.get_tensor_store();
     let tensors_by_name = sym_graph.get_tensors_by_name();
 
-    let mut all_infos: HashMap<GlobalId, TensorInfo> = HashMap::new();
+    let mut all_infos: HashMap<GlobalId, TensorInfo<'_, whisper_tensor::pool::SystemPool>> = HashMap::new();
     for (name, (dtype, shape_dims)) in &input_info {
         let shape: Vec<u64> = shape_dims.iter().map(|d| d.unwrap_or(4)).collect();
         let ndt = whisper_tensor::numeric_dtype::NumericDType::from_legacy(*dtype)
