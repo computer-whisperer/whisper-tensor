@@ -28,7 +28,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use crate::dtype::DType;
+use crate::numeric_dtype::NumericDType;
 use crate::graph::GlobalId;
 use crate::nano_graph::pattern::InputTensor;
 use crate::nano_graph::{AtomGroup, AtomId, AtomRange, InputRef, NanoGraph, ScalarOp, SymDim};
@@ -447,7 +447,7 @@ fn build_span(
     // Find all external dependencies needed by this span's groups.
     // External = atoms from earlier phases, or input tensors.
     // Internal = atoms from groups computed in this span.
-    let mut needed_external: BTreeMap<u64, (u64, DType)> = BTreeMap::new();
+    let mut needed_external: BTreeMap<u64, (u64, NumericDType)> = BTreeMap::new();
     let mut needed_literals: BTreeSet<usize> = BTreeSet::new();
 
     const LITERAL_INLINE_THRESHOLD: u64 = 131072;
@@ -568,7 +568,7 @@ fn build_span(
     // Build items to insert into span graph, sorted by base_id.
     #[derive(Debug)]
     enum InsertItem {
-        External { base: u64, count: u64, dtype: DType },
+        External { base: u64, count: u64, dtype: NumericDType },
         Literal { gi: usize },
         Compute(WorkItem),
     }
@@ -792,7 +792,7 @@ fn collect_deps_for_input(
     atom_offset: u64,
     span_compute: &HashMap<usize, Vec<(u64, u64)>>,
     input_tensors: &[InputTensor],
-    needed_external: &mut BTreeMap<u64, (u64, DType)>,
+    needed_external: &mut BTreeMap<u64, (u64, NumericDType)>,
     needed_literals: &mut BTreeSet<usize>,
 ) {
     let (lo, hi) = input_ref_range(input, count, atom_offset);
@@ -859,11 +859,11 @@ fn collect_external_in_range(
     graph: &NanoGraph,
     lo: u64,
     hi: u64,
-    fallback_dtype: DType,
+    fallback_dtype: NumericDType,
     input_tensors: &[InputTensor],
     span_compute: &HashMap<usize, Vec<(u64, u64)>>,
     inlined_literals: &BTreeSet<usize>,
-    needed_external: &mut BTreeMap<u64, (u64, DType)>,
+    needed_external: &mut BTreeMap<u64, (u64, NumericDType)>,
 ) {
     let groups = graph.groups();
     for (gi, g) in groups.iter().enumerate() {
@@ -916,7 +916,7 @@ fn collect_input_tensor_deps(
     atom_offset: u64,
     graph: &NanoGraph,
     input_tensors: &[InputTensor],
-    needed_external: &mut BTreeMap<u64, (u64, DType)>,
+    needed_external: &mut BTreeMap<u64, (u64, NumericDType)>,
 ) {
     let (lo, hi) = input_ref_range(input, count, atom_offset);
     for it in input_tensors {
@@ -928,7 +928,7 @@ fn collect_input_tensor_deps(
     }
 }
 
-fn record_external(ranges: &mut BTreeMap<u64, (u64, DType)>, base: u64, count: u64, dtype: DType) {
+fn record_external(ranges: &mut BTreeMap<u64, (u64, NumericDType)>, base: u64, count: u64, dtype: NumericDType) {
     ranges
         .entry(base)
         .and_modify(|(existing_count, _)| {
@@ -937,17 +937,17 @@ fn record_external(ranges: &mut BTreeMap<u64, (u64, DType)>, base: u64, count: u
         .or_insert((count, dtype));
 }
 
-fn merge_external_ranges(ranges: &BTreeMap<u64, (u64, DType)>) -> Vec<(u64, u64, DType)> {
+fn merge_external_ranges(ranges: &BTreeMap<u64, (u64, NumericDType)>) -> Vec<(u64, u64, NumericDType)> {
     if ranges.is_empty() {
         return vec![];
     }
 
-    let sorted: Vec<(u64, u64, DType)> = ranges
+    let sorted: Vec<(u64, u64, NumericDType)> = ranges
         .iter()
         .map(|(&base, &(count, dtype))| (base, count, dtype))
         .collect();
 
-    let mut merged: Vec<(u64, u64, DType)> = Vec::new();
+    let mut merged: Vec<(u64, u64, NumericDType)> = Vec::new();
 
     for (base, count, dtype) in sorted {
         if let Some(last) = merged.last_mut() {
@@ -1043,9 +1043,9 @@ fn merge_atom_ranges(mut ranges: Vec<AtomRange>) -> Vec<AtomRange> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dtype::DType;
+    use crate::numeric_dtype::NumericDType;
     use crate::nano_graph::ops::{ReduceKind, ScalarBinOp, ScalarUnaryOp};
-    use crate::migration::numeric_scalar::NumericScalar;
+    use crate::numeric_scalar::NumericScalar;
 
     const NUM_LANES: usize = 4;
 
@@ -1137,27 +1137,27 @@ mod tests {
 
         let lit = g.push_group(
             1000,
-            DType::F32,
-            ScalarOp::Literal(NumericScalar::F32(1.0)),
+            NumericDType::F32,
+            ScalarOp::Literal(NumericScalar::from_f32(1.0)),
             vec![],
             vec![],
         );
         let neg = g.push_group(
             1000,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Unary {
                 op: ScalarUnaryOp::Neg,
-                compute_dtype: DType::F32,
+                compute_dtype: NumericDType::F32,
             },
             vec![],
             vec![InputRef::affine(lit, 1)],
         );
         let exp = g.push_group(
             1000,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Unary {
                 op: ScalarUnaryOp::Exp,
-                compute_dtype: DType::F32,
+                compute_dtype: NumericDType::F32,
             },
             vec![],
             vec![InputRef::affine(neg, 1)],
@@ -1209,37 +1209,37 @@ mod tests {
 
         let lit = g.push_group(
             1000,
-            DType::F32,
-            ScalarOp::Literal(NumericScalar::F32(2.0)),
+            NumericDType::F32,
+            ScalarOp::Literal(NumericScalar::from_f32(2.0)),
             vec![],
             vec![],
         );
         let neg = g.push_group(
             1000,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Unary {
                 op: ScalarUnaryOp::Neg,
-                compute_dtype: DType::F32,
+                compute_dtype: NumericDType::F32,
             },
             vec![],
             vec![InputRef::affine(lit, 1)],
         );
         let exp = g.push_group(
             1000,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Unary {
                 op: ScalarUnaryOp::Exp,
-                compute_dtype: DType::F32,
+                compute_dtype: NumericDType::F32,
             },
             vec![],
             vec![InputRef::affine(lit, 1)],
         );
         let add = g.push_group(
             1000,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Binary {
                 op: ScalarBinOp::Add,
-                compute_dtype: DType::F32,
+                compute_dtype: NumericDType::F32,
             },
             vec![],
             vec![InputRef::affine(neg, 1), InputRef::affine(exp, 1)],
@@ -1288,22 +1288,22 @@ mod tests {
         // Weight matrix A: M*K literals.
         let a_base = g.push_group(
             m * k,
-            DType::F32,
-            ScalarOp::Literal(NumericScalar::F32(0.5)),
+            NumericDType::F32,
+            ScalarOp::Literal(NumericScalar::from_f32(0.5)),
             vec![],
             vec![],
         );
 
         // Input vector B: K elements (as input tensor).
-        let b_base = g.add_input_tensor(GlobalId(42), k, DType::F32);
+        let b_base = g.add_input_tensor(GlobalId(42), k, NumericDType::F32);
 
         // Mul group: M*K atoms.
         let mul_base = g.push_group(
             m * k,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Binary {
                 op: ScalarBinOp::Mul,
-                compute_dtype: DType::F32,
+                compute_dtype: NumericDType::F32,
             },
             vec![],
             vec![InputRef::affine(a_base, 1), InputRef::modular(b_base, 1, k)],
@@ -1312,12 +1312,12 @@ mod tests {
         // ReduceSum group: M atoms, each reduces K products.
         let red_base = g.push_group(
             m,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Reduce {
                 kind: ReduceKind::Sum,
                 reduce_count: k,
                 reduce_stride: 1,
-                compute_dtype: DType::F32,
+                compute_dtype: NumericDType::F32,
             },
             vec![],
             vec![InputRef::affine(mul_base, k as i64)],
@@ -1328,7 +1328,7 @@ mod tests {
             tensor_id: GlobalId(42),
             base_id: b_base,
             count: k,
-            dtype: DType::F32,
+            dtype: NumericDType::F32,
         }];
 
         let phases = plan(&g, NUM_LANES, &input_tensors, &[red_base]);
@@ -1359,17 +1359,17 @@ mod tests {
 
         let lit = g.push_group(
             100,
-            DType::F32,
-            ScalarOp::Literal(NumericScalar::F32(3.14)),
+            NumericDType::F32,
+            ScalarOp::Literal(NumericScalar::from_f32(3.14)),
             vec![],
             vec![],
         );
         let neg = g.push_group(
             1000,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Unary {
                 op: ScalarUnaryOp::Neg,
-                compute_dtype: DType::F32,
+                compute_dtype: NumericDType::F32,
             },
             vec![],
             vec![InputRef::Broadcast(lit)],
@@ -1411,17 +1411,17 @@ mod tests {
 
         let lit = g.push_group(
             1000,
-            DType::F32,
-            ScalarOp::Literal(NumericScalar::F32(1.0)),
+            NumericDType::F32,
+            ScalarOp::Literal(NumericScalar::from_f32(1.0)),
             vec![],
             vec![],
         );
         let neg = g.push_group(
             1000,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Unary {
                 op: ScalarUnaryOp::Neg,
-                compute_dtype: DType::F32,
+                compute_dtype: NumericDType::F32,
             },
             vec![],
             vec![InputRef::affine(lit, 1)],
@@ -1430,12 +1430,12 @@ mod tests {
         // Single-atom ReduceSum over all 1000 Neg atoms.
         let red = g.push_group(
             1,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Reduce {
                 kind: ReduceKind::Sum,
                 reduce_count: 1000,
                 reduce_stride: 1,
-                compute_dtype: DType::F32,
+                compute_dtype: NumericDType::F32,
             },
             vec![],
             vec![InputRef::affine(neg, 1)],
@@ -1475,8 +1475,8 @@ mod tests {
 
         let source = g.push_group(
             m * k,
-            DType::F32,
-            ScalarOp::Literal(NumericScalar::F32(1.0)),
+            NumericDType::F32,
+            ScalarOp::Literal(NumericScalar::from_f32(1.0)),
             vec![],
             vec![],
         );
@@ -1484,12 +1484,12 @@ mod tests {
         // M reduce groups, each reducing K elements.
         let red = g.push_group(
             m,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Reduce {
                 kind: ReduceKind::Sum,
                 reduce_count: k,
                 reduce_stride: 1,
-                compute_dtype: DType::F32,
+                compute_dtype: NumericDType::F32,
             },
             vec![],
             vec![InputRef::affine(source, k as i64)],
@@ -1520,25 +1520,25 @@ mod tests {
 
         let lit_a = g.push_group(
             4096,
-            DType::F32,
-            ScalarOp::Literal(NumericScalar::F32(1.0)),
+            NumericDType::F32,
+            ScalarOp::Literal(NumericScalar::from_f32(1.0)),
             vec![],
             vec![],
         );
         let lit_b = g.push_group(
             4096,
-            DType::F32,
-            ScalarOp::Literal(NumericScalar::F32(2.0)),
+            NumericDType::F32,
+            ScalarOp::Literal(NumericScalar::from_f32(2.0)),
             vec![],
             vec![],
         );
 
         let sub = g.push_group(
             4096,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Binary {
                 op: ScalarBinOp::Sub,
-                compute_dtype: DType::F32,
+                compute_dtype: NumericDType::F32,
             },
             vec![],
             vec![InputRef::affine(lit_a, 1), InputRef::affine(lit_b, 1)],
@@ -1546,18 +1546,18 @@ mod tests {
 
         let lit_c = g.push_group(
             4096,
-            DType::F32,
-            ScalarOp::Literal(NumericScalar::F32(2.0)),
+            NumericDType::F32,
+            ScalarOp::Literal(NumericScalar::from_f32(2.0)),
             vec![],
             vec![],
         );
 
         let pow = g.push_group(
             4096,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Binary {
                 op: ScalarBinOp::Pow,
-                compute_dtype: DType::F32,
+                compute_dtype: NumericDType::F32,
             },
             vec![],
             vec![InputRef::affine(sub, 1), InputRef::affine(lit_c, 1)],
@@ -1565,18 +1565,18 @@ mod tests {
 
         let lit_d = g.push_group(
             4096,
-            DType::F32,
-            ScalarOp::Literal(NumericScalar::F32(0.5)),
+            NumericDType::F32,
+            ScalarOp::Literal(NumericScalar::from_f32(0.5)),
             vec![],
             vec![],
         );
 
         let div = g.push_group(
             4096,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Binary {
                 op: ScalarBinOp::Div,
-                compute_dtype: DType::F32,
+                compute_dtype: NumericDType::F32,
             },
             vec![],
             vec![InputRef::affine(pow, 1), InputRef::affine(lit_d, 1)],
@@ -1632,17 +1632,17 @@ mod tests {
 
         let lit = g.push_group(
             1000,
-            DType::F32,
-            ScalarOp::Literal(NumericScalar::F32(1.0)),
+            NumericDType::F32,
+            ScalarOp::Literal(NumericScalar::from_f32(1.0)),
             vec![],
             vec![],
         );
         let neg = g.push_group(
             1000,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Unary {
                 op: ScalarUnaryOp::Neg,
-                compute_dtype: DType::F32,
+                compute_dtype: NumericDType::F32,
             },
             vec![],
             vec![InputRef::affine(lit, 1)],
@@ -1651,12 +1651,12 @@ mod tests {
         // ReduceSum over all 1000 neg outputs → 1 atom.
         let red = g.push_group(
             1,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Reduce {
                 kind: ReduceKind::Sum,
                 reduce_count: 1000,
                 reduce_stride: 1,
-                compute_dtype: DType::F32,
+                compute_dtype: NumericDType::F32,
             },
             vec![],
             vec![InputRef::affine(neg, 1)],
@@ -1665,10 +1665,10 @@ mod tests {
         // Div: each of 1000 atoms divides Neg by the ReduceSum scalar.
         let div = g.push_group(
             1000,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Binary {
                 op: ScalarBinOp::Div,
-                compute_dtype: DType::F32,
+                compute_dtype: NumericDType::F32,
             },
             vec![],
             vec![InputRef::affine(neg, 1), InputRef::Broadcast(red)],
@@ -1712,17 +1712,17 @@ mod tests {
 
         let lit = g.push_group(
             1,
-            DType::F32,
-            ScalarOp::Literal(NumericScalar::F32(42.0)),
+            NumericDType::F32,
+            ScalarOp::Literal(NumericScalar::from_f32(42.0)),
             vec![],
             vec![],
         );
         let neg = g.push_group(
             1,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Unary {
                 op: ScalarUnaryOp::Neg,
-                compute_dtype: DType::F32,
+                compute_dtype: NumericDType::F32,
             },
             vec![],
             vec![InputRef::affine(lit, 1)],
@@ -1742,13 +1742,13 @@ mod tests {
     fn test_input_tensor() {
         let mut g = NanoGraph::new();
 
-        let inp = g.add_input_tensor(GlobalId(1), 1000, DType::F32);
+        let inp = g.add_input_tensor(GlobalId(1), 1000, NumericDType::F32);
         let neg = g.push_group(
             1000,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Unary {
                 op: ScalarUnaryOp::Neg,
-                compute_dtype: DType::F32,
+                compute_dtype: NumericDType::F32,
             },
             vec![],
             vec![InputRef::affine(inp, 1)],
@@ -1759,7 +1759,7 @@ mod tests {
             tensor_id: GlobalId(1),
             base_id: inp,
             count: 1000,
-            dtype: DType::F32,
+            dtype: NumericDType::F32,
         }];
 
         let phases = plan(&g, NUM_LANES, &input_tensors, &[neg]);
@@ -1786,17 +1786,17 @@ mod tests {
         let mut g = NanoGraph::new();
         let lit = g.push_group(
             100,
-            DType::F32,
-            ScalarOp::Literal(NumericScalar::F32(1.0)),
+            NumericDType::F32,
+            ScalarOp::Literal(NumericScalar::from_f32(1.0)),
             vec![],
             vec![],
         );
         let neg = g.push_group(
             100,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Unary {
                 op: ScalarUnaryOp::Neg,
-                compute_dtype: DType::F32,
+                compute_dtype: NumericDType::F32,
             },
             vec![],
             vec![InputRef::affine(lit, 1)],
@@ -1825,8 +1825,8 @@ mod tests {
         // Table: 256 literal entries (e.g. embedding table).
         let table = g.push_group(
             256,
-            DType::F32,
-            ScalarOp::Literal(NumericScalar::F32(0.0)),
+            NumericDType::F32,
+            ScalarOp::Literal(NumericScalar::from_f32(0.0)),
             vec![],
             vec![],
         );
@@ -1834,8 +1834,8 @@ mod tests {
         // Index source: 100 atoms (e.g., token IDs).
         let indices = g.push_group(
             100,
-            DType::F32,
-            ScalarOp::Literal(NumericScalar::F32(0.0)),
+            NumericDType::F32,
+            ScalarOp::Literal(NumericScalar::from_f32(0.0)),
             vec![],
             vec![],
         );
@@ -1843,7 +1843,7 @@ mod tests {
         // IndirectLoad: 100 atoms, each looks up table[index].
         let load = g.push_group(
             100,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::IndirectLoad { table_base: table },
             vec![],
             vec![InputRef::affine(indices, 1)],

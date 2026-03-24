@@ -4,7 +4,7 @@ use crate::dtype::DType;
 use crate::graph::{GlobalId, Node};
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
-use crate::nano_graph::lower::{DimKind, TensorAtomMap};
+use crate::nano_graph::lower::{DimKind, NanoLoweringContext, TensorAtomMap};
 use crate::migration::numeric_tensor::NumericTensor;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -230,7 +230,7 @@ impl Slice {
             out_rowmajor[k] == expected
         });
 
-        let slice_dt = out_info.dtype();
+        let slice_dt = NanoLoweringContext::ndt(out_info);
         if contiguous {
             // All steps must be positive for simple offset-based addressing.
             let all_positive_steps = known_steps.iter().all(|&s| s > 0);

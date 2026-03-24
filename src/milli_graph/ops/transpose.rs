@@ -3,7 +3,7 @@ use crate::backends::eval_backend::EvalBackend;
 use crate::graph::{GlobalId, Node};
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
-use crate::nano_graph::lower::{DimKind, TensorAtomMap};
+use crate::nano_graph::lower::{DimKind, NanoLoweringContext, TensorAtomMap};
 use crate::migration::numeric_tensor::NumericTensor;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -170,7 +170,7 @@ impl Transpose {
             TensorAtomMap::simple(
                 in_map.base_id,
                 in_map.count,
-                out_info.dtype(),
+                NanoLoweringContext::ndt(out_info),
                 transposed_layout,
                 transposed_strides,
                 in_map.sym_dims.clone(),

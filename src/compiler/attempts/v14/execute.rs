@@ -15,7 +15,6 @@ use rayon::prelude::*;
 use crate::DynRank;
 use crate::backends::ndarray_backend::numeric_tensor::NDArrayNumericTensor;
 use crate::nano_graph::AtomId;
-use crate::nano_graph::eval;
 
 use super::types::*;
 
@@ -68,7 +67,8 @@ fn eval_span(
     let input_refs: Vec<(AtomId, &NDArrayNumericTensor<DynRank>)> =
         inputs.iter().map(|(base, t)| (*base, t)).collect();
 
-    let output_tensors = eval::eval(&span.graph, &input_refs, &span.outputs);
+    // TODO: eval module was deleted; needs migration to pool_eval (different API signature)
+    let output_tensors: Vec<NDArrayNumericTensor<DynRank>> = todo!("migrate to pool_eval");
 
     span.outputs
         .iter()

@@ -5,6 +5,7 @@ use crate::dtype::DType;
 use crate::milli_graph::MilliOpGraphError;
 use crate::milli_graph::ops::MilliOp;
 use crate::migration::numeric_tensor::NumericTensor;
+use crate::numeric_dtype::NumericDType;
 use crate::scalar_info::ScalarInfoTyped;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -233,11 +234,14 @@ impl SimpleBinary {
             return;
         };
 
-        let out_dt = out_info.dtype();
+        let out_dt = crate::nano_graph::NanoLoweringContext::ndt(out_info);
         // Comparison ops output BOOL but compute in input precision.
         // Use input dtype for compute_dtype when output is BOOL.
-        let input_dt = all_infos.get(&a_id).map(|i| i.dtype()).unwrap_or(out_dt);
-        let compute_dt = if out_dt == crate::dtype::DType::BOOL {
+        let input_dt = all_infos
+            .get(&a_id)
+            .map(|i| crate::nano_graph::NanoLoweringContext::ndt(i))
+            .unwrap_or(out_dt);
+        let compute_dt = if out_dt == NumericDType::BOOL {
             input_dt
         } else {
             out_dt
@@ -621,7 +625,7 @@ impl Pow {
         let count = count.max(1);
         let strides = TensorAtomMap::compute_strides(&known_dims);
 
-        let dt = out_info.dtype();
+        let dt = crate::nano_graph::NanoLoweringContext::ndt(out_info);
         let out_tmp = TensorAtomMap::simple(
             AtomId(0),
             count,
@@ -978,9 +982,12 @@ impl MatMul {
         // product_dtype: precision of A*B products (Mul groups).
         // accumulate_dtype: precision for summing products (ReduceSum groups).
         // output_dtype: final output precision (Identity cast-back if needed).
-        let product_dtype = self.product_dtype();
-        let accumulate_dtype = self.accumulate_dtype();
-        let out_dtype = self.output_dtype();
+        let product_dtype = NumericDType::from_legacy(self.product_dtype())
+            .expect("unsupported product_dtype for lowering");
+        let accumulate_dtype = NumericDType::from_legacy(self.accumulate_dtype())
+            .expect("unsupported accumulate_dtype for lowering");
+        let out_dtype = NumericDType::from_legacy(self.output_dtype())
+            .expect("unsupported output_dtype for lowering");
 
         // Use A and B's actual physical strides (may be non-row-major after Transpose).
         let a_known_dims: Vec<u64> = a_layout

@@ -1,7 +1,7 @@
 //! Scalar operations for the nano graph.
 
-use crate::dtype::DType;
-use crate::migration::numeric_scalar::NumericScalar;
+use crate::numeric_dtype::NumericDType;
+use crate::numeric_scalar::NumericScalar;
 
 /// Binary scalar operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -86,12 +86,12 @@ pub enum ScalarOp {
     /// Binary operation on two inputs.
     Binary {
         op: ScalarBinOp,
-        compute_dtype: DType,
+        compute_dtype: NumericDType,
     },
     /// Unary operation on one input.
     Unary {
         op: ScalarUnaryOp,
-        compute_dtype: DType,
+        compute_dtype: NumericDType,
     },
     /// Ternary select: condition ? x : y. Three inputs: [condition, x, y].
     Select,
@@ -102,7 +102,7 @@ pub enum ScalarOp {
         kind: ReduceKind,
         reduce_count: u64,
         reduce_stride: i64,
-        compute_dtype: DType,
+        compute_dtype: NumericDType,
     },
     // Note: if you add new ScalarOp variants, update is_reduce() and all
     // match sites in eval.rs, nano_codegen.rs, pattern.rs stats/validate.
@@ -114,7 +114,7 @@ pub enum ScalarOp {
 
 impl ScalarOp {
     /// Returns the compute dtype for this op (None for ops with no arithmetic).
-    pub fn compute_dtype(&self) -> Option<DType> {
+    pub fn compute_dtype(&self) -> Option<NumericDType> {
         match self {
             ScalarOp::Literal(_)
             | ScalarOp::Identity

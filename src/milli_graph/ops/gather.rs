@@ -4,10 +4,12 @@ use crate::dtype::DType;
 use crate::graph::{GlobalId, Node};
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
+use crate::nano_graph::NanoLoweringContext;
 use crate::nano_graph::lower::{DimKind, TensorAtomMap};
 use crate::nano_graph::ops::{ScalarBinOp, ScalarOp};
 use crate::nano_graph::pattern::InputRef;
-use crate::migration::numeric_scalar::NumericScalar;
+use crate::numeric_dtype::NumericDType;
+use crate::numeric_scalar::NumericScalar;
 use crate::migration::numeric_tensor::NumericTensor;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -163,7 +165,7 @@ impl Gather {
         };
         let out_count = out_count.max(1);
 
-        let out_dt = out_info.dtype();
+        let out_dt = NanoLoweringContext::ndt(out_info);
 
         // The output shape for axis=0, 1D indices is [N, D, ...] where N = indices count.
         // N may be symbolic (runtime token IDs) or known.
@@ -180,8 +182,8 @@ impl Gather {
 
         // Step 1: stride literal (single atom)
         let stride_lit = ctx.nano.push_atom(
-            DType::F32,
-            ScalarOp::Literal(NumericScalar::F32(d_total as f32)),
+            NumericDType::F32,
+            ScalarOp::Literal(NumericScalar::from_f32(d_total as f32)),
             vec![],
             vec![],
         );
@@ -201,10 +203,10 @@ impl Gather {
 
             // Mul group: 1 atom * broadcast stride → 1 atom (sym_dims from indices)
             let mul_id = ctx.nano.push_atom(
-                DType::F32,
+                NumericDType::F32,
                 ScalarOp::Binary {
                     op: ScalarBinOp::Mul,
-                    compute_dtype: DType::F32,
+                    compute_dtype: NumericDType::F32,
                 },
                 indices_map.sym_dims.clone(),
                 vec![
@@ -215,15 +217,15 @@ impl Gather {
 
             // Step 3: Add group — D_total atoms, each adds its column offset j
             let col_offsets_base = ctx.nano.push_atom(
-                DType::F32,
-                ScalarOp::Literal(NumericScalar::F32(0.0)),
+                NumericDType::F32,
+                ScalarOp::Literal(NumericScalar::from_f32(0.0)),
                 vec![],
                 vec![],
             );
             for j in 1..d_total {
                 ctx.nano.push_atom(
-                    DType::F32,
-                    ScalarOp::Literal(NumericScalar::F32(j as f32)),
+                    NumericDType::F32,
+                    ScalarOp::Literal(NumericScalar::from_f32(j as f32)),
                     vec![],
                     vec![],
                 );
@@ -231,10 +233,10 @@ impl Gather {
 
             let add_id = ctx.nano.push_group(
                 d_total,
-                DType::F32,
+                NumericDType::F32,
                 ScalarOp::Binary {
                     op: ScalarBinOp::Add,
-                    compute_dtype: DType::F32,
+                    compute_dtype: NumericDType::F32,
                 },
                 indices_map.sym_dims.clone(),
                 vec![
@@ -287,10 +289,10 @@ impl Gather {
             // Mul group: out_count atoms, each computes indices[row] * D_total
             let mul_base = ctx.nano.push_group(
                 out_count,
-                DType::F32,
+                NumericDType::F32,
                 ScalarOp::Binary {
                     op: ScalarBinOp::Mul,
-                    compute_dtype: DType::F32,
+                    compute_dtype: NumericDType::F32,
                 },
                 vec![],
                 vec![indices_ref, InputRef::Broadcast(stride_lit)],
@@ -298,15 +300,15 @@ impl Gather {
 
             // Column offset literals: d_total singletons with values [0, 1, ..., d_total-1].
             let col_lit_base = ctx.nano.push_atom(
-                DType::F32,
-                ScalarOp::Literal(NumericScalar::F32(0.0)),
+                NumericDType::F32,
+                ScalarOp::Literal(NumericScalar::from_f32(0.0)),
                 vec![],
                 vec![],
             );
             for j in 1..d_total {
                 ctx.nano.push_atom(
-                    DType::F32,
-                    ScalarOp::Literal(NumericScalar::F32(j as f32)),
+                    NumericDType::F32,
+                    ScalarOp::Literal(NumericScalar::from_f32(j as f32)),
                     vec![],
                     vec![],
                 );
@@ -315,10 +317,10 @@ impl Gather {
             // Add group: mul_result + column_offset (via Modular over d_total literals)
             let add_base = ctx.nano.push_group(
                 out_count,
-                DType::F32,
+                NumericDType::F32,
                 ScalarOp::Binary {
                     op: ScalarBinOp::Add,
-                    compute_dtype: DType::F32,
+                    compute_dtype: NumericDType::F32,
                 },
                 vec![],
                 vec![

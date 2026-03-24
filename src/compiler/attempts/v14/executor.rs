@@ -12,7 +12,7 @@ use std::time::Instant;
 
 use rayon::prelude::*;
 
-use crate::dtype::DType;
+use crate::numeric_dtype::NumericDType;
 use crate::nano_graph::{AtomId, AtomRange};
 
 // ─── Inter-phase data types ─────────────────────────────────────────────────
@@ -24,13 +24,13 @@ use crate::nano_graph::{AtomId, AtomRange};
 #[derive(Clone)]
 pub struct TypedBuffer {
     pub data: Vec<u8>,
-    pub dtype: DType,
+    pub dtype: NumericDType,
     pub count: u64,
 }
 
 impl TypedBuffer {
     /// Create a zeroed buffer for `count` elements of `dtype`.
-    pub fn zeroed(dtype: DType, count: u64) -> Self {
+    pub fn zeroed(dtype: NumericDType, count: u64) -> Self {
         let elem_bytes = dtype_elem_bytes(dtype);
         TypedBuffer {
             data: vec![0u8; count as usize * elem_bytes],
@@ -52,7 +52,7 @@ impl TypedBuffer {
 pub struct StoreSlice<'a> {
     pub base: AtomId,
     pub data: &'a [u8],
-    pub dtype: DType,
+    pub dtype: NumericDType,
     pub count: u64,
 }
 
@@ -463,12 +463,6 @@ fn read_rss_mb() -> f64 {
         / (1024.0 * 1024.0)
 }
 
-pub fn dtype_elem_bytes(dtype: DType) -> usize {
-    match dtype {
-        DType::F64 | DType::I64 | DType::U64 => 8,
-        DType::F32 | DType::I32 | DType::U32 => 4,
-        DType::BF16 | DType::F16 | DType::I16 | DType::U16 => 2,
-        DType::I8 | DType::U8 | DType::BOOL => 1,
-        _ => 4, // fallback
-    }
+pub fn dtype_elem_bytes(dtype: NumericDType) -> usize {
+    dtype.bytes_per_element()
 }

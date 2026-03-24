@@ -28,7 +28,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use crate::dtype::DType;
+use crate::numeric_dtype::NumericDType;
 use crate::graph::GlobalId;
 use crate::nano_graph::pattern::InputTensor;
 use crate::nano_graph::{AtomGroup, AtomId, AtomRange, InputRef, NanoGraph, ScalarOp, SymDim};
@@ -291,10 +291,10 @@ fn input_ref_source_range(input: &InputRef, count: u64, atom_offset: u64) -> (u6
 
 /// Record an external atom range dependency.
 fn record_external_range(
-    ranges: &mut BTreeMap<u64, (u64, DType)>,
+    ranges: &mut BTreeMap<u64, (u64, NumericDType)>,
     base: AtomId,
     count: u64,
-    dtype: DType,
+    dtype: NumericDType,
 ) {
     ranges
         .entry(base.0)
@@ -314,10 +314,10 @@ fn collect_external_in_range(
     graph: &NanoGraph,
     lo: u64,
     hi: u64,
-    fallback_dtype: DType,
+    fallback_dtype: NumericDType,
     input_tensors: &[InputTensor],
     internal_ranges: &[(u64, u64)],
-    needed_external: &mut BTreeMap<u64, (u64, DType)>,
+    needed_external: &mut BTreeMap<u64, (u64, NumericDType)>,
 ) {
     // Compute uncovered sub-intervals of [lo, hi+1) (half-open) against internal_ranges.
     let mut uncovered: Vec<(u64, u64)> = Vec::new();
@@ -388,8 +388,8 @@ fn collect_external_in_range(
 }
 
 /// Merge overlapping/adjacent external ranges.
-fn merge_external_ranges(ranges: &BTreeMap<u64, (u64, DType)>) -> Vec<(AtomId, u64, DType)> {
-    let mut merged: Vec<(AtomId, u64, DType)> = Vec::new();
+fn merge_external_ranges(ranges: &BTreeMap<u64, (u64, NumericDType)>) -> Vec<(AtomId, u64, NumericDType)> {
+    let mut merged: Vec<(AtomId, u64, NumericDType)> = Vec::new();
     for (&base, &(count, dtype)) in ranges {
         if let Some(last) = merged.last_mut() {
             let last_end = last.0.0 + last.1;
@@ -554,7 +554,7 @@ fn build_span(
 
     // Collect external dependencies: atoms needed by this span's groups
     // that are not covered by internal ranges.
-    let mut needed_external: BTreeMap<u64, (u64, DType)> = BTreeMap::new();
+    let mut needed_external: BTreeMap<u64, (u64, NumericDType)> = BTreeMap::new();
 
     for item in work_items {
         let group = &groups[item.group_idx];
@@ -598,7 +598,7 @@ fn build_span(
         ExternalInput {
             base: AtomId,
             count: u64,
-            dtype: DType,
+            dtype: NumericDType,
         },
         InlineLiteral {
             gi: usize,
@@ -940,9 +940,9 @@ fn identify_output_groups(graph: &NanoGraph, output_atom_ids: &[AtomId]) -> Hash
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dtype::DType;
+    use crate::numeric_dtype::NumericDType;
     use crate::nano_graph::ops::{ReduceKind, ScalarBinOp, ScalarUnaryOp};
-    use crate::migration::numeric_scalar::NumericScalar;
+    use crate::numeric_scalar::NumericScalar;
 
     /// Helper: assert that each phase has exactly `num_lanes` spans.
     fn assert_lane_count(phases: &[Phase], num_lanes: usize) {
@@ -1005,18 +1005,18 @@ mod tests {
 
         let lit_id = graph.push_group(
             count,
-            DType::F32,
-            ScalarOp::Literal(NumericScalar::F32(1.0)),
+            NumericDType::F32,
+            ScalarOp::Literal(NumericScalar::from_f32(1.0)),
             vec![],
             vec![],
         );
 
         let add_id = graph.push_group(
             count,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Binary {
                 op: ScalarBinOp::Add,
-                compute_dtype: DType::F32,
+                compute_dtype: NumericDType::F32,
             },
             vec![],
             vec![InputRef::affine(lit_id, 1), InputRef::affine(lit_id, 1)],
@@ -1024,10 +1024,10 @@ mod tests {
 
         let mul_id = graph.push_group(
             count,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Binary {
                 op: ScalarBinOp::Mul,
-                compute_dtype: DType::F32,
+                compute_dtype: NumericDType::F32,
             },
             vec![],
             vec![InputRef::affine(add_id, 1), InputRef::affine(add_id, 1)],
@@ -1089,18 +1089,18 @@ mod tests {
 
         let lit = graph.push_group(
             count,
-            DType::F32,
-            ScalarOp::Literal(NumericScalar::F32(2.0)),
+            NumericDType::F32,
+            ScalarOp::Literal(NumericScalar::from_f32(2.0)),
             vec![],
             vec![],
         );
 
         let sub_id = graph.push_group(
             count,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Binary {
                 op: ScalarBinOp::Sub,
-                compute_dtype: DType::F32,
+                compute_dtype: NumericDType::F32,
             },
             vec![],
             vec![InputRef::affine(lit, 1), InputRef::affine(lit, 1)],
@@ -1108,10 +1108,10 @@ mod tests {
 
         let pow_id = graph.push_group(
             count,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Binary {
                 op: ScalarBinOp::Pow,
-                compute_dtype: DType::F32,
+                compute_dtype: NumericDType::F32,
             },
             vec![],
             vec![InputRef::affine(sub_id, 1), InputRef::Broadcast(lit)],
@@ -1119,10 +1119,10 @@ mod tests {
 
         let div_id = graph.push_group(
             count,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Binary {
                 op: ScalarBinOp::Div,
-                compute_dtype: DType::F32,
+                compute_dtype: NumericDType::F32,
             },
             vec![],
             vec![InputRef::affine(pow_id, 1), InputRef::Broadcast(lit)],
@@ -1173,18 +1173,18 @@ mod tests {
 
         let a = graph.push_group(
             count,
-            DType::F32,
-            ScalarOp::Literal(NumericScalar::F32(1.0)),
+            NumericDType::F32,
+            ScalarOp::Literal(NumericScalar::from_f32(1.0)),
             vec![],
             vec![],
         );
 
         let b = graph.push_group(
             count,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Unary {
                 op: ScalarUnaryOp::Exp,
-                compute_dtype: DType::F32,
+                compute_dtype: NumericDType::F32,
             },
             vec![],
             vec![InputRef::affine(a, 1)],
@@ -1192,10 +1192,10 @@ mod tests {
 
         let c = graph.push_group(
             count,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Unary {
                 op: ScalarUnaryOp::Neg,
-                compute_dtype: DType::F32,
+                compute_dtype: NumericDType::F32,
             },
             vec![],
             vec![InputRef::affine(a, 1)],
@@ -1203,10 +1203,10 @@ mod tests {
 
         let d = graph.push_group(
             count,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Binary {
                 op: ScalarBinOp::Add,
-                compute_dtype: DType::F32,
+                compute_dtype: NumericDType::F32,
             },
             vec![],
             vec![InputRef::affine(b, 1), InputRef::affine(c, 1)],
@@ -1265,8 +1265,8 @@ mod tests {
         // Weights: M*K literal.
         let weights = graph.push_group(
             m * k,
-            DType::F32,
-            ScalarOp::Literal(NumericScalar::F32(0.5)),
+            NumericDType::F32,
+            ScalarOp::Literal(NumericScalar::from_f32(0.5)),
             vec![],
             vec![],
         );
@@ -1274,8 +1274,8 @@ mod tests {
         // Input vector: K literal.
         let input_vec = graph.push_group(
             k,
-            DType::F32,
-            ScalarOp::Literal(NumericScalar::F32(1.0)),
+            NumericDType::F32,
+            ScalarOp::Literal(NumericScalar::from_f32(1.0)),
             vec![],
             vec![],
         );
@@ -1283,10 +1283,10 @@ mod tests {
         // Mul: M*K atoms, weight[i] * input[i % K].
         let mul = graph.push_group(
             m * k,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Binary {
                 op: ScalarBinOp::Mul,
-                compute_dtype: DType::F32,
+                compute_dtype: NumericDType::F32,
             },
             vec![],
             vec![
@@ -1298,12 +1298,12 @@ mod tests {
         // ReduceSum: M atoms, each summing K consecutive mul atoms.
         let reduce = graph.push_group(
             m,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Reduce {
                 kind: ReduceKind::Sum,
                 reduce_count: k,
                 reduce_stride: 1,
-                compute_dtype: DType::F32,
+                compute_dtype: NumericDType::F32,
             },
             vec![],
             vec![InputRef::affine(mul, k as i64)],
@@ -1365,18 +1365,18 @@ mod tests {
 
         let lit = graph.push_group(
             count,
-            DType::F32,
-            ScalarOp::Literal(NumericScalar::F32(3.0)),
+            NumericDType::F32,
+            ScalarOp::Literal(NumericScalar::from_f32(3.0)),
             vec![],
             vec![],
         );
 
         let mul = graph.push_group(
             count,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Binary {
                 op: ScalarBinOp::Mul,
-                compute_dtype: DType::F32,
+                compute_dtype: NumericDType::F32,
             },
             vec![],
             vec![InputRef::affine(lit, 1), InputRef::affine(lit, 1)],
@@ -1441,18 +1441,18 @@ mod tests {
 
         let lit = graph.push_group(
             1,
-            DType::F32,
-            ScalarOp::Literal(NumericScalar::F32(1.0)),
+            NumericDType::F32,
+            ScalarOp::Literal(NumericScalar::from_f32(1.0)),
             vec![],
             vec![],
         );
 
         let source = graph.push_group(
             32,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Binary {
                 op: ScalarBinOp::Add,
-                compute_dtype: DType::F32,
+                compute_dtype: NumericDType::F32,
             },
             vec![],
             vec![InputRef::affine(lit, 0), InputRef::affine(lit, 0)],
@@ -1461,12 +1461,12 @@ mod tests {
         // Reduce all 32 atoms to 1 output.
         let reduce = graph.push_group(
             1,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Reduce {
                 kind: ReduceKind::Sum,
                 reduce_count: 32,
                 reduce_stride: 1,
-                compute_dtype: DType::F32,
+                compute_dtype: NumericDType::F32,
             },
             vec![],
             vec![InputRef::affine(source, 1)],
@@ -1511,18 +1511,18 @@ mod tests {
 
         let lit = graph.push_group(
             count,
-            DType::F32,
-            ScalarOp::Literal(NumericScalar::F32(1.0)),
+            NumericDType::F32,
+            ScalarOp::Literal(NumericScalar::from_f32(1.0)),
             vec![],
             vec![],
         );
 
         let add = graph.push_group(
             count,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Binary {
                 op: ScalarBinOp::Add,
-                compute_dtype: DType::F32,
+                compute_dtype: NumericDType::F32,
             },
             vec![],
             vec![InputRef::affine(lit, 1), InputRef::affine(lit, 1)],
@@ -1569,18 +1569,18 @@ mod tests {
 
         let lit = graph.push_group(
             count,
-            DType::F32,
-            ScalarOp::Literal(NumericScalar::F32(2.0)),
+            NumericDType::F32,
+            ScalarOp::Literal(NumericScalar::from_f32(2.0)),
             vec![],
             vec![],
         );
 
         let add = graph.push_group(
             count,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Binary {
                 op: ScalarBinOp::Add,
-                compute_dtype: DType::F32,
+                compute_dtype: NumericDType::F32,
             },
             vec![],
             vec![InputRef::affine(lit, 1), InputRef::affine(lit, 1)],
@@ -1588,10 +1588,10 @@ mod tests {
 
         let mul = graph.push_group(
             count,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Binary {
                 op: ScalarBinOp::Mul,
-                compute_dtype: DType::F32,
+                compute_dtype: NumericDType::F32,
             },
             vec![],
             vec![InputRef::affine(add, 1), InputRef::Broadcast(lit)],
@@ -1629,18 +1629,18 @@ mod tests {
 
         let lit = graph.push_group(
             count,
-            DType::F32,
-            ScalarOp::Literal(NumericScalar::F32(1.0)),
+            NumericDType::F32,
+            ScalarOp::Literal(NumericScalar::from_f32(1.0)),
             vec![],
             vec![],
         );
 
         let add = graph.push_group(
             count,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Binary {
                 op: ScalarBinOp::Add,
-                compute_dtype: DType::F32,
+                compute_dtype: NumericDType::F32,
             },
             vec![],
             vec![InputRef::affine(lit, 1), InputRef::affine(lit, 1)],
@@ -1690,18 +1690,18 @@ mod tests {
 
         let lit = graph.push_group(
             count,
-            DType::F32,
-            ScalarOp::Literal(NumericScalar::F32(1.0)),
+            NumericDType::F32,
+            ScalarOp::Literal(NumericScalar::from_f32(1.0)),
             vec![],
             vec![],
         );
 
         let add = graph.push_group(
             count,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Binary {
                 op: ScalarBinOp::Add,
-                compute_dtype: DType::F32,
+                compute_dtype: NumericDType::F32,
             },
             vec![],
             vec![InputRef::affine(lit, 1), InputRef::affine(lit, 1)],
@@ -1779,8 +1779,8 @@ mod tests {
 
         let table = graph.push_group(
             table_count,
-            DType::F32,
-            ScalarOp::Literal(NumericScalar::F32(0.0)),
+            NumericDType::F32,
+            ScalarOp::Literal(NumericScalar::from_f32(0.0)),
             vec![],
             vec![],
         );
@@ -1788,15 +1788,15 @@ mod tests {
         // Index input: literal indices (0, 1, 2, ... 63).
         let index = graph.push_group(
             load_count,
-            DType::I64,
-            ScalarOp::Literal(NumericScalar::I64(0)),
+            NumericDType::I64,
+            ScalarOp::Literal(NumericScalar::from_i64(0)),
             vec![],
             vec![],
         );
 
         let load = graph.push_group(
             load_count,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::IndirectLoad { table_base: table },
             vec![],
             vec![InputRef::affine(index, 1)],
@@ -1845,18 +1845,18 @@ mod tests {
 
         let lit = graph.push_group(
             count,
-            DType::F32,
-            ScalarOp::Literal(NumericScalar::F32(1.0)),
+            NumericDType::F32,
+            ScalarOp::Literal(NumericScalar::from_f32(1.0)),
             vec![],
             vec![],
         );
 
         let unary = graph.push_group(
             count,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Unary {
                 op: ScalarUnaryOp::Exp,
-                compute_dtype: DType::F32,
+                compute_dtype: NumericDType::F32,
             },
             vec![],
             vec![InputRef::affine(lit, 1)],

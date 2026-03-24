@@ -4,7 +4,7 @@ use crate::dtype::DType;
 use crate::graph::{GlobalId, Node};
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp, MilliOpTensorIDOrLiteral};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
-use crate::nano_graph::lower::{DimKind, TensorAtomMap};
+use crate::nano_graph::lower::{DimKind, NanoLoweringContext, TensorAtomMap};
 use crate::migration::numeric_tensor::NumericTensor;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -163,7 +163,7 @@ impl Split {
 
         // Zero-cost split for outermost axis with row-major strides:
         // output atoms are a contiguous sub-range.
-        let out_dt = out_info.dtype();
+        let out_dt = NanoLoweringContext::ndt(out_info);
         let in_rowmajor = TensorAtomMap::compute_strides(&in_known);
         if split_known_idx == 0 && in_map.known_strides == in_rowmajor {
             let base_offset = offset_along_axis * in_map.known_strides[split_known_idx];

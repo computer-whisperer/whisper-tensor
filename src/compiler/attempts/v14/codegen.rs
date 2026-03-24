@@ -38,7 +38,7 @@ use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{Linkage, Module};
 
-use crate::dtype::DType;
+use crate::numeric_dtype::NumericDType;
 use crate::nano_graph::{
     AtomGroup, AtomId, AtomRange, InputRef, NanoGraph, ReduceKind, ScalarBinOp, ScalarOp,
     ScalarUnaryOp,
@@ -58,7 +58,7 @@ pub struct SlotInfo {
     /// Bytes per element (derived from dtype).
     pub elem_bytes: usize,
     /// Storage dtype.
-    pub dtype: DType,
+    pub dtype: NumericDType,
 }
 
 /// Memory layout for a compiled span.
@@ -102,7 +102,7 @@ impl BufferLayout {
 
     /// Write literal group values into the buffer.
     pub fn populate_literals(&self, graph: &NanoGraph, buffer: &mut [u8]) {
-        use crate::migration::numeric_scalar::NumericScalar;
+        use crate::numeric_scalar::NumericScalar;
         for group in graph.groups() {
             if let ScalarOp::Literal(scalar) = &group.op {
                 if let Some((slot, _)) = self.find(group.base_id) {
@@ -120,7 +120,7 @@ impl BufferLayout {
     /// Write f32 input data into the buffer. Handles ranges spanning multiple slots.
     /// Used by unit tests (F32-only). Production code uses write_scalar_input.
     pub fn write_f32_input(&self, base: AtomId, data: &[f32], buffer: &mut [u8]) {
-        use crate::migration::numeric_scalar::NumericScalar;
+        use crate::numeric_scalar::NumericScalar;
         let mut written = 0usize;
         let mut atom = base.0;
         while written < data.len() {
@@ -130,7 +130,7 @@ impl BufferLayout {
                 for i in 0..to_write {
                     let off = slot.byte_offset + (elem_start as usize + i) * slot.elem_bytes;
                     if off + slot.elem_bytes <= buffer.len() {
-                        let scalar = NumericScalar::F32(data[written + i]).cast_to(slot.dtype);
+                        let scalar = NumericScalar::from_f32(data[written + i]).cast_to(slot.dtype);
                         write_scalar(buffer, off, &scalar);
                     }
                 }
@@ -146,7 +146,7 @@ impl BufferLayout {
     /// Read output data as f32 from the buffer. Handles ranges spanning multiple slots.
     /// Used by unit tests and diagnostics. Production extraction uses extract_outputs.
     pub fn read_f32_output(&self, range: &AtomRange, buffer: &[u8]) -> Vec<f32> {
-        use crate::migration::numeric_scalar::NumericScalar;
+        use crate::numeric_scalar::NumericScalar;
         let mut result = Vec::with_capacity(range.count as usize);
         let mut remaining = range.count;
         let mut atom = range.base.0;
@@ -176,75 +176,21 @@ impl BufferLayout {
 }
 
 /// Write a NumericScalar to `buffer[off..]` in its native byte format.
-fn write_scalar(buffer: &mut [u8], off: usize, val: &crate::migration::numeric_scalar::NumericScalar) {
-    use crate::migration::numeric_scalar::NumericScalar;
-    match val {
-        NumericScalar::F32(v) => buffer[off..off + 4].copy_from_slice(&v.to_le_bytes()),
-        NumericScalar::F64(v) => buffer[off..off + 8].copy_from_slice(&v.to_le_bytes()),
-        NumericScalar::BF16(v) => buffer[off..off + 2].copy_from_slice(&v.to_bits().to_le_bytes()),
-        NumericScalar::F16(v) => buffer[off..off + 2].copy_from_slice(&v.to_bits().to_le_bytes()),
-        NumericScalar::I64(v) => buffer[off..off + 8].copy_from_slice(&v.to_le_bytes()),
-        NumericScalar::U64(v) => buffer[off..off + 8].copy_from_slice(&v.to_le_bytes()),
-        NumericScalar::I32(v) => buffer[off..off + 4].copy_from_slice(&v.to_le_bytes()),
-        NumericScalar::U32(v) => buffer[off..off + 4].copy_from_slice(&v.to_le_bytes()),
-        NumericScalar::I16(v) => buffer[off..off + 2].copy_from_slice(&v.to_le_bytes()),
-        NumericScalar::U16(v) => buffer[off..off + 2].copy_from_slice(&v.to_le_bytes()),
-        NumericScalar::I8(v) => buffer[off] = *v as u8,
-        NumericScalar::U8(v) => buffer[off] = *v,
-        NumericScalar::BOOL(v) => buffer[off] = if *v { 1 } else { 0 },
-        _ => {
-            // Fallback: cast to F32.
-            let f = val.to_f64() as f32;
-            buffer[off..off + 4].copy_from_slice(&f.to_le_bytes());
-        }
-    }
+fn write_scalar(buffer: &mut [u8], off: usize, val: &crate::numeric_scalar::NumericScalar) {
+    let bytes = val.as_le_bytes();
+    buffer[off..off + bytes.len()].copy_from_slice(bytes);
 }
 
 /// Read a NumericScalar from `buffer[off..]` in the given storage dtype.
-fn read_scalar(buffer: &[u8], off: usize, dtype: DType) -> crate::migration::numeric_scalar::NumericScalar {
-    use crate::migration::numeric_scalar::NumericScalar;
-    match dtype {
-        DType::F32 => {
-            NumericScalar::F32(f32::from_le_bytes(buffer[off..off + 4].try_into().unwrap()))
-        }
-        DType::F64 => {
-            NumericScalar::F64(f64::from_le_bytes(buffer[off..off + 8].try_into().unwrap()))
-        }
-        DType::BF16 => {
-            let bits = u16::from_le_bytes(buffer[off..off + 2].try_into().unwrap());
-            NumericScalar::BF16(half::bf16::from_bits(bits))
-        }
-        DType::F16 => {
-            let bits = u16::from_le_bytes(buffer[off..off + 2].try_into().unwrap());
-            NumericScalar::F16(half::f16::from_bits(bits))
-        }
-        DType::I64 => {
-            NumericScalar::I64(i64::from_le_bytes(buffer[off..off + 8].try_into().unwrap()))
-        }
-        DType::U64 => {
-            NumericScalar::U64(u64::from_le_bytes(buffer[off..off + 8].try_into().unwrap()))
-        }
-        DType::I32 => {
-            NumericScalar::I32(i32::from_le_bytes(buffer[off..off + 4].try_into().unwrap()))
-        }
-        DType::U32 => {
-            NumericScalar::U32(u32::from_le_bytes(buffer[off..off + 4].try_into().unwrap()))
-        }
-        DType::I16 => {
-            NumericScalar::I16(i16::from_le_bytes(buffer[off..off + 2].try_into().unwrap()))
-        }
-        DType::U16 => {
-            NumericScalar::U16(u16::from_le_bytes(buffer[off..off + 2].try_into().unwrap()))
-        }
-        DType::I8 => NumericScalar::I8(buffer[off] as i8),
-        DType::U8 => NumericScalar::U8(buffer[off]),
-        DType::BOOL => NumericScalar::BOOL(buffer[off] != 0),
-        _ => NumericScalar::F32(f32::from_le_bytes(buffer[off..off + 4].try_into().unwrap())),
-    }
+fn read_scalar(buffer: &[u8], off: usize, dtype: NumericDType) -> crate::numeric_scalar::NumericScalar {
+    let n = dtype.bytes_per_element();
+    let mut bits = [0u8; 8];
+    bits[..n].copy_from_slice(&buffer[off..off + n]);
+    crate::numeric_scalar::NumericScalar { bits, dtype }
 }
 
 /// Legacy: read an f32 from buffer (used by diagnostics only).
-fn read_f32_from(buffer: &[u8], off: usize, dtype: DType) -> f32 {
+fn read_f32_from(buffer: &[u8], off: usize, dtype: NumericDType) -> f32 {
     read_scalar(buffer, off, dtype).to_f64() as f32
 }
 
@@ -258,8 +204,8 @@ fn bf16_to_f32(bits: u16) -> f32 {
     f32::from_bits((bits as u32) << 16)
 }
 
-fn dtype_elem_bytes(dtype: DType) -> usize {
-    dtype.bytes_per_element().unwrap_or(4)
+fn dtype_elem_bytes(dtype: NumericDType) -> usize {
+    dtype.bytes_per_element()
 }
 
 // ─── Free-list allocator ────────────────────────────────────────────────────
@@ -965,21 +911,11 @@ fn read_buffer_to_typed(
 }
 
 /// Read a NumericScalar from raw bytes in a given dtype.
-fn read_scalar_raw(data: &[u8], dtype: DType) -> crate::migration::numeric_scalar::NumericScalar {
-    use crate::migration::numeric_scalar::NumericScalar;
-    match dtype {
-        DType::F32 => NumericScalar::F32(f32::from_le_bytes(data[..4].try_into().unwrap())),
-        DType::F64 => NumericScalar::F64(f64::from_le_bytes(data[..8].try_into().unwrap())),
-        DType::I64 => NumericScalar::I64(i64::from_le_bytes(data[..8].try_into().unwrap())),
-        DType::I32 => NumericScalar::I32(i32::from_le_bytes(data[..4].try_into().unwrap())),
-        DType::BF16 => {
-            let bits = u16::from_le_bytes(data[..2].try_into().unwrap());
-            NumericScalar::BF16(half::bf16::from_bits(bits))
-        }
-        DType::U8 => NumericScalar::U8(data[0]),
-        DType::BOOL => NumericScalar::BOOL(data[0] != 0),
-        _ => NumericScalar::F32(f32::from_le_bytes(data[..4].try_into().unwrap())),
-    }
+fn read_scalar_raw(data: &[u8], dtype: NumericDType) -> crate::numeric_scalar::NumericScalar {
+    let n = dtype.bytes_per_element();
+    let mut bits = [0u8; 8];
+    bits[..n].copy_from_slice(&data[..n]);
+    crate::numeric_scalar::NumericScalar { bits, dtype }
 }
 
 // ─── Span compilation ───────────────────────────────────────────────────────
@@ -1262,7 +1198,7 @@ fn emit_chain(
 
     // Single-element chain: emit all bodies inline without a loop.
     if count == 1 {
-        let mut forwarded: HashMap<u64, (Value, DType)> = HashMap::new();
+        let mut forwarded: HashMap<u64, (Value, NumericDType)> = HashMap::new();
         for &gi in &chain.group_indices {
             let group = &groups[gi];
             emit_group_body_forwarded(
@@ -1303,9 +1239,9 @@ fn emit_chain(
 
     builder.switch_to_block(loop_body);
 
-    // Forwarding map: producer base_id → (Cranelift Value, output DType).
+    // Forwarding map: producer base_id → (Cranelift Value, output NumericDType).
     // Rebuilt each iteration (Cranelift SSA values are block-local within the loop body).
-    let mut forwarded: HashMap<u64, (Value, DType)> = HashMap::new();
+    let mut forwarded: HashMap<u64, (Value, NumericDType)> = HashMap::new();
 
     for &gi in &chain.group_indices {
         let group = &groups[gi];
@@ -1352,7 +1288,7 @@ fn emit_group_body_forwarded(
     math: &MathFuncs,
     var_counter: &mut VarCounter,
     table_counter: &mut usize,
-    forwarded: &mut HashMap<u64, (Value, DType)>,
+    forwarded: &mut HashMap<u64, (Value, NumericDType)>,
 ) -> Result<(), String> {
     let (out_slot, _) = layout
         .find(group.base_id)
@@ -1551,9 +1487,9 @@ fn emit_group_body_forwarded(
 ///
 /// This preserves the dtype truncation contract: BF16 outputs must lose
 /// precision between steps, I32 values must be sign-extended to I64, etc.
-fn emit_store_load_roundtrip(builder: &mut FunctionBuilder, val: Value, dtype: DType) -> Value {
+fn emit_store_load_roundtrip(builder: &mut FunctionBuilder, val: Value, dtype: NumericDType) -> Value {
     match dtype {
-        DType::BF16 => {
+        NumericDType::BF16 => {
             // F32 → BF16 round-to-nearest-even → F32
             // Store path: bitcast f32→i32, round, take top 16 bits
             // Load path: uextend i16→i32, shift left 16, bitcast i32→f32
@@ -1566,30 +1502,30 @@ fn emit_store_load_roundtrip(builder: &mut FunctionBuilder, val: Value, dtype: D
             let masked = builder.ins().band_imm(rounded, !0xFFFF_i64);
             builder.ins().bitcast(types::F32, MemFlags::new(), masked)
         }
-        DType::F16 => {
+        NumericDType::F16 => {
             // Similar to BF16 but different bit layout. For now, just pass through
             // (F16 handling would need its own rounding logic).
             val
         }
-        DType::F64 => {
+        NumericDType::F64 => {
             // Store: f64 store. Load: f64 load → fdemote to f32.
             // Round-trip: promote f32→f64→fdemote f64→f32 = f32 (no-op if already f32)
             val
         }
-        DType::I32 => {
+        NumericDType::I32 => {
             // Store: ireduce i64→i32. Load: sextend i32→i64.
             let narrow = builder.ins().ireduce(types::I32, val);
             builder.ins().sextend(types::I64, narrow)
         }
-        DType::U32 => {
+        NumericDType::U32 => {
             let narrow = builder.ins().ireduce(types::I32, val);
             builder.ins().uextend(types::I64, narrow)
         }
-        DType::BOOL | DType::U8 => {
+        NumericDType::BOOL | NumericDType::U8 => {
             let narrow = builder.ins().ireduce(types::I8, val);
             builder.ins().uextend(types::I64, narrow)
         }
-        DType::I8 => {
+        NumericDType::I8 => {
             let narrow = builder.ins().ireduce(types::I8, val);
             builder.ins().sextend(types::I64, narrow)
         }
@@ -1607,7 +1543,7 @@ fn forwarded_or_slot_repr(
     input: &InputRef,
     layout: &BufferLayout,
     atom_offset: u64,
-    forwarded: &HashMap<u64, (Value, DType)>,
+    forwarded: &HashMap<u64, (Value, NumericDType)>,
 ) -> ReprKind {
     if let InputRef::Strided {
         base,
@@ -1642,7 +1578,7 @@ fn load_input_forwarded(
     i_const: u64,
     atom_offset: u64,
     table_counter: &mut usize,
-    forwarded: &HashMap<u64, (Value, DType)>,
+    forwarded: &HashMap<u64, (Value, NumericDType)>,
 ) -> Result<Value, String> {
     // Check for forwarding: Affine stride=1 with a forwarded producer.
     if let InputRef::Strided {
@@ -2234,7 +2170,7 @@ fn emit_group_body(
 // ─── Input loading ──────────────────────────────────────────────────────────
 
 /// Determine the storage dtype that `load_input` will load from for a given InputRef.
-fn input_slot_dtype(input: &InputRef, layout: &BufferLayout, atom_offset: u64) -> Option<DType> {
+fn input_slot_dtype(input: &InputRef, layout: &BufferLayout, atom_offset: u64) -> Option<NumericDType> {
     // Try the InputRef's base first, then fall back to the first accessed atom.
     let try_find = |atom: AtomId| layout.find(atom).map(|(s, _)| s.dtype);
     match input {
@@ -2276,7 +2212,7 @@ fn resolve_affine_base(
     stride: i64,
     atom_offset: u64,
     label: &str,
-) -> Result<(i64, usize, DType), String> {
+) -> Result<(i64, usize, NumericDType), String> {
     // Fast path: base is in the layout (unsplit or atom_offset == 0).
     if let Some((slot, elem)) = layout.find(base) {
         let base_byte = slot.byte_offset as i64 + elem as i64 * slot.elem_bytes as i64;
@@ -2501,10 +2437,10 @@ enum ReprKind {
     Int,   // types::I64
 }
 
-/// Map a DType to its Cranelift representation kind.
-fn repr_of(dtype: DType) -> ReprKind {
+/// Map a NumericDType to its Cranelift representation kind.
+fn repr_of(dtype: NumericDType) -> ReprKind {
     match dtype {
-        DType::F32 | DType::BF16 | DType::F16 | DType::F64 => ReprKind::Float,
+        NumericDType::F32 | NumericDType::BF16 | NumericDType::F16 | NumericDType::F64 => ReprKind::Float,
         _ => ReprKind::Int,
     }
 }
@@ -2531,14 +2467,14 @@ fn emit_cast_to_output(
     builder: &mut FunctionBuilder,
     val: Value,
     compute_repr: ReprKind,
-    output_dtype: DType,
+    output_dtype: NumericDType,
 ) -> Value {
     let target_repr = repr_of(output_dtype);
     let val = emit_repr_cast(builder, val, compute_repr, target_repr);
 
     // Further narrowing for sub-word output types.
     match output_dtype {
-        DType::BOOL => {
+        NumericDType::BOOL => {
             // Nonzero test → 0 or 1 as i8.
             match target_repr {
                 ReprKind::Int => {
@@ -2558,11 +2494,11 @@ fn emit_cast_to_output(
                 }
             }
         }
-        DType::U8 | DType::I8 => {
+        NumericDType::U8 | NumericDType::I8 => {
             // Already Int repr (i64), narrow to i8.
             builder.ins().ireduce(types::I8, val)
         }
-        DType::I32 | DType::U32 => {
+        NumericDType::I32 | NumericDType::U32 => {
             // Already Int repr (i64), narrow to i32.
             builder.ins().ireduce(types::I32, val)
         }
@@ -2578,33 +2514,33 @@ fn emit_cast_to_output(
 /// Returns a value in the dtype's representation kind:
 /// - Float dtypes → types::F32 (BF16 widened to f32)
 /// - Integer dtypes → types::I64 (smaller ints zero/sign-extended)
-fn emit_typed_load(builder: &mut FunctionBuilder, addr: Value, dtype: DType) -> Value {
+fn emit_typed_load(builder: &mut FunctionBuilder, addr: Value, dtype: NumericDType) -> Value {
     match dtype {
-        DType::F32 => builder.ins().load(types::F32, MemFlags::trusted(), addr, 0),
-        DType::BF16 => {
+        NumericDType::F32 => builder.ins().load(types::F32, MemFlags::trusted(), addr, 0),
+        NumericDType::BF16 => {
             let raw = builder.ins().load(types::I16, MemFlags::trusted(), addr, 0);
             let wide = builder.ins().uextend(types::I32, raw);
             let shifted = builder.ins().ishl_imm(wide, 16);
             builder.ins().bitcast(types::F32, MemFlags::new(), shifted)
         }
-        DType::F64 => {
+        NumericDType::F64 => {
             let raw = builder.ins().load(types::F64, MemFlags::trusted(), addr, 0);
             builder.ins().fdemote(types::F32, raw)
         }
-        DType::I64 => builder.ins().load(types::I64, MemFlags::trusted(), addr, 0),
-        DType::I32 => {
+        NumericDType::I64 => builder.ins().load(types::I64, MemFlags::trusted(), addr, 0),
+        NumericDType::I32 => {
             let raw = builder.ins().load(types::I32, MemFlags::trusted(), addr, 0);
             builder.ins().sextend(types::I64, raw)
         }
-        DType::U32 => {
+        NumericDType::U32 => {
             let raw = builder.ins().load(types::I32, MemFlags::trusted(), addr, 0);
             builder.ins().uextend(types::I64, raw)
         }
-        DType::BOOL | DType::U8 => {
+        NumericDType::BOOL | NumericDType::U8 => {
             let raw = builder.ins().load(types::I8, MemFlags::trusted(), addr, 0);
             builder.ins().uextend(types::I64, raw)
         }
-        DType::I8 => {
+        NumericDType::I8 => {
             let raw = builder.ins().load(types::I8, MemFlags::trusted(), addr, 0);
             builder.ins().sextend(types::I64, raw)
         }
@@ -2623,12 +2559,12 @@ fn emit_typed_load(builder: &mut FunctionBuilder, addr: Value, dtype: DType) -> 
 /// - I64: types::I64
 /// - BOOL/U8/I8: types::I8
 /// - I32/U32: types::I32
-fn emit_typed_store(builder: &mut FunctionBuilder, addr: Value, val: Value, dtype: DType) {
+fn emit_typed_store(builder: &mut FunctionBuilder, addr: Value, val: Value, dtype: NumericDType) {
     match dtype {
-        DType::F32 => {
+        NumericDType::F32 => {
             builder.ins().store(MemFlags::trusted(), val, addr, 0);
         }
-        DType::BF16 => {
+        NumericDType::BF16 => {
             // Round f32 → BF16: bitcast to i32, round-to-nearest-even, take top 16 bits.
             let bits = builder.ins().bitcast(types::I32, MemFlags::new(), val);
             let shifted16 = builder.ins().ushr_imm(bits, 16);
@@ -2639,13 +2575,13 @@ fn emit_typed_store(builder: &mut FunctionBuilder, addr: Value, val: Value, dtyp
             let narrow = builder.ins().ireduce(types::I16, top);
             builder.ins().store(MemFlags::trusted(), narrow, addr, 0);
         }
-        DType::I64 | DType::U64 => {
+        NumericDType::I64 | NumericDType::U64 => {
             builder.ins().store(MemFlags::trusted(), val, addr, 0); // val is i64
         }
-        DType::I32 | DType::U32 => {
+        NumericDType::I32 | NumericDType::U32 => {
             builder.ins().store(MemFlags::trusted(), val, addr, 0); // val is i32
         }
-        DType::BOOL | DType::U8 | DType::I8 => {
+        NumericDType::BOOL | NumericDType::U8 | NumericDType::I8 => {
             builder.ins().store(MemFlags::trusted(), val, addr, 0); // val is i8
         }
         _ => {
@@ -2705,7 +2641,7 @@ fn emit_reduce(
     kind: ReduceKind,
     reduce_count: u64,
     reduce_stride: i64,
-    compute_dtype: DType,
+    compute_dtype: NumericDType,
     out_slot: &SlotInfo,
 ) -> Result<(), String> {
     let is_sum = matches!(kind, ReduceKind::Sum);
@@ -3259,7 +3195,6 @@ impl CompiledPlan {
         &self,
         inputs: Vec<(AtomId, NDArrayNumericTensor<DynRank>)>,
     ) -> HashMap<AtomId, NDArrayNumericTensor<DynRank>> {
-        use crate::nano_graph::eval;
         use rayon::prelude::*;
 
         let mut store: HashMap<AtomId, NDArrayNumericTensor<DynRank>> = HashMap::new();
@@ -3361,7 +3296,7 @@ impl CompiledPlan {
                             let src_val = entry
                                 .layout
                                 .byte_offset_of(src_atom)
-                                .map(|off| read_f32_from(&dbg_buf, off, DType::F32));
+                                .map(|off| read_f32_from(&dbg_buf, off, NumericDType::F32));
                             let src_owner = entry
                                 .graph
                                 .group_of(src_atom)
@@ -3399,7 +3334,7 @@ impl CompiledPlan {
                                             let src_atom = ids[elem];
                                             let src_val =
                                                 entry.layout.byte_offset_of(src_atom).map(|off| {
-                                                    read_f32_from(&dbg_buf, off, DType::F32)
+                                                    read_f32_from(&dbg_buf, off, NumericDType::F32)
                                                 });
                                             // Also check what group produces the source atom.
                                             let src_group = entry.graph.group_of(src_atom);
@@ -3449,7 +3384,7 @@ impl CompiledPlan {
                                                         .layout
                                                         .byte_offset_of(AtomId(src_atom))
                                                         .map(|off| {
-                                                            read_f32_from(&dbg_buf, off, DType::F32)
+                                                            read_f32_from(&dbg_buf, off, NumericDType::F32)
                                                         });
                                                     k_vals.push((src_atom, val));
                                                 }
@@ -3481,28 +3416,12 @@ impl CompiledPlan {
                         }
                     }
 
-                    // Also run eval for comparison.
-                    let interp_inputs =
-                        super::execute::gather_inputs_pub(&entry.inputs, &entry.outputs, &store);
-                    let refs: Vec<_> = interp_inputs.iter().map(|(b, t)| (*b, t)).collect();
-                    let eval_out = eval::eval(&entry.graph, &refs, &entry.outputs);
-                    let eval_nans: u64 = eval_out
-                        .iter()
-                        .map(|t| {
-                            if let NDArrayNumericTensor::F32(a) = t {
-                                a.iter().filter(|v| v.is_nan()).count() as u64
-                            } else {
-                                0
-                            }
-                        })
-                        .sum();
-
+                    // TODO: migrate to pool_eval (nano_graph::eval was deleted).
                     eprintln!(
-                        "  [phase {} span {}] JIT nans={}, eval nans={}, groups={}",
+                        "  [phase {} span {}] JIT nans={}, eval nans=N/A (eval deleted), groups={}",
                         pi,
                         si,
                         span_nans,
-                        eval_nans,
                         entry.graph.num_groups(),
                     );
                 }
@@ -3525,311 +3444,13 @@ impl CompiledPlan {
 /// and eval independently (same store inputs), then compares every group's
 /// output. Stops and reports at the first diverging group.
 pub fn diagnose_first_divergence(
-    plan: &CompiledPlan,
-    exec_plan: &ExecutionPlan,
-    inputs: Vec<(AtomId, NDArrayNumericTensor<DynRank>)>,
+    _plan: &CompiledPlan,
+    _exec_plan: &ExecutionPlan,
+    _inputs: Vec<(AtomId, NDArrayNumericTensor<DynRank>)>,
 ) {
-    use crate::nano_graph::eval;
-
-    let mut store: HashMap<AtomId, NDArrayNumericTensor<DynRank>> = HashMap::new();
-    for (base, tensor) in inputs {
-        store.insert(base, tensor);
-    }
-
-    for (pi, (compiled_phase, plan_phase)) in
-        plan.phases.iter().zip(exec_plan.phases.iter()).enumerate()
-    {
-        let mut phase_outputs: Vec<Vec<(AtomId, NDArrayNumericTensor<DynRank>)>> = Vec::new();
-
-        for (si, (entry, span)) in compiled_phase
-            .spans
-            .iter()
-            .zip(plan_phase.spans.iter())
-            .enumerate()
-        {
-            if entry.layout.total_bytes == 0 {
-                phase_outputs.push(Vec::new());
-                continue;
-            }
-
-            // Run JIT.
-            let mut buffer = entry.literal_buffer.clone();
-            populate_buffer_from_store(&entry.inputs, &store, &entry.layout, &mut buffer);
-
-            // Snapshot literal values before JIT for corruption detection.
-            let pre_jit_literals: Vec<(usize, f32, AtomId)> = entry
-                .graph
-                .groups()
-                .iter()
-                .filter(|g| matches!(&g.op, ScalarOp::Literal(_)))
-                .filter_map(|g| {
-                    let range = AtomRange {
-                        base: g.base_id,
-                        count: g.count,
-                        dtype: g.output_dtype,
-                    };
-                    let vals = entry.layout.read_f32_output(&range, &buffer);
-                    let gi = entry.graph.find_group_idx(g.base_id)?;
-                    Some((gi, vals[0], g.base_id))
-                })
-                .collect();
-
-            entry.compiled.execute(&mut buffer);
-
-            // Check if any literal was corrupted by JIT execution.
-            for &(gi, pre_val, base) in &pre_jit_literals {
-                let group = &entry.graph.groups()[gi];
-                let range = AtomRange {
-                    base: group.base_id,
-                    count: group.count,
-                    dtype: group.output_dtype,
-                };
-                let post_vals = entry.layout.read_f32_output(&range, &buffer);
-                if (post_vals[0] - pre_val).abs() > 1e-10 {
-                    eprintln!(
-                        "  LITERAL CORRUPTED by JIT: phase {} span {} group {} base={} pre={} post={} op={:?}",
-                        pi, si, gi, base, pre_val, post_vals[0], group.op
-                    );
-                    // Show the slot info for this literal.
-                    if let Some((slot, _)) = entry.layout.find(base) {
-                        let lit_off = slot.byte_offset;
-                        eprintln!(
-                            "    slot: byte_offset={} count={} elem_bytes={} dtype={:?}",
-                            lit_off, slot.count, slot.elem_bytes, slot.dtype
-                        );
-                        // Show raw bytes at that location.
-                        if lit_off + 8 <= buffer.len() {
-                            let bytes = &buffer[lit_off..lit_off + 8];
-                            eprintln!("    raw bytes: {:02x?}", bytes);
-                        }
-                        // Find neighbor slots that end at or near this offset.
-                        for other_group in entry.graph.groups() {
-                            if let Some((os, _)) = entry.layout.find(other_group.base_id) {
-                                let end = os.byte_offset + os.count as usize * os.elem_bytes;
-                                if end > lit_off
-                                    && end <= lit_off + 8
-                                    && os.atom_base != slot.atom_base
-                                {
-                                    eprintln!(
-                                        "    NEIGHBOR: base={} byte_offset={} count={} elem_bytes={} dtype={:?} end={} op={:?}",
-                                        os.atom_base,
-                                        os.byte_offset,
-                                        os.count,
-                                        os.elem_bytes,
-                                        os.dtype,
-                                        end,
-                                        op_name_short(&other_group.op)
-                                    );
-                                }
-                                // Also check if any slot CONTAINS byte lit_off.
-                                if os.byte_offset <= lit_off
-                                    && end > lit_off
-                                    && os.atom_base != slot.atom_base
-                                {
-                                    eprintln!(
-                                        "    OVERLAPPING: base={} byte_offset={} count={} elem_bytes={} dtype={:?} end={} op={:?}",
-                                        os.atom_base,
-                                        os.byte_offset,
-                                        os.count,
-                                        os.elem_bytes,
-                                        os.dtype,
-                                        end,
-                                        op_name_short(&other_group.op)
-                                    );
-                                }
-                            }
-                        }
-                    }
-                    break;
-                }
-            }
-
-            // Run eval with same inputs.
-            let interp_inputs =
-                super::execute::gather_inputs_pub(&entry.inputs, &entry.outputs, &store);
-            let refs: Vec<_> = interp_inputs.iter().map(|(b, t)| (*b, t)).collect();
-
-            // Build per-group output ranges so eval computes every group.
-            let group_ranges: Vec<AtomRange> = entry
-                .graph
-                .groups()
-                .iter()
-                .map(|g| AtomRange {
-                    base: g.base_id,
-                    count: g.count,
-                    dtype: g.output_dtype,
-                })
-                .collect();
-            let eval_results = eval::eval(&entry.graph, &refs, &group_ranges);
-
-            // Compare group by group (skip dead groups — JIT doesn't emit code for them).
-            for (gi, (group, eval_tensor)) in entry
-                .graph
-                .groups()
-                .iter()
-                .zip(eval_results.iter())
-                .enumerate()
-            {
-                if gi < entry.layout.group_use_counts.len()
-                    && entry.layout.group_use_counts[gi] == 0
-                {
-                    continue;
-                }
-                let jit_data = entry.layout.read_f32_output(
-                    &AtomRange {
-                        base: group.base_id,
-                        count: group.count,
-                        dtype: group.output_dtype,
-                    },
-                    &buffer,
-                );
-
-                let eval_flat = eval_tensor.flatten();
-                let n = jit_data.len().min(eval_flat.num_elements());
-                let mut max_diff = 0.0f64;
-                let mut first_bad: Option<(usize, f32, f64)> = None;
-                for j in 0..n {
-                    let jv = jit_data[j] as f64;
-                    let ev = eval_flat.get(&[j as u64]).unwrap().to_f64();
-                    if jv.is_nan() != ev.is_nan() {
-                        first_bad.get_or_insert((j, jit_data[j], ev));
-                    }
-                    if !jv.is_nan() && !ev.is_nan() {
-                        let d = (jv - ev).abs();
-                        max_diff = max_diff.max(d);
-                        if d > 1e-4 && first_bad.is_none() {
-                            first_bad = Some((j, jit_data[j], ev));
-                        }
-                    }
-                }
-
-                if let Some((elem, jv, ev)) = first_bad {
-                    let op_desc = match &group.op {
-                        ScalarOp::Binary { op, compute_dtype } => {
-                            format!("Binary({:?}, {:?})", op, compute_dtype)
-                        }
-                        ScalarOp::Unary { op, compute_dtype } => {
-                            format!("Unary({:?}, {:?})", op, compute_dtype)
-                        }
-                        ScalarOp::Reduce {
-                            kind,
-                            reduce_count,
-                            reduce_stride,
-                            compute_dtype,
-                        } => format!(
-                            "Reduce({:?}, rc={}, rs={}, {:?})",
-                            kind, reduce_count, reduce_stride, compute_dtype
-                        ),
-                        ScalarOp::Identity => "Identity".to_string(),
-                        ScalarOp::Select => "Select".to_string(),
-                        ScalarOp::IndirectLoad { table_base } => {
-                            format!("IndirectLoad(table={})", table_base)
-                        }
-                        ScalarOp::Literal(s) => format!("Literal({:?})", s),
-                    };
-                    eprintln!(
-                        "\n  DIVERGENCE: phase {} span {} group {} (of {})",
-                        pi,
-                        si,
-                        gi,
-                        entry.graph.num_groups()
-                    );
-                    eprintln!(
-                        "    base={} count={} atom_offset={} output_dtype={:?}",
-                        group.base_id, group.count, group.atom_offset, group.output_dtype
-                    );
-                    eprintln!("    op: {}", op_desc);
-                    let is_dead = gi < entry.layout.group_use_counts.len()
-                        && entry.layout.group_use_counts[gi] == 0;
-                    eprintln!(
-                        "    elem={}: jit={} eval={} max_diff={:.6} dead={}",
-                        elem, jv, ev, max_diff, is_dead
-                    );
-                    for (ii, ir) in group.inputs.iter().enumerate() {
-                        eprintln!("    input[{}]: {:?}", ii, ir);
-                        // Read input values at the diverging element from both JIT buffer and eval.
-                        let src_atom = ir.resolve(elem as u64 + group.atom_offset);
-                        let jit_src = entry.layout.find(src_atom).map(|(slot, idx)| {
-                            let off = slot.byte_offset + idx as usize * slot.elem_bytes;
-                            let s = read_scalar(&buffer, off, slot.dtype);
-                            format!("{:?} (dtype={:?})", s, slot.dtype)
-                        });
-                        // Find eval value for same atom.
-                        let eval_src = entry.graph.find_group_idx(src_atom).and_then(|sgi| {
-                            let sg = &entry.graph.groups()[sgi];
-                            let off = (src_atom.0 - sg.base_id.0) as usize;
-                            eval_results.get(sgi).map(|t| {
-                                let f = t.flatten();
-                                if off < f.num_elements() {
-                                    f.get(&[off as u64]).unwrap().to_f64()
-                                } else {
-                                    f64::NAN
-                                }
-                            })
-                        });
-                        let src_dead = entry.graph.find_group_idx(src_atom).map(|sgi| {
-                            sgi < entry.layout.group_use_counts.len()
-                                && entry.layout.group_use_counts[sgi] == 0
-                        });
-                        // Check store for this atom.
-                        let store_val = {
-                            let mut found = None;
-                            for (base, tensor) in store.iter() {
-                                let t_lo = base.0;
-                                let t_hi = t_lo + tensor.num_elements() as u64;
-                                if src_atom.0 >= t_lo && src_atom.0 < t_hi {
-                                    let off = (src_atom.0 - t_lo) as usize;
-                                    let scalars = tensor_slice_to_scalars(&tensor, off, 1);
-                                    found = Some(format!(
-                                        "{:?} (tensor dtype={:?}, base={}, n={})",
-                                        scalars[0],
-                                        tensor.dtype(),
-                                        base,
-                                        tensor.num_elements()
-                                    ));
-                                    break;
-                                }
-                            }
-                            found
-                        };
-                        eprintln!(
-                            "      src atom={} jit_buf={:?} eval={:?} src_dead={:?} store={:?}",
-                            src_atom, jit_src, eval_src, src_dead, store_val
-                        );
-                    }
-
-                    // Show a window of JIT vs eval around the diverging element.
-                    let start = if elem > 3 { elem - 3 } else { 0 };
-                    let end = (elem + 5).min(n);
-                    let mut window = Vec::new();
-                    for j in start..end {
-                        let jv = jit_data[j];
-                        let ev = eval_flat.get(&[j as u64]).unwrap().to_f64();
-                        window.push((j, jv, ev as f32));
-                    }
-                    eprintln!("    window (elem, jit, eval): {:?}", window);
-                    return;
-                }
-            }
-
-            // Extract JIT outputs for the store.
-            let jit_outputs = extract_outputs(&entry.outputs, &entry.layout, &buffer);
-            phase_outputs.push(jit_outputs);
-        }
-
-        // Commit phase outputs to store.
-        for span_outputs in phase_outputs {
-            for (base, tensor) in span_outputs {
-                store.insert(base, tensor);
-            }
-        }
-        eprintln!(
-            "  phase {}: all {} spans match",
-            pi,
-            compiled_phase.spans.len()
-        );
-    }
-    eprintln!("  All phases match — no divergence found.");
+    // TODO: migrate to pool_eval (nano_graph::eval was deleted).
+    // This diagnostic function compared JIT output vs eval output group-by-group.
+    eprintln!("diagnose_first_divergence: not yet migrated to pool_eval");
 }
 
 /// Execute a single compiled span: populate buffer from store, run JIT, extract outputs.
@@ -4021,7 +3642,7 @@ fn bulk_copy_to_buffer(
     tensor: &NDArrayNumericTensor<DynRank>,
     skip: usize,
     count: usize,
-    slot_dtype: DType,
+    slot_dtype: NumericDType,
     buf_offset: usize,
     buffer: &mut [u8],
 ) -> bool {
@@ -4045,37 +3666,37 @@ fn bulk_copy_to_buffer(
     }
     match tensor {
         NDArrayNumericTensor::F32(a) => {
-            bulk!(a, slot_dtype, DType::F32);
+            bulk!(a, slot_dtype, NumericDType::F32);
         }
         NDArrayNumericTensor::I64(a) => {
-            bulk!(a, slot_dtype, DType::I64);
+            bulk!(a, slot_dtype, NumericDType::I64);
         }
         NDArrayNumericTensor::I32(a) => {
-            bulk!(a, slot_dtype, DType::I32);
+            bulk!(a, slot_dtype, NumericDType::I32);
         }
         NDArrayNumericTensor::BF16(a) => {
-            bulk!(a, slot_dtype, DType::BF16);
+            bulk!(a, slot_dtype, NumericDType::BF16);
         }
         NDArrayNumericTensor::F16(a) => {
-            bulk!(a, slot_dtype, DType::F16);
+            bulk!(a, slot_dtype, NumericDType::F16);
         }
         NDArrayNumericTensor::U8(a) => {
-            bulk!(a, slot_dtype, DType::U8);
+            bulk!(a, slot_dtype, NumericDType::U8);
         }
         NDArrayNumericTensor::F64(a) => {
-            bulk!(a, slot_dtype, DType::F64);
+            bulk!(a, slot_dtype, NumericDType::F64);
         }
         NDArrayNumericTensor::U64(a) => {
-            bulk!(a, slot_dtype, DType::U64);
+            bulk!(a, slot_dtype, NumericDType::U64);
         }
         NDArrayNumericTensor::U32(a) => {
-            bulk!(a, slot_dtype, DType::U32);
+            bulk!(a, slot_dtype, NumericDType::U32);
         }
         NDArrayNumericTensor::I8(a) => {
-            bulk!(a, slot_dtype, DType::I8);
+            bulk!(a, slot_dtype, NumericDType::I8);
         }
         NDArrayNumericTensor::BOOL(a) => {
-            bulk!(a, slot_dtype, DType::BOOL);
+            bulk!(a, slot_dtype, NumericDType::BOOL);
         }
         _ => {}
     }
@@ -4087,30 +3708,30 @@ fn tensor_slice_to_scalars(
     tensor: &NDArrayNumericTensor<DynRank>,
     skip: usize,
     count: usize,
-) -> Vec<crate::migration::numeric_scalar::NumericScalar> {
-    use crate::migration::numeric_scalar::NumericScalar;
+) -> Vec<crate::numeric_scalar::NumericScalar> {
+    use crate::numeric_scalar::NumericScalar;
     macro_rules! extract {
-        ($arr:expr, $variant:ident) => {{
+        ($arr:expr, $conv:ident) => {{
             $arr.iter()
                 .skip(skip)
                 .take(count)
-                .map(|v| NumericScalar::$variant(*v))
+                .map(|v| NumericScalar::$conv(*v))
                 .collect()
         }};
     }
     match tensor {
-        NDArrayNumericTensor::F32(a) => extract!(a, F32),
-        NDArrayNumericTensor::F64(a) => extract!(a, F64),
-        NDArrayNumericTensor::I64(a) => extract!(a, I64),
-        NDArrayNumericTensor::I32(a) => extract!(a, I32),
-        NDArrayNumericTensor::U64(a) => extract!(a, U64),
-        NDArrayNumericTensor::U32(a) => extract!(a, U32),
-        NDArrayNumericTensor::BF16(a) => extract!(a, BF16),
-        NDArrayNumericTensor::F16(a) => extract!(a, F16),
-        NDArrayNumericTensor::U8(a) => extract!(a, U8),
-        NDArrayNumericTensor::I8(a) => extract!(a, I8),
-        NDArrayNumericTensor::BOOL(a) => extract!(a, BOOL),
-        _ => vec![NumericScalar::F32(0.0); count],
+        NDArrayNumericTensor::F32(a) => extract!(a, from_f32),
+        NDArrayNumericTensor::F64(a) => extract!(a, from_f64),
+        NDArrayNumericTensor::I64(a) => extract!(a, from_i64),
+        NDArrayNumericTensor::I32(a) => extract!(a, from_i32),
+        NDArrayNumericTensor::U64(a) => extract!(a, from_u64),
+        NDArrayNumericTensor::U32(a) => extract!(a, from_u32),
+        NDArrayNumericTensor::BF16(a) => extract!(a, from_bf16),
+        NDArrayNumericTensor::F16(a) => extract!(a, from_f16),
+        NDArrayNumericTensor::U8(a) => extract!(a, from_u8),
+        NDArrayNumericTensor::I8(a) => extract!(a, from_i8),
+        NDArrayNumericTensor::BOOL(a) => extract!(a, from_bool),
+        _ => vec![NumericScalar::from_f32(0.0); count],
     }
 }
 
@@ -4161,7 +3782,7 @@ fn extract_output_bulk(
 }
 
 /// Bulk-read `len` elements from `src` bytes into an NDArray tensor.
-fn bulk_read_tensor(src: &[u8], dtype: DType, len: usize) -> NDArrayNumericTensor<DynRank> {
+fn bulk_read_tensor(src: &[u8], dtype: NumericDType, len: usize) -> NDArrayNumericTensor<DynRank> {
     macro_rules! bulk_read {
         ($ty:ty, $variant:ident) => {{
             let mut data = vec![<$ty>::default(); len];
@@ -4177,17 +3798,17 @@ fn bulk_read_tensor(src: &[u8], dtype: DType, len: usize) -> NDArrayNumericTenso
         }};
     }
     match dtype {
-        DType::F32 => bulk_read!(f32, F32),
-        DType::F64 => bulk_read!(f64, F64),
-        DType::I64 => bulk_read!(i64, I64),
-        DType::I32 => bulk_read!(i32, I32),
-        DType::U64 => bulk_read!(u64, U64),
-        DType::U32 => bulk_read!(u32, U32),
-        DType::BF16 => bulk_read!(half::bf16, BF16),
-        DType::F16 => bulk_read!(half::f16, F16),
-        DType::U8 => bulk_read!(u8, U8),
-        DType::I8 => bulk_read!(i8, I8),
-        DType::BOOL => {
+        NumericDType::F32 => bulk_read!(f32, F32),
+        NumericDType::F64 => bulk_read!(f64, F64),
+        NumericDType::I64 => bulk_read!(i64, I64),
+        NumericDType::I32 => bulk_read!(i32, I32),
+        NumericDType::U64 => bulk_read!(u64, U64),
+        NumericDType::U32 => bulk_read!(u32, U32),
+        NumericDType::BF16 => bulk_read!(half::bf16, BF16),
+        NumericDType::F16 => bulk_read!(half::f16, F16),
+        NumericDType::U8 => bulk_read!(u8, U8),
+        NumericDType::I8 => bulk_read!(i8, I8),
+        NumericDType::BOOL => {
             let data: Vec<bool> = src.iter().map(|&b| b != 0).collect();
             NDArrayNumericTensor::BOOL(ArcArray::from_shape_vec(IxDyn(&[len]), data).unwrap())
         }
@@ -4205,7 +3826,7 @@ fn extract_output_scalar(
     buffer: &[u8],
     len: usize,
 ) -> NDArrayNumericTensor<DynRank> {
-    use crate::migration::numeric_scalar::{NumericScalar, NumericScalarType};
+    use crate::numeric_scalar::NumericScalar;
 
     let mut scalars = Vec::with_capacity(len);
     let mut remaining = range.count;
@@ -4219,53 +3840,50 @@ fn extract_output_scalar(
                 if off + slot.elem_bytes <= buffer.len() {
                     scalars.push(read_scalar(buffer, off, slot.dtype));
                 } else {
-                    scalars.push(NumericScalar::F32(0.0));
+                    scalars.push(NumericScalar::from_f32(0.0));
                 }
             }
             atom += to_read;
             remaining -= to_read;
         } else {
-            scalars.push(NumericScalar::F32(0.0));
+            scalars.push(NumericScalar::from_f32(0.0));
             atom += 1;
             remaining -= 1;
         }
     }
 
     match range.dtype {
-        DType::F32 => {
-            let data: Vec<f32> = scalars.iter().map(|s| s.to_f64() as f32).collect();
+        NumericDType::F32 => {
+            let data: Vec<f32> = scalars.iter().map(|s| s.to_f32()).collect();
             NDArrayNumericTensor::F32(ArcArray::from_shape_vec(IxDyn(&[len]), data).unwrap())
         }
-        DType::I64 => {
-            let data: Vec<i64> = scalars
-                .iter()
-                .map(|s| i64::cast_from_numeric_scalar(s))
-                .collect();
+        NumericDType::I64 => {
+            let data: Vec<i64> = scalars.iter().map(|s| s.to_i64()).collect();
             NDArrayNumericTensor::I64(ArcArray::from_shape_vec(IxDyn(&[len]), data).unwrap())
         }
-        DType::BF16 => {
+        NumericDType::BF16 => {
             let data: Vec<half::bf16> = scalars
                 .iter()
-                .map(|s| half::bf16::cast_from_numeric_scalar(s))
+                .map(|s| half::bf16::from_f32(s.to_f32()))
                 .collect();
             NDArrayNumericTensor::BF16(ArcArray::from_shape_vec(IxDyn(&[len]), data).unwrap())
         }
-        DType::U8 => {
+        NumericDType::U8 => {
             let data: Vec<u8> = scalars
                 .iter()
-                .map(|s| u8::cast_from_numeric_scalar(s))
+                .map(|s| s.to_i64() as u8)
                 .collect();
             NDArrayNumericTensor::U8(ArcArray::from_shape_vec(IxDyn(&[len]), data).unwrap())
         }
-        DType::BOOL => {
+        NumericDType::BOOL => {
             let data: Vec<bool> = scalars
                 .iter()
-                .map(|s| bool::cast_from_numeric_scalar(s))
+                .map(|s| s.to_i64() != 0)
                 .collect();
             NDArrayNumericTensor::BOOL(ArcArray::from_shape_vec(IxDyn(&[len]), data).unwrap())
         }
         _ => {
-            let data: Vec<f32> = scalars.iter().map(|s| s.to_f64() as f32).collect();
+            let data: Vec<f32> = scalars.iter().map(|s| s.to_f32()).collect();
             NDArrayNumericTensor::F32(ArcArray::from_shape_vec(IxDyn(&[len]), data).unwrap())
         }
     }
@@ -4320,26 +3938,26 @@ mod tests {
     use super::*;
     use crate::graph::GlobalId;
     use crate::nano_graph::ops::{ReduceKind, ScalarBinOp, ScalarOp, ScalarUnaryOp};
-    use crate::migration::numeric_scalar::NumericScalar;
+    use crate::numeric_scalar::NumericScalar;
 
     /// Build a graph: input[4] + broadcast(2.0) → output[4]
     #[test]
     fn test_add_broadcast_f32() {
         let mut g = NanoGraph::new();
-        let inp = g.add_input_tensor(GlobalId(0), 4, DType::F32);
+        let inp = g.add_input_tensor(GlobalId(0), 4, NumericDType::F32);
         let lit = g.push_group(
             1,
-            DType::F32,
-            ScalarOp::Literal(NumericScalar::F32(2.0)),
+            NumericDType::F32,
+            ScalarOp::Literal(NumericScalar::from_f32(2.0)),
             vec![],
             vec![],
         );
         let add = g.push_group(
             4,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Binary {
                 op: ScalarBinOp::Add,
-                compute_dtype: DType::F32,
+                compute_dtype: NumericDType::F32,
             },
             vec![],
             vec![InputRef::affine(inp, 1), InputRef::Broadcast(lit)],
@@ -4348,7 +3966,7 @@ mod tests {
         let outputs = vec![AtomRange {
             base: add,
             count: 4,
-            dtype: DType::F32,
+            dtype: NumericDType::F32,
         }];
         let layout = compute_layout(&g, &outputs);
         let compiled = compile_span(&g, &layout).unwrap();
@@ -4367,13 +3985,13 @@ mod tests {
     #[test]
     fn test_unary_neg() {
         let mut g = NanoGraph::new();
-        let inp = g.add_input_tensor(GlobalId(0), 3, DType::F32);
+        let inp = g.add_input_tensor(GlobalId(0), 3, NumericDType::F32);
         let neg = g.push_group(
             3,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Unary {
                 op: ScalarUnaryOp::Neg,
-                compute_dtype: DType::F32,
+                compute_dtype: NumericDType::F32,
             },
             vec![],
             vec![InputRef::affine(inp, 1)],
@@ -4382,7 +4000,7 @@ mod tests {
         let outputs = vec![AtomRange {
             base: neg,
             count: 3,
-            dtype: DType::F32,
+            dtype: NumericDType::F32,
         }];
         let layout = compute_layout(&g, &outputs);
         let compiled = compile_span(&g, &layout).unwrap();
@@ -4400,15 +4018,15 @@ mod tests {
     #[test]
     fn test_reduce_sum() {
         let mut g = NanoGraph::new();
-        let inp = g.add_input_tensor(GlobalId(0), 4, DType::F32);
+        let inp = g.add_input_tensor(GlobalId(0), 4, NumericDType::F32);
         let sum = g.push_group(
             1,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Reduce {
                 kind: ReduceKind::Sum,
                 reduce_count: 4,
                 reduce_stride: 1,
-                compute_dtype: DType::F32,
+                compute_dtype: NumericDType::F32,
             },
             vec![],
             vec![InputRef::affine(inp, 1)],
@@ -4417,7 +4035,7 @@ mod tests {
         let outputs = vec![AtomRange {
             base: sum,
             count: 1,
-            dtype: DType::F32,
+            dtype: NumericDType::F32,
         }];
         let layout = compute_layout(&g, &outputs);
         let compiled = compile_span(&g, &layout).unwrap();
@@ -4435,30 +4053,30 @@ mod tests {
     #[test]
     fn test_chain_mul_exp() {
         let mut g = NanoGraph::new();
-        let inp = g.add_input_tensor(GlobalId(0), 2, DType::F32);
+        let inp = g.add_input_tensor(GlobalId(0), 2, NumericDType::F32);
         let lit3 = g.push_group(
             1,
-            DType::F32,
-            ScalarOp::Literal(NumericScalar::F32(3.0)),
+            NumericDType::F32,
+            ScalarOp::Literal(NumericScalar::from_f32(3.0)),
             vec![],
             vec![],
         );
         let mul = g.push_group(
             2,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Binary {
                 op: ScalarBinOp::Mul,
-                compute_dtype: DType::F32,
+                compute_dtype: NumericDType::F32,
             },
             vec![],
             vec![InputRef::affine(inp, 1), InputRef::Broadcast(lit3)],
         );
         let exp = g.push_group(
             2,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Unary {
                 op: ScalarUnaryOp::Exp,
-                compute_dtype: DType::F32,
+                compute_dtype: NumericDType::F32,
             },
             vec![],
             vec![InputRef::affine(mul, 1)],
@@ -4467,7 +4085,7 @@ mod tests {
         let outputs = vec![AtomRange {
             base: exp,
             count: 2,
-            dtype: DType::F32,
+            dtype: NumericDType::F32,
         }];
         let layout = compute_layout(&g, &outputs);
         let compiled = compile_span(&g, &layout).unwrap();
@@ -4490,33 +4108,33 @@ mod tests {
     #[ignore]
     fn test_liveness_reuse() {
         let mut g = NanoGraph::new();
-        let inp = g.add_input_tensor(GlobalId(0), 100, DType::F32);
+        let inp = g.add_input_tensor(GlobalId(0), 100, NumericDType::F32);
         let a = g.push_group(
             100,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Unary {
                 op: ScalarUnaryOp::Neg,
-                compute_dtype: DType::F32,
+                compute_dtype: NumericDType::F32,
             },
             vec![],
             vec![InputRef::affine(inp, 1)],
         );
         let b = g.push_group(
             100,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Unary {
                 op: ScalarUnaryOp::Neg,
-                compute_dtype: DType::F32,
+                compute_dtype: NumericDType::F32,
             },
             vec![],
             vec![InputRef::affine(a, 1)],
         );
         let c = g.push_group(
             100,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Unary {
                 op: ScalarUnaryOp::Neg,
-                compute_dtype: DType::F32,
+                compute_dtype: NumericDType::F32,
             },
             vec![],
             vec![InputRef::affine(b, 1)],
@@ -4525,7 +4143,7 @@ mod tests {
         let outputs = vec![AtomRange {
             base: c,
             count: 100,
-            dtype: DType::F32,
+            dtype: NumericDType::F32,
         }];
         let layout = compute_layout(&g, &outputs);
 
@@ -4565,12 +4183,12 @@ mod tests {
     #[test]
     fn test_select() {
         let mut g = NanoGraph::new();
-        let cond = g.add_input_tensor(GlobalId(0), 3, DType::F32);
-        let x = g.add_input_tensor(GlobalId(1), 3, DType::F32);
-        let y = g.add_input_tensor(GlobalId(2), 3, DType::F32);
+        let cond = g.add_input_tensor(GlobalId(0), 3, NumericDType::F32);
+        let x = g.add_input_tensor(GlobalId(1), 3, NumericDType::F32);
+        let y = g.add_input_tensor(GlobalId(2), 3, NumericDType::F32);
         let sel = g.push_group(
             3,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Select,
             vec![],
             vec![
@@ -4583,7 +4201,7 @@ mod tests {
         let outputs = vec![AtomRange {
             base: sel,
             count: 3,
-            dtype: DType::F32,
+            dtype: NumericDType::F32,
         }];
         let layout = compute_layout(&g, &outputs);
         let compiled = compile_span(&g, &layout).unwrap();
@@ -4605,13 +4223,13 @@ mod tests {
     #[test]
     fn test_explicit_gather() {
         let mut g = NanoGraph::new();
-        let inp = g.add_input_tensor(GlobalId(0), 16, DType::F32);
+        let inp = g.add_input_tensor(GlobalId(0), 16, NumericDType::F32);
         // 4 source groups, each 4 atoms, that read from different input regions.
         let mut sources = Vec::new();
         for i in 0..4u64 {
             let src = g.push_group(
                 4,
-                DType::F32,
+                NumericDType::F32,
                 ScalarOp::Identity,
                 vec![],
                 vec![InputRef::affine(AtomId(inp.0 + i * 4), 1)],
@@ -4628,7 +4246,7 @@ mod tests {
             .collect();
         let gather = g.push_group(
             16,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Identity,
             vec![],
             vec![InputRef::Explicit(explicit_ids)],
@@ -4637,7 +4255,7 @@ mod tests {
         let outputs = vec![AtomRange {
             base: gather,
             count: 16,
-            dtype: DType::F32,
+            dtype: NumericDType::F32,
         }];
         let layout = compute_layout(&g, &outputs);
         let compiled = compile_span(&g, &layout).unwrap();
@@ -4665,22 +4283,22 @@ mod tests {
         // Two source groups: A (3 atoms) then B (3 atoms), contiguous in atom space.
         let a = g.push_group(
             3,
-            DType::F32,
-            ScalarOp::Literal(NumericScalar::F32(1.0)),
+            NumericDType::F32,
+            ScalarOp::Literal(NumericScalar::from_f32(1.0)),
             vec![],
             vec![],
         );
         let b = g.push_group(
             3,
-            DType::F32,
-            ScalarOp::Literal(NumericScalar::F32(2.0)),
+            NumericDType::F32,
+            ScalarOp::Literal(NumericScalar::from_f32(2.0)),
             vec![],
             vec![],
         );
         // Consumer reads 6 atoms starting from A's base, crossing into B.
         let out = g.push_group(
             6,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Identity,
             vec![],
             vec![InputRef::affine(a, 1)],
@@ -4689,7 +4307,7 @@ mod tests {
         let outputs = vec![AtomRange {
             base: out,
             count: 6,
-            dtype: DType::F32,
+            dtype: NumericDType::F32,
         }];
         let layout = compute_layout(&g, &outputs);
 
@@ -4714,19 +4332,19 @@ mod tests {
 
         let mut g = NanoGraph::new();
         let n = 8u64;
-        let inp = g.add_input_tensor(GlobalId(0), n, DType::F32);
+        let inp = g.add_input_tensor(GlobalId(0), n, NumericDType::F32);
 
         let lit2 = g.push_group(
             1,
-            DType::F32,
-            ScalarOp::Literal(NumericScalar::F32(2.0)),
+            NumericDType::F32,
+            ScalarOp::Literal(NumericScalar::from_f32(2.0)),
             vec![],
             vec![],
         );
         let lit3 = g.push_group(
             1,
-            DType::F32,
-            ScalarOp::Literal(NumericScalar::F32(3.0)),
+            NumericDType::F32,
+            ScalarOp::Literal(NumericScalar::from_f32(3.0)),
             vec![],
             vec![],
         );
@@ -4734,7 +4352,7 @@ mod tests {
         // Group 1: identity (copy input)
         let g1 = g.push_group(
             n,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Identity,
             vec![],
             vec![InputRef::affine(inp, 1)],
@@ -4743,10 +4361,10 @@ mod tests {
         // Group 2: g1 + 2.0
         let g2 = g.push_group(
             n,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Binary {
                 op: ScalarBinOp::Add,
-                compute_dtype: DType::F32,
+                compute_dtype: NumericDType::F32,
             },
             vec![],
             vec![InputRef::affine(g1, 1), InputRef::Broadcast(lit2)],
@@ -4755,10 +4373,10 @@ mod tests {
         // Group 3: g2 * 3.0
         let g3 = g.push_group(
             n,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Binary {
                 op: ScalarBinOp::Mul,
-                compute_dtype: DType::F32,
+                compute_dtype: NumericDType::F32,
             },
             vec![],
             vec![InputRef::affine(g2, 1), InputRef::Broadcast(lit3)],
@@ -4767,10 +4385,10 @@ mod tests {
         // Group 4: -g3
         let g4 = g.push_group(
             n,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Unary {
                 op: ScalarUnaryOp::Neg,
-                compute_dtype: DType::F32,
+                compute_dtype: NumericDType::F32,
             },
             vec![],
             vec![InputRef::affine(g3, 1)],
@@ -4779,10 +4397,10 @@ mod tests {
         // Group 5: exp(g4)
         let g5 = g.push_group(
             n,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Unary {
                 op: ScalarUnaryOp::Exp,
-                compute_dtype: DType::F32,
+                compute_dtype: NumericDType::F32,
             },
             vec![],
             vec![InputRef::affine(g4, 1)],
@@ -4791,7 +4409,7 @@ mod tests {
         let outputs = vec![AtomRange {
             base: g5,
             count: n,
-            dtype: DType::F32,
+            dtype: NumericDType::F32,
         }];
         let layout = compute_layout(&g, &outputs);
 
@@ -4846,12 +4464,12 @@ mod tests {
 
         let mut g = NanoGraph::new();
         let n = 8u64;
-        let inp = g.add_input_tensor(GlobalId(0), n, DType::F32);
+        let inp = g.add_input_tensor(GlobalId(0), n, NumericDType::F32);
 
         // A: identity(input)
         let a = g.push_group(
             n,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Identity,
             vec![],
             vec![InputRef::affine(inp, 1)],
@@ -4860,10 +4478,10 @@ mod tests {
         // B: A + A = 2*input
         let b = g.push_group(
             n,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Binary {
                 op: ScalarBinOp::Add,
-                compute_dtype: DType::F32,
+                compute_dtype: NumericDType::F32,
             },
             vec![],
             vec![InputRef::affine(a, 1), InputRef::affine(a, 1)],
@@ -4872,10 +4490,10 @@ mod tests {
         // C: -B
         let c = g.push_group(
             n,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Unary {
                 op: ScalarUnaryOp::Neg,
-                compute_dtype: DType::F32,
+                compute_dtype: NumericDType::F32,
             },
             vec![],
             vec![InputRef::affine(b, 1)],
@@ -4884,10 +4502,10 @@ mod tests {
         // D: A + C (reads from first AND third group in chain)
         let d = g.push_group(
             n,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Binary {
                 op: ScalarBinOp::Add,
-                compute_dtype: DType::F32,
+                compute_dtype: NumericDType::F32,
             },
             vec![],
             vec![InputRef::affine(a, 1), InputRef::affine(c, 1)],
@@ -4896,10 +4514,10 @@ mod tests {
         // E: exp(D)
         let e = g.push_group(
             n,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Unary {
                 op: ScalarUnaryOp::Exp,
-                compute_dtype: DType::F32,
+                compute_dtype: NumericDType::F32,
             },
             vec![],
             vec![InputRef::affine(d, 1)],
@@ -4908,7 +4526,7 @@ mod tests {
         let outputs = vec![AtomRange {
             base: e,
             count: n,
-            dtype: DType::F32,
+            dtype: NumericDType::F32,
         }];
         let layout = compute_layout(&g, &outputs);
 
@@ -4959,13 +4577,13 @@ mod tests {
 
         let mut g = NanoGraph::new();
         let n = 8u64;
-        let inp1 = g.add_input_tensor(GlobalId(0), n, DType::F32);
-        let inp2 = g.add_input_tensor(GlobalId(1), n, DType::F32);
+        let inp1 = g.add_input_tensor(GlobalId(0), n, NumericDType::F32);
+        let inp2 = g.add_input_tensor(GlobalId(1), n, NumericDType::F32);
 
         // A: identity(inp1)
         let a = g.push_group(
             n,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Identity,
             vec![],
             vec![InputRef::affine(inp1, 1)],
@@ -4973,7 +4591,7 @@ mod tests {
         // B: identity(inp2) — reads ONLY from external, NOT from A
         let b = g.push_group(
             n,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Identity,
             vec![],
             vec![InputRef::affine(inp2, 1)],
@@ -4981,7 +4599,7 @@ mod tests {
         // C: identity(inp1) — another independent group
         let c = g.push_group(
             n,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Identity,
             vec![],
             vec![InputRef::affine(inp1, 1)],
@@ -4989,10 +4607,10 @@ mod tests {
         // D: A + B — reads from chain members A and B
         let d = g.push_group(
             n,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Binary {
                 op: ScalarBinOp::Add,
-                compute_dtype: DType::F32,
+                compute_dtype: NumericDType::F32,
             },
             vec![],
             vec![InputRef::affine(a, 1), InputRef::affine(b, 1)],
@@ -5000,10 +4618,10 @@ mod tests {
         // E: D * C — reads from chain members D and C
         let e_group = g.push_group(
             n,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Binary {
                 op: ScalarBinOp::Mul,
-                compute_dtype: DType::F32,
+                compute_dtype: NumericDType::F32,
             },
             vec![],
             vec![InputRef::affine(d, 1), InputRef::affine(c, 1)],
@@ -5012,7 +4630,7 @@ mod tests {
         let outputs = vec![AtomRange {
             base: e_group,
             count: n,
-            dtype: DType::F32,
+            dtype: NumericDType::F32,
         }];
         let layout = compute_layout(&g, &outputs);
 
@@ -5060,18 +4678,18 @@ mod tests {
         let mut g = NanoGraph::new();
 
         // Input: 4 vectors of 8 elements each (32 total)
-        let inp = g.add_input_tensor(GlobalId(0), 32, DType::F32);
+        let inp = g.add_input_tensor(GlobalId(0), 32, NumericDType::F32);
         let lit_n_inv = g.push_group(
             1,
-            DType::F32,
-            ScalarOp::Literal(NumericScalar::F32(0.125)),
+            NumericDType::F32,
+            ScalarOp::Literal(NumericScalar::from_f32(0.125)),
             vec![],
             vec![],
         ); // 1/8
         let lit2 = g.push_group(
             1,
-            DType::F32,
-            ScalarOp::Literal(NumericScalar::F32(2.0)),
+            NumericDType::F32,
+            ScalarOp::Literal(NumericScalar::from_f32(2.0)),
             vec![],
             vec![],
         );
@@ -5079,12 +4697,12 @@ mod tests {
         // 4 ReduceSum groups, each summing 8 elements → 4 outputs
         let red = g.push_group(
             4,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Reduce {
                 kind: ReduceKind::Sum,
                 reduce_count: 8,
                 reduce_stride: 1,
-                compute_dtype: DType::F32,
+                compute_dtype: NumericDType::F32,
             },
             vec![],
             vec![InputRef::affine(inp, 8)],
@@ -5093,10 +4711,10 @@ mod tests {
         // Bin: red * (1/8) = mean
         let mean = g.push_group(
             4,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Binary {
                 op: ScalarBinOp::Mul,
-                compute_dtype: DType::F32,
+                compute_dtype: NumericDType::F32,
             },
             vec![],
             vec![InputRef::affine(red, 1), InputRef::Broadcast(lit_n_inv)],
@@ -5105,10 +4723,10 @@ mod tests {
         // Bin: mean + 2.0
         let biased = g.push_group(
             4,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Binary {
                 op: ScalarBinOp::Add,
-                compute_dtype: DType::F32,
+                compute_dtype: NumericDType::F32,
             },
             vec![],
             vec![InputRef::affine(mean, 1), InputRef::Broadcast(lit2)],
@@ -5117,10 +4735,10 @@ mod tests {
         // Un: sqrt(biased)
         let result = g.push_group(
             4,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Unary {
                 op: ScalarUnaryOp::Sqrt,
-                compute_dtype: DType::F32,
+                compute_dtype: NumericDType::F32,
             },
             vec![],
             vec![InputRef::affine(biased, 1)],
@@ -5129,7 +4747,7 @@ mod tests {
         let outputs = vec![AtomRange {
             base: result,
             count: 4,
-            dtype: DType::F32,
+            dtype: NumericDType::F32,
         }];
         let layout = compute_layout(&g, &outputs);
 
@@ -5192,18 +4810,18 @@ mod tests {
         let split_count = 8u64;
 
         // External input (large enough for the reduce to read from)
-        let inp = g.add_input_tensor(GlobalId(0), 128, DType::F32);
+        let inp = g.add_input_tensor(GlobalId(0), 128, NumericDType::F32);
         let lit_inv = g.push_group(
             1,
-            DType::F32,
-            ScalarOp::Literal(NumericScalar::F32(0.125)),
+            NumericDType::F32,
+            ScalarOp::Literal(NumericScalar::from_f32(0.125)),
             vec![],
             vec![],
         );
         let lit2 = g.push_group(
             1,
-            DType::F32,
-            ScalarOp::Literal(NumericScalar::F32(2.0)),
+            NumericDType::F32,
+            ScalarOp::Literal(NumericScalar::from_f32(2.0)),
             vec![],
             vec![],
         );
@@ -5212,12 +4830,12 @@ mod tests {
         // g0: ReduceSum, reads from input with stride=8 (each output sums 8 elements)
         let g0 = g.push_group(
             n_original,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Reduce {
                 kind: ReduceKind::Sum,
                 reduce_count: 8,
                 reduce_stride: 1,
-                compute_dtype: DType::F32,
+                compute_dtype: NumericDType::F32,
             },
             vec![],
             vec![InputRef::affine(inp, 8)],
@@ -5227,10 +4845,10 @@ mod tests {
         // g1: g0 * (1/8)
         let g1 = g.push_group(
             n_original,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Binary {
                 op: ScalarBinOp::Mul,
-                compute_dtype: DType::F32,
+                compute_dtype: NumericDType::F32,
             },
             vec![],
             vec![InputRef::affine(g0, 1), InputRef::Broadcast(lit_inv)],
@@ -5240,10 +4858,10 @@ mod tests {
         // g2: g1 + 2.0
         let g2 = g.push_group(
             n_original,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Binary {
                 op: ScalarBinOp::Add,
-                compute_dtype: DType::F32,
+                compute_dtype: NumericDType::F32,
             },
             vec![],
             vec![InputRef::affine(g1, 1), InputRef::Broadcast(lit2)],
@@ -5252,10 +4870,10 @@ mod tests {
         // g3: sqrt(g2)
         let g3 = g.push_group(
             n_original,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Unary {
                 op: ScalarUnaryOp::Sqrt,
-                compute_dtype: DType::F32,
+                compute_dtype: NumericDType::F32,
             },
             vec![],
             vec![InputRef::affine(g2, 1)],
@@ -5279,7 +4897,7 @@ mod tests {
         let outputs = vec![AtomRange {
             base: AtomId(g3.0 + split_offset),
             count: split_count,
-            dtype: DType::F32,
+            dtype: NumericDType::F32,
         }];
         let layout = compute_layout(&g, &outputs);
 
@@ -5339,12 +4957,12 @@ mod tests {
 
         let mut g = NanoGraph::new();
         let n = 8u64;
-        let inp = g.add_input_tensor(GlobalId(0), n, DType::F32);
+        let inp = g.add_input_tensor(GlobalId(0), n, NumericDType::F32);
 
         let lit2 = g.push_group(
             1,
-            DType::F32,
-            ScalarOp::Literal(NumericScalar::F32(2.0)),
+            NumericDType::F32,
+            ScalarOp::Literal(NumericScalar::from_f32(2.0)),
             vec![],
             vec![],
         );
@@ -5352,7 +4970,7 @@ mod tests {
         // A: identity F32 → BF16 cast
         let a = g.push_group(
             n,
-            DType::BF16,
+            NumericDType::BF16,
             ScalarOp::Identity,
             vec![],
             vec![InputRef::affine(inp, 1)],
@@ -5360,7 +4978,7 @@ mod tests {
         // B: identity BF16 → F32 cast
         let b = g.push_group(
             n,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Identity,
             vec![],
             vec![InputRef::affine(a, 1)],
@@ -5368,10 +4986,10 @@ mod tests {
         // C: B + 2.0
         let c = g.push_group(
             n,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Binary {
                 op: ScalarBinOp::Add,
-                compute_dtype: DType::F32,
+                compute_dtype: NumericDType::F32,
             },
             vec![],
             vec![InputRef::affine(b, 1), InputRef::Broadcast(lit2)],
@@ -5379,7 +4997,7 @@ mod tests {
         // D: cast F32 → BF16
         let d = g.push_group(
             n,
-            DType::BF16,
+            NumericDType::BF16,
             ScalarOp::Identity,
             vec![],
             vec![InputRef::affine(c, 1)],
@@ -5387,7 +5005,7 @@ mod tests {
         // E: cast BF16 → F32
         let e_group = g.push_group(
             n,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Identity,
             vec![],
             vec![InputRef::affine(d, 1)],
@@ -5395,10 +5013,10 @@ mod tests {
         // F: E * 2.0
         let f = g.push_group(
             n,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Binary {
                 op: ScalarBinOp::Mul,
-                compute_dtype: DType::F32,
+                compute_dtype: NumericDType::F32,
             },
             vec![],
             vec![InputRef::affine(e_group, 1), InputRef::Broadcast(lit2)],
@@ -5407,7 +5025,7 @@ mod tests {
         let outputs = vec![AtomRange {
             base: f,
             count: n,
-            dtype: DType::F32,
+            dtype: NumericDType::F32,
         }];
         let layout = compute_layout(&g, &outputs);
 

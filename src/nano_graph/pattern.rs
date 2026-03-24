@@ -9,7 +9,7 @@
 //! `AtomGroup`s. Groups are a convenience — every atom could exist standalone
 //! without changing semantics. The grouping never limits what can be expressed.
 
-use crate::dtype::DType;
+use crate::numeric_dtype::NumericDType;
 use crate::graph::GlobalId;
 use crate::nano_graph::ops::ScalarOp;
 use crate::range_map::RangeMap;
@@ -47,7 +47,7 @@ impl std::fmt::Display for AtomId {
 pub struct AtomRange {
     pub base: AtomId,
     pub count: u64,
-    pub dtype: DType,
+    pub dtype: NumericDType,
 }
 
 /// How an input to an atom group references source atoms.
@@ -184,7 +184,7 @@ pub struct AtomGroup {
     /// `count = original_count - s`, and `atom_offset = s`.
     pub atom_offset: u64,
     /// Element dtype of this group's output.
-    pub output_dtype: DType,
+    pub output_dtype: NumericDType,
     /// The scalar operation each atom performs.
     pub op: ScalarOp,
     /// Symbolic dimensions this group iterates over.
@@ -229,7 +229,7 @@ pub struct InputTensor {
     /// Number of atoms (elements) in the tensor.
     pub count: u64,
     /// Element dtype.
-    pub dtype: DType,
+    pub dtype: NumericDType,
 }
 
 /// One entry from a liveness scan: an atom range and how many
@@ -241,7 +241,7 @@ pub struct GroupUseCount {
     /// Number of atoms.
     pub count: u64,
     /// Element dtype (from the group's output_dtype).
-    pub dtype: DType,
+    pub dtype: NumericDType,
     /// Number of downstream groups that read atoms from this group.
     /// Zero means this group's output is never consumed (dead code)
     /// or is a final output of the graph.
@@ -302,7 +302,7 @@ impl NanoGraph {
     /// Reserve an AtomId range for an external input tensor.
     /// Returns the base AtomId. No group is created — the executor fills
     /// these atoms from the TensorStore or user data at runtime.
-    pub fn add_input_tensor(&mut self, tensor_id: GlobalId, count: u64, dtype: DType) -> AtomId {
+    pub fn add_input_tensor(&mut self, tensor_id: GlobalId, count: u64, dtype: NumericDType) -> AtomId {
         let base_id = self.alloc_ids(count);
         self.input_ranges.insert(
             base_id.0,
@@ -330,7 +330,7 @@ impl NanoGraph {
     /// Allocate space for a group without filling in its fields yet.
     /// Returns the base AtomId. The group is initially a no-op Literal placeholder.
     /// Call `fill_placeholder` to set the actual op and inputs.
-    pub fn alloc_placeholder(&mut self, count: u64, output_dtype: DType) -> AtomId {
+    pub fn alloc_placeholder(&mut self, count: u64, output_dtype: NumericDType) -> AtomId {
         let base_id = self.alloc_ids(count);
         self.groups.insert(
             base_id.0,
@@ -340,7 +340,7 @@ impl NanoGraph {
                 count,
                 atom_offset: 0,
                 output_dtype,
-                op: ScalarOp::Literal(crate::migration::numeric_scalar::NumericScalar::F32(0.0)),
+                op: ScalarOp::Literal(crate::numeric_scalar::NumericScalar::zero(output_dtype)),
                 sym_dims: vec![],
                 inputs: vec![],
             },
@@ -354,7 +354,7 @@ impl NanoGraph {
         &mut self,
         base_id: AtomId,
         count: u64,
-        output_dtype: DType,
+        output_dtype: NumericDType,
         op: ScalarOp,
         sym_dims: Vec<SymDim>,
         inputs: Vec<InputRef>,
@@ -381,7 +381,7 @@ impl NanoGraph {
         base_id: AtomId,
         tensor_id: GlobalId,
         count: u64,
-        dtype: DType,
+        dtype: NumericDType,
     ) {
         self.input_ranges.insert(
             base_id.0,
@@ -411,7 +411,7 @@ impl NanoGraph {
         base_id: AtomId,
         count: u64,
         atom_offset: u64,
-        output_dtype: DType,
+        output_dtype: NumericDType,
         op: ScalarOp,
         sym_dims: Vec<SymDim>,
         inputs: Vec<InputRef>,
@@ -440,7 +440,7 @@ impl NanoGraph {
     pub fn push_group(
         &mut self,
         count: u64,
-        output_dtype: DType,
+        output_dtype: NumericDType,
         op: ScalarOp,
         sym_dims: Vec<SymDim>,
         inputs: Vec<InputRef>,
@@ -465,7 +465,7 @@ impl NanoGraph {
     /// Convenience: push a single-atom group.
     pub fn push_atom(
         &mut self,
-        output_dtype: DType,
+        output_dtype: NumericDType,
         op: ScalarOp,
         sym_dims: Vec<SymDim>,
         inputs: Vec<InputRef>,
@@ -939,9 +939,9 @@ impl std::fmt::Display for NanoGraphStats {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dtype::DType;
+    use crate::numeric_dtype::NumericDType;
     use crate::nano_graph::ops::{ReduceKind, ScalarBinOp, ScalarOp, ScalarUnaryOp};
-    use crate::migration::numeric_scalar::NumericScalar;
+    use crate::numeric_scalar::NumericScalar;
 
     /// Build a tiny graph: c = a + b, elementwise over 1024 atoms.
     #[test]
@@ -950,25 +950,25 @@ mod tests {
 
         let a = g.push_group(
             1024,
-            DType::F32,
-            ScalarOp::Literal(NumericScalar::F32(0.0)),
+            NumericDType::F32,
+            ScalarOp::Literal(NumericScalar::from_f32(0.0)),
             vec![],
             vec![],
         );
         let b = g.push_group(
             1024,
-            DType::F32,
-            ScalarOp::Literal(NumericScalar::F32(0.0)),
+            NumericDType::F32,
+            ScalarOp::Literal(NumericScalar::from_f32(0.0)),
             vec![],
             vec![],
         );
 
         let c = g.push_group(
             1024,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Binary {
                 op: ScalarBinOp::Add,
-                compute_dtype: DType::F32,
+                compute_dtype: NumericDType::F32,
             },
             vec![],
             vec![InputRef::affine(a, 1), InputRef::affine(b, 1)],
@@ -990,24 +990,24 @@ mod tests {
 
         let a = g.push_group(
             1024,
-            DType::F32,
-            ScalarOp::Literal(NumericScalar::F32(1.0)),
+            NumericDType::F32,
+            ScalarOp::Literal(NumericScalar::from_f32(1.0)),
             vec![],
             vec![],
         );
         let b = g.push_atom(
-            DType::F32,
-            ScalarOp::Literal(NumericScalar::F32(2.0)),
+            NumericDType::F32,
+            ScalarOp::Literal(NumericScalar::from_f32(2.0)),
             vec![],
             vec![],
         );
 
         let _c = g.push_group(
             1024,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Binary {
                 op: ScalarBinOp::Add,
-                compute_dtype: DType::F32,
+                compute_dtype: NumericDType::F32,
             },
             vec![],
             vec![InputRef::affine(a, 1), InputRef::Broadcast(b)],
@@ -1025,24 +1025,24 @@ mod tests {
 
         let a = g.push_group(
             1024,
-            DType::F32,
-            ScalarOp::Literal(NumericScalar::F32(0.0)),
+            NumericDType::F32,
+            ScalarOp::Literal(NumericScalar::from_f32(0.0)),
             vec![batch],
             vec![],
         );
         let b = g.push_group(
             1024,
-            DType::F32,
-            ScalarOp::Literal(NumericScalar::F32(0.0)),
+            NumericDType::F32,
+            ScalarOp::Literal(NumericScalar::from_f32(0.0)),
             vec![batch],
             vec![],
         );
         let _c = g.push_group(
             1024,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Binary {
                 op: ScalarBinOp::Add,
-                compute_dtype: DType::F32,
+                compute_dtype: NumericDType::F32,
             },
             vec![batch],
             vec![InputRef::affine(a, 1), InputRef::affine(b, 1)],
@@ -1061,8 +1061,8 @@ mod tests {
 
         let input = g.push_group(
             768,
-            DType::F32,
-            ScalarOp::Literal(NumericScalar::F32(1.0)),
+            NumericDType::F32,
+            ScalarOp::Literal(NumericScalar::from_f32(1.0)),
             vec![seq],
             vec![],
         );
@@ -1071,12 +1071,12 @@ mod tests {
         // reduce_count=0 signals "driven by SymDim" rather than a known count.
         let _reduced = g.push_group(
             768,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Reduce {
                 kind: ReduceKind::Sum,
                 reduce_count: 0,
                 reduce_stride: 0,
-                compute_dtype: DType::F32,
+                compute_dtype: NumericDType::F32,
             },
             vec![], // seq is reduced away
             vec![InputRef::affine(input, 1)],
@@ -1095,7 +1095,7 @@ mod tests {
 
         // A Gather boundary: single atom, runtime-variable dims.
         let _gather = g.push_atom(
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Identity,
             vec![batch, seq],
             vec![], // no inputs tracked (boundary)
@@ -1115,8 +1115,8 @@ mod tests {
         // 4 source atoms.
         let src = g.push_group(
             4,
-            DType::F32,
-            ScalarOp::Literal(NumericScalar::F32(0.0)),
+            NumericDType::F32,
+            ScalarOp::Literal(NumericScalar::from_f32(0.0)),
             vec![],
             vec![],
         );
@@ -1124,10 +1124,10 @@ mod tests {
         // 3 consumer atoms that pick from source irregularly: [2, 0, 3].
         let _consumer = g.push_group(
             3,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Unary {
                 op: ScalarUnaryOp::Neg,
-                compute_dtype: DType::F32,
+                compute_dtype: NumericDType::F32,
             },
             vec![],
             vec![InputRef::Explicit(vec![

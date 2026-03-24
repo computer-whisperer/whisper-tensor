@@ -13,6 +13,7 @@ use whisper_tensor::dtype::DType;
 use whisper_tensor::graph::GlobalId;
 use whisper_tensor::model::Model;
 use whisper_tensor::nano_graph::lower;
+use whisper_tensor::numeric_dtype::NumericDType;
 use whisper_tensor::tensor_info::TensorInfo;
 use whisper_tensor_import::identify_and_load;
 use whisper_tensor_import::onnx_graph::WeightStorageStrategy;
@@ -368,7 +369,7 @@ fn main() {
         // Detail: what ops have I64 compute?
         let mut i64_ops: HashMap<String, usize> = HashMap::new();
         for g in result.graph.groups() {
-            if g.op.compute_dtype() == Some(whisper_tensor::dtype::DType::I64) {
+            if g.op.compute_dtype() == Some(NumericDType::I64) {
                 let name = format!("{:?}", g.op).chars().take(40).collect::<String>();
                 *i64_ops.entry(name).or_default() += 1;
             }
@@ -801,354 +802,16 @@ fn main() {
 
     // ── Single-span correctness test (skip unless SINGLE_SPAN=1) ─────────
     if std::env::var("SINGLE_SPAN").is_ok() {
-        // Evaluate B's first non-empty span directly and compare against the
-        // full-graph eval for the same atoms.
-        {
-            use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
-            use whisper_tensor::nano_graph::eval as nano_eval;
-
-            let span0 = &b_exec_plan.phases[0]
-                .spans
-                .iter()
-                .find(|s| s.graph.num_groups() > 0)
-                .unwrap();
-
-            // Build inputs the same way the executor does: use span.inputs AtomRanges
-            // and look up data from the main graph's input_tensors by base AtomId.
-            let mut span_nd: Vec<NDArrayNumericTensor<whisper_tensor::DynRank>> = Vec::new();
-            let mut span_eval_inputs: Vec<(AtomId, usize)> = Vec::new();
-            let mut matched_inputs = 0usize;
-
-            for inp in &span0.inputs {
-                // Find the main graph's input_tensor that covers this base.
-                let main_it = result
-                    .graph
-                    .input_tensors()
-                    .iter()
-                    .find(|it| it.base_id == inp.base);
-                if let Some(it) = main_it {
-                    // Look up the tensor data via milli input_map.
-                    let ext_id = milli_graph
-                        .input_map
-                        .iter()
-                        .find(|(_, int)| **int == it.tensor_id)
-                        .map(|(ext, _)| *ext);
-                    if let Some(ext) = ext_id {
-                        let tensor = if let Some(t) = initialized.get(&ext) {
-                            Some(t.to_ndarray().unwrap())
-                        } else {
-                            let name = sym_graph.get_tensor_name(ext);
-                            name.and_then(|n| input_info.get(n)).map(|(dtype, shape_dims)| {
-                            let shape: Vec<u64> = shape_dims.iter().map(|d| d.unwrap_or(4)).collect();
-                            let num_elements: u64 = shape.iter().product();
-                            let shape_usize: Vec<usize> = shape.iter().map(|&d| d as usize).collect();
-                            let t: whisper_tensor::migration::numeric_tensor::NumericTensor<whisper_tensor::DynRank> = match dtype {
-                                DType::I64 => {
-                                    let data: Vec<i64> = (0..num_elements).map(|i| (i % 64) as i64).collect();
-                                    whisper_tensor::migration::numeric_tensor::NumericTensor::from_vec_shape(data, shape_usize).unwrap()
-                                }
-                                _ => {
-                                    let data: Vec<f32> = (0..num_elements).map(|i| (i % 64) as f32 * 0.01).collect();
-                                    whisper_tensor::migration::numeric_tensor::NumericTensor::from_vec_shape(data, shape_usize).unwrap()
-                                }
-                            };
-                            t.to_ndarray().unwrap()
-                        })
-                        };
-                        if let Some(nd) = tensor {
-                            let idx = span_nd.len();
-                            span_nd.push(nd);
-                            span_eval_inputs.push((inp.base, idx));
-                            matched_inputs += 1;
-                        }
-                    }
-                }
-            }
-            let span_refs: Vec<(AtomId, &NDArrayNumericTensor<whisper_tensor::DynRank>)> =
-                span_eval_inputs
-                    .iter()
-                    .map(|&(base, idx)| (base, &span_nd[idx]))
-                    .collect();
-
-            println!("\n=== Single-Span Test (phase 0, first non-empty lane) ===");
-            println!(
-                "  Span groups: {}, inputs: {}, outputs: {}",
-                span0.graph.num_groups(),
-                span0.inputs.len(),
-                span0.outputs.len()
-            );
-            println!(
-                "  Matched {} of {} span inputs (span graph has {} input_tensors)",
-                matched_inputs,
-                span0.inputs.len(),
-                span0.graph.input_tensors().len()
-            );
-
-            // Evaluate span.
-            let t0 = Instant::now();
-            let span_results = nano_eval::eval(&span0.graph, &span_refs, &span0.outputs);
-            println!("  Span eval: {:.1?}", t0.elapsed());
-
-            // Now evaluate the FULL graph for the same output ranges.
-            let mut full_nd: Vec<NDArrayNumericTensor<whisper_tensor::DynRank>> = Vec::new();
-            let mut full_eval_inputs: Vec<(AtomId, usize)> = Vec::new();
-            for it in result.graph.input_tensors() {
-                let ext_id = milli_graph
-                    .input_map
-                    .iter()
-                    .find(|(_, int)| **int == it.tensor_id)
-                    .map(|(ext, _)| *ext);
-                if let Some(ext) = ext_id {
-                    if let Some(t) = initialized.get(&ext) {
-                        let idx = full_nd.len();
-                        full_nd.push(t.to_ndarray().unwrap());
-                        full_eval_inputs.push((it.base_id, idx));
-                    } else {
-                        let name = sym_graph.get_tensor_name(ext);
-                        if let Some(n) = name {
-                            if let Some((dtype, shape_dims)) = input_info.get(n) {
-                                let shape: Vec<u64> =
-                                    shape_dims.iter().map(|d| d.unwrap_or(4)).collect();
-                                let num_elements: u64 = shape.iter().product();
-                                let shape_usize: Vec<usize> =
-                                    shape.iter().map(|&d| d as usize).collect();
-                                let t: whisper_tensor::migration::numeric_tensor::NumericTensor<
-                                    whisper_tensor::DynRank,
-                                > = match dtype {
-                                    DType::I64 => {
-                                        let data: Vec<i64> =
-                                            (0..num_elements).map(|i| (i % 64) as i64).collect();
-                                        whisper_tensor::migration::numeric_tensor::NumericTensor::from_vec_shape(data, shape_usize).unwrap()
-                                    }
-                                    _ => {
-                                        let data: Vec<f32> = (0..num_elements)
-                                            .map(|i| (i % 64) as f32 * 0.01)
-                                            .collect();
-                                        whisper_tensor::migration::numeric_tensor::NumericTensor::from_vec_shape(data, shape_usize).unwrap()
-                                    }
-                                };
-                                let idx = full_nd.len();
-                                full_nd.push(t.to_ndarray().unwrap());
-                                full_eval_inputs.push((it.base_id, idx));
-                            }
-                        }
-                    }
-                }
-            }
-            let full_refs: Vec<(AtomId, &NDArrayNumericTensor<whisper_tensor::DynRank>)> =
-                full_eval_inputs
-                    .iter()
-                    .map(|&(base, idx)| (base, &full_nd[idx]))
-                    .collect();
-
-            let t0 = Instant::now();
-            let full_results = nano_eval::eval(&result.graph, &full_refs, &span0.outputs);
-            println!("  Full eval (same ranges): {:.1?}", t0.elapsed());
-
-            // Compare.
-            let mut total_compared = 0u64;
-            let mut total_mismatches = 0u64;
-            let mut max_abs = 0.0f64;
-            for (i, (sr, fr)) in span_results.iter().zip(full_results.iter()).enumerate() {
-                let sf = sr.flatten();
-                let ff = fr.flatten();
-                let n = sf.num_elements().min(ff.num_elements());
-                for j in 0..n {
-                    let sv = sf.get(&[j as u64]).unwrap().to_f64();
-                    let fv = ff.get(&[j as u64]).unwrap().to_f64();
-                    total_compared += 1;
-                    if sv.is_nan() || fv.is_nan() {
-                        continue;
-                    }
-                    let d = (sv - fv).abs();
-                    max_abs = max_abs.max(d);
-                    if d > 1e-6 {
-                        total_mismatches += 1;
-                    }
-                }
-                if i < 3 {
-                    let sf_first = (0..n.min(3))
-                        .map(|j| sf.get(&[j as u64]).unwrap().to_f64())
-                        .collect::<Vec<_>>();
-                    let ff_first = (0..n.min(3))
-                        .map(|j| ff.get(&[j as u64]).unwrap().to_f64())
-                        .collect::<Vec<_>>();
-                    println!(
-                        "  output[{}]: {} elements, span={:?}, full={:?}",
-                        i, n, sf_first, ff_first
-                    );
-                }
-            }
-            println!(
-                "  Compared: {}, mismatches: {}, max_abs: {:.6}",
-                total_compared, total_mismatches, max_abs
-            );
-        }
+        // TODO: migrate to pool_eval (nano_graph::eval was deleted).
+        eprintln!("SINGLE_SPAN check not yet migrated to pool_eval");
     } // end SINGLE_SPAN
 
     // ── Phase-by-phase correctness check ─────────────────────────────────
     // Run B's executor phase by phase, after each phase compare a sample
     // of store values against the full-graph direct eval.
     if std::env::var("CHECK_PHASES").is_ok() {
-        use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
-        use whisper_tensor::nano_graph::eval as nano_eval;
-
-        println!("\n=== Phase-by-Phase Correctness Check ===");
-
-        // Build full-graph eval inputs.
-        let mut full_nd: Vec<NDArrayNumericTensor<whisper_tensor::DynRank>> = Vec::new();
-        let mut full_inputs: Vec<(AtomId, usize)> = Vec::new();
-        for it in result.graph.input_tensors() {
-            let ext_id = milli_graph
-                .input_map
-                .iter()
-                .find(|(_, int)| **int == it.tensor_id)
-                .map(|(ext, _)| *ext);
-            if let Some(ext) = ext_id {
-                let tensor = initialized
-                    .get(&ext)
-                    .map(|t| t.to_ndarray().unwrap())
-                    .or_else(|| {
-                        let name = sym_graph.get_tensor_name(ext)?;
-                        input_info.get(name).map(|(dtype, shape_dims)| {
-                            let shape: Vec<u64> =
-                                shape_dims.iter().map(|d| d.unwrap_or(4)).collect();
-                            let n: u64 = shape.iter().product();
-                            let su: Vec<usize> = shape.iter().map(|&d| d as usize).collect();
-                            let t: whisper_tensor::migration::numeric_tensor::NumericTensor<
-                                whisper_tensor::DynRank,
-                            > = match dtype {
-                                DType::I64 => {
-                                    let d: Vec<i64> = (0..n).map(|i| (i % 64) as i64).collect();
-                                    whisper_tensor::migration::numeric_tensor::NumericTensor::from_vec_shape(
-                                        d, su,
-                                    )
-                                    .unwrap()
-                                }
-                                _ => {
-                                    let d: Vec<f32> =
-                                        (0..n).map(|i| (i % 64) as f32 * 0.01).collect();
-                                    whisper_tensor::migration::numeric_tensor::NumericTensor::from_vec_shape(
-                                        d, su,
-                                    )
-                                    .unwrap()
-                                }
-                            };
-                            t.to_ndarray().unwrap()
-                        })
-                    });
-                if let Some(nd) = tensor {
-                    let idx = full_nd.len();
-                    full_nd.push(nd);
-                    full_inputs.push((it.base_id, idx));
-                }
-            }
-        }
-        let full_refs: Vec<(AtomId, &NDArrayNumericTensor<whisper_tensor::DynRank>)> = full_inputs
-            .iter()
-            .map(|&(base, idx)| (base, &full_nd[idx]))
-            .collect();
-
-        // Run executor manually, checking after each phase.
-        let mut store: HashMap<AtomId, NDArrayNumericTensor<whisper_tensor::DynRank>> =
-            HashMap::new();
-        for &(base, idx) in &full_inputs {
-            store.insert(base, full_nd[idx].clone());
-        }
-
-        for (phase_idx, phase) in b_exec_plan.phases.iter().enumerate() {
-            let mut phase_outputs: Vec<(AtomId, NDArrayNumericTensor<whisper_tensor::DynRank>)> =
-                Vec::new();
-
-            for span in &phase.spans {
-                if span.graph.num_groups() == 0 {
-                    continue;
-                }
-
-                let sliced: Vec<_> = span
-                    .inputs
-                    .iter()
-                    .filter_map(|range| {
-                        let tensor = store.get(&range.base)?;
-                        Some((range.base, tensor.clone()))
-                    })
-                    .collect();
-                let refs: Vec<_> = sliced
-                    .iter()
-                    .map(
-                        |(b, t): &(
-                            AtomId,
-                            whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor<
-                                whisper_tensor::DynRank,
-                            >,
-                        )| (*b, t),
-                    )
-                    .collect();
-
-                let results = nano_eval::eval(&span.graph, &refs, &span.outputs);
-                for (range, tensor) in span.outputs.iter().zip(results) {
-                    phase_outputs.push((range.base, tensor));
-                }
-            }
-
-            for (base, tensor) in &phase_outputs {
-                store.insert(*base, tensor.clone());
-            }
-
-            // Sample a few phase outputs and compare against full-graph eval.
-            if phase_idx < 5 && !phase_outputs.is_empty() {
-                let sample: Vec<_> = phase_outputs.iter().take(3).collect();
-                let check_ranges: Vec<whisper_tensor::nano_graph::AtomRange> = sample
-                    .iter()
-                    .map(|(base, t)| whisper_tensor::nano_graph::AtomRange {
-                        base: *base,
-                        count: t.num_elements() as u64,
-                        dtype: whisper_tensor::dtype::DType::F32,
-                    })
-                    .collect();
-                let full_results = nano_eval::eval(&result.graph, &full_refs, &check_ranges);
-
-                let mut phase_ok = true;
-                for (i, ((base, span_t), full_t)) in
-                    sample.iter().zip(full_results.iter()).enumerate()
-                {
-                    let sf = span_t.flatten();
-                    let ff = full_t.flatten();
-                    let n = sf.num_elements().min(ff.num_elements());
-                    let mut max_diff = 0.0f64;
-                    for j in 0..n.min(1000) {
-                        let sv = sf.get(&[j as u64]).unwrap().to_f64();
-                        let fv = ff.get(&[j as u64]).unwrap().to_f64();
-                        if !sv.is_nan() && !fv.is_nan() {
-                            max_diff = max_diff.max((sv - fv).abs());
-                        }
-                    }
-                    if max_diff > 1e-6 {
-                        phase_ok = false;
-                        let s3: Vec<f64> = (0..n.min(3))
-                            .map(|j| sf.get(&[j as u64]).unwrap().to_f64())
-                            .collect();
-                        let f3: Vec<f64> = (0..n.min(3))
-                            .map(|j| ff.get(&[j as u64]).unwrap().to_f64())
-                            .collect();
-                        eprintln!(
-                            "  Phase {} output[{}] base={}: DIVERGED (max_diff={:.6}, span={:?}, full={:?})",
-                            phase_idx, i, base, max_diff, s3, f3
-                        );
-                    }
-                }
-                if phase_ok {
-                    println!(
-                        "  Phase {}: {} outputs checked, all match",
-                        phase_idx,
-                        sample.len()
-                    );
-                } else {
-                    println!("  Phase {}: DIVERGED — stopping check", phase_idx);
-                    break;
-                }
-            }
-        }
+        // TODO: migrate to pool_eval (nano_graph::eval was deleted).
+        eprintln!("CHECK_PHASES check not yet migrated to pool_eval");
     }
 
     // Save tensor_map and graph for output comparison before trivial plan consumes result.
@@ -1357,88 +1020,10 @@ fn main() {
 
     // Direct nano eval — slow, opt-in via RUN_DIRECT=1.
     if std::env::var("RUN_DIRECT").is_ok() {
-        profiler.phase("direct_eval");
-        // Direct eval with all output ranges.
-        let eval_input_refs: Vec<(AtomId, &NDArrayNumericTensor<whisper_tensor::DynRank>)> =
-            nano_inputs
-                .iter()
-                .map(|(base, tensor)| (*base, tensor))
-                .collect();
-        let t0 = Instant::now();
-        let direct_results = whisper_tensor::nano_graph::eval::eval(
-            &exec_plan.graph,
-            &eval_input_refs,
-            &output_ranges,
-        );
-        println!(
-            "  Direct eval: {:.1}s, {} output ranges",
-            t0.elapsed().as_secs_f64(),
-            direct_results.len()
-        );
-
-        // Build atom lookup from eval results.
-        let mut atom_vals: HashMap<u64, f64> = HashMap::new();
-        for (range, tensor) in output_ranges.iter().zip(direct_results.iter()) {
-            let flat = tensor.flatten();
-            for i in 0..flat.num_elements() {
-                atom_vals.insert(
-                    range.base.0 + i as u64,
-                    flat.get(&[i as u64]).unwrap().to_f64(),
-                );
-            }
-        }
-
-        // Compare against milli reference using atom_id_for_element for correct mapping.
-        println!("\n=== Direct NanoEval vs Milli Reference ===");
-        let mut direct_all_match = true;
-        for &(ext_id, _, _) in &output_range_mapping {
-            let int_id = reverse_output_map.get(&ext_id).copied().unwrap_or(ext_id);
-            let tam = &lower_tensor_map_for_compare[&int_id];
-            if let Some(milli_tensor) = milli_outputs.get(&ext_id) {
-                let milli_nd = milli_tensor.to_ndarray().unwrap();
-                let n = milli_nd.num_elements().min(tam.count as usize);
-                let milli_flat = milli_nd.flatten();
-                let mut max_abs_diff = 0.0f64;
-                let mut mismatches = 0usize;
-                for j in 0..n {
-                    let m = milli_flat.get(&[j as u64]).unwrap().to_f64();
-                    let atom = tam.atom_id_for_element(j as u64);
-                    let nv = atom_vals.get(&atom.0).copied().unwrap_or(0.0);
-                    if m.is_nan() || nv.is_nan() {
-                        continue;
-                    }
-                    let abs_diff = (m - nv).abs();
-                    max_abs_diff = max_abs_diff.max(abs_diff);
-                    let denom = m.abs().max(1e-10);
-                    if abs_diff > 1e-3 && abs_diff / denom > 1e-3 {
-                        mismatches += 1;
-                    }
-                }
-                let status = if mismatches == 0 { "MATCH" } else { "MISMATCH" };
-                let seg_info = if tam.segments.is_empty() {
-                    ""
-                } else {
-                    " [segmented]"
-                };
-                println!(
-                    "  {:?}: {} ({} elements, max_abs={:.6}, mismatches={}){}",
-                    ext_id, status, n, max_abs_diff, mismatches, seg_info
-                );
-                if mismatches > 0 {
-                    direct_all_match = false;
-                }
-            } else {
-                println!("  {:?}: MISSING from milli outputs", ext_id);
-                direct_all_match = false;
-            }
-        }
-        if direct_all_match {
-            println!("\nDirect NanoEval: All outputs MATCH!");
-        } else {
-            println!("\nDirect NanoEval: Some outputs MISMATCHED.");
-        }
-
-        // (Trivial executor comparison removed — direct eval covers correctness.)
+        // TODO: migrate to pool_eval (nano_graph::eval was deleted).
+        let _ = (&output_ranges, &nano_inputs, &output_range_mapping);
+        let _ = (&reverse_output_map, &lower_tensor_map_for_compare, &milli_outputs);
+        eprintln!("RUN_DIRECT check not yet migrated to pool_eval");
     } // end RUN_DIRECT
 
     /// Look up a single atom's value from a sorted store index.
@@ -1629,7 +1214,7 @@ fn main() {
 
         // Convert shared nano_inputs to TypedBuffers for JIT, then drop
         // the NDArray data so we don't hold both formats during execution.
-        let input_dtypes: HashMap<AtomId, DType> = b_exec_plan
+        let input_dtypes: HashMap<AtomId, NumericDType> = b_exec_plan
             .graph
             .input_tensors()
             .iter()
@@ -1638,7 +1223,7 @@ fn main() {
         let jit_inputs: Vec<(AtomId, TypedBuffer)> = nano_inputs
             .iter()
             .map(|(base, nd)| {
-                let dtype = input_dtypes.get(base).copied().unwrap_or(DType::F32);
+                let dtype = input_dtypes.get(base).copied().unwrap_or(NumericDType::F32);
                 (*base, ndarray_to_typed_buffer(nd, dtype))
             })
             .collect();
@@ -1731,7 +1316,7 @@ type NdTensor = whisper_tensor::backends::ndarray_backend::numeric_tensor::NDArr
 /// Convert an NDArray tensor to a TypedBuffer (raw bytes).
 fn ndarray_to_typed_buffer(
     nd: &NdTensor,
-    dtype: DType,
+    dtype: NumericDType,
 ) -> whisper_tensor::compiler::attempts::v14::executor::TypedBuffer {
     use whisper_tensor::compiler::attempts::v14::executor::TypedBuffer;
     macro_rules! to_bytes {
@@ -1761,7 +1346,7 @@ fn ndarray_to_typed_buffer(
             let data: Vec<u8> = a.iter().map(|&b| if b { 1 } else { 0 }).collect();
             TypedBuffer {
                 data,
-                dtype: DType::BOOL,
+                dtype: NumericDType::BOOL,
                 count: a.len() as u64,
             }
         }
@@ -1788,18 +1373,18 @@ fn lookup_atom_in_store(
             let byte_off = offset * elem_bytes;
             if byte_off + elem_bytes <= slice.data.len() {
                 return Some(match slice.dtype {
-                    DType::F32 => {
+                    NumericDType::F32 => {
                         f32::from_le_bytes(slice.data[byte_off..byte_off + 4].try_into().unwrap())
                             as f64
                     }
-                    DType::F64 => {
+                    NumericDType::F64 => {
                         f64::from_le_bytes(slice.data[byte_off..byte_off + 8].try_into().unwrap())
                     }
-                    DType::I64 => {
+                    NumericDType::I64 => {
                         i64::from_le_bytes(slice.data[byte_off..byte_off + 8].try_into().unwrap())
                             as f64
                     }
-                    DType::BF16 => {
+                    NumericDType::BF16 => {
                         let bits = u16::from_le_bytes(
                             slice.data[byte_off..byte_off + 2].try_into().unwrap(),
                         );

@@ -160,7 +160,7 @@ impl Concat {
                     TensorAtomMap::simple(
                         input_maps[0].base_id,
                         out_count,
-                        out_info.dtype(),
+                        crate::nano_graph::NanoLoweringContext::ndt(out_info),
                         out_layout,
                         TensorAtomMap::compute_strides(&out_known_dims),
                         out_sym_dims,
@@ -189,7 +189,7 @@ impl Concat {
             out_id,
             TensorAtomMap::segmented(
                 out_count,
-                out_info.dtype(),
+                crate::nano_graph::NanoLoweringContext::ndt(out_info),
                 out_layout,
                 out_sym_dims,
                 segments,

@@ -6,7 +6,6 @@
 //! dimensions (batch, seq_len) are represented as symbolic iteration
 //! parameters on atom groups.
 
-pub mod eval;
 pub mod lower;
 pub mod ops;
 pub mod pattern;

@@ -3,7 +3,7 @@ use crate::backends::eval_backend::EvalBackend;
 use crate::graph::{GlobalId, Node};
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
-use crate::nano_graph::lower::TensorAtomMap;
+use crate::nano_graph::lower::{NanoLoweringContext, TensorAtomMap};
 use crate::nano_graph::ops::ScalarOp;
 use crate::nano_graph::pattern::AtomId;
 use crate::migration::numeric_tensor::NumericTensor;
@@ -82,7 +82,7 @@ impl Where {
         let count = count.max(1);
         let strides = TensorAtomMap::compute_strides(&known_dims);
 
-        let dt = out_info.dtype();
+        let dt = NanoLoweringContext::ndt(out_info);
         let out_tmp = TensorAtomMap::simple(
             AtomId(0),
             count,

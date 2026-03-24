@@ -25,7 +25,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
-use crate::dtype::DType;
+use crate::numeric_dtype::NumericDType;
 use crate::graph::GlobalId;
 use crate::nano_graph::pattern::InputTensor;
 use crate::nano_graph::{AtomGroup, AtomId, AtomRange, InputRef, NanoGraph, ScalarOp, SymDim};
@@ -1186,24 +1186,24 @@ fn input_ref_source_range(input: &InputRef, count: u64, atom_offset: u64) -> (u6
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dtype::DType;
+    use crate::numeric_dtype::NumericDType;
     use crate::graph::GlobalId;
     use crate::nano_graph::ops::{ReduceKind, ScalarBinOp, ScalarUnaryOp};
     use crate::nano_graph::pattern::InputTensor;
     use crate::nano_graph::{AtomId, InputRef, NanoGraph, ScalarOp};
-    use crate::migration::numeric_scalar::NumericScalar;
+    use crate::numeric_scalar::NumericScalar;
 
     /// Helper: create an input tensor in the graph.
     fn add_input(graph: &mut NanoGraph, id: u64, count: u64) -> AtomId {
-        graph.add_input_tensor(GlobalId(id), count, DType::F32)
+        graph.add_input_tensor(GlobalId(id), count, NumericDType::F32)
     }
 
     /// Helper: create a literal group.
     fn add_literal(graph: &mut NanoGraph, count: u64) -> AtomId {
         graph.push_group(
             count,
-            DType::F32,
-            ScalarOp::Literal(NumericScalar::F32(1.0)),
+            NumericDType::F32,
+            ScalarOp::Literal(NumericScalar::from_f32(1.0)),
             vec![],
             vec![],
         )
@@ -1219,10 +1219,10 @@ mod tests {
     ) -> AtomId {
         graph.push_group(
             count,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Binary {
                 op,
-                compute_dtype: DType::F32,
+                compute_dtype: NumericDType::F32,
             },
             vec![],
             vec![InputRef::affine(a, 1), InputRef::affine(b, 1)],
@@ -1233,10 +1233,10 @@ mod tests {
     fn add_unary(graph: &mut NanoGraph, count: u64, input: AtomId, op: ScalarUnaryOp) -> AtomId {
         graph.push_group(
             count,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Unary {
                 op,
-                compute_dtype: DType::F32,
+                compute_dtype: NumericDType::F32,
             },
             vec![],
             vec![InputRef::affine(input, 1)],
@@ -1252,12 +1252,12 @@ mod tests {
     ) -> AtomId {
         graph.push_group(
             out_count,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Reduce {
                 kind: ReduceKind::Sum,
                 reduce_count,
                 reduce_stride: 1,
-                compute_dtype: DType::F32,
+                compute_dtype: NumericDType::F32,
             },
             vec![],
             vec![InputRef::affine(input, reduce_count as i64)],
@@ -1374,10 +1374,10 @@ mod tests {
         let weights = add_literal(&mut g, 8192);
         let mul = g.push_group(
             8192,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Binary {
                 op: ScalarBinOp::Mul,
-                compute_dtype: DType::F32,
+                compute_dtype: NumericDType::F32,
             },
             vec![],
             vec![
@@ -1387,12 +1387,12 @@ mod tests {
         );
         let reduce = g.push_group(
             64,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Reduce {
                 kind: ReduceKind::Sum,
                 reduce_count: 128,
                 reduce_stride: 1,
-                compute_dtype: DType::F32,
+                compute_dtype: NumericDType::F32,
             },
             vec![],
             vec![InputRef::affine(mul, 128)],
@@ -1448,10 +1448,10 @@ mod tests {
         let input = add_input(&mut g, 1, 800);
         let add = g.push_group(
             800,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Binary {
                 op: ScalarBinOp::Add,
-                compute_dtype: DType::F32,
+                compute_dtype: NumericDType::F32,
             },
             vec![],
             vec![InputRef::affine(input, 1), InputRef::modular(lit, 1, 100)],
@@ -1501,12 +1501,12 @@ mod tests {
         // Reduce to 1 value: count=1, reduce_count=1024
         let reduce = g.push_group(
             1,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Reduce {
                 kind: ReduceKind::Sum,
                 reduce_count: 1024,
                 reduce_stride: 1,
-                compute_dtype: DType::F32,
+                compute_dtype: NumericDType::F32,
             },
             vec![],
             vec![InputRef::affine(neg, 1)],
@@ -1514,10 +1514,10 @@ mod tests {
         // Downstream: broadcast the reduce result to 1024 atoms.
         let broadcast = g.push_group(
             1024,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Binary {
                 op: ScalarBinOp::Div,
-                compute_dtype: DType::F32,
+                compute_dtype: NumericDType::F32,
             },
             vec![],
             vec![InputRef::affine(input, 1), InputRef::Broadcast(reduce)],
@@ -1697,12 +1697,12 @@ mod tests {
         let input = add_input(&mut g, 1, 64 * 128);
         let reduce = g.push_group(
             64,
-            DType::F32,
+            NumericDType::F32,
             ScalarOp::Reduce {
                 kind: ReduceKind::Sum,
                 reduce_count: 128,
                 reduce_stride: 1,
-                compute_dtype: DType::F32,
+                compute_dtype: NumericDType::F32,
             },
             vec![],
             vec![InputRef::affine(input, 128)],

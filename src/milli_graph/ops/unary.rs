@@ -5,7 +5,6 @@ use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
 use crate::nano_graph::lower::{NanoLoweringContext, TensorAtomMap};
 use crate::nano_graph::ops::{ScalarBinOp, ScalarOp, ScalarUnaryOp};
 use crate::nano_graph::pattern::InputRef;
-use crate::migration::numeric_scalar::NumericScalar;
 use crate::migration::numeric_tensor::NumericTensor;
 use crate::tensor_info::TensorInfo;
 use crate::{DynRank, TrigOp};
@@ -167,7 +166,7 @@ impl SimpleUnaryOp {
             return;
         };
 
-        let dt = out_info.dtype();
+        let dt = NanoLoweringContext::ndt(out_info);
         let scalar_op = match self.which_op() {
             WhichSimpleUnaryOp::Neg => ScalarOp::Unary {
                 op: ScalarUnaryOp::Neg,
@@ -219,7 +218,7 @@ impl SimpleUnaryOp {
             },
             WhichSimpleUnaryOp::IsNan => ScalarOp::Unary {
                 op: ScalarUnaryOp::IsNan,
-                compute_dtype: all_infos.get(&in_id).map(|i| i.dtype()).unwrap_or(dt),
+                compute_dtype: all_infos.get(&in_id).map(|i| NanoLoweringContext::ndt(i)).unwrap_or(dt),
             },
             WhichSimpleUnaryOp::Erf => ScalarOp::Unary {
                 op: ScalarUnaryOp::Erf,
@@ -241,7 +240,7 @@ impl SimpleUnaryOp {
                     detect_positive: *detect_positive,
                     detect_negative: *detect_negative,
                 },
-                compute_dtype: all_infos.get(&in_id).map(|i| i.dtype()).unwrap_or(dt),
+                compute_dtype: all_infos.get(&in_id).map(|i| NanoLoweringContext::ndt(i)).unwrap_or(dt),
             },
             WhichSimpleUnaryOp::BitwiseNot => ScalarOp::Unary {
                 op: ScalarUnaryOp::BitwiseNot,
@@ -538,10 +537,10 @@ impl ClampMin {
         };
 
         let min_val = self.min_val();
-        let dt = out_info.dtype();
+        let dt = NanoLoweringContext::ndt(out_info);
         let min_id = ctx.nano.push_atom(
             dt,
-            ScalarOp::Literal(NumericScalar::F32(min_val)),
+            ScalarOp::Literal(crate::numeric_scalar::NumericScalar::from_f32(min_val)),
             vec![],
             vec![],
         );

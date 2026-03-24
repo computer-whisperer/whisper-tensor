@@ -40,7 +40,7 @@ pub fn pool_eval<'p, P: Pool + 'p>(
     let input_buffers: Vec<InputBuffer> = input_tensors
         .iter()
         .map(|it| {
-            let dtype = NumericDType::from_legacy(it.dtype).unwrap();
+            let dtype = it.dtype;
             InputBuffer {
                 base: it.base_id,
                 count: it.count,
@@ -112,7 +112,7 @@ pub fn pool_eval<'p, P: Pool + 'p>(
         }
 
         let count = group.count as usize;
-        let output_dtype = NumericDType::from_legacy(group.output_dtype).unwrap();
+        let output_dtype = group.output_dtype;
         let buf_size = output_dtype.bytes_per_element() * count;
         let layout = TensorLayout::<DynRank>::row_major(vec![count as u64], output_dtype);
 
@@ -130,10 +130,9 @@ pub fn pool_eval<'p, P: Pool + 'p>(
                 compute_dtype,
             } = &group.op
             {
-                let compute_ndt = NumericDType::from_legacy(*compute_dtype).unwrap();
                 let mut acc_raw = match kind {
-                    ReduceKind::Sum => compute_ndt.encode_from_f64(0.0),
-                    ReduceKind::Max => compute_ndt.encode_from_f64(f64::NEG_INFINITY),
+                    ReduceKind::Sum => compute_dtype.encode_from_f64(0.0),
+                    ReduceKind::Max => compute_dtype.encode_from_f64(f64::NEG_INFINITY),
                 };
 
                 let base_atom = group.inputs[0].resolve(ri);
@@ -142,29 +141,28 @@ pub fn pool_eval<'p, P: Pool + 'p>(
                         AtomId((base_atom.0 as i64 + k as i64 * reduce_stride) as u64);
                     let val = lookup_atom_raw(src_id, graph, &group_buffers, &input_buffers);
                     let val_dtype = lookup_atom_dtype(src_id, graph, &group_buffers, &input_buffers);
-                    let cast_raw = val_dtype.cast_raw(val, compute_ndt);
+                    let cast_raw = val_dtype.cast_raw(val, *compute_dtype);
 
                     acc_raw = match kind {
                         ReduceKind::Sum => {
-                            let sum = compute_ndt.decode_to_f64(acc_raw)
-                                + compute_ndt.decode_to_f64(cast_raw);
-                            compute_ndt.encode_from_f64(sum)
+                            let sum = compute_dtype.decode_to_f64(acc_raw)
+                                + compute_dtype.decode_to_f64(cast_raw);
+                            compute_dtype.encode_from_f64(sum)
                         }
                         ReduceKind::Max => {
-                            let a = compute_ndt.decode_to_f64(acc_raw);
-                            let b = compute_ndt.decode_to_f64(cast_raw);
-                            compute_ndt.encode_from_f64(a.max(b))
+                            let a = compute_dtype.decode_to_f64(acc_raw);
+                            let b = compute_dtype.decode_to_f64(cast_raw);
+                            compute_dtype.encode_from_f64(a.max(b))
                         }
                     };
                 }
-                let result = compute_ndt.cast_raw(acc_raw, output_dtype);
+                let result = compute_dtype.cast_raw(acc_raw, output_dtype);
                 write_atom(&mut tensor, i as usize, result, output_dtype);
             } else {
                 let result_raw = match &group.op {
                     ScalarOp::Literal(scalar) => {
-                        let legacy_ndt = NumericDType::from_legacy(scalar.dtype()).unwrap();
-                        let raw = legacy_scalar_to_raw(scalar);
-                        legacy_ndt.cast_raw(raw, output_dtype)
+                        let raw = scalar.view().read_raw();
+                        scalar.dtype().cast_raw(raw, output_dtype)
                     }
                     ScalarOp::Identity => {
                         let src = group.inputs[0].resolve(ri);
@@ -174,7 +172,6 @@ pub fn pool_eval<'p, P: Pool + 'p>(
                         val_dtype.cast_raw(val, output_dtype)
                     }
                     ScalarOp::Binary { op, compute_dtype } => {
-                        let compute_ndt = NumericDType::from_legacy(*compute_dtype).unwrap();
                         let a_src = group.inputs[0].resolve(ri);
                         let b_src = group.inputs[1].resolve(ri);
                         let a_raw = lookup_atom_raw(a_src, graph, &group_buffers, &input_buffers);
@@ -183,20 +180,19 @@ pub fn pool_eval<'p, P: Pool + 'p>(
                             lookup_atom_dtype(a_src, graph, &group_buffers, &input_buffers);
                         let b_dtype =
                             lookup_atom_dtype(b_src, graph, &group_buffers, &input_buffers);
-                        let a_cast = a_dtype.cast_raw(a_raw, compute_ndt);
-                        let b_cast = b_dtype.cast_raw(b_raw, compute_ndt);
-                        let result = eval_binop(op, a_cast, b_cast, compute_ndt);
-                        compute_ndt.cast_raw(result, output_dtype)
+                        let a_cast = a_dtype.cast_raw(a_raw, *compute_dtype);
+                        let b_cast = b_dtype.cast_raw(b_raw, *compute_dtype);
+                        let result = eval_binop(op, a_cast, b_cast, *compute_dtype);
+                        compute_dtype.cast_raw(result, output_dtype)
                     }
                     ScalarOp::Unary { op, compute_dtype } => {
-                        let compute_ndt = NumericDType::from_legacy(*compute_dtype).unwrap();
                         let src = group.inputs[0].resolve(ri);
                         let val = lookup_atom_raw(src, graph, &group_buffers, &input_buffers);
                         let val_dtype =
                             lookup_atom_dtype(src, graph, &group_buffers, &input_buffers);
-                        let x = val_dtype.cast_raw(val, compute_ndt);
-                        let result = eval_unaryop(op, x, compute_ndt);
-                        compute_ndt.cast_raw(result, output_dtype)
+                        let x = val_dtype.cast_raw(val, *compute_dtype);
+                        let result = eval_unaryop(op, x, *compute_dtype);
+                        compute_dtype.cast_raw(result, output_dtype)
                     }
                     ScalarOp::Select => {
                         let cond_src = group.inputs[0].resolve(ri);
@@ -253,7 +249,7 @@ pub fn pool_eval<'p, P: Pool + 'p>(
     let mut outputs = Vec::with_capacity(output_ranges.len());
     for range in output_ranges {
         let count = range.count as usize;
-        let output_dtype = NumericDType::from_legacy(range.dtype).unwrap();
+        let output_dtype = range.dtype;
         let layout = TensorLayout::<DynRank>::row_major(vec![count as u64], output_dtype);
         let buffer = pool.allocate(layout.buffer_size_bytes()).map_err(PoolEvalError::Allocation)?;
         let mut out_tensor = NumericTensor::from_parts(buffer, layout);
@@ -360,15 +356,6 @@ fn write_atom<P: Pool>(
 // ---------------------------------------------------------------------------
 // Op dispatch
 // ---------------------------------------------------------------------------
-
-/// Convert a legacy NumericScalar to raw u64 bits.
-fn legacy_scalar_to_raw(scalar: &crate::migration::numeric_scalar::NumericScalar) -> u64 {
-    // Go through f64 as the universal intermediate.
-    // This is only used for Literal ops (small constants), so precision is fine.
-    let f = scalar.to_f64();
-    let dtype = NumericDType::from_legacy(scalar.dtype()).unwrap();
-    dtype.encode_from_f64(f)
-}
 
 fn eval_binop(op: &ScalarBinOp, a: u64, b: u64, dtype: NumericDType) -> u64 {
     match dtype {

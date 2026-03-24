@@ -13,8 +13,37 @@ use crate::milli_graph::MilliOpGraph;
 use crate::milli_graph::ops::AnyMilliOp;
 use crate::nano_graph::ops::ScalarOp;
 use crate::nano_graph::pattern::{AtomId, InputRef, NanoGraph, SymDim};
-use crate::migration::numeric_scalar::NumericScalar;
+use crate::numeric_dtype::NumericDType;
+use crate::numeric_scalar::NumericScalar;
 use crate::tensor_info::TensorInfo;
+
+/// Convert an old `migration::numeric_scalar::NumericScalar` to the new `NumericScalar`.
+///
+/// Uses the raw bits where possible, falling back to f64 roundtrip for floats.
+/// Precision is preserved for all types that fit in the new format.
+fn legacy_scalar_to_new(old: &crate::migration::numeric_scalar::NumericScalar) -> NumericScalar {
+    use crate::migration::numeric_scalar::NumericScalar as OldScalar;
+    match old {
+        OldScalar::F64(v) => NumericScalar::from_f64(*v),
+        OldScalar::F32(v) => NumericScalar::from_f32(*v),
+        OldScalar::BF16(v) => NumericScalar::from_bf16(*v),
+        OldScalar::F16(v) => NumericScalar::from_f16(*v),
+        OldScalar::F8E4M3FN(v) => NumericScalar::from_f8e4m3fn(*v),
+        OldScalar::F8E5M2(v) => NumericScalar::from_f8e5m2(*v),
+        OldScalar::I64(v) => NumericScalar::from_i64(*v),
+        OldScalar::I32(v) => NumericScalar::from_i32(*v),
+        OldScalar::I16(v) => NumericScalar::from_i16(*v),
+        OldScalar::I8(v) => NumericScalar::from_i8(*v),
+        OldScalar::U64(v) => NumericScalar::from_u64(*v),
+        OldScalar::U32(v) => NumericScalar::from_u32(*v),
+        OldScalar::U16(v) => NumericScalar::from_u16(*v),
+        OldScalar::U8(v) => NumericScalar::from_u8(*v),
+        OldScalar::I4(v) => NumericScalar::from_i4(*v),
+        OldScalar::U4(v) => NumericScalar::from_u4(*v),
+        OldScalar::BOOL(v) => NumericScalar::from_bool(*v),
+        OldScalar::STRING(_) => panic!("STRING scalars cannot be converted to NumericScalar"),
+    }
+}
 
 /// Common accessors for reduce ops (ReduceSum, ReduceMax, ReduceMean).
 pub trait ReduceAccessors {
@@ -95,7 +124,7 @@ pub struct LowerResult {
 pub struct TensorAtomMapInfo {
     pub base_id: AtomId,
     pub count: u64,
-    pub dtype: DType,
+    pub dtype: NumericDType,
     pub sym_dims: Vec<SymDim>,
     pub known_strides: Vec<u64>,
     pub known_dims: Vec<u64>,
@@ -154,7 +183,7 @@ pub struct TensorAtomMap {
     /// Total number of atoms (product of known dims).
     pub count: u64,
     /// Data type of this tensor.
-    pub dtype: DType,
+    pub dtype: NumericDType,
     /// The full tensor layout: one entry per dim, preserving original order.
     pub layout: Vec<DimKind>,
     /// Physical strides for the known dims into the atom buffer.
@@ -197,7 +226,7 @@ impl TensorAtomMap {
     pub fn simple(
         base_id: AtomId,
         count: u64,
-        dtype: DType,
+        dtype: NumericDType,
         layout: Vec<DimKind>,
         known_strides: Vec<u64>,
         sym_dims: Vec<SymDim>,
@@ -216,7 +245,7 @@ impl TensorAtomMap {
     /// Create a segmented tensor atom map (for Concat).
     pub fn segmented(
         count: u64,
-        dtype: DType,
+        dtype: NumericDType,
         layout: Vec<DimKind>,
         sym_dims: Vec<SymDim>,
         segments: Vec<ConcatSegment>,
@@ -474,6 +503,13 @@ impl<'a> NanoLoweringContext<'a> {
         }
     }
 
+    /// Convert a TensorInfo's dtype (legacy DType) to NumericDType.
+    /// Panics on STRING or Packed dtypes (which should not appear in lowering).
+    pub fn ndt(info: &TensorInfo) -> NumericDType {
+        NumericDType::from_legacy(info.dtype())
+            .unwrap_or_else(|| panic!("unsupported dtype for lowering: {:?}", info.dtype()))
+    }
+
     /// Classify tensor dims and return layout info.
     /// Returns None if rank is unknown or atom count overflows u32.
     pub fn classify_dims(&mut self, info: &TensorInfo) -> Option<DimClassification> {
@@ -522,14 +558,14 @@ impl<'a> NanoLoweringContext<'a> {
 
         let strides = TensorAtomMap::compute_strides(&known_dims);
         let count = count.max(1) as usize;
-        let dt = info.dtype();
+        let dt = Self::ndt(info);
 
         // Extract flat scalar values from the tensor.
         let nd = numeric.to_ndarray().unwrap();
         let flat = nd.flatten();
         let n_elems = flat.num_elements();
         let scalars: Vec<NumericScalar> = (0..n_elems)
-            .map(|i| flat.get(&[i as u64]).unwrap())
+            .map(|i| legacy_scalar_to_new(&flat.get(&[i as u64]).unwrap()))
             .collect();
 
         if scalars.is_empty() {
@@ -578,7 +614,7 @@ impl<'a> NanoLoweringContext<'a> {
     pub fn register_input(&mut self, id: GlobalId, info: &TensorInfo) {
         let Some((layout, known_dims, sym_dims, count)) = self.classify_dims(info) else {
             // Unknown rank — register a single atom.
-            let dt = info.dtype();
+            let dt = Self::ndt(info);
             let base_id = self.nano.add_input_tensor(id, 1, dt);
             self.tensor_map.insert(
                 id,
@@ -589,7 +625,7 @@ impl<'a> NanoLoweringContext<'a> {
 
         let strides = TensorAtomMap::compute_strides(&known_dims);
         let count = count.max(1);
-        let dt = info.dtype();
+        let dt = Self::ndt(info);
 
         let base_id = self.nano.add_input_tensor(id, count, dt);
 
@@ -602,11 +638,11 @@ impl<'a> NanoLoweringContext<'a> {
     /// Register a tensor as a boundary (opaque) group.
     /// Boundary atoms are leaves — they use Literal(0) with no inputs.
     pub fn register_boundary(&mut self, output_id: GlobalId, info: &TensorInfo, _op_kind: &str) {
-        let dt = info.dtype();
+        let dt = Self::ndt(info);
         let Some((layout, known_dims, sym_dims, count)) = self.classify_dims(info) else {
             let base_id = self.nano.push_atom(
                 dt,
-                ScalarOp::Literal(NumericScalar::F32(0.0)),
+                ScalarOp::Literal(NumericScalar::zero(dt)),
                 vec![],
                 vec![],
             );
@@ -623,7 +659,7 @@ impl<'a> NanoLoweringContext<'a> {
         let base_id = self.nano.push_group(
             count,
             dt,
-            ScalarOp::Literal(NumericScalar::F32(0.0)),
+            ScalarOp::Literal(NumericScalar::zero(dt)),
             sym_dims.clone(),
             vec![],
         );
@@ -1109,8 +1145,8 @@ impl<'a> NanoLoweringContext<'a> {
             return;
         };
 
-        let in_dt = all_infos.get(&in_id).map(|i| i.dtype());
-        let out_dt = out_info.dtype();
+        let in_dt = all_infos.get(&in_id).map(|i| Self::ndt(i));
+        let out_dt = Self::ndt(out_info);
 
         // If dtypes match, this is a no-op — just re-register the tensor.
         if in_dt == Some(out_dt) {
@@ -1182,7 +1218,7 @@ impl<'a> NanoLoweringContext<'a> {
                     TensorAtomMap::simple(
                         in_map.base_id,
                         count,
-                        out_info.dtype(),
+                        Self::ndt(out_info),
                         layout,
                         TensorAtomMap::compute_strides(&known_dims),
                         sym_dims,
@@ -1190,7 +1226,7 @@ impl<'a> NanoLoweringContext<'a> {
                 );
             } else {
                 // Non-row-major input: emit Identity group to materialize row-major order.
-                let dt = out_info.dtype();
+                let dt = Self::ndt(out_info);
                 let input_ref = Self::pointwise_input_ref(&in_map);
                 let base_id = self.nano.push_group(
                     count,
@@ -1240,7 +1276,7 @@ impl<'a> NanoLoweringContext<'a> {
     where
         R: Node,
         R: ReduceAccessors,
-        F: Fn(DType, u64, i64) -> ScalarOp,
+        F: Fn(NumericDType, u64, i64) -> ScalarOp,
     {
         let all_infos = self.all_infos;
         let in_id = Node::inputs(reduce).next().unwrap();
@@ -1269,7 +1305,7 @@ impl<'a> NanoLoweringContext<'a> {
                 return;
             };
             let count = count.max(1);
-            let dt = out_info.dtype();
+            let dt = Self::ndt(out_info);
             let input_ref = Self::pointwise_input_ref(&in_map);
             let base_id = self.nano.push_group(
                 count,
@@ -1460,10 +1496,10 @@ impl<'a> NanoLoweringContext<'a> {
 
         // Determine compute dtype: ReduceSum upcasts BF16/F16 → F32 to match
         // milli eval precision semantics (see reduce_sum.rs lines 193-196).
-        let out_dt = out_info.dtype();
-        let in_dt = all_infos.get(&in_id).map(|i| i.dtype()).unwrap_or(out_dt);
+        let out_dt = Self::ndt(out_info);
+        let in_dt = all_infos.get(&in_id).map(|i| Self::ndt(i)).unwrap_or(out_dt);
         let compute_dt = match in_dt {
-            DType::BF16 | DType::F16 => DType::F32,
+            NumericDType::BF16 | NumericDType::F16 => NumericDType::F32,
             other => other,
         };
 
@@ -1563,14 +1599,14 @@ impl<'a> NanoLoweringContext<'a> {
             return;
         }
         let base_id = self.nano.push_atom(
-            DType::F32,
-            ScalarOp::Literal(NumericScalar::F32(0.0)),
+            NumericDType::F32,
+            ScalarOp::Literal(NumericScalar::from_f32(0.0)),
             vec![],
             vec![],
         );
         self.tensor_map.insert(
             id,
-            TensorAtomMap::simple(base_id, 1, DType::F32, vec![], vec![], vec![]),
+            TensorAtomMap::simple(base_id, 1, NumericDType::F32, vec![], vec![], vec![]),
         );
     }
 }
@@ -1580,13 +1616,16 @@ mod tests {
     use super::*;
     use crate::DynRank;
     use crate::backends::eval_backend::EvalBackend;
-    use crate::backends::ndarray_backend::NDArrayNumericTensor;
     use crate::graph::Graph;
     use crate::milli_graph::MilliOpGraph;
     use crate::milli_graph::ops::MilliOp;
-    use crate::nano_graph::eval;
+    use crate::nano_graph::pool_eval;
+    // Old NumericScalar still needed for MilliOp constructors (ConstantOfShape, etc.)
+    use crate::migration::numeric_scalar::NumericScalar as OldNumericScalar;
     use crate::nano_graph::pattern::AtomRange;
     use crate::migration::numeric_tensor::NumericTensor;
+    use crate::migration::bridge;
+    use crate::pool::TrackedPool;
 
     /// Extract flat values from a NumericTensor, returned as f64.
     fn tensor_to_f64(t: &NumericTensor<DynRank>) -> Vec<f64> {
@@ -1595,7 +1634,7 @@ mod tests {
         if t.dtype() == crate::dtype::DType::BOOL {
             let nd = t.to_ndarray().unwrap();
             match nd {
-                NDArrayNumericTensor::BOOL(a) => {
+                crate::backends::ndarray_backend::NDArrayNumericTensor::BOOL(a) => {
                     return a.iter().map(|&v| if v { 1.0 } else { 0.0 }).collect();
                 }
                 _ => unreachable!(),
@@ -1605,11 +1644,6 @@ mod tests {
         let flat = f32_tensor.flatten().unwrap();
         let v: Vec<f32> = flat.to_ndarray().unwrap().try_into().unwrap();
         v.into_iter().map(|x| x as f64).collect()
-    }
-
-    /// Convert a NumericTensor to an NDArrayNumericTensor for eval input.
-    fn to_ndarray(t: &NumericTensor<DynRank>) -> NDArrayNumericTensor<DynRank> {
-        t.to_ndarray().unwrap()
     }
 
     /// Build a milli graph, eval through both milli and nano, compare results.
@@ -1658,19 +1692,22 @@ mod tests {
             result.unsupported_details
         );
 
-        // Build eval inputs from input_tensors (the graph knows where each tensor lives).
-        let nd_inputs: Vec<NDArrayNumericTensor<DynRank>> = input_ids
+        // Convert old inputs to new NumericTensor via bridge for pool_eval.
+        let new_inputs: Vec<_> = input_ids
             .iter()
             .zip(inputs.iter())
-            .map(|(_, t)| to_ndarray(t))
+            .map(|(_, t)| bridge::legacy_to_new(t))
             .collect();
-        let eval_inputs: Vec<(AtomId, &NDArrayNumericTensor<DynRank>)> = result
+
+        // Map to (AtomId, view) pairs for pool_eval.
+        let input_views: Vec<_> = new_inputs.iter().map(|t| t.view()).collect();
+        let eval_inputs: Vec<_> = result
             .graph
             .input_tensors()
             .iter()
             .filter_map(|it| {
                 let idx = input_ids.iter().position(|&id| id == it.tensor_id)?;
-                Some((it.base_id, &nd_inputs[idx]))
+                Some((it.base_id, &input_views[idx]))
             })
             .collect();
 
@@ -1683,8 +1720,6 @@ mod tests {
                 tam.sym_dims.is_empty(),
                 "Sym dims not yet supported in test"
             );
-            // For segmented tensors, we need all groups that contain atoms.
-            // Collect unique groups by walking atom_id_for_element.
             let mut seen_groups = std::collections::HashSet::new();
             for i in 0..tam.count {
                 let atom = tam.atom_id_for_element(i);
@@ -1698,7 +1733,6 @@ mod tests {
                         });
                     }
                 }
-                // Also check input tensor ranges.
                 if let Some((ti, _)) = result.graph.find_input_idx(atom) {
                     let it = &result.graph.input_tensors()[ti];
                     let fake_gi = usize::MAX - ti;
@@ -1713,24 +1747,21 @@ mod tests {
             }
         }
 
-        // Eval NanoGraph.
-        let nano_results = eval::eval(&result.graph, &eval_inputs, &all_output_ranges);
+        // Eval NanoGraph via pool_eval.
+        let pool = TrackedPool::new(None);
+        let nano_results = pool_eval::pool_eval(
+            &result.graph,
+            &eval_inputs,
+            &all_output_ranges,
+            &pool,
+        ).unwrap();
 
         // Build a lookup from AtomId -> f64.
         let mut atom_vals: std::collections::HashMap<u64, f64> = std::collections::HashMap::new();
         for (range, tensor) in all_output_ranges.iter().zip(nano_results.iter()) {
-            let flat: Vec<f64> = match tensor {
-                NDArrayNumericTensor::F32(a) => a.iter().map(|&v| v as f64).collect(),
-                NDArrayNumericTensor::F64(a) => a.iter().copied().collect(),
-                NDArrayNumericTensor::I64(a) => a.iter().map(|&v| v as f64).collect(),
-                NDArrayNumericTensor::I32(a) => a.iter().map(|&v| v as f64).collect(),
-                NDArrayNumericTensor::BOOL(a) => {
-                    a.iter().map(|&v| if v { 1.0 } else { 0.0 }).collect()
-                }
-                other => panic!("Unsupported output dtype: {:?}", other.dtype()),
-            };
-            for (i, &v) in flat.iter().enumerate() {
-                atom_vals.insert(range.base.0 + i as u64, v);
+            for i in 0..range.count {
+                let scalar = tensor.read_element(i as usize);
+                atom_vals.insert(range.base.0 + i, scalar.to_f64());
             }
         }
 
@@ -1759,10 +1790,9 @@ mod tests {
             );
 
             // For BOOL outputs, compare as 0/1.
-            let is_bool = tam.dtype == crate::dtype::DType::BOOL;
+            let is_bool = tam.dtype == NumericDType::BOOL;
             for (i, (m, n)) in milli_flat.iter().zip(nano_flat.iter()).enumerate() {
                 let diff = if is_bool {
-                    // Both should be 0.0 or 1.0
                     let mb: f64 = if *m != 0.0 { 1.0 } else { 0.0 };
                     let nb: f64 = if *n != 0.0 { 1.0 } else { 0.0 };
                     (mb - nb).abs()
@@ -3186,7 +3216,7 @@ mod tests {
                 // Note: ConstantOfShape::push_new returns the OP id (not output tensor id).
                 let cos_op_id = crate::milli_graph::ops::ConstantOfShape::push_new(
                     g,
-                    NumericScalar::F32(7.0),
+                    OldNumericScalar::F32(7.0),
                     shape,
                     rng,
                 );

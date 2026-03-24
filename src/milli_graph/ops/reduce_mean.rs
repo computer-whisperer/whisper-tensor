@@ -7,7 +7,8 @@ use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
 use crate::nano_graph::lower::{NanoLoweringContext, TensorAtomMap};
 use crate::nano_graph::ops::{ReduceKind, ScalarBinOp, ScalarOp};
 use crate::nano_graph::pattern::InputRef;
-use crate::migration::numeric_scalar::NumericScalar;
+use crate::numeric_dtype::NumericDType;
+use crate::numeric_scalar::NumericScalar;
 use crate::migration::numeric_tensor::NumericTensor;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -122,13 +123,13 @@ impl ReduceMean {
             ctx.lower_as_boundary_named(self, "ReduceMean");
             return;
         };
-        let out_dt = out_info.dtype();
-        let in_dt = in_info.map(|i| i.dtype()).unwrap_or(out_dt);
+        let out_dt = NanoLoweringContext::ndt(out_info);
+        let in_dt = in_info.map(|i| NanoLoweringContext::ndt(i)).unwrap_or(out_dt);
 
         // For BF16/F16: keep entire mean computation in F32, cast at the end.
         // This matches milli eval where ndarray accumulates in F32.
         let compute_dt = match in_dt {
-            DType::BF16 | DType::F16 => DType::F32,
+            NumericDType::BF16 | NumericDType::F16 => NumericDType::F32,
             other => other,
         };
 
@@ -148,7 +149,7 @@ impl ReduceMean {
         // Divide by extent (not multiply by reciprocal — they differ in f32 rounding).
         let extent_lit = ctx.nano.push_atom(
             compute_dt,
-            ScalarOp::Literal(NumericScalar::F32(extent as f32)),
+            ScalarOp::Literal(NumericScalar::from_f32(extent as f32)),
             vec![],
             vec![],
         );
