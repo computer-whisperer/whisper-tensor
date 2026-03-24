@@ -229,7 +229,8 @@ impl MilliOp for ConstantOfShape {
         // If shape tensor is Ranked with known dims, each dim value tells us
         // the rank of the output but not the actual dim sizes.
         // If shape tensor is Shaped (1D with known length), we at least know the output rank.
-        let out_dtype = self.value.dtype();
+        let out_dtype = crate::numeric_dtype::NumericDType::from_legacy(self.value.dtype())
+            .expect("unsupported ConstantOfShape value dtype");
         if let Some(rank) = shape_info.rank_if_known() {
             // shape is 1D — its first dim tells us the output rank.
             if rank == 1
@@ -245,23 +246,8 @@ impl MilliOp for ConstantOfShape {
                     if let Some(crate::scalar_info::ScalarInfo::Numeric(n)) =
                         shape_info.get(&vec![i as u64], _symbolic_resolver)
                     {
-                        use crate::migration::numeric_scalar::NumericScalar;
-                        let v = match n {
-                            NumericScalar::I64(x) => x as u64,
-                            NumericScalar::I32(x) => x as u64,
-                            NumericScalar::U64(x) => x,
-                            NumericScalar::U32(x) => x as u64,
-                            NumericScalar::F32(x) => x as u64,
-                            NumericScalar::F64(x) => x as u64,
-                            _ => {
-                                out_dims.push(ScalarInfoTyped::Symbolic(
-                                    crate::symbolic_scalar::SymbolicScalarTyped::new(
-                                        _symbolic_resolver,
-                                    ),
-                                ));
-                                continue;
-                            }
-                        };
+                        // n is new NumericScalar — extract as u64 via to_i64
+                        let v = n.to_i64() as u64;
                         out_dims.push(ScalarInfoTyped::Numeric(v));
                     } else {
                         out_dims.push(ScalarInfoTyped::Symbolic(

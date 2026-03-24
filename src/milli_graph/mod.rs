@@ -1289,7 +1289,7 @@ impl MilliOpGraph {
                         known.entry(out_id).or_insert_with(|| {
                             TensorInfo::Minimal(MinimalTensor::new(
                                 ScalarInfo::Symbolic(SymbolicScalar::new(
-                                    DType::F32,
+                                    crate::numeric_dtype::NumericDType::from_legacy(DType::F32).unwrap(),
                                     &mut resolver,
                                 )),
                                 SymbolicScalarTyped::new(&mut resolver),
@@ -4525,7 +4525,7 @@ mod tests {
                 ext_id,
                 TensorInfo::Minimal(MinimalTensor::new(
                     ScalarInfo::Symbolic(SymbolicScalar::new(
-                        crate::dtype::DType::F32,
+                        crate::numeric_dtype::NumericDType::from_legacy(crate::dtype::DType::F32).unwrap(),
                         &mut resolver,
                     )),
                     SymbolicScalarTyped::new(&mut resolver),
@@ -4537,7 +4537,7 @@ mod tests {
 
         // Output should exist and have F32 dtype.
         let neg_info = &result[&neg];
-        assert_eq!(neg_info.dtype(), crate::dtype::DType::F32);
+        assert_eq!(neg_info.dtype(), crate::numeric_dtype::NumericDType::from_legacy(crate::dtype::DType::F32).unwrap());
 
         // It won't be concrete (no numeric values), so as_numeric should be None.
         assert!(neg_info.as_numeric().is_none());

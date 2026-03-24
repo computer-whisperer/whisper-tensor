@@ -404,7 +404,7 @@ impl MilliOp for SimpleBinary {
             | WhichSimpleBinaryOp::LessOrEqual
             | WhichSimpleBinaryOp::And
             | WhichSimpleBinaryOp::Or
-            | WhichSimpleBinaryOp::Xor => DType::BOOL,
+            | WhichSimpleBinaryOp::Xor => NumericDType::Bool,
             _ => a_info.dtype(),
         };
 
@@ -1255,7 +1255,8 @@ impl MilliOp for MatMul {
         }
 
         // MatMul output dtype comes from the struct's explicit field.
-        let out_dtype = self.output_dtype;
+        let out_dtype = NumericDType::from_legacy(self.output_dtype)
+            .expect("unsupported output_dtype for infer");
 
         // Try per-dim shape inference: A[...,M,K] @ B[...,K,N] -> [...,M,N]
         // Batch dims are broadcast, last two follow matmul rules.

@@ -6,7 +6,6 @@
 //! claims must match the ground-truth values from eval.
 
 use crate::backends::eval_backend::EvalBackend;
-use crate::dtype::DType;
 use crate::graph::{GlobalId, Node};
 use crate::milli_graph::ops::MilliOp;
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
@@ -91,7 +90,7 @@ impl fmt::Display for ValidationReport {
 
 /// Ground truth for a single output tensor from eval.
 struct GroundTruth {
-    dtype: DType,
+    dtype: crate::numeric_dtype::NumericDType,
     shape: Vec<u64>,
     rank: usize,
 }
@@ -99,7 +98,8 @@ struct GroundTruth {
 impl GroundTruth {
     fn from_numeric_tensor(tensor: &NumericTensor<DynRank>) -> Self {
         Self {
-            dtype: tensor.dtype(),
+            dtype: crate::numeric_dtype::NumericDType::from_legacy(tensor.dtype())
+                .expect("unsupported dtype in ground truth"),
             shape: tensor.shape(),
             rank: tensor.rank(),
         }
@@ -112,7 +112,8 @@ fn numeric_to_shaped(
     tensor: &NumericTensor<DynRank>,
     resolver: &mut SymbolicResolver,
 ) -> TensorInfo {
-    let dtype = tensor.dtype();
+    let dtype = crate::numeric_dtype::NumericDType::from_legacy(tensor.dtype())
+        .expect("unsupported dtype for shaped ablation");
     let shape: Vec<u64> = tensor.shape();
     let first_element = ScalarInfo::Symbolic(SymbolicScalar::new(dtype, resolver));
     TensorInfo::from(ShapedTensor::<DynRank>::new_symbolic(
@@ -129,7 +130,9 @@ fn numeric_to_ranked(
     resolver: &mut SymbolicResolver,
 ) -> TensorInfo {
     let rank = tensor.rank();
-    let first_element = ScalarInfo::Symbolic(SymbolicScalar::new(tensor.dtype(), resolver));
+    let ndt = crate::numeric_dtype::NumericDType::from_legacy(tensor.dtype())
+        .expect("unsupported dtype for ranked ablation");
+    let first_element = ScalarInfo::Symbolic(SymbolicScalar::new(ndt, resolver));
     let symbolic_dims: Vec<ScalarInfoTyped<u64>> = (0..rank)
         .map(|_| ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(resolver)))
         .collect();
@@ -146,7 +149,9 @@ fn numeric_to_minimal(
     tensor: &NumericTensor<DynRank>,
     resolver: &mut SymbolicResolver,
 ) -> TensorInfo {
-    let first_element = ScalarInfo::Symbolic(SymbolicScalar::new(tensor.dtype(), resolver));
+    let ndt = crate::numeric_dtype::NumericDType::from_legacy(tensor.dtype())
+        .expect("unsupported dtype for minimal ablation");
+    let first_element = ScalarInfo::Symbolic(SymbolicScalar::new(ndt, resolver));
     let symbolic_rank = SymbolicScalarTyped::<u32>::new(resolver);
     TensorInfo::from(MinimalTensor::new(first_element, symbolic_rank))
 }

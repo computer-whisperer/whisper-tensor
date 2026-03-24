@@ -87,7 +87,10 @@ impl MilliOp for NonZero {
         }
         // Fallback minimal info if unknown: dtype I64 vector of unknown size
         let minimal = TensorInfo::Minimal(MinimalTensor::new(
-            ScalarInfo::Symbolic(SymbolicScalar::new(DType::I64, symbolic_resolver)),
+            ScalarInfo::Symbolic(SymbolicScalar::new(
+                crate::numeric_dtype::NumericDType::from_legacy(DType::I64).unwrap(),
+                symbolic_resolver,
+            )),
             SymbolicScalarTyped::new(symbolic_resolver),
         ));
         let v: Vec<(GlobalId, TensorInfo)> = vec![(self.output, minimal)];

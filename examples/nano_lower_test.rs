@@ -52,7 +52,9 @@ fn main() {
     let mut all_infos: HashMap<GlobalId, TensorInfo> = HashMap::new();
     for (name, (dtype, shape_dims)) in &input_info {
         let shape: Vec<u64> = shape_dims.iter().map(|d| d.unwrap_or(4)).collect();
-        let info = TensorInfo::from_dtype_and_shape(*dtype, &shape);
+        let ndt = whisper_tensor::numeric_dtype::NumericDType::from_legacy(*dtype)
+            .expect("unsupported input dtype");
+        let info = TensorInfo::from_dtype_and_shape(ndt, &shape);
         println!("Input '{}': {:?} {:?}", name, dtype, shape);
         if let Some(id) = tensors_by_name.get(name) {
             all_infos.insert(*id, info);
@@ -70,7 +72,8 @@ fn main() {
         } else {
             // Large weight matrices: shape+dtype only.
             let shape: Vec<u64> = tensor.shape().to_vec();
-            let dtype = tensor.dtype();
+            let dtype = whisper_tensor::numeric_dtype::NumericDType::from_legacy(tensor.dtype())
+                .expect("unsupported weight dtype");
             all_infos.insert(*id, TensorInfo::from_dtype_and_shape(dtype, &shape));
             n_shape_only += 1;
         }

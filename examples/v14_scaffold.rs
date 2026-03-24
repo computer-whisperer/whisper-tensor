@@ -317,7 +317,8 @@ fn main() {
     for (id, tensor) in &initialized {
         if shape_only && tensor.num_elements() > 1024 {
             let shape: Vec<u64> = tensor.shape().to_vec();
-            let dtype = tensor.dtype();
+            let dtype = whisper_tensor::numeric_dtype::NumericDType::from_legacy(tensor.dtype())
+                .expect("unsupported weight dtype");
             all_infos.insert(*id, TensorInfo::from_dtype_and_shape(dtype, &shape));
         } else {
             all_infos.insert(*id, TensorInfo::from(tensor.clone()));

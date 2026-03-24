@@ -109,14 +109,16 @@ impl MilliOp for Cast {
         }
 
         // Same shape, new dtype. Preserve per-dim shape info.
+        let out_ndt = crate::numeric_dtype::NumericDType::from_legacy(self.dtype)
+            .expect("unsupported Cast target dtype");
         if let Some(ranked) = input_info.as_ranked() {
             let dims = ranked.shape();
-            let out_info = TensorInfo::from_dtype_and_shape_scalars(self.dtype, &dims);
+            let out_info = TensorInfo::from_dtype_and_shape_scalars(out_ndt, &dims);
             return Ok(Box::new([(self.output, out_info)].into_iter()));
         }
 
         let first_elem = crate::scalar_info::ScalarInfo::Symbolic(
-            crate::symbolic_scalar::SymbolicScalar::new(self.dtype, symbolic_resolver),
+            crate::symbolic_scalar::SymbolicScalar::new(out_ndt, symbolic_resolver),
         );
         let out_info = TensorInfo::new_from_first_element_and_rank(
             first_elem,

@@ -21,7 +21,7 @@ use crate::tensor_info::TensorInfo;
 ///
 /// Uses the raw bits where possible, falling back to f64 roundtrip for floats.
 /// Precision is preserved for all types that fit in the new format.
-fn legacy_scalar_to_new(old: &crate::migration::numeric_scalar::NumericScalar) -> NumericScalar {
+pub fn legacy_scalar_to_new(old: &crate::migration::numeric_scalar::NumericScalar) -> NumericScalar {
     use crate::migration::numeric_scalar::NumericScalar as OldScalar;
     match old {
         OldScalar::F64(v) => NumericScalar::from_f64(*v),
@@ -503,11 +503,9 @@ impl<'a> NanoLoweringContext<'a> {
         }
     }
 
-    /// Convert a TensorInfo's dtype (legacy DType) to NumericDType.
-    /// Panics on STRING or Packed dtypes (which should not appear in lowering).
+    /// Get the NumericDType from a TensorInfo.
     pub fn ndt(info: &TensorInfo) -> NumericDType {
-        NumericDType::from_legacy(info.dtype())
-            .unwrap_or_else(|| panic!("unsupported dtype for lowering: {:?}", info.dtype()))
+        info.dtype()
     }
 
     /// Classify tensor dims and return layout info.

@@ -112,7 +112,7 @@ impl MilliOp for Shape {
         // Fallback: symbolic output with known rank=1.
         let first_elem =
             crate::scalar_info::ScalarInfo::Symbolic(crate::symbolic_scalar::SymbolicScalar::new(
-                crate::dtype::DType::I64,
+                crate::numeric_dtype::NumericDType::from_legacy(crate::dtype::DType::I64).unwrap(),
                 symbolic_resolver,
             ));
         let out_info = TensorInfo::new_from_first_element_and_rank(

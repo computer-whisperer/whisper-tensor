@@ -1,5 +1,6 @@
 use crate::dtype::DType;
 use crate::migration::numeric_scalar::NumericScalarType;
+use crate::numeric_dtype::NumericDType;
 use serde::{Deserialize, Serialize};
 use std::marker::PhantomData;
 
@@ -25,14 +26,13 @@ where
         }
     }
 
-    pub fn dtype() -> DType {
-        T::DTYPE
-    }
+
 
     pub(crate) fn to_dyn_type(&self) -> SymbolicScalar {
         SymbolicScalar {
             offset: self.offset,
-            dtype: T::DTYPE,
+            dtype: NumericDType::from_legacy(T::DTYPE)
+                .expect("SymbolicScalarTyped type has no NumericDType equivalent"),
             symbol_idx: self.symbol_idx,
         }
     }
@@ -75,12 +75,12 @@ where
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SymbolicScalar {
     offset: i64,
-    dtype: DType,
+    dtype: NumericDType,
     symbol_idx: usize,
 }
 
 impl SymbolicScalar {
-    pub(crate) fn new(dtype: DType, resolver: &mut SymbolicResolver) -> Self {
+    pub(crate) fn new(dtype: NumericDType, resolver: &mut SymbolicResolver) -> Self {
         SymbolicScalar {
             offset: 0,
             dtype,
@@ -88,7 +88,7 @@ impl SymbolicScalar {
         }
     }
 
-    pub(crate) fn dtype(&self) -> DType {
+    pub(crate) fn dtype(&self) -> NumericDType {
         self.dtype
     }
 

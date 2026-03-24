@@ -383,7 +383,7 @@ impl MilliOp for SimpleUnaryOp {
                 use crate::scalar_info::ScalarInfo;
                 use crate::symbolic_scalar::SymbolicScalar;
                 let first_elem = ScalarInfo::Symbolic(SymbolicScalar::new(
-                    crate::dtype::DType::BOOL,
+                    crate::numeric_dtype::NumericDType::Bool,
                     symbolic_resolver,
                 ));
                 TensorInfo::new_from_first_element_and_rank(
