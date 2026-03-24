@@ -253,6 +253,158 @@ pub fn run_case_via_milli_eval(case: &TestCase) -> Result<(), String> {
     Ok(())
 }
 
+/// Run all data sets of a test case through the pool-based nano eval.
+///
+/// Flow: MilliOpGraph → lower_to_nano → pool_eval → compare
+pub fn run_case_via_pool_eval(case: &TestCase) -> Result<(), String> {
+    use crate::nano_graph::lower;
+    use crate::nano_graph::pattern::AtomRange;
+    use crate::nano_graph::pool_eval;
+    use crate::pool::TrackedPool;
+    use crate::tensor_info::TensorInfo;
+
+    for ds in &case.data_sets {
+        // Build TensorInfo for each input (needed by lower).
+        let legacy_inputs: HashMap<GlobalId, LegacyNumericTensor<LegacyDynRank>> = ds
+            .inputs
+            .iter()
+            .map(|(&id, t)| (id, bridge::view_to_legacy(&t.view())))
+            .collect();
+
+        let info_inputs: HashMap<GlobalId, TensorInfo> = legacy_inputs
+            .iter()
+            .map(|(&id, t)| (id, TensorInfo::from(t.clone())))
+            .collect();
+
+        // Lower MilliOpGraph → NanoGraph.
+        let lower_result = lower::lower(&case.graph, &info_inputs)
+            .map_err(|e| format!("{}[{}]: lower failed: {e}", case.name, ds.label))?;
+
+        if !lower_result.unsupported.is_empty() {
+            return Err(format!(
+                "{}[{}]: unsupported ops: {:?}",
+                case.name, ds.label, lower_result.unsupported_details
+            ));
+        }
+
+        // Map input tensors to (AtomId, view) pairs for pool_eval.
+        // Collect (AtomId, tensor) pairs, then create views with stable references.
+        let input_pairs: Vec<_> = ds.inputs.iter().filter_map(|(&ext_id, tensor)| {
+            let internal_id = case.graph.input_map.get(&ext_id)?;
+            let tam = lower_result.tensor_map.get(internal_id)?;
+            Some((tam.base_id, tensor))
+        }).collect();
+
+        let input_views: Vec<_> = input_pairs
+            .iter()
+            .map(|(_, tensor)| tensor.view())
+            .collect();
+
+        let eval_inputs: Vec<_> = input_pairs
+            .iter()
+            .zip(input_views.iter())
+            .map(|((atom_id, _), view)| (*atom_id, view))
+            .collect();
+
+        // Build output AtomRanges from the graph's output ids.
+        let output_ids: Vec<GlobalId> = case.graph.output_ordering
+            .as_ref()
+            .map(|v| v.clone())
+            .unwrap_or_default();
+
+        let mut output_ranges: Vec<AtomRange> = Vec::new();
+        let mut output_id_order: Vec<GlobalId> = Vec::new();
+        for &out_id in &output_ids {
+            if let Some(tam) = lower_result.tensor_map.get(&out_id) {
+                // Collect all groups covering this output's atoms.
+                let mut seen = std::collections::HashSet::new();
+                for i in 0..tam.count {
+                    let atom = tam.atom_id_for_element(i);
+                    if let Some(gi) = lower_result.graph.find_group_idx(atom) {
+                        if seen.insert(gi) {
+                            let g = &lower_result.graph.groups()[gi];
+                            output_ranges.push(AtomRange {
+                                base: g.base_id,
+                                count: g.count,
+                                dtype: g.output_dtype,
+                            });
+                        }
+                    }
+                }
+                output_id_order.push(out_id);
+            }
+        }
+
+        // Run pool_eval.
+        let pool = TrackedPool::new(None); // no budget limit for tests
+        let eval_results = pool_eval::pool_eval(
+            &lower_result.graph,
+            &eval_inputs,
+            &output_ranges,
+            &pool,
+        ).map_err(|e| format!("{}[{}]: pool_eval failed: {e}", case.name, ds.label))?;
+
+        // Compare outputs.
+        for (&expected_id, expected_tensor) in &ds.expected_outputs {
+            // Find the output in eval_results by matching against output_ids.
+            // The eval_results are ordered by output_ranges, which correspond to output_ids.
+            let out_idx = output_ids.iter().position(|&id| id == expected_id)
+                .ok_or_else(|| format!("{}[{}]: output {expected_id} not in output_ids", case.name, ds.label))?;
+
+            // The output tensor from pool_eval is a 1D flat buffer. We need to
+            // reconstruct elements in the original tensor's logical order.
+            if let Some(tam) = lower_result.tensor_map.get(&expected_id) {
+                let numel = tam.count as usize;
+                let expected_dtype = expected_tensor.dtype();
+                let mut actual = NumericTensor::zeros(
+                    expected_tensor.shape().clone(),
+                    expected_dtype,
+                    &POOL,
+                ).unwrap();
+
+                for i in 0..numel {
+                    let atom = tam.atom_id_for_element(i as u64);
+                    // Find this atom in the eval_results
+                    let mut found = false;
+                    for result_tensor in &eval_results {
+                        let result_layout = result_tensor.layout();
+                        if let crate::numeric_tensor::TensorLayout::ElementStrided { shape, .. } = result_layout {
+                            // Check if this result covers the atom we need.
+                            // This is a simplification — for non-segmented outputs,
+                            // the result's base matches the atom range's base.
+                            let result_view = result_tensor.view();
+                            // Find the matching output range
+                            for range in &output_ranges {
+                                let range_base = range.base.0;
+                                let range_end = range_base + range.count;
+                                if atom.0 >= range_base && atom.0 < range_end {
+                                    let offset = (atom.0 - range_base) as usize;
+                                    // Find the result tensor for this range
+                                    if let Some(rt_idx) = output_ranges.iter().position(|r| r.base == range.base) {
+                                        let scalar = eval_results[rt_idx].read_element(offset);
+                                        let cast = scalar.cast_to(expected_dtype);
+                                        actual.write_element(i, cast);
+                                        found = true;
+                                        break;
+                                    }
+                                }
+                            }
+                            if found { break; }
+                        }
+                    }
+                    if !found {
+                        return Err(format!("{}[{}]: atom {} not found in eval results", case.name, ds.label, atom));
+                    }
+                }
+
+                let ctx = format!("{}[{}] pool_eval", case.name, ds.label);
+                assert_tensors_close(&actual.view(), &expected_tensor.view(), &ds.tolerance, &ctx)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -268,6 +420,21 @@ mod tests {
         }
         eprintln!(
             "{} test cases ({total_data_sets} data sets) passed via milli eval",
+            cases.len()
+        );
+    }
+
+    #[test]
+    fn test_all_cases_via_pool_eval() {
+        let cases = build_test_set();
+        assert!(!cases.is_empty(), "test set should not be empty");
+        let mut total_data_sets = 0;
+        for case in &cases {
+            run_case_via_pool_eval(case).unwrap_or_else(|e| panic!("{e}"));
+            total_data_sets += case.data_sets.len();
+        }
+        eprintln!(
+            "{} test cases ({total_data_sets} data sets) passed via pool eval",
             cases.len()
         );
     }
