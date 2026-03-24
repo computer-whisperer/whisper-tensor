@@ -297,6 +297,24 @@ fn eval_unaryop(op: &ScalarUnaryOp, x: &NumericScalar) -> NumericScalar {
         ScalarUnaryOp::Erf => x.erf(),
         ScalarUnaryOp::Sin => x.trig(crate::TrigOp::Sin),
         ScalarUnaryOp::Cos => x.trig(crate::TrigOp::Cos),
+        ScalarUnaryOp::IsInf {
+            detect_positive,
+            detect_negative,
+        } => x.is_inf(*detect_positive, *detect_negative),
+        ScalarUnaryOp::BitwiseNot => x.bitwise_not(),
+        ScalarUnaryOp::Log1p => {
+            let one = crate::migration::numeric_scalar::NumericScalar::F32(1.0).cast_to(x.dtype());
+            one.add(x).ln()
+        }
+        ScalarUnaryOp::Tan => x.trig(crate::TrigOp::Tan),
+        ScalarUnaryOp::Asin => x.trig(crate::TrigOp::Asin),
+        ScalarUnaryOp::Acos => x.trig(crate::TrigOp::Acos),
+        ScalarUnaryOp::Atan => x.trig(crate::TrigOp::Atan),
+        ScalarUnaryOp::Sinh => x.trig(crate::TrigOp::Sinh),
+        ScalarUnaryOp::Cosh => x.trig(crate::TrigOp::Cosh),
+        ScalarUnaryOp::Asinh => x.trig(crate::TrigOp::Asinh),
+        ScalarUnaryOp::Acosh => x.trig(crate::TrigOp::Acosh),
+        ScalarUnaryOp::Atanh => x.trig(crate::TrigOp::Atanh),
     }
 }
 

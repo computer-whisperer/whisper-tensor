@@ -233,10 +233,60 @@ impl SimpleUnaryOp {
                 op: ScalarUnaryOp::Cos,
                 compute_dtype: dt,
             },
-            _ => {
-                ctx.lower_as_boundary_named(self, "SimpleUnary");
-                return;
-            }
+            WhichSimpleUnaryOp::IsInf {
+                detect_positive,
+                detect_negative,
+            } => ScalarOp::Unary {
+                op: ScalarUnaryOp::IsInf {
+                    detect_positive: *detect_positive,
+                    detect_negative: *detect_negative,
+                },
+                compute_dtype: all_infos.get(&in_id).map(|i| i.dtype()).unwrap_or(dt),
+            },
+            WhichSimpleUnaryOp::BitwiseNot => ScalarOp::Unary {
+                op: ScalarUnaryOp::BitwiseNot,
+                compute_dtype: dt,
+            },
+            WhichSimpleUnaryOp::Log1p => ScalarOp::Unary {
+                op: ScalarUnaryOp::Log1p,
+                compute_dtype: dt,
+            },
+            WhichSimpleUnaryOp::Trig(crate::TrigOp::Tan) => ScalarOp::Unary {
+                op: ScalarUnaryOp::Tan,
+                compute_dtype: dt,
+            },
+            WhichSimpleUnaryOp::Trig(crate::TrigOp::Asin) => ScalarOp::Unary {
+                op: ScalarUnaryOp::Asin,
+                compute_dtype: dt,
+            },
+            WhichSimpleUnaryOp::Trig(crate::TrigOp::Acos) => ScalarOp::Unary {
+                op: ScalarUnaryOp::Acos,
+                compute_dtype: dt,
+            },
+            WhichSimpleUnaryOp::Trig(crate::TrigOp::Atan) => ScalarOp::Unary {
+                op: ScalarUnaryOp::Atan,
+                compute_dtype: dt,
+            },
+            WhichSimpleUnaryOp::Trig(crate::TrigOp::Sinh) => ScalarOp::Unary {
+                op: ScalarUnaryOp::Sinh,
+                compute_dtype: dt,
+            },
+            WhichSimpleUnaryOp::Trig(crate::TrigOp::Cosh) => ScalarOp::Unary {
+                op: ScalarUnaryOp::Cosh,
+                compute_dtype: dt,
+            },
+            WhichSimpleUnaryOp::Trig(crate::TrigOp::Asinh) => ScalarOp::Unary {
+                op: ScalarUnaryOp::Asinh,
+                compute_dtype: dt,
+            },
+            WhichSimpleUnaryOp::Trig(crate::TrigOp::Acosh) => ScalarOp::Unary {
+                op: ScalarUnaryOp::Acosh,
+                compute_dtype: dt,
+            },
+            WhichSimpleUnaryOp::Trig(crate::TrigOp::Atanh) => ScalarOp::Unary {
+                op: ScalarUnaryOp::Atanh,
+                compute_dtype: dt,
+            },
         };
 
         let known_dims = in_map.known_dims();

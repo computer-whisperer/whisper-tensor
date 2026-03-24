@@ -492,6 +492,26 @@ fn eval_unaryop(op: &ScalarUnaryOp, x: u64, dtype: NumericDType) -> u64 {
                 // IsNan returns in the compute dtype (typically BOOL after cast)
                 dtype.encode_from_f64(if val.is_nan() { 1.0 } else { 0.0 })
             }
+            ScalarUnaryOp::IsInf {
+                detect_positive,
+                detect_negative,
+            } => {
+                let result = crate::scalar_ops::is_inf::float_is_inf(x, &ft, *detect_positive, *detect_negative);
+                dtype.encode_from_f64(result as f64)
+            }
+            ScalarUnaryOp::BitwiseNot => {
+                panic!("BitwiseNot is not applicable to float types")
+            }
+            ScalarUnaryOp::Log1p => ft.encode_f64((ft.decode_f64(x) + 1.0).ln()),
+            ScalarUnaryOp::Tan => crate::scalar_ops::trig::float_tan(x, &ft),
+            ScalarUnaryOp::Asin => crate::scalar_ops::trig::float_asin(x, &ft),
+            ScalarUnaryOp::Acos => crate::scalar_ops::trig::float_acos(x, &ft),
+            ScalarUnaryOp::Atan => crate::scalar_ops::trig::float_atan(x, &ft),
+            ScalarUnaryOp::Sinh => crate::scalar_ops::trig::float_sinh(x, &ft),
+            ScalarUnaryOp::Cosh => crate::scalar_ops::trig::float_cosh(x, &ft),
+            ScalarUnaryOp::Asinh => crate::scalar_ops::trig::float_asinh(x, &ft),
+            ScalarUnaryOp::Acosh => crate::scalar_ops::trig::float_acosh(x, &ft),
+            ScalarUnaryOp::Atanh => crate::scalar_ops::trig::float_atanh(x, &ft),
         },
         NumericDType::SignedInt(it) => match op {
             ScalarUnaryOp::Neg => crate::scalar_ops::neg::signed_neg_wrapping(x, &it),
@@ -502,6 +522,7 @@ fn eval_unaryop(op: &ScalarUnaryOp, x: u64, dtype: NumericDType) -> u64 {
                 let val = it.decode_signed(x);
                 it.encode_signed(if val != 0 { 0 } else { 1 })
             }
+            ScalarUnaryOp::BitwiseNot => crate::scalar_ops::bitwise::bitwise_not(x, &it),
             _ => panic!("unsupported unary op {op:?} for signed int"),
         },
         NumericDType::UnsignedInt(it) => match op {
@@ -510,6 +531,7 @@ fn eval_unaryop(op: &ScalarUnaryOp, x: u64, dtype: NumericDType) -> u64 {
                 let val = it.decode_unsigned(x);
                 it.encode_unsigned(if val != 0 { 0 } else { 1 })
             }
+            ScalarUnaryOp::BitwiseNot => crate::scalar_ops::bitwise::bitwise_not(x, &it),
             _ => panic!("unsupported unary op {op:?} for unsigned int"),
         },
         NumericDType::Bool => match op {

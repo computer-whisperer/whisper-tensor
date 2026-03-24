@@ -45,6 +45,21 @@ pub enum ScalarUnaryOp {
     Erf,
     Sin,
     Cos,
+    IsInf {
+        detect_positive: bool,
+        detect_negative: bool,
+    },
+    BitwiseNot,
+    Log1p,
+    Tan,
+    Asin,
+    Acos,
+    Atan,
+    Sinh,
+    Cosh,
+    Asinh,
+    Acosh,
+    Atanh,
 }
 
 /// Reduction accumulator kind.

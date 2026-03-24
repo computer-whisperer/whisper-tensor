@@ -47,6 +47,21 @@ pub fn float_tanh(raw: u64, ft: &FloatType) -> u64 {
     ft.encode_f64(ft.decode_f64(raw).tanh())
 }
 
+/// Inverse hyperbolic sine.
+pub fn float_asinh(raw: u64, ft: &FloatType) -> u64 {
+    ft.encode_f64(ft.decode_f64(raw).asinh())
+}
+
+/// Inverse hyperbolic cosine.
+pub fn float_acosh(raw: u64, ft: &FloatType) -> u64 {
+    ft.encode_f64(ft.decode_f64(raw).acosh())
+}
+
+/// Inverse hyperbolic tangent.
+pub fn float_atanh(raw: u64, ft: &FloatType) -> u64 {
+    ft.encode_f64(ft.decode_f64(raw).atanh())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

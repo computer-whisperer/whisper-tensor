@@ -3051,6 +3051,10 @@ fn emit_unop(
             let call = builder.ins().call(func_ref, &[x]);
             builder.inst_results(call)[0]
         }
+        // Float ops not yet supported by the JIT.
+        (_, ReprKind::Float) => {
+            return Err(format!("float {:?} not implemented in JIT", op));
+        }
         // Integer transcendentals — not meaningful, but cast through f32 if needed.
         (_, ReprKind::Int) => {
             return Err(format!("integer {:?} not implemented", op));

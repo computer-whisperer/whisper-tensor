@@ -43,6 +43,14 @@ pub fn build_cases() -> Vec<TestCase> {
         erf_case(),
         sin_case(),
         cos_case(),
+        is_inf_case(),
+        log1p_case(),
+        tan_case(),
+        asin_case(),
+        acos_case(),
+        atan_case(),
+        sinh_case(),
+        cosh_case(),
     ]
 }
 
@@ -745,6 +753,191 @@ fn cos_case() -> TestCase {
                 "f32", &ids,
                 tensor_f32(&[0.0, std::f32::consts::FRAC_PI_2, std::f32::consts::PI]),
                 tensor_f32(&[1.0, 0.0, -1.0]),
+                Tolerance { atol: 1e-5, rtol: 1e-5 },
+            ),
+        ],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// IsInf
+// ---------------------------------------------------------------------------
+
+fn is_inf_case() -> TestCase {
+    let (graph, ids) = build_unary_graph(|g, input, rng| {
+        SimpleUnaryOp::is_inf(g, input, true, true, rng)
+    });
+
+    TestCase {
+        name: "is_inf".to_string(),
+        graph,
+        data_sets: vec![
+            unary_data_set(
+                "f32", &ids,
+                tensor_f32(&[1.0, f32::INFINITY, f32::NEG_INFINITY, f32::NAN, 0.0]),
+                tensor_bool(&[false, true, true, false, false]),
+                Tolerance::for_dtype(NumericDType::BOOL),
+            ),
+        ],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Log1p
+// ---------------------------------------------------------------------------
+
+fn log1p_case() -> TestCase {
+    let (graph, ids) = build_unary_graph(SimpleUnaryOp::log1p);
+
+    TestCase {
+        name: "log1p".to_string(),
+        graph,
+        data_sets: vec![
+            unary_data_set(
+                "f32", &ids,
+                tensor_f32(&[0.0, 1.0, -0.5]),
+                // ln(1+0)=0, ln(1+1)=ln(2), ln(1-0.5)=ln(0.5)
+                tensor_f32(&[0.0, std::f32::consts::LN_2, -(std::f32::consts::LN_2)]),
+                Tolerance { atol: 1e-5, rtol: 1e-5 },
+            ),
+        ],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tan
+// ---------------------------------------------------------------------------
+
+fn tan_case() -> TestCase {
+    let (graph, ids) = build_unary_graph(|g, input, rng| {
+        SimpleUnaryOp::trig(g, input, crate::TrigOp::Tan, rng)
+    });
+
+    TestCase {
+        name: "tan".to_string(),
+        graph,
+        data_sets: vec![
+            unary_data_set(
+                "f32", &ids,
+                tensor_f32(&[0.0, std::f32::consts::FRAC_PI_4]),
+                tensor_f32(&[0.0, 1.0]),
+                Tolerance { atol: 1e-5, rtol: 1e-5 },
+            ),
+        ],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Asin
+// ---------------------------------------------------------------------------
+
+fn asin_case() -> TestCase {
+    let (graph, ids) = build_unary_graph(|g, input, rng| {
+        SimpleUnaryOp::trig(g, input, crate::TrigOp::Asin, rng)
+    });
+
+    TestCase {
+        name: "asin".to_string(),
+        graph,
+        data_sets: vec![
+            unary_data_set(
+                "f32", &ids,
+                tensor_f32(&[0.0, 1.0]),
+                tensor_f32(&[0.0, std::f32::consts::FRAC_PI_2]),
+                Tolerance { atol: 1e-5, rtol: 1e-5 },
+            ),
+        ],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Acos
+// ---------------------------------------------------------------------------
+
+fn acos_case() -> TestCase {
+    let (graph, ids) = build_unary_graph(|g, input, rng| {
+        SimpleUnaryOp::trig(g, input, crate::TrigOp::Acos, rng)
+    });
+
+    TestCase {
+        name: "acos".to_string(),
+        graph,
+        data_sets: vec![
+            unary_data_set(
+                "f32", &ids,
+                tensor_f32(&[1.0, 0.0]),
+                tensor_f32(&[0.0, std::f32::consts::FRAC_PI_2]),
+                Tolerance { atol: 1e-5, rtol: 1e-5 },
+            ),
+        ],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Atan
+// ---------------------------------------------------------------------------
+
+fn atan_case() -> TestCase {
+    let (graph, ids) = build_unary_graph(|g, input, rng| {
+        SimpleUnaryOp::trig(g, input, crate::TrigOp::Atan, rng)
+    });
+
+    TestCase {
+        name: "atan".to_string(),
+        graph,
+        data_sets: vec![
+            unary_data_set(
+                "f32", &ids,
+                tensor_f32(&[0.0, 1.0]),
+                tensor_f32(&[0.0, std::f32::consts::FRAC_PI_4]),
+                Tolerance { atol: 1e-5, rtol: 1e-5 },
+            ),
+        ],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Sinh
+// ---------------------------------------------------------------------------
+
+fn sinh_case() -> TestCase {
+    let (graph, ids) = build_unary_graph(|g, input, rng| {
+        SimpleUnaryOp::trig(g, input, crate::TrigOp::Sinh, rng)
+    });
+
+    TestCase {
+        name: "sinh".to_string(),
+        graph,
+        data_sets: vec![
+            unary_data_set(
+                "f32", &ids,
+                tensor_f32(&[0.0, 1.0]),
+                // sinh(0)=0, sinh(1)≈1.1752012
+                tensor_f32(&[0.0, 1.1752012]),
+                Tolerance { atol: 1e-5, rtol: 1e-5 },
+            ),
+        ],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Cosh
+// ---------------------------------------------------------------------------
+
+fn cosh_case() -> TestCase {
+    let (graph, ids) = build_unary_graph(|g, input, rng| {
+        SimpleUnaryOp::trig(g, input, crate::TrigOp::Cosh, rng)
+    });
+
+    TestCase {
+        name: "cosh".to_string(),
+        graph,
+        data_sets: vec![
+            unary_data_set(
+                "f32", &ids,
+                tensor_f32(&[0.0, 1.0]),
+                // cosh(0)=1, cosh(1)≈1.5430806
+                tensor_f32(&[1.0, 1.5430806]),
                 Tolerance { atol: 1e-5, rtol: 1e-5 },
             ),
         ],
