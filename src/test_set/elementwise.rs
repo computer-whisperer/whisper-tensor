@@ -16,7 +16,7 @@ use crate::milli_graph::ops::unary::SimpleUnaryOp;
 use crate::numeric_dtype::NumericDType;
 
 use super::{TestCase, TestDataSet, TestTensor, Tolerance};
-use super::{tensor_f32, tensor_bf16, tensor_f16};
+use super::{tensor_f32, tensor_bf16, tensor_f16, tensor_bool};
 
 pub fn build_cases() -> Vec<TestCase> {
     vec![
@@ -32,6 +32,11 @@ pub fn build_cases() -> Vec<TestCase> {
         floor_case(),
         ceil_case(),
         reciprocal_case(),
+        max_case(),
+        min_case(),
+        equal_case(),
+        greater_case(),
+        less_case(),
     ]
 }
 
@@ -439,6 +444,169 @@ fn reciprocal_case() -> TestCase {
                 tensor_bf16(&[bf16::from_f32(2.0), bf16::from_f32(0.5), bf16::from_f32(-1.0)]),
                 tensor_bf16(&[bf16::from_f32(0.5), bf16::from_f32(2.0), bf16::from_f32(-1.0)]),
                 Tolerance::for_dtype(NumericDType::BF16),
+            ),
+        ],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Max (binary)
+// ---------------------------------------------------------------------------
+
+fn max_case() -> TestCase {
+    let (graph, ids) = build_binary_graph(SimpleBinary::max);
+
+    TestCase {
+        name: "max".to_string(),
+        graph,
+        data_sets: vec![
+            binary_data_set(
+                "f32_mixed", &ids,
+                tensor_f32(&[1.0, 5.0, -3.0, 0.0, 7.0]),
+                tensor_f32(&[2.0, 5.0, -1.0, 0.0, -7.0]),
+                tensor_f32(&[2.0, 5.0, -1.0, 0.0, 7.0]),
+                Tolerance::for_dtype(NumericDType::F32),
+            ),
+            binary_data_set(
+                "f32_negative", &ids,
+                tensor_f32(&[-10.0, -1.0, -100.0]),
+                tensor_f32(&[-5.0, -2.0, -50.0]),
+                tensor_f32(&[-5.0, -1.0, -50.0]),
+                Tolerance::for_dtype(NumericDType::F32),
+            ),
+            binary_data_set(
+                "bf16", &ids,
+                tensor_bf16(&[bf16::from_f32(1.0), bf16::from_f32(-3.0), bf16::from_f32(0.0)]),
+                tensor_bf16(&[bf16::from_f32(2.0), bf16::from_f32(-1.0), bf16::from_f32(0.0)]),
+                tensor_bf16(&[bf16::from_f32(2.0), bf16::from_f32(-1.0), bf16::from_f32(0.0)]),
+                Tolerance::for_dtype(NumericDType::BF16),
+            ),
+        ],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Min (binary)
+// ---------------------------------------------------------------------------
+
+fn min_case() -> TestCase {
+    let (graph, ids) = build_binary_graph(SimpleBinary::min);
+
+    TestCase {
+        name: "min".to_string(),
+        graph,
+        data_sets: vec![
+            binary_data_set(
+                "f32_mixed", &ids,
+                tensor_f32(&[1.0, 5.0, -3.0, 0.0, 7.0]),
+                tensor_f32(&[2.0, 5.0, -1.0, 0.0, -7.0]),
+                tensor_f32(&[1.0, 5.0, -3.0, 0.0, -7.0]),
+                Tolerance::for_dtype(NumericDType::F32),
+            ),
+            binary_data_set(
+                "f32_positive", &ids,
+                tensor_f32(&[10.0, 1.0, 100.0]),
+                tensor_f32(&[5.0, 2.0, 50.0]),
+                tensor_f32(&[5.0, 1.0, 50.0]),
+                Tolerance::for_dtype(NumericDType::F32),
+            ),
+            binary_data_set(
+                "bf16", &ids,
+                tensor_bf16(&[bf16::from_f32(1.0), bf16::from_f32(-3.0), bf16::from_f32(5.0)]),
+                tensor_bf16(&[bf16::from_f32(2.0), bf16::from_f32(-1.0), bf16::from_f32(3.0)]),
+                tensor_bf16(&[bf16::from_f32(1.0), bf16::from_f32(-3.0), bf16::from_f32(3.0)]),
+                Tolerance::for_dtype(NumericDType::BF16),
+            ),
+        ],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Equal (comparison → BOOL output)
+// ---------------------------------------------------------------------------
+
+fn equal_case() -> TestCase {
+    let (graph, ids) = build_binary_graph(SimpleBinary::equal);
+
+    TestCase {
+        name: "equal".to_string(),
+        graph,
+        data_sets: vec![
+            binary_data_set(
+                "f32_mixed", &ids,
+                tensor_f32(&[1.0, 2.0, 3.0, 0.0, -1.0]),
+                tensor_f32(&[1.0, 3.0, 3.0, -0.0, -1.0]),
+                // 1==1→T, 2==3→F, 3==3→T, 0==-0→T, -1==-1→T
+                tensor_bool(&[true, false, true, true, true]),
+                Tolerance::for_dtype(NumericDType::BOOL),
+            ),
+            binary_data_set(
+                "f32_all_different", &ids,
+                tensor_f32(&[1.0, 2.0, 3.0]),
+                tensor_f32(&[4.0, 5.0, 6.0]),
+                tensor_bool(&[false, false, false]),
+                Tolerance::for_dtype(NumericDType::BOOL),
+            ),
+        ],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Greater (comparison → BOOL output)
+// ---------------------------------------------------------------------------
+
+fn greater_case() -> TestCase {
+    let (graph, ids) = build_binary_graph(SimpleBinary::greater);
+
+    TestCase {
+        name: "greater".to_string(),
+        graph,
+        data_sets: vec![
+            binary_data_set(
+                "f32_mixed", &ids,
+                tensor_f32(&[5.0, 2.0, 3.0, 0.0, -1.0]),
+                tensor_f32(&[1.0, 3.0, 3.0, 0.0, -2.0]),
+                // 5>1→T, 2>3→F, 3>3→F, 0>0→F, -1>-2→T
+                tensor_bool(&[true, false, false, false, true]),
+                Tolerance::for_dtype(NumericDType::BOOL),
+            ),
+            binary_data_set(
+                "f32_negative", &ids,
+                tensor_f32(&[-1.0, -5.0, 0.0]),
+                tensor_f32(&[-2.0, -3.0, 0.0]),
+                // -1>-2→T, -5>-3→F, 0>0→F
+                tensor_bool(&[true, false, false]),
+                Tolerance::for_dtype(NumericDType::BOOL),
+            ),
+        ],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Less (comparison → BOOL output)
+// ---------------------------------------------------------------------------
+
+fn less_case() -> TestCase {
+    let (graph, ids) = build_binary_graph(SimpleBinary::less);
+
+    TestCase {
+        name: "less".to_string(),
+        graph,
+        data_sets: vec![
+            binary_data_set(
+                "f32_mixed", &ids,
+                tensor_f32(&[1.0, 3.0, 3.0, 0.0, -2.0]),
+                tensor_f32(&[5.0, 2.0, 3.0, 0.0, -1.0]),
+                // 1<5→T, 3<2→F, 3<3→F, 0<0→F, -2<-1→T
+                tensor_bool(&[true, false, false, false, true]),
+                Tolerance::for_dtype(NumericDType::BOOL),
+            ),
+            binary_data_set(
+                "f32_all_less", &ids,
+                tensor_f32(&[1.0, 2.0, 3.0]),
+                tensor_f32(&[4.0, 5.0, 6.0]),
+                tensor_bool(&[true, true, true]),
+                Tolerance::for_dtype(NumericDType::BOOL),
             ),
         ],
     }

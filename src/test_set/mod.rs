@@ -7,8 +7,10 @@
 //! Behind `#[cfg(feature = "tch")]`, data sets can be validated against PyTorch
 //! via the tch crate as an independent oracle.
 
+pub mod cast;
 pub mod elementwise;
 pub mod matmul;
+pub mod reduce;
 
 use std::collections::HashMap;
 
@@ -157,6 +159,21 @@ pub fn tensor_i64(values: &[i64]) -> TestTensor {
     tensor_i64_shaped(vec![values.len() as u64], values)
 }
 
+/// Create a 1D test tensor of BOOL values.
+pub fn tensor_bool(values: &[bool]) -> TestTensor {
+    tensor_bool_shaped(vec![values.len() as u64], values)
+}
+
+/// Create a test tensor of BOOL values with an explicit shape.
+pub fn tensor_bool_shaped(shape: Vec<u64>, values: &[bool]) -> TestTensor {
+    assert_eq!(shape.iter().product::<u64>() as usize, values.len());
+    let mut t = NumericTensor::zeros(shape, NumericDType::BOOL, &POOL).unwrap();
+    for (i, &v) in values.iter().enumerate() {
+        t.write_element(i, NumericScalar::from_bool(v));
+    }
+    t
+}
+
 // ---------------------------------------------------------------------------
 // Comparison
 // ---------------------------------------------------------------------------
@@ -213,6 +230,8 @@ pub fn build_test_set() -> Vec<TestCase> {
     let mut cases = Vec::new();
     cases.extend(elementwise::build_cases());
     cases.extend(matmul::build_cases());
+    cases.extend(cast::build_cases());
+    cases.extend(reduce::build_cases());
     cases
 }
 
