@@ -515,18 +515,6 @@ impl<'a, R: Rank, P: Pool + 'a> NumericTensor<'a, R, P> {
     }
 }
 
-impl<'a, R: Rank, P: Pool + 'a> Clone for NumericTensor<'a, R, P>
-where
-    P::Buffer<'a>: Clone,
-{
-    fn clone(&self) -> Self {
-        Self {
-            buffer: self.buffer.clone(),
-            layout: self.layout.clone(),
-        }
-    }
-}
-
 impl<'a, R: Rank, P: Pool + 'a> fmt::Debug for NumericTensor<'a, R, P> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("NumericTensor")

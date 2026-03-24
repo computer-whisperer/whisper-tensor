@@ -117,7 +117,7 @@ impl MilliOp for ReduceSum {
         let axes_concrete = self.axes.map(|ax_id| {
             known_inputs
                 .get(&ax_id)
-                .and_then(|info| info.as_numeric())
+                .and_then(|info| info.as_numeric().cloned())
         });
         if data_info.as_numeric().is_some() {
             let axes_ok = match axes_concrete {
