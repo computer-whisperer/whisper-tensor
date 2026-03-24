@@ -55,10 +55,6 @@ pub fn pool_eval<'p, P: Pool + 'p>(
     for &(base, view) in inputs {
         if let Some((ti, offset)) = graph.find_input_idx(base) {
             let buf = &mut input_buffers[ti];
-            let layout = TensorLayout::<DynRank>::row_major(
-                vec![view.numel() as u64],
-                buf.dtype,
-            );
             for i in 0..view.numel() {
                 let scalar = view.read_element(i);
                 let cast = scalar.cast_to(buf.dtype);
@@ -385,23 +381,23 @@ fn eval_binop(op: &ScalarBinOp, a: u64, b: u64, dtype: NumericDType) -> u64 {
             ScalarBinOp::Min => crate::scalar_ops::min::float_min(a, b, &ft),
             ScalarBinOp::Mod => crate::scalar_ops::modulo::float_mod(a, b, &ft),
             ScalarBinOp::Pow => crate::scalar_ops::pow::float_pow(a, b, &ft),
-            ScalarBinOp::Equal => bool_to_raw(crate::scalar_ops::cmp::float_equal(a, b, &ft)),
-            ScalarBinOp::Greater => bool_to_raw(crate::scalar_ops::cmp::float_greater(a, b, &ft)),
+            ScalarBinOp::Equal => bool_to_dtype_raw(crate::scalar_ops::cmp::float_equal(a, b, &ft), dtype),
+            ScalarBinOp::Greater => bool_to_dtype_raw(crate::scalar_ops::cmp::float_greater(a, b, &ft), dtype),
             ScalarBinOp::GreaterOrEqual => {
-                bool_to_raw(crate::scalar_ops::cmp::float_greater_or_equal(a, b, &ft))
+                bool_to_dtype_raw(crate::scalar_ops::cmp::float_greater_or_equal(a, b, &ft), dtype)
             }
-            ScalarBinOp::Less => bool_to_raw(crate::scalar_ops::cmp::float_less(a, b, &ft)),
+            ScalarBinOp::Less => bool_to_dtype_raw(crate::scalar_ops::cmp::float_less(a, b, &ft), dtype),
             ScalarBinOp::LessOrEqual => {
-                bool_to_raw(crate::scalar_ops::cmp::float_less_or_equal(a, b, &ft))
+                bool_to_dtype_raw(crate::scalar_ops::cmp::float_less_or_equal(a, b, &ft), dtype)
             }
             ScalarBinOp::And => {
-                bool_to_raw(crate::scalar_ops::logical::logical_and(a, b))
+                bool_to_dtype_raw(crate::scalar_ops::logical::logical_and(a, b), dtype)
             }
             ScalarBinOp::Or => {
-                bool_to_raw(crate::scalar_ops::logical::logical_or(a, b))
+                bool_to_dtype_raw(crate::scalar_ops::logical::logical_or(a, b), dtype)
             }
             ScalarBinOp::Xor => {
-                bool_to_raw(crate::scalar_ops::logical::logical_xor(a, b))
+                bool_to_dtype_raw(crate::scalar_ops::logical::logical_xor(a, b), dtype)
             }
         },
         NumericDType::SignedInt(it) => match op {
@@ -413,20 +409,20 @@ fn eval_binop(op: &ScalarBinOp, a: u64, b: u64, dtype: NumericDType) -> u64 {
             ScalarBinOp::Min => crate::scalar_ops::min::signed_min(a, b, &it),
             ScalarBinOp::Mod => crate::scalar_ops::modulo::signed_mod(a, b, &it),
             ScalarBinOp::Pow => crate::scalar_ops::pow::signed_pow(a, b, &it),
-            ScalarBinOp::Equal => bool_to_raw(crate::scalar_ops::cmp::signed_equal(a, b, &it)),
+            ScalarBinOp::Equal => bool_to_dtype_raw(crate::scalar_ops::cmp::signed_equal(a, b, &it), dtype),
             ScalarBinOp::Greater => {
-                bool_to_raw(crate::scalar_ops::cmp::signed_greater(a, b, &it))
+                bool_to_dtype_raw(crate::scalar_ops::cmp::signed_greater(a, b, &it), dtype)
             }
             ScalarBinOp::GreaterOrEqual => {
-                bool_to_raw(crate::scalar_ops::cmp::signed_greater_or_equal(a, b, &it))
+                bool_to_dtype_raw(crate::scalar_ops::cmp::signed_greater_or_equal(a, b, &it), dtype)
             }
-            ScalarBinOp::Less => bool_to_raw(crate::scalar_ops::cmp::signed_less(a, b, &it)),
+            ScalarBinOp::Less => bool_to_dtype_raw(crate::scalar_ops::cmp::signed_less(a, b, &it), dtype),
             ScalarBinOp::LessOrEqual => {
-                bool_to_raw(crate::scalar_ops::cmp::signed_less_or_equal(a, b, &it))
+                bool_to_dtype_raw(crate::scalar_ops::cmp::signed_less_or_equal(a, b, &it), dtype)
             }
-            ScalarBinOp::And => bool_to_raw(crate::scalar_ops::logical::logical_and(a, b)),
-            ScalarBinOp::Or => bool_to_raw(crate::scalar_ops::logical::logical_or(a, b)),
-            ScalarBinOp::Xor => bool_to_raw(crate::scalar_ops::logical::logical_xor(a, b)),
+            ScalarBinOp::And => bool_to_dtype_raw(crate::scalar_ops::logical::logical_and(a, b), dtype),
+            ScalarBinOp::Or => bool_to_dtype_raw(crate::scalar_ops::logical::logical_or(a, b), dtype),
+            ScalarBinOp::Xor => bool_to_dtype_raw(crate::scalar_ops::logical::logical_xor(a, b), dtype),
         },
         NumericDType::UnsignedInt(it) => match op {
             ScalarBinOp::Add => crate::scalar_ops::add::unsigned_add_wrapping(a, b, &it),
@@ -438,31 +434,31 @@ fn eval_binop(op: &ScalarBinOp, a: u64, b: u64, dtype: NumericDType) -> u64 {
             ScalarBinOp::Mod => crate::scalar_ops::modulo::unsigned_mod(a, b, &it),
             ScalarBinOp::Pow => crate::scalar_ops::pow::unsigned_pow(a, b, &it),
             ScalarBinOp::Equal => {
-                bool_to_raw(crate::scalar_ops::cmp::unsigned_equal(a, b, &it))
+                bool_to_dtype_raw(crate::scalar_ops::cmp::unsigned_equal(a, b, &it), dtype)
             }
             ScalarBinOp::Greater => {
-                bool_to_raw(crate::scalar_ops::cmp::unsigned_greater(a, b, &it))
+                bool_to_dtype_raw(crate::scalar_ops::cmp::unsigned_greater(a, b, &it), dtype)
             }
             ScalarBinOp::GreaterOrEqual => {
-                bool_to_raw(crate::scalar_ops::cmp::unsigned_greater_or_equal(a, b, &it))
+                bool_to_dtype_raw(crate::scalar_ops::cmp::unsigned_greater_or_equal(a, b, &it), dtype)
             }
             ScalarBinOp::Less => {
-                bool_to_raw(crate::scalar_ops::cmp::unsigned_less(a, b, &it))
+                bool_to_dtype_raw(crate::scalar_ops::cmp::unsigned_less(a, b, &it), dtype)
             }
             ScalarBinOp::LessOrEqual => {
-                bool_to_raw(crate::scalar_ops::cmp::unsigned_less_or_equal(a, b, &it))
+                bool_to_dtype_raw(crate::scalar_ops::cmp::unsigned_less_or_equal(a, b, &it), dtype)
             }
-            ScalarBinOp::And => bool_to_raw(crate::scalar_ops::logical::logical_and(a, b)),
-            ScalarBinOp::Or => bool_to_raw(crate::scalar_ops::logical::logical_or(a, b)),
-            ScalarBinOp::Xor => bool_to_raw(crate::scalar_ops::logical::logical_xor(a, b)),
+            ScalarBinOp::And => bool_to_dtype_raw(crate::scalar_ops::logical::logical_and(a, b), dtype),
+            ScalarBinOp::Or => bool_to_dtype_raw(crate::scalar_ops::logical::logical_or(a, b), dtype),
+            ScalarBinOp::Xor => bool_to_dtype_raw(crate::scalar_ops::logical::logical_xor(a, b), dtype),
         },
         NumericDType::Bool => {
             // Comparisons and logical ops on Bool
             match op {
-                ScalarBinOp::Equal => if a == b { 1 } else { 0 },
-                ScalarBinOp::And => bool_to_raw(crate::scalar_ops::logical::logical_and(a, b)),
-                ScalarBinOp::Or => bool_to_raw(crate::scalar_ops::logical::logical_or(a, b)),
-                ScalarBinOp::Xor => bool_to_raw(crate::scalar_ops::logical::logical_xor(a, b)),
+                ScalarBinOp::Equal => bool_to_dtype_raw(if a == b { 1 } else { 0 }, dtype),
+                ScalarBinOp::And => bool_to_dtype_raw(crate::scalar_ops::logical::logical_and(a, b), dtype),
+                ScalarBinOp::Or => bool_to_dtype_raw(crate::scalar_ops::logical::logical_or(a, b), dtype),
+                ScalarBinOp::Xor => bool_to_dtype_raw(crate::scalar_ops::logical::logical_xor(a, b), dtype),
                 _ => panic!("unsupported binop {op:?} for Bool"),
             }
         }
@@ -497,7 +493,10 @@ fn eval_unaryop(op: &ScalarUnaryOp, x: u64, dtype: NumericDType) -> u64 {
     }
 }
 
-/// Pass through a comparison/logical result (already 0 or 1 as u64).
-fn bool_to_raw(val: u64) -> u64 {
-    val
+/// Encode a boolean comparison/logical result as raw bits in the given dtype.
+/// The old eval returns F32(1.0)/F32(0.0) for comparisons. We match that by
+/// encoding 1.0 or 0.0 in the compute dtype.
+fn bool_to_dtype_raw(val: u64, dtype: NumericDType) -> u64 {
+    let f = if val != 0 { 1.0 } else { 0.0 };
+    dtype.encode_from_f64(f)
 }
