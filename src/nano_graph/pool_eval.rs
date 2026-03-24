@@ -477,18 +477,46 @@ fn eval_unaryop(op: &ScalarUnaryOp, x: u64, dtype: NumericDType) -> u64 {
             ScalarUnaryOp::Tanh => crate::scalar_ops::trig::float_tanh(x, &ft),
             ScalarUnaryOp::Floor => crate::scalar_ops::floor::float_floor(x, &ft),
             ScalarUnaryOp::Ceil => crate::scalar_ops::ceil::float_ceil(x, &ft),
+            ScalarUnaryOp::Round => crate::scalar_ops::round::float_round(x, &ft),
+            ScalarUnaryOp::Sign => crate::scalar_ops::sign::float_sign(x, &ft),
+            ScalarUnaryOp::Erf => crate::scalar_ops::erf::float_erf(x, &ft),
+            ScalarUnaryOp::Sin => crate::scalar_ops::trig::float_sin(x, &ft),
+            ScalarUnaryOp::Cos => crate::scalar_ops::trig::float_cos(x, &ft),
+            ScalarUnaryOp::Not => {
+                // Logical NOT for float: nonzero → 0.0, zero → 1.0
+                let val = ft.decode_f64(x);
+                ft.encode_f64(if val != 0.0 && !val.is_nan() { 0.0 } else { 1.0 })
+            }
+            ScalarUnaryOp::IsNan => {
+                let val = ft.decode_f64(x);
+                // IsNan returns in the compute dtype (typically BOOL after cast)
+                dtype.encode_from_f64(if val.is_nan() { 1.0 } else { 0.0 })
+            }
         },
         NumericDType::SignedInt(it) => match op {
             ScalarUnaryOp::Neg => crate::scalar_ops::neg::signed_neg_wrapping(x, &it),
             ScalarUnaryOp::Abs => crate::scalar_ops::abs::signed_abs_wrapping(x, &it),
+            ScalarUnaryOp::Sign => crate::scalar_ops::sign::signed_sign(x, &it),
+            ScalarUnaryOp::Not => {
+                // Logical NOT for int: nonzero → 0, zero → 1
+                let val = it.decode_signed(x);
+                it.encode_signed(if val != 0 { 0 } else { 1 })
+            }
             _ => panic!("unsupported unary op {op:?} for signed int"),
         },
-        NumericDType::UnsignedInt(_) => match op {
-            ScalarUnaryOp::Abs => x, // abs of unsigned is identity
+        NumericDType::UnsignedInt(it) => match op {
+            ScalarUnaryOp::Abs => x,
+            ScalarUnaryOp::Not => {
+                let val = it.decode_unsigned(x);
+                it.encode_unsigned(if val != 0 { 0 } else { 1 })
+            }
             _ => panic!("unsupported unary op {op:?} for unsigned int"),
         },
-        NumericDType::Bool => {
-            panic!("unsupported unary op {op:?} for Bool");
+        NumericDType::Bool => match op {
+            ScalarUnaryOp::Not => {
+                dtype.encode_from_f64(if x != 0 { 0.0 } else { 1.0 })
+            }
+            _ => panic!("unsupported unary op {op:?} for Bool"),
         }
     }
 }

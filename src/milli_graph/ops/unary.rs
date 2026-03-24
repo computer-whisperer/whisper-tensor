@@ -205,6 +205,34 @@ impl SimpleUnaryOp {
                 op: ScalarUnaryOp::Ceil,
                 compute_dtype: dt,
             },
+            WhichSimpleUnaryOp::Round => ScalarOp::Unary {
+                op: ScalarUnaryOp::Round,
+                compute_dtype: dt,
+            },
+            WhichSimpleUnaryOp::Sign => ScalarOp::Unary {
+                op: ScalarUnaryOp::Sign,
+                compute_dtype: dt,
+            },
+            WhichSimpleUnaryOp::Not => ScalarOp::Unary {
+                op: ScalarUnaryOp::Not,
+                compute_dtype: dt,
+            },
+            WhichSimpleUnaryOp::IsNan => ScalarOp::Unary {
+                op: ScalarUnaryOp::IsNan,
+                compute_dtype: all_infos.get(&in_id).map(|i| i.dtype()).unwrap_or(dt),
+            },
+            WhichSimpleUnaryOp::Erf => ScalarOp::Unary {
+                op: ScalarUnaryOp::Erf,
+                compute_dtype: dt,
+            },
+            WhichSimpleUnaryOp::Trig(crate::TrigOp::Sin) => ScalarOp::Unary {
+                op: ScalarUnaryOp::Sin,
+                compute_dtype: dt,
+            },
+            WhichSimpleUnaryOp::Trig(crate::TrigOp::Cos) => ScalarOp::Unary {
+                op: ScalarUnaryOp::Cos,
+                compute_dtype: dt,
+            },
             _ => {
                 ctx.lower_as_boundary_named(self, "SimpleUnary");
                 return;

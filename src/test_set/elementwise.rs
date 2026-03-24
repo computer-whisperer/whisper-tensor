@@ -37,6 +37,12 @@ pub fn build_cases() -> Vec<TestCase> {
         equal_case(),
         greater_case(),
         less_case(),
+        round_case(),
+        sign_case(),
+        is_nan_case(),
+        erf_case(),
+        sin_case(),
+        cos_case(),
     ]
 }
 
@@ -607,6 +613,139 @@ fn less_case() -> TestCase {
                 tensor_f32(&[4.0, 5.0, 6.0]),
                 tensor_bool(&[true, true, true]),
                 Tolerance::for_dtype(NumericDType::BOOL),
+            ),
+        ],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Round
+// ---------------------------------------------------------------------------
+
+fn round_case() -> TestCase {
+    let (graph, ids) = build_unary_graph(SimpleUnaryOp::round);
+
+    TestCase {
+        name: "round".to_string(),
+        graph,
+        data_sets: vec![
+            unary_data_set(
+                "f32", &ids,
+                tensor_f32(&[3.5, 2.5, -1.7, 0.0, 4.5, -0.5]),
+                // ONNX uses banker's rounding (round half to even):
+                // 3.5→4.0, 2.5→2.0, -1.7→-2.0, 0.0→0.0, 4.5→4.0, -0.5→0.0
+                tensor_f32(&[4.0, 2.0, -2.0, 0.0, 4.0, 0.0]),
+                Tolerance::for_dtype(NumericDType::F32),
+            ),
+        ],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Sign
+// ---------------------------------------------------------------------------
+
+fn sign_case() -> TestCase {
+    let (graph, ids) = build_unary_graph(SimpleUnaryOp::sign);
+
+    TestCase {
+        name: "sign".to_string(),
+        graph,
+        data_sets: vec![
+            unary_data_set(
+                "f32", &ids,
+                tensor_f32(&[3.14, -2.0, 0.0, -0.0, f32::INFINITY, f32::NEG_INFINITY]),
+                tensor_f32(&[1.0, -1.0, 0.0, 0.0, 1.0, -1.0]),
+                Tolerance::for_dtype(NumericDType::F32),
+            ),
+        ],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// IsNan
+// ---------------------------------------------------------------------------
+
+fn is_nan_case() -> TestCase {
+    let (graph, ids) = build_unary_graph(SimpleUnaryOp::is_nan);
+
+    TestCase {
+        name: "is_nan".to_string(),
+        graph,
+        data_sets: vec![
+            unary_data_set(
+                "f32", &ids,
+                tensor_f32(&[1.0, f32::NAN, 0.0, f32::INFINITY, f32::NAN]),
+                tensor_bool(&[false, true, false, false, true]),
+                Tolerance::for_dtype(NumericDType::BOOL),
+            ),
+        ],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Erf
+// ---------------------------------------------------------------------------
+
+fn erf_case() -> TestCase {
+    let (graph, ids) = build_unary_graph(SimpleUnaryOp::erf);
+
+    TestCase {
+        name: "erf".to_string(),
+        graph,
+        data_sets: vec![
+            unary_data_set(
+                "f32", &ids,
+                tensor_f32(&[0.0, 1.0, -1.0, 3.0]),
+                // erf(0)=0, erf(1)≈0.8427, erf(-1)≈-0.8427, erf(3)≈0.9999
+                tensor_f32(&[0.0, 0.8427008, -0.8427008, 0.9999779]),
+                Tolerance { atol: 2e-4, rtol: 1e-3 },
+            ),
+        ],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Sin
+// ---------------------------------------------------------------------------
+
+fn sin_case() -> TestCase {
+    let (graph, ids) = build_unary_graph(|g, input, rng| {
+        SimpleUnaryOp::trig(g, input, crate::TrigOp::Sin, rng)
+    });
+
+    TestCase {
+        name: "sin".to_string(),
+        graph,
+        data_sets: vec![
+            unary_data_set(
+                "f32", &ids,
+                tensor_f32(&[0.0, std::f32::consts::FRAC_PI_2, std::f32::consts::PI, -std::f32::consts::FRAC_PI_2]),
+                tensor_f32(&[0.0, 1.0, 0.0, -1.0]),
+                Tolerance { atol: 1e-5, rtol: 1e-5 },
+            ),
+        ],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Cos
+// ---------------------------------------------------------------------------
+
+fn cos_case() -> TestCase {
+    let (graph, ids) = build_unary_graph(|g, input, rng| {
+        SimpleUnaryOp::trig(g, input, crate::TrigOp::Cos, rng)
+    });
+
+    TestCase {
+        name: "cos".to_string(),
+        graph,
+        data_sets: vec![
+            unary_data_set(
+                "f32", &ids,
+                tensor_f32(&[0.0, std::f32::consts::FRAC_PI_2, std::f32::consts::PI]),
+                tensor_f32(&[1.0, 0.0, -1.0]),
+                Tolerance { atol: 1e-5, rtol: 1e-5 },
             ),
         ],
     }

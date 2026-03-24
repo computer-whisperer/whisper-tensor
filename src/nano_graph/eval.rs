@@ -290,6 +290,13 @@ fn eval_unaryop(op: &ScalarUnaryOp, x: &NumericScalar) -> NumericScalar {
         ScalarUnaryOp::Tanh => x.tanh(),
         ScalarUnaryOp::Floor => x.floor(),
         ScalarUnaryOp::Ceil => x.ceil(),
+        ScalarUnaryOp::Round => x.round(),
+        ScalarUnaryOp::Sign => x.sign(),
+        ScalarUnaryOp::Not => x.not(),
+        ScalarUnaryOp::IsNan => x.is_nan(),
+        ScalarUnaryOp::Erf => x.erf(),
+        ScalarUnaryOp::Sin => x.trig(crate::TrigOp::Sin),
+        ScalarUnaryOp::Cos => x.trig(crate::TrigOp::Cos),
     }
 }
 

@@ -38,6 +38,13 @@ pub enum ScalarUnaryOp {
     Tanh,
     Floor,
     Ceil,
+    Round,
+    Sign,
+    Not,
+    IsNan,
+    Erf,
+    Sin,
+    Cos,
 }
 
 /// Reduction accumulator kind.
