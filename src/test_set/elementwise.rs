@@ -11,7 +11,7 @@ use rand::SeedableRng;
 
 use crate::graph::GlobalId;
 use crate::milli_graph::MilliOpGraph;
-use crate::milli_graph::ops::binary::SimpleBinary;
+use crate::milli_graph::ops::binary::{Pow, SimpleBinary};
 use crate::milli_graph::ops::unary::SimpleUnaryOp;
 use crate::numeric_dtype::NumericDType;
 
@@ -51,6 +51,15 @@ pub fn build_cases() -> Vec<TestCase> {
         atan_case(),
         sinh_case(),
         cosh_case(),
+        tanh_case(),
+        pow_case(),
+        mod_case(),
+        greater_or_equal_case(),
+        less_or_equal_case(),
+        and_case(),
+        or_case(),
+        xor_case(),
+        not_case(),
     ]
 }
 
@@ -939,6 +948,214 @@ fn cosh_case() -> TestCase {
                 // cosh(0)=1, cosh(1)≈1.5430806
                 tensor_f32(&[1.0, 1.5430806]),
                 Tolerance { atol: 1e-5, rtol: 1e-5 },
+            ),
+        ],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tanh
+// ---------------------------------------------------------------------------
+
+fn tanh_case() -> TestCase {
+    let (graph, ids) = build_unary_graph(|g, input, rng| {
+        SimpleUnaryOp::trig(g, input, crate::TrigOp::Tanh, rng)
+    });
+
+    TestCase {
+        name: "tanh".to_string(),
+        graph,
+        data_sets: vec![
+            unary_data_set(
+                "f32", &ids,
+                tensor_f32(&[0.0, 1.0, -1.0]),
+                tensor_f32(&[0.0, 0.7615942, -0.7615942]),
+                Tolerance { atol: 1e-5, rtol: 1e-5 },
+            ),
+        ],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Pow
+// ---------------------------------------------------------------------------
+
+fn pow_case() -> TestCase {
+    let (graph, ids) = build_binary_graph(|g, a, b, rng| {
+        Pow::push_new(g, a, b, rng)
+    });
+
+    TestCase {
+        name: "pow".to_string(),
+        graph,
+        data_sets: vec![
+            binary_data_set(
+                "f32", &ids,
+                tensor_f32(&[2.0, 3.0, 4.0]),
+                tensor_f32(&[3.0, 2.0, 0.5]),
+                tensor_f32(&[8.0, 9.0, 2.0]),
+                Tolerance::for_dtype(NumericDType::F32),
+            ),
+        ],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Mod (fmod)
+// ---------------------------------------------------------------------------
+
+fn mod_case() -> TestCase {
+    let (graph, ids) = build_binary_graph(|g, a, b, rng| {
+        SimpleBinary::modulo(g, a, b, Some(true), rng)
+    });
+
+    TestCase {
+        name: "mod".to_string(),
+        graph,
+        data_sets: vec![
+            binary_data_set(
+                "f32", &ids,
+                tensor_f32(&[7.0, 10.0, -5.0]),
+                tensor_f32(&[3.0, 4.0, 3.0]),
+                tensor_f32(&[1.0, 2.0, -2.0]),
+                Tolerance::for_dtype(NumericDType::F32),
+            ),
+        ],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GreaterOrEqual (comparison -> BOOL output)
+// ---------------------------------------------------------------------------
+
+fn greater_or_equal_case() -> TestCase {
+    let (graph, ids) = build_binary_graph(SimpleBinary::greater_or_equal);
+
+    TestCase {
+        name: "greater_or_equal".to_string(),
+        graph,
+        data_sets: vec![
+            binary_data_set(
+                "f32", &ids,
+                tensor_f32(&[1.0, 2.0, 3.0]),
+                tensor_f32(&[1.0, 3.0, 2.0]),
+                // 1>=1->T, 2>=3->F, 3>=2->T
+                tensor_bool(&[true, false, true]),
+                Tolerance::for_dtype(NumericDType::BOOL),
+            ),
+        ],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// LessOrEqual (comparison -> BOOL output)
+// ---------------------------------------------------------------------------
+
+fn less_or_equal_case() -> TestCase {
+    let (graph, ids) = build_binary_graph(SimpleBinary::less_or_equal);
+
+    TestCase {
+        name: "less_or_equal".to_string(),
+        graph,
+        data_sets: vec![
+            binary_data_set(
+                "f32", &ids,
+                tensor_f32(&[1.0, 2.0, 3.0]),
+                tensor_f32(&[1.0, 3.0, 2.0]),
+                // 1<=1->T, 2<=3->T, 3<=2->F
+                tensor_bool(&[true, true, false]),
+                Tolerance::for_dtype(NumericDType::BOOL),
+            ),
+        ],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// And (logical -> BOOL output)
+// ---------------------------------------------------------------------------
+
+fn and_case() -> TestCase {
+    let (graph, ids) = build_binary_graph(SimpleBinary::and);
+
+    TestCase {
+        name: "and".to_string(),
+        graph,
+        data_sets: vec![
+            binary_data_set(
+                "bool", &ids,
+                tensor_bool(&[true, false, true, false]),
+                tensor_bool(&[true, true, false, false]),
+                // T&&T->T, F&&T->F, T&&F->F, F&&F->F
+                tensor_bool(&[true, false, false, false]),
+                Tolerance::for_dtype(NumericDType::BOOL),
+            ),
+        ],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Or (logical -> BOOL output)
+// ---------------------------------------------------------------------------
+
+fn or_case() -> TestCase {
+    let (graph, ids) = build_binary_graph(SimpleBinary::or);
+
+    TestCase {
+        name: "or".to_string(),
+        graph,
+        data_sets: vec![
+            binary_data_set(
+                "bool", &ids,
+                tensor_bool(&[true, false, true, false]),
+                tensor_bool(&[true, true, false, false]),
+                // T||T->T, F||T->T, T||F->T, F||F->F
+                tensor_bool(&[true, true, true, false]),
+                Tolerance::for_dtype(NumericDType::BOOL),
+            ),
+        ],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Xor (logical -> BOOL output)
+// ---------------------------------------------------------------------------
+
+fn xor_case() -> TestCase {
+    let (graph, ids) = build_binary_graph(SimpleBinary::xor);
+
+    TestCase {
+        name: "xor".to_string(),
+        graph,
+        data_sets: vec![
+            binary_data_set(
+                "bool", &ids,
+                tensor_bool(&[true, false, true, false]),
+                tensor_bool(&[true, true, false, false]),
+                // T^T->F, F^T->T, T^F->T, F^F->F
+                tensor_bool(&[false, true, true, false]),
+                Tolerance::for_dtype(NumericDType::BOOL),
+            ),
+        ],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Not (logical unary -> BOOL output)
+// ---------------------------------------------------------------------------
+
+fn not_case() -> TestCase {
+    let (graph, ids) = build_unary_graph(SimpleUnaryOp::not);
+
+    TestCase {
+        name: "not".to_string(),
+        graph,
+        data_sets: vec![
+            unary_data_set(
+                "bool", &ids,
+                tensor_bool(&[false, true, true, false]),
+                // !F->T, !T->F, !T->F, !F->T
+                tensor_bool(&[true, false, false, true]),
+                Tolerance::for_dtype(NumericDType::BOOL),
             ),
         ],
     }
