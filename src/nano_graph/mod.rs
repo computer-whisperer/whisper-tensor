@@ -10,6 +10,7 @@ pub mod eval;
 pub mod lower;
 pub mod ops;
 pub mod pattern;
+pub mod pool_eval;
 
 pub use lower::{
     ConcatSegment, DimClassification, DimKind, NanoLoweringContext, ReduceAccessors, TensorAtomMap,

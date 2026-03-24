@@ -24,6 +24,8 @@ pub mod modulo;
 pub mod pow;
 pub mod neg;
 pub mod abs;
+pub mod min;
+pub mod max;
 
 // Float-only unary
 pub mod exp;

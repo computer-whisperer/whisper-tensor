@@ -50,7 +50,8 @@ mod tests {
         let ft = FloatType::F64;
         let nan = ft.encode_f64(f64::NAN);
         let one = ft.encode_f64(1.0);
-        assert!(ft.decode_f64(float_max(nan, one, &ft)).is_nan());
+        // f64::max follows IEEE 754-2008 maxNum: max(NaN, x) = x
+        assert_eq!(ft.decode_f64(float_max(nan, one, &ft)), 1.0);
     }
 
     #[test]

@@ -50,8 +50,8 @@ mod tests {
         let ft = FloatType::F64;
         let nan = ft.encode_f64(f64::NAN);
         let one = ft.encode_f64(1.0);
-        // f64::min propagates NaN if self is NaN
-        assert!(ft.decode_f64(float_min(nan, one, &ft)).is_nan());
+        // f64::min follows IEEE 754-2008 minNum: min(NaN, x) = x
+        assert_eq!(ft.decode_f64(float_min(nan, one, &ft)), 1.0);
     }
 
     #[test]
