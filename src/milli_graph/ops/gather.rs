@@ -426,14 +426,13 @@ impl MilliOp for Gather {
         let out_dtype = data_info.dtype();
         let out_info = TensorInfo::from_dtype_and_shape_scalars(out_dtype, &out_dims);
 
-        // Gather's lower_to_nano has a shortcut that registers the output as a
-        // constant from the info map when both inputs are numeric. In constant_fold
-        // the info map only has a hint (zeros), so we must use the eval fallback.
+        // Gather constant folding uses old eval fallback — the multi-axis
+        // gather indexing is non-trivial to implement directly.
         if let Some(results) = super::constant_fold(self, known_inputs, &[], pool) {
             return Ok(results);
         }
 
-        Ok(vec![((self.output, out_info))])
+        Ok(vec![(self.output, out_info)])
     }
 
     fn backward(

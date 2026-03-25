@@ -78,15 +78,8 @@ impl MilliOp for Shape {
             .get(&self.input)
             .ok_or(crate::milli_graph::MilliOpGraphError::UnableToInfer)?;
 
-        // Shape's lower_to_nano doesn't compute the shape — it reads it from
-        // the info map (register_constant). In constant_fold the info map only
-        // has the hint (not the real values), so we must use the eval fallback.
-        if let Some(results) = super::constant_fold(self, known_inputs, &[], pool) {
-            return Ok(results);
-        }
-
         // Shape op returns a 1-D i64 tensor with the input's dim values.
-        // If input has known rank, try to extract concrete dim values.
+        // If all dims are known, produce the result directly (no eval needed).
         if let Some(rank) = input_info.rank_if_known() {
             let mut all_known = true;
             let mut dim_vals = Vec::with_capacity(rank);
