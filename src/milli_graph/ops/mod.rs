@@ -140,6 +140,31 @@ pub struct MilliEvalConfig {
 
 pub type EvalResult =
     Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, MilliOpGraphError>;
+/// Try to constant-fold an op by running eval on concrete inputs.
+/// Returns `Some(results)` if all inputs are concrete, `None` if any are symbolic.
+pub fn constant_fold<'p, P: Pool + 'p>(
+    op: &(impl MilliOp + ?Sized),
+    known_inputs: &HashMap<GlobalId, TensorInfo<'p, P>>,
+    pool: &'p P,
+) -> Option<Vec<(GlobalId, TensorInfo<'p, P>)>> {
+    let mut resolved_inputs = HashMap::new();
+    for input in op.inputs() {
+        let tensor_info = known_inputs.get(&input)?;
+        let tensor = tensor_info.as_numeric()?;
+        resolved_inputs.insert(input, tensor);
+    }
+    let collected: Vec<(GlobalId, TensorInfo<'p, P>)> = op
+        .eval(
+            &resolved_inputs,
+            &MilliEvalConfig::default(),
+            &mut crate::backends::eval_backend::EvalBackend::NDArray,
+        )
+        .ok()?
+        .map(|(a, b)| (a, TensorInfo::from_legacy(&b, pool)))
+        .collect();
+    Some(collected)
+}
+
 pub trait MilliOp: Node {
     fn infer<'p, P: Pool + 'p>(
         &self,
@@ -147,24 +172,7 @@ pub trait MilliOp: Node {
         _symbolic_resolver: &mut SymbolicResolver,
         pool: &'p P,
     ) -> Result<Vec<(GlobalId, TensorInfo<'p, P>)>, MilliOpGraphError> {
-        let mut resolved_inputs = HashMap::new();
-        for input in self.inputs() {
-            if let Some(tensor_info) = known_inputs.get(&input) {
-                if let Some(tensor) = tensor_info.as_numeric() {
-                    resolved_inputs.insert(input, tensor.clone());
-                } else {
-                    return Err(MilliOpGraphError::UnableToInfer);
-                }
-            } else {
-                return Err(MilliOpGraphError::UnableToInfer);
-            }
-        }
-
-        let collected: Vec<(GlobalId, TensorInfo<'p, P>)> = self
-            .eval(&resolved_inputs, &MilliEvalConfig::default(), &mut crate::backends::eval_backend::EvalBackend::NDArray)?
-            .map(|(a, b)| (a, TensorInfo::from_legacy(&b, pool)))
-            .collect();
-        Ok(collected)
+        constant_fold(self, known_inputs, pool).ok_or(MilliOpGraphError::UnableToInfer)
     }
 
     fn eval(

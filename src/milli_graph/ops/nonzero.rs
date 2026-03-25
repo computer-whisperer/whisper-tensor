@@ -78,13 +78,8 @@ impl MilliOp for NonZero {
         symbolic_resolver: &mut SymbolicResolver,
         pool: &'p P,
     ) -> Result<Vec<(GlobalId, TensorInfo<'p, P>)>, MilliOpGraphError> {
-        if let Some(input) = known_inputs.get(&self.input).and_then(|ti| ti.as_numeric()) {
-            let inputs = HashMap::from([(self.input, input.clone())]);
-            let out = self
-                .eval(&inputs, &super::MilliEvalConfig::default(), &mut crate::backends::eval_backend::EvalBackend::NDArray)?
-                .map(|(tid, t)| (tid, TensorInfo::from_legacy(&t, pool)))
-                .collect::<Vec<_>>();
-            return Ok(out);
+        if let Some(results) = super::constant_fold(self, known_inputs, pool) {
+            return Ok(results);
         }
         // Fallback minimal info if unknown: dtype I64 vector of unknown size
         let minimal = TensorInfo::Minimal(MinimalTensor::new(

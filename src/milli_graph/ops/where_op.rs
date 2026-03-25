@@ -163,19 +163,8 @@ impl MilliOp for Where {
             .ok_or(MilliOpGraphError::UnableToInfer)?;
 
         // If all concrete, fall back to eval.
-        if cond_info.as_numeric().is_some()
-            && x_info.as_numeric().is_some()
-            && y_info.as_numeric().is_some()
-        {
-            let mut resolved = HashMap::new();
-            resolved.insert(self.condition, cond_info.as_numeric().unwrap());
-            resolved.insert(self.x, x_info.as_numeric().unwrap());
-            resolved.insert(self.y, y_info.as_numeric().unwrap());
-            let collected: Vec<(GlobalId, TensorInfo<'p, P>)> = self
-                .eval(&resolved, &super::MilliEvalConfig::default(), &mut crate::backends::eval_backend::EvalBackend::NDArray)?
-                .map(|(a, b)| (a, TensorInfo::from_legacy(&b, pool)))
-                .collect();
-            return Ok(collected);
+        if let Some(results) = super::constant_fold(self, known_inputs, pool) {
+            return Ok(results);
         }
 
         let out_dtype = x_info.dtype();

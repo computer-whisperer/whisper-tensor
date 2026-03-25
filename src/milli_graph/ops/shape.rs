@@ -79,14 +79,8 @@ impl MilliOp for Shape {
             .ok_or(crate::milli_graph::MilliOpGraphError::UnableToInfer)?;
 
         // If input is concrete, fall back to eval for exact shape.
-        if input_info.as_numeric().is_some() {
-            let mut resolved = HashMap::new();
-            resolved.insert(self.input, input_info.as_numeric().unwrap());
-            let collected: Vec<(GlobalId, TensorInfo<'p, P>)> = self
-                .eval(&resolved, &super::MilliEvalConfig::default(), &mut crate::backends::eval_backend::EvalBackend::NDArray)?
-                .map(|(a, b)| (a, TensorInfo::from_legacy(&b, pool)))
-                .collect();
-            return Ok(collected);
+        if let Some(results) = super::constant_fold(self, known_inputs, pool) {
+            return Ok(results);
         }
 
         // Shape op returns a 1-D i64 tensor with the input's dim values.

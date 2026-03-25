@@ -83,28 +83,8 @@ impl MilliOp for ReduceMin {
             .ok_or(MilliOpGraphError::UnableToInfer)?;
 
         // Check if all inputs are concrete; if so, fall back to eval.
-        let axes_concrete = self.axes.map(|ax_id| {
-            known_inputs
-                .get(&ax_id)
-                .and_then(|info| info.as_numeric())
-        });
-        if data_info.as_numeric().is_some() {
-            let axes_ok = match axes_concrete {
-                Some(Some(_)) | None => true,
-                Some(None) => false,
-            };
-            if axes_ok {
-                let mut resolved = HashMap::new();
-                resolved.insert(self.data, data_info.as_numeric().unwrap());
-                if let Some(ax_id) = self.axes {
-                    resolved.insert(ax_id, axes_concrete.unwrap().unwrap());
-                }
-                let collected: Vec<(GlobalId, TensorInfo<'p, P>)> = self
-                    .eval(&resolved, &super::MilliEvalConfig::default(), &mut crate::backends::eval_backend::EvalBackend::NDArray)?
-                    .map(|(a, b)| (a, TensorInfo::from_legacy(&b, pool)))
-                    .collect();
-                return Ok(collected);
-            }
+        if let Some(results) = super::constant_fold(self, known_inputs, pool) {
+            return Ok(results);
         }
 
         let out_dtype = data_info.dtype();

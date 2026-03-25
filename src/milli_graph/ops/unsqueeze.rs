@@ -101,14 +101,8 @@ impl MilliOp for Unsqueeze {
             .ok_or(MilliOpGraphError::UnableToInfer)?;
 
         // If both inputs are concrete, delegate to eval
-        if let (Some(data_num), Some(axes_num)) = (data_info.as_numeric(), axes_info.as_numeric()) {
-            let inputs =
-                HashMap::from([(self.data, data_num.clone()), (self.axes, axes_num.clone())]);
-            let out: Vec<_> = self
-                .eval(&inputs, &super::MilliEvalConfig::default(), &mut crate::backends::eval_backend::EvalBackend::NDArray)?
-                .map(|(id, t)| (id, TensorInfo::from_legacy(&t, pool)))
-                .collect();
-            return Ok(out);
+        if let Some(results) = super::constant_fold(self, known_inputs, pool) {
+            return Ok(results);
         }
 
         let first_elem = data_info.first_element();

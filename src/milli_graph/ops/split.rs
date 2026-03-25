@@ -274,31 +274,8 @@ impl MilliOp for Split {
             .ok_or(MilliOpGraphError::UnableToInfer)?;
 
         // If all inputs are concrete, fall back to eval.
-        let split_numeric = match &self.split {
-            Some(MilliOpTensorIDOrLiteral::TensorID(id)) => {
-                known_inputs.get(id).and_then(|i| i.as_numeric()).is_some()
-            }
-            Some(MilliOpTensorIDOrLiteral::Literal(_)) => true,
-            None => true,
-        };
-        if data_info.as_numeric().is_some() && split_numeric {
-            let mut resolved = HashMap::new();
-            for id in self.inputs() {
-                let info = known_inputs
-                    .get(&id)
-                    .ok_or(MilliOpGraphError::UnableToInfer)?;
-                resolved.insert(
-                    id,
-                    info.as_numeric()
-                        .ok_or(MilliOpGraphError::UnableToInfer)?
-                        .clone(),
-                );
-            }
-            let collected: Vec<(GlobalId, TensorInfo<'p, P>)> = self
-                .eval(&resolved, &super::MilliEvalConfig::default(), &mut crate::backends::eval_backend::EvalBackend::NDArray)?
-                .map(|(a, b)| (a, TensorInfo::from_legacy(&b, pool)))
-                .collect();
-            return Ok(collected);
+        if let Some(results) = super::constant_fold(self, known_inputs, pool) {
+            return Ok(results);
         }
 
         // Shape-only inference.

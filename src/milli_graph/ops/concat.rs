@@ -245,16 +245,8 @@ impl MilliOp for Concat {
         }
 
         // If all inputs are concrete, fall back to eval.
-        if input_infos.iter().all(|info| info.as_numeric().is_some()) {
-            let mut resolved = HashMap::new();
-            for (id, info) in self.inputs.iter().zip(input_infos.iter()) {
-                resolved.insert(*id, info.as_numeric().unwrap());
-            }
-            let collected: Vec<(GlobalId, TensorInfo<'p, P>)> = self
-                .eval(&resolved, &super::MilliEvalConfig::default(), &mut crate::backends::eval_backend::EvalBackend::NDArray)?
-                .map(|(a, b)| (a, TensorInfo::from_legacy(&b, pool)))
-                .collect();
-            return Ok(collected);
+        if let Some(results) = super::constant_fold(self, known_inputs, pool) {
+            return Ok(results);
         }
 
         // Try to compute concrete output dims from input shapes.

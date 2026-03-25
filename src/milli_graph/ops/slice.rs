@@ -335,35 +335,8 @@ impl MilliOp for Slice {
             .ok_or(MilliOpGraphError::UnableToInfer)?;
 
         // If all inputs are concrete, fall back to eval.
-        let all_numeric = data_info.as_numeric().is_some()
-            && known_inputs
-                .get(&self.starts)
-                .and_then(|i| i.as_numeric())
-                .is_some()
-            && known_inputs
-                .get(&self.ends)
-                .and_then(|i| i.as_numeric())
-                .is_some()
-            && self
-                .steps
-                .is_none_or(|id| known_inputs.get(&id).and_then(|i| i.as_numeric()).is_some())
-            && self
-                .axes
-                .is_none_or(|id| known_inputs.get(&id).and_then(|i| i.as_numeric()).is_some());
-        if all_numeric {
-            use crate::graph::Node;
-            let mut resolved = HashMap::new();
-            for id in Node::inputs(self) {
-                let info = known_inputs
-                    .get(&id)
-                    .ok_or(MilliOpGraphError::UnableToInfer)?;
-                resolved.insert(id, info.as_numeric().unwrap());
-            }
-            let collected: Vec<(GlobalId, TensorInfo<'p, P>)> = self
-                .eval(&resolved, &super::MilliEvalConfig::default(), &mut crate::backends::eval_backend::EvalBackend::NDArray)?
-                .map(|(a, b)| (a, TensorInfo::from_legacy(&b, pool)))
-                .collect();
-            return Ok(collected);
+        if let Some(results) = super::constant_fold(self, known_inputs, pool) {
+            return Ok(results);
         }
 
         // Shape-only inference: compute output shape from data shape + slice params.

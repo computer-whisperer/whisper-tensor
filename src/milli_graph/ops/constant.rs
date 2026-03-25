@@ -216,14 +216,8 @@ impl MilliOp for ConstantOfShape {
             .ok_or(MilliOpGraphError::UnableToInfer)?;
 
         // If shape is concrete, fall back to eval.
-        if shape_info.as_numeric().is_some() {
-            let mut resolved = HashMap::new();
-            resolved.insert(self.shape, shape_info.as_numeric().unwrap());
-            let collected: Vec<(GlobalId, TensorInfo<'p, P>)> = self
-                .eval(&resolved, &super::MilliEvalConfig::default(), &mut crate::backends::eval_backend::EvalBackend::NDArray)?
-                .map(|(a, b)| (a, TensorInfo::from_legacy(&b, pool)))
-                .collect();
-            return Ok(collected);
+        if let Some(results) = super::constant_fold(self, known_inputs, pool) {
+            return Ok(results);
         }
 
         // Shape-only inference: the shape tensor's VALUES are the output dims.

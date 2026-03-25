@@ -167,18 +167,8 @@ impl MilliOp for Expand {
             .ok_or(MilliOpGraphError::UnableToInfer)?;
 
         // If both inputs are concrete, delegate to eval
-        if let (Some(input_num), Some(shape_num)) =
-            (input_info.as_numeric(), shape_info.as_numeric())
-        {
-            let inputs = HashMap::from([
-                (self.input, input_num.clone()),
-                (self.shape, shape_num.clone()),
-            ]);
-            let out: Vec<_> = self
-                .eval(&inputs, &super::MilliEvalConfig::default(), &mut crate::backends::eval_backend::EvalBackend::NDArray)?
-                .map(|(id, t)| (id, TensorInfo::from_legacy(&t, pool)))
-                .collect();
-            return Ok(out);
+        if let Some(results) = super::constant_fold(self, known_inputs, pool) {
+            return Ok(results);
         }
 
         let first_elem = input_info.first_element();

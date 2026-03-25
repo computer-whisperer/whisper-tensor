@@ -400,15 +400,8 @@ impl MilliOp for Gather {
             .ok_or(MilliOpGraphError::UnableToInfer)?;
 
         // If both inputs are concrete, fall back to eval for full precision.
-        if data_info.as_numeric().is_some() && indices_info.as_numeric().is_some() {
-            let mut resolved = HashMap::new();
-            resolved.insert(self.data, data_info.as_numeric().unwrap());
-            resolved.insert(self.indices, indices_info.as_numeric().unwrap());
-            let collected: Vec<(GlobalId, TensorInfo<'p, P>)> = self
-                .eval(&resolved, &super::MilliEvalConfig::default(), &mut crate::backends::eval_backend::EvalBackend::NDArray)?
-                .map(|(a, b)| (a, TensorInfo::from_legacy(&b, pool)))
-                .collect();
-            return Ok(collected);
+        if let Some(results) = super::constant_fold(self, known_inputs, pool) {
+            return Ok(results);
         }
 
         // Shape-only inference: output_shape = data[:axis] + indices.shape + data[axis+1:]

@@ -385,15 +385,8 @@ impl MilliOp for SimpleBinary {
             .ok_or(MilliOpGraphError::UnableToInfer)?;
 
         // If both inputs are concrete, fall back to eval.
-        if a_info.as_numeric().is_some() && b_info.as_numeric().is_some() {
-            let mut resolved = HashMap::new();
-            resolved.insert(self.a, a_info.as_numeric().unwrap());
-            resolved.insert(self.b, b_info.as_numeric().unwrap());
-            let collected: Vec<(GlobalId, TensorInfo<'p, P>)> = self
-                .eval(&resolved, &super::MilliEvalConfig::default(), &mut crate::backends::eval_backend::EvalBackend::NDArray)?
-                .map(|(a, b)| (a, TensorInfo::from_legacy(&b, pool)))
-                .collect();
-            return Ok(collected);
+        if let Some(results) = super::constant_fold(self, known_inputs, pool) {
+            return Ok(results);
         }
 
         // Determine output dtype: comparison ops produce Bool, others match input.
@@ -686,15 +679,8 @@ impl MilliOp for Pow {
             .ok_or(MilliOpGraphError::UnableToInfer)?;
 
         // If both inputs are concrete, fall back to eval.
-        if a_info.as_numeric().is_some() && b_info.as_numeric().is_some() {
-            let mut resolved = HashMap::new();
-            resolved.insert(self.a, a_info.as_numeric().unwrap());
-            resolved.insert(self.b, b_info.as_numeric().unwrap());
-            let collected: Vec<(GlobalId, TensorInfo<'p, P>)> = self
-                .eval(&resolved, &super::MilliEvalConfig::default(), &mut crate::backends::eval_backend::EvalBackend::NDArray)?
-                .map(|(a, b)| (a, TensorInfo::from_legacy(&b, pool)))
-                .collect();
-            return Ok(collected);
+        if let Some(results) = super::constant_fold(self, known_inputs, pool) {
+            return Ok(results);
         }
 
         // Output dtype = input dtype.
@@ -1244,15 +1230,8 @@ impl MilliOp for MatMul {
             .ok_or(MilliOpGraphError::UnableToInfer)?;
 
         // If both inputs are concrete, fall back to eval.
-        if a_info.as_numeric().is_some() && b_info.as_numeric().is_some() {
-            let mut resolved = HashMap::new();
-            resolved.insert(self.a, a_info.as_numeric().unwrap());
-            resolved.insert(self.b, b_info.as_numeric().unwrap());
-            let collected: Vec<(GlobalId, TensorInfo<'p, P>)> = self
-                .eval(&resolved, &super::MilliEvalConfig::default(), &mut crate::backends::eval_backend::EvalBackend::NDArray)?
-                .map(|(a, b)| (a, TensorInfo::from_legacy(&b, pool)))
-                .collect();
-            return Ok(collected);
+        if let Some(results) = super::constant_fold(self, known_inputs, pool) {
+            return Ok(results);
         }
 
         // MatMul output dtype comes from the struct's explicit field.

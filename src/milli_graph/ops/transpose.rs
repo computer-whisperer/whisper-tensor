@@ -219,13 +219,8 @@ impl MilliOp for Transpose {
             .ok_or(MilliOpGraphError::UnableToInfer)?;
 
         // If input is concrete, delegate to eval
-        if let Some(numeric) = input_info.as_numeric() {
-            let inputs = HashMap::from([(self.data, numeric.clone())]);
-            let out: Vec<_> = self
-                .eval(&inputs, &super::MilliEvalConfig::default(), &mut crate::backends::eval_backend::EvalBackend::NDArray)?
-                .map(|(id, t)| (id, TensorInfo::from_legacy(&t, pool)))
-                .collect();
-            return Ok(out);
+        if let Some(results) = super::constant_fold(self, known_inputs, pool) {
+            return Ok(results);
         }
 
         let first_elem = input_info.first_element();

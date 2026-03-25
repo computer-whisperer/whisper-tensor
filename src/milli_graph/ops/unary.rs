@@ -367,14 +367,8 @@ impl MilliOp for SimpleUnaryOp {
             .ok_or(MilliOpGraphError::UnableToInfer)?;
 
         // If input is concrete, fall back to eval.
-        if input_info.as_numeric().is_some() {
-            let mut resolved = HashMap::new();
-            resolved.insert(self.input, input_info.as_numeric().unwrap());
-            let collected: Vec<(GlobalId, TensorInfo<'p, P>)> = self
-                .eval(&resolved, &super::MilliEvalConfig::default(), &mut crate::backends::eval_backend::EvalBackend::NDArray)?
-                .map(|(a, b)| (a, TensorInfo::from_legacy(&b, pool)))
-                .collect();
-            return Ok(collected);
+        if let Some(results) = super::constant_fold(self, known_inputs, pool) {
+            return Ok(results);
         }
 
         // Unary ops preserve shape and dtype (except IsNan/IsInf which produce Bool).
@@ -611,14 +605,8 @@ impl MilliOp for ClampMin {
             .get(&self.input)
             .ok_or(MilliOpGraphError::UnableToInfer)?;
 
-        if input_info.as_numeric().is_some() {
-            let mut resolved = HashMap::new();
-            resolved.insert(self.input, input_info.as_numeric().unwrap());
-            let collected: Vec<(GlobalId, TensorInfo<'p, P>)> = self
-                .eval(&resolved, &super::MilliEvalConfig::default(), &mut crate::backends::eval_backend::EvalBackend::NDArray)?
-                .map(|(a, b)| (a, TensorInfo::from_legacy(&b, pool)))
-                .collect();
-            return Ok(collected);
+        if let Some(results) = super::constant_fold(self, known_inputs, pool) {
+            return Ok(results);
         }
 
         // ClampMin preserves shape and dtype.
