@@ -1,11 +1,11 @@
 use crate::pool::Pool;
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
-use crate::dtype::DType;
 use crate::graph::GlobalId;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
 use crate::migration::numeric_tensor::NumericTensor;
+use crate::numeric_dtype::NumericDType;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -16,19 +16,19 @@ pub struct Cast {
     pub(crate) label: Option<String>,
     output: GlobalId,
     data: GlobalId,
-    dtype: DType,
+    dtype: NumericDType,
 }
 
 impl Cast {
     #[allow(dead_code)] // used by compiler (cranelift feature)
-    pub(crate) fn target_dtype(&self) -> DType {
+    pub(crate) fn target_dtype(&self) -> NumericDType {
         self.dtype
     }
 
     pub fn push_new(
         graph: &mut MilliOpGraph,
         data: GlobalId,
-        dtype: DType,
+        dtype: NumericDType,
         rng: &mut impl Rng,
     ) -> GlobalId {
         Self::push_new_with_label(graph, data, dtype, None, rng)
@@ -37,7 +37,7 @@ impl Cast {
     pub fn push_new_with_label(
         graph: &mut MilliOpGraph,
         data: GlobalId,
-        dtype: DType,
+        dtype: NumericDType,
         label: Option<String>,
         rng: &mut impl Rng,
     ) -> GlobalId {
@@ -104,8 +104,7 @@ impl MilliOp for Cast {
         }
 
         // Same shape, new dtype. Preserve per-dim shape info.
-        let out_ndt = crate::numeric_dtype::NumericDType::from_legacy(self.dtype)
-            .expect("unsupported Cast target dtype");
+        let out_ndt = self.dtype;
         if let Some(ranked) = input_info.as_ranked() {
             let dims = ranked.shape();
             let out_info = TensorInfo::from_dtype_and_shape_scalars(out_ndt, &dims);
@@ -144,7 +143,7 @@ impl MilliOp for Cast {
         backend: &mut EvalBackend,
     ) -> Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, MilliOpGraphError>
     {
-        let out = inputs[&self.data].cast(self.dtype, backend)?;
+        let out = inputs[&self.data].cast(self.dtype.to_legacy(), backend)?;
         Ok(Box::new([(self.output, out)].into_iter()))
     }
 }

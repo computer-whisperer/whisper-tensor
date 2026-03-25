@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
 use whisper_tensor::dtype::DType;
 use whisper_tensor::milli_graph::MilliOpGraph;
+use whisper_tensor::numeric_dtype::NumericDType;
 use whisper_tensor::milli_graph::ops::{
     ArgMax, Cast, Concat as MilliConcat, Constant, SimpleBinary, Squeeze, Unsqueeze, Where,
 };
@@ -191,7 +192,7 @@ pub(crate) fn build_whisper_supergraph(
         let (mut mg, input_map) =
             MilliOpGraph::new(std::iter::once(prefill_token_in.global_id()), rng);
         let token_in = *input_map.get(&prefill_token_in.global_id()).unwrap();
-        let token_i64 = Cast::push_new(&mut mg, token_in, DType::I64, rng);
+        let token_i64 = Cast::push_new(&mut mg, token_in, NumericDType::I64, rng);
         let axis0 = Constant::push_new(
             &mut mg,
             NDArrayNumericTensor::from_vec_shape(vec![0i64], &vec![1]).unwrap(),
@@ -244,7 +245,7 @@ pub(crate) fn build_whisper_supergraph(
         );
         let squeezed = Squeeze::push_new(&mut mg, logits, axis0, rng);
         let squeezed = Squeeze::push_new(&mut mg, squeezed, axis0, rng);
-        let logits_f32 = Cast::push_new(&mut mg, squeezed, DType::F32, rng);
+        let logits_f32 = Cast::push_new(&mut mg, squeezed, NumericDType::F32, rng);
         mg.set_output_map(std::iter::once((logits_f32, out.global_id())));
         let mut node = SuperGraphNodeMilliOpGraph::new(mg, rng);
         node.label = Some("prefill_logits_postprocess".to_string());
@@ -326,7 +327,7 @@ pub(crate) fn build_whisper_supergraph(
             .get(&prefill_last_logits_link.global_id())
             .unwrap();
         let next_token_scalar = ArgMax::push_new(&mut mg, last_logits, 0, false, false, rng);
-        let next_token_scalar = Cast::push_new(&mut mg, next_token_scalar, DType::I64, rng);
+        let next_token_scalar = Cast::push_new(&mut mg, next_token_scalar, NumericDType::I64, rng);
         let axis0 = Constant::push_new(
             &mut mg,
             NDArrayNumericTensor::from_vec_shape(vec![0i64], &vec![1]).unwrap(),
@@ -418,7 +419,7 @@ pub(crate) fn build_whisper_supergraph(
     let decoder_input_ids = {
         let (mut mg, input_map) = MilliOpGraph::new(std::iter::once(sub_token_in.global_id()), rng);
         let token_in = *input_map.get(&sub_token_in.global_id()).unwrap();
-        let token_i64 = Cast::push_new(&mut mg, token_in, DType::I64, rng);
+        let token_i64 = Cast::push_new(&mut mg, token_in, NumericDType::I64, rng);
         let axis0 = Constant::push_new(
             &mut mg,
             NDArrayNumericTensor::from_vec_shape(vec![0i64], &vec![1]).unwrap(),
@@ -478,9 +479,9 @@ pub(crate) fn build_whisper_supergraph(
         );
         let squeezed = Squeeze::push_new(&mut mg, logits, axis0, rng);
         let squeezed = Squeeze::push_new(&mut mg, squeezed, axis0, rng);
-        let logits_f32 = Cast::push_new(&mut mg, squeezed, DType::F32, rng);
+        let logits_f32 = Cast::push_new(&mut mg, squeezed, NumericDType::F32, rng);
         let next_token_scalar = ArgMax::push_new(&mut mg, logits_f32, 0, false, false, rng);
-        let next_token_scalar = Cast::push_new(&mut mg, next_token_scalar, DType::I64, rng);
+        let next_token_scalar = Cast::push_new(&mut mg, next_token_scalar, NumericDType::I64, rng);
         let next_token = Unsqueeze::push_new(&mut mg, next_token_scalar, axis0, rng);
 
         let eos_token = Constant::push_new(

@@ -7,7 +7,6 @@ use std::collections::HashMap;
 use rand::rngs::SmallRng;
 use rand::SeedableRng;
 
-use crate::dtype::DType;
 use crate::graph::GlobalId;
 use crate::milli_graph::MilliOpGraph;
 use crate::milli_graph::ops::MatMul;
@@ -45,10 +44,10 @@ fn build_matmul_graph() -> (MilliOpGraph, MatMulGraphIds) {
         &mut graph,
         int_a,
         int_b,
-        DType::F32,
-        DType::F32,
-        DType::F32,
-        DType::F32,
+        NumericDType::F32,
+        NumericDType::F32,
+        NumericDType::F32,
+        NumericDType::F32,
         &mut rng,
     );
     graph.set_outputs(vec![out]);

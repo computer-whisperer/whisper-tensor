@@ -1970,7 +1970,7 @@ mod tests {
                     graph,
                     a,
                     b,
-                    crate::dtype::DType::F32,
+                    NumericDType::F32,
                     rng,
                 );
                 (vec![a, b], vec![c])
@@ -1999,7 +1999,7 @@ mod tests {
                     graph,
                     a,
                     b,
-                    crate::dtype::DType::F32,
+                    NumericDType::F32,
                     rng,
                 );
                 (vec![a, b], vec![c])
@@ -2020,7 +2020,7 @@ mod tests {
             &mut milli,
             a_id,
             b_id,
-            crate::dtype::DType::F32,
+            NumericDType::F32,
             &mut rng,
         );
         let a_tensor: crate::migration::numeric_tensor::NumericTensor<crate::DynRank> =
@@ -2482,10 +2482,10 @@ mod tests {
                     graph,
                     a,
                     b,
-                    DType::F32,
-                    DType::F32,
-                    DType::F32,
-                    DType::F32,
+                    NumericDType::F32,
+                    NumericDType::F32,
+                    NumericDType::F32,
+                    NumericDType::F32,
                     rng,
                 );
                 (vec![a, b], vec![c])
@@ -2514,10 +2514,10 @@ mod tests {
                     graph,
                     x,
                     w1,
-                    DType::F32,
-                    DType::F32,
-                    DType::F32,
-                    DType::F32,
+                    NumericDType::F32,
+                    NumericDType::F32,
+                    NumericDType::F32,
+                    NumericDType::F32,
                     rng,
                 );
                 let h = SimpleBinary::add(graph, mm1, b1, rng);
@@ -2525,10 +2525,10 @@ mod tests {
                     graph,
                     h,
                     w2,
-                    DType::F32,
-                    DType::F32,
-                    DType::F32,
-                    DType::F32,
+                    NumericDType::F32,
+                    NumericDType::F32,
+                    NumericDType::F32,
+                    NumericDType::F32,
                     rng,
                 );
                 let out = SimpleBinary::add(graph, mm2, b2, rng);
@@ -2584,10 +2584,10 @@ mod tests {
                     graph,
                     x,
                     w,
-                    DType::F32,
-                    DType::F32,
-                    DType::F32,
-                    DType::F32,
+                    NumericDType::F32,
+                    NumericDType::F32,
+                    NumericDType::F32,
+                    NumericDType::F32,
                     rng,
                 );
                 let transposed = Transpose::push_new(graph, mm, Some(vec![0, 2, 1]), rng);
@@ -3055,7 +3055,7 @@ mod tests {
             |g, rng| {
                 let a = g.add_input(rng);
                 let b =
-                    crate::milli_graph::ops::Cast::push_new(g, a, crate::dtype::DType::F64, rng);
+                    crate::milli_graph::ops::Cast::push_new(g, a, NumericDType::F64, rng);
                 (vec![a], vec![b])
             },
             vec![NumericTensor::from_vec_shape(vec![1.5f32, -2.5, 0.0, 3.14], vec![4]).unwrap()],
@@ -3202,7 +3202,7 @@ mod tests {
                     g,
                     a,
                     b,
-                    DType::F32,
+                    NumericDType::F32,
                     rng,
                 );
                 (vec![a, b], vec![c])
@@ -3257,7 +3257,7 @@ mod tests {
                     g,
                     at,
                     b,
-                    DType::F32,
+                    NumericDType::F32,
                     rng,
                 );
                 (vec![a, b], vec![c])
@@ -3367,7 +3367,7 @@ mod tests {
                     g,
                     cat,
                     w,
-                    DType::F32,
+                    NumericDType::F32,
                     rng,
                 );
                 (vec![a, b, w], vec![out])
@@ -3502,7 +3502,7 @@ mod tests {
                     g,
                     q,
                     k,
-                    DType::F32,
+                    NumericDType::F32,
                     rng,
                 );
                 (vec![q, k], vec![c])
@@ -3543,7 +3543,7 @@ mod tests {
                     g,
                     q_perm,
                     k_t,
-                    DType::F32,
+                    NumericDType::F32,
                     rng,
                 );
                 (vec![q_flat, q_shape, k_t], vec![scores])
@@ -3734,7 +3734,7 @@ mod tests {
                     g,
                     q,
                     kt2,
-                    DType::F32,
+                    NumericDType::F32,
                     rng,
                 );
 
@@ -3775,21 +3775,21 @@ mod tests {
                     g,
                     x,
                     wq,
-                    DType::F32,
+                    NumericDType::F32,
                     rng,
                 );
                 let k = crate::milli_graph::ops::MatMul::push_new_default_precision(
                     g,
                     x,
                     wk,
-                    DType::F32,
+                    NumericDType::F32,
                     rng,
                 );
                 let v = crate::milli_graph::ops::MatMul::push_new_default_precision(
                     g,
                     x,
                     wv,
-                    DType::F32,
+                    NumericDType::F32,
                     rng,
                 );
 
@@ -3837,7 +3837,7 @@ mod tests {
                     g,
                     qt,
                     kt_t,
-                    DType::F32,
+                    NumericDType::F32,
                     rng,
                 );
 
@@ -3846,7 +3846,7 @@ mod tests {
                     g,
                     scores,
                     vt,
-                    DType::F32,
+                    NumericDType::F32,
                     rng,
                 );
 
@@ -3970,7 +3970,7 @@ mod tests {
                     g,
                     a,
                     b,
-                    DType::F32,
+                    NumericDType::F32,
                     rng,
                 );
                 (vec![a, b], vec![c])
@@ -4036,7 +4036,7 @@ mod tests {
                     g,
                     q_t,
                     k_t2,
-                    DType::F32,
+                    NumericDType::F32,
                     rng,
                 );
 
@@ -4149,7 +4149,7 @@ mod tests {
                     g,
                     x,
                     w,
-                    DType::F32,
+                    NumericDType::F32,
                     rng,
                 );
 
@@ -4230,7 +4230,7 @@ mod tests {
                     g,
                     x,
                     wqkv,
-                    DType::F32,
+                    NumericDType::F32,
                     rng,
                 );
 
@@ -4318,7 +4318,7 @@ mod tests {
                     g,
                     qt,
                     kt_t,
-                    DType::F32,
+                    NumericDType::F32,
                     rng,
                 );
 
@@ -4327,7 +4327,7 @@ mod tests {
                     g,
                     scores,
                     vt,
-                    DType::F32,
+                    NumericDType::F32,
                     rng,
                 );
 

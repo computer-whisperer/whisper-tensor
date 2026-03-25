@@ -1,6 +1,7 @@
 use crate::dtype::DType;
 use crate::graph::{GlobalId, Node, Property, PropertyValue};
 use crate::milli_graph::{MilliLoweringContext, MilliOpGraph};
+use crate::numeric_dtype::NumericDType;
 use crate::symbolic_graph::ops::Operation;
 use crate::symbolic_graph::{
     ONNXDecodingError, query_attribute_bool, query_attribute_float, query_attribute_int,
@@ -119,11 +120,12 @@ impl Operation for BinaryOperation {
                     .get(&self.a)
                     .copied()
                     .unwrap_or(DType::F32);
+                let input_ndt = NumericDType::from_legacy(input_dtype).unwrap();
                 milli_graph::ops::MatMul::push_new_default_precision(
                     &mut graph,
                     a,
                     b,
-                    input_dtype,
+                    input_ndt,
                     rng,
                 )
             }
@@ -332,11 +334,13 @@ impl Operation for GemmOperation {
             b
         };
 
-        let input_dtype = ctx
-            .tensor_dtypes
-            .get(&self.input_a)
-            .copied()
-            .unwrap_or(DType::F32);
+        let input_dtype = NumericDType::from_legacy(
+            ctx.tensor_dtypes
+                .get(&self.input_a)
+                .copied()
+                .unwrap_or(DType::F32),
+        )
+        .unwrap();
         let (prod_dt, acc_dt, out_dt) =
             milli_graph::ops::MatMul::default_precision_for(input_dtype);
 

@@ -1,6 +1,7 @@
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
 use crate::dtype::{DType, DTypeError};
+use crate::numeric_dtype::NumericDType;
 use crate::graph::{GlobalId, Graph, Link, Node, collect_disconnected_node_slots};
 use crate::milli_graph::observer::MilliOpGraphObserver;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
@@ -1541,7 +1542,7 @@ pub fn generate_optimizer_ops(
             let one_i = ops::Constant::new_scalar(graph, 1i64, rng);
             let t_new = ops::SimpleBinary::add(graph, t_in, one_i, rng);
             // Cast to float for pow
-            let t_float = ops::Cast::push_new(graph, t_new, crate::dtype::DType::F32, rng);
+            let t_float = ops::Cast::push_new(graph, t_new, NumericDType::F32, rng);
             training_meta
                 .global_state_outputs
                 .insert("timestep".into(), t_new);
@@ -2752,7 +2753,7 @@ mod tests {
     fn test_backward_matmul() {
         // f(A, B) = sum(A @ B), A=[2,3], B=[3,2]
         check_general_backward(
-            |g, ids, r| MatMul::push_new_default_precision(g, ids[0], ids[1], DType::F32, r),
+            |g, ids, r| MatMul::push_new_default_precision(g, ids[0], ids[1], NumericDType::F32, r),
             &[
                 vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], // A [2,3]
                 vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], // B [3,2]
@@ -3133,7 +3134,7 @@ mod tests {
                     graph,
                     inputs[0],
                     inputs[1],
-                    DType::F32,
+                    NumericDType::F32,
                     rng,
                 )
             },
@@ -3957,7 +3958,7 @@ mod tests {
             ..Default::default()
         });
         graph.set_default_group(Some(fwd_group));
-        let y = ops::MatMul::push_new_default_precision(&mut graph, x, w, DType::F32, rng);
+        let y = ops::MatMul::push_new_default_precision(&mut graph, x, w, NumericDType::F32, rng);
         graph.set_default_group(None);
 
         // Loss group: mse = mean((y - targets)^2)
@@ -4109,7 +4110,7 @@ mod tests {
             ..Default::default()
         });
         graph.set_default_group(Some(fwd_group));
-        let y = ops::MatMul::push_new_default_precision(&mut graph, x, w, DType::F32, rng);
+        let y = ops::MatMul::push_new_default_precision(&mut graph, x, w, NumericDType::F32, rng);
         graph.set_default_group(None);
 
         let loss_group = graph.create_group(MilliOpGroup {
@@ -4269,9 +4270,9 @@ mod tests {
             ..Default::default()
         });
         graph.set_default_group(Some(fwd_group));
-        let h_pre = ops::MatMul::push_new_default_precision(&mut graph, x, w1, DType::F32, rng);
+        let h_pre = ops::MatMul::push_new_default_precision(&mut graph, x, w1, NumericDType::F32, rng);
         let h = ops::ClampMin::push_new(&mut graph, h_pre, 0.0, rng);
-        let y = ops::MatMul::push_new_default_precision(&mut graph, h, w2, DType::F32, rng);
+        let y = ops::MatMul::push_new_default_precision(&mut graph, h, w2, NumericDType::F32, rng);
         graph.set_default_group(None);
 
         // Loss: MSE

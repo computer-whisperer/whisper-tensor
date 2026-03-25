@@ -1,7 +1,7 @@
-use crate::dtype::DType;
 use crate::graph::{GlobalId, Node};
 use crate::milli_graph::ops::*;
 use crate::milli_graph::{MilliLoweringContext, MilliOpGraph};
+use crate::numeric_dtype::NumericDType;
 use crate::symbolic_graph::ONNXDecodingError;
 use crate::symbolic_graph::ops::Operation;
 use rand::Rng;
@@ -79,16 +79,16 @@ impl Operation for MatMulIntegerOperation {
         let (mut g, input_map) = MilliOpGraph::new(self.inputs(), rng);
 
         // Cast A and B to INT32
-        let mut a_i32 = Cast::push_new(&mut g, input_map[&self.a], DType::I32, rng);
-        let mut b_i32 = Cast::push_new(&mut g, input_map[&self.b], DType::I32, rng);
+        let mut a_i32 = Cast::push_new(&mut g, input_map[&self.a], NumericDType::I32, rng);
+        let mut b_i32 = Cast::push_new(&mut g, input_map[&self.b], NumericDType::I32, rng);
 
         // Subtract zero points (cast to I32 first, broadcasting handled by Sub)
         if let Some(azp) = self.a_zero_point {
-            let azp_i32 = Cast::push_new(&mut g, input_map[&azp], DType::I32, rng);
+            let azp_i32 = Cast::push_new(&mut g, input_map[&azp], NumericDType::I32, rng);
             a_i32 = SimpleBinary::sub(&mut g, a_i32, azp_i32, rng);
         }
         if let Some(bzp) = self.b_zero_point {
-            let bzp_i32 = Cast::push_new(&mut g, input_map[&bzp], DType::I32, rng);
+            let bzp_i32 = Cast::push_new(&mut g, input_map[&bzp], NumericDType::I32, rng);
             b_i32 = SimpleBinary::sub(&mut g, b_i32, bzp_i32, rng);
         }
 
@@ -97,10 +97,10 @@ impl Operation for MatMulIntegerOperation {
             &mut g,
             a_i32,
             b_i32,
-            DType::I32,
-            DType::I32,
-            DType::I32,
-            DType::I32,
+            NumericDType::I32,
+            NumericDType::I32,
+            NumericDType::I32,
+            NumericDType::I32,
             rng,
         );
 

@@ -1,6 +1,6 @@
-use crate::dtype::DType;
 use crate::graph::{GlobalId, Node, Property, PropertyValue};
 use crate::milli_graph::{self, MilliLoweringContext, MilliOpGraph};
+use crate::numeric_dtype::NumericDType;
 use crate::onnx::AttributeProto;
 use crate::symbolic_graph::ops::Operation;
 use crate::symbolic_graph::{ONNXDecodingError, query_attribute_int, query_attribute_string};
@@ -112,7 +112,7 @@ pub(super) fn gather_class_axis(
     let flat_target = milli_graph::ops::Reshape::push_new(graph, target, flat_shape, false, rng);
 
     // Cast target to i64 for index arithmetic
-    let flat_target_i64 = milli_graph::ops::Cast::push_new(graph, flat_target, DType::I64, rng);
+    let flat_target_i64 = milli_graph::ops::Cast::push_new(graph, flat_target, NumericDType::I64, rng);
 
     // N_total = product of target shape elements
     let target_flat_shape = milli_graph::ops::Shape::push_new(graph, flat_target_i64, rng);
@@ -168,7 +168,7 @@ impl Operation for NegativeLogLikelihoodLossOperation {
         // When ignore_index is set, target values may be out-of-bounds (e.g. 10
         // when C=5). Clamp them to 0 before indexing, then zero out loss later.
         let (safe_target, is_ignored) = if let Some(ii) = self.ignore_index {
-            let target_i64 = milli_graph::ops::Cast::push_new(&mut graph, target, DType::I64, rng);
+            let target_i64 = milli_graph::ops::Cast::push_new(&mut graph, target, NumericDType::I64, rng);
             let ii_const = milli_graph::ops::Constant::new_scalar(&mut graph, ii, rng);
             let mask = milli_graph::ops::SimpleBinary::equal(&mut graph, target_i64, ii_const, rng);
             let zero_i64 = milli_graph::ops::Constant::new_scalar(&mut graph, 0i64, rng);
@@ -198,7 +198,7 @@ impl Operation for NegativeLogLikelihoodLossOperation {
                 false,
                 rng,
             );
-            milli_graph::ops::Cast::push_new(&mut graph, flat, DType::I64, rng)
+            milli_graph::ops::Cast::push_new(&mut graph, flat, NumericDType::I64, rng)
         };
 
         let mut sample_weight = if let Some(w_id) = self.weight {

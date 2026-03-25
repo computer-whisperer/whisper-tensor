@@ -2,6 +2,7 @@ use crate::backends::ndarray_backend::NDArrayNumericTensor;
 use crate::dtype::DType;
 use crate::graph::{GlobalId, Node, Property, PropertyValue};
 use crate::milli_graph::{MilliLoweringContext, MilliOpGraph, ops_helpers};
+use crate::numeric_dtype::NumericDType;
 use crate::symbolic_graph::ops::Operation;
 use crate::symbolic_graph::{ONNXDecodingError, query_attribute_float, query_attribute_int};
 use crate::{milli_graph, onnx};
@@ -85,7 +86,7 @@ impl Operation for LpNormalizationOperation {
             _ => panic!(),
         };
         let axis_tid = ops_helpers::scalar_const(&mut graph, self.axis, rng);
-        x_tid = milli_graph::ops::Cast::push_new(&mut graph, x_tid, DType::F32, rng);
+        x_tid = milli_graph::ops::Cast::push_new(&mut graph, x_tid, NumericDType::F32, rng);
         x_tid = milli_graph::ops::ReduceSum::push_new(
             &mut graph,
             x_tid,
@@ -97,7 +98,7 @@ impl Operation for LpNormalizationOperation {
         if self.p == 2 {
             x_tid = milli_graph::ops::SimpleUnaryOp::sqrt(&mut graph, x_tid, rng);
         }
-        let input_cast_tid = milli_graph::ops::Cast::push_new(&mut graph, input, DType::F32, rng);
+        let input_cast_tid = milli_graph::ops::Cast::push_new(&mut graph, input, NumericDType::F32, rng);
         let out_tid = milli_graph::ops::SimpleBinary::div(&mut graph, input_cast_tid, x_tid, rng);
         let out = milli_graph::ops::CastLike::push_new(&mut graph, out_tid, input, rng);
 
@@ -204,7 +205,7 @@ impl Operation for GroupNormalizationOperation {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let original_input = input_map[&self.input];
         let input_cast =
-            milli_graph::ops::Cast::push_new(&mut graph, original_input, self.stash_type, rng);
+            milli_graph::ops::Cast::push_new(&mut graph, original_input, NumericDType::from_legacy(self.stash_type).unwrap(), rng);
 
         let input_shape = milli_graph::ops::Shape::push_new(&mut graph, input_cast, rng);
         let num_channels = {
@@ -272,7 +273,7 @@ impl Operation for GroupNormalizationOperation {
             let scale_cast = milli_graph::ops::Cast::push_new(
                 &mut graph,
                 input_map[&self.scale],
-                self.stash_type,
+                NumericDType::from_legacy(self.stash_type).unwrap(),
                 rng,
             );
             let scale = milli_graph::ops::Unsqueeze::push_new(&mut graph, scale_cast, one, rng);
@@ -283,7 +284,7 @@ impl Operation for GroupNormalizationOperation {
             let bias_cast = milli_graph::ops::Cast::push_new(
                 &mut graph,
                 input_map[&self.bias],
-                self.stash_type,
+                NumericDType::from_legacy(self.stash_type).unwrap(),
                 rng,
             );
             let bias = milli_graph::ops::Unsqueeze::push_new(&mut graph, bias_cast, one, rng);
@@ -453,7 +454,7 @@ impl Operation for RMSNormalizationOperation {
         let input_scale = input_map[&self.scale];
 
         let input_f32 =
-            milli_graph::ops::Cast::push_new(&mut graph, input_data, self.stash_type, rng);
+            milli_graph::ops::Cast::push_new(&mut graph, input_data, NumericDType::from_legacy(self.stash_type).unwrap(), rng);
 
         let axis = ops_helpers::scalar_const(&mut graph, self.axis, rng);
         let axis = ops_helpers::resolve_axes(&mut graph, axis, input_data, rng);
@@ -658,7 +659,7 @@ impl Operation for LayerNormalizationOperation {
         let input_scale = input_map[&self.scale];
 
         let input_f32 =
-            milli_graph::ops::Cast::push_new(&mut graph, input_data, self.stash_type, rng);
+            milli_graph::ops::Cast::push_new(&mut graph, input_data, NumericDType::from_legacy(self.stash_type).unwrap(), rng);
 
         let axis = ops_helpers::scalar_const(&mut graph, self.axis, rng);
         let axis = ops_helpers::resolve_axes(&mut graph, axis, input_data, rng);
@@ -803,7 +804,7 @@ impl Operation for InstanceNormalizationOperation {
         let original_input = input_map[&self.input];
 
         let input_cast =
-            milli_graph::ops::Cast::push_new(&mut graph, original_input, DType::F32, rng);
+            milli_graph::ops::Cast::push_new(&mut graph, original_input, NumericDType::F32, rng);
 
         // Save original shape for reshaping back later
         let input_shape = milli_graph::ops::Shape::push_new(&mut graph, input_cast, rng);
@@ -860,7 +861,7 @@ impl Operation for InstanceNormalizationOperation {
             let scale_cast = milli_graph::ops::Cast::push_new(
                 &mut graph,
                 input_map[&self.scale],
-                DType::F32,
+                NumericDType::F32,
                 rng,
             );
             let scale = milli_graph::ops::Unsqueeze::push_new(&mut graph, scale_cast, one, rng);
@@ -871,7 +872,7 @@ impl Operation for InstanceNormalizationOperation {
             let bias_cast = milli_graph::ops::Cast::push_new(
                 &mut graph,
                 input_map[&self.bias],
-                DType::F32,
+                NumericDType::F32,
                 rng,
             );
             let bias = milli_graph::ops::Unsqueeze::push_new(&mut graph, bias_cast, one, rng);
@@ -1000,7 +1001,7 @@ impl Operation for BatchNormalizationOperation {
         let original_x = input_map[&self.x];
 
         // Cast input and params to F32 for numerical stability
-        let x = milli_graph::ops::Cast::push_new(&mut graph, original_x, DType::F32, rng);
+        let x = milli_graph::ops::Cast::push_new(&mut graph, original_x, NumericDType::F32, rng);
 
         // Save original shape for reshaping back
         let orig_shape = milli_graph::ops::Shape::push_new(&mut graph, x, rng);
@@ -1015,22 +1016,22 @@ impl Operation for BatchNormalizationOperation {
         // casting each to F32.
         let axis1 = milli_graph::ops::Constant::new_scalar(&mut graph, 1i64, rng);
         let scale =
-            milli_graph::ops::Cast::push_new(&mut graph, input_map[&self.scale], DType::F32, rng);
+            milli_graph::ops::Cast::push_new(&mut graph, input_map[&self.scale], NumericDType::F32, rng);
         let scale = milli_graph::ops::Unsqueeze::push_new(&mut graph, scale, axis1, rng);
         let bias =
-            milli_graph::ops::Cast::push_new(&mut graph, input_map[&self.bias], DType::F32, rng);
+            milli_graph::ops::Cast::push_new(&mut graph, input_map[&self.bias], NumericDType::F32, rng);
         let bias = milli_graph::ops::Unsqueeze::push_new(&mut graph, bias, axis1, rng);
         let mean = milli_graph::ops::Cast::push_new(
             &mut graph,
             input_map[&self.input_mean],
-            DType::F32,
+            NumericDType::F32,
             rng,
         );
         let mean = milli_graph::ops::Unsqueeze::push_new(&mut graph, mean, axis1, rng);
         let var = milli_graph::ops::Cast::push_new(
             &mut graph,
             input_map[&self.input_var],
-            DType::F32,
+            NumericDType::F32,
             rng,
         );
         let var = milli_graph::ops::Unsqueeze::push_new(&mut graph, var, axis1, rng);

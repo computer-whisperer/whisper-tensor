@@ -369,7 +369,7 @@ impl MilliOp for ReduceMean {
             let count = super::Gather::push_new(graph, input_shape, axes, 0, rng);
             let count_scalar = super::ReduceProd::push_new(graph, count, None, false, false, rng);
             let count_float =
-                super::Cast::push_new(graph, count_scalar, crate::dtype::DType::F32, rng);
+                super::Cast::push_new(graph, count_scalar, crate::numeric_dtype::NumericDType::F32, rng);
             let grad_input = super::SimpleBinary::div(graph, expanded, count_float, rng);
             let mut result = HashMap::new();
             result.insert(self.data, grad_input);
@@ -378,7 +378,7 @@ impl MilliOp for ReduceMean {
             // All axes reduced — count = total number of input elements
             // ReduceProd(input_shape) gives the total element count
             let total = super::ReduceProd::push_new(graph, input_shape, None, false, false, rng);
-            let total_float = super::Cast::push_new(graph, total, crate::dtype::DType::F32, rng);
+            let total_float = super::Cast::push_new(graph, total, crate::numeric_dtype::NumericDType::F32, rng);
             let grad_input = super::SimpleBinary::div(graph, expanded, total_float, rng);
             let mut result = HashMap::new();
             result.insert(self.data, grad_input);

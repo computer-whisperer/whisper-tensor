@@ -1,6 +1,6 @@
-use crate::dtype::DType;
 use crate::graph::{GlobalId, Node, Property, PropertyValue};
 use crate::milli_graph::{MilliLoweringContext, MilliOpGraph};
+use crate::numeric_dtype::NumericDType;
 use crate::symbolic_graph::ops::Operation;
 use crate::symbolic_graph::{ONNXDecodingError, query_attribute_float, query_attribute_int};
 use crate::{TrigOp, milli_graph, onnx};
@@ -117,7 +117,7 @@ impl Operation for UnaryOperation {
                 milli_graph::ops::ClampMin::push_new(&mut graph, a, 0.0, rng)
             }
             WhichUnaryOperation::Sigmoid => {
-                let xn = milli_graph::ops::Cast::push_new(&mut graph, a, DType::F32, rng);
+                let xn = milli_graph::ops::Cast::push_new(&mut graph, a, NumericDType::F32, rng);
                 let xn = milli_graph::ops::SimpleUnaryOp::neg(&mut graph, xn, rng);
                 let xn = milli_graph::ops::SimpleUnaryOp::exp(&mut graph, xn, rng);
                 let c_tid = milli_graph::ops::Constant::new_scalar(&mut graph, 1.0f32, rng);
@@ -248,7 +248,7 @@ impl Operation for SoftmaxOperation {
         // PyTorch's F.softmax internally computes in F32 for BF16/F16 inputs;
         // without this, each intermediate (sub, exp, reduce_sum, div) truncates
         // to BF16 causing compounding precision loss through every attention layer.
-        let input_f32 = milli_graph::ops::Cast::push_new(&mut graph, raw_input, DType::F32, rng);
+        let input_f32 = milli_graph::ops::Cast::push_new(&mut graph, raw_input, NumericDType::F32, rng);
 
         let axis_tid =
             milli_graph::ops::Constant::new_scalar(&mut graph, self.axis.unwrap_or(-1), rng);
@@ -338,7 +338,7 @@ impl Operation for LogSoftmaxOperation {
         let raw_input = input_map[&self.input];
 
         // Upcast to F32 — same rationale as Softmax.
-        let input_f32 = milli_graph::ops::Cast::push_new(&mut graph, raw_input, DType::F32, rng);
+        let input_f32 = milli_graph::ops::Cast::push_new(&mut graph, raw_input, NumericDType::F32, rng);
 
         let axis_tid =
             milli_graph::ops::Constant::new_scalar(&mut graph, self.axis.unwrap_or(-1), rng);

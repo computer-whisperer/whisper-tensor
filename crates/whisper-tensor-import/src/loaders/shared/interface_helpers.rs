@@ -7,6 +7,7 @@ use whisper_tensor::milli_graph::MilliOpGraph;
 use whisper_tensor::milli_graph::ops::{
     ArgMax, Cast, Constant, SimpleBinary, SimpleUnaryOp, Unsqueeze,
 };
+use whisper_tensor::numeric_dtype::NumericDType;
 use whisper_tensor::super_graph::links::{SuperGraphLinkDouble, SuperGraphLinkTriple};
 use whisper_tensor::super_graph::nodes::{
     SuperGraphNode, SuperGraphNodeMilliOpGraph, SuperGraphNodeModelExecution,
@@ -25,7 +26,7 @@ pub fn build_cast_node(
     let (mut mg, input_map) = MilliOpGraph::new(std::iter::once(input.global_id()), rng);
     let inp = *input_map.get(&input.global_id()).unwrap();
     let casted =
-        Cast::push_new_with_label(&mut mg, inp, dtype, Some(format!("cast_to_{dtype:?}")), rng);
+        Cast::push_new_with_label(&mut mg, inp, NumericDType::from_legacy(dtype).unwrap(), Some(format!("cast_to_{dtype:?}")), rng);
     mg.set_output_map(std::iter::once((casted, output.global_id())));
     let mut node = SuperGraphNodeMilliOpGraph::new(mg, rng);
     node.label = Some(format!("cast_to_{dtype:?}"));
@@ -94,7 +95,7 @@ pub fn build_input_prep(
     let lat_in = *input_map.get(&inner_latent_in.global_id()).unwrap();
     let ts_in = *input_map.get(&inner_timestep.global_id()).unwrap();
 
-    let lat_cast = Cast::push_new(&mut mg, lat_in, model_dtype, rng);
+    let lat_cast = Cast::push_new(&mut mg, lat_in, NumericDType::from_legacy(model_dtype).unwrap(), rng);
     let ts_shape = Constant::push_new(
         &mut mg,
         NDArrayNumericTensor::from_vec_shape(vec![1i64], &vec![1]).unwrap(),
@@ -275,14 +276,14 @@ pub(crate) fn build_denoising_loop(
         let lat_cast = Cast::push_new_with_label(
             &mut mg,
             scaled_lat,
-            model_dtype,
+            NumericDType::from_legacy(model_dtype).unwrap(),
             Some("latent.cast_model_dtype".to_string()),
             rng,
         );
         let ts_cast = Cast::push_new_with_label(
             &mut mg,
             ts_in,
-            model_dtype,
+            NumericDType::from_legacy(model_dtype).unwrap(),
             Some("timestep.cast_model_dtype".to_string()),
             rng,
         );
@@ -377,14 +378,14 @@ pub(crate) fn build_denoising_loop(
         let uncond_f32 = Cast::push_new_with_label(
             &mut mg,
             uncond_in,
-            DType::F32,
+            NumericDType::F32,
             Some("noise_uncond.cast_f32".to_string()),
             rng,
         );
         let cond_f32 = Cast::push_new_with_label(
             &mut mg,
             cond_in,
-            DType::F32,
+            NumericDType::F32,
             Some("noise_cond.cast_f32".to_string()),
             rng,
         );
@@ -532,7 +533,7 @@ pub(crate) fn build_vae_decode(
         let scaled_cast = Cast::push_new_with_label(
             &mut mg,
             scaled,
-            model_dtype,
+            NumericDType::from_legacy(model_dtype).unwrap(),
             Some("vae_latent.cast_model_dtype".to_string()),
             rng,
         );
@@ -600,7 +601,7 @@ pub(crate) fn build_vae_decode_with_shift(
         let casted = Cast::push_new_with_label(
             &mut mg,
             shifted,
-            model_dtype,
+            NumericDType::from_legacy(model_dtype).unwrap(),
             Some("vae_latent.cast_model_dtype".to_string()),
             rng,
         );
@@ -717,7 +718,7 @@ pub(crate) fn build_flux_denoising_loop(
         let lat_cast = Cast::push_new_with_label(
             &mut mg,
             lat_in,
-            model_dtype,
+            NumericDType::from_legacy(model_dtype).unwrap(),
             Some("latent.cast_model_dtype".to_string()),
             rng,
         );
@@ -809,7 +810,7 @@ pub(crate) fn build_flux_denoising_loop(
         let velocity_f32 = Cast::push_new_with_label(
             &mut mg,
             velocity,
-            DType::F32,
+            NumericDType::F32,
             Some("velocity.cast_f32".to_string()),
             rng,
         );
@@ -935,7 +936,7 @@ pub(crate) fn build_flux_vae_decode(
         let f32_lat = Cast::push_new_with_label(
             &mut mg,
             lat_in,
-            DType::F32,
+            NumericDType::F32,
             Some("latent.cast_f32".to_string()),
             rng,
         );
@@ -1070,14 +1071,14 @@ pub(crate) fn build_sd3_denoising_loop(
         let lat_cast = Cast::push_new_with_label(
             &mut mg,
             lat_in,
-            model_dtype,
+            NumericDType::from_legacy(model_dtype).unwrap(),
             Some("latent.cast_model_dtype".to_string()),
             rng,
         );
         let ts_cast = Cast::push_new_with_label(
             &mut mg,
             ts_in,
-            model_dtype,
+            NumericDType::from_legacy(model_dtype).unwrap(),
             Some("timestep.cast_model_dtype".to_string()),
             rng,
         );
@@ -1170,14 +1171,14 @@ pub(crate) fn build_sd3_denoising_loop(
         let uncond_f32 = Cast::push_new_with_label(
             &mut mg,
             uncond_in,
-            DType::F32,
+            NumericDType::F32,
             Some("pred_uncond.cast_f32".to_string()),
             rng,
         );
         let cond_f32 = Cast::push_new_with_label(
             &mut mg,
             cond_in,
-            DType::F32,
+            NumericDType::F32,
             Some("pred_cond.cast_f32".to_string()),
             rng,
         );

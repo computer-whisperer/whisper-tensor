@@ -1,8 +1,8 @@
 use crate::backends::ndarray_backend::NDArrayNumericTensor;
-use crate::dtype::DType;
 use crate::graph::{GlobalId, Node, Property, PropertyValue};
 use crate::milli_graph::ops as milli_ops;
 use crate::milli_graph::{MilliLoweringContext, MilliOpGraph, ops_helpers};
+use crate::numeric_dtype::NumericDType;
 use crate::onnx;
 use crate::symbolic_graph::ops::Operation;
 use crate::symbolic_graph::{
@@ -151,7 +151,7 @@ impl Operation for AveragePoolOperation {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let original_input = input_map[&self.input];
 
-        let input_f32 = milli_ops::Cast::push_new(&mut graph, original_input, DType::F32, rng);
+        let input_f32 = milli_ops::Cast::push_new(&mut graph, original_input, NumericDType::F32, rng);
 
         let n_spatial = self.kernel_shape.len();
         let kernel_shape: Vec<i64> = self.kernel_shape.clone();
@@ -709,7 +709,7 @@ impl Operation for MaxPoolOperation {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let original_input = input_map[&self.input];
 
-        let input_f32 = milli_ops::Cast::push_new(&mut graph, original_input, DType::F32, rng);
+        let input_f32 = milli_ops::Cast::push_new(&mut graph, original_input, NumericDType::F32, rng);
 
         let n_spatial = self.kernel_shape.len();
         let kernel_shape: Vec<i64> = self.kernel_shape.clone();
@@ -1147,7 +1147,7 @@ impl Operation for LpPoolOperation {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let original_input = input_map[&self.input];
 
-        let input_f32 = milli_ops::Cast::push_new(&mut graph, original_input, DType::F32, rng);
+        let input_f32 = milli_ops::Cast::push_new(&mut graph, original_input, NumericDType::F32, rng);
 
         let n_spatial = self.kernel_shape.len();
         let kernel_shape: Vec<i64> = self.kernel_shape.clone();

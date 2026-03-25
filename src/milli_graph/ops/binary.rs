@@ -730,8 +730,8 @@ impl MilliOp for Pow {
     }
 }
 
-fn default_f32() -> DType {
-    DType::F32
+fn default_f32() -> NumericDType {
+    NumericDType::F32
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -743,34 +743,34 @@ pub struct MatMul {
     b: GlobalId,
     /// Expected dtype of the input tensors (e.g. BF16).
     #[serde(default = "default_f32")]
-    input_dtype: DType,
+    input_dtype: NumericDType,
     /// Precision of the A[m,k] * B[k,n] products before accumulation.
     /// When wider than input_dtype, the full-precision product is kept
     /// (e.g. BF16 inputs → F32 products, matching tensor-core behavior).
     #[serde(default = "default_f32")]
-    product_dtype: DType,
+    product_dtype: NumericDType,
     /// Precision for accumulating (summing) the products across K.
     #[serde(default = "default_f32")]
-    accumulate_dtype: DType,
+    accumulate_dtype: NumericDType,
     /// Dtype of the output tensor.
     #[serde(default = "default_f32")]
-    output_dtype: DType,
+    output_dtype: NumericDType,
     /// Accumulation order for the contraction (K) dimension.
     #[serde(default)]
     accumulation_mode: AccumulationMode,
 }
 
 impl MatMul {
-    pub fn input_dtype(&self) -> DType {
+    pub fn input_dtype(&self) -> NumericDType {
         self.input_dtype
     }
-    pub fn product_dtype(&self) -> DType {
+    pub fn product_dtype(&self) -> NumericDType {
         self.product_dtype
     }
-    pub fn accumulate_dtype(&self) -> DType {
+    pub fn accumulate_dtype(&self) -> NumericDType {
         self.accumulate_dtype
     }
-    pub fn output_dtype(&self) -> DType {
+    pub fn output_dtype(&self) -> NumericDType {
         self.output_dtype
     }
     pub fn accumulation_mode(&self) -> AccumulationMode {
@@ -782,10 +782,10 @@ impl MatMul {
         graph: &mut MilliOpGraph,
         a: GlobalId,
         b: GlobalId,
-        input_dtype: DType,
-        product_dtype: DType,
-        accumulate_dtype: DType,
-        output_dtype: DType,
+        input_dtype: NumericDType,
+        product_dtype: NumericDType,
+        accumulate_dtype: NumericDType,
+        output_dtype: NumericDType,
         rng: &mut impl Rng,
     ) -> GlobalId {
         Self::push_new_with_label(
@@ -806,10 +806,10 @@ impl MatMul {
         graph: &mut MilliOpGraph,
         a: GlobalId,
         b: GlobalId,
-        input_dtype: DType,
-        product_dtype: DType,
-        accumulate_dtype: DType,
-        output_dtype: DType,
+        input_dtype: NumericDType,
+        product_dtype: NumericDType,
+        accumulate_dtype: NumericDType,
+        output_dtype: NumericDType,
         label: Option<String>,
         rng: &mut impl Rng,
     ) -> GlobalId {
@@ -837,7 +837,7 @@ impl MatMul {
         graph: &mut MilliOpGraph,
         a: GlobalId,
         b: GlobalId,
-        input_dtype: DType,
+        input_dtype: NumericDType,
         rng: &mut impl Rng,
     ) -> GlobalId {
         let (prod_dt, acc_dt, out_dt) = Self::default_precision_for(input_dtype);
@@ -846,9 +846,9 @@ impl MatMul {
 
     /// Returns (product_dtype, accumulate_dtype, output_dtype) for the standard
     /// precision convention given an input dtype.
-    pub fn default_precision_for(input_dtype: DType) -> (DType, DType, DType) {
+    pub fn default_precision_for(input_dtype: NumericDType) -> (NumericDType, NumericDType, NumericDType) {
         match input_dtype {
-            DType::BF16 | DType::F16 => (DType::F32, DType::F32, input_dtype),
+            NumericDType::BF16 | NumericDType::F16 => (NumericDType::F32, NumericDType::F32, input_dtype),
             _ => (input_dtype, input_dtype, input_dtype),
         }
     }
@@ -969,12 +969,9 @@ impl MatMul {
         // product_dtype: precision of A*B products (Mul groups).
         // accumulate_dtype: precision for summing products (ReduceSum groups).
         // output_dtype: final output precision (Identity cast-back if needed).
-        let product_dtype = NumericDType::from_legacy(self.product_dtype())
-            .expect("unsupported product_dtype for lowering");
-        let accumulate_dtype = NumericDType::from_legacy(self.accumulate_dtype())
-            .expect("unsupported accumulate_dtype for lowering");
-        let out_dtype = NumericDType::from_legacy(self.output_dtype())
-            .expect("unsupported output_dtype for lowering");
+        let product_dtype = self.product_dtype();
+        let accumulate_dtype = self.accumulate_dtype();
+        let out_dtype = self.output_dtype();
 
         // Use A and B's actual physical strides (may be non-row-major after Transpose).
         let a_known_dims: Vec<u64> = a_layout
@@ -1235,8 +1232,7 @@ impl MilliOp for MatMul {
         }
 
         // MatMul output dtype comes from the struct's explicit field.
-        let out_dtype = NumericDType::from_legacy(self.output_dtype)
-            .expect("unsupported output_dtype for infer");
+        let out_dtype = self.output_dtype;
 
         // Try per-dim shape inference: A[...,M,K] @ B[...,K,N] -> [...,M,N]
         // Batch dims are broadcast, last two follow matmul rules.
@@ -1323,8 +1319,9 @@ impl MilliOp for MatMul {
     {
         let a_input = &inputs[&self.a];
         let b_input = &inputs[&self.b];
-        let accumulate_dtype = if self.accumulate_dtype != a_input.dtype() {
-            Some(self.accumulate_dtype)
+        let accumulate_legacy = self.accumulate_dtype.to_legacy();
+        let accumulate_dtype = if accumulate_legacy != a_input.dtype() {
+            Some(accumulate_legacy)
         } else {
             None
         };
@@ -1337,7 +1334,7 @@ impl MilliOp for MatMul {
             a_input,
             b_input,
             accumulate_dtype,
-            self.output_dtype,
+            self.output_dtype.to_legacy(),
             mode,
             backend,
         )?;

@@ -8,7 +8,6 @@ use half::bf16;
 use rand::rngs::SmallRng;
 use rand::SeedableRng;
 
-use crate::dtype::DType;
 use crate::graph::GlobalId;
 use crate::milli_graph::MilliOpGraph;
 use crate::milli_graph::ops::Cast;
@@ -38,7 +37,7 @@ struct CastGraphIds {
     out: GlobalId,
 }
 
-fn build_cast_graph(target_dtype: DType) -> (MilliOpGraph, CastGraphIds) {
+fn build_cast_graph(target_dtype: NumericDType) -> (MilliOpGraph, CastGraphIds) {
     let mut rng = rng();
     let ext_in = GlobalId::new(&mut rng);
     let (mut graph, input_map) = MilliOpGraph::new([ext_in], &mut rng);
@@ -68,7 +67,7 @@ fn cast_data_set(
 // ---------------------------------------------------------------------------
 
 fn cast_f32_to_bf16_case() -> TestCase {
-    let (graph, ids) = build_cast_graph(DType::BF16);
+    let (graph, ids) = build_cast_graph(NumericDType::BF16);
 
     // Values that are exactly representable in bf16
     // and values that lose precision.
@@ -109,7 +108,7 @@ fn cast_f32_to_bf16_case() -> TestCase {
 // ---------------------------------------------------------------------------
 
 fn cast_f32_to_i32_case() -> TestCase {
-    let (graph, ids) = build_cast_graph(DType::I32);
+    let (graph, ids) = build_cast_graph(NumericDType::I32);
 
     TestCase {
         name: "cast_f32_to_i32".to_string(),
@@ -137,7 +136,7 @@ fn cast_f32_to_i32_case() -> TestCase {
 // ---------------------------------------------------------------------------
 
 fn cast_i32_to_f32_case() -> TestCase {
-    let (graph, ids) = build_cast_graph(DType::F32);
+    let (graph, ids) = build_cast_graph(NumericDType::F32);
 
     TestCase {
         name: "cast_i32_to_f32".to_string(),

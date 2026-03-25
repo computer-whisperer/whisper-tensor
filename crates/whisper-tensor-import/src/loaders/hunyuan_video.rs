@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use whisper_tensor::dtype::DType;
 use whisper_tensor::interfaces::{SchedulerType, VideoGenerationInterface};
+use whisper_tensor::numeric_dtype::NumericDType;
 use whisper_tensor::loader::*;
 use whisper_tensor::metadata::TokenizerInfo;
 use whisper_tensor::milli_graph::MilliOpGraph;
@@ -474,7 +475,7 @@ fn build_hunyuan_denoising_loop(
         let lat_in = *input_map.get(&inner_latent_in.global_id()).unwrap();
         let dt_in = *input_map.get(&inner_dt.global_id()).unwrap();
 
-        let vel_f32 = Cast::push_new(&mut mg, velocity, DType::F32, rng);
+        let vel_f32 = Cast::push_new(&mut mg, velocity, NumericDType::F32, rng);
         let step = SimpleBinary::mul(&mut mg, vel_f32, dt_in, rng);
         let latent_next = SimpleBinary::add(&mut mg, lat_in, step, rng);
 

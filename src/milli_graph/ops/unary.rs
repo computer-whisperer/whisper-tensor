@@ -640,7 +640,7 @@ impl MilliOp for ClampMin {
         // mask = cast(input >= value, float)
         let threshold = super::Constant::new_scalar(graph, self.value, rng);
         let mask = super::SimpleBinary::greater_or_equal(graph, self.input, threshold, rng);
-        let mask_float = super::Cast::push_new(graph, mask, crate::dtype::DType::F32, rng);
+        let mask_float = super::Cast::push_new(graph, mask, crate::numeric_dtype::NumericDType::F32, rng);
         let grad_input = super::SimpleBinary::mul(graph, grad_output, mask_float, rng);
         let mut result = HashMap::new();
         result.insert(self.input, grad_input);

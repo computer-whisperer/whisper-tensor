@@ -2,6 +2,7 @@ use super::shared::{build_rnn_supergraph, default_storage, onnx_bytes_to_model};
 use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
 use whisper_tensor::dtype::DType;
 use whisper_tensor::interfaces::TextInferenceTokensInLogitOutInterface;
+use whisper_tensor::numeric_dtype::NumericDType;
 use whisper_tensor::loader::*;
 use whisper_tensor::metadata::TokenizerInfo;
 use whisper_tensor::milli_graph::MilliOpGraph;
@@ -174,7 +175,7 @@ fn build_simple_transformer_supergraph(
         let mut x = Cast::push_new_with_label(
             &mut milli_graph,
             milli_op_graph_input,
-            input_dtype,
+            NumericDType::from_legacy(input_dtype).unwrap(),
             Some("input.cast_dtype".to_string()),
             rng,
         );
@@ -235,7 +236,7 @@ fn build_simple_transformer_supergraph(
         x = Cast::push_new_with_label(
             &mut milli_graph,
             x,
-            DType::F32,
+            NumericDType::F32,
             Some("output.cast_f32".to_string()),
             rng,
         );

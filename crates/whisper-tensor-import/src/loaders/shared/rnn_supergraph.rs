@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
 use whisper_tensor::dtype::DType;
 use whisper_tensor::interfaces::TextInferenceTokensInLogitOutInterface;
+use whisper_tensor::numeric_dtype::NumericDType;
 use whisper_tensor::metadata::TokenizerInfo;
 use whisper_tensor::milli_graph::MilliOpGraph;
 use whisper_tensor::milli_graph::ops::{Cast, Constant, Shape, SimpleBinary, Squeeze, Unsqueeze};
@@ -223,7 +224,7 @@ pub(super) fn build_rnn_supergraph(
         let mut x = Cast::push_new_with_label(
             &mut milli_graph,
             milli_op_graph_input,
-            input_tensor_dtype,
+            NumericDType::from_legacy(input_tensor_dtype).unwrap(),
             Some("token.cast_dtype".to_string()),
             rng,
         );
@@ -312,7 +313,7 @@ pub(super) fn build_rnn_supergraph(
         x = Cast::push_new_with_label(
             &mut milli_graph,
             x,
-            DType::F32,
+            NumericDType::F32,
             Some("logits.cast_f32".to_string()),
             rng,
         );

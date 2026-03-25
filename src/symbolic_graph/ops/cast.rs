@@ -1,6 +1,7 @@
 use crate::dtype::DType;
 use crate::graph::{GlobalId, Node, Property, PropertyValue};
 use crate::milli_graph::{self, MilliLoweringContext, MilliOpGraph};
+use crate::numeric_dtype::NumericDType;
 use crate::onnx;
 use crate::symbolic_graph::ONNXDecodingError;
 use crate::symbolic_graph::ops::Operation;
@@ -183,7 +184,7 @@ impl Operation for CastOperation {
     ) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let out =
-            milli_graph::ops::Cast::push_new(&mut graph, input_map[&self.input], self.to, rng);
+            milli_graph::ops::Cast::push_new(&mut graph, input_map[&self.input], NumericDType::from_legacy(self.to).unwrap(), rng);
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);
         graph.set_output_map(output_map);

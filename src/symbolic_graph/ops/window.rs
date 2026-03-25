@@ -2,6 +2,7 @@ use crate::dtype::DType;
 use crate::graph::{GlobalId, Node};
 use crate::milli_graph::ops::*;
 use crate::milli_graph::{MilliLoweringContext, MilliOpGraph};
+use crate::numeric_dtype::NumericDType;
 use crate::symbolic_graph::ops::Operation;
 use crate::symbolic_graph::{ONNXDecodingError, query_attribute_int};
 use crate::{TrigOp, onnx};
@@ -118,10 +119,10 @@ impl Operation for WindowOperation {
         };
 
         // Ensure size is INT64 for Range
-        let size_i64 = Cast::push_new(&mut g, size_input, DType::I64, rng);
+        let size_i64 = Cast::push_new(&mut g, size_input, NumericDType::I64, rng);
 
         // Cast size to float for arithmetic
-        let size_f32 = Cast::push_new(&mut g, size_i64, DType::F32, rng);
+        let size_f32 = Cast::push_new(&mut g, size_i64, NumericDType::F32, rng);
 
         // N = size (periodic) or size - 1 (symmetric)
         let denom = if self.periodic == 1 {
@@ -135,7 +136,7 @@ impl Operation for WindowOperation {
         let zero_i64 = Constant::new_scalar(&mut g, 0i64, rng);
         let one_i64 = Constant::new_scalar(&mut g, 1i64, rng);
         let n_i64 = Range::push_new(&mut g, zero_i64, size_i64, one_i64, rng);
-        let n = Cast::push_new(&mut g, n_i64, DType::F32, rng);
+        let n = Cast::push_new(&mut g, n_i64, NumericDType::F32, rng);
 
         // ratio = n / N
         let ratio = SimpleBinary::div(&mut g, n, denom, rng);
@@ -163,7 +164,7 @@ impl Operation for WindowOperation {
 
         // Cast to requested output dtype
         if out_dtype != DType::F32 {
-            w = Cast::push_new(&mut g, w, out_dtype, rng);
+            w = Cast::push_new(&mut g, w, NumericDType::from_legacy(out_dtype).unwrap(), rng);
         }
 
         let mut output_map = HashMap::new();

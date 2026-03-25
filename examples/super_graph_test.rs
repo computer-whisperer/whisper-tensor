@@ -3,6 +3,7 @@ use std::path::Path;
 use whisper_tensor::backends::eval_backend::EvalBackend;
 use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
 use whisper_tensor::dtype::DType;
+use whisper_tensor::numeric_dtype::NumericDType;
 use whisper_tensor::milli_graph::MilliOpGraph;
 use whisper_tensor::milli_graph::ops::{
     ArgMax, Cast, Constant, Shape, SimpleBinary, Slice, Squeeze, Unsqueeze,
@@ -97,7 +98,7 @@ fn main() {
         let logits_in = Squeeze::push_new(&mut milli_graph, logits_in, const_0, &mut rng);
 
         let output = ArgMax::push_new(&mut milli_graph, logits_in, 0, false, false, &mut rng);
-        let output = Cast::push_new(&mut milli_graph, output, DType::U32, &mut rng);
+        let output = Cast::push_new(&mut milli_graph, output, NumericDType::U32, &mut rng);
         let output = Unsqueeze::push_new(&mut milli_graph, output, const_0, &mut rng);
         let mut output_map = HashMap::new();
 

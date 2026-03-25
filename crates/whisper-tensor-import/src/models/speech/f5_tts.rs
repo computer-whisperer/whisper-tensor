@@ -3,6 +3,7 @@ use std::path::Path;
 use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
 use whisper_tensor::dtype::DType;
 use whisper_tensor::interfaces::{TTSInputConfig, TextToSpeechInterface};
+use whisper_tensor::numeric_dtype::NumericDType;
 use whisper_tensor::loader::{LoadedInterface, LoaderError, LoaderOutput};
 use whisper_tensor::milli_graph::MilliOpGraph;
 use whisper_tensor::milli_graph::ops::{Cast, Constant, SimpleBinary};
@@ -336,7 +337,7 @@ fn build_f5_denoising_loop(
         let dt = Cast::push_new_with_label(
             &mut mg,
             dt,
-            DType::F16,
+            NumericDType::F16,
             Some("ode.dt.cast_f16".to_string()),
             rng,
         );
@@ -351,7 +352,7 @@ fn build_f5_denoising_loop(
         let one = Cast::push_new_with_label(
             &mut mg,
             one,
-            DType::F16,
+            NumericDType::F16,
             Some("ode.one.cast_f16".to_string()),
             rng,
         );

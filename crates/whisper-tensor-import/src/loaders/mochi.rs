@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use whisper_tensor::dtype::DType;
 use whisper_tensor::interfaces::{SchedulerType, VideoGenerationInterface};
+use whisper_tensor::numeric_dtype::NumericDType;
 use whisper_tensor::loader::*;
 use whisper_tensor::metadata::TokenizerInfo;
 use whisper_tensor::milli_graph::MilliOpGraph;
@@ -398,8 +399,8 @@ fn build_mochi_denoising_loop(
         let gs_in = *input_map.get(&inner_guidance_scale.global_id()).unwrap();
         let dt_in = *input_map.get(&inner_dt.global_id()).unwrap();
 
-        let uncond_f32 = Cast::push_new(&mut mg, uncond_in, DType::F32, rng);
-        let cond_f32 = Cast::push_new(&mut mg, cond_in, DType::F32, rng);
+        let uncond_f32 = Cast::push_new(&mut mg, uncond_in, NumericDType::F32, rng);
+        let cond_f32 = Cast::push_new(&mut mg, cond_in, NumericDType::F32, rng);
 
         let diff = SimpleBinary::sub(&mut mg, cond_f32, uncond_f32, rng);
         let scaled = SimpleBinary::mul(&mut mg, diff, gs_in, rng);
