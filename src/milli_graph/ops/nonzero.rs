@@ -78,19 +78,65 @@ impl MilliOp for NonZero {
         symbolic_resolver: &mut SymbolicResolver,
         pool: &'p P,
     ) -> Result<Vec<(GlobalId, TensorInfo<'p, P>)>, MilliOpGraphError> {
-        if let Some(results) = super::constant_fold(self, known_inputs, &[], pool) {
-            return Ok(results);
+        let input_info = known_inputs
+            .get(&self.input)
+            .ok_or(MilliOpGraphError::UnableToInfer)?;
+
+        let out_dtype = crate::numeric_dtype::NumericDType::I64;
+
+        // If input is concrete, compute nonzero indices directly.
+        if let Some(tensor) = input_info.as_concrete() {
+            let shape = tensor.shape().clone();
+            let rank = shape.len();
+            let numel = tensor.numel();
+
+            // Find all nonzero element flat indices.
+            let mut nz_flat: Vec<usize> = Vec::new();
+            for i in 0..numel {
+                if tensor.read_element(i).is_nonzero() {
+                    nz_flat.push(i);
+                }
+            }
+            let nnz = nz_flat.len();
+
+            // Build output: [rank, nnz] I64 tensor.
+            // Column j contains the multi-index of the j-th nonzero element.
+            let out_shape = vec![rank as u64, nnz as u64];
+            let layout =
+                crate::numeric_tensor::TensorLayout::row_major(out_shape, out_dtype);
+            if let Ok(buf) = pool.allocate(layout.buffer_size_bytes()) {
+                let mut out_tensor =
+                    crate::numeric_tensor::NumericTensor::from_parts(buf, layout);
+
+                // Compute row-major strides for decomposing flat index → multi-index.
+                let mut strides = vec![1usize; rank];
+                for i in (0..rank.saturating_sub(1)).rev() {
+                    strides[i] = strides[i + 1] * shape[i + 1] as usize;
+                }
+
+                for (col, &flat) in nz_flat.iter().enumerate() {
+                    let mut rem = flat;
+                    for row in 0..rank {
+                        let idx = rem / strides[row];
+                        rem %= strides[row];
+                        // Output layout is row-major [rank, nnz]: element at (row, col) = row * nnz + col
+                        out_tensor.write_element(
+                            row * nnz + col,
+                            crate::numeric_scalar::NumericScalar::from_i64(idx as i64),
+                        );
+                    }
+                }
+
+                return Ok(vec![(self.output, TensorInfo::from(out_tensor))]);
+            }
         }
-        // Fallback minimal info if unknown: dtype I64 vector of unknown size
+
+        // Fallback: dtype I64, unknown shape.
         let minimal = TensorInfo::Minimal(MinimalTensor::new(
-            ScalarInfo::Symbolic(SymbolicScalar::new(
-                crate::numeric_dtype::NumericDType::from_legacy(DType::I64).unwrap(),
-                symbolic_resolver,
-            )),
+            ScalarInfo::Symbolic(SymbolicScalar::new(out_dtype, symbolic_resolver)),
             SymbolicScalarTyped::new(symbolic_resolver),
         ));
-        let v: Vec<(GlobalId, TensorInfo<'p, P>)> = vec![(self.output, minimal)];
-        Ok(v)
+        Ok(vec![(self.output, minimal)])
     }
 
     fn eval(
