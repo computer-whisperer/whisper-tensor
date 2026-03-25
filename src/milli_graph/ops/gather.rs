@@ -79,14 +79,10 @@ impl Gather {
         let indices_id = self.indices_id();
         let out_id = self.output_id();
 
-        // If both inputs are fully numeric (constant-folded), treat as constant.
-        let all_numeric = [data_id, indices_id]
-            .iter()
-            .all(|id| all_infos.get(id).is_some_and(|i| i.as_concrete().is_some()));
-        if all_numeric && let Some(out_info) = all_infos.get(&out_id) {
-            ctx.register_constant(out_id, out_info);
-            return;
-        }
+        // Note: previously had a short-circuit that registered the output as a
+        // constant from the info map when both inputs were numeric. Removed because
+        // in constant_fold the info map has shape hints (zeros), not computed values.
+        // The IndirectLoad nano lowering below handles concrete inputs correctly.
 
         let Some(data_map) = ctx.tensor_map.get(&data_id).cloned() else {
             ctx.lower_as_boundary_named(self, "Gather");
@@ -426,9 +422,12 @@ impl MilliOp for Gather {
         let out_dtype = data_info.dtype();
         let out_info = TensorInfo::from_dtype_and_shape_scalars(out_dtype, &out_dims);
 
-        // Gather constant folding uses old eval fallback — the multi-axis
-        // gather indexing is non-trivial to implement directly.
-        if let Some(results) = super::constant_fold(self, known_inputs, &[], pool) {
+        if let Some(results) = super::constant_fold(
+            self,
+            known_inputs,
+            &[(self.output, out_info.clone_with_pool(pool))],
+            pool,
+        ) {
             return Ok(results);
         }
 
