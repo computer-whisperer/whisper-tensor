@@ -399,11 +399,6 @@ impl MilliOp for Gather {
             .get(&self.indices)
             .ok_or(MilliOpGraphError::UnableToInfer)?;
 
-        // If both inputs are concrete, fall back to eval for full precision.
-        if let Some(results) = super::constant_fold(self, known_inputs, &[], pool) {
-            return Ok(results);
-        }
-
         // Shape-only inference: output_shape = data[:axis] + indices.shape + data[axis+1:]
         let data_ranked = data_info
             .as_ranked()
@@ -430,6 +425,14 @@ impl MilliOp for Gather {
 
         let out_dtype = data_info.dtype();
         let out_info = TensorInfo::from_dtype_and_shape_scalars(out_dtype, &out_dims);
+
+        // Gather's lower_to_nano has a shortcut that registers the output as a
+        // constant from the info map when both inputs are numeric. In constant_fold
+        // the info map only has a hint (zeros), so we must use the eval fallback.
+        if let Some(results) = super::constant_fold(self, known_inputs, &[], pool) {
+            return Ok(results);
+        }
+
         Ok(vec![((self.output, out_info))])
     }
 

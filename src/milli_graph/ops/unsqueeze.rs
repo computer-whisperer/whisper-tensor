@@ -100,8 +100,40 @@ impl MilliOp for Unsqueeze {
             .get(&self.axes)
             .ok_or(MilliOpGraphError::UnableToInfer)?;
 
-        // If both inputs are concrete, delegate to eval
-        if let Some(results) = super::constant_fold(self, known_inputs, &[], pool) {
+        // Build output hint: same dtype as data, shape = data shape with 1s inserted at axes.
+        let out_dtype = data_info.dtype();
+        let output_hint = if let (Some(data_ranked), Some(axes_values)) =
+            (data_info.as_ranked(), axes_info.to_i64_vec())
+        {
+            let input_shape = data_ranked.shape();
+            let output_rank = input_shape.len() + axes_values.len();
+            let normalized_axes: Vec<usize> = axes_values
+                .iter()
+                .map(|&a| {
+                    if a < 0 {
+                        (output_rank as i64 + a) as usize
+                    } else {
+                        a as usize
+                    }
+                })
+                .collect();
+            let mut output_shape: Vec<ScalarInfoTyped<u64>> = Vec::new();
+            let mut input_idx = 0;
+            for i in 0..output_rank {
+                if normalized_axes.contains(&i) {
+                    output_shape.push(ScalarInfoTyped::Numeric(1));
+                } else {
+                    output_shape.push(input_shape[input_idx].clone());
+                    input_idx += 1;
+                }
+            }
+            TensorInfo::from_dtype_and_shape_scalars(out_dtype, &output_shape)
+        } else {
+            TensorInfo::from_dtype_and_shape_scalars(out_dtype, &[])
+        };
+
+        // If both inputs are concrete, try constant fold via nano+pool_eval path.
+        if let Some(results) = super::constant_fold(self, known_inputs, &[(self.output, output_hint)], pool) {
             return Ok(results);
         }
 

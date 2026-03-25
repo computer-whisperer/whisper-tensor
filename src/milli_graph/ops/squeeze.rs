@@ -100,8 +100,36 @@ impl MilliOp for Squeeze {
             .get(&self.axes)
             .ok_or(MilliOpGraphError::UnableToInfer)?;
 
-        // If both inputs are concrete, delegate to eval
-        if let Some(results) = super::constant_fold(self, known_inputs, &[], pool) {
+        // Build output hint: same dtype as data, shape = data shape with axes removed.
+        let out_dtype = data_info.dtype();
+        let output_hint = if let (Some(data_ranked), Some(axes_values)) =
+            (data_info.as_ranked(), axes_info.to_i64_vec())
+        {
+            let input_shape = data_ranked.shape();
+            let input_rank = input_shape.len();
+            let normalized_axes: Vec<usize> = axes_values
+                .iter()
+                .map(|&a| {
+                    if a < 0 {
+                        (input_rank as i64 + a) as usize
+                    } else {
+                        a as usize
+                    }
+                })
+                .collect();
+            let output_shape: Vec<ScalarInfoTyped<u64>> = input_shape
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| !normalized_axes.contains(i))
+                .map(|(_, d)| d.clone())
+                .collect();
+            TensorInfo::from_dtype_and_shape_scalars(out_dtype, &output_shape)
+        } else {
+            TensorInfo::from_dtype_and_shape_scalars(out_dtype, &[])
+        };
+
+        // If both inputs are concrete, try constant fold via nano+pool_eval path.
+        if let Some(results) = super::constant_fold(self, known_inputs, &[(self.output, output_hint)], pool) {
             return Ok(results);
         }
 

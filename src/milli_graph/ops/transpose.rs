@@ -218,15 +218,10 @@ impl MilliOp for Transpose {
             .get(&self.data)
             .ok_or(MilliOpGraphError::UnableToInfer)?;
 
-        // If input is concrete, delegate to eval
-        if let Some(results) = super::constant_fold(self, known_inputs, &[], pool) {
-            return Ok(results);
-        }
-
         let first_elem = input_info.first_element();
 
-        // Try to propagate shape when rank is known
-        if let Some(ranked) = input_info.as_ranked() {
+        // Compute output info: Transpose has same dtype, permuted shape.
+        let out_info = if let Some(ranked) = input_info.as_ranked() {
             let input_shape = ranked.shape();
             let input_rank = input_shape.len();
 
@@ -264,18 +259,23 @@ impl MilliOp for Transpose {
                     s
                 }
             };
-            let out = TensorInfo::Ranked(crate::tensor_info::TensorInfoRanked::new(
+            TensorInfo::Ranked(crate::tensor_info::TensorInfoRanked::new(
                 first_elem,
                 output_shape,
                 symbolic_resolver,
-            ));
-            return Ok(vec![((self.output, out))]);
+            ))
+        } else {
+            // At minimum: same rank, same dtype
+            let rank = input_info.rank();
+            TensorInfo::new_from_first_element_and_rank(first_elem, rank, symbolic_resolver)
+        };
+
+        // If input is concrete, try constant fold via nano+pool_eval path.
+        if let Some(results) = super::constant_fold(self, known_inputs, &[(self.output, out_info.clone_with_pool(pool))], pool) {
+            return Ok(results);
         }
 
-        // At minimum: same rank, same dtype
-        let rank = input_info.rank();
-        let out = TensorInfo::new_from_first_element_and_rank(first_elem, rank, symbolic_resolver);
-        Ok(vec![((self.output, out))])
+        Ok(vec![((self.output, out_info))])
     }
 
     fn backward(

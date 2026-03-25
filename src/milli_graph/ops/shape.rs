@@ -78,7 +78,9 @@ impl MilliOp for Shape {
             .get(&self.input)
             .ok_or(crate::milli_graph::MilliOpGraphError::UnableToInfer)?;
 
-        // If input is concrete, fall back to eval for exact shape.
+        // Shape's lower_to_nano doesn't compute the shape — it reads it from
+        // the info map (register_constant). In constant_fold the info map only
+        // has the hint (not the real values), so we must use the eval fallback.
         if let Some(results) = super::constant_fold(self, known_inputs, &[], pool) {
             return Ok(results);
         }

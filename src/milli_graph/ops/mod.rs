@@ -281,38 +281,38 @@ pub fn constant_fold<'p, P: Pool + 'p>(
         pool_eval::pool_eval(&ctx.nano, &[], &output_ranges, pool).ok()?;
 
     // 6. Build result TensorInfos.
-    let mut atom_range_map: HashMap<u64, usize> = HashMap::new();
-    for (ri, range) in output_ranges.iter().enumerate() {
-        atom_range_map.insert(range.base.0, ri);
-    }
+    //
+    // Output atoms may span multiple eval result ranges (e.g. when Literal
+    // coalescing splits input data into several groups, and the output is a
+    // zero-cost view over those groups). For each atom we need to find which
+    // result range it belongs to.
+    let find_range = |atom: crate::nano_graph::pattern::AtomId| -> Option<(usize, usize)> {
+        for (ri, range) in output_ranges.iter().enumerate() {
+            if atom.0 >= range.base.0 && atom.0 < range.base.0 + range.count {
+                return Some((ri, (atom.0 - range.base.0) as usize));
+            }
+        }
+        None
+    };
 
     let mut results = Vec::new();
     for &out_id in &output_ids {
         let tam = ctx.tensor_map.get(&out_id)?;
         let shape = tam.known_dims();
+
+        // Determine dtype from the first atom's result.
         let first_atom = tam.atom_id_for_element(0);
+        let (first_ri, _) = find_range(first_atom)?;
+        let dtype = eval_results[first_ri].dtype();
 
-        // Find the eval result containing this output's atoms.
-        let ri = atom_range_map
-            .get(&first_atom.0)
-            .or_else(|| {
-                // Might be in an input range (passthrough ops).
-                ctx.nano.find_input_idx(first_atom).and_then(|(ti, _)| {
-                    let it = &ctx.nano.input_tensors()[ti];
-                    atom_range_map.get(&it.base_id.0)
-                })
-            })?;
-
-        let result_tensor = &eval_results[*ri];
-        let dtype = result_tensor.dtype();
         let layout = crate::numeric_tensor::TensorLayout::row_major(shape, dtype);
         let buf = pool.allocate(layout.buffer_size_bytes()).ok()?;
         let mut out_tensor = crate::numeric_tensor::NumericTensor::from_parts(buf, layout);
         let numel = out_tensor.numel();
         for i in 0..numel {
             let atom = tam.atom_id_for_element(i as u64);
-            let offset = (atom.0 - first_atom.0) as usize;
-            out_tensor.write_element(i, result_tensor.read_element(offset));
+            let (ri, offset) = find_range(atom)?;
+            out_tensor.write_element(i, eval_results[ri].read_element(offset));
         }
         results.push((out_id, TensorInfo::from(out_tensor)));
     }

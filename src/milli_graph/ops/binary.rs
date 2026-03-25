@@ -1252,24 +1252,20 @@ impl MilliOp for MatMul {
             .get(&self.b)
             .ok_or(MilliOpGraphError::UnableToInfer)?;
 
-        // If both inputs are concrete, try constant fold.
-        if let Some(results) = super::constant_fold(self, known_inputs, &[], pool) {
-            return Ok(results);
-        }
-
         // MatMul output dtype comes from the struct's explicit field.
         let out_dtype = self.output_dtype;
 
-        // Try per-dim shape inference: A[...,M,K] @ B[...,K,N] -> [...,M,N]
+        // Compute output info: try per-dim shape inference first, then rank-only fallback.
+        // A[...,M,K] @ B[...,K,N] -> [...,M,N]
         // Batch dims are broadcast, last two follow matmul rules.
-        if let (Some(a_ranked), Some(b_ranked)) = (a_info.as_ranked(), b_info.as_ranked()) {
+        let out_info = if let (Some(a_ranked), Some(b_ranked)) = (a_info.as_ranked(), b_info.as_ranked()) {
             let a_dims = a_ranked.shape();
             let b_dims = b_ranked.shape();
             let a_rank = a_dims.len();
             let b_rank = b_dims.len();
 
-            if a_rank >= 1 && b_rank >= 1 {
-                let out_dims: Option<Vec<ScalarInfoTyped<u64>>> = if a_rank >= 2 && b_rank >= 2 {
+            let out_dims: Option<Vec<ScalarInfoTyped<u64>>> = if a_rank >= 1 && b_rank >= 1 {
+                if a_rank >= 2 && b_rank >= 2 {
                     // Standard case: batch broadcast + [M,K]@[K,N]->[M,N]
                     let a_batch = &a_dims[..a_rank - 2];
                     let b_batch = &b_dims[..b_rank - 2];
@@ -1296,42 +1292,53 @@ impl MilliOp for MatMul {
                 } else {
                     // both rank 1: dot product -> scalar []
                     Some(vec![])
-                };
-
-                if let Some(out_dims) = out_dims {
-                    let out_info = TensorInfo::from_dtype_and_shape_scalars(out_dtype, &out_dims);
-                    return Ok(vec![((self.output, out_info))]);
                 }
-            }
-        }
+            } else {
+                None
+            };
 
-        // Fallback: rank-only inference.
-        let out_rank = match (a_info.rank(), b_info.rank()) {
-            (
-                crate::scalar_info::ScalarInfoTyped::Numeric(a_rank),
-                crate::scalar_info::ScalarInfoTyped::Numeric(b_rank),
-            ) => {
-                let out_r = if a_rank >= 2 && b_rank >= 2 {
-                    a_rank.max(b_rank)
-                } else if a_rank == 1 && b_rank >= 2 {
-                    b_rank - 1
-                } else if a_rank >= 2 && b_rank == 1 {
-                    a_rank - 1
-                } else {
-                    0
-                };
-                crate::scalar_info::ScalarInfoTyped::Numeric(out_r)
+            if let Some(out_dims) = out_dims {
+                TensorInfo::from_dtype_and_shape_scalars(out_dtype, &out_dims)
+            } else {
+                // Ranked inputs but couldn't compute shape — fall through to rank-only
+                let first_elem = crate::scalar_info::ScalarInfo::Symbolic(
+                    crate::symbolic_scalar::SymbolicScalar::new(out_dtype, symbolic_resolver),
+                );
+                TensorInfo::new_from_first_element_and_rank(first_elem, a_info.rank(), symbolic_resolver)
             }
-            _ => crate::scalar_info::ScalarInfoTyped::Symbolic(
-                crate::symbolic_scalar::SymbolicScalarTyped::new(symbolic_resolver),
-            ),
+        } else {
+            // Fallback: rank-only inference.
+            let out_rank = match (a_info.rank(), b_info.rank()) {
+                (
+                    crate::scalar_info::ScalarInfoTyped::Numeric(a_rank),
+                    crate::scalar_info::ScalarInfoTyped::Numeric(b_rank),
+                ) => {
+                    let out_r = if a_rank >= 2 && b_rank >= 2 {
+                        a_rank.max(b_rank)
+                    } else if a_rank == 1 && b_rank >= 2 {
+                        b_rank - 1
+                    } else if a_rank >= 2 && b_rank == 1 {
+                        a_rank - 1
+                    } else {
+                        0
+                    };
+                    crate::scalar_info::ScalarInfoTyped::Numeric(out_r)
+                }
+                _ => crate::scalar_info::ScalarInfoTyped::Symbolic(
+                    crate::symbolic_scalar::SymbolicScalarTyped::new(symbolic_resolver),
+                ),
+            };
+
+            let first_elem = crate::scalar_info::ScalarInfo::Symbolic(
+                crate::symbolic_scalar::SymbolicScalar::new(out_dtype, symbolic_resolver),
+            );
+            TensorInfo::new_from_first_element_and_rank(first_elem, out_rank, symbolic_resolver)
         };
 
-        let first_elem = crate::scalar_info::ScalarInfo::Symbolic(
-            crate::symbolic_scalar::SymbolicScalar::new(out_dtype, symbolic_resolver),
-        );
-        let out_info =
-            TensorInfo::new_from_first_element_and_rank(first_elem, out_rank, symbolic_resolver);
+        // If both inputs are concrete, try constant fold via nano+pool_eval path.
+        if let Some(results) = super::constant_fold(self, known_inputs, &[(self.output, out_info.clone_with_pool(pool))], pool) {
+            return Ok(results);
+        }
 
         Ok(vec![((self.output, out_info))])
     }

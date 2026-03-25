@@ -244,13 +244,57 @@ impl MilliOp for Concat {
             input_infos.push(info);
         }
 
-        // If all inputs are concrete, fall back to eval.
-        if let Some(results) = super::constant_fold(self, known_inputs, &[], pool) {
+        // Build output hint for constant folding.
+        let out_dtype = input_infos[0].dtype();
+        let rank = input_infos
+            .iter()
+            .filter_map(|info| info.rank_if_known())
+            .next();
+        let output_hint = if let Some(rank) = rank {
+            use crate::scalar_info::ScalarInfoTyped;
+            use crate::symbolic_scalar::SymbolicScalarTyped;
+
+            let axis = if self.axis < 0 {
+                (self.axis + rank as i64) as usize
+            } else {
+                self.axis as usize
+            };
+            let mut out_dims: Vec<ScalarInfoTyped<u64>> = Vec::with_capacity(rank);
+            for d in 0..rank {
+                if d == axis {
+                    let mut total: Option<u64> = Some(0);
+                    for info in &input_infos {
+                        if let Some(dim_val) = info.dim_if_known(d) {
+                            total = total.map(|t| t + dim_val);
+                        } else {
+                            total = None;
+                            break;
+                        }
+                    }
+                    match total {
+                        Some(v) => out_dims.push(ScalarInfoTyped::Numeric(v)),
+                        None => out_dims.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(symbolic_resolver))),
+                    }
+                } else {
+                    let known_dim = input_infos
+                        .iter()
+                        .filter_map(|info| info.dim_if_known(d))
+                        .next();
+                    match known_dim {
+                        Some(v) => out_dims.push(ScalarInfoTyped::Numeric(v)),
+                        None => out_dims.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(symbolic_resolver))),
+                    }
+                }
+            }
+            TensorInfo::from_dtype_and_shape_scalars(out_dtype, &out_dims)
+        } else {
+            TensorInfo::from_dtype_and_shape_scalars(out_dtype, &[])
+        };
+
+        // If all inputs are concrete, try constant fold via nano+pool_eval path.
+        if let Some(results) = super::constant_fold(self, known_inputs, &[(self.output, output_hint)], pool) {
             return Ok(results);
         }
-
-        // Try to compute concrete output dims from input shapes.
-        let out_dtype = input_infos[0].dtype();
 
         // Find the rank from any input that has a known rank.
         let rank = input_infos

@@ -152,8 +152,71 @@ impl MilliOp for Reshape {
             .get(&self.shape)
             .ok_or(MilliOpGraphError::UnableToInfer)?;
 
-        // If both inputs are concrete, delegate to eval
-        if let Some(results) = super::constant_fold(self, known_inputs, &[], pool) {
+        // Build output hint: same dtype as data, rank from shape tensor length.
+        let out_dtype = data_info.dtype();
+        let output_hint = if let Some(shape_values) = shape_info.to_i64_vec() {
+            // Shape tensor is concrete — we know the output rank.
+            // Try to compute full output dims for the hint.
+            let data_shape_known = data_info.as_ranked().map(|r| {
+                r.shape()
+                    .iter()
+                    .map(|d| d.as_numeric().copied())
+                    .collect::<Vec<_>>()
+            });
+            let mut hint_dims: Vec<ScalarInfoTyped<u64>> = Vec::new();
+            let mut has_minus_one = false;
+            let mut all_resolved = true;
+            for (i, &sv) in shape_values.iter().enumerate() {
+                if sv == 0 {
+                    if let Some(ref ds) = data_shape_known {
+                        if let Some(Some(d)) = ds.get(i) {
+                            hint_dims.push(ScalarInfoTyped::Numeric(*d));
+                        } else {
+                            all_resolved = false;
+                            hint_dims.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(symbolic_resolver)));
+                        }
+                    } else {
+                        all_resolved = false;
+                        hint_dims.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(symbolic_resolver)));
+                    }
+                } else if sv == -1 {
+                    has_minus_one = true;
+                    hint_dims.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(symbolic_resolver)));
+                } else if sv > 0 {
+                    hint_dims.push(ScalarInfoTyped::Numeric(sv as u64));
+                } else {
+                    all_resolved = false;
+                    hint_dims.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(symbolic_resolver)));
+                }
+            }
+            // Try to resolve -1 dimension
+            if has_minus_one {
+                if let Some(ref ds) = data_shape_known {
+                    if ds.iter().all(|d| d.is_some()) {
+                        let total: u64 = ds.iter().map(|d| d.unwrap()).product();
+                        let known_product: Option<u64> = hint_dims
+                            .iter()
+                            .enumerate()
+                            .filter(|(idx, _)| shape_values[*idx] != -1)
+                            .try_fold(1u64, |acc, (_, d)| d.as_numeric().map(|v| acc * v));
+                        if let Some(kp) = known_product {
+                            if kp > 0 {
+                                let inferred = total / kp;
+                                let minus_one_idx = shape_values.iter().position(|&v| v == -1).unwrap();
+                                hint_dims[minus_one_idx] = ScalarInfoTyped::Numeric(inferred);
+                            }
+                        }
+                    }
+                }
+            }
+            TensorInfo::from_dtype_and_shape_scalars(out_dtype, &hint_dims)
+        } else {
+            // Shape tensor not concrete — just provide dtype hint.
+            TensorInfo::from_dtype_and_shape_scalars(out_dtype, &[])
+        };
+
+        // If both inputs are concrete, try constant fold via nano+pool_eval path.
+        if let Some(results) = super::constant_fold(self, known_inputs, &[(self.output, output_hint)], pool) {
             return Ok(results);
         }
 

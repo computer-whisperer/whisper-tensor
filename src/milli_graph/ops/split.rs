@@ -267,11 +267,6 @@ impl MilliOp for Split {
             .get(&self.data)
             .ok_or(MilliOpGraphError::UnableToInfer)?;
 
-        // If all inputs are concrete, fall back to eval.
-        if let Some(results) = super::constant_fold(self, known_inputs, &[], pool) {
-            return Ok(results);
-        }
-
         // Shape-only inference.
         let data_ranked = data_info
             .as_ranked()
@@ -321,6 +316,12 @@ impl MilliOp for Split {
 
         let out_dtype = data_info.dtype();
         let out_info = TensorInfo::from_dtype_and_shape_scalars(out_dtype, &out_dims);
+
+        // If all inputs are concrete, try constant fold via nano+pool_eval path.
+        if let Some(results) = super::constant_fold(self, known_inputs, &[(self.output, out_info.clone_with_pool(pool))], pool) {
+            return Ok(results);
+        }
+
         Ok(vec![((self.output, out_info))])
     }
 

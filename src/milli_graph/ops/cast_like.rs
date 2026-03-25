@@ -113,9 +113,8 @@ impl MilliOp for CastLike {
             )
         };
 
-        // If data is concrete and we know target dtype, try constant fold (eval-based fallback
-        // for now; nano-based Cast lowering has a dtype size mismatch bug).
-        if let Some(results) = super::constant_fold(self, known_inputs, &[], pool) {
+        // If data is concrete and we know target dtype, try constant fold via nano+pool_eval path.
+        if let Some(results) = super::constant_fold(self, known_inputs, &[(self.output, out_info.clone_with_pool(pool))], pool) {
             return Ok(results);
         }
 

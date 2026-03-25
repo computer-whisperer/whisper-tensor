@@ -166,8 +166,43 @@ impl MilliOp for Expand {
             .get(&self.shape)
             .ok_or(MilliOpGraphError::UnableToInfer)?;
 
-        // If both inputs are concrete, delegate to eval
-        if let Some(results) = super::constant_fold(self, known_inputs, &[], pool) {
+        // Build output hint: same dtype as input, shape from target shape tensor.
+        let out_dtype = input_info.dtype();
+        let output_hint = if let Some(shape_values) = shape_info.to_i64_vec() {
+            let target_shape: Vec<ScalarInfoTyped<u64>> = shape_values
+                .iter()
+                .map(|&v| ScalarInfoTyped::Numeric(v as u64))
+                .collect();
+            // Broadcast with input shape if known (take max of each dim).
+            if let Some(input_ranked) = input_info.as_ranked() {
+                let input_shape = input_ranked.shape();
+                let output_rank = target_shape.len().max(input_shape.len());
+                let mut final_shape: Vec<ScalarInfoTyped<u64>> = Vec::new();
+                for i in 0..output_rank {
+                    let target_i = (i as i64 - output_rank as i64) + target_shape.len() as i64;
+                    let input_i = (i as i64 - output_rank as i64) + input_shape.len() as i64;
+                    let target_dim = if target_i >= 0 { Some(target_shape[target_i as usize].clone()) } else { None };
+                    let input_dim = if input_i >= 0 { Some(input_shape[input_i as usize].clone()) } else { None };
+                    let dim = match (target_dim, input_dim) {
+                        (Some(ScalarInfoTyped::Numeric(t)), Some(ScalarInfoTyped::Numeric(inp))) => ScalarInfoTyped::Numeric(t.max(inp)),
+                        (Some(t), None) => t,
+                        (None, Some(inp)) => inp,
+                        (Some(ScalarInfoTyped::Numeric(t)), Some(_)) => ScalarInfoTyped::Numeric(t),
+                        (Some(_), Some(ScalarInfoTyped::Numeric(inp))) => ScalarInfoTyped::Numeric(inp),
+                        _ => ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(symbolic_resolver)),
+                    };
+                    final_shape.push(dim);
+                }
+                TensorInfo::from_dtype_and_shape_scalars(out_dtype, &final_shape)
+            } else {
+                TensorInfo::from_dtype_and_shape_scalars(out_dtype, &target_shape)
+            }
+        } else {
+            TensorInfo::from_dtype_and_shape_scalars(out_dtype, &[])
+        };
+
+        // If both inputs are concrete, try constant fold via nano+pool_eval path.
+        if let Some(results) = super::constant_fold(self, known_inputs, &[(self.output, output_hint)], pool) {
             return Ok(results);
         }
 
