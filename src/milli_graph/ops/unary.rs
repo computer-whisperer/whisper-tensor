@@ -394,8 +394,12 @@ impl MilliOp for SimpleUnaryOp {
                 )
             }
             _ => {
-                // Same dtype, same shape — clone the input info.
-                input_info.clone()
+                // Same dtype, same shape — reconstruct from first_element + rank.
+                TensorInfo::new_from_first_element_and_rank(
+                    input_info.first_element(),
+                    input_info.rank(),
+                    symbolic_resolver,
+                )
             }
         };
         Ok(vec![((self.output, out_info))])
@@ -600,7 +604,7 @@ impl MilliOp for ClampMin {
     fn infer<'p, P: Pool + 'p>(
         &self,
         known_inputs: &HashMap<GlobalId, TensorInfo<'p, P>>,
-        _symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
+        symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
         pool: &'p P,
     ) -> Result<Vec<(GlobalId, TensorInfo<'p, P>)>, MilliOpGraphError> {
         let input_info = known_inputs
@@ -618,7 +622,12 @@ impl MilliOp for ClampMin {
         }
 
         // ClampMin preserves shape and dtype.
-        Ok(vec![((self.output, input_info.clone()))])
+        let out = TensorInfo::new_from_first_element_and_rank(
+            input_info.first_element(),
+            input_info.rank(),
+            symbolic_resolver,
+        );
+        Ok(vec![((self.output, out))])
     }
 
     fn eval(

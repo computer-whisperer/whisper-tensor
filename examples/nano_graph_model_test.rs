@@ -24,6 +24,7 @@ use whisper_tensor_import::identify_and_load;
 use whisper_tensor_import::onnx_graph::WeightStorageStrategy;
 
 use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
+use whisper_tensor::pool::SystemPool;
 
 fn main() {
     let onnx_path = std::env::args()
@@ -118,7 +119,7 @@ fn main() {
     // ---- Build TensorInfo for lowering (shapes only for user inputs, full data for weights) ----
     let mut all_infos: HashMap<GlobalId, TensorInfo<'_, whisper_tensor::pool::SystemPool>> = HashMap::new();
     for (id, tensor) in &milli_inputs {
-        all_infos.insert(*id, TensorInfo::from(tensor.clone()));
+        all_infos.insert(*id, TensorInfo::from_legacy(tensor, &SystemPool));
     }
 
     // ---- Step 1: Run milli interpreter ----

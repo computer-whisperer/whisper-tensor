@@ -1267,7 +1267,7 @@ impl MilliOpGraph {
                     "missing external input mapping for {ext_id}"
                 ))
             })?;
-            known.insert(int_id, info.clone());
+            known.insert(int_id, info.clone_with_pool(pool));
         }
 
         // Walk ops in topological order.
@@ -1287,13 +1287,13 @@ impl MilliOpGraph {
                     // eprintln!("[infer-fail] {}", op.op_kind());
                     for out_id in op.outputs() {
                         known.entry(out_id).or_insert_with(|| {
-                            TensorInfo::wrap(crate::tensor_info::TensorInfoData::Minimal(MinimalTensor::new(
+                            TensorInfo::Minimal(MinimalTensor::new(
                                 ScalarInfo::Symbolic(SymbolicScalar::new(
                                     crate::numeric_dtype::NumericDType::from_legacy(DType::F32).unwrap(),
                                     &mut resolver,
                                 )),
                                 SymbolicScalarTyped::new(&mut resolver),
-                            )))
+                            ))
                         });
                     }
                 }
@@ -4482,7 +4482,7 @@ mod tests {
         // Provide a concrete tensor as TensorInfo for input x.
         let x_tensor = NumericTensor::<DynRank>::from_vec_shape(vec![3.0f32], vec![1]).unwrap();
         let mut inputs = HashMap::new();
-        inputs.insert(ext_x, TensorInfo::<'_, crate::pool::SystemPool>::from(x_tensor));
+        inputs.insert(ext_x, TensorInfo::from_legacy(&x_tensor, &crate::pool::SystemPool));
 
         let result = graph.infer_all(&inputs, &crate::pool::SystemPool).unwrap();
 
@@ -4523,13 +4523,13 @@ mod tests {
         for ext_id in [ext_x, ext_y] {
             inputs.insert(
                 ext_id,
-                TensorInfo::wrap(crate::tensor_info::TensorInfoData::Minimal(MinimalTensor::new(
+                TensorInfo::Minimal(MinimalTensor::new(
                     ScalarInfo::Symbolic(SymbolicScalar::new(
                         crate::numeric_dtype::NumericDType::from_legacy(crate::dtype::DType::F32).unwrap(),
                         &mut resolver,
                     )),
                     SymbolicScalarTyped::new(&mut resolver),
-                ))),
+                )),
             );
         }
 
@@ -4560,7 +4560,7 @@ mod tests {
         let x_tensor =
             NumericTensor::<DynRank>::from_vec_shape(vec![1.0f32; 6], vec![2, 3]).unwrap();
         let mut inputs = HashMap::new();
-        inputs.insert(ext_x, TensorInfo::<'_, crate::pool::SystemPool>::from(x_tensor));
+        inputs.insert(ext_x, TensorInfo::from_legacy(&x_tensor, &crate::pool::SystemPool));
 
         let result = graph.infer_all(&inputs, &crate::pool::SystemPool).unwrap();
 

@@ -14,6 +14,7 @@ use whisper_tensor::graph::GlobalId;
 use whisper_tensor::model::Model;
 use whisper_tensor::nano_graph::lower;
 use whisper_tensor::numeric_dtype::NumericDType;
+use whisper_tensor::pool::SystemPool;
 use whisper_tensor::tensor_info::TensorInfo;
 use whisper_tensor_import::identify_and_load;
 use whisper_tensor_import::onnx_graph::WeightStorageStrategy;
@@ -304,7 +305,7 @@ fn main() {
                 }
             };
         if let Some(id) = tensors_by_name.get(name) {
-            all_infos.insert(*id, TensorInfo::from(tensor));
+            all_infos.insert(*id, TensorInfo::from_legacy(&tensor, &SystemPool));
         }
     }
 
@@ -321,7 +322,7 @@ fn main() {
                 .expect("unsupported weight dtype");
             all_infos.insert(*id, TensorInfo::from_dtype_and_shape(dtype, &shape));
         } else {
-            all_infos.insert(*id, TensorInfo::from(tensor.clone()));
+            all_infos.insert(*id, TensorInfo::from_legacy(tensor, &SystemPool));
         }
     }
     eprintln!(

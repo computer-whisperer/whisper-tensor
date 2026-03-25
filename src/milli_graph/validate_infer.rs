@@ -13,7 +13,7 @@ use crate::migration::numeric_tensor::NumericTensor;
 use crate::pool::SystemPool;
 use crate::scalar_info::{ScalarInfo, ScalarInfoTyped};
 use crate::symbolic_scalar::{SymbolicResolver, SymbolicScalar, SymbolicScalarTyped};
-use crate::tensor_info::{MinimalTensor, ShapedTensor, TensorInfo, TensorInfoData, TensorInfoRanked};
+use crate::tensor_info::{MinimalTensor, ShapedTensor, TensorInfo, TensorInfoRanked};
 use crate::tensor_rank::DynRank;
 use std::collections::HashMap;
 use std::fmt;
@@ -137,7 +137,7 @@ fn numeric_to_ranked(
     let symbolic_dims: Vec<ScalarInfoTyped<u64>> = (0..rank)
         .map(|_| ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(resolver)))
         .collect();
-    TensorInfo::from(TensorInfoRanked::<DynRank>::new(
+    TensorInfo::Ranked(TensorInfoRanked::new(
         first_element,
         symbolic_dims,
         resolver,
@@ -164,7 +164,7 @@ fn ablate_tensor(
     resolver: &mut SymbolicResolver,
 ) -> TensorInfo<'static, SystemPool> {
     match level {
-        AblationLevel::Numeric => TensorInfo::from(tensor.clone()),
+        AblationLevel::Numeric => TensorInfo::from_legacy(tensor, &SystemPool),
         AblationLevel::Shaped => numeric_to_shaped(tensor, resolver),
         AblationLevel::Ranked => numeric_to_ranked(tensor, resolver),
         AblationLevel::Minimal => numeric_to_minimal(tensor, resolver),
@@ -185,12 +185,12 @@ fn validate_against_ground_truth(inferred: &TensorInfo<'_, impl crate::pool::Poo
         ));
     }
 
-    match &inferred.0 {
-        TensorInfoData::Minimal(_) => {
+    match inferred {
+        TensorInfo::Minimal(_) => {
             // Only dtype was claimed, already checked above. Pass.
             Ok(())
         }
-        TensorInfoData::Ranked(ranked) => {
+        TensorInfo::Ranked(ranked) => {
             // Check rank
             let inferred_rank = ranked.rank();
             if inferred_rank != truth.rank {
@@ -275,12 +275,12 @@ impl MilliOpGraph {
                 // except this op's inputs which are ablated.
                 let input_ids: Vec<GlobalId> = op.inputs().collect();
 
-                let pool = SystemPool;
+                static POOL: SystemPool = SystemPool;
                 let mut known: HashMap<GlobalId, TensorInfo<'_, SystemPool>> = HashMap::new();
 
                 // Insert all intermediate values as Numeric TensorInfo
                 for (id, tensor) in &intermediate_values {
-                    known.insert(*id, TensorInfo::from(tensor.clone()));
+                    known.insert(*id, TensorInfo::from_legacy(tensor, &POOL));
                 }
 
                 // Now overwrite this op's inputs with ablated versions
@@ -291,7 +291,7 @@ impl MilliOpGraph {
                 }
 
                 // Call infer
-                let result = op.infer(&known, &mut resolver, &pool);
+                let result = op.infer(&known, &mut resolver, &POOL);
 
                 match result {
                     Err(MilliOpGraphError::UnableToInfer) => {

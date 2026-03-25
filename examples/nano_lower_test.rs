@@ -12,6 +12,7 @@ use whisper_tensor::graph::GlobalId;
 use whisper_tensor::model::Model;
 use whisper_tensor::tensor_info::TensorInfo;
 use whisper_tensor_import::identify_and_load;
+use whisper_tensor::pool::SystemPool;
 use whisper_tensor_import::onnx_graph::WeightStorageStrategy;
 
 fn main() {
@@ -67,7 +68,7 @@ fn main() {
         if tensor.num_elements() <= 1024 {
             // Small constants (axes, indices, shape values): keep full data
             // so infer_all can resolve Shape/Gather/Reshape ops.
-            all_infos.insert(*id, TensorInfo::from(tensor.clone()));
+            all_infos.insert(*id, TensorInfo::from_legacy(tensor, &SystemPool));
             n_full += 1;
         } else {
             // Large weight matrices: shape+dtype only.

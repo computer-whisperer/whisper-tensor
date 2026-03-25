@@ -106,7 +106,7 @@ impl MilliOp for Unsqueeze {
                 HashMap::from([(self.data, data_num.clone()), (self.axes, axes_num.clone())]);
             let out: Vec<_> = self
                 .eval(&inputs, &super::MilliEvalConfig::default(), &mut crate::backends::eval_backend::EvalBackend::NDArray)?
-                .map(|(id, t)| (id, TensorInfo::from(t)))
+                .map(|(id, t)| (id, TensorInfo::from_legacy(&t, pool)))
                 .collect();
             return Ok(out);
         }
@@ -147,11 +147,11 @@ impl MilliOp for Unsqueeze {
                 }
             }
 
-            let out = TensorInfo::wrap(crate::tensor_info::TensorInfoData::Ranked(crate::tensor_info::TensorInfoRanked::new(
+            let out = TensorInfo::Ranked(crate::tensor_info::TensorInfoRanked::new(
                 first_elem,
                 output_shape,
                 symbolic_resolver,
-            )));
+            ));
             return Ok(vec![((self.output, out))]);
         }
 

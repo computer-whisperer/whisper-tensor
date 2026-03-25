@@ -82,18 +82,18 @@ impl MilliOp for NonZero {
             let inputs = HashMap::from([(self.input, input.clone())]);
             let out = self
                 .eval(&inputs, &super::MilliEvalConfig::default(), &mut crate::backends::eval_backend::EvalBackend::NDArray)?
-                .map(|(tid, t)| (tid, TensorInfo::from(t)))
+                .map(|(tid, t)| (tid, TensorInfo::from_legacy(&t, pool)))
                 .collect::<Vec<_>>();
             return Ok(out);
         }
         // Fallback minimal info if unknown: dtype I64 vector of unknown size
-        let minimal = TensorInfo::wrap(crate::tensor_info::TensorInfoData::Minimal(MinimalTensor::new(
+        let minimal = TensorInfo::Minimal(MinimalTensor::new(
             ScalarInfo::Symbolic(SymbolicScalar::new(
                 crate::numeric_dtype::NumericDType::from_legacy(DType::I64).unwrap(),
                 symbolic_resolver,
             )),
             SymbolicScalarTyped::new(symbolic_resolver),
-        )));
+        ));
         let v: Vec<(GlobalId, TensorInfo<'p, P>)> = vec![(self.output, minimal)];
         Ok(v)
     }

@@ -50,6 +50,79 @@ pub fn legacy_scalar_to_new(old: &crate::migration::numeric_scalar::NumericScala
     }
 }
 
+/// Convert a new `NumericScalar` back to the legacy `migration::numeric_scalar::NumericScalar`.
+///
+/// Extracts raw LE bytes from the new scalar and reconstructs the legacy variant.
+pub fn new_scalar_to_legacy(new: &NumericScalar) -> crate::migration::numeric_scalar::NumericScalar {
+    use crate::migration::numeric_scalar::NumericScalar as OldScalar;
+    let bytes = new.raw_bits();
+    let legacy_dtype = new.dtype().to_legacy();
+    match legacy_dtype {
+        crate::dtype::DType::F64 => OldScalar::F64(f64::from_le_bytes(bytes[..8].try_into().unwrap())),
+        crate::dtype::DType::F32 => OldScalar::F32(f32::from_le_bytes(bytes[..4].try_into().unwrap())),
+        crate::dtype::DType::BF16 => OldScalar::BF16(half::bf16::from_bits(u16::from_le_bytes(bytes[..2].try_into().unwrap()))),
+        crate::dtype::DType::F16 => OldScalar::F16(half::f16::from_bits(u16::from_le_bytes(bytes[..2].try_into().unwrap()))),
+        crate::dtype::DType::F8E4M3FN => OldScalar::F8E4M3FN(float8::F8E4M3::from_bits(bytes[0])),
+        crate::dtype::DType::F8E5M2 => OldScalar::F8E5M2(float8::F8E5M2::from_bits(bytes[0])),
+        crate::dtype::DType::I64 => OldScalar::I64(i64::from_le_bytes(bytes[..8].try_into().unwrap())),
+        crate::dtype::DType::I32 => OldScalar::I32(i32::from_le_bytes(bytes[..4].try_into().unwrap())),
+        crate::dtype::DType::I16 => OldScalar::I16(i16::from_le_bytes(bytes[..2].try_into().unwrap())),
+        crate::dtype::DType::I8 => OldScalar::I8(bytes[0] as i8),
+        crate::dtype::DType::U64 => OldScalar::U64(u64::from_le_bytes(bytes[..8].try_into().unwrap())),
+        crate::dtype::DType::U32 => OldScalar::U32(u32::from_le_bytes(bytes[..4].try_into().unwrap())),
+        crate::dtype::DType::U16 => OldScalar::U16(u16::from_le_bytes(bytes[..2].try_into().unwrap())),
+        crate::dtype::DType::U8 => OldScalar::U8(bytes[0]),
+        crate::dtype::DType::I4 => OldScalar::I4(arbitrary_int::i4::new((bytes[0] & 0x0F) as i8)),
+        crate::dtype::DType::U4 => OldScalar::U4(arbitrary_int::u4::new(bytes[0] & 0x0F)),
+        crate::dtype::DType::BOOL => OldScalar::BOOL(bytes[0] != 0),
+        _ => panic!("new_scalar_to_legacy: unsupported dtype {:?}", new.dtype()),
+    }
+}
+
+/// Convert a pool-backed `NumericTensor` to a legacy `migration::numeric_tensor::NumericTensor`.
+///
+/// For element-strided row-major tensors, passes the raw byte buffer directly.
+/// Panics on quantized formats (those should not appear in TensorInfo).
+pub fn new_numeric_to_legacy<P: crate::pool::Pool>(
+    tensor: &crate::numeric_tensor::NumericTensor<'_, crate::tensor_rank::DynRank, P>,
+) -> crate::migration::numeric_tensor::NumericTensor<crate::tensor_rank::DynRank> {
+    // Use the existing bridge which handles packing differences (e.g. Bool bit-packing).
+    crate::migration::bridge::view_to_legacy(&tensor.view())
+}
+
+/// Convert a legacy `NumericTensor` to a pool-backed `NumericTensor`.
+///
+/// Allocates a new buffer from the pool and copies raw bytes from the contiguous
+/// representation. For packed (quantized) tensors, dequantizes first.
+pub fn legacy_numeric_to_new<'p, P: crate::pool::Pool>(
+    tensor: &crate::migration::numeric_tensor::NumericTensor<crate::tensor_rank::DynRank>,
+    pool: &'p P,
+) -> crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P> {
+    let shape = tensor.shape();
+    let legacy_dtype = tensor.dtype();
+    let dtype = NumericDType::from_legacy(legacy_dtype)
+        .expect("legacy NumericTensor dtype has no NumericDType equivalent");
+    let layout = crate::numeric_tensor::TensorLayout::row_major(shape, dtype);
+
+    let nd = tensor
+        .to_ndarray()
+        .expect("legacy tensor to_ndarray failed");
+    let flat = nd.flatten();
+    let numel = flat.num_elements();
+
+    let buffer = pool
+        .allocate(layout.buffer_size_bytes())
+        .expect("pool allocation failed in legacy_numeric_to_new");
+    // Write element by element to handle packing differences (e.g. Bool: 1-bit vs 1-byte).
+    let mut new_tensor = crate::numeric_tensor::NumericTensor::from_parts(buffer, layout);
+    for i in 0..numel {
+        let old_scalar = flat.get(&[i as u64]).unwrap();
+        let new_scalar = legacy_scalar_to_new(&old_scalar);
+        new_tensor.write_element(i, new_scalar);
+    }
+    new_tensor
+}
+
 /// Common accessors for reduce ops (ReduceSum, ReduceMax, ReduceMean).
 pub trait ReduceAccessors {
     fn axes_tensor(&self) -> Option<GlobalId>;
@@ -1668,7 +1741,7 @@ mod tests {
         let mut info_inputs: HashMap<GlobalId, LowerTensorInfo> = HashMap::new();
         let mut intermediates: HashMap<GlobalId, NumericTensor<DynRank>> = HashMap::new();
         for (id, tensor) in input_ids.iter().zip(inputs.iter()) {
-            info_inputs.insert(*id, LowerTensorInfo::from(tensor.clone()));
+            info_inputs.insert(*id, LowerTensorInfo::from_legacy(tensor, &SystemPool));
             intermediates.insert(*id, tensor.clone());
         }
 
@@ -1956,8 +2029,8 @@ mod tests {
             NumericTensor::from_vec_shape(vec![1.0f32; 8 * 16], vec![8, 16]).unwrap();
 
         let mut info = std::collections::HashMap::new();
-        info.insert(a_id, LowerTensorInfo::from(a_tensor));
-        info.insert(b_id, LowerTensorInfo::from(b_tensor));
+        info.insert(a_id, LowerTensorInfo::from_legacy(&a_tensor, &SystemPool));
+        info.insert(b_id, LowerTensorInfo::from_legacy(&b_tensor, &SystemPool));
 
         let result = super::lower_with_info(&milli, &info).unwrap();
         let graph = &result.graph;
@@ -2092,7 +2165,7 @@ mod tests {
         let tensor: NumericTensor<DynRank> =
             NumericTensor::from_vec_shape(vec![1.0f32; 12], vec![4, 3]).unwrap();
         let mut info = std::collections::HashMap::new();
-        info.insert(data, LowerTensorInfo::from(tensor));
+        info.insert(data, LowerTensorInfo::from_legacy(&tensor, &SystemPool));
         let result = super::lower_with_info(&milli, &info).unwrap();
         let identity_count = result
             .graph
@@ -2316,7 +2389,7 @@ mod tests {
         let tensor: NumericTensor<DynRank> =
             NumericTensor::from_vec_shape(vec![1.0f32; 6], vec![6]).unwrap();
         let mut info = std::collections::HashMap::new();
-        info.insert(data, LowerTensorInfo::from(tensor));
+        info.insert(data, LowerTensorInfo::from_legacy(&tensor, &SystemPool));
         let result = super::lower_with_info(&milli, &info).unwrap();
         let identity_count = result
             .graph

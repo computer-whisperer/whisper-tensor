@@ -161,7 +161,7 @@ impl MilliOp for Reshape {
             ]);
             let out: Vec<_> = self
                 .eval(&inputs, &super::MilliEvalConfig::default(), &mut crate::backends::eval_backend::EvalBackend::NDArray)?
-                .map(|(id, t)| (id, TensorInfo::from(t)))
+                .map(|(id, t)| (id, TensorInfo::from_legacy(&t, pool)))
                 .collect();
             return Ok(out);
         }
@@ -235,11 +235,11 @@ impl MilliOp for Reshape {
                 }
             }
 
-            let out = TensorInfo::wrap(crate::tensor_info::TensorInfoData::Ranked(crate::tensor_info::TensorInfoRanked::new(
+            let out = TensorInfo::Ranked(crate::tensor_info::TensorInfoRanked::new(
                 first_elem,
                 output_dims,
                 symbolic_resolver,
-            )));
+            ));
             return Ok(vec![((self.output, out))]);
         }
 

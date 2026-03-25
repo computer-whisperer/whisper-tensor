@@ -106,7 +106,7 @@ impl MilliOp for Shape {
                 // All dims concrete — produce a Numeric tensor.
                 let out: NumericTensor<DynRank> =
                     NDArrayNumericTensor::<P1>::from(dim_vals).to_dyn().into();
-                return Ok(vec![((self.output, TensorInfo::from(out)))]);
+                return Ok(vec![((self.output, TensorInfo::from_legacy(&out, pool)))]);
             }
         }
 

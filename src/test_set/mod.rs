@@ -292,7 +292,7 @@ pub fn run_case_via_pool_eval(case: &TestCase) -> Result<(), String> {
 
         let info_inputs: HashMap<GlobalId, TensorInfo<'_, crate::pool::SystemPool>> = legacy_inputs
             .iter()
-            .map(|(&id, t)| (id, TensorInfo::from(t.clone())))
+            .map(|(&id, t)| (id, TensorInfo::from_legacy(t, &crate::pool::SystemPool)))
             .collect();
 
         // Lower MilliOpGraph → NanoGraph.
