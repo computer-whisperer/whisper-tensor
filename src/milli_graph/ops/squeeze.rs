@@ -108,13 +108,9 @@ impl MilliOp for Squeeze {
         let first_elem = data_info.first_element();
 
         // If we know the input shape and the axes are concrete, compute output shape
-        if let (Some(data_ranked), Some(axes_num)) = (data_info.as_ranked(), axes_info.as_numeric())
+        if let (Some(data_ranked), Some(axes_values)) =
+            (data_info.as_ranked(), axes_info.to_i64_vec())
         {
-            let axes_values: Vec<i64> = axes_num
-                .cast(DType::I64, &mut crate::backends::eval_backend::EvalBackend::NDArray)?
-                .try_to_rank::<P1>()?
-                .try_into()?;
-
             let input_shape = data_ranked.shape();
             let input_rank = input_shape.len();
 
@@ -145,11 +141,7 @@ impl MilliOp for Squeeze {
         }
 
         // If axes are concrete, we can at least compute output rank
-        if let Some(axes_num) = axes_info.as_numeric() {
-            let axes_values: Vec<i64> = axes_num
-                .cast(DType::I64, &mut crate::backends::eval_backend::EvalBackend::NDArray)?
-                .try_to_rank::<P1>()?
-                .try_into()?;
+        if let Some(axes_values) = axes_info.to_i64_vec() {
             let num_axes = axes_values.len() as u32;
 
             if let ScalarInfoTyped::Numeric(input_rank) = data_info.rank() {

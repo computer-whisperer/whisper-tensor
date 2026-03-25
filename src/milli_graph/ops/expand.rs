@@ -174,8 +174,7 @@ impl MilliOp for Expand {
         let first_elem = input_info.first_element();
 
         // If shape tensor is concrete, use its values for output shape
-        if let Some(shape_num) = shape_info.as_numeric() {
-            let shape_values: Vec<i64> = shape_num.try_to_rank::<P1>()?.try_into()?;
+        if let Some(shape_values) = shape_info.to_i64_vec() {
             let output_shape: Vec<ScalarInfoTyped<u64>> = shape_values
                 .iter()
                 .map(|&v| ScalarInfoTyped::Numeric(v as u64))

@@ -323,8 +323,6 @@ fn infer_reduce_output_shape<'p, P: Pool + 'p>(
     known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'p, P>>,
     symbolic_resolver: &mut SymbolicResolver,
 ) -> Option<Vec<ScalarInfoTyped<u64>>> {
-    use crate::dtype::DType;
-
     // Need input with known per-dim shape.
     let data_ranked = data_info.as_ranked()?;
     let data_shape = data_ranked.shape();
@@ -333,15 +331,7 @@ fn infer_reduce_output_shape<'p, P: Pool + 'p>(
     // Get concrete axes values.
     let axes: Vec<usize> = if let Some(ax_id) = axes_id {
         let ax_info = known_inputs.get(&ax_id)?;
-        let tensor = ax_info.as_numeric()?;
-        let as_i64 = tensor
-            .cast(
-                DType::I64,
-                &mut crate::backends::eval_backend::EvalBackend::NDArray,
-            )
-            .ok()?;
-        let rank1 = as_i64.try_to_rank::<typenum::P1>().ok()?;
-        let vals = Vec::<i64>::try_from(rank1.to_ndarray().ok()?).ok()?;
+        let vals = ax_info.to_i64_vec()?;
         vals.iter()
             .map(|&a| {
                 if a < 0 {

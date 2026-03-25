@@ -105,15 +105,7 @@ impl Slice {
         // Extract concrete slice parameters.
         let extract_i64 = |id: &GlobalId| -> Option<Vec<i64>> {
             let info = all_infos.get(id)?;
-            let tensor = info.as_numeric()?;
-            let as_i64 = tensor
-                .cast(
-                    DType::I64,
-                    &mut crate::backends::eval_backend::EvalBackend::NDArray,
-                )
-                .ok()?;
-            let rank1 = as_i64.try_to_rank::<typenum::P1>().ok()?;
-            Vec::<i64>::try_from(rank1.to_ndarray().ok()?).ok()
+            info.to_i64_vec()
         };
 
         let starts = extract_i64(&self.starts_id());
@@ -349,10 +341,7 @@ impl MilliOp for Slice {
         // Try to extract concrete i64 values from a tensor.
         let extract_i64 = |id: &GlobalId| -> Option<Vec<i64>> {
             let info = known_inputs.get(id)?;
-            let tensor = info.as_numeric()?;
-            let as_i64 = tensor.cast(DType::I64, &mut EvalBackend::NDArray).ok()?;
-            let rank1 = as_i64.try_to_rank::<P1>().ok()?;
-            Vec::<i64>::try_from(rank1.to_ndarray().ok()?).ok()
+            info.to_i64_vec()
         };
 
         let starts = extract_i64(&self.starts);

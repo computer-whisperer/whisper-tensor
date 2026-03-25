@@ -211,13 +211,7 @@ impl Split {
         if let Some(crate::milli_graph::ops::MilliOpTensorIDOrLiteral::TensorID(tensor_id)) =
             self.split_tensor()
             && let Some(info) = all_infos.get(tensor_id)
-            && let Some(numeric) = info.as_numeric()
-            && let Ok(cast) = numeric.cast(
-                DType::I64,
-                &mut crate::backends::eval_backend::EvalBackend::NDArray,
-            )
-            && let Ok(rank1) = cast.try_to_rank::<typenum::P1>()
-            && let Ok(vals) = Vec::<i64>::try_from(rank1.to_ndarray().unwrap())
+            && let Some(vals) = info.to_i64_vec()
         {
             let offset: i64 = vals[..output_id_idx].iter().sum();
             return offset as u64;
@@ -297,8 +291,7 @@ impl MilliOp for Split {
                     let info = known_inputs
                         .get(id)
                         .ok_or(MilliOpGraphError::UnableToInfer)?;
-                    let tensor = info.as_numeric().ok_or(MilliOpGraphError::UnableToInfer)?;
-                    tensor.clone().try_to_rank::<P1>()?.try_into()?
+                    info.to_i64_vec().ok_or(MilliOpGraphError::UnableToInfer)?
                 }
                 MilliOpTensorIDOrLiteral::Literal(lit) => lit.try_to_rank::<P1>()?.try_into()?,
             }

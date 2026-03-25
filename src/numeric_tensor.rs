@@ -506,6 +506,16 @@ impl<'a, R: Rank, P: Pool + 'a> NumericTensor<'a, R, P> {
             .write_element(&mut self.buffer, flat_index, value);
     }
 
+    /// Read all elements as i64 values. Useful for extracting shape/axes parameters.
+    pub fn to_i64_vec(&self) -> Vec<i64> {
+        (0..self.numel()).map(|i| self.read_element(i).to_i64()).collect()
+    }
+
+    /// Read all elements as f64 values.
+    pub fn to_f64_vec(&self) -> Vec<f64> {
+        (0..self.numel()).map(|i| self.read_element(i).to_f64()).collect()
+    }
+
     pub fn buffer(&self) -> &[u8] {
         &self.buffer
     }

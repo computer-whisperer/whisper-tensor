@@ -160,11 +160,7 @@ impl MilliOp for Reshape {
         let first_elem = data_info.first_element();
 
         // If shape tensor is concrete, we can determine the output shape
-        if let Some(shape_num) = shape_info.as_numeric() {
-            let shape_values: Vec<i64> = shape_num
-                .cast(DType::I64, &mut crate::backends::eval_backend::EvalBackend::NDArray)?
-                .try_to_rank::<P1>()?
-                .try_into()?;
+        if let Some(shape_values) = shape_info.to_i64_vec() {
 
             // Try to compute output shape, handling -1 and 0 dims
             let data_shape_known = data_info.as_ranked().map(|r| {

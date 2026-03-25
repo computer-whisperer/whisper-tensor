@@ -82,7 +82,7 @@ impl Gather {
         // If both inputs are fully numeric (constant-folded), treat as constant.
         let all_numeric = [data_id, indices_id]
             .iter()
-            .all(|id| all_infos.get(id).is_some_and(|i| i.as_numeric().is_some()));
+            .all(|id| all_infos.get(id).is_some_and(|i| i.as_concrete().is_some()));
         if all_numeric && let Some(out_info) = all_infos.get(&out_id) {
             ctx.register_constant(out_id, out_info);
             return;
