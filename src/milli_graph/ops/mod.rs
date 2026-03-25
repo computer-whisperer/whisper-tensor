@@ -168,25 +168,11 @@ pub fn constant_fold<'p, P: Pool + 'p>(
         known_inputs.get(&id)?.as_concrete()?;
     }
 
-    // 1b. If no output hints, fall back to eval-based constant folding.
-    //     Nano lowering requires output hints to classify output dimensions;
-    //     without them it may silently produce garbage.
+    // Output hints are required — without them the lowering can't classify
+    // output dimensions. All ops should provide hints from their symbolic
+    // inference path.
     if output_hints.is_empty() {
-        let mut resolved_inputs = HashMap::new();
-        for &id in &input_ids {
-            let tensor = known_inputs.get(&id)?.as_numeric()?;
-            resolved_inputs.insert(id, tensor);
-        }
-        let collected: Vec<(GlobalId, TensorInfo<'p, P>)> = op
-            .eval(
-                &resolved_inputs,
-                &MilliEvalConfig::default(),
-                &mut crate::backends::eval_backend::EvalBackend::NDArray,
-            )
-            .ok()?
-            .map(|(a, b)| (a, TensorInfo::from_legacy(&b, pool)))
-            .collect();
-        return Some(collected);
+        return None;
     }
 
     // 2. Build LowerTensorInfo map with inputs + output hints.
