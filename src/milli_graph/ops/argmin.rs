@@ -4,6 +4,7 @@ use crate::graph::{GlobalId, Node};
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
 use crate::migration::numeric_tensor::NumericTensor;
+use crate::pool::Pool;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -63,6 +64,59 @@ impl ArgMin {
 }
 
 impl MilliOp for ArgMin {
+    fn infer<'p, P: Pool + 'p>(
+        &self,
+        known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'p, P>>,
+        symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
+        _pool: &'p P,
+    ) -> Result<Vec<(GlobalId, crate::tensor_info::TensorInfo<'p, P>)>, MilliOpGraphError> {
+        use crate::numeric_dtype::NumericDType;
+        use crate::scalar_info::{ScalarInfo, ScalarInfoTyped};
+        use crate::symbolic_scalar::SymbolicScalar;
+        use crate::tensor_info::TensorInfo;
+
+        let input_info = known_inputs
+            .get(&self.input)
+            .ok_or(MilliOpGraphError::UnableToInfer)?;
+        let out_dtype = NumericDType::I64;
+
+        if let Some(ranked) = input_info.as_ranked() {
+            let shape = ranked.shape();
+            let rank = shape.len();
+            let axis = if self.axis < 0 {
+                (self.axis + rank as i64) as usize
+            } else {
+                self.axis as usize
+            };
+            let mut out_dims = Vec::new();
+            for (i, dim) in shape.iter().enumerate() {
+                if i == axis {
+                    if self.keepdims {
+                        out_dims.push(ScalarInfoTyped::Numeric(1));
+                    }
+                    // else: skip this dim
+                } else {
+                    out_dims.push(dim.clone());
+                }
+            }
+            return Ok(vec![(
+                self.output,
+                TensorInfo::from_dtype_and_shape_scalars(out_dtype, &out_dims),
+            )]);
+        }
+
+        // Fallback: unknown shape
+        let first = ScalarInfo::Symbolic(SymbolicScalar::new(out_dtype, symbolic_resolver));
+        Ok(vec![(
+            self.output,
+            TensorInfo::new_from_first_element_and_rank(
+                first,
+                input_info.rank(),
+                symbolic_resolver,
+            ),
+        )])
+    }
+
     fn eval(
         &self,
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,

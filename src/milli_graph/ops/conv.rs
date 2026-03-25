@@ -2,9 +2,10 @@ use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
 use crate::dtype::DType;
 use crate::graph::{GlobalId, Node};
-use crate::milli_graph::MilliOpGraph;
+use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::migration::numeric_tensor::NumericTensor;
+use crate::pool::Pool;
 use rand::Rng;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -349,7 +350,159 @@ fn conv_nd_generic(p: &ConvNdParams) -> Vec<f32> {
     output_data
 }
 
+/// Helper: build Conv output with known batch + out_channels but symbolic spatial dims.
+fn make_symbolic_output<'p, P: Pool + 'p>(
+    output_id: GlobalId,
+    out_dtype: crate::numeric_dtype::NumericDType,
+    batch: &crate::scalar_info::ScalarInfoTyped<u64>,
+    out_channels: &crate::scalar_info::ScalarInfoTyped<u64>,
+    n_spatial: usize,
+    symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
+) -> Result<Vec<(GlobalId, crate::tensor_info::TensorInfo<'p, P>)>, crate::milli_graph::MilliOpGraphError> {
+    use crate::scalar_info::ScalarInfoTyped;
+    use crate::symbolic_scalar::SymbolicScalarTyped;
+    use crate::tensor_info::TensorInfo;
+
+    let mut out_dims = Vec::with_capacity(2 + n_spatial);
+    out_dims.push(batch.clone());
+    out_dims.push(out_channels.clone());
+    for _ in 0..n_spatial {
+        out_dims.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(
+            symbolic_resolver,
+        )));
+    }
+    Ok(vec![(
+        output_id,
+        TensorInfo::from_dtype_and_shape_scalars(out_dtype, &out_dims),
+    )])
+}
+
 impl MilliOp for Conv {
+    fn infer<'p, P: Pool + 'p>(
+        &self,
+        known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'p, P>>,
+        symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
+        _pool: &'p P,
+    ) -> Result<Vec<(GlobalId, crate::tensor_info::TensorInfo<'p, P>)>, MilliOpGraphError> {
+        use crate::milli_graph::MilliOpGraphError::UnableToInfer;
+        use crate::scalar_info::ScalarInfoTyped;
+        use crate::symbolic_scalar::SymbolicScalarTyped;
+        use crate::tensor_info::TensorInfo;
+
+        let input_info = known_inputs.get(&self.input).ok_or(UnableToInfer)?;
+        let weight_info = known_inputs.get(&self.weight).ok_or(UnableToInfer)?;
+        let out_dtype = input_info.dtype();
+
+        let input_ranked = input_info.as_ranked().ok_or(UnableToInfer)?;
+        let weight_ranked = weight_info.as_ranked().ok_or(UnableToInfer)?;
+        let input_shape = input_ranked.shape();
+        let weight_shape = weight_ranked.shape();
+        let rank = input_shape.len();
+
+        if rank < 3 {
+            return Err(UnableToInfer);
+        }
+        let n_spatial = rank - 2;
+
+        // batch = input_shape[0]
+        let batch = input_shape[0].clone();
+        // out_channels = weight_shape[0]
+        let out_channels = weight_shape[0].clone();
+
+        // Try to compute concrete spatial output dims
+        let kernel_shape: Vec<usize> = if self.kernel_shape.is_empty() {
+            // Infer from weight shape[2..]
+            let mut ks = Vec::new();
+            for i in 0..n_spatial {
+                match &weight_shape[i + 2] {
+                    ScalarInfoTyped::Numeric(v) => ks.push(*v as usize),
+                    ScalarInfoTyped::Symbolic(_) => return make_symbolic_output(
+                        self.output, out_dtype, &batch, &out_channels, n_spatial, symbolic_resolver,
+                    ),
+                }
+            }
+            ks
+        } else {
+            self.kernel_shape.iter().map(|&x| x as usize).collect()
+        };
+
+        let strides: Vec<usize> = if self.strides.is_empty() {
+            vec![1; n_spatial]
+        } else {
+            self.strides.iter().map(|&x| x as usize).collect()
+        };
+        let dilations: Vec<usize> = if self.dilations.is_empty() {
+            vec![1; n_spatial]
+        } else {
+            self.dilations.iter().map(|&x| x as usize).collect()
+        };
+
+        let dilated_kernel: Vec<usize> = (0..n_spatial)
+            .map(|i| dilations[i] * (kernel_shape[i] - 1) + 1)
+            .collect();
+
+        // Try to get concrete input spatial dims
+        let input_spatial: Option<Vec<usize>> = (0..n_spatial)
+            .map(|i| match &input_shape[i + 2] {
+                ScalarInfoTyped::Numeric(v) => Some(*v as usize),
+                ScalarInfoTyped::Symbolic(_) => None,
+            })
+            .collect();
+
+        let spatial_dims: Vec<ScalarInfoTyped<u64>> = if let Some(input_spatial) = input_spatial {
+            let (pad_begin, pad_end) = resolve_padding(
+                self.auto_pad,
+                &self.pads,
+                n_spatial,
+                &input_spatial,
+                &strides,
+                &dilated_kernel,
+            );
+            (0..n_spatial)
+                .map(|i| {
+                    let out_size = (input_spatial[i] + pad_begin[i] + pad_end[i]
+                        - dilated_kernel[i])
+                        / strides[i]
+                        + 1;
+                    ScalarInfoTyped::Numeric(out_size as u64)
+                })
+                .collect()
+        } else {
+            // For SameUpper/SameLower with symbolic input, we can still compute output = ceil(input/stride)
+            // but for NotSet/Valid we need concrete dims
+            match self.auto_pad {
+                ConvAutoPad::SameUpper | ConvAutoPad::SameLower => {
+                    (0..n_spatial)
+                        .map(|i| match &input_shape[i + 2] {
+                            ScalarInfoTyped::Numeric(v) => {
+                                let out = (*v as usize).div_ceil(strides[i]);
+                                ScalarInfoTyped::Numeric(out as u64)
+                            }
+                            ScalarInfoTyped::Symbolic(_) => ScalarInfoTyped::Symbolic(
+                                SymbolicScalarTyped::new(symbolic_resolver),
+                            ),
+                        })
+                        .collect()
+                }
+                _ => (0..n_spatial)
+                    .map(|_| {
+                        ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(symbolic_resolver))
+                    })
+                    .collect(),
+            }
+        };
+
+        let mut out_dims = Vec::with_capacity(rank);
+        out_dims.push(batch);
+        out_dims.push(out_channels);
+        out_dims.extend(spatial_dims);
+
+        Ok(vec![(
+            self.output,
+            TensorInfo::from_dtype_and_shape_scalars(out_dtype, &out_dims),
+        )])
+    }
+
     fn backward(
         &self,
         output_grads: &HashMap<GlobalId, GlobalId>,

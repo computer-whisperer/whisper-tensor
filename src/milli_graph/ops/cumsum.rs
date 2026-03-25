@@ -6,6 +6,7 @@ use crate::milli_graph::MilliOpGraphError;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::migration::numeric_scalar::NumericScalarType;
 use crate::migration::numeric_tensor::NumericTensor;
+use crate::pool::Pool;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -83,6 +84,42 @@ impl Node for CumSum {
 }
 
 impl MilliOp for CumSum {
+    fn infer<'p, P: Pool + 'p>(
+        &self,
+        known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'p, P>>,
+        symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
+        _pool: &'p P,
+    ) -> Result<Vec<(GlobalId, crate::tensor_info::TensorInfo<'p, P>)>, MilliOpGraphError> {
+        use crate::scalar_info::{ScalarInfo, ScalarInfoTyped};
+        use crate::symbolic_scalar::SymbolicScalar;
+        use crate::tensor_info::TensorInfo;
+
+        let data_info = known_inputs
+            .get(&self.input)
+            .ok_or(MilliOpGraphError::UnableToInfer)?;
+        let out_dtype = data_info.dtype();
+
+        // CumSum preserves shape — output shape == input shape.
+        if let Some(ranked) = data_info.as_ranked() {
+            let dims = ranked.shape();
+            return Ok(vec![(
+                self.output,
+                TensorInfo::from_dtype_and_shape_scalars(out_dtype, &dims),
+            )]);
+        }
+
+        // Fallback: unknown shape
+        let first = ScalarInfo::Symbolic(SymbolicScalar::new(out_dtype, symbolic_resolver));
+        Ok(vec![(
+            self.output,
+            TensorInfo::new_from_first_element_and_rank(
+                first,
+                data_info.rank(),
+                symbolic_resolver,
+            ),
+        )])
+    }
+
     fn eval(
         &self,
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,

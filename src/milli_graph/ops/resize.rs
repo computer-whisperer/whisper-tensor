@@ -6,6 +6,7 @@ use crate::milli_graph::MilliOpGraph;
 use crate::milli_graph::MilliOpGraphError;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::migration::numeric_tensor::NumericTensor;
+use crate::pool::Pool;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -902,6 +903,153 @@ fn compute_scales(
 // =============================================================================
 
 impl MilliOp for Resize {
+    fn infer<'p, P: Pool + 'p>(
+        &self,
+        known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'p, P>>,
+        symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
+        _pool: &'p P,
+    ) -> Result<Vec<(GlobalId, crate::tensor_info::TensorInfo<'p, P>)>, MilliOpGraphError> {
+        use crate::scalar_info::ScalarInfoTyped;
+        use crate::symbolic_scalar::SymbolicScalarTyped;
+        use crate::tensor_info::TensorInfo;
+
+        let input_info = known_inputs
+            .get(&self.input)
+            .ok_or(MilliOpGraphError::UnableToInfer)?;
+        let out_dtype = input_info.dtype();
+
+        let ranked = input_info
+            .as_ranked()
+            .ok_or(MilliOpGraphError::UnableToInfer)?;
+        let shape = ranked.shape();
+        let rank = shape.len();
+
+        // Resolve axes
+        let resolved_axes: Vec<usize> = if self.axes.is_empty() {
+            (0..rank).collect()
+        } else {
+            self.axes
+                .iter()
+                .map(|&a| {
+                    if a < 0 {
+                        (rank as i64 + a) as usize
+                    } else {
+                        a as usize
+                    }
+                })
+                .collect()
+        };
+
+        // Try sizes first (takes priority over scales per ONNX spec)
+        if let Some(sizes_id) = self.sizes {
+            if let Some(sizes_info) = known_inputs.get(&sizes_id) {
+                if let Some(sizes_vec) = sizes_info.to_i64_vec() {
+                    if !sizes_vec.is_empty() {
+                        // Get concrete input shape for keep_aspect_ratio computation
+                        let input_concrete: Option<Vec<u64>> = shape
+                            .iter()
+                            .map(|d| match d {
+                                ScalarInfoTyped::Numeric(v) => Some(*v),
+                                ScalarInfoTyped::Symbolic(_) => None,
+                            })
+                            .collect();
+
+                        let mut out_dims = shape.to_vec();
+                        match self.keep_aspect_ratio_policy {
+                            ResizeKeepAspectRatioPolicy::Stretch => {
+                                for (i, &axis) in resolved_axes.iter().enumerate() {
+                                    out_dims[axis] =
+                                        ScalarInfoTyped::Numeric(sizes_vec[i] as u64);
+                                }
+                            }
+                            ResizeKeepAspectRatioPolicy::NotLarger
+                            | ResizeKeepAspectRatioPolicy::NotSmaller => {
+                                if let Some(ref input_conc) = input_concrete {
+                                    let scales: Vec<f32> = resolved_axes
+                                        .iter()
+                                        .enumerate()
+                                        .map(|(i, &axis)| {
+                                            sizes_vec[i] as f32 / input_conc[axis] as f32
+                                        })
+                                        .collect();
+                                    let chosen_scale = if matches!(
+                                        self.keep_aspect_ratio_policy,
+                                        ResizeKeepAspectRatioPolicy::NotLarger
+                                    ) {
+                                        scales
+                                            .iter()
+                                            .copied()
+                                            .fold(f32::INFINITY, f32::min)
+                                    } else {
+                                        scales.iter().copied().fold(0.0f32, f32::max)
+                                    };
+                                    for &axis in &resolved_axes {
+                                        let v = round_half_up(
+                                            chosen_scale * input_conc[axis] as f32,
+                                        );
+                                        out_dims[axis] =
+                                            ScalarInfoTyped::Numeric(v as u64);
+                                    }
+                                } else {
+                                    // Input shape is partially symbolic — can't compute aspect ratio
+                                    for &axis in &resolved_axes {
+                                        out_dims[axis] = ScalarInfoTyped::Symbolic(
+                                            SymbolicScalarTyped::new(symbolic_resolver),
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        return Ok(vec![(
+                            self.output,
+                            TensorInfo::from_dtype_and_shape_scalars(out_dtype, &out_dims),
+                        )]);
+                    }
+                }
+            }
+        }
+
+        // Try scales
+        if let Some(scales_id) = self.scales {
+            if let Some(scales_info) = known_inputs.get(&scales_id) {
+                if let Some(scales_f64) = scales_info.to_f64_vec() {
+                    if !scales_f64.is_empty()
+                        && !scales_f64.iter().all(|&x| x == 0.0)
+                    {
+                        let mut out_dims = shape.to_vec();
+                        for (i, &axis) in resolved_axes.iter().enumerate() {
+                            let scale = scales_f64[i] as f32;
+                            match &shape[axis] {
+                                ScalarInfoTyped::Numeric(v) => {
+                                    let new_size = (*v as f32 * scale).floor() as u64;
+                                    out_dims[axis] = ScalarInfoTyped::Numeric(new_size);
+                                }
+                                ScalarInfoTyped::Symbolic(_) => {
+                                    out_dims[axis] = ScalarInfoTyped::Symbolic(
+                                        SymbolicScalarTyped::new(symbolic_resolver),
+                                    );
+                                }
+                            }
+                        }
+                        return Ok(vec![(
+                            self.output,
+                            TensorInfo::from_dtype_and_shape_scalars(out_dtype, &out_dims),
+                        )]);
+                    }
+                }
+            }
+        }
+
+        // Neither sizes nor scales are concrete — return same rank with symbolic dims
+        let out_dims: Vec<ScalarInfoTyped<u64>> = (0..rank)
+            .map(|_| ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(symbolic_resolver)))
+            .collect();
+        Ok(vec![(
+            self.output,
+            TensorInfo::from_dtype_and_shape_scalars(out_dtype, &out_dims),
+        )])
+    }
+
     fn eval(
         &self,
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,

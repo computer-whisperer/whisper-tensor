@@ -5,6 +5,7 @@ use crate::graph::GlobalId;
 use crate::milli_graph::MilliOpGraphError;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::migration::numeric_tensor::NumericTensor;
+use crate::pool::Pool;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use typenum::P1;
@@ -118,6 +119,117 @@ impl NdLayout {
 }
 
 impl MilliOp for Pad {
+    fn infer<'p, P: Pool + 'p>(
+        &self,
+        known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'p, P>>,
+        symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
+        _pool: &'p P,
+    ) -> Result<Vec<(GlobalId, crate::tensor_info::TensorInfo<'p, P>)>, MilliOpGraphError> {
+        use crate::scalar_info::ScalarInfoTyped;
+        use crate::symbolic_scalar::SymbolicScalarTyped;
+        use crate::tensor_info::TensorInfo;
+
+        let data_info = known_inputs
+            .get(&self.data)
+            .ok_or(MilliOpGraphError::UnableToInfer)?;
+        let out_dtype = data_info.dtype();
+
+        let ranked = data_info
+            .as_ranked()
+            .ok_or(MilliOpGraphError::UnableToInfer)?;
+        let shape = ranked.shape();
+        let rank = shape.len();
+
+        // Try to get concrete pads values
+        let pads_info = known_inputs
+            .get(&self.pads)
+            .ok_or(MilliOpGraphError::UnableToInfer)?;
+        let pads_vec = match pads_info.to_i64_vec() {
+            Some(v) => v,
+            None => {
+                // Pads are symbolic — return same rank with symbolic dims
+                let out_dims: Vec<ScalarInfoTyped<u64>> = (0..rank)
+                    .map(|_| {
+                        ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(symbolic_resolver))
+                    })
+                    .collect();
+                return Ok(vec![(
+                    self.output,
+                    TensorInfo::from_dtype_and_shape_scalars(out_dtype, &out_dims),
+                )]);
+            }
+        };
+
+        // Parse axes (optional)
+        let axes: Vec<usize> = if let Some(axes_id) = self.axes {
+            match known_inputs.get(&axes_id).and_then(|a| a.to_i64_vec()) {
+                Some(raw) => raw
+                    .iter()
+                    .map(|&a| {
+                        if a < 0 {
+                            (rank as i64 + a) as usize
+                        } else {
+                            a as usize
+                        }
+                    })
+                    .collect(),
+                None => {
+                    // Axes are symbolic — return same rank with symbolic dims
+                    let out_dims: Vec<ScalarInfoTyped<u64>> = (0..rank)
+                        .map(|_| {
+                            ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(symbolic_resolver))
+                        })
+                        .collect();
+                    return Ok(vec![(
+                        self.output,
+                        TensorInfo::from_dtype_and_shape_scalars(out_dtype, &out_dims),
+                    )]);
+                }
+            }
+        } else {
+            (0..rank).collect()
+        };
+
+        let num_axes = axes.len();
+        if pads_vec.len() != 2 * num_axes {
+            return Err(MilliOpGraphError::UnableToInfer);
+        }
+
+        // Build per-axis (begin_pad, end_pad)
+        let mut begin_pads = vec![0i64; rank];
+        let mut end_pads = vec![0i64; rank];
+        for (i, &axis) in axes.iter().enumerate() {
+            begin_pads[axis] = pads_vec[i];
+            end_pads[axis] = pads_vec[num_axes + i];
+        }
+
+        let mut out_dims = Vec::new();
+        for (i, dim) in shape.iter().enumerate() {
+            let pad_total = begin_pads[i] + end_pads[i];
+            if pad_total == 0 {
+                out_dims.push(dim.clone());
+            } else {
+                match dim {
+                    ScalarInfoTyped::Numeric(v) => {
+                        out_dims.push(ScalarInfoTyped::Numeric(
+                            (*v as i64 + pad_total) as u64,
+                        ));
+                    }
+                    ScalarInfoTyped::Symbolic(_) => {
+                        out_dims.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(
+                            symbolic_resolver,
+                        )));
+                    }
+                }
+            }
+        }
+
+        Ok(vec![(
+            self.output,
+            TensorInfo::from_dtype_and_shape_scalars(out_dtype, &out_dims),
+        )])
+    }
+
     fn eval(
         &self,
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,

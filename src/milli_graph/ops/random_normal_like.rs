@@ -107,6 +107,45 @@ fn fill_normal(rng: &mut impl Rng, total: usize, mean: f32, scale: f32) -> Vec<f
 }
 
 impl MilliOp for RandomNormalLike {
+    fn infer<'p, P: crate::pool::Pool + 'p>(
+        &self,
+        known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'p, P>>,
+        symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
+        _pool: &'p P,
+    ) -> Result<Vec<(GlobalId, crate::tensor_info::TensorInfo<'p, P>)>, MilliOpGraphError> {
+        use crate::numeric_dtype::NumericDType;
+        use crate::scalar_info::{ScalarInfo, ScalarInfoTyped};
+        use crate::symbolic_scalar::SymbolicScalar;
+        use crate::tensor_info::TensorInfo;
+
+        let input_info = known_inputs
+            .get(&self.input)
+            .ok_or(MilliOpGraphError::UnableToInfer)?;
+        let out_dtype = self
+            .dtype
+            .map(|dt| NumericDType::from_legacy(dt).unwrap())
+            .unwrap_or_else(|| input_info.dtype());
+
+        if let Some(ranked) = input_info.as_ranked() {
+            let dims = ranked.shape();
+            return Ok(vec![(
+                self.output,
+                TensorInfo::from_dtype_and_shape_scalars(out_dtype, &dims),
+            )]);
+        }
+
+        // Fallback: unknown shape
+        let first = ScalarInfo::Symbolic(SymbolicScalar::new(out_dtype, symbolic_resolver));
+        Ok(vec![(
+            self.output,
+            TensorInfo::new_from_first_element_and_rank(
+                first,
+                input_info.rank(),
+                symbolic_resolver,
+            ),
+        )])
+    }
+
     fn eval(
         &self,
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,

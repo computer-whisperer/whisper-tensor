@@ -4,6 +4,7 @@ use crate::graph::{GlobalId, Node};
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
 use crate::migration::numeric_tensor::NumericTensor;
+use crate::pool::Pool;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use typenum::P1;
@@ -80,6 +81,53 @@ impl Node for SumTo {
 }
 
 impl MilliOp for SumTo {
+    fn infer<'p, P: Pool + 'p>(
+        &self,
+        known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'p, P>>,
+        symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
+        _pool: &'p P,
+    ) -> Result<Vec<(GlobalId, crate::tensor_info::TensorInfo<'p, P>)>, MilliOpGraphError> {
+        use crate::scalar_info::{ScalarInfo, ScalarInfoTyped};
+        use crate::symbolic_scalar::SymbolicScalar;
+        use crate::tensor_info::TensorInfo;
+
+        let data_info = known_inputs
+            .get(&self.data)
+            .ok_or(MilliOpGraphError::UnableToInfer)?;
+        let target_info = known_inputs
+            .get(&self.target_shape)
+            .ok_or(MilliOpGraphError::UnableToInfer)?;
+        let out_dtype = data_info.dtype();
+
+        // If target_shape is concrete, extract its values to determine output shape.
+        if let Some(shape_vals) = target_info.to_i64_vec() {
+            let dims: Vec<ScalarInfoTyped<u64>> = shape_vals
+                .iter()
+                .map(|&v| ScalarInfoTyped::Numeric(v as u64))
+                .collect();
+            return Ok(vec![(
+                self.output,
+                TensorInfo::from_dtype_and_shape_scalars(out_dtype, &dims),
+            )]);
+        }
+
+        // target_shape is a 1D tensor whose length = output rank.
+        // If we know the length of target_shape, we know the output rank.
+        if let Some(out_rank) = target_info.dim_if_known(0) {
+            let first = ScalarInfo::Symbolic(SymbolicScalar::new(out_dtype, symbolic_resolver));
+            return Ok(vec![(
+                self.output,
+                TensorInfo::new_from_first_element_and_rank(
+                    first,
+                    ScalarInfoTyped::Numeric(out_rank as u32),
+                    symbolic_resolver,
+                ),
+            )]);
+        }
+
+        Err(MilliOpGraphError::UnableToInfer)
+    }
+
     fn eval(
         &self,
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
