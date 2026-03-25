@@ -153,7 +153,7 @@ impl MilliOp for Reshape {
             .ok_or(MilliOpGraphError::UnableToInfer)?;
 
         // If both inputs are concrete, delegate to eval
-        if let Some(results) = super::constant_fold(self, known_inputs, pool) {
+        if let Some(results) = super::constant_fold(self, known_inputs, &[], pool) {
             return Ok(results);
         }
 
@@ -289,5 +289,9 @@ impl MilliOp for Reshape {
         let output_value = data_input.reshape(output_shape, backend)?;
 
         Ok(Box::new([(self.output, output_value)].into_iter()))
+    }
+
+    fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
+        Reshape::lower_to_nano(self, ctx);
     }
 }

@@ -111,11 +111,6 @@ impl MilliOp for ReduceProd {
             .get(&self.data)
             .ok_or(MilliOpGraphError::UnableToInfer)?;
 
-        // Check if all inputs are concrete; if so, fall back to eval.
-        if let Some(results) = super::constant_fold(self, known_inputs, pool) {
-            return Ok(results);
-        }
-
         let out_dtype = data_info.dtype();
 
         let num_axes: Option<usize> = if let Some(ax_id) = self.axes {
@@ -170,6 +165,12 @@ impl MilliOp for ReduceProd {
         );
         let out_info =
             TensorInfo::new_from_first_element_and_rank(first_elem, out_rank, symbolic_resolver);
+
+        // Check if all inputs are concrete; if so, try constant fold with output hints.
+        if let Some(results) = super::constant_fold(self, known_inputs, &[(self.output, out_info.clone_with_pool(pool))], pool) {
+            return Ok(results);
+        }
+
         Ok(vec![((self.output, out_info))])
     }
 

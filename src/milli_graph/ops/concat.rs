@@ -245,7 +245,7 @@ impl MilliOp for Concat {
         }
 
         // If all inputs are concrete, fall back to eval.
-        if let Some(results) = super::constant_fold(self, known_inputs, pool) {
+        if let Some(results) = super::constant_fold(self, known_inputs, &[], pool) {
             return Ok(results);
         }
 
@@ -387,5 +387,9 @@ impl MilliOp for Concat {
         } as usize;
         let out = NumericTensor::<DynRank>::concat(resolved_inputs.as_slice(), axis, backend)?;
         Ok(Box::new([(self.output, out)].into_iter()))
+    }
+
+    fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
+        Concat::lower_to_nano(self, ctx);
     }
 }

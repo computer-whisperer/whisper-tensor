@@ -228,15 +228,10 @@ impl MilliOp for ReduceMean {
             .get(&self.data)
             .ok_or(MilliOpGraphError::UnableToInfer)?;
 
-        // Check if all inputs are concrete; if so, fall back to eval.
-        if let Some(results) = super::constant_fold(self, known_inputs, pool) {
-            return Ok(results);
-        }
-
         let out_dtype = data_info.dtype();
 
-        // Try per-dim shape inference first.
-        if let Some(out_dims) = super::infer_reduce_output_shape(
+        // Compute symbolic output info.
+        let out_info = if let Some(out_dims) = super::infer_reduce_output_shape(
             data_info,
             self.axes,
             self.keepdims,
@@ -244,53 +239,57 @@ impl MilliOp for ReduceMean {
             known_inputs,
             symbolic_resolver,
         ) {
-            let out_info = TensorInfo::from_dtype_and_shape_scalars(out_dtype, &out_dims);
-            return Ok(vec![((self.output, out_info))]);
-        }
-
-        // Fallback: rank-only inference.
-        let num_axes: Option<usize> = if let Some(ax_id) = self.axes {
-            known_inputs.get(&ax_id).and_then(|ax_info| {
-                ax_info
-                    .rank_if_known()
-                    .and_then(|_| ax_info.dim_if_known(0).map(|n| n as usize))
-            })
+            TensorInfo::from_dtype_and_shape_scalars(out_dtype, &out_dims)
         } else {
-            None
-        };
+            // Fallback: rank-only inference.
+            let num_axes: Option<usize> = if let Some(ax_id) = self.axes {
+                known_inputs.get(&ax_id).and_then(|ax_info| {
+                    ax_info
+                        .rank_if_known()
+                        .and_then(|_| ax_info.dim_if_known(0).map(|n| n as usize))
+                })
+            } else {
+                None
+            };
 
-        let out_rank: ScalarInfoTyped<u32> = match data_info.rank() {
-            ScalarInfoTyped::Numeric(input_rank) => {
-                if self.axes.is_none() {
-                    ScalarInfoTyped::Numeric(if self.keepdims { input_rank } else { 0 })
-                } else if let Some(n) = num_axes {
-                    if n == 0 && self.noop_with_empty_axes {
-                        ScalarInfoTyped::Numeric(input_rank)
-                    } else if n == 0 {
+            let out_rank: ScalarInfoTyped<u32> = match data_info.rank() {
+                ScalarInfoTyped::Numeric(input_rank) => {
+                    if self.axes.is_none() {
                         ScalarInfoTyped::Numeric(if self.keepdims { input_rank } else { 0 })
+                    } else if let Some(n) = num_axes {
+                        if n == 0 && self.noop_with_empty_axes {
+                            ScalarInfoTyped::Numeric(input_rank)
+                        } else if n == 0 {
+                            ScalarInfoTyped::Numeric(if self.keepdims { input_rank } else { 0 })
+                        } else if self.keepdims {
+                            ScalarInfoTyped::Numeric(input_rank)
+                        } else {
+                            ScalarInfoTyped::Numeric(input_rank.saturating_sub(n as u32))
+                        }
                     } else if self.keepdims {
                         ScalarInfoTyped::Numeric(input_rank)
                     } else {
-                        ScalarInfoTyped::Numeric(input_rank.saturating_sub(n as u32))
+                        ScalarInfoTyped::Symbolic(crate::symbolic_scalar::SymbolicScalarTyped::new(
+                            symbolic_resolver,
+                        ))
                     }
-                } else if self.keepdims {
-                    ScalarInfoTyped::Numeric(input_rank)
-                } else {
-                    ScalarInfoTyped::Symbolic(crate::symbolic_scalar::SymbolicScalarTyped::new(
-                        symbolic_resolver,
-                    ))
                 }
-            }
-            _ => ScalarInfoTyped::Symbolic(crate::symbolic_scalar::SymbolicScalarTyped::new(
-                symbolic_resolver,
-            )),
+                _ => ScalarInfoTyped::Symbolic(crate::symbolic_scalar::SymbolicScalarTyped::new(
+                    symbolic_resolver,
+                )),
+            };
+
+            let first_elem = crate::scalar_info::ScalarInfo::Symbolic(
+                crate::symbolic_scalar::SymbolicScalar::new(out_dtype, symbolic_resolver),
+            );
+            TensorInfo::new_from_first_element_and_rank(first_elem, out_rank, symbolic_resolver)
         };
 
-        let first_elem = crate::scalar_info::ScalarInfo::Symbolic(
-            crate::symbolic_scalar::SymbolicScalar::new(out_dtype, symbolic_resolver),
-        );
-        let out_info =
-            TensorInfo::new_from_first_element_and_rank(first_elem, out_rank, symbolic_resolver);
+        // Check if all inputs are concrete; if so, try constant fold with output hints.
+        if let Some(results) = super::constant_fold(self, known_inputs, &[(self.output, out_info.clone_with_pool(pool))], pool) {
+            return Ok(results);
+        }
+
         Ok(vec![((self.output, out_info))])
     }
 
@@ -384,5 +383,9 @@ impl MilliOp for ReduceMean {
             result.insert(self.data, grad_input);
             Some(result)
         }
+    }
+
+    fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
+        ReduceMean::lower_to_nano(self, ctx);
     }
 }

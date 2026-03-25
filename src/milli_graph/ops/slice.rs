@@ -327,7 +327,7 @@ impl MilliOp for Slice {
             .ok_or(MilliOpGraphError::UnableToInfer)?;
 
         // If all inputs are concrete, fall back to eval.
-        if let Some(results) = super::constant_fold(self, known_inputs, pool) {
+        if let Some(results) = super::constant_fold(self, known_inputs, &[], pool) {
             return Ok(results);
         }
 
@@ -495,5 +495,9 @@ impl MilliOp for Slice {
 
         let output = data_input.slice_with_steps(&slices, backend)?;
         Ok(Box::new([(self.output, output)].into_iter()))
+    }
+
+    fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
+        Slice::lower_to_nano(self, ctx);
     }
 }

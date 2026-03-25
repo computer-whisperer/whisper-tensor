@@ -79,7 +79,7 @@ impl MilliOp for Shape {
             .ok_or(crate::milli_graph::MilliOpGraphError::UnableToInfer)?;
 
         // If input is concrete, fall back to eval for exact shape.
-        if let Some(results) = super::constant_fold(self, known_inputs, pool) {
+        if let Some(results) = super::constant_fold(self, known_inputs, &[], pool) {
             return Ok(results);
         }
 
@@ -135,6 +135,10 @@ impl MilliOp for Shape {
             .to_dyn()
             .into();
         Ok(Box::new([(self.output, out)].into_iter()))
+    }
+
+    fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
+        Shape::lower_to_nano(self, ctx);
     }
 }
 

@@ -167,7 +167,7 @@ impl MilliOp for Expand {
             .ok_or(MilliOpGraphError::UnableToInfer)?;
 
         // If both inputs are concrete, delegate to eval
-        if let Some(results) = super::constant_fold(self, known_inputs, pool) {
+        if let Some(results) = super::constant_fold(self, known_inputs, &[], pool) {
             return Ok(results);
         }
 
@@ -280,5 +280,9 @@ impl MilliOp for Expand {
             .collect::<Vec<u64>>();
         let out = x.expand(&shape_u)?;
         Ok(Box::new([(self.output, out)].into_iter()))
+    }
+
+    fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
+        Expand::lower_to_nano(self, ctx);
     }
 }

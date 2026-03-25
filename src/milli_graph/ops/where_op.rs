@@ -162,15 +162,10 @@ impl MilliOp for Where {
             .get(&self.y)
             .ok_or(MilliOpGraphError::UnableToInfer)?;
 
-        // If all concrete, fall back to eval.
-        if let Some(results) = super::constant_fold(self, known_inputs, pool) {
-            return Ok(results);
-        }
-
         let out_dtype = x_info.dtype();
 
-        // Try per-dim broadcast shape inference.
-        if let (Some(c_ranked), Some(x_ranked), Some(y_ranked)) = (
+        // Compute symbolic output info for the hint.
+        let out_info = if let (Some(c_ranked), Some(x_ranked), Some(y_ranked)) = (
             cond_info.as_ranked(),
             x_info.as_ranked(),
             y_info.as_ranked(),
@@ -178,23 +173,26 @@ impl MilliOp for Where {
             &[c_ranked.shape(), x_ranked.shape(), y_ranked.shape()],
             symbolic_resolver,
         ) {
-            let out_info = TensorInfo::from_dtype_and_shape_scalars(out_dtype, &out_dims);
-            return Ok(vec![((self.output, out_info))]);
+            TensorInfo::from_dtype_and_shape_scalars(out_dtype, &out_dims)
+        } else {
+            let c_shape = cond_info.shape(symbolic_resolver);
+            let x_shape = x_info.shape(symbolic_resolver);
+            let y_shape = y_info.shape(symbolic_resolver);
+            let out_rank = super::infer_multidirectional_broadcasting_rank(
+                &[c_shape, x_shape, y_shape],
+                symbolic_resolver,
+            )?;
+            let first_elem = crate::scalar_info::ScalarInfo::Symbolic(
+                crate::symbolic_scalar::SymbolicScalar::new(out_dtype, symbolic_resolver),
+            );
+            TensorInfo::new_from_first_element_and_rank(first_elem, out_rank, symbolic_resolver)
+        };
+
+        // If all concrete, try constant fold with output hints.
+        if let Some(results) = super::constant_fold(self, known_inputs, &[(self.output, out_info.clone_with_pool(pool))], pool) {
+            return Ok(results);
         }
 
-        // Fallback: rank-only inference.
-        let c_shape = cond_info.shape(symbolic_resolver);
-        let x_shape = x_info.shape(symbolic_resolver);
-        let y_shape = y_info.shape(symbolic_resolver);
-        let out_rank = super::infer_multidirectional_broadcasting_rank(
-            &[c_shape, x_shape, y_shape],
-            symbolic_resolver,
-        )?;
-        let first_elem = crate::scalar_info::ScalarInfo::Symbolic(
-            crate::symbolic_scalar::SymbolicScalar::new(out_dtype, symbolic_resolver),
-        );
-        let out_info =
-            TensorInfo::new_from_first_element_and_rank(first_elem, out_rank, symbolic_resolver);
         Ok(vec![((self.output, out_info))])
     }
 
@@ -207,5 +205,9 @@ impl MilliOp for Where {
     {
         let out = inputs[&self.condition].where_op(&inputs[&self.x], &inputs[&self.y], backend)?;
         Ok(Box::new([(self.output, out)].into_iter()))
+    }
+
+    fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
+        Where::lower_to_nano(self, ctx);
     }
 }

@@ -268,7 +268,7 @@ impl MilliOp for Split {
             .ok_or(MilliOpGraphError::UnableToInfer)?;
 
         // If all inputs are concrete, fall back to eval.
-        if let Some(results) = super::constant_fold(self, known_inputs, pool) {
+        if let Some(results) = super::constant_fold(self, known_inputs, &[], pool) {
             return Ok(results);
         }
 
@@ -383,6 +383,10 @@ impl MilliOp for Split {
         let outs = inputs[&self.data].split(&split, self.axis, backend)?;
         let out = outs[self.output_id].clone();
         Ok(Box::new([(self.output, out)].into_iter()))
+    }
+
+    fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
+        Split::lower_to_nano(self, ctx);
     }
 }
 

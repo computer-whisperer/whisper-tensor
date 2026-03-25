@@ -384,11 +384,6 @@ impl MilliOp for SimpleBinary {
             .get(&self.b)
             .ok_or(MilliOpGraphError::UnableToInfer)?;
 
-        // If both inputs are concrete, fall back to eval.
-        if let Some(results) = super::constant_fold(self, known_inputs, pool) {
-            return Ok(results);
-        }
-
         // Determine output dtype: comparison ops produce Bool, others match input.
         let out_dtype = match self.which_op {
             WhichSimpleBinaryOp::Equal
@@ -402,34 +397,48 @@ impl MilliOp for SimpleBinary {
             _ => a_info.dtype(),
         };
 
-        // Try per-dim broadcast shape inference for better precision.
-        let a_ranked = a_info.as_ranked();
-        let b_ranked = b_info.as_ranked();
-        if let (Some(a_ranked), Some(b_ranked)) = (a_ranked, b_ranked) {
-            let a_dims = a_ranked.shape();
-            let b_dims = b_ranked.shape();
-            if let Ok(out_dims) = super::infer_multidirectional_broadcasting_shape(
-                &[a_dims.clone(), b_dims.clone()],
-                symbolic_resolver,
-            ) {
-                let out_info = TensorInfo::from_dtype_and_shape_scalars(out_dtype, &out_dims);
-                return Ok(vec![((self.output, out_info))]);
+        // Compute symbolic output info for the hint.
+        let out_info = {
+            let a_ranked = a_info.as_ranked();
+            let b_ranked = b_info.as_ranked();
+            if let (Some(a_ranked), Some(b_ranked)) = (a_ranked, b_ranked) {
+                let a_dims = a_ranked.shape();
+                let b_dims = b_ranked.shape();
+                if let Ok(out_dims) = super::infer_multidirectional_broadcasting_shape(
+                    &[a_dims.clone(), b_dims.clone()],
+                    symbolic_resolver,
+                ) {
+                    TensorInfo::from_dtype_and_shape_scalars(out_dtype, &out_dims)
+                } else {
+                    let a_shape = a_info.shape(symbolic_resolver);
+                    let b_shape = b_info.shape(symbolic_resolver);
+                    let out_rank = super::infer_multidirectional_broadcasting_rank(
+                        &[a_shape, b_shape],
+                        symbolic_resolver,
+                    )?;
+                    let first_elem = crate::scalar_info::ScalarInfo::Symbolic(
+                        crate::symbolic_scalar::SymbolicScalar::new(out_dtype, symbolic_resolver),
+                    );
+                    TensorInfo::new_from_first_element_and_rank(first_elem, out_rank, symbolic_resolver)
+                }
+            } else {
+                let a_shape = a_info.shape(symbolic_resolver);
+                let b_shape = b_info.shape(symbolic_resolver);
+                let out_rank = super::infer_multidirectional_broadcasting_rank(
+                    &[a_shape, b_shape],
+                    symbolic_resolver,
+                )?;
+                let first_elem = crate::scalar_info::ScalarInfo::Symbolic(
+                    crate::symbolic_scalar::SymbolicScalar::new(out_dtype, symbolic_resolver),
+                );
+                TensorInfo::new_from_first_element_and_rank(first_elem, out_rank, symbolic_resolver)
             }
+        };
+
+        // If both inputs are concrete, try constant fold with output hints.
+        if let Some(results) = super::constant_fold(self, known_inputs, &[(self.output, out_info.clone_with_pool(pool))], pool) {
+            return Ok(results);
         }
-
-        // Fallback: rank-only inference.
-        let a_shape = a_info.shape(symbolic_resolver);
-        let b_shape = b_info.shape(symbolic_resolver);
-        let out_rank = super::infer_multidirectional_broadcasting_rank(
-            &[a_shape, b_shape],
-            symbolic_resolver,
-        )?;
-
-        let first_elem = crate::scalar_info::ScalarInfo::Symbolic(
-            crate::symbolic_scalar::SymbolicScalar::new(out_dtype, symbolic_resolver),
-        );
-        let out_info =
-            TensorInfo::new_from_first_element_and_rank(first_elem, out_rank, symbolic_resolver);
 
         Ok(vec![((self.output, out_info))])
     }
@@ -546,6 +555,10 @@ impl MilliOp for SimpleBinary {
                 .or_insert(reduced);
         }
         Some(result)
+    }
+
+    fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
+        SimpleBinary::lower_to_nano(self, ctx);
     }
 }
 
@@ -678,42 +691,51 @@ impl MilliOp for Pow {
             .get(&self.b)
             .ok_or(MilliOpGraphError::UnableToInfer)?;
 
-        // If both inputs are concrete, fall back to eval.
-        if let Some(results) = super::constant_fold(self, known_inputs, pool) {
-            return Ok(results);
-        }
-
         // Output dtype = input dtype.
         let out_dtype = a_info.dtype();
 
-        // Try per-dim broadcast shape inference.
-        let a_ranked = a_info.as_ranked();
-        let b_ranked = b_info.as_ranked();
-        if let (Some(a_ranked), Some(b_ranked)) = (a_ranked, b_ranked) {
-            let a_dims = a_ranked.shape();
-            let b_dims = b_ranked.shape();
-            if let Ok(out_dims) = super::infer_multidirectional_broadcasting_shape(
-                &[a_dims.clone(), b_dims.clone()],
-                symbolic_resolver,
-            ) {
-                let out_info = TensorInfo::from_dtype_and_shape_scalars(out_dtype, &out_dims);
-                return Ok(vec![((self.output, out_info))]);
+        // Compute symbolic output info for the hint.
+        let out_info = {
+            let a_ranked = a_info.as_ranked();
+            let b_ranked = b_info.as_ranked();
+            if let (Some(a_ranked), Some(b_ranked)) = (a_ranked, b_ranked) {
+                let a_dims = a_ranked.shape();
+                let b_dims = b_ranked.shape();
+                if let Ok(out_dims) = super::infer_multidirectional_broadcasting_shape(
+                    &[a_dims.clone(), b_dims.clone()],
+                    symbolic_resolver,
+                ) {
+                    TensorInfo::from_dtype_and_shape_scalars(out_dtype, &out_dims)
+                } else {
+                    let a_shape = a_info.shape(symbolic_resolver);
+                    let b_shape = b_info.shape(symbolic_resolver);
+                    let out_rank = super::infer_multidirectional_broadcasting_rank(
+                        &[a_shape, b_shape],
+                        symbolic_resolver,
+                    )?;
+                    let first_elem = crate::scalar_info::ScalarInfo::Symbolic(
+                        crate::symbolic_scalar::SymbolicScalar::new(out_dtype, symbolic_resolver),
+                    );
+                    TensorInfo::new_from_first_element_and_rank(first_elem, out_rank, symbolic_resolver)
+                }
+            } else {
+                let a_shape = a_info.shape(symbolic_resolver);
+                let b_shape = b_info.shape(symbolic_resolver);
+                let out_rank = super::infer_multidirectional_broadcasting_rank(
+                    &[a_shape, b_shape],
+                    symbolic_resolver,
+                )?;
+                let first_elem = crate::scalar_info::ScalarInfo::Symbolic(
+                    crate::symbolic_scalar::SymbolicScalar::new(out_dtype, symbolic_resolver),
+                );
+                TensorInfo::new_from_first_element_and_rank(first_elem, out_rank, symbolic_resolver)
             }
+        };
+
+        // If both inputs are concrete, try constant fold with output hints.
+        if let Some(results) = super::constant_fold(self, known_inputs, &[(self.output, out_info.clone_with_pool(pool))], pool) {
+            return Ok(results);
         }
-
-        // Fallback: rank-only inference.
-        let a_shape = a_info.shape(symbolic_resolver);
-        let b_shape = b_info.shape(symbolic_resolver);
-        let out_rank = super::infer_multidirectional_broadcasting_rank(
-            &[a_shape, b_shape],
-            symbolic_resolver,
-        )?;
-
-        let first_elem = crate::scalar_info::ScalarInfo::Symbolic(
-            crate::symbolic_scalar::SymbolicScalar::new(out_dtype, symbolic_resolver),
-        );
-        let out_info =
-            TensorInfo::new_from_first_element_and_rank(first_elem, out_rank, symbolic_resolver);
 
         Ok(vec![((self.output, out_info))])
     }
@@ -727,6 +749,10 @@ impl MilliOp for Pow {
     {
         let out = NumericTensor::<DynRank>::pow(&inputs[&self.a], &inputs[&self.b], backend)?;
         Ok(Box::new([(self.output, out)].into_iter()))
+    }
+
+    fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
+        Pow::lower_to_nano(self, ctx);
     }
 }
 
@@ -1226,8 +1252,8 @@ impl MilliOp for MatMul {
             .get(&self.b)
             .ok_or(MilliOpGraphError::UnableToInfer)?;
 
-        // If both inputs are concrete, fall back to eval.
-        if let Some(results) = super::constant_fold(self, known_inputs, pool) {
+        // If both inputs are concrete, try constant fold.
+        if let Some(results) = super::constant_fold(self, known_inputs, &[], pool) {
             return Ok(results);
         }
 
@@ -1387,6 +1413,10 @@ impl MilliOp for MatMul {
                 .or_insert(reduced);
         }
         Some(result)
+    }
+
+    fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
+        MatMul::lower_to_nano(self, ctx);
     }
 }
 

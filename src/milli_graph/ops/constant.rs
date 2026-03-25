@@ -115,6 +115,20 @@ impl Node for Constant {
 }
 
 impl MilliOp for Constant {
+    fn infer<'p, P: Pool + 'p>(
+        &self,
+        _known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'p, P>>,
+        _symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
+        pool: &'p P,
+    ) -> Result<
+        Vec<(GlobalId, crate::tensor_info::TensorInfo<'p, P>)>,
+        MilliOpGraphError,
+    > {
+        use crate::tensor_info::TensorInfo;
+        let out: NumericTensor<DynRank> = self.data.clone().into();
+        Ok(vec![(self.output, TensorInfo::from_legacy(&out, pool))])
+    }
+
     fn eval(
         &self,
         _inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
@@ -125,6 +139,10 @@ impl MilliOp for Constant {
         Ok(Box::new(
             [(self.output, self.data.clone().into())].into_iter(),
         ))
+    }
+
+    fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
+        Constant::lower_to_nano(self, ctx);
     }
 }
 
@@ -215,9 +233,14 @@ impl MilliOp for ConstantOfShape {
             .get(&self.shape)
             .ok_or(MilliOpGraphError::UnableToInfer)?;
 
-        // If shape is concrete, fall back to eval.
-        if let Some(results) = super::constant_fold(self, known_inputs, pool) {
-            return Ok(results);
+        // If shape is concrete, produce the filled tensor directly.
+        if let Some(shape_values) = shape_info.to_i64_vec() {
+            let shape_usize = shape_values.iter().map(|x| *x as u64).collect::<Vec<_>>();
+            let out: NumericTensor<DynRank> =
+                NDArrayNumericTensor::<DynRank>::fill(self.value.clone(), &shape_usize)
+                    .map_err(|_| MilliOpGraphError::UnableToInfer)?
+                    .into();
+            return Ok(vec![(self.output, TensorInfo::from_legacy(&out, pool))]);
         }
 
         // Shape-only inference: the shape tensor's VALUES are the output dims.
@@ -270,5 +293,9 @@ impl MilliOp for ConstantOfShape {
         let out: NumericTensor<DynRank> =
             NDArrayNumericTensor::<DynRank>::fill(self.value.clone(), &shape_usize)?.into();
         Ok(Box::new([(self.output, out)].into_iter()))
+    }
+
+    fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
+        ConstantOfShape::lower_to_nano(self, ctx);
     }
 }

@@ -78,7 +78,7 @@ impl MilliOp for NonZero {
         symbolic_resolver: &mut SymbolicResolver,
         pool: &'p P,
     ) -> Result<Vec<(GlobalId, TensorInfo<'p, P>)>, MilliOpGraphError> {
-        if let Some(results) = super::constant_fold(self, known_inputs, pool) {
+        if let Some(results) = super::constant_fold(self, known_inputs, &[], pool) {
             return Ok(results);
         }
         // Fallback minimal info if unknown: dtype I64 vector of unknown size

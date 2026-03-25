@@ -366,11 +366,6 @@ impl MilliOp for SimpleUnaryOp {
             .get(&self.input)
             .ok_or(MilliOpGraphError::UnableToInfer)?;
 
-        // If input is concrete, fall back to eval.
-        if let Some(results) = super::constant_fold(self, known_inputs, pool) {
-            return Ok(results);
-        }
-
         // Unary ops preserve shape and dtype (except IsNan/IsInf which produce Bool).
         let out_info = match self.op {
             WhichSimpleUnaryOp::IsNan | WhichSimpleUnaryOp::IsInf { .. } => {
@@ -396,6 +391,12 @@ impl MilliOp for SimpleUnaryOp {
                 )
             }
         };
+
+        // If input is concrete, try constant fold with output hints.
+        if let Some(results) = super::constant_fold(self, known_inputs, &[(self.output, out_info.clone_with_pool(pool))], pool) {
+            return Ok(results);
+        }
+
         Ok(vec![((self.output, out_info))])
     }
 
@@ -474,6 +475,10 @@ impl MilliOp for SimpleUnaryOp {
         let mut result = HashMap::new();
         result.insert(self.input, grad_input);
         Some(result)
+    }
+
+    fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
+        SimpleUnaryOp::lower_to_nano(self, ctx);
     }
 }
 
@@ -605,16 +610,17 @@ impl MilliOp for ClampMin {
             .get(&self.input)
             .ok_or(MilliOpGraphError::UnableToInfer)?;
 
-        if let Some(results) = super::constant_fold(self, known_inputs, pool) {
-            return Ok(results);
-        }
-
         // ClampMin preserves shape and dtype.
         let out = TensorInfo::new_from_first_element_and_rank(
             input_info.first_element(),
             input_info.rank(),
             symbolic_resolver,
         );
+
+        if let Some(results) = super::constant_fold(self, known_inputs, &[(self.output, out.clone_with_pool(pool))], pool) {
+            return Ok(results);
+        }
+
         Ok(vec![((self.output, out))])
     }
 
@@ -645,5 +651,9 @@ impl MilliOp for ClampMin {
         let mut result = HashMap::new();
         result.insert(self.input, grad_input);
         Some(result)
+    }
+
+    fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
+        ClampMin::lower_to_nano(self, ctx);
     }
 }

@@ -96,28 +96,29 @@ impl MilliOp for CastLike {
             .get(&self.target_type)
             .ok_or(MilliOpGraphError::UnableToInfer)?;
 
-        // If data is concrete and we know target dtype, fall back to eval.
-        if let Some(results) = super::constant_fold(self, known_inputs, pool) {
-            return Ok(results);
-        }
-
         // Same shape as data, dtype from target. Preserve per-dim shape info.
         let out_dtype = target_info.dtype();
 
-        if let Some(ranked) = data_info.as_ranked() {
+        let out_info = if let Some(ranked) = data_info.as_ranked() {
             let dims = ranked.shape();
-            let out_info = TensorInfo::from_dtype_and_shape_scalars(out_dtype, &dims);
-            return Ok(vec![((self.output, out_info))]);
+            TensorInfo::from_dtype_and_shape_scalars(out_dtype, &dims)
+        } else {
+            let first_elem = crate::scalar_info::ScalarInfo::Symbolic(
+                crate::symbolic_scalar::SymbolicScalar::new(out_dtype, symbolic_resolver),
+            );
+            TensorInfo::new_from_first_element_and_rank(
+                first_elem,
+                data_info.rank(),
+                symbolic_resolver,
+            )
+        };
+
+        // If data is concrete and we know target dtype, try constant fold (eval-based fallback
+        // for now; nano-based Cast lowering has a dtype size mismatch bug).
+        if let Some(results) = super::constant_fold(self, known_inputs, &[], pool) {
+            return Ok(results);
         }
 
-        let first_elem = crate::scalar_info::ScalarInfo::Symbolic(
-            crate::symbolic_scalar::SymbolicScalar::new(out_dtype, symbolic_resolver),
-        );
-        let out_info = TensorInfo::new_from_first_element_and_rank(
-            first_elem,
-            data_info.rank(),
-            symbolic_resolver,
-        );
         Ok(vec![((self.output, out_info))])
     }
 
@@ -144,5 +145,9 @@ impl MilliOp for CastLike {
     {
         let out = inputs[&self.data].cast(inputs[&self.target_type].dtype(), backend)?;
         Ok(Box::new([(self.output, out)].into_iter()))
+    }
+
+    fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
+        CastLike::lower_to_nano(self, ctx);
     }
 }

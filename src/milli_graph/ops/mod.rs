@@ -140,39 +140,197 @@ pub struct MilliEvalConfig {
 
 pub type EvalResult =
     Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, MilliOpGraphError>;
-/// Try to constant-fold an op by running eval on concrete inputs.
-/// Returns `Some(results)` if all inputs are concrete, `None` if any are symbolic.
+/// Try to constant-fold an op by lowering to nano-ops and evaluating via pool_eval.
+///
+/// Returns `Some(results)` if all inputs are concrete and lowering succeeds.
+/// Returns `None` if any inputs are symbolic or lowering/eval fails.
+///
+/// `output_hints` provides dtype+shape info for the op's outputs (needed by
+/// lower_to_nano to classify output dimensions). Callers compute this from
+/// their symbolic inference path before calling constant_fold.
 pub fn constant_fold<'p, P: Pool + 'p>(
-    op: &(impl MilliOp + ?Sized),
+    op: &(impl MilliOp + Sized),
     known_inputs: &HashMap<GlobalId, TensorInfo<'p, P>>,
+    output_hints: &[(GlobalId, TensorInfo<'p, P>)],
     pool: &'p P,
 ) -> Option<Vec<(GlobalId, TensorInfo<'p, P>)>> {
-    let mut resolved_inputs = HashMap::new();
-    for input in op.inputs() {
-        let tensor_info = known_inputs.get(&input)?;
-        let tensor = tensor_info.as_numeric()?;
-        resolved_inputs.insert(input, tensor);
+    use crate::nano_graph::lower::{NanoLoweringContext, new_numeric_to_legacy};
+    use crate::nano_graph::pattern::AtomRange;
+    use crate::nano_graph::pool_eval;
+    use crate::pool::SystemPool;
+
+    type LowerTensorInfo = TensorInfo<'static, SystemPool>;
+    static SYS_POOL: SystemPool = SystemPool;
+
+    // 1. Check all inputs are concrete.
+    let input_ids: Vec<GlobalId> = op.inputs().collect();
+    for &id in &input_ids {
+        known_inputs.get(&id)?.as_concrete()?;
     }
-    let collected: Vec<(GlobalId, TensorInfo<'p, P>)> = op
-        .eval(
-            &resolved_inputs,
-            &MilliEvalConfig::default(),
-            &mut crate::backends::eval_backend::EvalBackend::NDArray,
-        )
-        .ok()?
-        .map(|(a, b)| (a, TensorInfo::from_legacy(&b, pool)))
-        .collect();
-    Some(collected)
+
+    // 1b. If no output hints, fall back to eval-based constant folding.
+    //     Nano lowering requires output hints to classify output dimensions;
+    //     without them it may silently produce garbage.
+    if output_hints.is_empty() {
+        let mut resolved_inputs = HashMap::new();
+        for &id in &input_ids {
+            let tensor = known_inputs.get(&id)?.as_numeric()?;
+            resolved_inputs.insert(id, tensor);
+        }
+        let collected: Vec<(GlobalId, TensorInfo<'p, P>)> = op
+            .eval(
+                &resolved_inputs,
+                &MilliEvalConfig::default(),
+                &mut crate::backends::eval_backend::EvalBackend::NDArray,
+            )
+            .ok()?
+            .map(|(a, b)| (a, TensorInfo::from_legacy(&b, pool)))
+            .collect();
+        return Some(collected);
+    }
+
+    // 2. Build LowerTensorInfo map with inputs + output hints.
+    let mut sys_infos: HashMap<GlobalId, LowerTensorInfo> = HashMap::new();
+    for &id in &input_ids {
+        let concrete = known_inputs.get(&id)?.as_concrete()?;
+        let legacy = new_numeric_to_legacy(concrete);
+        sys_infos.insert(id, LowerTensorInfo::from_legacy(&legacy, &SYS_POOL));
+    }
+    for (id, hint) in output_hints {
+        // Output hints are dtype+shape only (no concrete data).
+        // Reconstruct as a symbolic TensorInfo for the lowering context.
+        let dtype = hint.dtype();
+        if let Some(rank) = hint.rank_if_known() {
+            let dims: Vec<crate::scalar_info::ScalarInfoTyped<u64>> = (0..rank)
+                .map(|i| match hint.dim_if_known(i) {
+                    Some(d) => crate::scalar_info::ScalarInfoTyped::Numeric(d),
+                    None => crate::scalar_info::ScalarInfoTyped::Symbolic(
+                        crate::symbolic_scalar::SymbolicScalarTyped::new(
+                            &mut crate::symbolic_scalar::SymbolicResolver::new(),
+                        ),
+                    ),
+                })
+                .collect();
+            sys_infos.insert(*id, LowerTensorInfo::from_dtype_and_shape_scalars(dtype, &dims));
+        } else {
+            sys_infos.insert(
+                *id,
+                LowerTensorInfo::Minimal(crate::tensor_info::MinimalTensor::new(
+                    crate::scalar_info::ScalarInfo::Numeric(
+                        crate::numeric_scalar::NumericScalar::zero(dtype),
+                    ),
+                    crate::symbolic_scalar::SymbolicScalarTyped::new(
+                        &mut crate::symbolic_scalar::SymbolicResolver::new(),
+                    ),
+                )),
+            );
+        }
+    }
+
+    // 3. Lower this single op with constants embedded as Literal nano-ops.
+    let mut ctx = NanoLoweringContext::new(&sys_infos);
+    for &id in &input_ids {
+        ctx.register_constant(id, &sys_infos[&id]);
+    }
+    op.lower_to_nano(&mut ctx);
+
+    // If the op wasn't lowered (unsupported or fell back to boundary), bail out.
+    if !ctx.unsupported.is_empty() {
+        return None;
+    }
+    let output_ids: Vec<GlobalId> = op.outputs().collect();
+    for &out_id in &output_ids {
+        if !ctx.tensor_map.contains_key(&out_id) {
+            return None;
+        }
+    }
+
+    // 4. Build output AtomRanges.
+    let mut output_ranges: Vec<AtomRange> = Vec::new();
+    for &out_id in &output_ids {
+        let tam = ctx.tensor_map.get(&out_id)?;
+        let mut seen = std::collections::HashSet::new();
+        for i in 0..tam.count {
+            let atom = tam.atom_id_for_element(i);
+            if let Some(gi) = ctx.nano.find_group_idx(atom) {
+                if seen.insert(gi) {
+                    let g = &ctx.nano.groups()[gi];
+                    output_ranges.push(AtomRange {
+                        base: g.base_id,
+                        count: g.count,
+                        dtype: g.output_dtype,
+                    });
+                }
+            }
+            if let Some((ti, _)) = ctx.nano.find_input_idx(atom) {
+                let it = &ctx.nano.input_tensors()[ti];
+                let fake_gi = usize::MAX - ti;
+                if seen.insert(fake_gi) {
+                    output_ranges.push(AtomRange {
+                        base: it.base_id,
+                        count: it.count,
+                        dtype: it.dtype,
+                    });
+                }
+            }
+        }
+    }
+
+    // 5. Run pool_eval (no external inputs — all data in Literal groups).
+    let eval_results =
+        pool_eval::pool_eval(&ctx.nano, &[], &output_ranges, pool).ok()?;
+
+    // 6. Build result TensorInfos.
+    let mut atom_range_map: HashMap<u64, usize> = HashMap::new();
+    for (ri, range) in output_ranges.iter().enumerate() {
+        atom_range_map.insert(range.base.0, ri);
+    }
+
+    let mut results = Vec::new();
+    for &out_id in &output_ids {
+        let tam = ctx.tensor_map.get(&out_id)?;
+        let shape = tam.known_dims();
+        let first_atom = tam.atom_id_for_element(0);
+
+        // Find the eval result containing this output's atoms.
+        let ri = atom_range_map
+            .get(&first_atom.0)
+            .or_else(|| {
+                // Might be in an input range (passthrough ops).
+                ctx.nano.find_input_idx(first_atom).and_then(|(ti, _)| {
+                    let it = &ctx.nano.input_tensors()[ti];
+                    atom_range_map.get(&it.base_id.0)
+                })
+            })?;
+
+        let result_tensor = &eval_results[*ri];
+        let dtype = result_tensor.dtype();
+        let layout = crate::numeric_tensor::TensorLayout::row_major(shape, dtype);
+        let buf = pool.allocate(layout.buffer_size_bytes()).ok()?;
+        let mut out_tensor = crate::numeric_tensor::NumericTensor::from_parts(buf, layout);
+        let numel = out_tensor.numel();
+        for i in 0..numel {
+            let atom = tam.atom_id_for_element(i as u64);
+            let offset = (atom.0 - first_atom.0) as usize;
+            out_tensor.write_element(i, result_tensor.read_element(offset));
+        }
+        results.push((out_id, TensorInfo::from(out_tensor)));
+    }
+
+    Some(results)
 }
 
-pub trait MilliOp: Node {
+pub trait MilliOp: Node<OpKind = String> {
     fn infer<'p, P: Pool + 'p>(
         &self,
         known_inputs: &HashMap<GlobalId, TensorInfo<'p, P>>,
         _symbolic_resolver: &mut SymbolicResolver,
         pool: &'p P,
-    ) -> Result<Vec<(GlobalId, TensorInfo<'p, P>)>, MilliOpGraphError> {
-        constant_fold(self, known_inputs, pool).ok_or(MilliOpGraphError::UnableToInfer)
+    ) -> Result<Vec<(GlobalId, TensorInfo<'p, P>)>, MilliOpGraphError>
+    where
+        Self: Sized,
+    {
+        constant_fold(self, known_inputs, &[], pool).ok_or(MilliOpGraphError::UnableToInfer)
     }
 
     fn eval(
@@ -193,6 +351,15 @@ pub trait MilliOp: Node {
         _rng: &mut impl Rng,
     ) -> Option<HashMap<GlobalId, GlobalId>> {
         None // default: not differentiable
+    }
+
+    /// Lower this op to nano-graph representation.
+    /// Default: registers outputs as boundary ops.
+    fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext)
+    where
+        Self: Sized,
+    {
+        ctx.lower_default_trait(self);
     }
 }
 
@@ -705,6 +872,10 @@ impl MilliOp for AnyMilliOp {
             AnyMilliOp::RandomNormalLike(x) => x.backward(output_grads, graph, rng),
             AnyMilliOp::TopK(x) => x.backward(output_grads, graph, rng),
         }
+    }
+
+    fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
+        AnyMilliOp::lower_to_nano(self, ctx);
     }
 }
 

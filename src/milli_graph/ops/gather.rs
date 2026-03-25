@@ -400,7 +400,7 @@ impl MilliOp for Gather {
             .ok_or(MilliOpGraphError::UnableToInfer)?;
 
         // If both inputs are concrete, fall back to eval for full precision.
-        if let Some(results) = super::constant_fold(self, known_inputs, pool) {
+        if let Some(results) = super::constant_fold(self, known_inputs, &[], pool) {
             return Ok(results);
         }
 
@@ -462,6 +462,10 @@ impl MilliOp for Gather {
             backend,
         )?;
         Ok(Box::new([(self.output, out)].into_iter()))
+    }
+
+    fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
+        Gather::lower_to_nano(self, ctx);
     }
 }
 

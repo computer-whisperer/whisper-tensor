@@ -1158,6 +1158,32 @@ impl<'a> NanoLoweringContext<'a> {
         }
     }
 
+    /// Default lowering for trait-based dispatch: if all outputs are numeric
+    /// (constant-folded), register as constants; otherwise register as boundary.
+    pub fn lower_default_trait(&mut self, op: &impl crate::graph::Node<OpKind = String>) {
+        let all_infos = self.all_infos;
+        let op_kind = op.op_kind();
+        let all_numeric = op.outputs().all(|out_id| {
+            all_infos
+                .get(&out_id)
+                .is_some_and(|i| i.as_numeric().is_some())
+        });
+        for out_id in op.outputs() {
+            if let Some(info) = all_infos.get(&out_id) {
+                if all_numeric {
+                    self.register_constant(out_id, info);
+                } else {
+                    self.register_boundary(out_id, info, &op_kind);
+                }
+            } else {
+                self.register_opaque(out_id);
+            }
+        }
+        if !all_numeric {
+            self.push_unsupported(op, &op_kind);
+        }
+    }
+
     /// Default lowering for unsupported ops: if all outputs are numeric
     /// (constant-folded), register as constants; otherwise register as boundary.
     pub fn lower_default(&mut self, op: &AnyMilliOp) {
