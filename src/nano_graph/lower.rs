@@ -180,6 +180,30 @@ impl ReduceAccessors for crate::milli_graph::ops::ReduceMax {
     }
 }
 
+impl ReduceAccessors for crate::milli_graph::ops::ReduceMin {
+    fn axes_tensor(&self) -> Option<GlobalId> {
+        self.axes_tensor()
+    }
+    fn noop_with_empty_axes(&self) -> bool {
+        self.noop_with_empty_axes()
+    }
+    fn keepdims(&self) -> bool {
+        self.keepdims()
+    }
+}
+
+impl ReduceAccessors for crate::milli_graph::ops::ReduceProd {
+    fn axes_tensor(&self) -> Option<GlobalId> {
+        self.axes_tensor()
+    }
+    fn noop_with_empty_axes(&self) -> bool {
+        self.noop_with_empty_axes()
+    }
+    fn keepdims(&self) -> bool {
+        self.keepdims()
+    }
+}
+
 impl ReduceAccessors for crate::milli_graph::ops::ReduceMean {
     fn axes_tensor(&self) -> Option<GlobalId> {
         self.axes_tensor()

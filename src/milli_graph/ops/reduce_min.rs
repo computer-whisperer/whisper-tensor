@@ -57,16 +57,39 @@ impl ReduceMin {
 }
 
 impl ReduceMin {
+    pub(crate) fn axes_tensor(&self) -> Option<GlobalId> {
+        self.axes
+    }
+    pub(crate) fn noop_with_empty_axes(&self) -> bool {
+        self.noop_with_empty_axes
+    }
+    pub(crate) fn keepdims(&self) -> bool {
+        self.keepdims
+    }
+
+    pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
+        use crate::nano_graph::{ReduceKind, ScalarOp};
+        ctx.lower_reduce(self, |compute_dt, count, stride| ScalarOp::Reduce {
+            kind: ReduceKind::Min,
+            reduce_count: count,
+            reduce_stride: stride,
+            compute_dtype: compute_dt,
+        });
+    }
+
     pub fn remap_tensors(&mut self, map: &HashMap<GlobalId, GlobalId>, rng: &mut impl rand::Rng) {
         self.global_id = GlobalId::new(rng);
         super::remap(&mut self.output, map);
         super::remap(&mut self.data, map);
         super::remap_opt(&mut self.axes, map);
     }
-
 }
 
 impl MilliOp for ReduceMin {
+    fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
+        ReduceMin::lower_to_nano(self, ctx);
+    }
+
     fn eval_new<'p, P2: crate::pool::Pool + 'p>(
         &self,
         inputs: &[crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>],

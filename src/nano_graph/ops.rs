@@ -72,6 +72,8 @@ pub enum ScalarUnaryOp {
 pub enum ReduceKind {
     Sum,
     Max,
+    Min,
+    Prod,
 }
 
 // ---------------------------------------------------------------------------

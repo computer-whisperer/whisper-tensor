@@ -647,6 +647,14 @@ impl NanoGraph {
                     kind: ReduceKind::Max,
                     ..
                 } => "ReduceMax",
+                ScalarOp::Reduce {
+                    kind: ReduceKind::Min,
+                    ..
+                } => "ReduceMin",
+                ScalarOp::Reduce {
+                    kind: ReduceKind::Prod,
+                    ..
+                } => "ReduceProd",
                 ScalarOp::IndirectLoad { .. } => "IndirectLoad",
                 ScalarOp::OpaqueOutput { .. } => "OpaqueOutput",
             };

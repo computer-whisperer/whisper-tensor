@@ -620,6 +620,8 @@ impl AnyMilliOp {
             AnyMilliOp::ReduceMax(x) => x.lower_to_nano(ctx),
             AnyMilliOp::ReduceMean(x) => x.lower_to_nano(ctx),
             AnyMilliOp::Gather(x) => x.lower_to_nano(ctx),
+            AnyMilliOp::ReduceMin(x) => x.lower_to_nano(ctx),
+            AnyMilliOp::ReduceProd(x) => x.lower_to_nano(ctx),
             // Everything else: constant-fold if numeric, otherwise opaque via eval_new.
             _ => ctx.lower_default(self),
         }

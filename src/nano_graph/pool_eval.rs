@@ -215,6 +215,8 @@ pub fn pool_eval<'p, P: Pool + 'p>(
                 let mut acc_raw = match kind {
                     ReduceKind::Sum => compute_dtype.encode_from_f64(0.0),
                     ReduceKind::Max => compute_dtype.encode_from_f64(f64::NEG_INFINITY),
+                    ReduceKind::Min => compute_dtype.encode_from_f64(f64::INFINITY),
+                    ReduceKind::Prod => compute_dtype.encode_from_f64(1.0),
                 };
 
                 let base_atom = group.inputs[0].resolve(ri);
@@ -235,6 +237,16 @@ pub fn pool_eval<'p, P: Pool + 'p>(
                             let a = compute_dtype.decode_to_f64(acc_raw);
                             let b = compute_dtype.decode_to_f64(cast_raw);
                             compute_dtype.encode_from_f64(a.max(b))
+                        }
+                        ReduceKind::Min => {
+                            let a = compute_dtype.decode_to_f64(acc_raw);
+                            let b = compute_dtype.decode_to_f64(cast_raw);
+                            compute_dtype.encode_from_f64(a.min(b))
+                        }
+                        ReduceKind::Prod => {
+                            let prod = compute_dtype.decode_to_f64(acc_raw)
+                                * compute_dtype.decode_to_f64(cast_raw);
+                            compute_dtype.encode_from_f64(prod)
                         }
                     };
                 }

@@ -67,6 +67,26 @@ impl ReduceProd {
 }
 
 impl ReduceProd {
+    pub(crate) fn axes_tensor(&self) -> Option<GlobalId> {
+        self.axes
+    }
+    pub(crate) fn noop_with_empty_axes(&self) -> bool {
+        self.noop_with_empty_axes
+    }
+    pub(crate) fn keepdims(&self) -> bool {
+        self.keepdims
+    }
+
+    pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
+        use crate::nano_graph::{ReduceKind, ScalarOp};
+        ctx.lower_reduce(self, |compute_dt, count, stride| ScalarOp::Reduce {
+            kind: ReduceKind::Prod,
+            reduce_count: count,
+            reduce_stride: stride,
+            compute_dtype: compute_dt,
+        });
+    }
+
     pub fn remap_tensors(&mut self, map: &HashMap<GlobalId, GlobalId>, rng: &mut impl rand::Rng) {
         self.global_id = GlobalId::new(rng);
         super::remap(&mut self.output, map);
@@ -74,160 +94,6 @@ impl ReduceProd {
         super::remap_opt(&mut self.axes, map);
     }
 
-    pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
-        let all_infos = ctx.all_infos;
-
-        // Get concrete axes for the opaque eval.
-        let axes: Vec<usize> = if let Some(ax_id) = self.axes {
-            if let Some(ax_info) = all_infos.get(&ax_id) {
-                if let Some(vals) = ax_info.to_i64_vec() {
-                    let data_rank = all_infos
-                        .get(&self.data)
-                        .and_then(|i| i.rank_if_known())
-                        .unwrap_or(0);
-                    vals.iter()
-                        .map(|&a| {
-                            if a < 0 { (a + data_rank as i64) as usize } else { a as usize }
-                        })
-                        .collect()
-                } else {
-                    ctx.lower_as_boundary_named(self, "ReduceProd");
-                    return;
-                }
-            } else {
-                ctx.lower_as_boundary_named(self, "ReduceProd");
-                return;
-            }
-        } else {
-            let data_rank = all_infos
-                .get(&self.data)
-                .and_then(|i| i.rank_if_known())
-                .unwrap_or(0);
-            (0..data_rank).collect()
-        };
-        let keepdims = self.keepdims;
-        let noop_with_empty_axes = self.noop_with_empty_axes;
-
-        let input_ids: Vec<GlobalId> = self.inputs().collect();
-        let output_ids = vec![self.output];
-
-        let eval_fn = std::sync::Arc::new(ReduceProdEval { axes, keepdims, noop_with_empty_axes });
-        ctx.register_opaque_op(eval_fn, "ReduceProd", &input_ids, &output_ids);
-    }
-}
-
-/// Opaque eval implementation for ReduceProd on new types.
-struct ReduceProdEval {
-    axes: Vec<usize>,
-    keepdims: bool,
-    noop_with_empty_axes: bool,
-}
-
-impl crate::nano_graph::ops::OpaqueEval for ReduceProdEval {
-    fn eval(
-        &self,
-        inputs: &[crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>],
-    ) -> Result<
-        Vec<crate::numeric_tensor::NumericTensor<'static, crate::tensor_rank::DynRank, crate::pool::SystemPool>>,
-        crate::nano_graph::pool_eval::PoolEvalError,
-    > {
-        use crate::numeric_tensor::{NumericTensor, TensorLayout};
-        use crate::pool::{Pool, SystemPool};
-        use crate::tensor_rank::DynRank;
-
-        static POOL: SystemPool = SystemPool;
-        let data = &inputs[0];
-        let shape = data.shape();
-        let rank = shape.len();
-        let dtype = data.dtype();
-
-        let axes: Vec<usize> = if self.axes.is_empty() && self.noop_with_empty_axes {
-            // Noop: output = input
-            let layout = TensorLayout::<DynRank>::row_major(shape.clone(), dtype);
-            let buf = POOL.allocate(layout.buffer_size_bytes())
-                .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
-            let mut out = NumericTensor::from_parts(buf, layout);
-            for i in 0..data.numel() {
-                out.write_element(i, data.read_element(i));
-            }
-            return Ok(vec![out]);
-        } else if self.axes.is_empty() {
-            (0..rank).collect()
-        } else {
-            self.axes.clone()
-        };
-
-        // Compute output shape.
-        let mut out_shape = Vec::new();
-        for (i, &dim) in shape.iter().enumerate() {
-            if axes.contains(&i) {
-                if self.keepdims {
-                    out_shape.push(1u64);
-                }
-            } else {
-                out_shape.push(dim);
-            }
-        }
-        if out_shape.is_empty() {
-            out_shape.push(1);
-        }
-
-        let out_numel: usize = out_shape.iter().product::<u64>() as usize;
-        let layout = TensorLayout::<DynRank>::row_major(out_shape.clone(), dtype);
-        let buf = POOL.allocate(layout.buffer_size_bytes())
-            .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
-        let mut out = NumericTensor::from_parts(buf, layout);
-
-        // Initialize output to 1.0 (identity for multiplication).
-        for i in 0..out_numel {
-            out.write_element(
-                i,
-                crate::numeric_scalar::NumericScalar::from_f64(1.0).cast_to(dtype),
-            );
-        }
-
-        // Compute strides for mapping input flat index -> output flat index.
-        let in_strides = {
-            let mut s = vec![1usize; rank];
-            for i in (0..rank.saturating_sub(1)).rev() {
-                s[i] = s[i + 1] * shape[i + 1] as usize;
-            }
-            s
-        };
-        let out_strides = {
-            let mut s = vec![1usize; out_shape.len()];
-            for i in (0..out_shape.len().saturating_sub(1)).rev() {
-                s[i] = s[i + 1] * out_shape[i + 1] as usize;
-            }
-            s
-        };
-
-        // Iterate all input elements and reduce by multiplication.
-        for flat_in in 0..data.numel() {
-            let mut rem = flat_in;
-            let mut out_flat = 0usize;
-            let mut out_dim_idx = 0;
-            for i in 0..rank {
-                let idx = rem / in_strides[i];
-                rem %= in_strides[i];
-                if !axes.contains(&i) {
-                    out_flat += idx * out_strides[out_dim_idx];
-                    out_dim_idx += 1;
-                } else if self.keepdims {
-                    out_dim_idx += 1;
-                }
-            }
-
-            let val = data.read_element(flat_in).to_f64();
-            let cur = out.read_element(out_flat).to_f64();
-            out.write_element(
-                out_flat,
-                crate::numeric_scalar::NumericScalar::from_f64(cur * val).cast_to(dtype),
-            );
-        }
-
-        Ok(vec![out])
-    }
 }
 
 impl Node for ReduceProd {
@@ -250,6 +116,10 @@ impl Node for ReduceProd {
 }
 
 impl MilliOp for ReduceProd {
+    fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
+        ReduceProd::lower_to_nano(self, ctx);
+    }
+
     fn eval_new<'p, P2: crate::pool::Pool + 'p>(
         &self,
         inputs: &[crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>],
