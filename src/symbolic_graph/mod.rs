@@ -140,9 +140,54 @@ fn query_attribute_graph<'a>(
     None
 }
 
+/// A pool tensor wrapped in Arc for cheap cloning in graph structures.
+/// Skips serde — serialization goes through the legacy path.
+#[derive(Debug)]
+pub struct SharedPoolTensor(pub std::sync::Arc<crate::numeric_tensor::NumericTensor<'static, DynRank, crate::pool::SystemPool>>);
+
+impl Clone for SharedPoolTensor {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
+impl serde::Serialize for SharedPoolTensor {
+    fn serialize<S: serde::Serializer>(&self, _serializer: S) -> Result<S::Ok, S::Error> {
+        Err(serde::ser::Error::custom("SharedPoolTensor serialization not yet implemented"))
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for SharedPoolTensor {
+    fn deserialize<D: serde::Deserializer<'de>>(_deserializer: D) -> Result<Self, D::Error> {
+        Err(serde::de::Error::custom("SharedPoolTensor deserialization not yet implemented"))
+    }
+}
+
+type PoolTensor = crate::numeric_tensor::NumericTensor<'static, DynRank, crate::pool::SystemPool>;
+
+/// Decode TensorProto into StoredOrNotTensor using new types.
+/// Large tensors (>100 elements) go to the tensor store; small ones are held inline.
+fn decode_tensor_proto_to_stored(
+    t: &onnx::TensorProto,
+    tensor_store: &mut TensorStore,
+) -> Result<StoredOrNotTensor, ONNXDecodingError> {
+    let pool_tensor = tensor_proto_to_pool_tensor(t)?;
+    let numel = pool_tensor.numel();
+    if numel > 100 {
+        let id = tensor_store.add_tensor(StoredTensor::Inline(pool_tensor));
+        Ok(StoredOrNotTensor::Stored(id))
+    } else {
+        Ok(StoredOrNotTensor::Inline(SharedPoolTensor(std::sync::Arc::new(pool_tensor))))
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum StoredOrNotTensor {
     Stored(TensorStoreTensorId),
+    /// Small tensor held inline (not in the tensor store).
+    Inline(SharedPoolTensor),
+    /// Legacy: NDArray tensor. Kept during migration.
+    #[allow(dead_code)]
     NotStored(NDArrayNumericTensor<DynRank>),
 }
 
@@ -150,12 +195,20 @@ impl StoredOrNotTensor {
     pub fn get_tensor(&self, tensor_store: &TensorStore) -> NumericTensor<DynRank> {
         match self {
             StoredOrNotTensor::Stored(id) => tensor_store.get_tensor(*id).unwrap().to_numeric(),
+            StoredOrNotTensor::Inline(shared) => {
+                // Bridge to legacy for old eval path.
+                let info = crate::tensor_info::TensorInfo::from_view(
+                    &shared.0.view(), &crate::pool::SystemPool,
+                );
+                info.as_numeric().expect("inline tensor must bridge to legacy")
+            }
             StoredOrNotTensor::NotStored(tensor) => NumericTensor::NDArray(tensor.clone()),
         }
     }
     pub fn shape(&self, tensor_store: &TensorStore) -> Vec<u64> {
         match self {
             StoredOrNotTensor::Stored(id) => tensor_store.get_tensor(*id).unwrap().shape(),
+            StoredOrNotTensor::Inline(shared) => shared.0.shape().clone(),
             StoredOrNotTensor::NotStored(tensor) => tensor.shape(),
         }
     }
@@ -163,6 +216,7 @@ impl StoredOrNotTensor {
     pub fn dtype(&self, tensor_store: &TensorStore) -> DType {
         match self {
             StoredOrNotTensor::Stored(id) => tensor_store.get_tensor(*id).unwrap().dtype(),
+            StoredOrNotTensor::Inline(shared) => shared.0.dtype().to_legacy(),
             StoredOrNotTensor::NotStored(tensor) => tensor.dtype(),
         }
     }
@@ -172,7 +226,7 @@ impl StoredOrNotTensor {
             StoredOrNotTensor::Stored(id) => tensor_store
                 .get_tensor(*id)
                 .and_then(|tensor| tensor.loading_label()),
-            StoredOrNotTensor::NotStored(_) => None,
+            StoredOrNotTensor::Inline(_) | StoredOrNotTensor::NotStored(_) => None,
         }
     }
 }
@@ -496,15 +550,7 @@ impl SymbolicGraph {
                             StoredOrNotTensor::Stored(id)
                         } else {
                             // Missing required keys for pth; fallback to eager load
-                            let numeric_tensor = NDArrayNumericTensor::try_from(t)?;
-                            if numeric_tensor.num_elements() > 100 {
-                                let id = graph_mutator.tensor_store.add_tensor(
-                                    StoredTensor::Numeric(NumericTensor::NDArray(numeric_tensor)),
-                                );
-                                StoredOrNotTensor::Stored(id)
-                            } else {
-                                StoredOrNotTensor::NotStored(numeric_tensor)
-                            }
+                            decode_tensor_proto_to_stored(t, &mut graph_mutator.tensor_store)?
                         }
                     } else if fmt == "safetensors" {
                         if let (Some(location), Some(tensor_name)) =
@@ -531,15 +577,7 @@ impl SymbolicGraph {
                             StoredOrNotTensor::Stored(id)
                         } else {
                             // Missing required keys; fallback to eager load
-                            let numeric_tensor = NDArrayNumericTensor::try_from(t)?;
-                            if numeric_tensor.num_elements() > 100 {
-                                let id = graph_mutator.tensor_store.add_tensor(
-                                    StoredTensor::Numeric(NumericTensor::NDArray(numeric_tensor)),
-                                );
-                                StoredOrNotTensor::Stored(id)
-                            } else {
-                                StoredOrNotTensor::NotStored(numeric_tensor)
-                            }
+                            decode_tensor_proto_to_stored(t, &mut graph_mutator.tensor_store)?
                         }
                     } else {
                         // Unknown format; try generic external binary with offset/length
@@ -568,15 +606,7 @@ impl SymbolicGraph {
                             StoredOrNotTensor::Stored(id)
                         } else {
                             // Fallback to eager load when essential keys missing
-                            let numeric_tensor = NDArrayNumericTensor::try_from(t)?;
-                            if numeric_tensor.num_elements() > 100 {
-                                let id = graph_mutator.tensor_store.add_tensor(
-                                    StoredTensor::Numeric(NumericTensor::NDArray(numeric_tensor)),
-                                );
-                                StoredOrNotTensor::Stored(id)
-                            } else {
-                                StoredOrNotTensor::NotStored(numeric_tensor)
-                            }
+                            decode_tensor_proto_to_stored(t, &mut graph_mutator.tensor_store)?
                         }
                     }
                 } else if let (Some(location), Some(offset), Some(length)) =
@@ -599,27 +629,10 @@ impl SymbolicGraph {
                         });
                     StoredOrNotTensor::Stored(id)
                 } else {
-                    // Fallback to eager load when essential keys missing
-                    let numeric_tensor = NDArrayNumericTensor::try_from(t)?;
-                    if numeric_tensor.num_elements() > 100 {
-                        let id = graph_mutator.tensor_store.add_tensor(StoredTensor::Numeric(
-                            NumericTensor::NDArray(numeric_tensor),
-                        ));
-                        StoredOrNotTensor::Stored(id)
-                    } else {
-                        StoredOrNotTensor::NotStored(numeric_tensor)
-                    }
+                    decode_tensor_proto_to_stored(t, &mut graph_mutator.tensor_store)?
                 }
             } else {
-                let numeric_tensor = NDArrayNumericTensor::try_from(t)?;
-                if numeric_tensor.num_elements() > 100 {
-                    let id = graph_mutator.tensor_store.add_tensor(StoredTensor::Numeric(
-                        NumericTensor::NDArray(numeric_tensor),
-                    ));
-                    StoredOrNotTensor::Stored(id)
-                } else {
-                    StoredOrNotTensor::NotStored(numeric_tensor)
-                }
+                decode_tensor_proto_to_stored(t, &mut graph_mutator.tensor_store)?
             };
 
             if let Some(x) = graph_mutator.tensors_by_name.get(&t.name) {
@@ -639,6 +652,9 @@ impl SymbolicGraph {
                 match tensor {
                     StoredOrNotTensor::Stored(x) => {
                         graph_mutator.new_stored_tensor(self, x, Some(t.name.clone()), rng);
+                    }
+                    StoredOrNotTensor::Inline(pool_tensor) => {
+                        graph_mutator.new_constant_pool_tensor(self, pool_tensor, Some(t.name.clone()), rng);
                     }
                     StoredOrNotTensor::NotStored(x) => {
                         graph_mutator.new_constant_tensor(self, x, Some(t.name.clone()), rng);
@@ -1198,8 +1214,22 @@ impl SymbolicGraph {
                                 }
                             }
                         }
+                        StoredOrNotTensor::Inline(shared) => {
+                            // Copy from shared tensor into pool.
+                            let src = &*shared.0;
+                            let ndt = src.dtype();
+                            let shape = src.shape().clone();
+                            let layout = TensorLayout::<DynRank>::row_major(shape, ndt);
+                            if let Ok(buf) = POOL_S.allocate(layout.buffer_size_bytes()) {
+                                let mut tensor = crate::numeric_tensor::NumericTensor::from_parts(buf, layout);
+                                for i in 0..src.numel() {
+                                    tensor.write_element(i, src.read_element(i));
+                                }
+                                out.push((tensor_id, tensor));
+                            }
+                        }
                         StoredOrNotTensor::NotStored(nd_tensor) => {
-                            // Inline NDArray tensor — bridge via legacy NumericTensor.
+                            // Legacy fallback — bridge via TensorInfo.
                             let legacy = NumericTensor::NDArray(nd_tensor.clone());
                             let info = TensorInfo::from_legacy(&legacy, &POOL_S);
                             if let Some(concrete) = info.as_concrete() {
@@ -1314,6 +1344,88 @@ fn unpack_4bit_pairs(packed: &[u8], numel: usize) -> Vec<u8> {
         }
     }
     out
+}
+
+/// Decode an ONNX TensorProto directly into a pool-backed NumericTensor.
+/// Handles raw_data, typed data fields (float_data, int32_data, etc.),
+/// and 4-bit packed formats. No legacy NDArrayNumericTensor intermediate.
+fn tensor_proto_to_pool_tensor(
+    tensor: &onnx::TensorProto,
+) -> Result<crate::numeric_tensor::NumericTensor<'static, DynRank, crate::pool::SystemPool>, ONNXDecodingError> {
+    use crate::numeric_dtype::NumericDType;
+    use crate::numeric_scalar::NumericScalar;
+    use crate::numeric_tensor::{NumericTensor as NewTensor, TensorLayout};
+    use crate::pool::{Pool, SystemPool};
+
+    let legacy_dt = DType::try_from(
+        onnx::tensor_proto::DataType::try_from(tensor.data_type)
+            .map_err(|x| ONNXDecodingError::ProtobufDecodeError(anyhow::Error::from(x)))?,
+    )?;
+    let ndt = NumericDType::from_legacy(legacy_dt).ok_or_else(|| {
+        ONNXDecodingError::UnsupportedONNX(format!("unsupported dtype {legacy_dt:?} for pool tensor"))
+    })?;
+    let shape: Vec<u64> = tensor.dims.iter().map(|x| *x as u64).collect();
+    let numel = shape.iter().product::<u64>() as usize;
+    let layout = TensorLayout::<DynRank>::row_major(shape.clone(), ndt);
+    let buf = SystemPool.allocate(layout.buffer_size_bytes())
+        .map_err(|_| ONNXDecodingError::UnsupportedONNX("allocation failed".into()))?;
+    let mut out: NewTensor<'static, DynRank, SystemPool> = NewTensor::from_parts(buf, layout);
+
+    if !tensor.raw_data.is_empty() {
+        // Raw LE bytes — read element-by-element via read_raw_bits to handle sub-byte types.
+        let bits = ndt.total_bits() as usize;
+        // ONNX packs 4-bit types two per byte (low nibble first).
+        let is_4bit = matches!(ndt, NumericDType::SignedInt(it) | NumericDType::UnsignedInt(it) if it.bits == 4);
+        if is_4bit {
+            let unpacked = unpack_4bit_pairs(&tensor.raw_data, numel);
+            for (i, &byte) in unpacked.iter().enumerate() {
+                out.write_element(i, NumericScalar::from_raw_bits(byte as u64, ndt));
+            }
+        } else {
+            for i in 0..numel {
+                let bit_offset = i * bits;
+                let raw = crate::numeric_scalar::conversions::read_raw_bits(
+                    &tensor.raw_data, bit_offset, bits as u8,
+                );
+                out.write_element(i, NumericScalar::from_raw_bits(raw, ndt));
+            }
+        }
+    } else if !tensor.float_data.is_empty() {
+        for (i, &v) in tensor.float_data.iter().enumerate().take(numel) {
+            out.write_element(i, NumericScalar::from_f32(v).cast_to(ndt));
+        }
+    } else if !tensor.double_data.is_empty() {
+        for (i, &v) in tensor.double_data.iter().enumerate().take(numel) {
+            out.write_element(i, NumericScalar::from_f64(v).cast_to(ndt));
+        }
+    } else if !tensor.int32_data.is_empty() {
+        // int32_data is used for I32, I16, U16, I8, U8, F16, BF16, F8, and 4-bit types.
+        let is_4bit = matches!(ndt, NumericDType::SignedInt(it) | NumericDType::UnsignedInt(it) if it.bits == 4);
+        if is_4bit {
+            let bytes: Vec<u8> = tensor.int32_data.iter().map(|x| *x as u8).collect();
+            let unpacked = unpack_4bit_pairs(&bytes, numel);
+            for (i, &byte) in unpacked.iter().enumerate() {
+                out.write_element(i, NumericScalar::from_raw_bits(byte as u64, ndt));
+            }
+        } else {
+            for (i, &v) in tensor.int32_data.iter().enumerate().take(numel) {
+                // Encode the low bits of the i32 as the target type's raw bits.
+                out.write_element(i, NumericScalar::from_raw_bits(v as u64, ndt));
+            }
+        }
+    } else if !tensor.int64_data.is_empty() {
+        for (i, &v) in tensor.int64_data.iter().enumerate().take(numel) {
+            out.write_element(i, NumericScalar::from_i64(v).cast_to(ndt));
+        }
+    } else if !tensor.uint64_data.is_empty() {
+        for (i, &v) in tensor.uint64_data.iter().enumerate().take(numel) {
+            out.write_element(i, NumericScalar::from_raw_bits(v, ndt));
+        }
+    } else {
+        // Empty tensor — already zero-initialized by from_parts.
+    }
+
+    Ok(out)
 }
 
 impl TryFrom<&onnx::TensorProto> for NDArrayNumericTensor<DynRank> {
@@ -1801,6 +1913,36 @@ impl SymbolicGraphMutator {
                 dtype: Some(value.dtype()),
                 shape: Some(shape),
                 tensor_type: TensorType::Constant(StoredOrNotTensor::NotStored(value)),
+                global_id,
+            },
+        );
+        if let Some(name) = name {
+            self.tensors_by_name.insert(name, global_id);
+        }
+
+        global_id
+    }
+
+    pub fn new_constant_pool_tensor(
+        &mut self,
+        inner_graph: &mut SymbolicGraph,
+        value: SharedPoolTensor,
+        name: Option<String>,
+        rng: &mut impl Rng,
+    ) -> GlobalId {
+        let mut shape = Vec::new();
+        for &s in value.0.shape().iter() {
+            shape.push(ScalarInfoTyped::Numeric(s));
+        }
+
+        let global_id = GlobalId::new(rng);
+        inner_graph.tensors.insert(
+            global_id,
+            ONNXTensorInfo {
+                onnx_name: name.clone(),
+                dtype: Some(value.0.dtype().to_legacy()),
+                shape: Some(shape),
+                tensor_type: TensorType::Constant(StoredOrNotTensor::Inline(value)),
                 global_id,
             },
         );
