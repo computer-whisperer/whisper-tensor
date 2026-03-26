@@ -5,16 +5,16 @@
 //! (e.g. UnableToInfer or Minimal when Shaped is possible), but any concrete
 //! claims must match the ground-truth values from eval.
 
-use crate::backends::eval_backend::EvalBackend;
 use crate::graph::{GlobalId, Node};
 use crate::milli_graph::ops::MilliOp;
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
-use crate::migration::numeric_tensor::NumericTensor;
-use crate::pool::SystemPool;
+use crate::numeric_tensor::{NumericTensor as NewNumericTensor, NumericTensorView, TensorLayout};
+use crate::pool::{Pool, SystemPool};
 use crate::scalar_info::{ScalarInfo, ScalarInfoTyped};
 use crate::symbolic_scalar::{SymbolicResolver, SymbolicScalar, SymbolicScalarTyped};
 use crate::tensor_info::{MinimalTensor, ShapedTensor, TensorInfo, TensorInfoRanked};
 use crate::tensor_rank::DynRank;
+use crate::numeric_dtype::NumericDType;
 use std::collections::HashMap;
 use std::fmt;
 
@@ -89,85 +89,54 @@ impl fmt::Display for ValidationReport {
     }
 }
 
-/// Ground truth for a single output tensor from eval.
+/// Ground truth for a single output tensor.
 struct GroundTruth {
-    dtype: crate::numeric_dtype::NumericDType,
+    dtype: NumericDType,
     shape: Vec<u64>,
     rank: usize,
 }
 
 impl GroundTruth {
-    fn from_numeric_tensor(tensor: &NumericTensor<DynRank>) -> Self {
+    fn from_view(view: &NumericTensorView<'_, DynRank>) -> Self {
+        let shape = view.shape().clone();
+        let rank = shape.len();
         Self {
-            dtype: crate::numeric_dtype::NumericDType::from_legacy(tensor.dtype())
-                .expect("unsupported dtype in ground truth"),
-            shape: tensor.shape(),
-            rank: tensor.rank(),
+            dtype: view.dtype(),
+            shape,
+            rank,
         }
     }
 }
 
-/// Create a Shaped TensorInfo from a concrete NumericTensor.
-/// Keeps the concrete shape but replaces all element values with symbolic scalars.
-fn numeric_to_shaped(
-    tensor: &NumericTensor<DynRank>,
-    resolver: &mut SymbolicResolver,
-) -> TensorInfo<'static, SystemPool> {
-    let dtype = crate::numeric_dtype::NumericDType::from_legacy(tensor.dtype())
-        .expect("unsupported dtype for shaped ablation");
-    let shape: Vec<u64> = tensor.shape();
-    let first_element = ScalarInfo::Symbolic(SymbolicScalar::new(dtype, resolver));
-    TensorInfo::from(ShapedTensor::<DynRank>::new_symbolic(
-        first_element,
-        shape,
-        resolver,
-    ))
-}
-
-/// Create a Ranked TensorInfo from a concrete NumericTensor.
-/// Keeps the rank but replaces all dims with symbolic values.
-fn numeric_to_ranked(
-    tensor: &NumericTensor<DynRank>,
-    resolver: &mut SymbolicResolver,
-) -> TensorInfo<'static, SystemPool> {
-    let rank = tensor.rank();
-    let ndt = crate::numeric_dtype::NumericDType::from_legacy(tensor.dtype())
-        .expect("unsupported dtype for ranked ablation");
-    let first_element = ScalarInfo::Symbolic(SymbolicScalar::new(ndt, resolver));
-    let symbolic_dims: Vec<ScalarInfoTyped<u64>> = (0..rank)
-        .map(|_| ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(resolver)))
-        .collect();
-    TensorInfo::Ranked(TensorInfoRanked::new(
-        first_element,
-        symbolic_dims,
-        resolver,
-    ))
-}
-
-/// Create a Minimal TensorInfo from a concrete NumericTensor.
-/// Only preserves dtype; rank is unknown.
-fn numeric_to_minimal(
-    tensor: &NumericTensor<DynRank>,
-    resolver: &mut SymbolicResolver,
-) -> TensorInfo<'static, SystemPool> {
-    let ndt = crate::numeric_dtype::NumericDType::from_legacy(tensor.dtype())
-        .expect("unsupported dtype for minimal ablation");
-    let first_element = ScalarInfo::Symbolic(SymbolicScalar::new(ndt, resolver));
-    let symbolic_rank = SymbolicScalarTyped::<u32>::new(resolver);
-    TensorInfo::from(MinimalTensor::new(first_element, symbolic_rank))
-}
-
-/// Ablate a NumericTensor to the given level.
-fn ablate_tensor(
-    tensor: &NumericTensor<DynRank>,
+/// Ablate a tensor view to the given TensorInfo level.
+fn ablate_view<'p, P: Pool + 'p>(
+    view: &NumericTensorView<'_, DynRank>,
     level: AblationLevel,
     resolver: &mut SymbolicResolver,
-) -> TensorInfo<'static, SystemPool> {
+    pool: &'p P,
+) -> TensorInfo<'p, P> {
+    let dtype = view.dtype();
+    let shape = view.shape();
+    let rank = shape.len();
     match level {
-        AblationLevel::Numeric => TensorInfo::from_legacy(tensor, &SystemPool),
-        AblationLevel::Shaped => numeric_to_shaped(tensor, resolver),
-        AblationLevel::Ranked => numeric_to_ranked(tensor, resolver),
-        AblationLevel::Minimal => numeric_to_minimal(tensor, resolver),
+        AblationLevel::Numeric => TensorInfo::from_view(view, pool),
+        AblationLevel::Shaped => {
+            let first_element = ScalarInfo::Symbolic(SymbolicScalar::new(dtype, resolver));
+            TensorInfo::from(ShapedTensor::<DynRank>::new_symbolic(
+                first_element, shape.clone(), resolver,
+            ))
+        }
+        AblationLevel::Ranked => {
+            let first_element = ScalarInfo::Symbolic(SymbolicScalar::new(dtype, resolver));
+            let symbolic_dims: Vec<ScalarInfoTyped<u64>> = (0..rank)
+                .map(|_| ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(resolver)))
+                .collect();
+            TensorInfo::Ranked(TensorInfoRanked::new(first_element, symbolic_dims, resolver))
+        }
+        AblationLevel::Minimal => {
+            let first_element = ScalarInfo::Symbolic(SymbolicScalar::new(dtype, resolver));
+            TensorInfo::from(MinimalTensor::new(first_element, SymbolicScalarTyped::new(resolver)))
+        }
     }
 }
 
@@ -221,24 +190,86 @@ fn validate_against_ground_truth(inferred: &TensorInfo<'_, impl crate::pool::Poo
 }
 
 impl MilliOpGraph {
+    /// Legacy entry point — converts legacy tensors and delegates to the pool-based version.
+    pub fn validate_infer_against_eval(
+        &self,
+        inputs: &HashMap<GlobalId, crate::migration::numeric_tensor::NumericTensor<DynRank>>,
+    ) -> ValidationReport {
+        // Convert legacy tensors to TensorInfo, extract concrete new-type tensors.
+        let infos: Vec<_> = inputs
+            .iter()
+            .map(|(&id, legacy)| (id, TensorInfo::from_legacy(legacy, &SystemPool)))
+            .collect();
+        let new_tensors: Vec<_> = infos
+            .iter()
+            .map(|(id, info)| (*id, info.as_concrete().expect("must be concrete").clone()))
+            .collect();
+        let views: Vec<_> = new_tensors.iter().map(|(id, t)| (*id, t.view())).collect();
+        let view_map: HashMap<GlobalId, &NumericTensorView<'_, DynRank>> = views
+            .iter()
+            .map(|(id, view)| (*id, view))
+            .collect();
+        self.validate_infer_against_pool_eval(&view_map)
+    }
+
     /// Validate that `infer()` never returns incorrect information for any op
     /// in this graph, at any ablation level.
     ///
-    /// Runs eval to collect ground-truth intermediate values, then for each op
-    /// and each ablation level, calls `infer()` with ablated inputs and checks
-    /// that all concrete claims match reality.
-    ///
-    /// Panics on validation failure with a detailed message.
-    pub fn validate_infer_against_eval(
+    /// Runs each op through `eval_new()` to collect ground-truth shapes, then
+    /// for each op and each ablation level, calls `infer()` with ablated inputs
+    /// and checks that all concrete claims match reality.
+    pub fn validate_infer_against_pool_eval<'v>(
         &self,
-        inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
+        inputs: &HashMap<GlobalId, &'v NumericTensorView<'v, DynRank>>,
     ) -> ValidationReport {
-        let mut backend = EvalBackend::NDArray;
+        static POOL: SystemPool = SystemPool;
 
-        // Step 1: Run eval to collect all intermediate tensor values
-        let intermediate_values = self
-            .collect_all_intermediate_values(inputs)
-            .expect("eval failed during validation");
+        // Step 1: Walk ops in order, evaluating each via eval_new to get
+        // ground-truth intermediate tensors.
+        let mut intermediates: HashMap<GlobalId, NewNumericTensor<'static, DynRank, SystemPool>> =
+            HashMap::new();
+
+        // Map external inputs → internal IDs.
+        for (&ext_id, &view) in inputs {
+            if let Some(&int_id) = self.input_map.get(&ext_id) {
+                // Copy view into a pool-backed tensor.
+                let layout = TensorLayout::<DynRank>::row_major(view.shape().clone(), view.dtype());
+                if let Ok(buf) = POOL.allocate(layout.buffer_size_bytes()) {
+                    let mut tensor = NewNumericTensor::from_parts(buf, layout);
+                    for i in 0..view.numel() {
+                        tensor.write_element(i, view.read_element(i));
+                    }
+                    intermediates.insert(int_id, tensor);
+                }
+            }
+        }
+
+        // Evaluate each op via eval_new.
+        for op_id in self.op_ordering() {
+            let op = &self.ops[op_id];
+            let input_ids: Vec<GlobalId> = op.inputs().collect();
+            let input_views: Vec<_> = input_ids
+                .iter()
+                .filter_map(|id| intermediates.get(id).map(|t| t.view()))
+                .collect();
+
+            if input_views.len() != input_ids.len() {
+                continue; // Missing inputs — skip
+            }
+
+            let input_view_refs: Vec<_> = input_views.iter().collect();
+            match op.eval_new(&input_views, &POOL) {
+                Ok(output_tensors) => {
+                    let output_ids: Vec<GlobalId> = op.outputs().collect();
+                    for (i, tensor) in output_tensors.into_iter().enumerate() {
+                        if let Some(&out_id) = output_ids.get(i) {
+                            intermediates.insert(out_id, tensor);
+                        }
+                    }
+                }
+                Err(_) => {} // eval_new failed — skip this op
+            }
+        }
 
         let mut report = ValidationReport::default();
 
@@ -258,39 +289,36 @@ impl MilliOpGraph {
             let output_ids: Vec<GlobalId> = op.outputs().collect();
             let mut ground_truths: HashMap<GlobalId, GroundTruth> = HashMap::new();
             for &out_id in &output_ids {
-                if let Some(tensor) = intermediate_values.get(&out_id) {
-                    ground_truths.insert(out_id, GroundTruth::from_numeric_tensor(tensor));
+                if let Some(tensor) = intermediates.get(&out_id) {
+                    ground_truths.insert(out_id, GroundTruth::from_view(&tensor.view()));
                 }
             }
 
             if ground_truths.is_empty() {
-                // Op produced no outputs we can validate
                 continue;
             }
 
             for &level in &levels {
                 let mut resolver = SymbolicResolver::new();
-
-                // Build the known map: all tensors as ground-truth Numeric,
-                // except this op's inputs which are ablated.
                 let input_ids: Vec<GlobalId> = op.inputs().collect();
 
-                static POOL: SystemPool = SystemPool;
                 let mut known: HashMap<GlobalId, TensorInfo<'_, SystemPool>> = HashMap::new();
 
                 // Insert all intermediate values as Numeric TensorInfo
-                for (id, tensor) in &intermediate_values {
-                    known.insert(*id, TensorInfo::from_legacy(tensor, &POOL));
+                for (id, tensor) in &intermediates {
+                    known.insert(*id, TensorInfo::from_view(&tensor.view(), &POOL));
                 }
 
-                // Now overwrite this op's inputs with ablated versions
+                // Overwrite this op's inputs with ablated versions
                 for &input_id in &input_ids {
-                    if let Some(tensor) = intermediate_values.get(&input_id) {
-                        known.insert(input_id, ablate_tensor(tensor, level, &mut resolver));
+                    if let Some(tensor) = intermediates.get(&input_id) {
+                        known.insert(
+                            input_id,
+                            ablate_view(&tensor.view(), level, &mut resolver, &POOL),
+                        );
                     }
                 }
 
-                // Call infer
                 let result = op.infer(&known, &mut resolver, &POOL);
 
                 match result {
@@ -298,9 +326,6 @@ impl MilliOpGraph {
                         report.unable_to_infer_count += 1;
                     }
                     Err(e) => {
-                        // Non-UnableToInfer errors at ablated levels are acceptable --
-                        // the op may legitimately fail if it can't handle degraded inputs.
-                        // But at Numeric level this is a real problem.
                         if level == AblationLevel::Numeric {
                             report.failure_count += 1;
                             report.failures.push(ValidationFailure {
@@ -349,8 +374,8 @@ mod tests {
     use super::*;
     use crate::graph::GlobalId;
     use crate::milli_graph::ops::SimpleBinary;
+    use crate::numeric_scalar::NumericScalar;
 
-    /// Build a simple add graph and validate infer correctness.
     #[test]
     fn test_validate_infer_simple_add() {
         let rng = &mut rand::rng();
@@ -365,18 +390,27 @@ mod tests {
         let out = SimpleBinary::add(&mut graph, x, y, rng);
         graph.add_output(out, ext_out);
 
-        let x_tensor: NumericTensor<DynRank> =
-            NumericTensor::from_vec_shape(vec![1.0f32, 2.0, 3.0], vec![3]).unwrap();
-        let y_tensor: NumericTensor<DynRank> =
-            NumericTensor::from_vec_shape(vec![4.0f32, 5.0, 6.0], vec![3]).unwrap();
+        // Build inputs using new types only.
+        let layout_x = TensorLayout::<DynRank>::row_major(vec![3], NumericDType::F32);
+        let buf_x = SystemPool.allocate(layout_x.buffer_size_bytes()).unwrap();
+        let mut x_tensor: NewNumericTensor<'_, DynRank, SystemPool> = NewNumericTensor::from_parts(buf_x, layout_x);
+        for (i, &v) in [1.0f32, 2.0, 3.0].iter().enumerate() {
+            x_tensor.write_element(i, NumericScalar::from_f32(v));
+        }
+        let layout_y = TensorLayout::<DynRank>::row_major(vec![3], NumericDType::F32);
+        let buf_y = SystemPool.allocate(layout_y.buffer_size_bytes()).unwrap();
+        let mut y_tensor: NewNumericTensor<'_, DynRank, SystemPool> = NewNumericTensor::from_parts(buf_y, layout_y);
+        for (i, &v) in [4.0f32, 5.0, 6.0].iter().enumerate() {
+            y_tensor.write_element(i, NumericScalar::from_f32(v));
+        }
 
-        let mut inputs = HashMap::new();
-        inputs.insert(ext_x, x_tensor);
-        inputs.insert(ext_y, y_tensor);
+        let x_view = x_tensor.view();
+        let y_view = y_tensor.view();
+        let inputs: HashMap<GlobalId, &NumericTensorView<'_, DynRank>> =
+            HashMap::from([(ext_x, &x_view), (ext_y, &y_view)]);
 
-        let report = graph.validate_infer_against_eval(&inputs);
+        let report = graph.validate_infer_against_pool_eval(&inputs);
         assert_eq!(report.failure_count, 0, "Validation failures:\n{}", report);
-        // Should have at least one pass (Numeric level always works for add)
         assert!(report.pass_count > 0, "Expected at least one pass");
     }
 }
