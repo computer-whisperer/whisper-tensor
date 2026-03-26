@@ -14,6 +14,7 @@ pub mod matmul;
 pub mod opaque_ops;
 pub mod pad;
 pub mod reduce;
+pub mod structural;
 
 use std::collections::HashMap;
 
@@ -237,6 +238,7 @@ pub fn build_test_set() -> Vec<TestCase> {
     cases.extend(reduce::build_cases());
     cases.extend(conv::build_cases());
     cases.extend(pad::build_cases());
+    cases.extend(structural::build_cases());
     cases.extend(opaque_ops::build_cases());
     cases
 }

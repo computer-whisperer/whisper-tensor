@@ -456,6 +456,89 @@ impl MilliOp for Gather {
         Ok(Box::new([(self.output, out)].into_iter()))
     }
 
+    fn eval_new<'p, P2: crate::pool::Pool + 'p>(
+        &self,
+        inputs: &[crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>],
+        pool: &'p P2,
+    ) -> Result<Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>, crate::nano_graph::pool_eval::PoolEvalError> {
+        use crate::numeric_tensor::{NumericTensor, TensorLayout};
+        use crate::tensor_rank::DynRank;
+
+        let data = &inputs[0];
+        let indices = &inputs[1];
+        let data_shape = data.shape();
+        let idx_shape = indices.shape();
+        let rank = data_shape.len();
+        let dtype = data.dtype();
+        let axis = if self.axis() < 0 { (self.axis() + rank as i64) as usize } else { self.axis() as usize };
+
+        // Output shape: data_shape[..axis] ++ idx_shape ++ data_shape[axis+1..]
+        let mut out_shape = Vec::new();
+        out_shape.extend_from_slice(&data_shape[..axis]);
+        out_shape.extend_from_slice(&idx_shape);
+        out_shape.extend_from_slice(&data_shape[axis + 1..]);
+        let out_numel: usize = out_shape.iter().product::<u64>() as usize;
+
+        let layout = TensorLayout::<DynRank>::row_major(out_shape.clone(), dtype);
+        let buf = pool.allocate(layout.buffer_size_bytes())
+            .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
+        let mut out = NumericTensor::from_parts(buf, layout);
+
+        // Strides
+        let mut data_strides = vec![1usize; rank];
+        for i in (0..rank.saturating_sub(1)).rev() { data_strides[i] = data_strides[i + 1] * data_shape[i + 1] as usize; }
+
+        let out_rank = out_shape.len();
+        let mut out_strides = vec![1usize; out_rank];
+        for i in (0..out_rank.saturating_sub(1)).rev() { out_strides[i] = out_strides[i + 1] * out_shape[i + 1] as usize; }
+
+        let idx_ndim = idx_shape.len();
+        let mut idx_strides = vec![1usize; idx_ndim];
+        for i in (0..idx_ndim.saturating_sub(1)).rev() { idx_strides[i] = idx_strides[i + 1] * idx_shape[i + 1] as usize; }
+
+        let prefix_dims = axis;
+        let suffix_dims = rank - axis - 1;
+        let axis_len = data_shape[axis] as i64;
+
+        for out_flat in 0..out_numel {
+            let mut rem = out_flat;
+            let mut data_flat = 0usize;
+
+            // Prefix coords
+            for d in 0..prefix_dims {
+                let coord = rem / out_strides[d];
+                rem %= out_strides[d];
+                data_flat += coord * data_strides[d];
+            }
+
+            // Index coords → flat index into indices tensor
+            let mut idx_flat = 0usize;
+            for d in 0..idx_ndim {
+                let out_d = prefix_dims + d;
+                let coord = rem / out_strides[out_d];
+                rem %= out_strides[out_d];
+                idx_flat += coord * idx_strides[d];
+            }
+
+            // Suffix coords
+            for d in 0..suffix_dims {
+                let out_d = prefix_dims + idx_ndim + d;
+                let coord = rem / out_strides[out_d];
+                rem %= out_strides[out_d];
+                data_flat += coord * data_strides[axis + 1 + d];
+            }
+
+            // Look up gather index
+            let mut idx_val = indices.read_element(idx_flat).to_i64();
+            if idx_val < 0 { idx_val += axis_len; }
+            data_flat += idx_val as usize * data_strides[axis];
+
+            out.write_element(out_flat, data.read_element(data_flat));
+        }
+
+        Ok(vec![out])
+    }
+
     fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
         Gather::lower_to_nano(self, ctx)
     }
