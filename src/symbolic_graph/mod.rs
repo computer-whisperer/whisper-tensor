@@ -1154,6 +1154,73 @@ impl SymbolicGraph {
         Ok(combined)
     }
 
+    /// Execute this symbolic graph through the pool-based pipeline.
+    ///
+    /// Flow: generate_milli_graph → load weights → pool_eval.
+    /// Uses only new types — no EvalBackend, no legacy NumericTensor.
+    ///
+    /// `user_inputs` are keyed by tensor GlobalId (the symbolic graph's tensor IDs).
+    /// Initialized tensors (weights/constants) are loaded from `tensor_store`
+    /// and combined with user inputs automatically.
+    pub fn pool_eval<'p, P: crate::pool::Pool + 'p>(
+        &self,
+        user_inputs: &HashMap<GlobalId, &crate::numeric_tensor::NumericTensorView<'_, DynRank>>,
+        tensor_store: &TensorStore,
+        pool: &'p P,
+        rng: &mut impl Rng,
+    ) -> Result<
+        HashMap<GlobalId, crate::numeric_tensor::NumericTensor<'p, DynRank, P>>,
+        crate::milli_graph::MilliOpGraphError,
+    > {
+        use crate::numeric_tensor::TensorLayout;
+        use crate::pool::{Pool, SystemPool};
+        use crate::tensor_info::TensorInfo;
+
+        // Generate the combined milli graph.
+        let milli_graph = self.generate_milli_graph(rng);
+
+        // Load initialized tensors (weights/constants) via legacy path,
+        // then bridge to new types. The tensor_store migration is separate.
+        let legacy_initialized = self.get_initialized_tensors(tensor_store);
+        static POOL_S: SystemPool = SystemPool;
+
+        // Convert legacy tensors to new-type tensors for pool_eval.
+        let bridged_tensors: Vec<(GlobalId, crate::numeric_tensor::NumericTensor<'_, DynRank, SystemPool>)> =
+            legacy_initialized
+                .iter()
+                .filter_map(|(&id, legacy)| {
+                    let ndt = crate::numeric_dtype::NumericDType::from_legacy(legacy.dtype())?;
+                    let shape = legacy.shape();
+                    let layout = TensorLayout::<DynRank>::row_major(shape, ndt);
+                    let buf = POOL_S.allocate(layout.buffer_size_bytes()).ok()?;
+                    let info = TensorInfo::from_legacy(legacy, &POOL_S);
+                    let concrete = info.as_concrete()?;
+                    let mut tensor = crate::numeric_tensor::NumericTensor::from_parts(buf, layout);
+                    for i in 0..concrete.numel() {
+                        tensor.write_element(i, concrete.read_element(i));
+                    }
+                    Some((id, tensor))
+                })
+                .collect();
+
+        // Build combined input view map (user inputs + bridged weights).
+        let bridged_views: Vec<_> = bridged_tensors
+            .iter()
+            .map(|(id, t)| (*id, t.view()))
+            .collect();
+
+        let mut input_map: HashMap<GlobalId, &crate::numeric_tensor::NumericTensorView<'_, DynRank>> =
+            HashMap::new();
+        for (id, view) in &bridged_views {
+            input_map.insert(*id, view);
+        }
+        for (&id, &view) in user_inputs {
+            input_map.insert(id, view);
+        }
+
+        milli_graph.pool_eval(&input_map, pool)
+    }
+
     fn eval(
         &self,
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
