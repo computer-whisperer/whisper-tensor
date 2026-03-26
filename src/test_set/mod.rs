@@ -417,6 +417,46 @@ pub fn run_case_via_pool_eval(case: &TestCase) -> Result<(), String> {
     Ok(())
 }
 
+/// Run all data sets of a test case through MilliOpGraph::pool_eval().
+///
+/// This is the new end-to-end path using only pool-based types.
+/// No legacy NumericTensor, no EvalBackend.
+pub fn run_case_via_graph_pool_eval(case: &TestCase) -> Result<(), String> {
+    use crate::pool::TrackedPool;
+
+    for ds in &case.data_sets {
+        let pool = TrackedPool::new(None);
+
+        // Build input views keyed by external IDs.
+        let input_views: Vec<(GlobalId, _)> = ds
+            .inputs
+            .iter()
+            .map(|(&id, t)| (id, t.view()))
+            .collect();
+        let input_map: HashMap<GlobalId, &crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>> = input_views
+            .iter()
+            .map(|(id, view)| (*id, view))
+            .collect();
+
+        let results = case
+            .graph
+            .pool_eval(&input_map, &pool)
+            .map_err(|e| format!("{}[{}]: pool_eval failed: {e}", case.name, ds.label))?;
+
+        for (&expected_id, expected_tensor) in &ds.expected_outputs {
+            let actual = results.get(&expected_id).ok_or_else(|| {
+                format!(
+                    "{}[{}]: output {expected_id} not in results",
+                    case.name, ds.label
+                )
+            })?;
+            let ctx = format!("{}[{}] graph_pool_eval", case.name, ds.label);
+            assert_tensors_close(&actual.view(), &expected_tensor.view(), &ds.tolerance, &ctx)?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -447,6 +487,21 @@ mod tests {
         }
         eprintln!(
             "{} test cases ({total_data_sets} data sets) passed via pool eval",
+            cases.len()
+        );
+    }
+
+    #[test]
+    fn test_all_cases_via_graph_pool_eval() {
+        let cases = build_test_set();
+        assert!(!cases.is_empty(), "test set should not be empty");
+        let mut total_data_sets = 0;
+        for case in &cases {
+            run_case_via_graph_pool_eval(case).unwrap_or_else(|e| panic!("{e}"));
+            total_data_sets += case.data_sets.len();
+        }
+        eprintln!(
+            "{} test cases ({total_data_sets} data sets) passed via graph pool eval",
             cases.len()
         );
     }

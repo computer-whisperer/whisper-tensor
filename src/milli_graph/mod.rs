@@ -59,6 +59,8 @@ pub enum MilliOpGraphError {
     UnableToInfer,
     #[error("Execution cancelled")]
     Cancelled,
+    #[error("Nano lowering error: {0}")]
+    LowerError(String),
 }
 
 /// Training phase a group of milli-ops belongs to.
@@ -1089,6 +1091,158 @@ impl MilliOpGraph {
         }
 
         Ok(Box::new(outputs.into_iter()))
+    }
+
+    /// Execute the graph through the pool-based nano eval pipeline.
+    ///
+    /// Flow: infer_all → lower_to_nano → pool_eval.
+    /// Uses only new types — no EvalBackend, no legacy NumericTensor.
+    ///
+    /// Inputs and outputs use external tensor IDs (the same IDs passed to
+    /// `MilliOpGraph::new()` and returned by `set_outputs()`).
+    pub fn pool_eval<'p, 'v, P: crate::pool::Pool + 'p>(
+        &self,
+        inputs: &HashMap<GlobalId, &'v crate::numeric_tensor::NumericTensorView<'v, DynRank>>,
+        pool: &'p P,
+    ) -> Result<
+        HashMap<GlobalId, crate::numeric_tensor::NumericTensor<'p, DynRank, P>>,
+        MilliOpGraphError,
+    > {
+        use crate::nano_graph::lower;
+        use crate::nano_graph::pattern::AtomRange;
+        use crate::nano_graph::pool_eval;
+        use crate::tensor_info::TensorInfo;
+
+        self.validate_ready_for_interpreter()?;
+
+        // Build TensorInfo for each input (with concrete data for constant folding),
+        // keyed by external IDs (infer_all does ext→internal mapping internally).
+        static POOL_S: crate::pool::SystemPool = crate::pool::SystemPool;
+        let mut info_inputs: HashMap<GlobalId, TensorInfo<'_, crate::pool::SystemPool>> =
+            HashMap::new();
+        for (&ext_id, &view) in inputs {
+            info_inputs.insert(ext_id, TensorInfo::from_view(view, &POOL_S));
+        }
+
+        // Infer all tensor shapes/dtypes, then lower.
+        let all_infos = self.infer_all(&info_inputs, &POOL_S)?;
+        let lower_result = lower::lower(self, &info_inputs)
+            .map_err(|e| MilliOpGraphError::LowerError(e.to_string()))?;
+
+        // Map inputs to (AtomId, &View) pairs (ext → internal → atom_id).
+        let eval_inputs: Vec<_> = inputs
+            .iter()
+            .filter_map(|(&ext_id, view)| {
+                let &internal_id = self.input_map.get(&ext_id)?;
+                let tam = lower_result.tensor_map.get(&internal_id)?;
+                Some((tam.base_id, *view))
+            })
+            .collect();
+
+        // Build output AtomRanges.
+        let output_ids: Vec<GlobalId> = self
+            .output_ordering
+            .as_ref()
+            .cloned()
+            .unwrap_or_default();
+
+        let output_map = self.output_map.as_ref().ok_or_else(|| {
+            MilliOpGraphError::InvalidGraph("output_map is not configured".into())
+        })?;
+
+        // Map external output IDs → internal IDs for tensor_map lookup.
+        let reverse_output: HashMap<GlobalId, GlobalId> = output_map
+            .iter()
+            .map(|(&internal, &external)| (external, internal))
+            .collect();
+
+        let mut output_ranges: Vec<AtomRange> = Vec::new();
+        for &ext_id in &output_ids {
+            let internal_id = reverse_output.get(&ext_id).copied().unwrap_or(ext_id);
+            if let Some(tam) = lower_result.tensor_map.get(&internal_id) {
+                let mut seen = std::collections::HashSet::new();
+                for i in 0..tam.count {
+                    let atom = tam.atom_id_for_element(i);
+                    if let Some(gi) = lower_result.graph.find_group_idx(atom) {
+                        if seen.insert(gi) {
+                            let g = &lower_result.graph.groups()[gi];
+                            output_ranges.push(AtomRange {
+                                base: g.base_id,
+                                count: g.count,
+                                dtype: g.output_dtype,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        // Run pool_eval.
+        let eval_results = pool_eval::pool_eval(
+            &lower_result.graph,
+            &eval_inputs,
+            &output_ranges,
+            pool,
+        )
+        .map_err(|e| MilliOpGraphError::InvalidInput(format!("pool_eval: {e}")))?;
+
+        // Reconstruct output tensors.
+        let mut outputs = HashMap::new();
+        for &ext_id in &output_ids {
+            let internal_id = reverse_output.get(&ext_id).copied().unwrap_or(ext_id);
+            let Some(tam) = lower_result.tensor_map.get(&internal_id) else {
+                continue;
+            };
+            let numel = tam.count as usize;
+            let dtype = tam.dtype;
+
+            // Get the full output shape from inference. If all dims are concrete,
+            // use them. Otherwise fall back to tensor_map's known_dims.
+            let shape: Vec<u64> = if let Some(info) = all_infos.get(&internal_id) {
+                if let Some(ranked) = info.as_ranked() {
+                    let inferred: Option<Vec<u64>> = ranked.shape().iter().map(|s| {
+                        if let crate::scalar_info::ScalarInfoTyped::Numeric(v) = s { Some(*v) } else { None }
+                    }).collect();
+                    inferred.unwrap_or_else(|| tam.known_dims.clone())
+                } else {
+                    tam.known_dims.clone()
+                }
+            } else {
+                tam.known_dims.clone()
+            };
+
+            let layout = crate::numeric_tensor::TensorLayout::<DynRank>::row_major(shape, dtype);
+            let buf = pool
+                .allocate(layout.buffer_size_bytes())
+                .map_err(|e| MilliOpGraphError::InvalidInput(format!("allocation: {e}")))?;
+            let mut out_tensor =
+                crate::numeric_tensor::NumericTensor::from_parts(buf, layout);
+
+            for i in 0..numel {
+                let atom = tam.atom_id_for_element(i as u64);
+                let scalar = output_ranges
+                    .iter()
+                    .enumerate()
+                    .find_map(|(idx, range)| {
+                        let range_end = range.base.0 + range.count;
+                        if atom.0 >= range.base.0 && atom.0 < range_end {
+                            let offset = (atom.0 - range.base.0) as usize;
+                            Some(eval_results[idx].read_element(offset))
+                        } else {
+                            None
+                        }
+                    })
+                    .ok_or_else(|| {
+                        MilliOpGraphError::InvalidGraph(format!(
+                            "output atom {atom} not in any eval range"
+                        ))
+                    })?;
+                out_tensor.write_element(i, scalar.cast_to(dtype));
+            }
+            outputs.insert(ext_id, out_tensor);
+        }
+
+        Ok(outputs)
     }
 
     /// Run the graph through the interpreter and return the shape of every

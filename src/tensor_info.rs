@@ -942,6 +942,25 @@ impl<'p, P: Pool + 'p> TensorInfo<'p, P> {
 
     /// Backward-compat constructor: wrap a legacy NumericTensor into a TensorInfo.
     /// Reads elements from the legacy tensor into a pool-allocated buffer.
+    /// Create a TensorInfo from a new-type tensor view. Copies data into a pool buffer.
+    pub fn from_view(
+        view: &crate::numeric_tensor::NumericTensorView<'_, DynRank>,
+        pool: &'p P,
+    ) -> Self {
+        use crate::numeric_tensor::{NumericTensor as NewTensor, TensorLayout};
+        let layout = TensorLayout::<DynRank>::row_major(view.shape().clone(), view.dtype());
+        if let Ok(buf) = pool.allocate(layout.buffer_size_bytes()) {
+            let mut tensor = NewTensor::from_parts(buf, layout);
+            for i in 0..view.numel() {
+                tensor.write_element(i, view.read_element(i));
+            }
+            TensorInfo::Ranked(TensorInfoRanked::Shaped(TensorInfoShaped::Numeric(tensor)))
+        } else {
+            // Allocation failed — fall back to shape-only info.
+            Self::from_dtype_and_shape(view.dtype(), &view.shape())
+        }
+    }
+
     pub fn from_legacy(tensor: &NumericTensor<DynRank>, pool: &'p P) -> Self {
         let new_tensor = crate::nano_graph::lower::legacy_numeric_to_new(tensor, pool);
         TensorInfo::Ranked(TensorInfoRanked::Shaped(TensorInfoShaped::Numeric(new_tensor)))
