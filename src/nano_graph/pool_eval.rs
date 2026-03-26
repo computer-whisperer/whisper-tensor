@@ -7,7 +7,7 @@
 //! Group buffers are freed as soon as their last consumer finishes, returning
 //! memory to the pool. Output buffers are returned to the caller.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::numeric_dtype::NumericDType;
 use crate::numeric_scalar::NumericScalar;
@@ -106,8 +106,90 @@ pub fn pool_eval<'p, P: Pool + 'p>(
     // --- Step 3: Evaluate groups in topological order ---
     let mut group_buffers: Vec<Option<GroupBuffer<'p, P>>> = (0..n).map(|_| None).collect();
 
+    // Cache for opaque op results. Key: opaque_idx, Value: output tensors.
+    let mut opaque_cache: HashMap<usize, Vec<NumericTensor<'p, DynRank, P>>> = HashMap::new();
+
     for (gi, group) in groups.iter().enumerate() {
         if remaining[gi] == 0 && !matches!(&group.op, ScalarOp::Literal(_)) {
+            continue;
+        }
+
+        // --- Handle OpaqueOutput: dispatch to opaque eval function ---
+        if let ScalarOp::OpaqueOutput { opaque_idx, output_idx } = &group.op {
+            // Evaluate the opaque op if not cached.
+            if !opaque_cache.contains_key(opaque_idx) {
+                let opaque_op = &graph.opaque_ops()[*opaque_idx];
+
+                // Assemble input tensors from atom buffers.
+                let mut input_tensors = Vec::with_capacity(opaque_op.inputs.len());
+                for inp in &opaque_op.inputs {
+                    let inp_layout = TensorLayout::<DynRank>::row_major(
+                        inp.shape.clone(),
+                        inp.dtype,
+                    );
+                    let mut inp_buf = pool.allocate(inp_layout.buffer_size_bytes())
+                        .map_err(PoolEvalError::Allocation)?;
+                    let mut inp_tensor: NumericTensor<'p, DynRank, P> = NumericTensor::from_parts(inp_buf, inp_layout);
+                    for elem in 0..inp.count as usize {
+                        let atom_id = AtomId(inp.base.0 + elem as u64);
+                        let val = lookup_atom_raw(atom_id, graph, &group_buffers, &input_buffers);
+                        let val_dtype = lookup_atom_dtype(atom_id, graph, &group_buffers, &input_buffers);
+                        let scalar = NumericScalar {
+                            bits: val.to_le_bytes(),
+                            dtype: val_dtype,
+                        };
+                        inp_tensor.write_element(elem, scalar.cast_to(inp.dtype));
+                    }
+                    input_tensors.push(inp_tensor);
+                }
+
+                let input_views: Vec<_> = input_tensors.iter().map(|t| t.view()).collect();
+                let sys_results = opaque_op.eval_fn.eval(&input_views)?;
+                // Copy SystemPool results into the caller's pool.
+                let results: Vec<NumericTensor<'p, DynRank, P>> = sys_results
+                    .iter()
+                    .map(|sys_t| {
+                        let layout = sys_t.layout().clone();
+                        let mut buf = pool.allocate(layout.buffer_size_bytes())
+                            .expect("pool alloc failed copying opaque result");
+                        let mut t = NumericTensor::from_parts(buf, layout);
+                        for i in 0..sys_t.numel() {
+                            t.write_element(i, sys_t.read_element(i));
+                        }
+                        t
+                    })
+                    .collect();
+                opaque_cache.insert(*opaque_idx, results);
+            }
+
+            // Read this output from the cache.
+            let cached = &opaque_cache[opaque_idx];
+            let result_tensor = &cached[*output_idx];
+
+            // Copy result into the group buffer.
+            let count = group.count as usize;
+            let output_dtype = group.output_dtype;
+            let layout = TensorLayout::<DynRank>::row_major(vec![count as u64], output_dtype);
+            let buffer = pool.allocate(layout.buffer_size_bytes())
+                .map_err(PoolEvalError::Allocation)?;
+            let mut tensor = NumericTensor::from_parts(buffer, layout);
+            for i in 0..count {
+                let scalar = result_tensor.read_element(i);
+                tensor.write_element(i, scalar);
+            }
+
+            group_buffers[gi] = Some(GroupBuffer {
+                tensor,
+                dtype: output_dtype,
+            });
+
+            // Free spent producers.
+            for &pi in &producers[gi] {
+                remaining[pi] -= 1;
+                if remaining[pi] == 0 {
+                    group_buffers[pi] = None;
+                }
+            }
             continue;
         }
 
@@ -225,7 +307,7 @@ pub fn pool_eval<'p, P: Pool + 'p>(
                             lookup_atom_dtype(table_atom, graph, &group_buffers, &input_buffers);
                         val_dtype.cast_raw(val, output_dtype)
                     }
-                    ScalarOp::Reduce { .. } => unreachable!(),
+                    ScalarOp::Reduce { .. } | ScalarOp::OpaqueOutput { .. } => unreachable!(),
                 };
                 write_atom(&mut tensor, i as usize, result_raw, output_dtype);
             }

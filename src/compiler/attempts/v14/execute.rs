@@ -412,6 +412,7 @@ fn op_name(op: &crate::nano_graph::ScalarOp) -> &'static str {
         ScalarOp::Select => "Select",
         ScalarOp::Reduce { .. } => "Reduce",
         ScalarOp::IndirectLoad { .. } => "IndirectLoad",
+        ScalarOp::OpaqueOutput { .. } => "OpaqueOutput",
     }
 }
 

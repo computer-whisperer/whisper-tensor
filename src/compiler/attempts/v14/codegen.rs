@@ -1458,6 +1458,8 @@ fn emit_group_body_forwarded(
                 table_counter,
             );
         }
+
+        ScalarOp::OpaqueOutput { .. } => todo!("opaque ops not supported in compiler"),
     };
 
     // Always store to buffer (safe approach — avoids needing to track
@@ -2164,6 +2166,8 @@ fn emit_group_body(
             );
             Ok(())
         }
+
+        ScalarOp::OpaqueOutput { .. } => todo!("opaque ops not supported in compiler"),
     }
 }
 
@@ -3007,6 +3011,7 @@ fn op_name_short(op: &ScalarOp) -> &'static str {
         ScalarOp::Select => "Sel",
         ScalarOp::Reduce { .. } => "Red",
         ScalarOp::IndirectLoad { .. } => "Ind",
+        ScalarOp::OpaqueOutput { .. } => "Opq",
     }
 }
 

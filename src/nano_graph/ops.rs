@@ -1,7 +1,12 @@
 //! Scalar operations for the nano graph.
 
+use std::sync::Arc;
+
 use crate::numeric_dtype::NumericDType;
 use crate::numeric_scalar::NumericScalar;
+use crate::numeric_tensor::{NumericTensor, NumericTensorView};
+use crate::pool::Pool;
+use crate::tensor_rank::DynRank;
 
 /// Binary scalar operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -69,6 +74,64 @@ pub enum ReduceKind {
     Max,
 }
 
+// ---------------------------------------------------------------------------
+// Opaque milli-op support
+// ---------------------------------------------------------------------------
+
+/// An opaque milli-level operation that can't be decomposed into scalar nano-ops.
+///
+/// Lives in `NanoGraph::opaque_ops`. AtomGroups with `ScalarOp::OpaqueOutput`
+/// reference these by index. The evaluator assembles input tensors from atom
+/// buffers, calls the eval function, and scatters results back.
+#[derive(Clone)]
+pub struct OpaqueOp {
+    /// The evaluation function.
+    pub eval_fn: Arc<dyn OpaqueEval>,
+    /// Input tensor mappings — where to read input data from the atom space.
+    pub inputs: Vec<OpaqueTensorMapping>,
+    /// Output tensor mappings — where to write results in the atom space.
+    /// Each output corresponds to one AtomGroup with ScalarOp::OpaqueOutput.
+    pub outputs: Vec<OpaqueTensorMapping>,
+    /// Human-readable name for debugging.
+    pub name: String,
+}
+
+/// Mapping between an atom range and a tensor shape.
+#[derive(Clone, Debug)]
+pub struct OpaqueTensorMapping {
+    pub base: super::pattern::AtomId,
+    pub count: u64,
+    pub shape: Vec<u64>,
+    pub dtype: NumericDType,
+}
+
+/// Trait for opaque op evaluation. Operates on new pool-backed types only.
+///
+/// Returns SystemPool-backed tensors for dyn-compatibility. The evaluator
+/// copies elements into its own pool as needed.
+pub trait OpaqueEval: Send + Sync {
+    /// Evaluate the op given input tensor views.
+    /// Returns one output tensor per output mapping.
+    fn eval(
+        &self,
+        inputs: &[NumericTensorView<'_, DynRank>],
+    ) -> Result<Vec<NumericTensor<'static, DynRank, crate::pool::SystemPool>>, crate::nano_graph::pool_eval::PoolEvalError>;
+}
+
+impl std::fmt::Debug for OpaqueOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OpaqueOp")
+            .field("name", &self.name)
+            .field("inputs", &self.inputs)
+            .field("outputs", &self.outputs)
+            .finish()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Scalar operations
+// ---------------------------------------------------------------------------
+
 /// A scalar operation performed by each atom in a group.
 ///
 /// The output dtype lives on the `AtomGroup`, not here. Variants that
@@ -110,6 +173,15 @@ pub enum ScalarOp {
     /// from a known table of atoms at `table_base + index`. Used for Gather
     /// (embedding lookups). No computation, just a runtime-dependent load.
     IndirectLoad { table_base: super::pattern::AtomId },
+    /// Output of an opaque milli-op. The evaluator looks up the opaque op
+    /// by index in `NanoGraph::opaque_ops`, calls it (once, caching results
+    /// across all output groups), and reads this group's portion of the output.
+    OpaqueOutput {
+        /// Index into `NanoGraph::opaque_ops`.
+        opaque_idx: usize,
+        /// Which output of the opaque op this group corresponds to.
+        output_idx: usize,
+    },
 }
 
 impl ScalarOp {
@@ -119,7 +191,8 @@ impl ScalarOp {
             ScalarOp::Literal(_)
             | ScalarOp::Identity
             | ScalarOp::Select
-            | ScalarOp::IndirectLoad { .. } => None,
+            | ScalarOp::IndirectLoad { .. }
+            | ScalarOp::OpaqueOutput { .. } => None,
             ScalarOp::Binary { compute_dtype, .. }
             | ScalarOp::Unary { compute_dtype, .. }
             | ScalarOp::Reduce { compute_dtype, .. } => Some(*compute_dtype),

@@ -266,6 +266,10 @@ fn classify_group(group: &AtomGroup, num_lanes: usize) -> GroupKind {
         ScalarOp::IndirectLoad { .. } => GroupKind::Split,
 
         // Reduce: depends on what it's reducing over.
+        ScalarOp::OpaqueOutput { .. } => {
+            todo!("opaque ops not supported in compiler")
+        }
+
         ScalarOp::Reduce {
             reduce_count,
             reduce_stride,

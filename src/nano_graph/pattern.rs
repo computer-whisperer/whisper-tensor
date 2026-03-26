@@ -254,15 +254,13 @@ pub struct NanoGraph {
     groups: RangeMap<AtomGroup>,
     next_atom_id: u64,
     /// External input tensors mapped into the AtomId space.
-    /// These are NOT groups — they occupy atom IDs that compute groups
-    /// reference via InputRefs, but they have no ScalarOp. The executor
-    /// fills these ranges from the TensorStore or user-provided data.
     input_ranges: RangeMap<InputTensor>,
+    /// Opaque milli-ops that can't be decomposed into scalar nano-ops.
+    /// AtomGroups with `ScalarOp::OpaqueOutput` reference these by index.
+    opaque_ops: Vec<super::ops::OpaqueOp>,
     /// Named symbolic dimensions (e.g., "batch" → SymDim(0)).
     pub sym_dim_names: HashMap<String, SymDim>,
-    /// Known upper bounds for symbolic dimensions. A SymDim with a known bound
-    /// is used for contractions (e.g., MatMul's K dimension) where the extent
-    /// is compile-time known but the dim is iterated over during reduction.
+    /// Known upper bounds for symbolic dimensions.
     pub sym_dim_bounds: HashMap<SymDim, u64>,
     next_sym_dim: u16,
     /// Which atoms are final outputs of the computation.
@@ -272,6 +270,53 @@ pub struct NanoGraph {
 impl NanoGraph {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Add an opaque op and create output AtomGroups for each output mapping.
+    /// Returns the atom IDs for each output (in order).
+    pub fn push_opaque_op(&mut self, mut op: super::ops::OpaqueOp) -> Vec<AtomId> {
+        let opaque_idx = self.opaque_ops.len();
+        let mut output_bases = Vec::with_capacity(op.outputs.len());
+
+        for (output_idx, mapping) in op.outputs.iter_mut().enumerate() {
+            let base_id = self.alloc_ids(mapping.count);
+            mapping.base = base_id;
+
+            // Create an AtomGroup for this output — references the opaque op by index.
+            // The group's inputs reference the opaque op's input atom bases for liveness.
+            let input_refs: Vec<InputRef> = op
+                .inputs
+                .iter()
+                .map(|inp| InputRef::Broadcast(inp.base))
+                .collect();
+
+            self.groups.insert(
+                base_id.0,
+                mapping.count,
+                AtomGroup {
+                    base_id,
+                    count: mapping.count,
+                    atom_offset: 0,
+                    output_dtype: mapping.dtype,
+                    op: ScalarOp::OpaqueOutput {
+                        opaque_idx,
+                        output_idx,
+                    },
+                    sym_dims: vec![],
+                    inputs: input_refs,
+                },
+            );
+
+            output_bases.push(base_id);
+        }
+
+        self.opaque_ops.push(op);
+        output_bases
+    }
+
+    /// Access the opaque ops list.
+    pub fn opaque_ops(&self) -> &[super::ops::OpaqueOp] {
+        &self.opaque_ops
     }
 
     /// Register or retrieve a symbolic dimension by name.
@@ -603,6 +648,7 @@ impl NanoGraph {
                     ..
                 } => "ReduceMax",
                 ScalarOp::IndirectLoad { .. } => "IndirectLoad",
+                ScalarOp::OpaqueOutput { .. } => "OpaqueOutput",
             };
             *groups_by_op.entry(op_name).or_default() += 1;
         }
@@ -890,6 +936,9 @@ impl NanoGraph {
                 ScalarOp::Binary { .. } => 2,
                 ScalarOp::Select => 3,
                 ScalarOp::Reduce { .. } => 1,
+                // OpaqueOutput inputs are Broadcast refs to opaque op's input bases (for liveness).
+                // The count varies — skip the check.
+                ScalarOp::OpaqueOutput { .. } => { continue; }
             };
             if group.inputs.len() != expected_inputs {
                 errors.push(format!(

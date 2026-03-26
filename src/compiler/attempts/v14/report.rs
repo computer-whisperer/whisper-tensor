@@ -451,6 +451,7 @@ fn scalar_op_name(op: &ScalarOp) -> &'static str {
         ScalarOp::Select => "Select",
         ScalarOp::Reduce { .. } => "Reduce",
         ScalarOp::IndirectLoad { .. } => "IndirLoad",
+        ScalarOp::OpaqueOutput { .. } => "Opaque",
     }
 }
 

@@ -1210,6 +1210,101 @@ impl<'a> NanoLoweringContext<'a> {
         }
     }
 
+    /// Register an opaque milli-op that can't be decomposed into scalar nano-ops.
+    ///
+    /// Creates OpaqueOutput atom groups for each output and registers them in the
+    /// tensor_map. Input tensor mappings are built from the tensor_map entries.
+    pub fn register_opaque_op(
+        &mut self,
+        eval_fn: std::sync::Arc<dyn crate::nano_graph::ops::OpaqueEval>,
+        name: &str,
+        input_ids: &[GlobalId],
+        output_ids: &[GlobalId],
+    ) {
+        use crate::nano_graph::ops::{OpaqueOp, OpaqueTensorMapping};
+
+        // Build input mappings from tensor_map.
+        let inputs: Vec<OpaqueTensorMapping> = input_ids
+            .iter()
+            .filter_map(|&id| {
+                let tam = self.tensor_map.get(&id)?;
+                let known_dims = tam.known_dims();
+                Some(OpaqueTensorMapping {
+                    base: tam.base_id,
+                    count: tam.count,
+                    shape: known_dims,
+                    dtype: tam.dtype,
+                })
+            })
+            .collect();
+
+        // Build output mappings from all_infos (shape/dtype).
+        let outputs: Vec<OpaqueTensorMapping> = output_ids
+            .iter()
+            .filter_map(|&id| {
+                let info = self.all_infos.get(&id)?;
+                let dtype = info.dtype();
+                let shape: Vec<u64> = if let Some(rank) = info.rank_if_known() {
+                    (0..rank)
+                        .map(|i| info.dim_if_known(i).unwrap_or(1))
+                        .collect()
+                } else {
+                    vec![1]
+                };
+                let count: u64 = shape.iter().product();
+                Some(OpaqueTensorMapping {
+                    base: crate::nano_graph::pattern::AtomId(0), // filled by push_opaque_op
+                    count,
+                    shape,
+                    dtype,
+                })
+            })
+            .collect();
+
+        if inputs.len() != input_ids.len() || outputs.len() != output_ids.len() {
+            // Some inputs/outputs missing — fall back to boundary.
+            for &out_id in output_ids {
+                self.register_opaque_id(out_id);
+            }
+            return;
+        }
+
+        let op = OpaqueOp {
+            eval_fn,
+            inputs,
+            outputs,
+            name: name.to_string(),
+        };
+
+        let output_bases = self.nano.push_opaque_op(op);
+
+        // Register outputs in tensor_map.
+        for (i, &out_id) in output_ids.iter().enumerate() {
+            let base_id = output_bases[i];
+            let info = self.all_infos.get(&out_id).unwrap();
+            let dtype = info.dtype();
+            let shape: Vec<u64> = if let Some(rank) = info.rank_if_known() {
+                (0..rank)
+                    .map(|i| info.dim_if_known(i).unwrap_or(1))
+                    .collect()
+            } else {
+                vec![1]
+            };
+            let strides = TensorAtomMap::compute_strides(&shape);
+            let layout: Vec<DimKind> = shape.iter().map(|&d| DimKind::Known(d)).collect();
+            let count: u64 = shape.iter().product();
+            self.tensor_map.insert(
+                out_id,
+                TensorAtomMap::simple(base_id, count, dtype, layout, strides, vec![]),
+            );
+        }
+    }
+
+    /// Register a tensor ID as opaque (unknown, single atom).
+    fn register_opaque_id(&mut self, id: GlobalId) {
+        self.register_opaque(id);
+    }
+
     /// Build an InputRef for a pointwise (element-by-element) read of a tensor.
     ///
     /// For row-major tensors this returns `Affine { base, stride: 1 }`.
