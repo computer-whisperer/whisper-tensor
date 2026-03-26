@@ -2,75 +2,42 @@
 
 pub mod attempts;
 
+use crate::graph::GlobalId;
 use crate::milli_graph::MilliOpGraph;
+use crate::numeric_tensor::NumericTensorView;
+use crate::tensor_rank::DynRank;
 
-/// Run a MilliOpGraph through the interpreter and return results.
+/// Run a MilliOpGraph through pool_eval and return results.
 /// Convenience wrapper for benchmarking the compiler against the interpreter.
-pub fn interpret_milli_graph(
+pub fn interpret_milli_graph<'p, P: crate::pool::Pool + 'p>(
     graph: &MilliOpGraph,
-    inputs: &std::collections::HashMap<
-        crate::graph::GlobalId,
-        crate::migration::numeric_tensor::NumericTensor<crate::DynRank>,
-    >,
+    inputs: &std::collections::HashMap<GlobalId, &NumericTensorView<'_, DynRank>>,
+    pool: &'p P,
 ) -> Result<
-    std::collections::HashMap<
-        crate::graph::GlobalId,
-        crate::migration::numeric_tensor::NumericTensor<crate::DynRank>,
-    >,
+    std::collections::HashMap<GlobalId, crate::numeric_tensor::NumericTensor<'p, DynRank, P>>,
     crate::milli_graph::MilliOpGraphError,
 > {
-    let mut backend = crate::backends::eval_backend::EvalBackend::NDArray;
+    graph.pool_eval(inputs, pool)
+}
+
+/// Legacy interpreter — uses old eval path. Kept for examples/callers not yet migrated.
+pub fn interpret_milli_graph_legacy(
+    graph: &MilliOpGraph,
+    inputs: &std::collections::HashMap<GlobalId, NumericTensor<DynRank>>,
+) -> Result<std::collections::HashMap<GlobalId, NumericTensor<DynRank>>, crate::milli_graph::MilliOpGraphError> {
+    let mut backend = EvalBackend::NDArray;
     Ok(graph.eval(inputs, &mut (), &mut backend)?.collect())
 }
 
-/// Run a MilliOpGraph through the interpreter and return ALL intermediate tensors,
-/// not just the final outputs. Useful for debugging lowering mismatches.
+/// Legacy: return ALL intermediate tensors via old eval path.
 pub fn interpret_milli_graph_all_intermediates(
     graph: &MilliOpGraph,
-    inputs: &std::collections::HashMap<
-        crate::graph::GlobalId,
-        crate::migration::numeric_tensor::NumericTensor<crate::DynRank>,
-    >,
-) -> Result<
-    std::collections::HashMap<
-        crate::graph::GlobalId,
-        crate::migration::numeric_tensor::NumericTensor<crate::DynRank>,
-    >,
-    crate::milli_graph::MilliOpGraphError,
-> {
-    use crate::graph::Graph;
-    use crate::milli_graph::ops::MilliOp;
-
-    let mut backend = crate::backends::eval_backend::EvalBackend::NDArray;
-    let mut intermediates = inputs.clone();
-
-    // Map external input IDs to internal IDs.
-    for (ext_id, tensor) in inputs {
-        if let Some(&int_id) = graph.input_map.get(ext_id) {
-            intermediates.insert(int_id, tensor.clone());
-        }
-    }
-
-    for &op_id in graph.op_ordering() {
-        let Some(op) = graph.get_node_by_id(&op_id) else {
-            continue;
-        };
-        if let Ok(iter) = op.eval(
-            &intermediates,
-            &crate::milli_graph::ops::MilliEvalConfig::default(),
-            &mut backend,
-        ) {
-            for (tid, val) in iter {
-                intermediates.insert(tid, val);
-            }
-        }
-    }
-
-    Ok(intermediates)
+    inputs: &std::collections::HashMap<GlobalId, NumericTensor<DynRank>>,
+) -> Result<std::collections::HashMap<GlobalId, NumericTensor<DynRank>>, crate::milli_graph::MilliOpGraphError> {
+    graph.collect_all_intermediate_values(inputs)
 }
 
-/// For each tensor produced by an op, return (tensor_id, op_kind, op_input_shapes).
-/// Used to identify which op produces a diverging tensor.
+/// Legacy: map each output tensor to its producing op info.
 pub fn tensor_producers(
     graph: &MilliOpGraph,
     intermediates: &std::collections::HashMap<GlobalId, NumericTensor<DynRank>>,
@@ -79,20 +46,12 @@ pub fn tensor_producers(
     use crate::graph::{Graph, Node};
     let mut result = std::collections::HashMap::new();
     for &op_id in graph.op_ordering() {
-        let Some(op) = graph.get_node_by_id(&op_id) else {
-            continue;
-        };
+        let Some(op) = graph.get_node_by_id(&op_id) else { continue };
         let kind = op.op_kind();
-        let input_shapes: Vec<(GlobalId, Vec<u64>)> = op
-            .inputs()
-            .map(|id| {
-                let shape = intermediates
-                    .get(&id)
-                    .map(|t| t.shape().to_vec())
-                    .unwrap_or_default();
-                (id, shape)
-            })
-            .collect();
+        let input_shapes: Vec<(GlobalId, Vec<u64>)> = op.inputs().map(|id| {
+            let shape = intermediates.get(&id).map(|t| t.shape().to_vec()).unwrap_or_default();
+            (id, shape)
+        }).collect();
         for out_id in op.outputs() {
             result.insert(out_id, (kind.clone(), input_shapes.clone()));
         }
@@ -119,10 +78,8 @@ pub fn op_census(graph: &MilliOpGraph) -> Vec<(String, usize)> {
 // (interfaces.rs, super_graph/, server, examples)
 // ---------------------------------------------------------------------------
 
-use crate::DynRank;
 use crate::backends::eval_backend;
 use crate::backends::eval_backend::EvalBackend;
-use crate::graph::GlobalId;
 use crate::migration::numeric_tensor::NumericTensor;
 use crate::symbolic_graph::SymbolicGraph;
 use crate::symbolic_graph::observer::SymbolicGraphObserver;

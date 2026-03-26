@@ -672,7 +672,7 @@ impl<'a> NanoLoweringContext<'a> {
     /// Runs of identical values are coalesced into single groups. If the
     /// LowerTensorInfo has no numeric data, falls back to `register_input`.
     pub fn register_constant(&mut self, id: GlobalId, info: &LowerTensorInfo) {
-        let Some(numeric) = info.as_numeric() else {
+        let Some(concrete) = info.as_concrete() else {
             self.register_input(id, info);
             return;
         };
@@ -687,11 +687,9 @@ impl<'a> NanoLoweringContext<'a> {
         let dt = Self::ndt(info);
 
         // Extract flat scalar values from the tensor.
-        let nd = numeric.to_ndarray().unwrap();
-        let flat = nd.flatten();
-        let n_elems = flat.num_elements();
+        let n_elems = concrete.numel();
         let scalars: Vec<NumericScalar> = (0..n_elems)
-            .map(|i| legacy_scalar_to_new(&flat.get(&[i as u64]).unwrap()))
+            .map(|i| concrete.read_element(i))
             .collect();
 
         if scalars.is_empty() {
@@ -1226,7 +1224,7 @@ impl<'a> NanoLoweringContext<'a> {
         let all_numeric = op.outputs().all(|out_id| {
             all_infos
                 .get(&out_id)
-                .is_some_and(|i| i.as_numeric().is_some())
+                .is_some_and(|i| i.as_concrete().is_some())
         });
         if all_numeric {
             for out_id in op.outputs() {
@@ -1500,15 +1498,10 @@ impl<'a> NanoLoweringContext<'a> {
         id: &GlobalId,
     ) -> Option<Vec<i64>> {
         let info = all_infos.get(id)?;
-        let tensor = info.as_numeric()?;
-        let as_i64 = tensor
-            .cast(
-                DType::I64,
-                &mut crate::backends::eval_backend::EvalBackend::NDArray,
-            )
-            .ok()?;
-        let rank1 = as_i64.try_to_rank::<typenum::P1>().ok()?;
-        Vec::<i64>::try_from(rank1.to_ndarray().ok()?).ok()
+        let concrete = info.as_concrete()?;
+        let n = concrete.numel();
+        let vals: Vec<i64> = (0..n).map(|i| concrete.read_element(i).to_i64()).collect();
+        Some(vals)
     }
 
     /// Lower ReduceSum or ReduceMax over known axes.
@@ -1775,7 +1768,7 @@ impl<'a> NanoLoweringContext<'a> {
             return "?".to_string();
         };
         let r = info.rank_if_known().unwrap_or(0);
-        let prefix = if info.as_numeric().is_some() {
+        let prefix = if info.as_concrete().is_some() {
             "N"
         } else {
             "R"

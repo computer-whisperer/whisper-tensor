@@ -9,7 +9,7 @@ use std::path::Path;
 use std::time::Instant;
 
 use whisper_tensor::DynRank;
-use whisper_tensor::compiler::interpret_milli_graph;
+use whisper_tensor::compiler::interpret_milli_graph_legacy as interpret_milli_graph;
 use whisper_tensor::compiler::op_census;
 use whisper_tensor::dtype::DType;
 use whisper_tensor::graph::GlobalId;
