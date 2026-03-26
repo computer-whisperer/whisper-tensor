@@ -357,6 +357,8 @@ pub fn pool_eval<'p, P: Pool + 'p>(
 pub enum PoolEvalError {
     #[error("allocation failed: {0}")]
     Allocation(#[from] AllocationError),
+    #[error("unsupported op: {0}")]
+    Unsupported(String),
 }
 
 // ---------------------------------------------------------------------------

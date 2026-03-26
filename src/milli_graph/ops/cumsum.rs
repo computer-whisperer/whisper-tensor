@@ -65,6 +65,135 @@ impl CumSum {
         super::remap(&mut self.input, map);
         super::remap(&mut self.axis, map);
     }
+
+    pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
+        let exclusive = self.exclusive;
+        let reverse = self.reverse;
+
+        let input_ids: Vec<GlobalId> = self.inputs().collect();
+        let output_ids = vec![self.output];
+
+        let eval_fn = std::sync::Arc::new(CumSumEval { exclusive, reverse });
+        ctx.register_opaque_op(eval_fn, "CumSum", &input_ids, &output_ids);
+    }
+}
+
+/// Opaque eval implementation for CumSum on new types.
+struct CumSumEval {
+    exclusive: bool,
+    reverse: bool,
+}
+
+impl crate::nano_graph::ops::OpaqueEval for CumSumEval {
+    fn eval(
+        &self,
+        inputs: &[crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>],
+    ) -> Result<
+        Vec<crate::numeric_tensor::NumericTensor<'static, crate::tensor_rank::DynRank, crate::pool::SystemPool>>,
+        crate::nano_graph::pool_eval::PoolEvalError,
+    > {
+        use crate::numeric_tensor::{NumericTensor, TensorLayout};
+        use crate::pool::{Pool, SystemPool};
+        use crate::tensor_rank::DynRank;
+
+        static POOL: SystemPool = SystemPool;
+        let data = &inputs[0];
+        let shape = data.shape();
+        let rank = shape.len();
+        let dtype = data.dtype();
+
+        // Extract axis from inputs[1] (scalar i64).
+        let raw_axis = inputs[1].read_element(0).to_i64();
+        let axis = if raw_axis < 0 { (raw_axis + rank as i64) as usize } else { raw_axis as usize };
+
+        let layout = TensorLayout::<DynRank>::row_major(shape.clone(), dtype);
+        let buf = POOL.allocate(layout.buffer_size_bytes())
+            .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
+        let mut out = NumericTensor::from_parts(buf, layout);
+
+        // Compute strides for the input shape.
+        let strides = {
+            let mut s = vec![1usize; rank];
+            for i in (0..rank.saturating_sub(1)).rev() {
+                s[i] = s[i + 1] * shape[i + 1] as usize;
+            }
+            s
+        };
+
+        let axis_dim = shape[axis] as usize;
+        let axis_stride = strides[axis];
+        // Number of independent "lines" along the axis.
+        let outer_count = data.numel() / axis_dim.max(1);
+
+        // For each line along the axis, compute cumulative sum.
+        for line in 0..outer_count {
+            // Compute the flat index of the first element in this line (axis coord = 0).
+            // Decompose `line` into the multi-index skipping the axis dimension.
+            let base = {
+                let mut rem = line;
+                let mut idx = 0usize;
+                for d in 0..rank {
+                    if d == axis { continue; }
+                    let dim_stride = strides[d];
+                    // Effective stride in the "outer" iteration: product of non-axis dims after d.
+                    let outer_stride = {
+                        let mut os = 1usize;
+                        for d2 in (d + 1)..rank {
+                            if d2 != axis {
+                                os *= shape[d2] as usize;
+                            }
+                        }
+                        os
+                    };
+                    let coord = rem / outer_stride;
+                    rem %= outer_stride;
+                    idx += coord * dim_stride;
+                }
+                idx
+            };
+
+            let mut acc = 0.0f64;
+            if self.reverse {
+                for k in (0..axis_dim).rev() {
+                    let flat = base + k * axis_stride;
+                    let val = data.read_element(flat).to_f64();
+                    if self.exclusive {
+                        out.write_element(
+                            flat,
+                            crate::numeric_scalar::NumericScalar::from_f64(acc).cast_to(dtype),
+                        );
+                        acc += val;
+                    } else {
+                        acc += val;
+                        out.write_element(
+                            flat,
+                            crate::numeric_scalar::NumericScalar::from_f64(acc).cast_to(dtype),
+                        );
+                    }
+                }
+            } else {
+                for k in 0..axis_dim {
+                    let flat = base + k * axis_stride;
+                    let val = data.read_element(flat).to_f64();
+                    if self.exclusive {
+                        out.write_element(
+                            flat,
+                            crate::numeric_scalar::NumericScalar::from_f64(acc).cast_to(dtype),
+                        );
+                        acc += val;
+                    } else {
+                        acc += val;
+                        out.write_element(
+                            flat,
+                            crate::numeric_scalar::NumericScalar::from_f64(acc).cast_to(dtype),
+                        );
+                    }
+                }
+            }
+        }
+
+        Ok(vec![out])
+    }
 }
 
 impl Node for CumSum {
@@ -84,6 +213,98 @@ impl Node for CumSum {
 }
 
 impl MilliOp for CumSum {
+    fn eval_new<'p, P2: crate::pool::Pool + 'p>(
+        &self,
+        inputs: &[crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>],
+        pool: &'p P2,
+    ) -> Result<Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>, crate::nano_graph::pool_eval::PoolEvalError> {
+        use crate::numeric_tensor::{NumericTensor, TensorLayout};
+        use crate::tensor_rank::DynRank;
+
+        let data = &inputs[0];
+        let shape = data.shape();
+        let rank = shape.len();
+        let dtype = data.dtype();
+
+        // Extract axis from inputs[1] (scalar i64).
+        let raw_axis = inputs[1].read_element(0).to_i64();
+        let axis = if raw_axis < 0 { (raw_axis + rank as i64) as usize } else { raw_axis as usize };
+
+        let layout = TensorLayout::<DynRank>::row_major(shape.clone(), dtype);
+        let buf = pool.allocate(layout.buffer_size_bytes())
+            .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
+        let mut out = NumericTensor::from_parts(buf, layout);
+
+        // Compute strides for the input shape.
+        let strides = {
+            let mut s = vec![1usize; rank];
+            for i in (0..rank.saturating_sub(1)).rev() {
+                s[i] = s[i + 1] * shape[i + 1] as usize;
+            }
+            s
+        };
+
+        let axis_dim = shape[axis] as usize;
+        let axis_stride = strides[axis];
+        // Number of independent "lines" along the axis.
+        let outer_count = data.numel() / axis_dim.max(1);
+
+        // For each line along the axis, compute cumulative sum.
+        for line in 0..outer_count {
+            // Compute the flat index of the first element in this line (axis coord = 0).
+            let base = {
+                let mut rem = line;
+                let mut idx = 0usize;
+                for d in 0..rank {
+                    if d == axis { continue; }
+                    let dim_stride = strides[d];
+                    let outer_stride = {
+                        let mut os = 1usize;
+                        for d2 in (d + 1)..rank {
+                            if d2 != axis {
+                                os *= shape[d2] as usize;
+                            }
+                        }
+                        os
+                    };
+                    let coord = rem / outer_stride;
+                    rem %= outer_stride;
+                    idx += coord * dim_stride;
+                }
+                idx
+            };
+
+            let mut acc = 0.0f64;
+            if self.reverse {
+                for k in (0..axis_dim).rev() {
+                    let flat = base + k * axis_stride;
+                    let val = data.read_element(flat).to_f64();
+                    if self.exclusive {
+                        out.write_element(flat, crate::numeric_scalar::NumericScalar::from_f64(acc).cast_to(dtype));
+                        acc += val;
+                    } else {
+                        acc += val;
+                        out.write_element(flat, crate::numeric_scalar::NumericScalar::from_f64(acc).cast_to(dtype));
+                    }
+                }
+            } else {
+                for k in 0..axis_dim {
+                    let flat = base + k * axis_stride;
+                    let val = data.read_element(flat).to_f64();
+                    if self.exclusive {
+                        out.write_element(flat, crate::numeric_scalar::NumericScalar::from_f64(acc).cast_to(dtype));
+                        acc += val;
+                    } else {
+                        acc += val;
+                        out.write_element(flat, crate::numeric_scalar::NumericScalar::from_f64(acc).cast_to(dtype));
+                    }
+                }
+            }
+        }
+
+        Ok(vec![out])
+    }
+
     fn infer<'p, P: Pool + 'p>(
         &self,
         known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'p, P>>,

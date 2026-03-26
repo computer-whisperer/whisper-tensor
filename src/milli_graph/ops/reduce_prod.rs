@@ -73,6 +73,161 @@ impl ReduceProd {
         super::remap(&mut self.data, map);
         super::remap_opt(&mut self.axes, map);
     }
+
+    pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
+        let all_infos = ctx.all_infos;
+
+        // Get concrete axes for the opaque eval.
+        let axes: Vec<usize> = if let Some(ax_id) = self.axes {
+            if let Some(ax_info) = all_infos.get(&ax_id) {
+                if let Some(vals) = ax_info.to_i64_vec() {
+                    let data_rank = all_infos
+                        .get(&self.data)
+                        .and_then(|i| i.rank_if_known())
+                        .unwrap_or(0);
+                    vals.iter()
+                        .map(|&a| {
+                            if a < 0 { (a + data_rank as i64) as usize } else { a as usize }
+                        })
+                        .collect()
+                } else {
+                    ctx.lower_as_boundary_named(self, "ReduceProd");
+                    return;
+                }
+            } else {
+                ctx.lower_as_boundary_named(self, "ReduceProd");
+                return;
+            }
+        } else {
+            let data_rank = all_infos
+                .get(&self.data)
+                .and_then(|i| i.rank_if_known())
+                .unwrap_or(0);
+            (0..data_rank).collect()
+        };
+        let keepdims = self.keepdims;
+        let noop_with_empty_axes = self.noop_with_empty_axes;
+
+        let input_ids: Vec<GlobalId> = self.inputs().collect();
+        let output_ids = vec![self.output];
+
+        let eval_fn = std::sync::Arc::new(ReduceProdEval { axes, keepdims, noop_with_empty_axes });
+        ctx.register_opaque_op(eval_fn, "ReduceProd", &input_ids, &output_ids);
+    }
+}
+
+/// Opaque eval implementation for ReduceProd on new types.
+struct ReduceProdEval {
+    axes: Vec<usize>,
+    keepdims: bool,
+    noop_with_empty_axes: bool,
+}
+
+impl crate::nano_graph::ops::OpaqueEval for ReduceProdEval {
+    fn eval(
+        &self,
+        inputs: &[crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>],
+    ) -> Result<
+        Vec<crate::numeric_tensor::NumericTensor<'static, crate::tensor_rank::DynRank, crate::pool::SystemPool>>,
+        crate::nano_graph::pool_eval::PoolEvalError,
+    > {
+        use crate::numeric_tensor::{NumericTensor, TensorLayout};
+        use crate::pool::{Pool, SystemPool};
+        use crate::tensor_rank::DynRank;
+
+        static POOL: SystemPool = SystemPool;
+        let data = &inputs[0];
+        let shape = data.shape();
+        let rank = shape.len();
+        let dtype = data.dtype();
+
+        let axes: Vec<usize> = if self.axes.is_empty() && self.noop_with_empty_axes {
+            // Noop: output = input
+            let layout = TensorLayout::<DynRank>::row_major(shape.clone(), dtype);
+            let buf = POOL.allocate(layout.buffer_size_bytes())
+                .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
+            let mut out = NumericTensor::from_parts(buf, layout);
+            for i in 0..data.numel() {
+                out.write_element(i, data.read_element(i));
+            }
+            return Ok(vec![out]);
+        } else if self.axes.is_empty() {
+            (0..rank).collect()
+        } else {
+            self.axes.clone()
+        };
+
+        // Compute output shape.
+        let mut out_shape = Vec::new();
+        for (i, &dim) in shape.iter().enumerate() {
+            if axes.contains(&i) {
+                if self.keepdims {
+                    out_shape.push(1u64);
+                }
+            } else {
+                out_shape.push(dim);
+            }
+        }
+        if out_shape.is_empty() {
+            out_shape.push(1);
+        }
+
+        let out_numel: usize = out_shape.iter().product::<u64>() as usize;
+        let layout = TensorLayout::<DynRank>::row_major(out_shape.clone(), dtype);
+        let buf = POOL.allocate(layout.buffer_size_bytes())
+            .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
+        let mut out = NumericTensor::from_parts(buf, layout);
+
+        // Initialize output to 1.0 (identity for multiplication).
+        for i in 0..out_numel {
+            out.write_element(
+                i,
+                crate::numeric_scalar::NumericScalar::from_f64(1.0).cast_to(dtype),
+            );
+        }
+
+        // Compute strides for mapping input flat index -> output flat index.
+        let in_strides = {
+            let mut s = vec![1usize; rank];
+            for i in (0..rank.saturating_sub(1)).rev() {
+                s[i] = s[i + 1] * shape[i + 1] as usize;
+            }
+            s
+        };
+        let out_strides = {
+            let mut s = vec![1usize; out_shape.len()];
+            for i in (0..out_shape.len().saturating_sub(1)).rev() {
+                s[i] = s[i + 1] * out_shape[i + 1] as usize;
+            }
+            s
+        };
+
+        // Iterate all input elements and reduce by multiplication.
+        for flat_in in 0..data.numel() {
+            let mut rem = flat_in;
+            let mut out_flat = 0usize;
+            let mut out_dim_idx = 0;
+            for i in 0..rank {
+                let idx = rem / in_strides[i];
+                rem %= in_strides[i];
+                if !axes.contains(&i) {
+                    out_flat += idx * out_strides[out_dim_idx];
+                    out_dim_idx += 1;
+                } else if self.keepdims {
+                    out_dim_idx += 1;
+                }
+            }
+
+            let val = data.read_element(flat_in).to_f64();
+            let cur = out.read_element(out_flat).to_f64();
+            out.write_element(
+                out_flat,
+                crate::numeric_scalar::NumericScalar::from_f64(cur * val).cast_to(dtype),
+            );
+        }
+
+        Ok(vec![out])
+    }
 }
 
 impl Node for ReduceProd {
@@ -95,6 +250,99 @@ impl Node for ReduceProd {
 }
 
 impl MilliOp for ReduceProd {
+    fn eval_new<'p, P2: crate::pool::Pool + 'p>(
+        &self,
+        inputs: &[crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>],
+        pool: &'p P2,
+    ) -> Result<Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>, crate::nano_graph::pool_eval::PoolEvalError> {
+        use crate::numeric_tensor::{NumericTensor, TensorLayout};
+        use crate::tensor_rank::DynRank;
+
+        let data = &inputs[0];
+        let shape = data.shape();
+        let rank = shape.len();
+        let dtype = data.dtype();
+
+        // Extract axes: if axes input exists, read from inputs[1]; else reduce all.
+        let axes: Vec<usize> = if self.axes.is_some() && inputs.len() > 1 {
+            let ax_view = &inputs[1];
+            let raw: Vec<i64> = (0..ax_view.numel()).map(|i| ax_view.read_element(i).to_i64()).collect();
+            if raw.is_empty() && self.noop_with_empty_axes {
+                // Noop: copy input.
+                let layout = TensorLayout::<DynRank>::row_major(shape.clone(), dtype);
+                let buf = pool.allocate(layout.buffer_size_bytes())
+                    .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
+                let mut out = NumericTensor::from_parts(buf, layout);
+                for i in 0..data.numel() { out.write_element(i, data.read_element(i)); }
+                return Ok(vec![out]);
+            }
+            if raw.is_empty() {
+                (0..rank).collect()
+            } else {
+                raw.iter().map(|&a| if a < 0 { (a + rank as i64) as usize } else { a as usize }).collect()
+            }
+        } else {
+            if self.noop_with_empty_axes && self.axes.is_none() {
+                // No axes specified + noop_with_empty_axes → identity
+            }
+            (0..rank).collect()
+        };
+
+        // Compute output shape.
+        let mut out_shape = Vec::new();
+        for (i, &dim) in shape.iter().enumerate() {
+            if axes.contains(&i) {
+                if self.keepdims { out_shape.push(1u64); }
+            } else {
+                out_shape.push(dim);
+            }
+        }
+        if out_shape.is_empty() { out_shape.push(1); }
+
+        let out_numel: usize = out_shape.iter().product::<u64>() as usize;
+        let layout = TensorLayout::<DynRank>::row_major(out_shape.clone(), dtype);
+        let buf = pool.allocate(layout.buffer_size_bytes())
+            .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
+        let mut out = NumericTensor::from_parts(buf, layout);
+
+        // Initialize to 1.0 (multiplicative identity).
+        for i in 0..out_numel {
+            out.write_element(i, crate::numeric_scalar::NumericScalar::from_f64(1.0).cast_to(dtype));
+        }
+
+        // Strides for index decomposition.
+        let in_strides = {
+            let mut s = vec![1usize; rank];
+            for i in (0..rank.saturating_sub(1)).rev() { s[i] = s[i + 1] * shape[i + 1] as usize; }
+            s
+        };
+        let out_strides = {
+            let mut s = vec![1usize; out_shape.len()];
+            for i in (0..out_shape.len().saturating_sub(1)).rev() { s[i] = s[i + 1] * out_shape[i + 1] as usize; }
+            s
+        };
+
+        for flat_in in 0..data.numel() {
+            let mut rem = flat_in;
+            let mut out_flat = 0usize;
+            let mut out_dim_idx = 0;
+            for i in 0..rank {
+                let idx = rem / in_strides[i];
+                rem %= in_strides[i];
+                if !axes.contains(&i) {
+                    out_flat += idx * out_strides[out_dim_idx];
+                    out_dim_idx += 1;
+                } else if self.keepdims {
+                    out_dim_idx += 1;
+                }
+            }
+            let val = data.read_element(flat_in).to_f64();
+            let cur = out.read_element(out_flat).to_f64();
+            out.write_element(out_flat, crate::numeric_scalar::NumericScalar::from_f64(cur * val).cast_to(dtype));
+        }
+        Ok(vec![out])
+    }
+
     fn infer<'p, P: Pool + 'p>(
         &self,
         known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'p, P>>,
@@ -113,58 +361,60 @@ impl MilliOp for ReduceProd {
 
         let out_dtype = data_info.dtype();
 
-        let num_axes: Option<usize> = if let Some(ax_id) = self.axes {
-            if let Some(ax_info) = known_inputs.get(&ax_id) {
-                ax_info
-                    .rank_if_known()
-                    .and_then(|_| ax_info.dim_if_known(0).map(|n| n as usize))
+        // Compute symbolic output info.
+        let out_info = if let Some(out_dims) = super::infer_reduce_output_shape(
+            data_info,
+            self.axes,
+            self.keepdims,
+            self.noop_with_empty_axes,
+            known_inputs,
+            symbolic_resolver,
+        ) {
+            TensorInfo::from_dtype_and_shape_scalars(out_dtype, &out_dims)
+        } else {
+            // Fallback: rank-only inference.
+            let num_axes: Option<usize> = if let Some(ax_id) = self.axes {
+                known_inputs.get(&ax_id).and_then(|ax_info| {
+                    ax_info
+                        .rank_if_known()
+                        .and_then(|_| ax_info.dim_if_known(0).map(|n| n as usize))
+                })
             } else {
                 None
-            }
-        } else {
-            None
-        };
+            };
 
-        let out_rank: ScalarInfoTyped<u32> = match data_info.rank() {
-            ScalarInfoTyped::Numeric(input_rank) => {
-                if self.axes.is_none() {
-                    if self.keepdims {
-                        ScalarInfoTyped::Numeric(input_rank)
-                    } else {
-                        ScalarInfoTyped::Numeric(0)
-                    }
-                } else if let Some(n) = num_axes {
-                    if n == 0 && self.noop_with_empty_axes {
-                        ScalarInfoTyped::Numeric(input_rank)
-                    } else if n == 0 {
-                        if self.keepdims {
+            let out_rank: ScalarInfoTyped<u32> = match data_info.rank() {
+                ScalarInfoTyped::Numeric(input_rank) => {
+                    if self.axes.is_none() {
+                        ScalarInfoTyped::Numeric(if self.keepdims { input_rank } else { 0 })
+                    } else if let Some(n) = num_axes {
+                        if n == 0 && self.noop_with_empty_axes {
+                            ScalarInfoTyped::Numeric(input_rank)
+                        } else if n == 0 {
+                            ScalarInfoTyped::Numeric(if self.keepdims { input_rank } else { 0 })
+                        } else if self.keepdims {
                             ScalarInfoTyped::Numeric(input_rank)
                         } else {
-                            ScalarInfoTyped::Numeric(0)
+                            ScalarInfoTyped::Numeric(input_rank.saturating_sub(n as u32))
                         }
                     } else if self.keepdims {
                         ScalarInfoTyped::Numeric(input_rank)
                     } else {
-                        ScalarInfoTyped::Numeric(input_rank.saturating_sub(n as u32))
+                        ScalarInfoTyped::Symbolic(crate::symbolic_scalar::SymbolicScalarTyped::new(
+                            symbolic_resolver,
+                        ))
                     }
-                } else if self.keepdims {
-                    ScalarInfoTyped::Numeric(input_rank)
-                } else {
-                    ScalarInfoTyped::Symbolic(crate::symbolic_scalar::SymbolicScalarTyped::new(
-                        symbolic_resolver,
-                    ))
                 }
-            }
-            _ => ScalarInfoTyped::Symbolic(crate::symbolic_scalar::SymbolicScalarTyped::new(
-                symbolic_resolver,
-            )),
-        };
+                _ => ScalarInfoTyped::Symbolic(crate::symbolic_scalar::SymbolicScalarTyped::new(
+                    symbolic_resolver,
+                )),
+            };
 
-        let first_elem = crate::scalar_info::ScalarInfo::Symbolic(
-            crate::symbolic_scalar::SymbolicScalar::new(out_dtype, symbolic_resolver),
-        );
-        let out_info =
-            TensorInfo::new_from_first_element_and_rank(first_elem, out_rank, symbolic_resolver);
+            let first_elem = crate::scalar_info::ScalarInfo::Symbolic(
+                crate::symbolic_scalar::SymbolicScalar::new(out_dtype, symbolic_resolver),
+            );
+            TensorInfo::new_from_first_element_and_rank(first_elem, out_rank, symbolic_resolver)
+        };
 
         // Check if all inputs are concrete; if so, try constant fold with output hints.
         if let Some(results) = super::constant_fold(self, known_inputs, &[(self.output, out_info.clone_with_pool(pool))], pool) {

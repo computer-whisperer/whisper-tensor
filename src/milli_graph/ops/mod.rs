@@ -339,6 +339,24 @@ pub trait MilliOp: Node<OpKind = String> {
         None // default: not differentiable
     }
 
+    /// Evaluate this op on new pool-backed types.
+    ///
+    /// Used by the OpaqueOp system for ops that can't be decomposed into
+    /// scalar nano-ops. The default returns `Unsupported` — ops must override
+    /// this to be executable through pool_eval without nano decomposition.
+    fn eval_new<'p, P2: Pool + 'p>(
+        &self,
+        _inputs: &[crate::numeric_tensor::NumericTensorView<'_, DynRank>],
+        _pool: &'p P2,
+    ) -> Result<Vec<crate::numeric_tensor::NumericTensor<'p, DynRank, P2>>, crate::nano_graph::pool_eval::PoolEvalError>
+    where
+        Self: Sized,
+    {
+        Err(crate::nano_graph::pool_eval::PoolEvalError::Unsupported(
+            format!("{} does not implement eval_new", self.op_kind()),
+        ))
+    }
+
     /// Lower this op to nano-graph representation.
     /// Default: registers outputs as boundary ops.
     fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext)
@@ -602,8 +620,7 @@ impl AnyMilliOp {
             AnyMilliOp::ReduceMax(x) => x.lower_to_nano(ctx),
             AnyMilliOp::ReduceMean(x) => x.lower_to_nano(ctx),
             AnyMilliOp::Gather(x) => x.lower_to_nano(ctx),
-            AnyMilliOp::ReduceMin(x) => x.lower_to_nano(ctx),
-            // Everything else: constant-fold if numeric, otherwise boundary.
+            // Everything else: constant-fold if numeric, otherwise opaque via eval_new.
             _ => ctx.lower_default(self),
         }
     }
@@ -863,6 +880,55 @@ impl MilliOp for AnyMilliOp {
 
     fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
         AnyMilliOp::lower_to_nano(self, ctx);
+    }
+
+    fn eval_new<'p, P2: Pool + 'p>(
+        &self,
+        inputs: &[crate::numeric_tensor::NumericTensorView<'_, DynRank>],
+        pool: &'p P2,
+    ) -> Result<Vec<crate::numeric_tensor::NumericTensor<'p, DynRank, P2>>, crate::nano_graph::pool_eval::PoolEvalError> {
+        match self {
+            AnyMilliOp::SimpleBinary(x) => x.eval_new(inputs, pool),
+            AnyMilliOp::MatMul(x) => x.eval_new(inputs, pool),
+            AnyMilliOp::Pow(x) => x.eval_new(inputs, pool),
+            AnyMilliOp::SimpleUnary(x) => x.eval_new(inputs, pool),
+            AnyMilliOp::ClampMin(x) => x.eval_new(inputs, pool),
+            AnyMilliOp::NonZero(x) => x.eval_new(inputs, pool),
+            AnyMilliOp::CumSum(x) => x.eval_new(inputs, pool),
+            AnyMilliOp::Shape(x) => x.eval_new(inputs, pool),
+            AnyMilliOp::Reshape(x) => x.eval_new(inputs, pool),
+            AnyMilliOp::Slice(x) => x.eval_new(inputs, pool),
+            AnyMilliOp::ReduceSum(x) => x.eval_new(inputs, pool),
+            AnyMilliOp::ReduceMin(x) => x.eval_new(inputs, pool),
+            AnyMilliOp::ReduceMax(x) => x.eval_new(inputs, pool),
+            AnyMilliOp::ReduceProd(x) => x.eval_new(inputs, pool),
+            AnyMilliOp::ReduceMean(x) => x.eval_new(inputs, pool),
+            AnyMilliOp::Cast(x) => x.eval_new(inputs, pool),
+            AnyMilliOp::CastLike(x) => x.eval_new(inputs, pool),
+            AnyMilliOp::Transpose(x) => x.eval_new(inputs, pool),
+            AnyMilliOp::Squeeze(x) => x.eval_new(inputs, pool),
+            AnyMilliOp::Unsqueeze(x) => x.eval_new(inputs, pool),
+            AnyMilliOp::Gather(x) => x.eval_new(inputs, pool),
+            AnyMilliOp::GatherGrad(x) => x.eval_new(inputs, pool),
+            AnyMilliOp::Concat(x) => x.eval_new(inputs, pool),
+            AnyMilliOp::Split(x) => x.eval_new(inputs, pool),
+            AnyMilliOp::Where(x) => x.eval_new(inputs, pool),
+            AnyMilliOp::Range(x) => x.eval_new(inputs, pool),
+            AnyMilliOp::Expand(x) => x.eval_new(inputs, pool),
+            AnyMilliOp::SumTo(x) => x.eval_new(inputs, pool),
+            AnyMilliOp::ArgMax(x) => x.eval_new(inputs, pool),
+            AnyMilliOp::ArgMin(x) => x.eval_new(inputs, pool),
+            AnyMilliOp::Resize(x) => x.eval_new(inputs, pool),
+            AnyMilliOp::Conv(x) => x.eval_new(inputs, pool),
+            AnyMilliOp::ConvInputGrad(x) => x.eval_new(inputs, pool),
+            AnyMilliOp::ConvWeightGrad(x) => x.eval_new(inputs, pool),
+            AnyMilliOp::ConvBiasGrad(x) => x.eval_new(inputs, pool),
+            AnyMilliOp::Pad(x) => x.eval_new(inputs, pool),
+            AnyMilliOp::Constant(x) => x.eval_new(inputs, pool),
+            AnyMilliOp::ConstantOfShape(x) => x.eval_new(inputs, pool),
+            AnyMilliOp::RandomNormalLike(x) => x.eval_new(inputs, pool),
+            AnyMilliOp::TopK(x) => x.eval_new(inputs, pool),
+        }
     }
 }
 

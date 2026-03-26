@@ -62,9 +62,234 @@ impl ArgMax {
         super::remap(&mut self.output, map);
         super::remap(&mut self.input, map);
     }
+
+    pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
+        let all_infos = ctx.all_infos;
+        let data_rank = all_infos
+            .get(&self.input)
+            .and_then(|i| i.rank_if_known())
+            .unwrap_or(0);
+        let axis = if self.axis < 0 {
+            (self.axis + data_rank as i64) as usize
+        } else {
+            self.axis as usize
+        };
+
+        let input_ids: Vec<GlobalId> = self.inputs().collect();
+        let output_ids = vec![self.output];
+
+        let eval_fn = std::sync::Arc::new(ArgMaxEval {
+            axis,
+            keepdims: self.keepdims,
+            select_last_index: self.select_last_index,
+        });
+        ctx.register_opaque_op(eval_fn, "ArgMax", &input_ids, &output_ids);
+    }
+}
+
+/// Opaque eval implementation for ArgMax on new types.
+struct ArgMaxEval {
+    axis: usize,
+    keepdims: bool,
+    select_last_index: bool,
+}
+
+impl crate::nano_graph::ops::OpaqueEval for ArgMaxEval {
+    fn eval(
+        &self,
+        inputs: &[crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>],
+    ) -> Result<
+        Vec<crate::numeric_tensor::NumericTensor<'static, crate::tensor_rank::DynRank, crate::pool::SystemPool>>,
+        crate::nano_graph::pool_eval::PoolEvalError,
+    > {
+        use crate::numeric_dtype::NumericDType;
+        use crate::numeric_tensor::{NumericTensor, TensorLayout};
+        use crate::pool::{Pool, SystemPool};
+        use crate::tensor_rank::DynRank;
+
+        static POOL: SystemPool = SystemPool;
+        let data = &inputs[0];
+        let shape = data.shape();
+        let rank = shape.len();
+        let axis = self.axis;
+        let out_dtype = NumericDType::I64;
+
+        // Compute output shape.
+        let mut out_shape = Vec::new();
+        for (i, &dim) in shape.iter().enumerate() {
+            if i == axis {
+                if self.keepdims {
+                    out_shape.push(1u64);
+                }
+            } else {
+                out_shape.push(dim);
+            }
+        }
+        if out_shape.is_empty() {
+            out_shape.push(1);
+        }
+
+        let out_numel: usize = out_shape.iter().product::<u64>() as usize;
+        let layout = TensorLayout::<DynRank>::row_major(out_shape.clone(), out_dtype);
+        let buf = POOL.allocate(layout.buffer_size_bytes())
+            .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
+        let mut out = NumericTensor::from_parts(buf, layout);
+
+        // Compute strides for the input shape.
+        let in_strides = {
+            let mut s = vec![1usize; rank];
+            for i in (0..rank.saturating_sub(1)).rev() {
+                s[i] = s[i + 1] * shape[i + 1] as usize;
+            }
+            s
+        };
+
+        let axis_dim = shape[axis] as usize;
+        let axis_stride = in_strides[axis];
+
+        // Number of independent "lines" along the axis.
+        let outer_count = out_numel;
+
+        // Compute strides for the output shape.
+        let out_strides = {
+            let mut s = vec![1usize; out_shape.len()];
+            for i in (0..out_shape.len().saturating_sub(1)).rev() {
+                s[i] = s[i + 1] * out_shape[i + 1] as usize;
+            }
+            s
+        };
+
+        for out_flat in 0..outer_count {
+            // Decompose out_flat into output coords, then map to input base index.
+            let mut rem = out_flat;
+            let mut base = 0usize;
+            let mut out_dim_idx = 0;
+            for d in 0..rank {
+                if d == axis {
+                    if self.keepdims {
+                        out_dim_idx += 1; // skip the axis dim (always 0)
+                    }
+                    continue;
+                }
+                let coord = rem / out_strides[out_dim_idx];
+                rem %= out_strides[out_dim_idx];
+                base += coord * in_strides[d];
+                out_dim_idx += 1;
+            }
+
+            // Scan along axis to find argmax.
+            let mut best_idx: usize = 0;
+            let mut best_val: f64 = f64::NEG_INFINITY;
+            for k in 0..axis_dim {
+                let flat = base + k * axis_stride;
+                let val = data.read_element(flat).to_f64();
+                if val > best_val || (self.select_last_index && val >= best_val) {
+                    best_val = val;
+                    best_idx = k;
+                }
+            }
+
+            out.write_element(
+                out_flat,
+                crate::numeric_scalar::NumericScalar::from_i64(best_idx as i64),
+            );
+        }
+
+        Ok(vec![out])
+    }
 }
 
 impl MilliOp for ArgMax {
+    fn eval_new<'p, P2: crate::pool::Pool + 'p>(
+        &self,
+        inputs: &[crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>],
+        pool: &'p P2,
+    ) -> Result<Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>, crate::nano_graph::pool_eval::PoolEvalError> {
+        use crate::numeric_dtype::NumericDType;
+        use crate::numeric_tensor::{NumericTensor, TensorLayout};
+        use crate::tensor_rank::DynRank;
+
+        let data = &inputs[0];
+        let shape = data.shape();
+        let rank = shape.len();
+        let axis = if self.axis < 0 { (self.axis + rank as i64) as usize } else { self.axis as usize };
+        let out_dtype = NumericDType::I64;
+
+        // Compute output shape.
+        let mut out_shape = Vec::new();
+        for (i, &dim) in shape.iter().enumerate() {
+            if i == axis {
+                if self.keepdims { out_shape.push(1u64); }
+            } else {
+                out_shape.push(dim);
+            }
+        }
+        if out_shape.is_empty() { out_shape.push(1); }
+
+        let out_numel: usize = out_shape.iter().product::<u64>() as usize;
+        let layout = TensorLayout::<DynRank>::row_major(out_shape.clone(), out_dtype);
+        let buf = pool.allocate(layout.buffer_size_bytes())
+            .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
+        let mut out = NumericTensor::from_parts(buf, layout);
+
+        // Compute strides for the input shape.
+        let in_strides = {
+            let mut s = vec![1usize; rank];
+            for i in (0..rank.saturating_sub(1)).rev() {
+                s[i] = s[i + 1] * shape[i + 1] as usize;
+            }
+            s
+        };
+
+        let axis_dim = shape[axis] as usize;
+        let axis_stride = in_strides[axis];
+        let outer_count = out_numel;
+
+        // Compute strides for the output shape.
+        let out_strides = {
+            let mut s = vec![1usize; out_shape.len()];
+            for i in (0..out_shape.len().saturating_sub(1)).rev() {
+                s[i] = s[i + 1] * out_shape[i + 1] as usize;
+            }
+            s
+        };
+
+        for out_flat in 0..outer_count {
+            // Decompose out_flat into output coords, then map to input base index.
+            let mut rem = out_flat;
+            let mut base = 0usize;
+            let mut out_dim_idx = 0;
+            for d in 0..rank {
+                if d == axis {
+                    if self.keepdims {
+                        out_dim_idx += 1;
+                    }
+                    continue;
+                }
+                let coord = rem / out_strides[out_dim_idx];
+                rem %= out_strides[out_dim_idx];
+                base += coord * in_strides[d];
+                out_dim_idx += 1;
+            }
+
+            // Scan along axis to find argmax.
+            let mut best_idx: usize = 0;
+            let mut best_val: f64 = f64::NEG_INFINITY;
+            for k in 0..axis_dim {
+                let flat = base + k * axis_stride;
+                let val = data.read_element(flat).to_f64();
+                if val > best_val || (self.select_last_index && val >= best_val) {
+                    best_val = val;
+                    best_idx = k;
+                }
+            }
+
+            out.write_element(out_flat, crate::numeric_scalar::NumericScalar::from_i64(best_idx as i64));
+        }
+
+        Ok(vec![out])
+    }
+
     fn infer<'p, P: Pool + 'p>(
         &self,
         known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'p, P>>,

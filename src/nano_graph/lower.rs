@@ -123,6 +123,31 @@ pub fn legacy_numeric_to_new<'p, P: crate::pool::Pool>(
     new_tensor
 }
 
+/// Wrapper that calls `AnyMilliOp::eval_new` through the `OpaqueEval` trait.
+///
+/// Used by `lower_default` to make any MilliOp executable through pool_eval
+/// without nano decomposition.
+struct MilliOpOpaqueEval(crate::milli_graph::ops::AnyMilliOp);
+
+// Safety: AnyMilliOp derives Clone + Serialize + Debug, and all op fields are
+// plain data (GlobalId, numeric params). No thread-unsafe state.
+unsafe impl Send for MilliOpOpaqueEval {}
+unsafe impl Sync for MilliOpOpaqueEval {}
+
+impl crate::nano_graph::ops::OpaqueEval for MilliOpOpaqueEval {
+    fn eval(
+        &self,
+        inputs: &[crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>],
+        ) -> Result<
+        Vec<crate::numeric_tensor::NumericTensor<'static, crate::tensor_rank::DynRank, crate::pool::SystemPool>>,
+        crate::nano_graph::pool_eval::PoolEvalError,
+    > {
+        use crate::milli_graph::ops::MilliOp;
+        static POOL: crate::pool::SystemPool = crate::pool::SystemPool;
+        self.0.eval_new(inputs, &POOL)
+    }
+}
+
 /// Common accessors for reduce ops (ReduceSum, ReduceMax, ReduceMean).
 pub trait ReduceAccessors {
     fn axes_tensor(&self) -> Option<GlobalId>;
@@ -1184,30 +1209,55 @@ impl<'a> NanoLoweringContext<'a> {
         }
     }
 
-    /// Default lowering for unsupported ops: if all outputs are numeric
-    /// (constant-folded), register as constants; otherwise register as boundary.
+    /// Default lowering for ops without nano decomposition.
+    ///
+    /// If all outputs are numeric (constant-folded), registers as constants.
+    /// Otherwise, registers an OpaqueOp that calls `eval_new` on the op
+    /// through pool_eval. Falls back to boundary if output info is missing.
     pub fn lower_default(&mut self, op: &AnyMilliOp) {
+        use crate::nano_graph::ops::OpaqueOp;
+
         let all_infos = self.all_infos;
         let op_kind = op.op_kind();
+
+        // If all outputs have concrete values, register as constants (no eval needed).
         let all_numeric = op.outputs().all(|out_id| {
             all_infos
                 .get(&out_id)
                 .is_some_and(|i| i.as_numeric().is_some())
         });
-        for out_id in op.outputs() {
-            if let Some(info) = all_infos.get(&out_id) {
-                if all_numeric {
+        if all_numeric {
+            for out_id in op.outputs() {
+                if let Some(info) = all_infos.get(&out_id) {
                     self.register_constant(out_id, info);
-                } else {
-                    self.register_boundary(out_id, info, &op_kind);
                 }
-            } else {
-                self.register_opaque(out_id);
             }
+            return;
         }
-        if !all_numeric {
+
+        // Check all outputs have shape info (needed for opaque op registration).
+        let all_outputs_known = op.outputs().all(|out_id| {
+            all_infos.get(&out_id).is_some_and(|i| i.rank_if_known().is_some())
+        });
+
+        if !all_outputs_known {
+            // Fall back to boundary if we can't determine output shapes.
+            for out_id in op.outputs() {
+                if let Some(info) = all_infos.get(&out_id) {
+                    self.register_boundary(out_id, info, &op_kind);
+                } else {
+                    self.register_opaque(out_id);
+                }
+            }
             self.push_unsupported(op, &op_kind);
+            return;
         }
+
+        // Register as an opaque op — pool_eval will call eval_new on the cloned op.
+        let input_ids: Vec<GlobalId> = op.inputs().collect();
+        let output_ids: Vec<GlobalId> = op.outputs().collect();
+        let eval_fn = std::sync::Arc::new(MilliOpOpaqueEval(op.clone()));
+        self.register_opaque_op(eval_fn, &op_kind, &input_ids, &output_ids);
     }
 
     /// Register an opaque milli-op that can't be decomposed into scalar nano-ops.

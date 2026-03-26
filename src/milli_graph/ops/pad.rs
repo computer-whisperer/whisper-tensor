@@ -119,6 +119,110 @@ impl NdLayout {
 }
 
 impl MilliOp for Pad {
+    fn eval_new<'p, P2: crate::pool::Pool + 'p>(
+        &self,
+        inputs: &[crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>],
+        pool: &'p P2,
+    ) -> Result<Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>, crate::nano_graph::pool_eval::PoolEvalError> {
+        use crate::numeric_tensor::{NumericTensor, TensorLayout};
+        use crate::tensor_rank::DynRank;
+
+        let data = &inputs[0];
+        let shape = data.shape();
+        let rank = shape.len();
+        let dtype = data.dtype();
+
+        // Parse pads from inputs[1] (1D i64 tensor).
+        let pads_view = &inputs[1];
+        let pads_raw: Vec<i64> = (0..pads_view.numel()).map(|i| pads_view.read_element(i).to_i64()).collect();
+
+        // Get constant value (default 0.0) from inputs[2] if present.
+        let const_val: f64 = if self.constant_value.is_some() && inputs.len() > 2 {
+            inputs[2].read_element(0).to_f64()
+        } else {
+            0.0
+        };
+
+        // Parse axes (optional) — if axes input exists it follows constant_value.
+        let axes: Vec<usize> = if self.axes.is_some() {
+            let axes_input_idx = if self.constant_value.is_some() { 3 } else { 2 };
+            if inputs.len() > axes_input_idx {
+                let ax_view = &inputs[axes_input_idx];
+                (0..ax_view.numel()).map(|i| {
+                    let a = ax_view.read_element(i).to_i64();
+                    if a < 0 { (a + rank as i64) as usize } else { a as usize }
+                }).collect()
+            } else {
+                (0..rank).collect()
+            }
+        } else {
+            (0..rank).collect()
+        };
+
+        let num_axes = axes.len();
+        if pads_raw.len() != 2 * num_axes {
+            return Err(crate::nano_graph::pool_eval::PoolEvalError::Unsupported(
+                format!("Pad: expected pads length {}, got {}", 2 * num_axes, pads_raw.len()),
+            ));
+        }
+
+        // Build per-axis (begin_pad, end_pad).
+        let mut begin_pads = vec![0i64; rank];
+        let mut end_pads = vec![0i64; rank];
+        for (i, &axis) in axes.iter().enumerate() {
+            begin_pads[axis] = pads_raw[i];
+            end_pads[axis] = pads_raw[num_axes + i];
+        }
+
+        // Compute output shape.
+        let out_shape: Vec<u64> = (0..rank)
+            .map(|i| (shape[i] as i64 + begin_pads[i] + end_pads[i]) as u64)
+            .collect();
+
+        let out_numel: usize = out_shape.iter().product::<u64>() as usize;
+        let layout = TensorLayout::<DynRank>::row_major(out_shape.clone(), dtype);
+        let buf = pool.allocate(layout.buffer_size_bytes())
+            .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
+        let mut out = NumericTensor::from_parts(buf, layout);
+
+        // Initialize output with constant value.
+        let const_scalar = crate::numeric_scalar::NumericScalar::from_f64(const_val).cast_to(dtype);
+        for i in 0..out_numel {
+            out.write_element(i, const_scalar);
+        }
+
+        // Compute strides for input and output.
+        let in_strides = {
+            let mut s = vec![1usize; rank];
+            for i in (0..rank.saturating_sub(1)).rev() {
+                s[i] = s[i + 1] * shape[i + 1] as usize;
+            }
+            s
+        };
+        let out_strides = {
+            let mut s = vec![1usize; rank];
+            for i in (0..rank.saturating_sub(1)).rev() {
+                s[i] = s[i + 1] * out_shape[i + 1] as usize;
+            }
+            s
+        };
+
+        // Copy input data into output at offset position (constant mode).
+        let in_total = data.numel();
+        for flat_idx in 0..in_total {
+            let mut remaining = flat_idx;
+            let mut out_offset = 0usize;
+            for d in 0..rank {
+                let coord = remaining / in_strides[d];
+                remaining %= in_strides[d];
+                out_offset += (coord as i64 + begin_pads[d]) as usize * out_strides[d];
+            }
+            out.write_element(out_offset, data.read_element(flat_idx));
+        }
+
+        Ok(vec![out])
+    }
+
     fn infer<'p, P: Pool + 'p>(
         &self,
         known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'p, P>>,
