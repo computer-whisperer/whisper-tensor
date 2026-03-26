@@ -177,4 +177,43 @@ impl MilliOp for RandomNormalLike {
 
         Ok(Box::new([(self.output, out)].into_iter()))
     }
+
+    fn eval_new<'p, P2: crate::pool::Pool + 'p>(
+        &self,
+        inputs: &[crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>],
+        pool: &'p P2,
+    ) -> Result<Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>, crate::nano_graph::pool_eval::PoolEvalError> {
+        use crate::numeric_scalar::NumericScalar;
+        use crate::numeric_tensor::{NumericTensor, TensorLayout};
+        use crate::tensor_rank::DynRank;
+
+        let input = &inputs[0];
+        let shape = input.shape().clone();
+        let numel: usize = shape.iter().product::<u64>() as usize;
+
+        let out_dtype = self.dtype
+            .and_then(|dt| crate::numeric_dtype::NumericDType::from_legacy(dt))
+            .unwrap_or_else(|| input.dtype());
+
+        let layout = TensorLayout::<DynRank>::row_major(shape, out_dtype);
+        let buf = pool.allocate(layout.buffer_size_bytes())
+            .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
+        let mut out = NumericTensor::from_parts(buf, layout);
+
+        // Generate random normal values using fill_normal helper
+        let values = if let Some(seed) = self.seed {
+            use rand::SeedableRng;
+            let mut rng = rand::rngs::StdRng::seed_from_u64(seed.to_bits() as u64);
+            fill_normal(&mut rng, numel, self.mean, self.scale)
+        } else {
+            let mut rng = rand::rng();
+            fill_normal(&mut rng, numel, self.mean, self.scale)
+        };
+
+        for (i, &v) in values.iter().enumerate() {
+            out.write_element(i, NumericScalar::from_f64(v as f64).cast_to(out_dtype));
+        }
+
+        Ok(vec![out])
+    }
 }

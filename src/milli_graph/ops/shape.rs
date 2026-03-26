@@ -133,6 +133,27 @@ impl MilliOp for Shape {
         Ok(Box::new([(self.output, out)].into_iter()))
     }
 
+    fn eval_new<'p, P2: crate::pool::Pool + 'p>(
+        &self,
+        inputs: &[crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>],
+        pool: &'p P2,
+    ) -> Result<Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>, crate::nano_graph::pool_eval::PoolEvalError> {
+        use crate::numeric_scalar::NumericScalar;
+        use crate::numeric_tensor::{NumericTensor, TensorLayout};
+        use crate::tensor_rank::DynRank;
+
+        let input_shape = inputs[0].shape();
+        let rank = input_shape.len();
+        let layout = TensorLayout::<DynRank>::row_major(vec![rank as u64], crate::numeric_dtype::NumericDType::I64);
+        let buf = pool.allocate(layout.buffer_size_bytes())
+            .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
+        let mut out = NumericTensor::from_parts(buf, layout);
+        for (i, &dim) in input_shape.iter().enumerate() {
+            out.write_element(i, NumericScalar::from_i64(dim as i64));
+        }
+        Ok(vec![out])
+    }
+
     fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
         Shape::lower_to_nano(self, ctx)
     }

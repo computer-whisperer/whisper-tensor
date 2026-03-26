@@ -337,6 +337,79 @@ impl MilliOp for Transpose {
         Ok(Box::new([(self.output, out)].into_iter()))
     }
 
+    fn eval_new<'p, P2: crate::pool::Pool + 'p>(
+        &self,
+        inputs: &[crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>],
+        pool: &'p P2,
+    ) -> Result<Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>, crate::nano_graph::pool_eval::PoolEvalError> {
+        use crate::numeric_tensor::{NumericTensor, TensorLayout};
+        use crate::tensor_rank::DynRank;
+
+        let data = &inputs[0];
+        let input_shape = data.shape();
+        let rank = input_shape.len();
+        let dtype = data.dtype();
+
+        // Build full permutation
+        let full_perm: Vec<usize> = match &self.perm {
+            None => (0..rank).rev().collect(),
+            Some(p) => {
+                let expanded = if p.len() < rank {
+                    let prefix_len = rank - p.len();
+                    let mut fp: Vec<i64> = (0..prefix_len as i64).collect();
+                    fp.extend(p.iter().map(|&x| if x < 0 { x + rank as i64 } else { x }));
+                    fp
+                } else {
+                    p.clone()
+                };
+                expanded.iter().map(|&x| if x < 0 { (x + rank as i64) as usize } else { x as usize }).collect()
+            }
+        };
+
+        // Compute output shape
+        let output_shape: Vec<u64> = full_perm.iter().map(|&p| input_shape[p]).collect();
+        let out_numel: usize = output_shape.iter().product::<u64>() as usize;
+
+        // Compute input strides (row-major)
+        let mut input_strides = vec![1usize; rank];
+        for i in (0..rank.saturating_sub(1)).rev() {
+            input_strides[i] = input_strides[i + 1] * input_shape[i + 1] as usize;
+        }
+
+        // Compute output strides (row-major)
+        let mut output_strides = vec![1usize; rank];
+        for i in (0..rank.saturating_sub(1)).rev() {
+            output_strides[i] = output_strides[i + 1] * output_shape[i + 1] as usize;
+        }
+
+        let layout = TensorLayout::<DynRank>::row_major(output_shape, dtype);
+        let buf = pool.allocate(layout.buffer_size_bytes())
+            .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
+        let mut out = NumericTensor::from_parts(buf, layout);
+
+        // Build inverse permutation: inv_perm[perm[i]] = i
+        let mut inv_perm = vec![0usize; rank];
+        for (i, &p) in full_perm.iter().enumerate() {
+            inv_perm[p] = i;
+        }
+
+        for out_flat in 0..out_numel {
+            // Decompose output flat index into output coords
+            let mut rem = out_flat;
+            let mut input_flat = 0usize;
+            for out_dim in 0..rank {
+                let coord = rem / output_strides[out_dim];
+                rem %= output_strides[out_dim];
+                // This output coord corresponds to input dim = perm[out_dim]
+                let in_dim = full_perm[out_dim];
+                input_flat += coord * input_strides[in_dim];
+            }
+            out.write_element(out_flat, data.read_element(input_flat));
+        }
+
+        Ok(vec![out])
+    }
+
     fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
         Transpose::lower_to_nano(self, ctx)
     }

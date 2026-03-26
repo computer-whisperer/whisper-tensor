@@ -251,6 +251,43 @@ impl MilliOp for Squeeze {
         }
     }
 
+    fn eval_new<'p, P2: crate::pool::Pool + 'p>(
+        &self,
+        inputs: &[crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>],
+        pool: &'p P2,
+    ) -> Result<Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>, crate::nano_graph::pool_eval::PoolEvalError> {
+        use crate::numeric_tensor::{NumericTensor, TensorLayout};
+        use crate::tensor_rank::DynRank;
+
+        let data = &inputs[0];
+        let axes_tensor = &inputs[1];
+        let input_shape = data.shape();
+        let input_rank = input_shape.len();
+        let dtype = data.dtype();
+        let numel = data.numel();
+
+        let axes: Vec<usize> = (0..axes_tensor.numel())
+            .map(|i| {
+                let a = axes_tensor.read_element(i).to_i64();
+                if a < 0 { (a + input_rank as i64) as usize } else { a as usize }
+            })
+            .collect();
+
+        let output_shape: Vec<u64> = input_shape.iter().enumerate()
+            .filter(|(i, _)| !axes.contains(i))
+            .map(|(_, &d)| d)
+            .collect();
+
+        let layout = TensorLayout::<DynRank>::row_major(output_shape, dtype);
+        let buf = pool.allocate(layout.buffer_size_bytes())
+            .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
+        let mut out = NumericTensor::from_parts(buf, layout);
+        for i in 0..numel {
+            out.write_element(i, data.read_element(i));
+        }
+        Ok(vec![out])
+    }
+
     fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
         Squeeze::lower_to_nano(self, ctx)
     }

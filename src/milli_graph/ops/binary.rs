@@ -499,6 +499,131 @@ impl MilliOp for SimpleBinary {
         Ok(Box::new([(self.output, out)].into_iter()))
     }
 
+    fn eval_new<'p, P2: crate::pool::Pool + 'p>(
+        &self,
+        inputs: &[crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>],
+        pool: &'p P2,
+    ) -> Result<Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>, crate::nano_graph::pool_eval::PoolEvalError> {
+        use crate::numeric_scalar::NumericScalar;
+        use crate::numeric_tensor::{NumericTensor, TensorLayout};
+        use crate::tensor_rank::DynRank;
+
+        let a = &inputs[0];
+        let b = &inputs[1];
+        let a_shape = a.shape();
+        let b_shape = b.shape();
+        let a_dtype = a.dtype();
+
+        // Determine output dtype
+        let out_dtype = match self.which_op {
+            WhichSimpleBinaryOp::Equal
+            | WhichSimpleBinaryOp::Greater
+            | WhichSimpleBinaryOp::GreaterOrEqual
+            | WhichSimpleBinaryOp::Less
+            | WhichSimpleBinaryOp::LessOrEqual
+            | WhichSimpleBinaryOp::And
+            | WhichSimpleBinaryOp::Or
+            | WhichSimpleBinaryOp::Xor => NumericDType::Bool,
+            _ => a_dtype,
+        };
+
+        // Compute broadcast output shape
+        let out_rank = a_shape.len().max(b_shape.len());
+        let mut output_shape = vec![0u64; out_rank];
+        let mut pa = vec![1u64; out_rank];
+        let mut pb = vec![1u64; out_rank];
+        for (i, &d) in a_shape.iter().enumerate() {
+            pa[out_rank - a_shape.len() + i] = d;
+        }
+        for (i, &d) in b_shape.iter().enumerate() {
+            pb[out_rank - b_shape.len() + i] = d;
+        }
+        for i in 0..out_rank {
+            output_shape[i] = pa[i].max(pb[i]);
+        }
+
+        let out_numel: usize = output_shape.iter().product::<u64>() as usize;
+
+        // Compute strides
+        let mut out_strides = vec![1usize; out_rank];
+        for i in (0..out_rank.saturating_sub(1)).rev() {
+            out_strides[i] = out_strides[i + 1] * output_shape[i + 1] as usize;
+        }
+        let mut a_strides = vec![1usize; out_rank];
+        for i in (0..out_rank.saturating_sub(1)).rev() {
+            a_strides[i] = a_strides[i + 1] * pa[i + 1] as usize;
+        }
+        let mut b_strides = vec![1usize; out_rank];
+        for i in (0..out_rank.saturating_sub(1)).rev() {
+            b_strides[i] = b_strides[i + 1] * pb[i + 1] as usize;
+        }
+
+        let layout = TensorLayout::<DynRank>::row_major(output_shape.clone(), out_dtype);
+        let buf = pool.allocate(layout.buffer_size_bytes())
+            .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
+        let mut out = NumericTensor::from_parts(buf, layout);
+
+        for out_flat in 0..out_numel {
+            let mut rem = out_flat;
+            let mut a_flat = 0usize;
+            let mut b_flat = 0usize;
+            for d in 0..out_rank {
+                let coord = rem / out_strides[d];
+                rem %= out_strides[d];
+                a_flat += (if pa[d] == 1 { 0 } else { coord }) * a_strides[d];
+                b_flat += (if pb[d] == 1 { 0 } else { coord }) * b_strides[d];
+            }
+            let av = a.read_element(a_flat);
+            let bv = b.read_element(b_flat);
+
+            let result = match self.which_op {
+                WhichSimpleBinaryOp::Add => av.add(bv),
+                WhichSimpleBinaryOp::Sub => av.sub(bv),
+                WhichSimpleBinaryOp::Mul => av.mul(bv),
+                WhichSimpleBinaryOp::Div => av.div(bv),
+                WhichSimpleBinaryOp::Max => av.max(bv),
+                WhichSimpleBinaryOp::Min => av.min(bv),
+                WhichSimpleBinaryOp::Modulo(_) => {
+                    let af = av.to_f64();
+                    let bf = bv.to_f64();
+                    if bf == 0.0 {
+                        NumericScalar::from_f64(f64::NAN).cast_to(a_dtype)
+                    } else {
+                        NumericScalar::from_f64(af % bf).cast_to(a_dtype)
+                    }
+                }
+                WhichSimpleBinaryOp::Equal => NumericScalar::from_bool(av.to_f64() == bv.to_f64()),
+                WhichSimpleBinaryOp::Greater => NumericScalar::from_bool(av.gt(bv)),
+                WhichSimpleBinaryOp::GreaterOrEqual => NumericScalar::from_bool(!av.lt(bv)),
+                WhichSimpleBinaryOp::Less => NumericScalar::from_bool(av.lt(bv)),
+                WhichSimpleBinaryOp::LessOrEqual => NumericScalar::from_bool(!av.gt(bv)),
+                WhichSimpleBinaryOp::And => NumericScalar::from_bool(av.is_nonzero() && bv.is_nonzero()),
+                WhichSimpleBinaryOp::Or => NumericScalar::from_bool(av.is_nonzero() || bv.is_nonzero()),
+                WhichSimpleBinaryOp::Xor => NumericScalar::from_bool(av.is_nonzero() != bv.is_nonzero()),
+                WhichSimpleBinaryOp::BitwiseAnd => {
+                    NumericScalar::from_raw_bits(av.raw() & bv.raw(), a_dtype)
+                }
+                WhichSimpleBinaryOp::BitwiseOr => {
+                    NumericScalar::from_raw_bits(av.raw() | bv.raw(), a_dtype)
+                }
+                WhichSimpleBinaryOp::BitwiseXor => {
+                    NumericScalar::from_raw_bits(av.raw() ^ bv.raw(), a_dtype)
+                }
+                WhichSimpleBinaryOp::BitShiftLeft => {
+                    let shift = bv.to_i64() as u32;
+                    NumericScalar::from_raw_bits(av.raw().wrapping_shl(shift), a_dtype)
+                }
+                WhichSimpleBinaryOp::BitShiftRight => {
+                    let shift = bv.to_i64() as u32;
+                    NumericScalar::from_raw_bits(av.raw().wrapping_shr(shift), a_dtype)
+                }
+            };
+            out.write_element(out_flat, result);
+        }
+
+        Ok(vec![out])
+    }
+
     fn backward(
         &self,
         output_grads: &HashMap<GlobalId, GlobalId>,
@@ -744,6 +869,62 @@ impl MilliOp for Pow {
     {
         let out = NumericTensor::<DynRank>::pow(&inputs[&self.a], &inputs[&self.b], backend)?;
         Ok(Box::new([(self.output, out)].into_iter()))
+    }
+
+    fn eval_new<'p, P2: crate::pool::Pool + 'p>(
+        &self,
+        inputs: &[crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>],
+        pool: &'p P2,
+    ) -> Result<Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>, crate::nano_graph::pool_eval::PoolEvalError> {
+        use crate::numeric_scalar::NumericScalar;
+        use crate::numeric_tensor::{NumericTensor, TensorLayout};
+        use crate::tensor_rank::DynRank;
+
+        let a = &inputs[0];
+        let b = &inputs[1];
+        let a_shape = a.shape();
+        let b_shape = b.shape();
+        let dtype = a.dtype();
+
+        // Compute broadcast output shape
+        let out_rank = a_shape.len().max(b_shape.len());
+        let mut output_shape = vec![0u64; out_rank];
+        let mut pa = vec![1u64; out_rank];
+        let mut pb = vec![1u64; out_rank];
+        for (i, &d) in a_shape.iter().enumerate() { pa[out_rank - a_shape.len() + i] = d; }
+        for (i, &d) in b_shape.iter().enumerate() { pb[out_rank - b_shape.len() + i] = d; }
+        for i in 0..out_rank { output_shape[i] = pa[i].max(pb[i]); }
+
+        let out_numel: usize = output_shape.iter().product::<u64>() as usize;
+        let mut out_strides = vec![1usize; out_rank];
+        for i in (0..out_rank.saturating_sub(1)).rev() { out_strides[i] = out_strides[i + 1] * output_shape[i + 1] as usize; }
+        let mut a_strides = vec![1usize; out_rank];
+        for i in (0..out_rank.saturating_sub(1)).rev() { a_strides[i] = a_strides[i + 1] * pa[i + 1] as usize; }
+        let mut b_strides = vec![1usize; out_rank];
+        for i in (0..out_rank.saturating_sub(1)).rev() { b_strides[i] = b_strides[i + 1] * pb[i + 1] as usize; }
+
+        let layout = TensorLayout::<DynRank>::row_major(output_shape, dtype);
+        let buf = pool.allocate(layout.buffer_size_bytes())
+            .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
+        let mut out = NumericTensor::from_parts(buf, layout);
+
+        for out_flat in 0..out_numel {
+            let mut rem = out_flat;
+            let mut a_flat = 0usize;
+            let mut b_flat = 0usize;
+            for d in 0..out_rank {
+                let coord = rem / out_strides[d];
+                rem %= out_strides[d];
+                a_flat += (if pa[d] == 1 { 0 } else { coord }) * a_strides[d];
+                b_flat += (if pb[d] == 1 { 0 } else { coord }) * b_strides[d];
+            }
+            let base = a.read_element(a_flat).to_f64();
+            let exp = b.read_element(b_flat).to_f64();
+            let result = base.powf(exp);
+            out.write_element(out_flat, NumericScalar::from_f64(result).cast_to(dtype));
+        }
+
+        Ok(vec![out])
     }
 
     fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
@@ -1408,6 +1589,137 @@ impl MilliOp for MatMul {
                 .or_insert(reduced);
         }
         Some(result)
+    }
+
+    fn eval_new<'p, P2: crate::pool::Pool + 'p>(
+        &self,
+        inputs: &[crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>],
+        pool: &'p P2,
+    ) -> Result<Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>, crate::nano_graph::pool_eval::PoolEvalError> {
+        use crate::numeric_scalar::NumericScalar;
+        use crate::numeric_tensor::{NumericTensor, TensorLayout};
+        use crate::tensor_rank::DynRank;
+
+        let a = &inputs[0];
+        let b = &inputs[1];
+        let a_shape = a.shape();
+        let b_shape = b.shape();
+        let a_rank = a_shape.len();
+        let b_rank = b_shape.len();
+        let out_dtype = self.output_dtype;
+
+        // Handle matmul cases: A[...,M,K] @ B[...,K,N] -> C[...,M,N]
+        let (output_shape, m, k, n, a_batch, b_batch) = if a_rank >= 2 && b_rank >= 2 {
+            let am = a_shape[a_rank - 2] as usize;
+            let ak = a_shape[a_rank - 1] as usize;
+            let bn = b_shape[b_rank - 1] as usize;
+            let a_bat: Vec<u64> = a_shape[..a_rank - 2].to_vec();
+            let b_bat: Vec<u64> = b_shape[..b_rank - 2].to_vec();
+            // Broadcast batch dims
+            let batch_rank = a_bat.len().max(b_bat.len());
+            let mut pa = vec![1u64; batch_rank];
+            let mut pb = vec![1u64; batch_rank];
+            for (i, &d) in a_bat.iter().enumerate() { pa[batch_rank - a_bat.len() + i] = d; }
+            for (i, &d) in b_bat.iter().enumerate() { pb[batch_rank - b_bat.len() + i] = d; }
+            let mut batch_shape = vec![0u64; batch_rank];
+            for i in 0..batch_rank { batch_shape[i] = pa[i].max(pb[i]); }
+            let mut out_shape = batch_shape.clone();
+            out_shape.push(am as u64);
+            out_shape.push(bn as u64);
+            (out_shape, am, ak, bn, pa, pb)
+        } else if a_rank == 1 && b_rank >= 2 {
+            // vector @ matrix: [K] @ [...,K,N] -> [...,N]
+            let ak = a_shape[0] as usize;
+            let bn = b_shape[b_rank - 1] as usize;
+            let b_bat: Vec<u64> = b_shape[..b_rank - 2].to_vec();
+            let mut out_shape = b_bat.clone();
+            out_shape.push(bn as u64);
+            (out_shape, 1, ak, bn, vec![], b_bat)
+        } else if a_rank >= 2 && b_rank == 1 {
+            // matrix @ vector: [...,M,K] @ [K] -> [...,M]
+            let am = a_shape[a_rank - 2] as usize;
+            let ak = a_shape[a_rank - 1] as usize;
+            let a_bat: Vec<u64> = a_shape[..a_rank - 2].to_vec();
+            let mut out_shape = a_bat.clone();
+            out_shape.push(am as u64);
+            (out_shape, am, ak, 1, a_bat, vec![])
+        } else {
+            // both rank 1: dot product -> scalar []
+            let ak = a_shape[0] as usize;
+            (vec![], 1, ak, 1, vec![], vec![])
+        };
+
+        let out_numel: usize = output_shape.iter().product::<u64>().max(1) as usize;
+
+        // Compute batch dims
+        let batch_rank = a_batch.len().max(b_batch.len());
+        let mut batch_shape = vec![1u64; batch_rank];
+        for i in 0..batch_rank {
+            let ad = if i < a_batch.len() { a_batch[i] } else { 1 };
+            let bd = if i < b_batch.len() { b_batch[i] } else { 1 };
+            batch_shape[i] = ad.max(bd);
+        }
+        let batch_total: usize = batch_shape.iter().product::<u64>().max(1) as usize;
+
+        let layout = TensorLayout::<DynRank>::row_major(output_shape, out_dtype);
+        let buf = pool.allocate(layout.buffer_size_bytes())
+            .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
+        let mut out = NumericTensor::from_parts(buf, layout);
+        // Initialize to zero
+        let zero = NumericScalar::zero(out_dtype);
+        for i in 0..out_numel { out.write_element(i, zero); }
+
+        // Compute strides for A and B
+        let mut a_strides = vec![1usize; a_rank];
+        for i in (0..a_rank.saturating_sub(1)).rev() { a_strides[i] = a_strides[i + 1] * a_shape[i + 1] as usize; }
+        let mut b_strides = vec![1usize; b_rank];
+        for i in (0..b_rank.saturating_sub(1)).rev() { b_strides[i] = b_strides[i + 1] * b_shape[i + 1] as usize; }
+
+        // Compute batch strides for output
+        let mut batch_strides = vec![1usize; batch_rank];
+        for i in (0..batch_rank.saturating_sub(1)).rev() {
+            batch_strides[i] = batch_strides[i + 1] * batch_shape[i + 1] as usize;
+        }
+
+        for batch_idx in 0..batch_total {
+            // Decompose batch index into coordinates
+            let mut rem = batch_idx;
+            let mut a_batch_offset = 0usize;
+            let mut b_batch_offset = 0usize;
+            for d in 0..batch_rank {
+                let coord = rem / batch_strides[d];
+                rem %= batch_strides[d];
+                if d < a_batch.len() {
+                    let ac = if a_batch[d] == 1 { 0 } else { coord };
+                    a_batch_offset += ac * a_strides[d];
+                }
+                if d < b_batch.len() {
+                    let bc = if b_batch[d] == 1 { 0 } else { coord };
+                    b_batch_offset += bc * b_strides[d];
+                }
+            }
+
+            let out_batch_offset = batch_idx * m * n;
+
+            for mi in 0..m {
+                for ni in 0..n {
+                    let mut acc = 0.0f64;
+                    for ki in 0..k {
+                        let a_idx = a_batch_offset
+                            + if a_rank >= 2 { mi * a_strides[a_rank - 2] + ki * a_strides[a_rank - 1] }
+                              else { ki };
+                        let b_idx = b_batch_offset
+                            + if b_rank >= 2 { ki * b_strides[b_rank - 2] + ni * b_strides[b_rank - 1] }
+                              else { ki };
+                        acc += a.read_element(a_idx).to_f64() * b.read_element(b_idx).to_f64();
+                    }
+                    let out_idx = out_batch_offset + mi * n + ni;
+                    out.write_element(out_idx, NumericScalar::from_f64(acc).cast_to(out_dtype));
+                }
+            }
+        }
+
+        Ok(vec![out])
     }
 
     fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {

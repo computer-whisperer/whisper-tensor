@@ -269,6 +269,51 @@ impl MilliOp for Unsqueeze {
         }
     }
 
+    fn eval_new<'p, P2: crate::pool::Pool + 'p>(
+        &self,
+        inputs: &[crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>],
+        pool: &'p P2,
+    ) -> Result<Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>, crate::nano_graph::pool_eval::PoolEvalError> {
+        use crate::numeric_tensor::{NumericTensor, TensorLayout};
+        use crate::tensor_rank::DynRank;
+
+        let data = &inputs[0];
+        let axes_tensor = &inputs[1];
+        let input_shape = data.shape();
+        let dtype = data.dtype();
+        let numel = data.numel();
+
+        let axes: Vec<i64> = (0..axes_tensor.numel())
+            .map(|i| axes_tensor.read_element(i).to_i64())
+            .collect();
+        let output_rank = input_shape.len() + axes.len();
+
+        // Build output shape: insert 1s at the specified axes
+        let normalized_axes: Vec<usize> = axes.iter()
+            .map(|&a| if a < 0 { (output_rank as i64 + a) as usize } else { a as usize })
+            .collect();
+
+        let mut output_shape = Vec::new();
+        let mut input_idx = 0;
+        for i in 0..output_rank {
+            if normalized_axes.contains(&i) {
+                output_shape.push(1u64);
+            } else {
+                output_shape.push(input_shape[input_idx]);
+                input_idx += 1;
+            }
+        }
+
+        let layout = TensorLayout::<DynRank>::row_major(output_shape, dtype);
+        let buf = pool.allocate(layout.buffer_size_bytes())
+            .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
+        let mut out = NumericTensor::from_parts(buf, layout);
+        for i in 0..numel {
+            out.write_element(i, data.read_element(i));
+        }
+        Ok(vec![out])
+    }
+
     fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
         Unsqueeze::lower_to_nano(self, ctx)
     }

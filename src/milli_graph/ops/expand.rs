@@ -316,6 +316,69 @@ impl MilliOp for Expand {
         Ok(Box::new([(self.output, out)].into_iter()))
     }
 
+    fn eval_new<'p, P2: crate::pool::Pool + 'p>(
+        &self,
+        inputs: &[crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>],
+        pool: &'p P2,
+    ) -> Result<Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>, crate::nano_graph::pool_eval::PoolEvalError> {
+        use crate::numeric_tensor::{NumericTensor, TensorLayout};
+        use crate::tensor_rank::DynRank;
+
+        let data = &inputs[0];
+        let shape_tensor = &inputs[1];
+        let dtype = data.dtype();
+        let input_shape = data.shape();
+
+        // Read target shape
+        let target_shape: Vec<u64> = (0..shape_tensor.numel())
+            .map(|i| shape_tensor.read_element(i).to_i64() as u64)
+            .collect();
+
+        // Compute output shape with broadcasting (max of input and target per dim)
+        let output_rank = target_shape.len().max(input_shape.len());
+        let mut output_shape = vec![0u64; output_rank];
+        let mut padded_input = vec![1u64; output_rank];
+        for (i, &d) in input_shape.iter().enumerate() {
+            padded_input[output_rank - input_shape.len() + i] = d;
+        }
+        for i in 0..output_rank {
+            let t = if i < output_rank - target_shape.len() { 1 } else { target_shape[i - (output_rank - target_shape.len())] };
+            output_shape[i] = t.max(padded_input[i]);
+        }
+
+        let out_numel: usize = output_shape.iter().product::<u64>() as usize;
+
+        // Compute strides for output and padded input
+        let mut out_strides = vec![1usize; output_rank];
+        for i in (0..output_rank.saturating_sub(1)).rev() {
+            out_strides[i] = out_strides[i + 1] * output_shape[i + 1] as usize;
+        }
+        let mut in_strides = vec![1usize; output_rank];
+        for i in (0..output_rank.saturating_sub(1)).rev() {
+            in_strides[i] = in_strides[i + 1] * padded_input[i + 1] as usize;
+        }
+
+        let layout = TensorLayout::<DynRank>::row_major(output_shape.clone(), dtype);
+        let buf = pool.allocate(layout.buffer_size_bytes())
+            .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
+        let mut out = NumericTensor::from_parts(buf, layout);
+
+        for out_flat in 0..out_numel {
+            let mut rem = out_flat;
+            let mut in_flat = 0usize;
+            for d in 0..output_rank {
+                let coord = rem / out_strides[d];
+                rem %= out_strides[d];
+                // Broadcast: if input dim is 1, always use coord 0
+                let in_coord = if padded_input[d] == 1 { 0 } else { coord };
+                in_flat += in_coord * in_strides[d];
+            }
+            out.write_element(out_flat, data.read_element(in_flat));
+        }
+
+        Ok(vec![out])
+    }
+
     fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
         Expand::lower_to_nano(self, ctx)
     }

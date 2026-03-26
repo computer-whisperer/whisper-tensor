@@ -429,6 +429,66 @@ impl MilliOp for Concat {
         Ok(Box::new([(self.output, out)].into_iter()))
     }
 
+    fn eval_new<'p, P2: crate::pool::Pool + 'p>(
+        &self,
+        inputs: &[crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>],
+        pool: &'p P2,
+    ) -> Result<Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>, crate::nano_graph::pool_eval::PoolEvalError> {
+        use crate::numeric_tensor::{NumericTensor, TensorLayout};
+        use crate::tensor_rank::DynRank;
+
+        if inputs.is_empty() {
+            return Err(crate::nano_graph::pool_eval::PoolEvalError::Unsupported("Concat: no inputs".to_string()));
+        }
+
+        let dtype = inputs[0].dtype();
+        let rank = inputs[0].shape().len();
+        let axis = if self.axis < 0 { (self.axis + rank as i64) as usize } else { self.axis as usize };
+
+        // Compute output shape: same as first input except concat axis is sum
+        let mut output_shape: Vec<u64> = inputs[0].shape().clone();
+        for inp in inputs.iter().skip(1) {
+            output_shape[axis] += inp.shape()[axis];
+        }
+
+        let layout = TensorLayout::<DynRank>::row_major(output_shape.clone(), dtype);
+        let buf = pool.allocate(layout.buffer_size_bytes())
+            .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
+        let mut out = NumericTensor::from_parts(buf, layout);
+
+        // Compute output strides
+        let mut out_strides = vec![1usize; rank];
+        for i in (0..rank.saturating_sub(1)).rev() {
+            out_strides[i] = out_strides[i + 1] * output_shape[i + 1] as usize;
+        }
+
+        // Copy each input into the right slice of the output
+        let mut axis_offset = 0usize;
+        for inp in inputs.iter() {
+            let inp_shape = inp.shape();
+            let inp_numel = inp.numel();
+            let mut inp_strides = vec![1usize; rank];
+            for i in (0..rank.saturating_sub(1)).rev() {
+                inp_strides[i] = inp_strides[i + 1] * inp_shape[i + 1] as usize;
+            }
+
+            for inp_flat in 0..inp_numel {
+                let mut rem = inp_flat;
+                let mut out_flat = 0usize;
+                for d in 0..rank {
+                    let coord = rem / inp_strides[d];
+                    rem %= inp_strides[d];
+                    let out_coord = if d == axis { coord + axis_offset } else { coord };
+                    out_flat += out_coord * out_strides[d];
+                }
+                out.write_element(out_flat, inp.read_element(inp_flat));
+            }
+            axis_offset += inp_shape[axis] as usize;
+        }
+
+        Ok(vec![out])
+    }
+
     fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
         Concat::lower_to_nano(self, ctx)
     }

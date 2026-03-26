@@ -380,6 +380,82 @@ impl MilliOp for Split {
         Ok(Box::new([(self.output, out)].into_iter()))
     }
 
+    fn eval_new<'p, P2: crate::pool::Pool + 'p>(
+        &self,
+        inputs: &[crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>],
+        pool: &'p P2,
+    ) -> Result<Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>, crate::nano_graph::pool_eval::PoolEvalError> {
+        use crate::numeric_tensor::{NumericTensor, TensorLayout};
+        use crate::tensor_rank::DynRank;
+
+        let data = &inputs[0];
+        let data_shape = data.shape();
+        let rank = data_shape.len();
+        let dtype = data.dtype();
+        let axis = if self.axis < 0 { (self.axis + rank as i64) as usize } else { self.axis as usize };
+
+        // Determine split sizes
+        let split_sizes: Vec<i64> = if let Some(ref split) = self.split {
+            match split {
+                MilliOpTensorIDOrLiteral::TensorID(_) => {
+                    // inputs[1] is the split tensor
+                    let split_tensor = &inputs[1];
+                    (0..split_tensor.numel()).map(|i| split_tensor.read_element(i).to_i64()).collect()
+                }
+                MilliOpTensorIDOrLiteral::Literal(lit) => {
+                    let legacy: crate::migration::numeric_tensor::NumericTensor<DynRank> = lit.clone().into();
+                    // Extract values via casting
+                    let cast = legacy.cast(crate::dtype::DType::I64, &mut crate::backends::eval_backend::EvalBackend::NDArray)
+                        .map_err(|e| crate::nano_graph::pool_eval::PoolEvalError::Unsupported(format!("{e:?}")))?;
+                    cast.try_to_rank::<P1>()
+                        .and_then(|r| Vec::<i64>::try_from(r))
+                        .map_err(|e| crate::nano_graph::pool_eval::PoolEvalError::Unsupported(format!("{e:?}")))?
+                }
+            }
+        } else if let Some(num_outputs) = self.num_outputs {
+            let dim = data_shape[axis] as usize;
+            let base = dim / num_outputs;
+            let remainder = dim % num_outputs;
+            (0..num_outputs).map(|i| (base + if i < remainder { 1 } else { 0 }) as i64).collect()
+        } else {
+            return Err(crate::nano_graph::pool_eval::PoolEvalError::Unsupported("Split: no split attribute".to_string()));
+        };
+
+        // Compute start offset along axis for this output_id
+        let start: usize = split_sizes[..self.output_id].iter().map(|&s| s as usize).sum();
+        let size = split_sizes[self.output_id] as usize;
+
+        // Output shape: same as input but axis dim = size
+        let mut output_shape = data_shape.clone();
+        output_shape[axis] = size as u64;
+        let out_numel: usize = output_shape.iter().product::<u64>() as usize;
+
+        // Compute strides
+        let mut in_strides = vec![1usize; rank];
+        for i in (0..rank.saturating_sub(1)).rev() { in_strides[i] = in_strides[i + 1] * data_shape[i + 1] as usize; }
+        let mut out_strides = vec![1usize; rank];
+        for i in (0..rank.saturating_sub(1)).rev() { out_strides[i] = out_strides[i + 1] * output_shape[i + 1] as usize; }
+
+        let layout = TensorLayout::<DynRank>::row_major(output_shape, dtype);
+        let buf = pool.allocate(layout.buffer_size_bytes())
+            .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
+        let mut out = NumericTensor::from_parts(buf, layout);
+
+        for out_flat in 0..out_numel {
+            let mut rem = out_flat;
+            let mut in_flat = 0usize;
+            for d in 0..rank {
+                let coord = rem / out_strides[d];
+                rem %= out_strides[d];
+                let in_coord = if d == axis { coord + start } else { coord };
+                in_flat += in_coord * in_strides[d];
+            }
+            out.write_element(out_flat, data.read_element(in_flat));
+        }
+
+        Ok(vec![out])
+    }
+
     fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
         Split::lower_to_nano(self, ctx)
     }

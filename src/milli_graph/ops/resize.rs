@@ -1246,6 +1246,102 @@ impl MilliOp for Resize {
 
         Ok(Box::new(std::iter::once((self.output, output_tensor))))
     }
+
+    fn eval_new<'p, P2: crate::pool::Pool + 'p>(
+        &self,
+        inputs: &[crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>],
+        pool: &'p P2,
+    ) -> Result<Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>, crate::nano_graph::pool_eval::PoolEvalError> {
+        use crate::numeric_scalar::NumericScalar;
+        use crate::numeric_tensor::{NumericTensor, TensorLayout};
+        use crate::tensor_rank::DynRank;
+
+        let data = &inputs[0];
+        let input_shape = data.shape();
+        let rank = input_shape.len();
+        let dtype = data.dtype();
+
+        // Parse optional inputs based on field presence
+        let mut input_idx = 1;
+        let _roi: Vec<f64> = if self.roi.is_some() && inputs.len() > input_idx {
+            let r: Vec<f64> = (0..inputs[input_idx].numel()).map(|i| inputs[input_idx].read_element(i).to_f64()).collect();
+            input_idx += 1;
+            r
+        } else {
+            vec![]
+        };
+        let scales_vec: Option<Vec<f64>> = if self.scales.is_some() && inputs.len() > input_idx {
+            let s: Vec<f64> = (0..inputs[input_idx].numel()).map(|i| inputs[input_idx].read_element(i).to_f64()).collect();
+            input_idx += 1;
+            if s.iter().all(|&x| x == 0.0) { None } else { Some(s) }
+        } else {
+            None
+        };
+        let sizes_vec: Option<Vec<i64>> = if self.sizes.is_some() && inputs.len() > input_idx {
+            let s: Vec<i64> = (0..inputs[input_idx].numel()).map(|i| inputs[input_idx].read_element(i).to_i64()).collect();
+            Some(s)
+        } else {
+            None
+        };
+
+        // Compute output shape
+        let output_shape: Vec<usize> = if let Some(ref sizes) = sizes_vec {
+            if !self.axes.is_empty() {
+                let mut out = input_shape.iter().map(|&d| d as usize).collect::<Vec<_>>();
+                for (i, &a) in self.axes.iter().enumerate() {
+                    let axis = if a < 0 { (a + rank as i64) as usize } else { a as usize };
+                    out[axis] = sizes[i] as usize;
+                }
+                out
+            } else {
+                sizes.iter().map(|&s| s as usize).collect()
+            }
+        } else if let Some(ref scales) = scales_vec {
+            if !self.axes.is_empty() {
+                let mut out = input_shape.iter().map(|&d| d as usize).collect::<Vec<_>>();
+                for (i, &a) in self.axes.iter().enumerate() {
+                    let axis = if a < 0 { (a + rank as i64) as usize } else { a as usize };
+                    out[axis] = (input_shape[axis] as f64 * scales[i]).floor() as usize;
+                }
+                out
+            } else {
+                input_shape.iter().zip(scales.iter()).map(|(&d, &s)| (d as f64 * s).floor() as usize).collect()
+            }
+        } else {
+            input_shape.iter().map(|&d| d as usize).collect()
+        };
+
+        let out_shape_u64: Vec<u64> = output_shape.iter().map(|&s| s as u64).collect();
+        let out_numel: usize = out_shape_u64.iter().product::<u64>() as usize;
+
+        // Compute input/output strides
+        let mut in_strides = vec![1usize; rank];
+        for i in (0..rank.saturating_sub(1)).rev() { in_strides[i] = in_strides[i + 1] * input_shape[i + 1] as usize; }
+        let mut out_strides = vec![1usize; rank];
+        for i in (0..rank.saturating_sub(1)).rev() { out_strides[i] = out_strides[i + 1] * output_shape[i + 1]; }
+
+        let layout = TensorLayout::<DynRank>::row_major(out_shape_u64, dtype);
+        let buf = pool.allocate(layout.buffer_size_bytes())
+            .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
+        let mut out = NumericTensor::from_parts(buf, layout);
+
+        // Nearest-neighbor interpolation for all modes (correctness fallback)
+        for out_flat in 0..out_numel {
+            let mut rem = out_flat;
+            let mut in_flat = 0usize;
+            for d in 0..rank {
+                let coord = rem / out_strides[d];
+                rem %= out_strides[d];
+                let scale = if output_shape[d] > 0 { input_shape[d] as f64 / output_shape[d] as f64 } else { 1.0 };
+                let in_coord = ((coord as f64 + 0.5) * scale).floor() as usize;
+                let in_coord = in_coord.min(input_shape[d] as usize - 1);
+                in_flat += in_coord * in_strides[d];
+            }
+            out.write_element(out_flat, data.read_element(in_flat));
+        }
+
+        Ok(vec![out])
+    }
 }
 
 struct ResizeGenericParams<'a> {

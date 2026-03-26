@@ -432,6 +432,98 @@ impl MilliOp for SimpleUnaryOp {
         Ok(Box::new([(self.output, out)].into_iter()))
     }
 
+    fn eval_new<'p, P2: crate::pool::Pool + 'p>(
+        &self,
+        inputs: &[crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>],
+        pool: &'p P2,
+    ) -> Result<Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>, crate::nano_graph::pool_eval::PoolEvalError> {
+        use crate::numeric_scalar::NumericScalar;
+        use crate::numeric_tensor::{NumericTensor, TensorLayout};
+        use crate::tensor_rank::DynRank;
+
+        let data = &inputs[0];
+        let input_shape = data.shape().clone();
+        let dtype = data.dtype();
+        let numel = data.numel();
+
+        // IsNan and IsInf produce Bool output
+        let out_dtype = match self.op {
+            WhichSimpleUnaryOp::IsNan | WhichSimpleUnaryOp::IsInf { .. } => crate::numeric_dtype::NumericDType::Bool,
+            _ => dtype,
+        };
+
+        let layout = TensorLayout::<DynRank>::row_major(input_shape, out_dtype);
+        let buf = pool.allocate(layout.buffer_size_bytes())
+            .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
+        let mut out = NumericTensor::from_parts(buf, layout);
+
+        for i in 0..numel {
+            let v = data.read_element(i);
+            let f = v.to_f64();
+            let result = match self.op {
+                WhichSimpleUnaryOp::Neg => NumericScalar::from_f64(-f).cast_to(dtype),
+                WhichSimpleUnaryOp::Abs => NumericScalar::from_f64(f.abs()).cast_to(dtype),
+                WhichSimpleUnaryOp::Exp => NumericScalar::from_f64(f.exp()).cast_to(dtype),
+                WhichSimpleUnaryOp::Ln => NumericScalar::from_f64(f.ln()).cast_to(dtype),
+                WhichSimpleUnaryOp::Sqrt => NumericScalar::from_f64(f.sqrt()).cast_to(dtype),
+                WhichSimpleUnaryOp::Reciprocal => NumericScalar::from_f64(1.0 / f).cast_to(dtype),
+                WhichSimpleUnaryOp::Floor => NumericScalar::from_f64(f.floor()).cast_to(dtype),
+                WhichSimpleUnaryOp::Ceil => NumericScalar::from_f64(f.ceil()).cast_to(dtype),
+                WhichSimpleUnaryOp::Round => NumericScalar::from_f64(f.round()).cast_to(dtype),
+                WhichSimpleUnaryOp::Sign => {
+                    let s = if f > 0.0 { 1.0 } else if f < 0.0 { -1.0 } else { 0.0 };
+                    NumericScalar::from_f64(s).cast_to(dtype)
+                }
+                WhichSimpleUnaryOp::Log1p => NumericScalar::from_f64(f.ln_1p()).cast_to(dtype),
+                WhichSimpleUnaryOp::Trig(trig_op) => {
+                    let r = match trig_op {
+                        crate::TrigOp::Sin => f.sin(),
+                        crate::TrigOp::Cos => f.cos(),
+                        crate::TrigOp::Tan => f.tan(),
+                        crate::TrigOp::Asin => f.asin(),
+                        crate::TrigOp::Acos => f.acos(),
+                        crate::TrigOp::Atan => f.atan(),
+                        crate::TrigOp::Sinh => f.sinh(),
+                        crate::TrigOp::Cosh => f.cosh(),
+                        crate::TrigOp::Tanh => f.tanh(),
+                        crate::TrigOp::Asinh => f.asinh(),
+                        crate::TrigOp::Acosh => f.acosh(),
+                        crate::TrigOp::Atanh => f.atanh(),
+                    };
+                    NumericScalar::from_f64(r).cast_to(dtype)
+                }
+                WhichSimpleUnaryOp::Erf => {
+                    // Horner approximation of erf
+                    let x = f;
+                    let a1 = 0.254829592;
+                    let a2 = -0.284496736;
+                    let a3 = 1.421413741;
+                    let a4 = -1.453152027;
+                    let a5 = 1.061405429;
+                    let p = 0.3275911;
+                    let sign = if x < 0.0 { -1.0 } else { 1.0 };
+                    let x = x.abs();
+                    let t = 1.0 / (1.0 + p * x);
+                    let y = 1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * (-x * x).exp();
+                    NumericScalar::from_f64(sign * y).cast_to(dtype)
+                }
+                WhichSimpleUnaryOp::IsNan => NumericScalar::from_bool(f.is_nan()),
+                WhichSimpleUnaryOp::IsInf { detect_positive, detect_negative } => {
+                    let is_inf = (detect_positive && f == f64::INFINITY)
+                        || (detect_negative && f == f64::NEG_INFINITY);
+                    NumericScalar::from_bool(is_inf)
+                }
+                WhichSimpleUnaryOp::Not => NumericScalar::from_bool(!v.is_nonzero()),
+                WhichSimpleUnaryOp::BitwiseNot => {
+                    NumericScalar::from_raw_bits(!v.raw(), dtype)
+                }
+            };
+            out.write_element(i, result);
+        }
+
+        Ok(vec![out])
+    }
+
     fn backward(
         &self,
         output_grads: &HashMap<GlobalId, GlobalId>,
@@ -649,6 +741,36 @@ impl MilliOp for ClampMin {
         let mut result = HashMap::new();
         result.insert(self.input, grad_input);
         Some(result)
+    }
+
+    fn eval_new<'p, P2: crate::pool::Pool + 'p>(
+        &self,
+        inputs: &[crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>],
+        pool: &'p P2,
+    ) -> Result<Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>, crate::nano_graph::pool_eval::PoolEvalError> {
+        use crate::numeric_scalar::NumericScalar;
+        use crate::numeric_tensor::{NumericTensor, TensorLayout};
+        use crate::tensor_rank::DynRank;
+
+        let data = &inputs[0];
+        let dtype = data.dtype();
+        let shape = data.shape().clone();
+        let numel = data.numel();
+        let min_val = self.value as f64;
+
+        let layout = TensorLayout::<DynRank>::row_major(shape, dtype);
+        let buf = pool.allocate(layout.buffer_size_bytes())
+            .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
+        let mut out = NumericTensor::from_parts(buf, layout);
+
+        for i in 0..numel {
+            let v = data.read_element(i);
+            let f = v.to_f64();
+            let clamped = if f < min_val { min_val } else { f };
+            out.write_element(i, NumericScalar::from_f64(clamped).cast_to(dtype));
+        }
+
+        Ok(vec![out])
     }
 
     fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {

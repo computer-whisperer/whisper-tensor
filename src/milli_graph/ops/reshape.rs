@@ -354,6 +354,38 @@ impl MilliOp for Reshape {
         Ok(Box::new([(self.output, output_value)].into_iter()))
     }
 
+    fn eval_new<'p, P2: crate::pool::Pool + 'p>(
+        &self,
+        inputs: &[crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>],
+        pool: &'p P2,
+    ) -> Result<Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>, crate::nano_graph::pool_eval::PoolEvalError> {
+        use crate::numeric_tensor::{NumericTensor, TensorLayout};
+        use crate::tensor_rank::DynRank;
+
+        let data = &inputs[0];
+        let shape_tensor = &inputs[1];
+        let dtype = data.dtype();
+        let numel = data.numel();
+
+        // Read shape values from inputs[1]
+        let shape_values: Vec<i64> = (0..shape_tensor.numel())
+            .map(|i| shape_tensor.read_element(i).to_i64())
+            .collect();
+
+        let data_shape: Vec<u64> = data.shape().clone();
+        let output_shape = self.calculate_new_shape(&data_shape, &shape_values)
+            .map_err(|e| crate::nano_graph::pool_eval::PoolEvalError::Unsupported(format!("{e:?}")))?;
+
+        let layout = TensorLayout::<DynRank>::row_major(output_shape, dtype);
+        let buf = pool.allocate(layout.buffer_size_bytes())
+            .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
+        let mut out = NumericTensor::from_parts(buf, layout);
+        for i in 0..numel {
+            out.write_element(i, data.read_element(i));
+        }
+        Ok(vec![out])
+    }
+
     fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
         Reshape::lower_to_nano(self, ctx)
     }

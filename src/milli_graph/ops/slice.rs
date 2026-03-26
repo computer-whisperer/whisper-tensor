@@ -490,6 +490,101 @@ impl MilliOp for Slice {
         Ok(Box::new([(self.output, output)].into_iter()))
     }
 
+    fn eval_new<'p, P2: crate::pool::Pool + 'p>(
+        &self,
+        inputs: &[crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>],
+        pool: &'p P2,
+    ) -> Result<Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>, crate::nano_graph::pool_eval::PoolEvalError> {
+        use crate::numeric_tensor::{NumericTensor, TensorLayout};
+        use crate::tensor_rank::DynRank;
+
+        let data = &inputs[0];
+        let input_shape = data.shape();
+        let input_rank = input_shape.len();
+        let dtype = data.dtype();
+
+        // Parse starts (inputs[1]) and ends (inputs[2])
+        let starts: Vec<i64> = (0..inputs[1].numel()).map(|i| inputs[1].read_element(i).to_i64()).collect();
+        let ends: Vec<i64> = (0..inputs[2].numel()).map(|i| inputs[2].read_element(i).to_i64()).collect();
+
+        // Parse steps and axes from optional inputs
+        let mut input_idx = 3;
+        let steps: Vec<i64> = if self.steps.is_some() && inputs.len() > input_idx {
+            let s: Vec<i64> = (0..inputs[input_idx].numel()).map(|i| inputs[input_idx].read_element(i).to_i64()).collect();
+            input_idx += 1;
+            s
+        } else {
+            starts.iter().map(|_| 1i64).collect()
+        };
+        let axes: Vec<usize> = if self.axes.is_some() && inputs.len() > input_idx {
+            (0..inputs[input_idx].numel()).map(|i| {
+                let a = inputs[input_idx].read_element(i).to_i64();
+                if a < 0 { (a + input_rank as i64) as usize } else { a as usize }
+            }).collect()
+        } else {
+            (0..starts.len()).collect()
+        };
+
+        // Build per-axis (start, end, step)
+        let mut slices: Vec<(i64, i64, i64)> = input_shape.iter().map(|&d| (0, d as i64, 1)).collect();
+        for (i, &axis) in axes.iter().enumerate() {
+            let dim = input_shape[axis] as i64;
+            let step = steps[i];
+            let (start, end) = if step > 0 {
+                let s = starts[i].clamp(-dim, dim);
+                let s = if s < 0 { s + dim } else { s };
+                let e = ends[i].clamp(-dim, dim);
+                let e = if e < 0 { e + dim } else { e };
+                (s, e)
+            } else {
+                let s = starts[i].clamp(-dim, dim - 1);
+                let s = if s < 0 { s + dim } else { s };
+                let e = ends[i].clamp(-dim - 1, dim);
+                let e = if e < 0 { e + dim } else { e };
+                (s, e)
+            };
+            slices[axis] = (start, end, step);
+        }
+
+        // Compute output shape
+        let output_shape: Vec<u64> = slices.iter().map(|&(s, e, step)| {
+            ((e - s + (step - step.signum())) / step).max(0) as u64
+        }).collect();
+
+        let out_numel: usize = output_shape.iter().product::<u64>() as usize;
+
+        // Compute input strides (row-major)
+        let mut in_strides = vec![1usize; input_rank];
+        for i in (0..input_rank.saturating_sub(1)).rev() {
+            in_strides[i] = in_strides[i + 1] * input_shape[i + 1] as usize;
+        }
+        // Compute output strides
+        let mut out_strides = vec![1usize; input_rank];
+        for i in (0..input_rank.saturating_sub(1)).rev() {
+            out_strides[i] = out_strides[i + 1] * output_shape[i + 1] as usize;
+        }
+
+        let layout = TensorLayout::<DynRank>::row_major(output_shape.clone(), dtype);
+        let buf = pool.allocate(layout.buffer_size_bytes())
+            .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
+        let mut out = NumericTensor::from_parts(buf, layout);
+
+        for out_flat in 0..out_numel {
+            let mut rem = out_flat;
+            let mut in_flat = 0usize;
+            for d in 0..input_rank {
+                let coord = rem / out_strides[d];
+                rem %= out_strides[d];
+                let (start, _, step) = slices[d];
+                let in_coord = (start + coord as i64 * step) as usize;
+                in_flat += in_coord * in_strides[d];
+            }
+            out.write_element(out_flat, data.read_element(in_flat));
+        }
+
+        Ok(vec![out])
+    }
+
     fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
         Slice::lower_to_nano(self, ctx)
     }

@@ -142,6 +142,39 @@ impl MilliOp for Constant {
         ))
     }
 
+    fn eval_new<'p, P2: crate::pool::Pool + 'p>(
+        &self,
+        _inputs: &[crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>],
+        pool: &'p P2,
+    ) -> Result<Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>, crate::nano_graph::pool_eval::PoolEvalError> {
+        use crate::numeric_tensor::{NumericTensor, TensorLayout};
+        use crate::tensor_rank::DynRank;
+
+        // Convert the NDArrayNumericTensor data to contiguous bytes
+        let raw_bytes = self.data.to_contiguous_bytes();
+        let legacy_dtype = self.data.dtype();
+        let ndt = crate::numeric_dtype::NumericDType::from_legacy(legacy_dtype)
+            .ok_or_else(|| crate::nano_graph::pool_eval::PoolEvalError::Unsupported(
+                format!("Constant: unsupported dtype {:?}", legacy_dtype),
+            ))?;
+
+        let shape: Vec<u64> = {
+            let s = self.data.shape();
+            s.iter().map(|&d| d as u64).collect()
+        };
+
+        let layout = TensorLayout::<DynRank>::row_major(shape, ndt);
+        let buf_size = layout.buffer_size_bytes();
+        let mut buf = pool.allocate(buf_size)
+            .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
+
+        // Copy raw bytes into pool buffer
+        let copy_len = raw_bytes.len().min(buf_size);
+        buf[..copy_len].copy_from_slice(&raw_bytes[..copy_len]);
+
+        Ok(vec![NumericTensor::from_parts(buf, layout)])
+    }
+
     fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
         Constant::lower_to_nano(self, ctx)
     }
@@ -295,6 +328,40 @@ impl MilliOp for ConstantOfShape {
         let out: NumericTensor<DynRank> =
             NDArrayNumericTensor::<DynRank>::fill(self.value.clone(), &shape_usize)?.into();
         Ok(Box::new([(self.output, out)].into_iter()))
+    }
+
+    fn eval_new<'p, P2: crate::pool::Pool + 'p>(
+        &self,
+        inputs: &[crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>],
+        pool: &'p P2,
+    ) -> Result<Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>, crate::nano_graph::pool_eval::PoolEvalError> {
+        use crate::numeric_tensor::{NumericTensor, TensorLayout};
+        use crate::tensor_rank::DynRank;
+
+        // Read shape from inputs[0]
+        let shape_tensor = &inputs[0];
+        let shape: Vec<u64> = (0..shape_tensor.numel())
+            .map(|i| shape_tensor.read_element(i).to_i64() as u64)
+            .collect();
+
+        let legacy_dtype = self.value.dtype();
+        let ndt = crate::numeric_dtype::NumericDType::from_legacy(legacy_dtype)
+            .ok_or_else(|| crate::nano_graph::pool_eval::PoolEvalError::Unsupported(
+                format!("ConstantOfShape: unsupported dtype {:?}", legacy_dtype),
+            ))?;
+
+        let fill_val = crate::numeric_scalar::NumericScalar::from_f64(self.value.to_f64()).cast_to(ndt);
+        let numel: usize = shape.iter().product::<u64>() as usize;
+
+        let layout = TensorLayout::<DynRank>::row_major(shape, ndt);
+        let buf = pool.allocate(layout.buffer_size_bytes())
+            .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
+        let mut out = NumericTensor::from_parts(buf, layout);
+        for i in 0..numel {
+            out.write_element(i, fill_val);
+        }
+
+        Ok(vec![out])
     }
 
     fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
