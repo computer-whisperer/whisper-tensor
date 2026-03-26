@@ -63,7 +63,7 @@ impl ArgMax {
         super::remap(&mut self.input, map);
     }
 
-    pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
+    pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
         let all_infos = ctx.all_infos;
         let data_rank = all_infos
             .get(&self.input)
@@ -84,6 +84,7 @@ impl ArgMax {
             select_last_index: self.select_last_index,
         });
         ctx.register_opaque_op(eval_fn, "ArgMax", &input_ids, &output_ids);
+        crate::milli_graph::ops::LowerResult::Lowered
     }
 }
 

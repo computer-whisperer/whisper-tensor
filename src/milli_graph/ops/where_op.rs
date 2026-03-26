@@ -55,7 +55,7 @@ impl Where {
 }
 
 impl Where {
-    pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
+    pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
         let all_infos = ctx.all_infos;
         let mut inputs_iter = Node::inputs(self);
         let cond_id = inputs_iter.next().unwrap();
@@ -68,17 +68,14 @@ impl Where {
             ctx.tensor_map.get(&x_id).cloned(),
             ctx.tensor_map.get(&y_id).cloned(),
         ) else {
-            ctx.lower_as_boundary_named(self, "Where");
-            return;
+            return crate::milli_graph::ops::LowerResult::Unsupported;
         };
         let Some(out_info) = all_infos.get(&out_id) else {
-            ctx.lower_as_boundary_named(self, "Where");
-            return;
+            return crate::milli_graph::ops::LowerResult::Unsupported;
         };
 
         let Some((layout, known_dims, sym_dims, count)) = ctx.classify_dims(out_info) else {
-            ctx.lower_as_boundary_named(self, "Where");
-            return;
+            return crate::milli_graph::ops::LowerResult::Unsupported;
         };
         let count = count.max(1);
         let strides = TensorAtomMap::compute_strides(&known_dims);
@@ -113,6 +110,7 @@ impl Where {
             out_id,
             TensorAtomMap::simple(base_id, count, dt, layout, strides, sym_dims),
         );
+        crate::milli_graph::ops::LowerResult::Lowered
     }
 
     pub fn remap_tensors(&mut self, map: &HashMap<GlobalId, GlobalId>, rng: &mut impl rand::Rng) {
@@ -207,7 +205,7 @@ impl MilliOp for Where {
         Ok(Box::new([(self.output, out)].into_iter()))
     }
 
-    fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
-        Where::lower_to_nano(self, ctx);
+    fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
+        Where::lower_to_nano(self, ctx)
     }
 }

@@ -152,19 +152,17 @@ impl SimpleUnaryOp {
 }
 
 impl SimpleUnaryOp {
-    pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
+    pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
         let all_infos = ctx.all_infos;
 
         let in_id = Node::inputs(self).next().unwrap();
         let out_id = Node::outputs(self).next().unwrap();
 
         let Some(in_map) = ctx.tensor_map.get(&in_id).cloned() else {
-            ctx.lower_as_boundary_named(self, "SimpleUnary");
-            return;
+            return crate::milli_graph::ops::LowerResult::Unsupported;
         };
         let Some(out_info) = all_infos.get(&out_id) else {
-            ctx.lower_as_boundary_named(self, "SimpleUnary");
-            return;
+            return crate::milli_graph::ops::LowerResult::Unsupported;
         };
 
         let dt = NanoLoweringContext::ndt(out_info);
@@ -311,6 +309,7 @@ impl SimpleUnaryOp {
                 in_map.sym_dims.clone(),
             ),
         );
+        crate::milli_graph::ops::LowerResult::Lowered
     }
 
     pub fn remap_tensors(&mut self, map: &HashMap<GlobalId, GlobalId>, rng: &mut impl rand::Rng) {
@@ -477,8 +476,8 @@ impl MilliOp for SimpleUnaryOp {
         Some(result)
     }
 
-    fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
-        SimpleUnaryOp::lower_to_nano(self, ctx);
+    fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
+        SimpleUnaryOp::lower_to_nano(self, ctx)
     }
 }
 
@@ -526,18 +525,16 @@ impl ClampMin {
 }
 
 impl ClampMin {
-    pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
+    pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
         let all_infos = ctx.all_infos;
         let in_id = Node::inputs(self).next().unwrap();
         let out_id = Node::outputs(self).next().unwrap();
 
         let Some(in_map) = ctx.tensor_map.get(&in_id).cloned() else {
-            ctx.lower_as_boundary_named(self, "ClampMin");
-            return;
+            return crate::milli_graph::ops::LowerResult::Unsupported;
         };
         let Some(out_info) = all_infos.get(&out_id) else {
-            ctx.lower_as_boundary_named(self, "ClampMin");
-            return;
+            return crate::milli_graph::ops::LowerResult::Unsupported;
         };
 
         let min_val = self.min_val();
@@ -574,6 +571,7 @@ impl ClampMin {
                 in_map.sym_dims.clone(),
             ),
         );
+        crate::milli_graph::ops::LowerResult::Lowered
     }
 
     pub fn remap_tensors(&mut self, map: &HashMap<GlobalId, GlobalId>, rng: &mut impl rand::Rng) {
@@ -653,7 +651,7 @@ impl MilliOp for ClampMin {
         Some(result)
     }
 
-    fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
-        ClampMin::lower_to_nano(self, ctx);
+    fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
+        ClampMin::lower_to_nano(self, ctx)
     }
 }

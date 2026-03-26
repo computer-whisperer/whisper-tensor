@@ -66,7 +66,7 @@ impl CumSum {
         super::remap(&mut self.axis, map);
     }
 
-    pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
+    pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
         let exclusive = self.exclusive;
         let reverse = self.reverse;
 
@@ -75,6 +75,7 @@ impl CumSum {
 
         let eval_fn = std::sync::Arc::new(CumSumEval { exclusive, reverse });
         ctx.register_opaque_op(eval_fn, "CumSum", &input_ids, &output_ids);
+        crate::milli_graph::ops::LowerResult::Lowered
     }
 }
 

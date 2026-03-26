@@ -84,7 +84,7 @@ impl ReduceMean {
 }
 
 impl ReduceMean {
-    pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
+    pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
         let all_infos = ctx.all_infos;
         let out_id = Node::outputs(self).next().unwrap();
 
@@ -116,13 +116,11 @@ impl ReduceMean {
         })();
 
         let Some(extent) = extent else {
-            ctx.lower_as_boundary_named(self, "ReduceMean");
-            return;
+            return crate::milli_graph::ops::LowerResult::Unsupported;
         };
 
         let Some(out_info) = all_infos.get(&out_id) else {
-            ctx.lower_as_boundary_named(self, "ReduceMean");
-            return;
+            return crate::milli_graph::ops::LowerResult::Unsupported;
         };
         let out_dt = NanoLoweringContext::ndt(out_info);
         let in_dt = in_info.map(|i| NanoLoweringContext::ndt(i)).unwrap_or(out_dt);
@@ -135,7 +133,7 @@ impl ReduceMean {
         };
 
         // Lower as ReduceSum, keeping output in compute_dt (not out_dt).
-        ctx.lower_reduce(self, |cd, count, stride| ScalarOp::Reduce {
+        let reduce_result = ctx.lower_reduce(self, |cd, count, stride| ScalarOp::Reduce {
             kind: ReduceKind::Sum,
             reduce_count: count,
             reduce_stride: stride,
@@ -144,7 +142,7 @@ impl ReduceMean {
 
         // If ReduceSum succeeded (output is in tensor_map), divide by extent.
         let Some(sum_map) = ctx.tensor_map.get(&out_id).cloned() else {
-            return; // ReduceSum failed, already boundaried.
+            return reduce_result; // ReduceSum unsupported, fall to opaque.
         };
 
         // Divide by extent (not multiply by reciprocal — they differ in f32 rounding).
@@ -182,6 +180,7 @@ impl ReduceMean {
                 sum_map.sym_dims,
             ),
         );
+        crate::milli_graph::ops::LowerResult::Lowered
     }
 
     pub fn remap_tensors(&mut self, map: &HashMap<GlobalId, GlobalId>, rng: &mut impl rand::Rng) {
@@ -385,7 +384,25 @@ impl MilliOp for ReduceMean {
         }
     }
 
-    fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
-        ReduceMean::lower_to_nano(self, ctx);
+    fn eval_new<'p, P2: crate::pool::Pool + 'p>(
+        &self,
+        inputs: &[crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>],
+        pool: &'p P2,
+    ) -> Result<Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>, crate::nano_graph::pool_eval::PoolEvalError> {
+        let dtype = inputs[0].dtype();
+        super::reduce_eval_new(
+            inputs,
+            if self.axes.is_some() { Some(1) } else { None },
+            self.keepdims,
+            self.noop_with_empty_axes,
+            NumericScalar::zero(dtype),
+            |cur, val| cur.add(val),
+            |v, count| v.div(NumericScalar::from_f64(count as f64).cast_to(v.dtype())),
+            pool,
+        )
+    }
+
+    fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
+        ReduceMean::lower_to_nano(self, ctx)
     }
 }

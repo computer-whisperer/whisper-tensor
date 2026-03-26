@@ -212,7 +212,7 @@ impl SimpleBinary {
 }
 
 impl SimpleBinary {
-    pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
+    pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
         use crate::nano_graph::lower::TensorAtomMap;
         use crate::nano_graph::ops::{ScalarBinOp, ScalarOp};
         use crate::nano_graph::pattern::AtomId;
@@ -227,12 +227,10 @@ impl SimpleBinary {
             ctx.tensor_map.get(&a_id).cloned(),
             ctx.tensor_map.get(&b_id).cloned(),
         ) else {
-            ctx.lower_as_boundary_named(self, "SimpleBinary");
-            return;
+            return crate::milli_graph::ops::LowerResult::Unsupported;
         };
         let Some(out_info) = all_infos.get(&out_id) else {
-            ctx.lower_as_boundary_named(self, "SimpleBinary");
-            return;
+            return crate::milli_graph::ops::LowerResult::Unsupported;
         };
 
         let out_dt = crate::nano_graph::NanoLoweringContext::ndt(out_info);
@@ -317,14 +315,12 @@ impl SimpleBinary {
                 compute_dtype: compute_dt,
             },
             WhichSimpleBinaryOp::BitShiftLeft | WhichSimpleBinaryOp::BitShiftRight => {
-                ctx.lower_as_boundary_named(self, "SimpleBinary");
-                return;
+                return crate::milli_graph::ops::LowerResult::Unsupported;
             }
         };
 
         let Some((layout, known_dims, sym_dims, count)) = ctx.classify_dims(out_info) else {
-            ctx.lower_as_boundary_named(self, "SimpleBinary");
-            return;
+            return crate::milli_graph::ops::LowerResult::Unsupported;
         };
         let count = count.max(1);
         let strides = TensorAtomMap::compute_strides(&known_dims);
@@ -355,6 +351,7 @@ impl SimpleBinary {
             out_id,
             TensorAtomMap::simple(base_id, count, out_dt, layout, strides, sym_dims),
         );
+        crate::milli_graph::ops::LowerResult::Lowered
     }
 
     pub fn remap_tensors(&mut self, map: &HashMap<GlobalId, GlobalId>, rng: &mut impl Rng) {
@@ -557,8 +554,8 @@ impl MilliOp for SimpleBinary {
         Some(result)
     }
 
-    fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
-        SimpleBinary::lower_to_nano(self, ctx);
+    fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
+        SimpleBinary::lower_to_nano(self, ctx)
     }
 }
 
@@ -602,7 +599,7 @@ impl Pow {
 }
 
 impl Pow {
-    pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
+    pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
         use crate::nano_graph::lower::TensorAtomMap;
         use crate::nano_graph::ops::{ScalarBinOp, ScalarOp};
         use crate::nano_graph::pattern::AtomId;
@@ -617,17 +614,14 @@ impl Pow {
             ctx.tensor_map.get(&a_id).cloned(),
             ctx.tensor_map.get(&b_id).cloned(),
         ) else {
-            ctx.lower_as_boundary_named(self, "Pow");
-            return;
+            return crate::milli_graph::ops::LowerResult::Unsupported;
         };
         let Some(out_info) = all_infos.get(&out_id) else {
-            ctx.lower_as_boundary_named(self, "Pow");
-            return;
+            return crate::milli_graph::ops::LowerResult::Unsupported;
         };
 
         let Some((layout, known_dims, sym_dims, count)) = ctx.classify_dims(out_info) else {
-            ctx.lower_as_boundary_named(self, "Pow");
-            return;
+            return crate::milli_graph::ops::LowerResult::Unsupported;
         };
         let count = count.max(1);
         let strides = TensorAtomMap::compute_strides(&known_dims);
@@ -662,6 +656,7 @@ impl Pow {
             out_id,
             TensorAtomMap::simple(base_id, count, dt, layout, strides, sym_dims),
         );
+        crate::milli_graph::ops::LowerResult::Lowered
     }
 
     pub fn remap_tensors(&mut self, map: &HashMap<GlobalId, GlobalId>, rng: &mut impl Rng) {
@@ -751,8 +746,8 @@ impl MilliOp for Pow {
         Ok(Box::new([(self.output, out)].into_iter()))
     }
 
-    fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
-        Pow::lower_to_nano(self, ctx);
+    fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
+        Pow::lower_to_nano(self, ctx)
     }
 }
 
@@ -881,7 +876,7 @@ impl MatMul {
 }
 
 impl MatMul {
-    pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
+    pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
         use crate::nano_graph::lower::DimKind;
         use crate::nano_graph::lower::TensorAtomMap;
         use crate::nano_graph::ops::{ReduceKind, ScalarBinOp, ScalarOp};
@@ -897,12 +892,10 @@ impl MatMul {
             ctx.tensor_map.get(&a_id).cloned(),
             ctx.tensor_map.get(&b_id).cloned(),
         ) else {
-            ctx.lower_as_boundary_named(self, "MatMul");
-            return;
+            return crate::milli_graph::ops::LowerResult::Unsupported;
         };
         let Some(out_info) = all_infos.get(&out_id) else {
-            ctx.lower_as_boundary_named(self, "MatMul");
-            return;
+            return crate::milli_graph::ops::LowerResult::Unsupported;
         };
 
         // MatMul operates on the last 2 tensor dims: A=[...,M,K] @ B=[...,K,N].
@@ -916,16 +909,14 @@ impl MatMul {
         let b_layout = &b_map.layout;
 
         if a_layout.len() < 2 || b_layout.len() < 2 {
-            ctx.lower_as_boundary_named(self, "MatMul");
-            return;
+            return crate::milli_graph::ops::LowerResult::Unsupported;
         }
 
         // Extract K from last dim of A and second-to-last of B.
         let k = match (&a_layout[a_layout.len() - 1], &b_layout[b_layout.len() - 2]) {
             (DimKind::Known(ka), DimKind::Known(kb)) if ka == kb && *ka > 0 => *ka,
             _ => {
-                ctx.lower_as_boundary_named(self, "MatMul");
-                return;
+                return crate::milli_graph::ops::LowerResult::Unsupported;
             }
         };
 
@@ -933,8 +924,7 @@ impl MatMul {
         let n = match &b_layout[b_layout.len() - 1] {
             DimKind::Known(n) if *n > 0 => *n,
             _ => {
-                ctx.lower_as_boundary_named(self, "MatMul");
-                return;
+                return crate::milli_graph::ops::LowerResult::Unsupported;
             }
         };
 
@@ -971,8 +961,7 @@ impl MatMul {
 
         // B can have fewer batch dims (broadcasting). If B has batch dims, they must match.
         if !b_batch_known.is_empty() && a_batch_known != b_batch_known {
-            ctx.lower_as_boundary_named(self, "MatMul");
-            return;
+            return crate::milli_graph::ops::LowerResult::Unsupported;
         }
 
         let batch_known_product: u64 = a_batch_known.iter().product::<u64>().max(1);
@@ -981,14 +970,12 @@ impl MatMul {
         let Some((out_layout, out_known_dims, out_sym_dims, out_count)) =
             ctx.classify_dims(out_info)
         else {
-            ctx.lower_as_boundary_named(self, "MatMul");
-            return;
+            return crate::milli_graph::ops::LowerResult::Unsupported;
         };
         let out_count = out_count.max(1);
 
         if out_count > 64_000_000 {
-            ctx.lower_as_boundary_named(self, "MatMul");
-            return;
+            return crate::milli_graph::ops::LowerResult::Unsupported;
         }
 
         // Use the MatMul's explicit dtype fields for nano group precision.
@@ -1222,6 +1209,7 @@ impl MatMul {
                 out_sym_dims,
             ),
         );
+        crate::milli_graph::ops::LowerResult::Lowered
     }
 
     pub fn remap_tensors(&mut self, map: &HashMap<GlobalId, GlobalId>, rng: &mut impl Rng) {
@@ -1422,8 +1410,8 @@ impl MilliOp for MatMul {
         Some(result)
     }
 
-    fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
-        MatMul::lower_to_nano(self, ctx);
+    fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
+        MatMul::lower_to_nano(self, ctx)
     }
 }
 

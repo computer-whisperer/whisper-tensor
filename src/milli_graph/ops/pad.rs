@@ -102,6 +102,227 @@ impl crate::graph::Node for Pad {
     }
 }
 
+impl Pad {
+    /// Lower Pad (constant mode) to nano ops: Literal + Identity atoms in row-major order.
+    ///
+    /// All dimensions must be known. Pads tensor must be constant-folded.
+    pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
+        use crate::nano_graph::lower::{DimKind, NanoLoweringContext, TensorAtomMap};
+        use crate::nano_graph::ops::ScalarOp;
+        use crate::nano_graph::pattern::InputRef;
+        use crate::numeric_scalar::NumericScalar;
+
+        // Constant mode only.
+        if !matches!(self.mode, PadMode::Constant) {
+            return crate::milli_graph::ops::LowerResult::Unsupported;
+        }
+
+        let all_infos = ctx.all_infos;
+
+        let Some(in_map) = ctx.tensor_map.get(&self.data).cloned() else {
+            return crate::milli_graph::ops::LowerResult::Unsupported;
+        };
+        let Some(out_info) = all_infos.get(&self.output) else {
+            return crate::milli_graph::ops::LowerResult::Unsupported;
+        };
+
+        // No segmented inputs.
+        if !in_map.segments.is_empty() {
+            return crate::milli_graph::ops::LowerResult::Unsupported;
+        }
+
+        // Extract concrete pad values.
+        let Some(pads_raw) = NanoLoweringContext::extract_i64(all_infos, &self.pads) else {
+            return crate::milli_graph::ops::LowerResult::Unsupported;
+        };
+
+        // All input dims must be known.
+        let in_known: Vec<u64> = in_map
+            .layout
+            .iter()
+            .filter_map(|d| match d { DimKind::Known(s) => Some(*s), _ => None })
+            .collect();
+        if in_known.len() != in_map.layout.len() {
+            return crate::milli_graph::ops::LowerResult::Unsupported;
+        }
+        let rank = in_known.len();
+
+        // Resolve axes: if specified, only those axes are padded.
+        let axes: Vec<usize> = if let Some(axes_id) = self.axes {
+            let Some(axes_raw) = NanoLoweringContext::extract_i64(all_infos, &axes_id) else {
+                return crate::milli_graph::ops::LowerResult::Unsupported;
+            };
+            axes_raw
+                .iter()
+                .map(|&a| if a < 0 { (a + rank as i64) as usize } else { a as usize })
+                .collect()
+        } else {
+            (0..rank).collect()
+        };
+
+        // Build per-dimension pad_begin / pad_end arrays.
+        let n_pad_axes = axes.len();
+        if pads_raw.len() != 2 * n_pad_axes {
+            return crate::milli_graph::ops::LowerResult::Unsupported;
+        }
+        let mut pad_begin = vec![0usize; rank];
+        let mut pad_end = vec![0usize; rank];
+        for (i, &ax) in axes.iter().enumerate() {
+            pad_begin[ax] = pads_raw[i] as usize;
+            pad_end[ax] = pads_raw[n_pad_axes + i] as usize;
+        }
+
+        // Compute output shape.
+        let out_shape: Vec<u64> = (0..rank)
+            .map(|d| in_known[d] + pad_begin[d] as u64 + pad_end[d] as u64)
+            .collect();
+        let out_total: u64 = out_shape.iter().product();
+
+        // No-op: no actual padding — pass through as view/identity.
+        if pad_begin.iter().all(|&p| p == 0) && pad_end.iter().all(|&p| p == 0) {
+            return ctx.lower_view_op(self);
+        }
+
+        // Atom count cap.
+        if out_total > 16_000_000 {
+            return crate::milli_graph::ops::LowerResult::Unsupported;
+        }
+
+        // Extract constant fill value (default 0.0).
+        let fill_val = if let Some(cv_id) = self.constant_value {
+            if let Some(cv_info) = all_infos.get(&cv_id) {
+                cv_info.to_f64_vec().and_then(|v| v.first().copied()).unwrap_or(0.0)
+            } else {
+                0.0
+            }
+        } else {
+            0.0
+        };
+        let fill_scalar = NumericScalar::from_f32(fill_val as f32);
+
+        let in_strides = &in_map.known_strides;
+        let sym_dims = in_map.sym_dims.clone();
+        let dt = in_map.dtype;
+
+        // Compute output strides (row-major) for multi-index decomposition.
+        let out_strides = TensorAtomMap::compute_strides(&out_shape);
+
+        // Number of "rows" (all dims except last).
+        let n_rows = if rank > 0 { out_shape[..rank - 1].iter().product::<u64>() } else { 1 };
+        let last = rank - 1;
+        let last_out = out_shape[last] as usize;
+        let last_in = in_known[last] as usize;
+        let last_pb = pad_begin[last];
+        let last_pe = pad_end[last];
+
+        // Emit groups row by row, tracking pending zeros for merging.
+        let mut first_base = None;
+        let mut pending_zeros = 0u64;
+
+        // Helper closure: flush pending zeros as a Literal group.
+        // Can't use a closure that borrows ctx mutably, so we'll inline it.
+
+        for row_idx in 0..n_rows {
+            // Decompose row_idx into multi-index for dims 0..rank-1.
+            let mut coords = vec![0u64; rank];
+            let mut rem = row_idx;
+            for d in 0..rank - 1 {
+                let dim_stride = out_strides[d] / out_shape[last];
+                coords[d] = rem / dim_stride;
+                rem %= dim_stride;
+            }
+
+            // Check if this row is entirely in padding (any outer dim in pad region).
+            let mut is_pad_row = false;
+            for d in 0..rank - 1 {
+                if coords[d] < pad_begin[d] as u64
+                    || coords[d] >= pad_begin[d] as u64 + in_known[d]
+                {
+                    is_pad_row = true;
+                    break;
+                }
+            }
+
+            if is_pad_row {
+                pending_zeros += last_out as u64;
+            } else {
+                // Interior row: [left_pad, input_data, right_pad].
+
+                // Left pad.
+                pending_zeros += last_pb as u64;
+
+                // Flush zeros before Identity group.
+                if pending_zeros > 0 {
+                    let b = ctx.nano.push_group(
+                        pending_zeros,
+                        dt,
+                        ScalarOp::Literal(fill_scalar.clone()),
+                        sym_dims.clone(),
+                        vec![],
+                    );
+                    if first_base.is_none() { first_base = Some(b); }
+                    pending_zeros = 0;
+                }
+
+                // Identity group for the inner data.
+                let mut in_offset = 0u64;
+                for d in 0..rank - 1 {
+                    in_offset += (coords[d] - pad_begin[d] as u64) * in_strides[d];
+                }
+                let in_row_base = in_map.base_id.offset(in_offset);
+                let in_last_stride = in_strides[last] as i64;
+
+                let b = ctx.nano.push_group(
+                    last_in as u64,
+                    dt,
+                    ScalarOp::Identity,
+                    sym_dims.clone(),
+                    vec![InputRef::affine(in_row_base, in_last_stride)],
+                );
+                if first_base.is_none() { first_base = Some(b); }
+
+                // Right pad (accumulated, will merge with next row's left or trailing zeros).
+                pending_zeros += last_pe as u64;
+            }
+        }
+
+        // Flush remaining zeros.
+        if pending_zeros > 0 {
+            ctx.nano.push_group(
+                pending_zeros,
+                dt,
+                ScalarOp::Literal(fill_scalar),
+                sym_dims.clone(),
+                vec![],
+            );
+        }
+
+        // Edge case: if entire tensor is padding (no interior rows).
+        if first_base.is_none() {
+            // Should have been caught by the no-op check, but handle gracefully.
+            return crate::milli_graph::ops::LowerResult::Unsupported;
+        }
+
+        // Register output.
+        let Some((out_layout, out_known_dims, out_sym_dims, _)) = ctx.classify_dims(out_info)
+        else {
+            return crate::milli_graph::ops::LowerResult::Unsupported;
+        };
+        ctx.tensor_map.insert(
+            self.output,
+            TensorAtomMap::simple(
+                first_base.unwrap(),
+                out_total,
+                dt,
+                out_layout,
+                TensorAtomMap::compute_strides(&out_known_dims),
+                out_sym_dims,
+            ),
+        );
+        crate::milli_graph::ops::LowerResult::Lowered
+    }
+}
+
 /// Layout info for N-dimensional index decomposition.
 struct NdLayout {
     strides: Vec<usize>,

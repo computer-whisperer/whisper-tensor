@@ -68,14 +68,14 @@ impl ReduceMax {
 }
 
 impl ReduceMax {
-    pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
+    pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
         use crate::nano_graph::{ReduceKind, ScalarOp};
         ctx.lower_reduce(self, |compute_dt, count, stride| ScalarOp::Reduce {
             kind: ReduceKind::Max,
             reduce_count: count,
             reduce_stride: stride,
             compute_dtype: compute_dt,
-        });
+        })
     }
 
     pub fn remap_tensors(&mut self, map: &HashMap<GlobalId, GlobalId>, rng: &mut impl rand::Rng) {
@@ -224,7 +224,26 @@ impl MilliOp for ReduceMax {
         Ok(Box::new([(self.output, out)].into_iter()))
     }
 
-    fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
-        ReduceMax::lower_to_nano(self, ctx);
+    fn eval_new<'p, P2: crate::pool::Pool + 'p>(
+        &self,
+        inputs: &[crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>],
+        pool: &'p P2,
+    ) -> Result<Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>, crate::nano_graph::pool_eval::PoolEvalError> {
+        use crate::numeric_scalar::NumericScalar;
+        let dtype = inputs[0].dtype();
+        super::reduce_eval_new(
+            inputs,
+            if self.axes.is_some() { Some(1) } else { None },
+            self.keepdims,
+            self.noop_with_empty_axes,
+            NumericScalar::min_sentinel(dtype),
+            |cur, val| cur.max(val),
+            |v, _count| v,
+            pool,
+        )
+    }
+
+    fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
+        ReduceMax::lower_to_nano(self, ctx)
     }
 }

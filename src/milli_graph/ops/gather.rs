@@ -73,7 +73,7 @@ impl Gather {
         self.output
     }
 
-    pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
+    pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
         let all_infos = ctx.all_infos;
         let data_id = self.data_id();
         let indices_id = self.indices_id();
@@ -85,32 +85,26 @@ impl Gather {
         // The IndirectLoad nano lowering below handles concrete inputs correctly.
 
         let Some(data_map) = ctx.tensor_map.get(&data_id).cloned() else {
-            ctx.lower_as_boundary_named(self, "Gather");
-            return;
+            return crate::milli_graph::ops::LowerResult::Unsupported;
         };
         let Some(indices_map) = ctx.tensor_map.get(&indices_id).cloned() else {
-            ctx.lower_as_boundary_named(self, "Gather");
-            return;
+            return crate::milli_graph::ops::LowerResult::Unsupported;
         };
         let Some(out_info) = all_infos.get(&out_id) else {
-            ctx.lower_as_boundary_named(self, "Gather");
-            return;
+            return crate::milli_graph::ops::LowerResult::Unsupported;
         };
         let Some(data_info) = all_infos.get(&data_id) else {
-            ctx.lower_as_boundary_named(self, "Gather");
-            return;
+            return crate::milli_graph::ops::LowerResult::Unsupported;
         };
         let Some(_indices_info) = all_infos.get(&indices_id) else {
-            ctx.lower_as_boundary_named(self, "Gather");
-            return;
+            return crate::milli_graph::ops::LowerResult::Unsupported;
         };
 
         // Normalize axis.
         let data_rank = match data_info.rank_if_known() {
             Some(r) => r,
             None => {
-                ctx.lower_as_boundary_named(self, "Gather");
-                return;
+                return crate::milli_graph::ops::LowerResult::Unsupported;
             }
         };
         let axis = if self.axis() < 0 {
@@ -121,8 +115,7 @@ impl Gather {
 
         // Only handle axis=0 for now.
         if axis != 0 {
-            ctx.lower_as_boundary_named(self, "Gather");
-            return;
+            return crate::milli_graph::ops::LowerResult::Unsupported;
         }
 
         // Indices can be any rank — we treat them as a flat list of index values.
@@ -142,8 +135,7 @@ impl Gather {
             .collect();
         if data_known.len() != data_rank {
             // Some data dims are symbolic — can't lower.
-            ctx.lower_as_boundary_named(self, "Gather");
-            return;
+            return crate::milli_graph::ops::LowerResult::Unsupported;
         }
 
         // For axis=0: data=[V, D, ...], D_total = product of data_known[1..]
@@ -157,8 +149,7 @@ impl Gather {
         let Some((out_layout, out_known_dims, out_sym_dims, out_count)) =
             ctx.classify_dims(out_info)
         else {
-            ctx.lower_as_boundary_named(self, "Gather");
-            return;
+            return crate::milli_graph::ops::LowerResult::Unsupported;
         };
         let out_count = out_count.max(1);
 
@@ -194,8 +185,7 @@ impl Gather {
             // Simple case: indices_map.count == 1, sym_dims present
             // Output should have count == D_total, same sym_dims
             if indices_map.count != 1 || out_count != d_total {
-                ctx.lower_as_boundary_named(self, "Gather");
-                return;
+                return crate::milli_graph::ops::LowerResult::Unsupported;
             }
 
             // Mul group: 1 atom * broadcast stride → 1 atom (sym_dims from indices)
@@ -350,6 +340,7 @@ impl Gather {
                 ),
             );
         }
+        crate::milli_graph::ops::LowerResult::Lowered
     }
 
     pub fn remap_tensors(&mut self, map: &HashMap<GlobalId, GlobalId>, rng: &mut impl rand::Rng) {
@@ -465,8 +456,8 @@ impl MilliOp for Gather {
         Ok(Box::new([(self.output, out)].into_iter()))
     }
 
-    fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
-        Gather::lower_to_nano(self, ctx);
+    fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
+        Gather::lower_to_nano(self, ctx)
     }
 }
 
@@ -646,5 +637,88 @@ impl MilliOp for GatherGrad {
 
         let result_tensor = NumericTensor::<DynRank>::from_vec_shape(result, data_shape)?;
         Ok(Box::new(std::iter::once((self.output, result_tensor))))
+    }
+
+    fn eval_new<'p, P2: crate::pool::Pool + 'p>(
+        &self,
+        inputs: &[crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>],
+        pool: &'p P2,
+    ) -> Result<Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>, crate::nano_graph::pool_eval::PoolEvalError> {
+        use crate::numeric_scalar::NumericScalar;
+        use crate::numeric_tensor::{NumericTensor, TensorLayout};
+        use crate::tensor_rank::DynRank;
+
+        let grad_out = &inputs[0];
+        let indices = &inputs[1];
+        let data = &inputs[2]; // for shape only
+
+        let data_shape = data.shape();
+        let rank = data_shape.len();
+        let dtype = grad_out.dtype();
+        let axis = if self.axis < 0 { (self.axis + rank as i64) as usize } else { self.axis as usize };
+
+        let out_numel: usize = data_shape.iter().product::<u64>() as usize;
+        let layout = TensorLayout::<DynRank>::row_major(data_shape.clone(), dtype);
+        let buf = pool.allocate(layout.buffer_size_bytes())
+            .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
+        let mut out = NumericTensor::from_parts(buf, layout);
+        for i in 0..out_numel { out.write_element(i, NumericScalar::zero(dtype)); }
+
+        // Strides.
+        let mut data_strides = vec![1usize; rank];
+        for i in (0..rank.saturating_sub(1)).rev() { data_strides[i] = data_strides[i + 1] * data_shape[i + 1] as usize; }
+
+        let grad_shape = grad_out.shape();
+        let grad_rank = grad_shape.len();
+        let mut grad_strides = vec![1usize; grad_rank];
+        for i in (0..grad_rank.saturating_sub(1)).rev() { grad_strides[i] = grad_strides[i + 1] * grad_shape[i + 1] as usize; }
+
+        let idx_shape = indices.shape();
+        let idx_ndim = idx_shape.len();
+        let mut idx_strides = vec![1usize; idx_ndim];
+        for i in (0..idx_ndim.saturating_sub(1)).rev() { idx_strides[i] = idx_strides[i + 1] * idx_shape[i + 1] as usize; }
+
+        let prefix_dims = axis;
+        let suffix_dims = rank - axis - 1;
+        let axis_len = data_shape[axis] as i64;
+
+        for flat_g in 0..grad_out.numel() {
+            let val = grad_out.read_element(flat_g);
+            // Skip zeros for efficiency.
+            if !val.is_nonzero() { continue; }
+
+            let mut rem = flat_g;
+            let mut data_flat = 0usize;
+
+            for d in 0..prefix_dims {
+                let coord = rem / grad_strides[d];
+                rem %= grad_strides[d];
+                data_flat += coord * data_strides[d];
+            }
+
+            let mut idx_flat = 0usize;
+            for (d, &stride) in idx_strides.iter().enumerate() {
+                let grad_dim = prefix_dims + d;
+                let coord = rem / grad_strides[grad_dim];
+                rem %= grad_strides[grad_dim];
+                idx_flat += coord * stride;
+            }
+
+            for d in 0..suffix_dims {
+                let grad_dim = prefix_dims + idx_ndim + d;
+                let coord = rem / grad_strides[grad_dim];
+                rem %= grad_strides[grad_dim];
+                data_flat += coord * data_strides[axis + 1 + d];
+            }
+
+            let mut idx_val = indices.read_element(idx_flat).to_i64();
+            if idx_val < 0 { idx_val += axis_len; }
+            data_flat += idx_val as usize * data_strides[axis];
+
+            let cur = out.read_element(data_flat);
+            out.write_element(data_flat, cur.add(val));
+        }
+
+        Ok(vec![out])
     }
 }

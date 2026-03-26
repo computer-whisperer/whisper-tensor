@@ -79,16 +79,16 @@ pub enum AnyMilliOp {
     // Constants
     Constant(Constant),
     ConstantOfShape(ConstantOfShape),
-    
+
     // Binary Operations
     SimpleBinary(SimpleBinary),   // Add, Sub, Mul, Div, comparisons, etc.
     MatMul(MatMul),
     Pow(Pow),
-    
+
     // Unary Operations
     SimpleUnary(SimpleUnaryOp),   // Neg, Abs, Exp, Sqrt, trig, etc.
     ClampMin(ClampMin),
-    
+
     // Shape Operations
     Shape(Shape),
     Reshape(Reshape),
@@ -96,33 +96,47 @@ pub enum AnyMilliOp {
     Squeeze(Squeeze),
     Unsqueeze(Unsqueeze),
     Expand(Expand),
-    
+
     // Indexing Operations
     Slice(Slice),
     Gather(Gather),
-    
+    GatherGrad(GatherGrad),
+
     // Reduction Operations
     ReduceSum(ReduceSum),
     ReduceMean(ReduceMean),
     ReduceMax(ReduceMax),
     ReduceMin(ReduceMin),
     ReduceProd(ReduceProd),
-    
+
     // Type Operations
     Cast(Cast),
     CastLike(CastLike),
-    
+
     // Multi-tensor Operations
     Concat(Concat),
     Split(Split),
     Where(Where),
-    
-    // Sequence Operations
+
+    // Convolution
+    Conv(Conv),
+    ConvInputGrad(ConvInputGrad),
+    ConvWeightGrad(ConvWeightGrad),
+    ConvBiasGrad(ConvBiasGrad),
+
+    // Padding & Resize
+    Pad(Pad),
+    Resize(Resize),
+
+    // Sequence / Misc Operations
     Range(Range),
     CumSum(CumSum),
     NonZero(NonZero),
     ArgMax(ArgMax),
     ArgMin(ArgMin),
+    SumTo(SumTo),
+    TopK(TopK),
+    RandomNormalLike(RandomNormalLike),
 }
 ```
 
@@ -219,7 +233,30 @@ All reductions support:
 | `Split` | Split tensor into multiple outputs |
 | `Where` | Conditional selection between two tensors |
 
-### Sequence Operations
+### Convolution
+
+| Operation | Description |
+|-----------|-------------|
+| `Conv` | N-dimensional convolution (forward) with optional bias |
+| `ConvInputGrad` | Backward: gradient w.r.t. input (col2im) |
+| `ConvWeightGrad` | Backward: gradient w.r.t. weight |
+| `ConvBiasGrad` | Backward: gradient w.r.t. bias (sum reduction) |
+
+### Padding & Resize
+
+| Operation | Description |
+|-----------|-------------|
+| `Pad` | Pad tensor with constant, reflect, edge, or wrap mode |
+| `Resize` | Spatial resize/interpolation (nearest, linear, cubic) |
+
+### Gradient Helpers
+
+| Operation | Description |
+|-----------|-------------|
+| `GatherGrad` | Backward for Gather (scatter-add) |
+| `SumTo` | Un-broadcast reduction: sum to target shape |
+
+### Sequence & Misc Operations
 
 | Operation | Description |
 |-----------|-------------|
@@ -228,6 +265,8 @@ All reductions support:
 | `NonZero` | Returns indices of non-zero elements |
 | `ArgMax` | Index of maximum value along axis |
 | `ArgMin` | Index of minimum value along axis |
+| `TopK` | Top-K values and indices along axis |
+| `RandomNormalLike` | Random normal tensor matching input shape |
 
 ---
 
@@ -547,6 +586,138 @@ Operations work with `NumericTensor<DynRank>`:
 
 ---
 
+## Migration Status
+
+The system is migrating from the legacy `eval()` path (HashMap-based, EvalBackend) to the pool-based architecture: `infer()` → `lower_to_nano()` → `pool_eval`, with `eval_new()` as an opaque fallback for ops that can't decompose into scalar nano-ops.
+
+### MilliOp Trait Methods
+
+| Method | Purpose | Default |
+|--------|---------|---------|
+| `infer()` | Shape/dtype inference from symbolic inputs | Attempts constant_fold, else `UnableToInfer` |
+| `eval()` | Legacy execution (required, no default) | — |
+| `eval_new()` | Pool-based opaque execution (for unlowerable ops) | Returns `Unsupported` |
+| `lower_to_nano()` | Decompose into scalar nano-op DAG; returns `LowerResult` | Returns `LowerResult::Unsupported` |
+
+When `lower_to_nano` returns `Unsupported`, the system automatically falls through to an OpaqueOp that calls `eval_new` at runtime. This means any op with `eval_new` is fully executable through pool_eval even without nano decomposition.
+
+### Per-Op Status
+
+Legend:
+- **infer**: ✅ = custom impl, ⚙️ = uses default (constant_fold)
+- **lower**: ✅ = real nano decomposition, ⚠️ = partial (some cases fall to opaque), — = no nano decomposition
+- **eval_new**: ✅ = custom pool-based impl, — = returns Unsupported (trait default)
+- **eval**: ✅ = legacy impl (all ops have this)
+
+#### Constants & Literals
+
+| Op | infer | lower | eval_new | eval | Notes |
+|----|-------|-------|----------|------|-------|
+| Constant | ✅ | ✅ | — | ✅ | Lowered as Literal atoms |
+| ConstantOfShape | ✅ | ✅ | — | ✅ | |
+
+#### Elementwise Binary
+
+| Op | infer | lower | eval_new | eval | Notes |
+|----|-------|-------|----------|------|-------|
+| SimpleBinary | ✅ | ✅ | — | ✅ | All 15 binary ops (Add, Sub, Mul, etc.) |
+| MatMul | ✅ | ⚠️ | — | ✅ | Opaque for >64M output atoms, symbolic K/N, or non-matching batch dims |
+| Pow | ✅ | ✅ | — | ✅ | |
+
+#### Elementwise Unary
+
+| Op | infer | lower | eval_new | eval | Notes |
+|----|-------|-------|----------|------|-------|
+| SimpleUnary | ✅ | ⚠️ | — | ✅ | Opaque for IsInf (has subfields) |
+| ClampMin | ⚙️ | ✅ | — | ✅ | |
+
+#### View / Layout Ops
+
+| Op | infer | lower | eval_new | eval | Notes |
+|----|-------|-------|----------|------|-------|
+| Reshape | ✅ | ✅ | — | ✅ | Zero-cost when row-major |
+| Transpose | ✅ | ⚠️ | — | ✅ | Opaque for symbolic dims |
+| Squeeze | ✅ | ✅ | — | ✅ | |
+| Unsqueeze | ✅ | ✅ | — | ✅ | |
+| Expand | ✅ | ⚠️ | — | ✅ | Opaque if expand shape not constant |
+| Shape | ✅ | ✅ | — | ✅ | |
+| Slice | ✅ | ⚠️ | — | ✅ | Opaque for negative step, non-constant starts/ends |
+| Concat | ✅ | ⚠️ | — | ✅ | Opaque for symbolic concat axis or mixed sym dims |
+| Split | ✅ | ✅ | — | ✅ | |
+
+#### Reductions
+
+| Op | infer | lower | eval_new | eval | Notes |
+|----|-------|-------|----------|------|-------|
+| ReduceSum | ✅ | ⚠️ | ✅ | ✅ | Nano: single-axis only; multi-axis via opaque eval_new |
+| ReduceMean | ✅ | ⚠️ | ✅ | ✅ | Same |
+| ReduceMax | ✅ | ⚠️ | ✅ | ✅ | Same |
+| ReduceMin | ✅ | ⚠️ | ✅ | ✅ | Same |
+| ReduceProd | ✅ | ⚠️ | ✅ | ✅ | Same |
+
+#### Type Ops
+
+| Op | infer | lower | eval_new | eval | Notes |
+|----|-------|-------|----------|------|-------|
+| Cast | ✅ | ✅ | — | ✅ | Identity group with output dtype |
+| CastLike | ✅ | ✅ | — | ✅ | |
+
+#### Indexing
+
+| Op | infer | lower | eval_new | eval | Notes |
+|----|-------|-------|----------|------|-------|
+| Gather | ✅ | ⚠️ | — | ✅ | axis=0 only; uses IndirectLoad for runtime indices |
+| Where | ✅ | ✅ | — | ✅ | Select op |
+
+#### Convolution
+
+| Op | infer | lower | eval_new | eval | Notes |
+|----|-------|-------|----------|------|-------|
+| Conv | ✅ | ⚠️ | — | ✅ | 2D only, group=1, dilation=[1,1], ≤16M atoms |
+| ConvInputGrad | ✅ | — | — | ✅ | col2im backward; complex |
+| ConvWeightGrad | ✅ | — | — | ✅ | im2col backward; complex |
+| ConvBiasGrad | ✅ | — | ✅ | ✅ | Opaque via eval_new (channel-wise sum) |
+
+#### Padding
+
+| Op | infer | lower | eval_new | eval | Notes |
+|----|-------|-------|----------|------|-------|
+| Pad | ✅ | ⚠️ | ✅ | ✅ | Nano: constant mode, known pads; other modes via opaque eval_new |
+
+#### Sequence / Misc
+
+| Op | infer | lower | eval_new | eval | Notes |
+|----|-------|-------|----------|------|-------|
+| Range | ✅ | — | ✅ | ✅ | Opaque via eval_new |
+| CumSum | ✅ | — | ✅ | ✅ | Sequential dependency; opaque via eval_new |
+| NonZero | ✅ | — | ✅ | ✅ | Data-dependent output shape; opaque via eval_new |
+| ArgMax | ✅ | — | ✅ | ✅ | Opaque via eval_new |
+| ArgMin | ✅ | — | ✅ | ✅ | Opaque via eval_new |
+| SumTo | ✅ | — | ✅ | ✅ | Opaque via eval_new (multi-axis reduce + reshape) |
+| Resize | ✅ | — | — | ✅ | No eval_new; complex interpolation |
+| TopK | ✅ | — | — | ✅ | No eval_new; sorting |
+| RandomNormalLike | ✅ | — | — | ✅ | No eval_new; random generation |
+| GatherGrad | ✅ | — | ✅ | ✅ | Opaque via eval_new (scatter-add) |
+
+### Key Issues to Address
+
+**High priority (blocks full nano coverage of common inference models):**
+- Gather is **axis=0 only**. Models using axis!=0 Gather fall to opaque (no eval_new).
+- Conv only handles **group=1, dilation=[1,1]**. Depthwise convolutions (group=C) and dilated convolutions fall to opaque (no eval_new).
+- MatMul has no eval_new — large matmuls or symbolic dims fall to opaque and fail.
+
+**Medium priority (functional but no nano decomposition):**
+- All reductions: **single-axis nano only**; multi-axis works via opaque eval_new but bypasses nano optimizations.
+- ConvInputGrad/ConvWeightGrad have no eval_new — training backward passes require legacy eval.
+- Resize has no eval_new — vision model upsampling requires legacy eval.
+
+**Low priority (rare ops or structural limitations):**
+- TopK, RandomNormalLike have no eval_new.
+- NonZero, Range have data-dependent output shapes — fundamentally cannot decompose into fixed atom groups, but work via opaque eval_new.
+- CumSum has sequential dependency — not naturally parallelizable, works via opaque eval_new.
+
+---
+
 ## File Structure
 
 ```
@@ -563,10 +734,13 @@ src/milli_graph/
     ├── cast_like.rs    # CastLike operation
     ├── concat.rs       # Concat operation
     ├── constant.rs     # Constant, ConstantOfShape
+    ├── conv.rs         # Conv, ConvInputGrad, ConvWeightGrad, ConvBiasGrad
     ├── cumsum.rs       # CumSum operation
     ├── expand.rs       # Expand operation
-    ├── gather.rs       # Gather operation
+    ├── gather.rs       # Gather, GatherGrad operations
     ├── nonzero.rs      # NonZero operation
+    ├── pad.rs          # Pad operation
+    ├── random_normal_like.rs  # RandomNormalLike operation
     ├── range.rs        # Range operation
     ├── reduce_max.rs   # ReduceMax operation
     ├── reduce_mean.rs  # ReduceMean operation
@@ -574,10 +748,13 @@ src/milli_graph/
     ├── reduce_prod.rs  # ReduceProd operation
     ├── reduce_sum.rs   # ReduceSum operation
     ├── reshape.rs      # Reshape operation
+    ├── resize.rs       # Resize operation
     ├── shape.rs        # Shape operation
     ├── slice.rs        # Slice operation
     ├── split.rs        # Split operation
     ├── squeeze.rs      # Squeeze operation
+    ├── sum_to.rs       # SumTo operation
+    ├── topk.rs         # TopK operation
     ├── transpose.rs    # Transpose operation
     ├── unary.rs        # SimpleUnaryOp, ClampMin
     ├── unsqueeze.rs    # Unsqueeze operation

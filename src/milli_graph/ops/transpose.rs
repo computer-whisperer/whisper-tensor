@@ -53,37 +53,33 @@ impl Transpose {
 }
 
 impl Transpose {
-    pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
+    pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
         let all_infos = ctx.all_infos;
         let in_id = Node::inputs(self).next().unwrap();
         let out_id = Node::outputs(self).next().unwrap();
 
         let Some(in_map) = ctx.tensor_map.get(&in_id).cloned() else {
-            ctx.lower_as_boundary_named(self, "Transpose");
-            return;
+            return crate::milli_graph::ops::LowerResult::Unsupported;
         };
         let Some(out_info) = all_infos.get(&out_id) else {
             ctx.register_opaque(out_id);
-            return;
+            return crate::milli_graph::ops::LowerResult::Lowered;
         };
         let Some(in_info) = all_infos.get(&in_id) else {
-            ctx.lower_as_boundary_named(self, "Transpose");
-            return;
+            return crate::milli_graph::ops::LowerResult::Unsupported;
         };
 
         let in_rank = match in_info.rank_if_known() {
             Some(r) => r,
             None => {
-                ctx.lower_as_boundary_named(self, "Transpose");
-                return;
+                return crate::milli_graph::ops::LowerResult::Unsupported;
             }
         };
 
         let Some((out_layout, out_known_dims, _out_sym_dims, _out_count)) =
             ctx.classify_dims(out_info)
         else {
-            ctx.lower_as_boundary_named(self, "Transpose");
-            return;
+            return crate::milli_graph::ops::LowerResult::Unsupported;
         };
 
         // Build full permutation (handling None=reverse, partial perms, negative indices).
@@ -141,9 +137,7 @@ impl Transpose {
             .any(|d| matches!(d, DimKind::Symbolic(_)))
             || out_layout.iter().any(|d| matches!(d, DimKind::Symbolic(_)))
         {
-            ctx.register_boundary(out_id, out_info, "Transpose");
-            ctx.push_unsupported(self, "Transpose(symbolic dims)");
-            return;
+            return crate::milli_graph::ops::LowerResult::Unsupported;
         }
 
         // Zero-cost transpose: reuse the input's atoms with permuted strides.
@@ -177,6 +171,7 @@ impl Transpose {
                 in_map.sym_dims.clone(),
             ),
         );
+        crate::milli_graph::ops::LowerResult::Lowered
     }
 
     pub fn remap_tensors(&mut self, map: &HashMap<GlobalId, GlobalId>, rng: &mut impl rand::Rng) {
@@ -342,7 +337,7 @@ impl MilliOp for Transpose {
         Ok(Box::new([(self.output, out)].into_iter()))
     }
 
-    fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
-        Transpose::lower_to_nano(self, ctx);
+    fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
+        Transpose::lower_to_nano(self, ctx)
     }
 }

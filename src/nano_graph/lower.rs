@@ -1196,40 +1196,19 @@ impl<'a> NanoLoweringContext<'a> {
     }
 
     pub fn lower_op(&mut self, op: &AnyMilliOp) {
+        use crate::milli_graph::ops::LowerResult;
+
         let groups_before = self.nano.num_groups();
-        op.lower_to_nano(self);
+        match op.lower_to_nano(self) {
+            LowerResult::Lowered => {}
+            LowerResult::Unsupported => self.lower_default(op),
+        }
         let groups_after = self.nano.num_groups();
         // Record provenance for any new groups.
         let op_id = op.global_id();
         let op_kind = op.op_kind();
         for _ in groups_before..groups_after {
             self.group_provenance.push((op_id, op_kind.clone()));
-        }
-    }
-
-    /// Default lowering for trait-based dispatch: if all outputs are numeric
-    /// (constant-folded), register as constants; otherwise register as boundary.
-    pub fn lower_default_trait(&mut self, op: &impl crate::graph::Node<OpKind = String>) {
-        let all_infos = self.all_infos;
-        let op_kind = op.op_kind();
-        let all_numeric = op.outputs().all(|out_id| {
-            all_infos
-                .get(&out_id)
-                .is_some_and(|i| i.as_numeric().is_some())
-        });
-        for out_id in op.outputs() {
-            if let Some(info) = all_infos.get(&out_id) {
-                if all_numeric {
-                    self.register_constant(out_id, info);
-                } else {
-                    self.register_boundary(out_id, info, &op_kind);
-                }
-            } else {
-                self.register_opaque(out_id);
-            }
-        }
-        if !all_numeric {
-            self.push_unsupported(op, &op_kind);
         }
     }
 
@@ -1403,18 +1382,16 @@ impl<'a> NanoLoweringContext<'a> {
     ///
     /// If input and output dtypes match, this is a zero-cost view (no atoms created).
     /// Otherwise, emits an Identity group that performs the dtype cast.
-    pub fn lower_identity_passthrough<T: Node>(&mut self, op: &T) {
+    pub fn lower_identity_passthrough<T: Node>(&mut self, op: &T) -> crate::milli_graph::ops::LowerResult {
         let all_infos = self.all_infos;
         let in_id = Node::inputs(op).next().unwrap();
         let out_id = Node::outputs(op).next().unwrap();
 
         let Some(in_map) = self.tensor_map.get(&in_id).cloned() else {
-            self.lower_as_boundary_named(op, "ViewOp");
-            return;
+            return crate::milli_graph::ops::LowerResult::Unsupported;
         };
         let Some(out_info) = all_infos.get(&out_id) else {
-            self.lower_as_boundary_named(op, "ViewOp");
-            return;
+            return crate::milli_graph::ops::LowerResult::Unsupported;
         };
 
         let in_dt = all_infos.get(&in_id).map(|i| Self::ndt(i));
@@ -1423,7 +1400,7 @@ impl<'a> NanoLoweringContext<'a> {
         // If dtypes match, this is a no-op — just re-register the tensor.
         if in_dt == Some(out_dt) {
             self.tensor_map.insert(out_id, in_map);
-            return;
+            return crate::milli_graph::ops::LowerResult::Lowered;
         }
 
         // Dtype differs — emit an Identity group for the cast.
@@ -1438,7 +1415,6 @@ impl<'a> NanoLoweringContext<'a> {
             vec![input_ref],
         );
 
-        // The output has freshly allocated atoms in row-major order.
         self.tensor_map.insert(
             out_id,
             TensorAtomMap::simple(
@@ -1450,33 +1426,29 @@ impl<'a> NanoLoweringContext<'a> {
                 in_map.sym_dims.clone(),
             ),
         );
+
+        crate::milli_graph::ops::LowerResult::Lowered
     }
 
     /// View op: no compute, just re-register with the new shape.
-    pub fn lower_view_op<T: Node>(&mut self, op: &T) {
+    pub fn lower_view_op<T: Node>(&mut self, op: &T) -> crate::milli_graph::ops::LowerResult {
         let all_infos = self.all_infos;
         let in_id = Node::inputs(op).next().unwrap();
         let out_id = Node::outputs(op).next().unwrap();
 
         let Some(in_map) = self.tensor_map.get(&in_id).cloned() else {
-            self.lower_as_boundary_named(op, "ViewOp");
-            return;
+            return crate::milli_graph::ops::LowerResult::Unsupported;
         };
         let Some(out_info) = all_infos.get(&out_id) else {
-            self.register_opaque(out_id);
-            return;
+            return crate::milli_graph::ops::LowerResult::Unsupported;
         };
 
         let Some((layout, known_dims, sym_dims, count)) = self.classify_dims(out_info) else {
-            self.lower_as_boundary_named(op, "ViewOp");
-            return;
+            return crate::milli_graph::ops::LowerResult::Unsupported;
         };
         let count = count.max(1);
 
         if count == in_map.count {
-            // Check if input is row-major (or trivial). If so, zero-cost re-register.
-            // If input has non-row-major strides (from Transpose or non-leading Split),
-            // we must materialize an Identity group to reorder elements into row-major.
             let in_known = in_map.known_dims();
             let in_rowmajor = TensorAtomMap::compute_strides(&in_known);
             let is_row_major = in_map.known_strides == in_rowmajor
@@ -1484,7 +1456,6 @@ impl<'a> NanoLoweringContext<'a> {
                 || in_map.segments.is_empty() && in_map.known_strides.iter().all(|&s| s <= 1);
 
             if is_row_major && in_map.segments.is_empty() {
-                // Zero-cost: just re-register with new layout.
                 self.tensor_map.insert(
                     out_id,
                     TensorAtomMap::simple(
@@ -1497,7 +1468,6 @@ impl<'a> NanoLoweringContext<'a> {
                     ),
                 );
             } else {
-                // Non-row-major input: emit Identity group to materialize row-major order.
                 let dt = Self::ndt(out_info);
                 let input_ref = Self::pointwise_input_ref(&in_map);
                 let base_id = self.nano.push_group(
@@ -1519,10 +1489,9 @@ impl<'a> NanoLoweringContext<'a> {
                     ),
                 );
             }
+            crate::milli_graph::ops::LowerResult::Lowered
         } else {
-            self.register_boundary(out_id, out_info, "ViewOp");
-            let name = format!("ViewOp(count {} → {})", in_map.count, count);
-            self.push_unsupported(op, &name);
+            crate::milli_graph::ops::LowerResult::Unsupported
         }
     }
 
@@ -1544,37 +1513,42 @@ impl<'a> NanoLoweringContext<'a> {
     }
 
     /// Lower ReduceSum or ReduceMax over known axes.
-    pub fn lower_reduce<R, F>(&mut self, reduce: &R, make_reduce_op: F)
+    ///
+    /// Returns `Lowered` on success, `Unsupported` if this configuration
+    /// can't be decomposed (multi-axis, symbolic axis, etc.).
+    pub fn lower_reduce<R, F>(
+        &mut self,
+        reduce: &R,
+        make_reduce_op: F,
+    ) -> crate::milli_graph::ops::LowerResult
     where
         R: Node,
         R: ReduceAccessors,
         F: Fn(NumericDType, u64, i64) -> ScalarOp,
     {
+        use crate::milli_graph::ops::LowerResult;
+
         let all_infos = self.all_infos;
         let in_id = Node::inputs(reduce).next().unwrap();
         let out_id = Node::outputs(reduce).next().unwrap();
 
         let Some(in_map) = self.tensor_map.get(&in_id).cloned() else {
-            self.lower_as_boundary_named(reduce, "Reduce");
-            return;
+            return crate::milli_graph::ops::LowerResult::Unsupported;
         };
         let Some(out_info) = all_infos.get(&out_id) else {
-            self.lower_as_boundary_named(reduce, "Reduce");
-            return;
+            return crate::milli_graph::ops::LowerResult::Unsupported;
         };
 
         // Get the concrete reduction axes.
         let axes: Vec<i64> = if let Some(axes_id) = reduce.axes_tensor() {
             let Some(vals) = Self::extract_i64(all_infos, &axes_id) else {
-                self.lower_as_boundary_named(reduce, "Reduce");
-                return;
+                return crate::milli_graph::ops::LowerResult::Unsupported;
             };
             vals
         } else if reduce.noop_with_empty_axes() {
             // No axes + noop = identity.
             let Some((layout, known_dims, sym_dims, count)) = self.classify_dims(out_info) else {
-                self.lower_as_boundary_named(reduce, "Reduce");
-                return;
+                return crate::milli_graph::ops::LowerResult::Unsupported;
             };
             let count = count.max(1);
             let dt = Self::ndt(out_info);
@@ -1597,11 +1571,9 @@ impl<'a> NanoLoweringContext<'a> {
                     sym_dims,
                 ),
             );
-            return;
+            return crate::milli_graph::ops::LowerResult::Lowered;
         } else {
-            // No axes = reduce all. Boundary for now.
-            self.lower_as_boundary_named(reduce, "Reduce");
-            return;
+            return crate::milli_graph::ops::LowerResult::Unsupported;
         };
 
         let in_rank = in_map.layout.len();
@@ -1652,14 +1624,10 @@ impl<'a> NanoLoweringContext<'a> {
         let mut reduce_known_indices = Vec::new();
         for &ax in &norm_axes {
             if ax >= in_rank {
-                self.lower_as_boundary_named(reduce, "Reduce");
-                return;
+                return crate::milli_graph::ops::LowerResult::Unsupported;
             }
             let Some(ki) = axis_to_known_idx[ax] else {
-                // Reducing a symbolic dim — use the symbolic reduce path.
-                // For now, boundary.
-                self.lower_as_boundary_named(reduce, "Reduce");
-                return;
+                return crate::milli_graph::ops::LowerResult::Unsupported;
             };
             reduce_known_indices.push(ki);
         }
@@ -1670,8 +1638,7 @@ impl<'a> NanoLoweringContext<'a> {
             .map(|&ki| in_known[ki])
             .product();
         if reduce_extent == 0 {
-            self.lower_as_boundary_named(reduce, "Reduce");
-            return;
+            return crate::milli_graph::ops::LowerResult::Unsupported;
         }
 
         // Output known dims = input known dims minus the reduced ones.
@@ -1685,28 +1652,17 @@ impl<'a> NanoLoweringContext<'a> {
 
         // For now, handle single-axis reduction (covers most cases).
         if reduce_known_indices.len() != 1 {
-            self.lower_as_boundary_named(reduce, "Reduce");
-            return;
+            return crate::milli_graph::ops::LowerResult::Unsupported;
         }
 
         let rki = reduce_known_indices[0];
-        // Use the input's actual strides (may be non-row-major after Transpose).
         let in_strides = &in_map.known_strides;
         let reduce_stride = in_strides[rki] as i64;
 
-        // Build output known strides.
         let out_strides_local = TensorAtomMap::compute_strides(&out_known);
 
-        // For each output atom, compute the base input atom.
-        // The output atom at flat index `f` maps to input indices where the
-        // reduced dim is 0. We need to compute the input flat index with
-        // the reduced dim set to 0.
-        // Build Explicit mapping: output flat → input flat (at k=0).
-        // For each output atom, decompose into non-reduced dims, then compute
-        // the input flat index (with reduced dim = 0).
         let mut base_ids = Vec::with_capacity(out_count as usize);
         for flat_out in 0..out_count {
-            // Decompose flat_out into output known-dim indices.
             let mut out_indices = vec![0u64; out_known.len()];
             let mut rem = flat_out;
             for (i, &stride) in out_strides_local.iter().enumerate() {
@@ -1716,7 +1672,6 @@ impl<'a> NanoLoweringContext<'a> {
                 }
             }
 
-            // Map back to input known-dim indices (insert 0 for reduced dim).
             let mut in_indices = Vec::with_capacity(in_known.len());
             let mut oi = 0;
             for ki in 0..in_known.len() {
@@ -1735,7 +1690,6 @@ impl<'a> NanoLoweringContext<'a> {
             base_ids.push(in_flat);
         }
 
-        // Check if the base_ids form a simple affine pattern.
         let is_affine = if out_count <= 1 {
             true
         } else {
@@ -1745,8 +1699,6 @@ impl<'a> NanoLoweringContext<'a> {
                 .all(|w| (w[1] as i64 - w[0] as i64) == stride)
         };
 
-        // Build the input ref: Affine addressing for the base (at k=0),
-        // with reduce_count and reduce_stride encoded in the op itself.
         let input_ref = if is_affine && out_count > 0 {
             let stride_i = if out_count > 1 {
                 base_ids[1] as i64 - base_ids[0] as i64
@@ -1762,12 +1714,9 @@ impl<'a> NanoLoweringContext<'a> {
                     .collect(),
             )
         } else {
-            self.lower_as_boundary_named(reduce, "Reduce");
-            return;
+            return crate::milli_graph::ops::LowerResult::Unsupported;
         };
 
-        // Determine compute dtype: ReduceSum upcasts BF16/F16 → F32 to match
-        // milli eval precision semantics (see reduce_sum.rs lines 193-196).
         let out_dt = Self::ndt(out_info);
         let in_dt = all_infos.get(&in_id).map(|i| Self::ndt(i)).unwrap_or(out_dt);
         let compute_dt = match in_dt {
@@ -1775,17 +1724,11 @@ impl<'a> NanoLoweringContext<'a> {
             other => other,
         };
 
-        // Classify output for proper layout.
         let Some((out_layout, out_known_dims_full, out_sym_dims, _)) = self.classify_dims(out_info)
         else {
-            // This shouldn't happen since we computed out_count, but be safe.
-            self.lower_as_boundary_named(reduce, "Reduce");
-            return;
+            return crate::milli_graph::ops::LowerResult::Unsupported;
         };
 
-        // ReduceSum/ReduceMax group: the op carries reduce_count and reduce_stride,
-        // and the input uses Affine addressing (base at k=0).
-        // The evaluator loops k=0..reduce_count, reading at base + stride*i + k*reduce_stride.
         let reduce_op = make_reduce_op(compute_dt, reduce_extent, reduce_stride);
         let base_id = self.nano.push_group(
             out_count,
@@ -1806,26 +1749,11 @@ impl<'a> NanoLoweringContext<'a> {
                 out_sym_dims,
             ),
         );
+
+        crate::milli_graph::ops::LowerResult::Lowered
     }
 
-    /// Generic boundary fallback. Always registers outputs in tensor_map
-    /// so downstream ops can reference them.
-    pub fn lower_as_boundary_named<T: Node>(&mut self, op: &T, name: &str) {
-        let all_infos = self.all_infos;
-        let _op_id = op.global_id();
-        for out_id in op.outputs() {
-            if let Some(info) = all_infos.get(&out_id) {
-                self.register_boundary(out_id, info, name);
-            } else {
-                // No info available — register a minimal opaque atom so downstream
-                // ops always find this tensor in tensor_map.
-                self.register_opaque(out_id);
-            }
-        }
-        self.push_unsupported(op, name);
-    }
-
-    pub fn push_unsupported<T: Node>(&mut self, op: &T, name: &str) {
+    fn push_unsupported<T: Node>(&mut self, op: &T, name: &str) {
         let all_infos = self.all_infos;
         let in_shapes: Vec<String> = op
             .inputs()

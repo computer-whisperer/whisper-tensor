@@ -103,8 +103,8 @@ impl Reshape {
 }
 
 impl Reshape {
-    pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
-        ctx.lower_view_op(self);
+    pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
+        ctx.lower_view_op(self)
     }
 
     pub fn remap_tensors(&mut self, map: &HashMap<GlobalId, GlobalId>, rng: &mut impl rand::Rng) {
@@ -354,7 +354,7 @@ impl MilliOp for Reshape {
         Ok(Box::new([(self.output, output_value)].into_iter()))
     }
 
-    fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
-        Reshape::lower_to_nano(self, ctx);
+    fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
+        Reshape::lower_to_nano(self, ctx)
     }
 }

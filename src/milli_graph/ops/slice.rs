@@ -80,25 +80,22 @@ impl Slice {
         self.axes
     }
 
-    pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
+    pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
         let all_infos = ctx.all_infos;
         let data_id = self.data_id();
         let out_id = Node::outputs(self).next().unwrap();
 
         let Some(in_map) = ctx.tensor_map.get(&data_id).cloned() else {
-            ctx.lower_as_boundary_named(self, "Slice");
-            return;
+            return crate::milli_graph::ops::LowerResult::Unsupported;
         };
         let Some(out_info) = all_infos.get(&out_id) else {
-            ctx.lower_as_boundary_named(self, "Slice");
-            return;
+            return crate::milli_graph::ops::LowerResult::Unsupported;
         };
 
         let Some((out_layout, out_known_dims, out_sym_dims, out_count)) =
             ctx.classify_dims(out_info)
         else {
-            ctx.lower_as_boundary_named(self, "Slice");
-            return;
+            return crate::milli_graph::ops::LowerResult::Unsupported;
         };
         let out_count = out_count.max(1);
 
@@ -135,8 +132,7 @@ impl Slice {
 
         let (Some(starts), Some(_ends), Some(steps), Some(axes)) = (starts, ends, steps, axes)
         else {
-            ctx.lower_as_boundary_named(self, "Slice");
-            return;
+            return crate::milli_graph::ops::LowerResult::Unsupported;
         };
 
         // Build per-axis (start, step) for known dims.
@@ -178,20 +174,17 @@ impl Slice {
 
         for (i, &axis) in axes.iter().enumerate() {
             if axis >= in_rank {
-                ctx.lower_as_boundary_named(self, "Slice");
-                return;
+                return crate::milli_graph::ops::LowerResult::Unsupported;
             }
             let Some(ki) = axis_to_known_idx[axis] else {
                 // Slicing a symbolic dim -- boundary.
-                ctx.lower_as_boundary_named(self, "Slice");
-                return;
+                return crate::milli_graph::ops::LowerResult::Unsupported;
             };
 
             let dim = in_known[ki] as i64;
             let step = steps[i];
             if step == 0 {
-                ctx.lower_as_boundary_named(self, "Slice");
-                return;
+                return crate::milli_graph::ops::LowerResult::Unsupported;
             }
 
             let start = if step > 0 {
@@ -207,8 +200,7 @@ impl Slice {
         }
 
         if out_known_dims.len() != in_known.len() {
-            ctx.lower_as_boundary_named(self, "Slice");
-            return;
+            return crate::milli_graph::ops::LowerResult::Unsupported;
         }
 
         // Zero-cost slice: if the output atoms are contiguous in the input's
@@ -243,7 +235,7 @@ impl Slice {
                         out_sym_dims,
                     ),
                 );
-                return;
+            return crate::milli_graph::ops::LowerResult::Lowered;
             }
         }
 
@@ -268,11 +260,11 @@ impl Slice {
                     out_sym_dims,
                 ),
             );
-            return;
+            return crate::milli_graph::ops::LowerResult::Lowered;
         }
 
         // Negative steps: fall back to boundary (rare).
-        ctx.lower_as_boundary_named(self, "Slice(negative step)");
+        return crate::milli_graph::ops::LowerResult::Unsupported;
     }
 
     pub fn remap_tensors(&mut self, map: &HashMap<GlobalId, GlobalId>, rng: &mut impl rand::Rng) {
@@ -498,7 +490,7 @@ impl MilliOp for Slice {
         Ok(Box::new([(self.output, output)].into_iter()))
     }
 
-    fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
-        Slice::lower_to_nano(self, ctx);
+    fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
+        Slice::lower_to_nano(self, ctx)
     }
 }

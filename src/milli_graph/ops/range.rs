@@ -145,4 +145,38 @@ impl MilliOp for Range {
         .to_dyn_rank();
         Ok(Box::new([(self.output, out)].into_iter()))
     }
+
+    fn eval_new<'p, P2: crate::pool::Pool + 'p>(
+        &self,
+        inputs: &[crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>],
+        pool: &'p P2,
+    ) -> Result<Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>, crate::nano_graph::pool_eval::PoolEvalError> {
+        use crate::numeric_scalar::NumericScalar;
+        use crate::numeric_tensor::{NumericTensor, TensorLayout};
+        use crate::tensor_rank::DynRank;
+
+        let start = inputs[0].read_element(0);
+        let end = inputs[1].read_element(0);
+        let delta = inputs[2].read_element(0);
+        let dtype = start.dtype();
+
+        // Compute length: ceil((end - start) / delta).
+        let start_f = start.to_f64();
+        let end_f = end.to_f64();
+        let delta_f = delta.to_f64();
+        let n = ((end_f - start_f) / delta_f).ceil().max(0.0) as usize;
+
+        let layout = TensorLayout::<DynRank>::row_major(vec![n as u64], dtype);
+        let buf = pool.allocate(layout.buffer_size_bytes())
+            .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
+        let mut out = NumericTensor::from_parts(buf, layout);
+
+        let mut cur = start;
+        for i in 0..n {
+            out.write_element(i, cur);
+            cur = cur.add(delta);
+        }
+
+        Ok(vec![out])
+    }
 }

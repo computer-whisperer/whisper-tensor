@@ -8,9 +8,11 @@
 //! via the tch crate as an independent oracle.
 
 pub mod cast;
+pub mod conv;
 pub mod elementwise;
 pub mod matmul;
 pub mod opaque_ops;
+pub mod pad;
 pub mod reduce;
 
 use std::collections::HashMap;
@@ -233,6 +235,8 @@ pub fn build_test_set() -> Vec<TestCase> {
     cases.extend(matmul::build_cases());
     cases.extend(cast::build_cases());
     cases.extend(reduce::build_cases());
+    cases.extend(conv::build_cases());
+    cases.extend(pad::build_cases());
     cases.extend(opaque_ops::build_cases());
     cases
 }

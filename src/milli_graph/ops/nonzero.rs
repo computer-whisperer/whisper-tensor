@@ -149,4 +149,48 @@ impl MilliOp for NonZero {
         let out = inputs[&self.input].nonzero(backend)?;
         Ok(Box::new([(self.output, out)].into_iter()))
     }
+
+    fn eval_new<'p, P2: crate::pool::Pool + 'p>(
+        &self,
+        inputs: &[crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>],
+        pool: &'p P2,
+    ) -> Result<Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>, crate::nano_graph::pool_eval::PoolEvalError> {
+        use crate::numeric_dtype::NumericDType;
+        use crate::numeric_scalar::NumericScalar;
+        use crate::numeric_tensor::{NumericTensor, TensorLayout};
+        use crate::tensor_rank::DynRank;
+
+        let data = &inputs[0];
+        let shape = data.shape();
+        let rank = shape.len();
+
+        // Find all nonzero element indices.
+        let nz_flat: Vec<usize> = (0..data.numel())
+            .filter(|&i| data.read_element(i).is_nonzero())
+            .collect();
+        let nnz = nz_flat.len();
+
+        // Output: [rank, nnz] I64.
+        let out_shape = vec![rank as u64, nnz as u64];
+        let layout = TensorLayout::<DynRank>::row_major(out_shape, NumericDType::I64);
+        let buf = pool.allocate(layout.buffer_size_bytes())
+            .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
+        let mut out = NumericTensor::from_parts(buf, layout);
+
+        let mut strides = vec![1usize; rank];
+        for i in (0..rank.saturating_sub(1)).rev() {
+            strides[i] = strides[i + 1] * shape[i + 1] as usize;
+        }
+
+        for (col, &flat) in nz_flat.iter().enumerate() {
+            let mut rem = flat;
+            for row in 0..rank {
+                let idx = rem / strides[row];
+                rem %= strides[row];
+                out.write_element(row * nnz + col, NumericScalar::from_i64(idx as i64));
+            }
+        }
+
+        Ok(vec![out])
+    }
 }

@@ -83,13 +83,14 @@ impl Constant {
 }
 
 impl Constant {
-    pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
+    pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
         let out_id = self.output;
         if let Some(info) = ctx.all_infos.get(&out_id) {
             ctx.register_constant(out_id, info);
         } else {
             ctx.register_opaque(out_id);
         }
+        crate::milli_graph::ops::LowerResult::Lowered
     }
 
     pub fn remap_tensors(&mut self, map: &HashMap<GlobalId, GlobalId>, rng: &mut impl Rng) {
@@ -141,8 +142,8 @@ impl MilliOp for Constant {
         ))
     }
 
-    fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
-        Constant::lower_to_nano(self, ctx);
+    fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
+        Constant::lower_to_nano(self, ctx)
     }
 }
 
@@ -184,13 +185,14 @@ impl ConstantOfShape {
 }
 
 impl ConstantOfShape {
-    pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
+    pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
         let out_id = self.output;
         if let Some(info) = ctx.all_infos.get(&out_id) {
             ctx.register_constant(out_id, info);
         } else {
             ctx.register_opaque(out_id);
         }
+        crate::milli_graph::ops::LowerResult::Lowered
     }
 
     pub fn remap_tensors(&mut self, map: &HashMap<GlobalId, GlobalId>, rng: &mut impl Rng) {
@@ -295,7 +297,7 @@ impl MilliOp for ConstantOfShape {
         Ok(Box::new([(self.output, out)].into_iter()))
     }
 
-    fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
-        ConstantOfShape::lower_to_nano(self, ctx);
+    fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
+        ConstantOfShape::lower_to_nano(self, ctx)
     }
 }

@@ -67,14 +67,14 @@ impl ReduceMin {
         self.keepdims
     }
 
-    pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
+    pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
         use crate::nano_graph::{ReduceKind, ScalarOp};
         ctx.lower_reduce(self, |compute_dt, count, stride| ScalarOp::Reduce {
             kind: ReduceKind::Min,
             reduce_count: count,
             reduce_stride: stride,
             compute_dtype: compute_dt,
-        });
+        })
     }
 
     pub fn remap_tensors(&mut self, map: &HashMap<GlobalId, GlobalId>, rng: &mut impl rand::Rng) {
@@ -86,8 +86,8 @@ impl ReduceMin {
 }
 
 impl MilliOp for ReduceMin {
-    fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
-        ReduceMin::lower_to_nano(self, ctx);
+    fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
+        ReduceMin::lower_to_nano(self, ctx)
     }
 
     fn eval_new<'p, P2: crate::pool::Pool + 'p>(
@@ -95,94 +95,18 @@ impl MilliOp for ReduceMin {
         inputs: &[crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>],
         pool: &'p P2,
     ) -> Result<Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>, crate::nano_graph::pool_eval::PoolEvalError> {
-        use crate::numeric_tensor::{NumericTensor, TensorLayout};
-        use crate::tensor_rank::DynRank;
-
-        let data = &inputs[0];
-        let shape = data.shape();
-        let rank = shape.len();
-        let dtype = data.dtype();
-
-        // Extract axes: if axes input exists, read from inputs[1]; else reduce all.
-        let axes: Vec<usize> = if self.axes.is_some() && inputs.len() > 1 {
-            let ax_view = &inputs[1];
-            let raw: Vec<i64> = (0..ax_view.numel()).map(|i| ax_view.read_element(i).to_i64()).collect();
-            if raw.is_empty() && self.noop_with_empty_axes {
-                // Noop: copy input.
-                let layout = TensorLayout::<DynRank>::row_major(shape.clone(), dtype);
-                let buf = pool.allocate(layout.buffer_size_bytes())
-                    .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
-                let mut out = NumericTensor::from_parts(buf, layout);
-                for i in 0..data.numel() { out.write_element(i, data.read_element(i)); }
-                return Ok(vec![out]);
-            }
-            if raw.is_empty() {
-                (0..rank).collect()
-            } else {
-                raw.iter().map(|&a| if a < 0 { (a + rank as i64) as usize } else { a as usize }).collect()
-            }
-        } else {
-            if self.noop_with_empty_axes && self.axes.is_none() {
-                // No axes specified + noop_with_empty_axes → identity
-            }
-            (0..rank).collect()
-        };
-
-        // Compute output shape.
-        let mut out_shape = Vec::new();
-        for (i, &dim) in shape.iter().enumerate() {
-            if axes.contains(&i) {
-                if self.keepdims { out_shape.push(1u64); }
-            } else {
-                out_shape.push(dim);
-            }
-        }
-        if out_shape.is_empty() { out_shape.push(1); }
-
-        let out_numel: usize = out_shape.iter().product::<u64>() as usize;
-        let layout = TensorLayout::<DynRank>::row_major(out_shape.clone(), dtype);
-        let buf = pool.allocate(layout.buffer_size_bytes())
-            .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
-        let mut out = NumericTensor::from_parts(buf, layout);
-
-        // Initialize to +infinity.
-        for i in 0..out_numel {
-            out.write_element(i, crate::numeric_scalar::NumericScalar::from_f64(f64::INFINITY).cast_to(dtype));
-        }
-
-        // Strides for index decomposition.
-        let in_strides = {
-            let mut s = vec![1usize; rank];
-            for i in (0..rank.saturating_sub(1)).rev() { s[i] = s[i + 1] * shape[i + 1] as usize; }
-            s
-        };
-        let out_strides = {
-            let mut s = vec![1usize; out_shape.len()];
-            for i in (0..out_shape.len().saturating_sub(1)).rev() { s[i] = s[i + 1] * out_shape[i + 1] as usize; }
-            s
-        };
-
-        for flat_in in 0..data.numel() {
-            let mut rem = flat_in;
-            let mut out_flat = 0usize;
-            let mut out_dim_idx = 0;
-            for i in 0..rank {
-                let idx = rem / in_strides[i];
-                rem %= in_strides[i];
-                if !axes.contains(&i) {
-                    out_flat += idx * out_strides[out_dim_idx];
-                    out_dim_idx += 1;
-                } else if self.keepdims {
-                    out_dim_idx += 1;
-                }
-            }
-            let val = data.read_element(flat_in).to_f64();
-            let cur = out.read_element(out_flat).to_f64();
-            if val < cur {
-                out.write_element(out_flat, crate::numeric_scalar::NumericScalar::from_f64(val).cast_to(dtype));
-            }
-        }
-        Ok(vec![out])
+        use crate::numeric_scalar::NumericScalar;
+        let dtype = inputs[0].dtype();
+        super::reduce_eval_new(
+            inputs,
+            if self.axes.is_some() { Some(1) } else { None },
+            self.keepdims,
+            self.noop_with_empty_axes,
+            NumericScalar::max_sentinel(dtype),
+            |cur, val| cur.min(val),
+            |v, _count| v,
+            pool,
+        )
     }
 
     fn infer<'p, P: Pool + 'p>(

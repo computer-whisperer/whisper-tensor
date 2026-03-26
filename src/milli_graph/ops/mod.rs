@@ -306,6 +306,128 @@ pub fn constant_fold<'p, P: Pool + 'p>(
     Some(results)
 }
 
+/// Shared eval_new logic for all reduction ops (ReduceSum, ReduceMax, ReduceMin, etc.).
+///
+/// `init` is the identity element (zero for sum, -inf for max, +inf for min, etc.).
+/// `acc` is the accumulation function applied per element.
+/// `finalize` is applied to each output element after accumulation (e.g., divide by count for mean).
+pub(crate) fn reduce_eval_new<'p, P2: Pool + 'p>(
+    inputs: &[crate::numeric_tensor::NumericTensorView<'_, DynRank>],
+    axes_input_idx: Option<usize>,
+    keepdims: bool,
+    noop_with_empty_axes: bool,
+    init: crate::numeric_scalar::NumericScalar,
+    acc: impl Fn(crate::numeric_scalar::NumericScalar, crate::numeric_scalar::NumericScalar) -> crate::numeric_scalar::NumericScalar,
+    finalize: impl Fn(crate::numeric_scalar::NumericScalar, u64) -> crate::numeric_scalar::NumericScalar,
+    pool: &'p P2,
+) -> Result<Vec<crate::numeric_tensor::NumericTensor<'p, DynRank, P2>>, crate::nano_graph::pool_eval::PoolEvalError> {
+    use crate::numeric_tensor::{NumericTensor, TensorLayout};
+
+    let data = &inputs[0];
+    let shape = data.shape();
+    let rank = shape.len();
+    let dtype = data.dtype();
+
+    // Extract axes.
+    let axes: Vec<usize> = if let Some(ax_idx) = axes_input_idx {
+        if ax_idx < inputs.len() {
+            let ax_view = &inputs[ax_idx];
+            let raw: Vec<i64> = (0..ax_view.numel()).map(|i| ax_view.read_element(i).to_i64()).collect();
+            if raw.is_empty() && noop_with_empty_axes {
+                let layout = TensorLayout::<DynRank>::row_major(shape.clone(), dtype);
+                let buf = pool.allocate(layout.buffer_size_bytes())
+                    .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
+                let mut out = NumericTensor::from_parts(buf, layout);
+                for i in 0..data.numel() { out.write_element(i, data.read_element(i)); }
+                return Ok(vec![out]);
+            }
+            if raw.is_empty() {
+                (0..rank).collect()
+            } else {
+                raw.iter().map(|&a| if a < 0 { (a + rank as i64) as usize } else { a as usize }).collect()
+            }
+        } else {
+            (0..rank).collect()
+        }
+    } else {
+        (0..rank).collect()
+    };
+
+    // Compute output shape.
+    let mut out_shape = Vec::new();
+    for (i, &dim) in shape.iter().enumerate() {
+        if axes.contains(&i) {
+            if keepdims { out_shape.push(1u64); }
+        } else {
+            out_shape.push(dim);
+        }
+    }
+    if out_shape.is_empty() { out_shape.push(1); }
+
+    // Compute reduce count (product of reduced dims) for finalize.
+    let reduce_count: u64 = axes.iter().map(|&a| shape[a]).product();
+
+    let out_numel: usize = out_shape.iter().product::<u64>() as usize;
+    let layout = TensorLayout::<DynRank>::row_major(out_shape.clone(), dtype);
+    let buf = pool.allocate(layout.buffer_size_bytes())
+        .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
+    let mut out = NumericTensor::from_parts(buf, layout);
+
+    // Initialize all output elements.
+    for i in 0..out_numel {
+        out.write_element(i, init);
+    }
+
+    // Strides for index decomposition.
+    let in_strides = {
+        let mut s = vec![1usize; rank];
+        for i in (0..rank.saturating_sub(1)).rev() { s[i] = s[i + 1] * shape[i + 1] as usize; }
+        s
+    };
+    let out_strides = {
+        let mut s = vec![1usize; out_shape.len()];
+        for i in (0..out_shape.len().saturating_sub(1)).rev() { s[i] = s[i + 1] * out_shape[i + 1] as usize; }
+        s
+    };
+
+    // Accumulate.
+    for flat_in in 0..data.numel() {
+        let mut rem = flat_in;
+        let mut out_flat = 0usize;
+        let mut out_dim_idx = 0;
+        for i in 0..rank {
+            let idx = rem / in_strides[i];
+            rem %= in_strides[i];
+            if !axes.contains(&i) {
+                out_flat += idx * out_strides[out_dim_idx];
+                out_dim_idx += 1;
+            } else if keepdims {
+                out_dim_idx += 1;
+            }
+        }
+        let val = data.read_element(flat_in);
+        let cur = out.read_element(out_flat);
+        out.write_element(out_flat, acc(cur, val));
+    }
+
+    // Finalize (e.g. divide by count for mean).
+    for i in 0..out_numel {
+        out.write_element(i, finalize(out.read_element(i), reduce_count));
+    }
+
+    Ok(vec![out])
+}
+
+/// Result of attempting to lower a milli op into nano ops.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LowerResult {
+    /// Op was fully decomposed into nano scalar ops.
+    Lowered,
+    /// Op (or this specific configuration) cannot be decomposed.
+    /// The caller should fall through to the opaque eval_new path.
+    Unsupported,
+}
+
 pub trait MilliOp: Node<OpKind = String> {
     fn infer<'p, P: Pool + 'p>(
         &self,
@@ -358,12 +480,15 @@ pub trait MilliOp: Node<OpKind = String> {
     }
 
     /// Lower this op to nano-graph representation.
-    /// Default: registers outputs as boundary ops.
-    fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext)
+    ///
+    /// Returns `Lowered` if the op was decomposed into nano ops.
+    /// Returns `Unsupported` if this op/configuration can't be lowered —
+    /// the caller will fall through to the opaque eval_new path.
+    fn lower_to_nano(&self, _ctx: &mut crate::nano_graph::NanoLoweringContext) -> LowerResult
     where
         Self: Sized,
     {
-        ctx.lower_default_trait(self);
+        LowerResult::Unsupported
     }
 }
 
@@ -595,7 +720,7 @@ pub enum AnyMilliOp {
 }
 
 impl AnyMilliOp {
-    pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
+    pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> LowerResult {
         match self {
             AnyMilliOp::SimpleBinary(x) => x.lower_to_nano(ctx),
             AnyMilliOp::SimpleUnary(x) => x.lower_to_nano(ctx),
@@ -622,8 +747,10 @@ impl AnyMilliOp {
             AnyMilliOp::Gather(x) => x.lower_to_nano(ctx),
             AnyMilliOp::ReduceMin(x) => x.lower_to_nano(ctx),
             AnyMilliOp::ReduceProd(x) => x.lower_to_nano(ctx),
-            // Everything else: constant-fold if numeric, otherwise opaque via eval_new.
-            _ => ctx.lower_default(self),
+            AnyMilliOp::Conv(x) => x.lower_to_nano(ctx),
+            AnyMilliOp::Pad(x) => x.lower_to_nano(ctx),
+            // Everything else: no nano decomposition, fall through to opaque.
+            _ => LowerResult::Unsupported,
         }
     }
 
@@ -880,8 +1007,8 @@ impl MilliOp for AnyMilliOp {
         }
     }
 
-    fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
-        AnyMilliOp::lower_to_nano(self, ctx);
+    fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> LowerResult {
+        AnyMilliOp::lower_to_nano(self, ctx)
     }
 
     fn eval_new<'p, P2: Pool + 'p>(

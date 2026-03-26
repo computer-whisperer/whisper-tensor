@@ -53,24 +53,22 @@ impl Expand {
 }
 
 impl Expand {
-    pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
+    pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
         let all_infos = ctx.all_infos;
         let in_id = Node::inputs(self).next().unwrap();
         let out_id = Node::outputs(self).next().unwrap();
 
         let Some(in_map) = ctx.tensor_map.get(&in_id).cloned() else {
-            ctx.lower_as_boundary_named(self, "Expand");
-            return;
+            return crate::milli_graph::ops::LowerResult::Unsupported;
         };
         let Some(out_info) = all_infos.get(&out_id) else {
             ctx.register_opaque(out_id);
-            return;
+            return crate::milli_graph::ops::LowerResult::Lowered;
         };
         let in_info = all_infos.get(&in_id);
 
         let Some((layout, known_dims, sym_dims, count)) = ctx.classify_dims(out_info) else {
-            ctx.lower_as_boundary_named(self, "Expand");
-            return;
+            return crate::milli_graph::ops::LowerResult::Unsupported;
         };
         let count = count.max(1);
 
@@ -119,6 +117,7 @@ impl Expand {
                 ),
             );
         }
+        crate::milli_graph::ops::LowerResult::Lowered
     }
 
     pub fn remap_tensors(&mut self, map: &HashMap<GlobalId, GlobalId>, rng: &mut impl rand::Rng) {
@@ -317,7 +316,7 @@ impl MilliOp for Expand {
         Ok(Box::new([(self.output, out)].into_iter()))
     }
 
-    fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
-        Expand::lower_to_nano(self, ctx);
+    fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
+        Expand::lower_to_nano(self, ctx)
     }
 }

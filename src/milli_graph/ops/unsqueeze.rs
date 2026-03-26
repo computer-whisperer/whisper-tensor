@@ -51,8 +51,8 @@ impl Unsqueeze {
 }
 
 impl Unsqueeze {
-    pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
-        ctx.lower_view_op(self);
+    pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
+        ctx.lower_view_op(self)
     }
 
     pub fn remap_tensors(&mut self, map: &HashMap<GlobalId, GlobalId>, rng: &mut impl rand::Rng) {
@@ -269,7 +269,7 @@ impl MilliOp for Unsqueeze {
         }
     }
 
-    fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
-        Unsqueeze::lower_to_nano(self, ctx);
+    fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
+        Unsqueeze::lower_to_nano(self, ctx)
     }
 }

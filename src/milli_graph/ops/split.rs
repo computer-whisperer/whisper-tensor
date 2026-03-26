@@ -76,29 +76,25 @@ impl Split {
 }
 
 impl Split {
-    pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
+    pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
         let all_infos = ctx.all_infos;
         let in_id = Node::inputs(self).next().unwrap();
         let out_id = Node::outputs(self).next().unwrap();
 
         let Some(in_map) = ctx.tensor_map.get(&in_id).cloned() else {
-            ctx.lower_as_boundary_named(self, "Split");
-            return;
+            return crate::milli_graph::ops::LowerResult::Unsupported;
         };
         let Some(out_info) = all_infos.get(&out_id) else {
-            ctx.lower_as_boundary_named(self, "Split");
-            return;
+            return crate::milli_graph::ops::LowerResult::Unsupported;
         };
         let Some(_in_info) = all_infos.get(&in_id) else {
-            ctx.lower_as_boundary_named(self, "Split");
-            return;
+            return crate::milli_graph::ops::LowerResult::Unsupported;
         };
 
         let Some((out_layout, out_known_dims, out_sym_dims, out_count)) =
             ctx.classify_dims(out_info)
         else {
-            ctx.lower_as_boundary_named(self, "Split");
-            return;
+            return crate::milli_graph::ops::LowerResult::Unsupported;
         };
         let out_count = out_count.max(1);
 
@@ -112,8 +108,7 @@ impl Split {
         };
 
         if axis >= rank || !matches!(in_map.layout[axis], DimKind::Known(_)) {
-            ctx.lower_as_boundary_named(self, "Split");
-            return;
+            return crate::milli_graph::ops::LowerResult::Unsupported;
         }
 
         // Determine the offset along the split axis for this output_id.
@@ -146,8 +141,7 @@ impl Split {
         let out_split_size = match &out_layout[axis] {
             DimKind::Known(s) => *s,
             _ => {
-                ctx.lower_as_boundary_named(self, "Split");
-                return;
+                return crate::milli_graph::ops::LowerResult::Unsupported;
             }
         };
 
@@ -158,8 +152,7 @@ impl Split {
         let offset_along_axis = self.compute_split_offset(ctx, output_id_idx, out_split_size);
 
         if out_known_dims.len() != in_known.len() {
-            ctx.lower_as_boundary_named(self, "Split");
-            return;
+            return crate::milli_graph::ops::LowerResult::Unsupported;
         }
 
         // Zero-cost split for outermost axis with row-major strides:
@@ -179,7 +172,7 @@ impl Split {
                     out_sym_dims,
                 ),
             );
-            return;
+            return crate::milli_graph::ops::LowerResult::Lowered;
         }
 
         // Non-outermost split: zero-cost view with input's strides.
@@ -197,6 +190,7 @@ impl Split {
                 out_sym_dims,
             ),
         );
+        crate::milli_graph::ops::LowerResult::Lowered
     }
 
     /// Compute the cumulative offset along the split axis for output_id_idx.
@@ -386,8 +380,8 @@ impl MilliOp for Split {
         Ok(Box::new([(self.output, out)].into_iter()))
     }
 
-    fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
-        Split::lower_to_nano(self, ctx);
+    fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
+        Split::lower_to_nano(self, ctx)
     }
 }
 

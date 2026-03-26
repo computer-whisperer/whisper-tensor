@@ -59,22 +59,20 @@ impl Concat {
         &self.inputs
     }
 
-    pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
+    pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
         let all_infos = ctx.all_infos;
         let axis_raw = self.axis();
         let out_id = Node::outputs(self).next().unwrap();
         let input_ids = self.concat_inputs();
 
         let Some(out_info) = all_infos.get(&out_id) else {
-            ctx.lower_as_boundary_named(self, "Concat");
-            return;
+            return crate::milli_graph::ops::LowerResult::Unsupported;
         };
 
         let Some((out_layout, out_known_dims, out_sym_dims, out_count)) =
             ctx.classify_dims(out_info)
         else {
-            ctx.lower_as_boundary_named(self, "Concat");
-            return;
+            return crate::milli_graph::ops::LowerResult::Unsupported;
         };
         let out_count = out_count.max(1);
 
@@ -88,8 +86,7 @@ impl Concat {
 
         // Concat axis must be a known dim.
         if axis >= rank || !matches!(out_layout[axis], DimKind::Known(_)) {
-            ctx.lower_as_boundary_named(self, "Concat");
-            return;
+            return crate::milli_graph::ops::LowerResult::Unsupported;
         }
 
         // Known-dim index of the concat axis.
@@ -104,8 +101,7 @@ impl Concat {
         let mut concat_dim_sizes = Vec::with_capacity(input_ids.len());
         for &inp_id in input_ids {
             let Some(inp_map) = ctx.tensor_map.get(&inp_id).cloned() else {
-                ctx.lower_as_boundary_named(self, "Concat");
-                return;
+                return crate::milli_graph::ops::LowerResult::Unsupported;
             };
             let inp_known: Vec<u64> = inp_map
                 .layout
@@ -119,8 +115,7 @@ impl Concat {
                 })
                 .collect();
             if inp_known.len() != out_known_dims.len() {
-                ctx.lower_as_boundary_named(self, "Concat");
-                return;
+                return crate::milli_graph::ops::LowerResult::Unsupported;
             }
             concat_dim_sizes.push(inp_known[concat_known_idx]);
             input_maps.push(inp_map);
@@ -167,7 +162,7 @@ impl Concat {
                         out_sym_dims,
                     ),
                 );
-                return;
+            return crate::milli_graph::ops::LowerResult::Lowered;
             }
         }
 
@@ -196,6 +191,7 @@ impl Concat {
                 segments,
             ),
         );
+        crate::milli_graph::ops::LowerResult::Lowered
     }
 
     pub fn remap_tensors(&mut self, map: &HashMap<GlobalId, GlobalId>, rng: &mut impl rand::Rng) {
@@ -433,7 +429,7 @@ impl MilliOp for Concat {
         Ok(Box::new([(self.output, out)].into_iter()))
     }
 
-    fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) {
-        Concat::lower_to_nano(self, ctx);
+    fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
+        Concat::lower_to_nano(self, ctx)
     }
 }

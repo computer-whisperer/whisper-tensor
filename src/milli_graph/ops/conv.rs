@@ -377,6 +377,355 @@ fn make_symbolic_output<'p, P: Pool + 'p>(
     )])
 }
 
+impl Conv {
+    /// Lower Conv to nano ops: padded input atoms + Mul/ReduceSum per output channel.
+    ///
+    /// Scope: 2D, group=1, dilation=[1,1], all spatial/channel dims known, batch symbolic.
+    pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
+        use crate::nano_graph::lower::DimKind;
+        use crate::nano_graph::lower::TensorAtomMap;
+        use crate::nano_graph::ops::{ReduceKind, ScalarBinOp, ScalarOp};
+        use crate::nano_graph::pattern::InputRef;
+        use crate::numeric_dtype::NumericDType;
+        use crate::numeric_scalar::NumericScalar;
+
+        let all_infos = ctx.all_infos;
+        let in_id = self.input;
+        let w_id = self.weight;
+        let out_id = self.output;
+
+        let (Some(in_map), Some(w_map)) = (
+            ctx.tensor_map.get(&in_id).cloned(),
+            ctx.tensor_map.get(&w_id).cloned(),
+        ) else {
+            return crate::milli_graph::ops::LowerResult::Unsupported;
+        };
+
+        let bias_map = self.bias.and_then(|id| ctx.tensor_map.get(&id).cloned());
+        if self.bias.is_some() && bias_map.is_none() {
+            return crate::milli_graph::ops::LowerResult::Unsupported;
+        }
+
+        let Some(out_info) = all_infos.get(&out_id) else {
+            return crate::milli_graph::ops::LowerResult::Unsupported;
+        };
+
+        // --- Scope restrictions ---
+
+        let in_layout = &in_map.layout;
+        let w_layout = &w_map.layout;
+
+        // 4D input [N, C, H, W], 2D spatial only.
+        let n_spatial = in_layout.len().saturating_sub(2);
+        if in_layout.len() < 4 || n_spatial != 2 {
+            return crate::milli_graph::ops::LowerResult::Unsupported;
+        }
+
+        // group=1 only.
+        if self.group != 1 {
+            return crate::milli_graph::ops::LowerResult::Unsupported;
+        }
+
+        // dilation=[1,1] only.
+        let dilations: Vec<usize> = if self.dilations.is_empty() {
+            vec![1; n_spatial]
+        } else {
+            self.dilations.iter().map(|&x| x as usize).collect()
+        };
+        if dilations.iter().any(|&d| d != 1) {
+            return crate::milli_graph::ops::LowerResult::Unsupported;
+        }
+
+        // No segmented inputs.
+        if !in_map.segments.is_empty() || !w_map.segments.is_empty() {
+            return crate::milli_graph::ops::LowerResult::Unsupported;
+        }
+        if let Some(ref bm) = bias_map {
+            if !bm.segments.is_empty() {
+                return crate::milli_graph::ops::LowerResult::Unsupported;
+            }
+        }
+
+        // Extract known spatial/channel dims from input.
+        let in_known: Vec<u64> = in_layout
+            .iter()
+            .filter_map(|d| match d { DimKind::Known(s) => Some(*s), _ => None })
+            .collect();
+        // in_known should be [C_in, IH, IW] (batch is Symbolic).
+        if in_known.len() < 3 {
+            return crate::milli_graph::ops::LowerResult::Unsupported;
+        }
+        let c_in = in_known[in_known.len() - 3];
+        let ih = in_known[in_known.len() - 2] as usize;
+        let iw = in_known[in_known.len() - 1] as usize;
+
+        // Weight must be fully known [C_out, C_in/group, KH, KW].
+        let w_known: Vec<u64> = w_layout
+            .iter()
+            .filter_map(|d| match d { DimKind::Known(s) => Some(*s), _ => None })
+            .collect();
+        if w_known.len() != w_layout.len() || w_known.len() != 4 {
+            return crate::milli_graph::ops::LowerResult::Unsupported;
+        }
+        let c_out = w_known[0];
+        let kh = if self.kernel_shape.is_empty() { w_known[2] as usize } else { self.kernel_shape[0] as usize };
+        let kw = if self.kernel_shape.is_empty() { w_known[3] as usize } else { self.kernel_shape[1] as usize };
+
+        let strides: Vec<usize> = if self.strides.is_empty() {
+            vec![1; n_spatial]
+        } else {
+            self.strides.iter().map(|&x| x as usize).collect()
+        };
+        let stride_h = strides[0];
+        let stride_w = strides[1];
+
+        // Resolve padding.
+        let dilated_kernel = vec![kh, kw]; // dilation=1
+        let input_spatial = vec![ih, iw];
+        let (pad_begin, pad_end) = resolve_padding(
+            self.auto_pad, &self.pads, n_spatial, &input_spatial, &strides, &dilated_kernel,
+        );
+        let pad_top = pad_begin[0];
+        let pad_left = pad_begin[1];
+        let pad_bottom = pad_end[0];
+        let pad_right = pad_end[1];
+
+        let ph = ih + pad_top + pad_bottom;
+        let pw = iw + pad_left + pad_right;
+
+        // Output spatial dims.
+        let oh = (ih + pad_top + pad_bottom - kh) / stride_h + 1;
+        let ow = (iw + pad_left + pad_right - kw) / stride_w + 1;
+        let s = (oh * ow) as u64;
+
+        let k = c_in * kh as u64 * kw as u64; // contraction dim
+
+        // Atom count cap.
+        let batch_known: u64 = in_layout.iter()
+            .take(in_layout.len() - 3)
+            .filter_map(|d| match d { DimKind::Known(s) => Some(*s), _ => None })
+            .product::<u64>()
+            .max(1);
+        let total_mul_atoms = batch_known * c_out * k * s;
+        if total_mul_atoms > 16_000_000 {
+            return crate::milli_graph::ops::LowerResult::Unsupported;
+        }
+
+        // Classify output dims.
+        let Some((out_layout, out_known_dims, out_sym_dims, out_count)) =
+            ctx.classify_dims(out_info)
+        else {
+            return crate::milli_graph::ops::LowerResult::Unsupported;
+        };
+        let _out_count = out_count.max(1);
+
+        let sym_dims = in_map.sym_dims.clone();
+        let in_strides = &in_map.known_strides;
+        let w_strides = &w_map.known_strides;
+        let original_dtype = in_map.dtype;
+
+        // --- Phase 1: Emit padded input atoms ---
+        let has_padding = pad_top > 0 || pad_bottom > 0 || pad_left > 0 || pad_right > 0;
+
+        let padded_base;
+
+        if has_padding {
+            let mut first_base = None;
+
+            // Index into in_strides: the known dims are [C_in, IH, IW] at the tail.
+            let in_c_stride = in_strides[in_strides.len() - 3];
+            let in_h_stride = in_strides[in_strides.len() - 2];
+            let in_w_stride = in_strides[in_strides.len() - 1] as i64;
+
+            for ci in 0..c_in {
+                let in_c_offset = ci * in_c_stride;
+
+                // Top padding rows + first interior row's left padding (merged).
+                let top_count = (pad_top * pw + pad_left) as u64;
+                if top_count > 0 {
+                    let b = ctx.nano.push_group(
+                        top_count,
+                        NumericDType::F32,
+                        ScalarOp::Literal(NumericScalar::from_f32(0.0)),
+                        sym_dims.clone(),
+                        vec![],
+                    );
+                    if first_base.is_none() { first_base = Some(b); }
+                }
+
+                // Interior rows.
+                for ih_idx in 0..ih {
+                    // Identity group: W input elements for this row.
+                    let in_row_base = in_map.base_id.offset(in_c_offset + ih_idx as u64 * in_h_stride);
+                    let b = ctx.nano.push_group(
+                        iw as u64,
+                        NumericDType::F32,
+                        ScalarOp::Identity,
+                        sym_dims.clone(),
+                        vec![InputRef::affine(in_row_base, in_w_stride)],
+                    );
+                    if first_base.is_none() { first_base = Some(b); }
+
+                    // Merged literal: right pad of this row + left pad of next row.
+                    let inter_count = if ih_idx < ih - 1 {
+                        (pad_right + pad_left) as u64
+                    } else {
+                        // Last interior row: right pad + all bottom padding rows.
+                        (pad_right + pad_bottom * pw) as u64
+                    };
+                    if inter_count > 0 {
+                        ctx.nano.push_group(
+                            inter_count,
+                            NumericDType::F32,
+                            ScalarOp::Literal(NumericScalar::from_f32(0.0)),
+                            sym_dims.clone(),
+                            vec![],
+                        );
+                    }
+                }
+            }
+
+            padded_base = first_base.unwrap();
+        } else {
+            // No padding: reference input atoms directly.
+            // The Mul compute_dtype=F32 handles any dtype cast.
+            padded_base = in_map.base_id;
+        }
+
+        // Strides for addressing into the padded/input atom space.
+        // Padded atoms are always row-major; raw input may have non-row-major strides.
+        let (ref_c_stride, ref_h_stride, ref_w_stride): (u64, u64, u64);
+        if has_padding {
+            ref_c_stride = (ph * pw) as u64;
+            ref_h_stride = pw as u64;
+            ref_w_stride = 1;
+        } else {
+            ref_c_stride = in_strides[in_strides.len() - 3];
+            ref_h_stride = in_strides[in_strides.len() - 2];
+            ref_w_stride = in_strides[in_strides.len() - 1];
+        }
+
+        // --- Phase 2a: Push ALL mul groups (all co × all k) ---
+        // Must push all mul groups before any reduce groups so that
+        // reduce groups are contiguous in atom space.
+        let mut mul_bases: Vec<_> = Vec::with_capacity(c_out as usize);
+
+        for co in 0..c_out {
+            let mut first_mul_base = None;
+
+            for ci_idx in 0..c_in {
+                for kh_idx in 0..kh {
+                    for kw_idx in 0..kw {
+                        // Weight: Broadcast single weight atom.
+                        let w_offset = co * w_strides[0]
+                            + ci_idx * w_strides[1]
+                            + kh_idx as u64 * w_strides[2]
+                            + kw_idx as u64 * w_strides[3];
+                        let w_atom = w_map.base_id.offset(w_offset);
+
+                        // Input: Strided into padded/input space.
+                        // Atom s = oh * OW + ow reads from:
+                        //   input[ci_idx, oh*stride_h + kh_idx, ow*stride_w + kw_idx]
+                        //
+                        // Strided { base, stride_inner, stride_outer, modulus=OW }:
+                        //   inner = s % OW = ow, outer = s / OW = oh
+                        let in_base_offset = ci_idx * ref_c_stride
+                            + kh_idx as u64 * ref_h_stride
+                            + kw_idx as u64 * ref_w_stride;
+                        let in_base = padded_base.offset(in_base_offset);
+
+                        let input_ref = InputRef::Strided {
+                            base: in_base,
+                            stride_inner: (stride_w as u64 * ref_w_stride) as i64,
+                            stride_outer: (stride_h as u64 * ref_h_stride) as i64,
+                            modulus: ow as u64,
+                        };
+
+                        let b = ctx.nano.push_group(
+                            s,
+                            NumericDType::F32,
+                            ScalarOp::Binary {
+                                op: ScalarBinOp::Mul,
+                                compute_dtype: NumericDType::F32,
+                            },
+                            out_sym_dims.clone(),
+                            vec![InputRef::Broadcast(w_atom), input_ref],
+                        );
+                        if first_mul_base.is_none() { first_mul_base = Some(b); }
+                    }
+                }
+            }
+
+            mul_bases.push(first_mul_base.unwrap());
+        }
+
+        // --- Phase 2b: Push ALL reduce groups (contiguous) ---
+        let reduce_dtype = if self.bias.is_some() { NumericDType::F32 } else { original_dtype };
+        let mut first_reduce_base = None;
+
+        for co in 0..c_out as usize {
+            let b = ctx.nano.push_group(
+                s,
+                reduce_dtype,
+                ScalarOp::Reduce {
+                    kind: ReduceKind::Sum,
+                    reduce_count: k,
+                    reduce_stride: s as i64,
+                    compute_dtype: NumericDType::F32,
+                },
+                out_sym_dims.clone(),
+                vec![InputRef::affine(mul_bases[co], 1)],
+            );
+            if first_reduce_base.is_none() { first_reduce_base = Some(b); }
+        }
+
+        // --- Phase 3: Bias add (contiguous) ---
+        let output_base;
+        if let Some(ref bm) = bias_map {
+            let mut first_bias_base = None;
+            let reduce_base = first_reduce_base.unwrap();
+
+            for co in 0..c_out {
+                let reduce_co_base = reduce_base.offset(co * s);
+                let bias_atom = bm.base_id.offset(co * bm.known_strides.get(0).copied().unwrap_or(1));
+
+                let b = ctx.nano.push_group(
+                    s,
+                    original_dtype,
+                    ScalarOp::Binary {
+                        op: ScalarBinOp::Add,
+                        compute_dtype: NumericDType::F32,
+                    },
+                    out_sym_dims.clone(),
+                    vec![
+                        InputRef::affine(reduce_co_base, 1),
+                        InputRef::Broadcast(bias_atom),
+                    ],
+                );
+                if first_bias_base.is_none() { first_bias_base = Some(b); }
+            }
+
+            output_base = first_bias_base.unwrap();
+        } else {
+            output_base = first_reduce_base.unwrap();
+        }
+
+        // --- Phase 4: Register output ---
+        ctx.tensor_map.insert(
+            out_id,
+            TensorAtomMap::simple(
+                output_base,
+                out_known_dims.iter().product::<u64>().max(1),
+                original_dtype,
+                out_layout,
+                TensorAtomMap::compute_strides(&out_known_dims),
+                out_sym_dims,
+            ),
+        );
+        crate::milli_graph::ops::LowerResult::Lowered
+    }
+}
+
 impl MilliOp for Conv {
     fn infer<'p, P: Pool + 'p>(
         &self,
@@ -1438,6 +1787,34 @@ impl Node for ConvBiasGrad {
 }
 
 impl MilliOp for ConvBiasGrad {
+    fn infer<'p, P: Pool + 'p>(
+        &self,
+        known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'p, P>>,
+        _symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
+        _pool: &'p P,
+    ) -> Result<Vec<(GlobalId, crate::tensor_info::TensorInfo<'p, P>)>, MilliOpGraphError> {
+        use crate::scalar_info::ScalarInfoTyped;
+        use crate::tensor_info::TensorInfo;
+
+        let grad_info = known_inputs
+            .get(&self.grad_output)
+            .ok_or(MilliOpGraphError::UnableToInfer)?;
+        let out_dtype = grad_info.dtype();
+
+        // Output is [C_out] where C_out = grad_output.shape[1].
+        if let Some(ranked) = grad_info.as_ranked() {
+            let shape = ranked.shape();
+            if shape.len() >= 2 {
+                return Ok(vec![(
+                    self.output,
+                    TensorInfo::from_dtype_and_shape_scalars(out_dtype, &[shape[1].clone()]),
+                )]);
+            }
+        }
+
+        Err(MilliOpGraphError::UnableToInfer)
+    }
+
     fn eval(
         &self,
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
@@ -1449,7 +1826,6 @@ impl MilliOp for ConvBiasGrad {
         let grad_f32 = grad.cast(DType::F32, backend)?;
 
         let rank = grad_f32.rank();
-        // Sum over all axes except axis 1 (the channel dim)
         let mut axes: Vec<usize> = Vec::new();
         axes.push(0);
         for a in 2..rank {
@@ -1459,5 +1835,50 @@ impl MilliOp for ConvBiasGrad {
             grad_f32.reduce_sum(axes, false, super::AccumulationMode::default(), backend)?;
 
         Ok(Box::new(std::iter::once((self.output, result))))
+    }
+
+    fn eval_new<'p, P2: crate::pool::Pool + 'p>(
+        &self,
+        inputs: &[crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>],
+        pool: &'p P2,
+    ) -> Result<Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>, crate::nano_graph::pool_eval::PoolEvalError> {
+        use crate::numeric_scalar::NumericScalar;
+        use crate::numeric_tensor::{NumericTensor, TensorLayout};
+        use crate::tensor_rank::DynRank;
+
+        let grad = &inputs[0];
+        let shape = grad.shape();
+        let rank = shape.len();
+        let dtype = grad.dtype();
+
+        // Output: [C_out] = sum over axes [0, 2, 3, ...].
+        let c_out = if rank >= 2 { shape[1] } else { shape[0] };
+        let out_shape = vec![c_out];
+        let out_numel = c_out as usize;
+
+        let layout = TensorLayout::<DynRank>::row_major(out_shape, dtype);
+        let buf = pool.allocate(layout.buffer_size_bytes())
+            .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
+        let mut out = NumericTensor::from_parts(buf, layout);
+
+        for i in 0..out_numel { out.write_element(i, NumericScalar::zero(dtype)); }
+
+        // Sum all elements with the same channel index.
+        let channel_stride = if rank >= 2 {
+            let mut s = 1usize;
+            for d in 2..rank { s *= shape[d] as usize; }
+            s
+        } else { 1 };
+        let spatial_size = channel_stride;
+        let batch_stride = c_out as usize * spatial_size;
+
+        for flat in 0..grad.numel() {
+            let co = (flat % batch_stride) / spatial_size;
+            let val = grad.read_element(flat);
+            let cur = out.read_element(co);
+            out.write_element(co, cur.add(val));
+        }
+
+        Ok(vec![out])
     }
 }
