@@ -1,5 +1,6 @@
 use crate::dtype::DType;
 use crate::migration::numeric_tensor::NumericTensor;
+use crate::numeric_dtype::NumericDType;
 use crate::packed_tensor::PackedTensor;
 use crate::tensor_rank::DynRank;
 use serde::{Deserialize, Serialize};
@@ -10,6 +11,9 @@ use std::sync::Arc;
 pub struct TensorStoreTensorId(u64);
 
 pub enum StoredTensor {
+    /// Pool-backed tensor (new type system).
+    Inline(crate::numeric_tensor::NumericTensor<'static, DynRank, crate::pool::SystemPool>),
+    /// Legacy in-memory tensor — kept for backward compatibility during migration.
     Numeric(NumericTensor<DynRank>),
     ExternalBinary {
         path: String,
@@ -59,6 +63,18 @@ impl StoredTensor {
         use crate::numeric_tensor::{NumericTensor as NewTensor, TensorLayout};
 
         match self {
+            StoredTensor::Inline(src) => {
+                // Copy from SystemPool tensor into the target pool.
+                let ndt = src.dtype();
+                let shape = src.shape().clone();
+                let layout = TensorLayout::<DynRank>::row_major(shape, ndt);
+                let buf = pool.allocate(layout.buffer_size_bytes()).ok()?;
+                let mut tensor = NewTensor::from_parts(buf, layout);
+                for i in 0..src.numel() {
+                    tensor.write_element(i, src.read_element(i));
+                }
+                Some(tensor)
+            }
             StoredTensor::Numeric(legacy) => {
                 // Bridge: legacy → TensorInfo → concrete → copy
                 let sys_pool = crate::pool::SystemPool;
@@ -90,33 +106,97 @@ impl StoredTensor {
         }
     }
 
-    /// Load raw bytes from this stored tensor (handling the specific format)
-    /// and copy into a pool buffer as a new-type tensor.
+    /// Read raw bytes from disk for this stored tensor.
+    fn load_raw_bytes(&self) -> Option<Vec<u8>> {
+        use std::io::{Read, Seek, SeekFrom};
+        match self {
+            StoredTensor::ExternalBinary { path, offset, length, .. } => {
+                let mut file = std::fs::File::open(path).ok()?;
+                file.seek(SeekFrom::Start(*offset as u64)).ok()?;
+                let mut buf = vec![0u8; *length];
+                file.read_exact(&mut buf).ok()?;
+                Some(buf)
+            }
+            StoredTensor::ExternalPth { path, tensor_name, .. } => {
+                let pth_path = std::path::Path::new(path);
+                let tensors = crate::pth::PthTensors::new(pth_path, None).ok()?;
+                tensors.get_raw_bytes(tensor_name).ok()?
+            }
+            StoredTensor::ExternalSafetensors { path, tensor_name, .. } => {
+                #[cfg(feature = "safetensors")]
+                {
+                    use memmap2::Mmap;
+                    use safetensors::SafeTensors;
+                    let file = std::fs::File::open(path).ok()?;
+                    let mmap = unsafe { Mmap::map(&file) }.ok()?;
+                    let st = SafeTensors::deserialize(&mmap).ok()?;
+                    let view = st.tensor(tensor_name).ok()?;
+                    Some(view.data().to_vec())
+                }
+                #[cfg(not(feature = "safetensors"))]
+                {
+                    let _ = (path, tensor_name);
+                    None
+                }
+            }
+            StoredTensor::ExternalGGUF { path, offset, length, .. } => {
+                let mut file = std::fs::File::open(path).ok()?;
+                file.seek(SeekFrom::Start(*offset as u64)).ok()?;
+                let mut buf = vec![0u8; *length];
+                file.read_exact(&mut buf).ok()?;
+                Some(buf)
+            }
+            _ => None,
+        }
+    }
+
+    /// Load raw file bytes directly into a pool-backed tensor.
+    /// The raw bytes are little-endian and copied directly — no legacy intermediate.
     fn load_raw_to_pool<'p, P: crate::pool::Pool + 'p>(
         &self,
         ndt: crate::numeric_dtype::NumericDType,
         shape: &[u64],
         pool: &'p P,
     ) -> Option<crate::numeric_tensor::NumericTensor<'p, DynRank, P>> {
+        use crate::numeric_scalar::NumericScalar;
         use crate::numeric_tensor::{NumericTensor as NewTensor, TensorLayout};
 
-        // Use to_numeric() to load bytes, then bridge.
-        // TODO: load raw bytes directly without legacy intermediate
-        let legacy = self.to_numeric();
-        let sys_pool = crate::pool::SystemPool;
-        let info = crate::tensor_info::TensorInfo::from_legacy(&legacy, &sys_pool);
-        let concrete = info.as_concrete()?;
+        let raw = self.load_raw_bytes()?;
         let layout = TensorLayout::<DynRank>::row_major(shape.to_vec(), ndt);
+        let numel = shape.iter().product::<u64>() as usize;
         let buf = pool.allocate(layout.buffer_size_bytes()).ok()?;
         let mut tensor = NewTensor::from_parts(buf, layout);
-        for i in 0..concrete.numel() {
-            tensor.write_element(i, concrete.read_element(i));
+
+        let bits = ndt.total_bits() as usize;
+        for i in 0..numel {
+            let bit_offset = i * bits;
+            let raw_val = crate::numeric_scalar::conversions::read_raw_bits(&raw, bit_offset, bits as u8);
+            tensor.write_element(i, NumericScalar::from_raw_bits(raw_val, ndt));
         }
+
         Some(tensor)
     }
 
     pub fn to_numeric(&self) -> NumericTensor<DynRank> {
         match self {
+            StoredTensor::Inline(src) => {
+                // Bridge to legacy: read elements from new-type tensor.
+                let legacy_dt = src.dtype().to_legacy();
+                let shape = src.shape().clone();
+                let numel = src.numel();
+                // Build legacy via element extraction.
+                let mut vals = Vec::with_capacity(numel);
+                for i in 0..numel {
+                    vals.push(src.read_element(i).to_f64());
+                }
+                // Create f64 ndarray then cast to target dtype.
+                let nd = crate::backends::ndarray_backend::NDArrayNumericTensor::from_vec_shape(vals, &shape)
+                    .expect("build legacy from inline");
+                let mut backend = crate::backends::eval_backend::EvalBackend::NDArray;
+                let cast = NumericTensor::NDArray(nd).cast(legacy_dt, &mut backend)
+                    .expect("cast inline to legacy dtype");
+                cast
+            }
             StoredTensor::Numeric(tensor) => tensor.clone(),
             StoredTensor::ExternalBinary {
                 path,
@@ -233,6 +313,7 @@ impl StoredTensor {
 
     pub fn shape(&self) -> Vec<u64> {
         match self {
+            StoredTensor::Inline(t) => t.shape().clone(),
             StoredTensor::Numeric(tensor) => tensor.shape(),
             StoredTensor::ExternalBinary { shape, .. } => shape.clone(),
             StoredTensor::ExternalPth { shape, .. } => shape.clone(),
@@ -243,11 +324,19 @@ impl StoredTensor {
 
     pub fn dtype(&self) -> DType {
         match self {
+            StoredTensor::Inline(t) => t.dtype().to_legacy(),
             StoredTensor::Numeric(tensor) => tensor.dtype(),
             StoredTensor::ExternalBinary { dtype, .. } => *dtype,
             StoredTensor::ExternalPth { dtype, .. } => *dtype,
             StoredTensor::ExternalSafetensors { dtype, .. } => *dtype,
             StoredTensor::ExternalGGUF { dtype, .. } => *dtype,
+        }
+    }
+
+    pub fn numeric_dtype(&self) -> Option<NumericDType> {
+        match self {
+            StoredTensor::Inline(t) => Some(t.dtype()),
+            _ => NumericDType::from_legacy(self.dtype()),
         }
     }
 
