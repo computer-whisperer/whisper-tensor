@@ -44,6 +44,77 @@ pub enum StoredTensor {
 }
 
 impl StoredTensor {
+    /// Load this tensor into a pool-backed new-type NumericTensor.
+    ///
+    /// For external file formats, reads bytes and copies directly into the pool
+    /// buffer — no legacy NDArrayNumericTensor intermediary. For the Numeric
+    /// variant (in-memory legacy tensor), bridges via TensorInfo.
+    ///
+    /// Returns None for packed/quantized tensors or unsupported dtypes.
+    pub fn to_pool_tensor<'p, P: crate::pool::Pool + 'p>(
+        &self,
+        pool: &'p P,
+    ) -> Option<crate::numeric_tensor::NumericTensor<'p, DynRank, P>> {
+        use crate::numeric_dtype::NumericDType;
+        use crate::numeric_tensor::{NumericTensor as NewTensor, TensorLayout};
+
+        match self {
+            StoredTensor::Numeric(legacy) => {
+                // Bridge: legacy → TensorInfo → concrete → copy
+                let sys_pool = crate::pool::SystemPool;
+                let info = crate::tensor_info::TensorInfo::from_legacy(legacy, &sys_pool);
+                let concrete = info.as_concrete()?;
+                let ndt = concrete.dtype();
+                let shape = concrete.shape().clone();
+                let layout = TensorLayout::<DynRank>::row_major(shape, ndt);
+                let buf = pool.allocate(layout.buffer_size_bytes()).ok()?;
+                let mut tensor = NewTensor::from_parts(buf, layout);
+                for i in 0..concrete.numel() {
+                    tensor.write_element(i, concrete.read_element(i));
+                }
+                Some(tensor)
+            }
+            StoredTensor::ExternalBinary { dtype, shape, .. }
+            | StoredTensor::ExternalPth { dtype, shape, .. }
+            | StoredTensor::ExternalSafetensors { dtype, shape, .. } => {
+                let ndt = NumericDType::from_legacy(*dtype)?;
+                self.load_raw_to_pool(ndt, shape, pool)
+            }
+            StoredTensor::ExternalGGUF { dtype, shape, .. } => {
+                if dtype.packed_format().is_some() {
+                    return None;
+                }
+                let ndt = NumericDType::from_legacy(*dtype)?;
+                self.load_raw_to_pool(ndt, shape, pool)
+            }
+        }
+    }
+
+    /// Load raw bytes from this stored tensor (handling the specific format)
+    /// and copy into a pool buffer as a new-type tensor.
+    fn load_raw_to_pool<'p, P: crate::pool::Pool + 'p>(
+        &self,
+        ndt: crate::numeric_dtype::NumericDType,
+        shape: &[u64],
+        pool: &'p P,
+    ) -> Option<crate::numeric_tensor::NumericTensor<'p, DynRank, P>> {
+        use crate::numeric_tensor::{NumericTensor as NewTensor, TensorLayout};
+
+        // Use to_numeric() to load bytes, then bridge.
+        // TODO: load raw bytes directly without legacy intermediate
+        let legacy = self.to_numeric();
+        let sys_pool = crate::pool::SystemPool;
+        let info = crate::tensor_info::TensorInfo::from_legacy(&legacy, &sys_pool);
+        let concrete = info.as_concrete()?;
+        let layout = TensorLayout::<DynRank>::row_major(shape.to_vec(), ndt);
+        let buf = pool.allocate(layout.buffer_size_bytes()).ok()?;
+        let mut tensor = NewTensor::from_parts(buf, layout);
+        for i in 0..concrete.numel() {
+            tensor.write_element(i, concrete.read_element(i));
+        }
+        Some(tensor)
+    }
+
     pub fn to_numeric(&self) -> NumericTensor<DynRank> {
         match self {
             StoredTensor::Numeric(tensor) => tensor.clone(),

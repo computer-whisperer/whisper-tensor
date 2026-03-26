@@ -1179,29 +1179,47 @@ impl SymbolicGraph {
         // Generate the combined milli graph.
         let milli_graph = self.generate_milli_graph(rng);
 
-        // Load initialized tensors (weights/constants) via legacy path,
-        // then bridge to new types. The tensor_store migration is separate.
-        let legacy_initialized = self.get_initialized_tensors(tensor_store);
+        // Load initialized tensors (weights/constants) into pool tensors.
+        // Uses StoredTensor::to_pool_tensor for stored tensors, bridges for inline ones.
         static POOL_S: SystemPool = SystemPool;
-
-        // Convert legacy tensors to new-type tensors for pool_eval.
-        let bridged_tensors: Vec<(GlobalId, crate::numeric_tensor::NumericTensor<'_, DynRank, SystemPool>)> =
-            legacy_initialized
-                .iter()
-                .filter_map(|(&id, legacy)| {
-                    let ndt = crate::numeric_dtype::NumericDType::from_legacy(legacy.dtype())?;
-                    let shape = legacy.shape();
-                    let layout = TensorLayout::<DynRank>::row_major(shape, ndt);
-                    let buf = POOL_S.allocate(layout.buffer_size_bytes()).ok()?;
-                    let info = TensorInfo::from_legacy(legacy, &POOL_S);
-                    let concrete = info.as_concrete()?;
-                    let mut tensor = crate::numeric_tensor::NumericTensor::from_parts(buf, layout);
-                    for i in 0..concrete.numel() {
-                        tensor.write_element(i, concrete.read_element(i));
+        let bridged_tensors: Vec<(GlobalId, crate::numeric_tensor::NumericTensor<'_, DynRank, SystemPool>)> = {
+            let mut out = Vec::new();
+            for (&tensor_id, tensor_meta) in &self.tensors {
+                let stored_ref = match &tensor_meta.tensor_type {
+                    TensorType::Constant(s) | TensorType::Input(Some(s)) => Some(s),
+                    _ => None,
+                };
+                if let Some(stored_ref) = stored_ref {
+                    match stored_ref {
+                        StoredOrNotTensor::Stored(store_id) => {
+                            if let Some(stored) = tensor_store.get_tensor(*store_id) {
+                                if let Some(new_tensor) = stored.to_pool_tensor(&POOL_S) {
+                                    out.push((tensor_id, new_tensor));
+                                }
+                            }
+                        }
+                        StoredOrNotTensor::NotStored(nd_tensor) => {
+                            // Inline NDArray tensor — bridge via legacy NumericTensor.
+                            let legacy = NumericTensor::NDArray(nd_tensor.clone());
+                            let info = TensorInfo::from_legacy(&legacy, &POOL_S);
+                            if let Some(concrete) = info.as_concrete() {
+                                let ndt = concrete.dtype();
+                                let shape = concrete.shape().clone();
+                                let layout = TensorLayout::<DynRank>::row_major(shape, ndt);
+                                if let Ok(buf) = POOL_S.allocate(layout.buffer_size_bytes()) {
+                                    let mut tensor = crate::numeric_tensor::NumericTensor::from_parts(buf, layout);
+                                    for i in 0..concrete.numel() {
+                                        tensor.write_element(i, concrete.read_element(i));
+                                    }
+                                    out.push((tensor_id, tensor));
+                                }
+                            }
+                        }
                     }
-                    Some((id, tensor))
-                })
-                .collect();
+                }
+            }
+            out
+        };
 
         // Build combined input view map (user inputs + bridged weights).
         let bridged_views: Vec<_> = bridged_tensors
