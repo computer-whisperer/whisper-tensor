@@ -13,7 +13,7 @@ use crate::milli_graph::MilliOpGraph;
 use crate::milli_graph::ops::{self, Constant};
 use crate::numeric_dtype::NumericDType;
 
-use super::{TestCase, TestDataSet, TestTensor, Tolerance};
+use super::{TestCase, TestDataSet, Tolerance};
 use super::{tensor_f32_shaped, tensor_i64_shaped, tensor_bool_shaped};
 
 pub fn build_cases() -> Vec<TestCase> {
@@ -44,10 +44,6 @@ fn rng() -> SmallRng {
     SmallRng::seed_from_u64(600)
 }
 
-struct SingleInputIds {
-    ext_data: GlobalId,
-    out: GlobalId,
-}
 
 // ---------------------------------------------------------------------------
 // Helpers for constant tensor creation

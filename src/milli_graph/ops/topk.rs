@@ -217,7 +217,7 @@ impl MilliOp for TopK {
                 // Collect elements along axis for this slice
                 let mut elements: Vec<(f64, usize)> = Vec::with_capacity(axis_len);
                 for ai in 0..axis_len {
-                    let flat = outer * in_strides.get(0).copied().unwrap_or(1).max(if axis == 0 { axis_len * inner_size } else { 1 })
+                    let _flat = outer * in_strides.get(0).copied().unwrap_or(1).max(if axis == 0 { axis_len * inner_size } else { 1 })
                         // Compute flat index properly
                         ;
                     // Actually compute it correctly using strides

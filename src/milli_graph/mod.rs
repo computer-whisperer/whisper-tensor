@@ -1124,7 +1124,8 @@ impl MilliOpGraph {
             info_inputs.insert(ext_id, TensorInfo::from_view(view, &POOL_S));
         }
 
-        // Infer all tensor shapes/dtypes, then lower.
+        // Infer for output shape reconstruction. lower() re-infers internally —
+        // TODO: pass pre-computed infos to avoid the double infer.
         let all_infos = self.infer_all(&info_inputs, &POOL_S)?;
         let lower_result = lower::lower(self, &info_inputs)
             .map_err(|e| MilliOpGraphError::LowerError(e.to_string()))?;

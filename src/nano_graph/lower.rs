@@ -1218,7 +1218,6 @@ impl<'a> NanoLoweringContext<'a> {
     /// Otherwise, registers an OpaqueOp that calls `eval_new` on the op
     /// through pool_eval. Falls back to boundary if output info is missing.
     pub fn lower_default(&mut self, op: &AnyMilliOp) {
-        use crate::nano_graph::ops::OpaqueOp;
 
         let all_infos = self.all_infos;
         let op_kind = op.op_kind();
@@ -1526,8 +1525,6 @@ impl<'a> NanoLoweringContext<'a> {
         R: ReduceAccessors,
         F: Fn(NumericDType, u64, i64) -> ScalarOp,
     {
-        use crate::milli_graph::ops::LowerResult;
-
         let all_infos = self.all_infos;
         let in_id = Node::inputs(reduce).next().unwrap();
         let out_id = Node::outputs(reduce).next().unwrap();

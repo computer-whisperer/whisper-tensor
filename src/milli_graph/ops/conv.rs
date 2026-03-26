@@ -1793,7 +1793,6 @@ impl MilliOp for ConvBiasGrad {
         _symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
         _pool: &'p P,
     ) -> Result<Vec<(GlobalId, crate::tensor_info::TensorInfo<'p, P>)>, MilliOpGraphError> {
-        use crate::scalar_info::ScalarInfoTyped;
         use crate::tensor_info::TensorInfo;
 
         let grad_info = known_inputs

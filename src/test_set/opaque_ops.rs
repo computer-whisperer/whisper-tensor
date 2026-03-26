@@ -15,7 +15,7 @@ use crate::milli_graph::MilliOpGraph;
 use crate::milli_graph::ops::{self, Constant};
 use crate::numeric_dtype::NumericDType;
 
-use super::{TestCase, TestDataSet, TestTensor, Tolerance};
+use super::{TestCase, TestDataSet, Tolerance};
 use super::tensor_f32_shaped;
 
 pub fn build_cases() -> Vec<TestCase> {
