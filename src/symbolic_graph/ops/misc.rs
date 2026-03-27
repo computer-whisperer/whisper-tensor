@@ -715,7 +715,7 @@ impl Operation for TileOperation {
         let ones = {
             let op_id = crate::milli_graph::ops::ConstantOfShape::push_new(
                 &mut graph,
-                crate::migration::numeric_scalar::NumericScalar::I64(1),
+                crate::numeric_scalar::NumericScalar::from_i64(1),
                 shape_of_shape,
                 rng,
             );
@@ -920,7 +920,7 @@ impl Operation for GlobalAveragePoolOperation {
         let spatial_ones = {
             let op_id = crate::milli_graph::ops::ConstantOfShape::push_new(
                 &mut graph,
-                crate::migration::numeric_scalar::NumericScalar::I64(1),
+                crate::numeric_scalar::NumericScalar::from_i64(1),
                 n_spatial,
                 rng,
             );
@@ -1030,7 +1030,7 @@ impl Operation for GlobalMaxPoolOperation {
         let spatial_ones = {
             let op_id = crate::milli_graph::ops::ConstantOfShape::push_new(
                 &mut graph,
-                crate::migration::numeric_scalar::NumericScalar::I64(1),
+                crate::numeric_scalar::NumericScalar::from_i64(1),
                 n_spatial,
                 rng,
             );

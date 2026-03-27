@@ -77,9 +77,8 @@ impl Operation for ConstantOfShapeOperation {
 
     fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
-        let legacy_scalar = crate::nano_graph::lower::new_scalar_to_legacy(&self.value);
         let node =
-            ConstantOfShape::push_new(&mut graph, legacy_scalar, input_map[&self.input], rng);
+            ConstantOfShape::push_new(&mut graph, self.value, input_map[&self.input], rng);
         let out = match graph.get_node_by_id(&node) {
             Some(AnyMilliOp::ConstantOfShape(op)) => op.outputs().next().unwrap(),
             _ => unreachable!(),

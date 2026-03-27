@@ -3396,7 +3396,7 @@ mod tests {
 
     #[test]
     fn test_constant_of_shape() {
-        use crate::migration::numeric_scalar::NumericScalar;
+        use crate::numeric_scalar::NumericScalar;
         // ConstantOfShape(shape=[2,3], val=7.0) → [2,3] of 7s.
         // Then add with an input to force nano eval of the constant.
         check_integrity(
@@ -3406,7 +3406,7 @@ mod tests {
                 // Note: ConstantOfShape::push_new returns the OP id (not output tensor id).
                 let cos_op_id = crate::milli_graph::ops::ConstantOfShape::push_new(
                     g,
-                    OldNumericScalar::F32(7.0),
+                    NumericScalar::from_f32(7.0),
                     shape,
                     rng,
                 );

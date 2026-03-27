@@ -185,14 +185,14 @@ pub struct ConstantOfShape {
     global_id: GlobalId,
     pub(crate) label: Option<String>,
     output: GlobalId,
-    value: NumericScalar,
+    value: NewScalar,
     shape: GlobalId,
 }
 
 impl ConstantOfShape {
     pub fn push_new(
         graph: &mut MilliOpGraph,
-        value: NumericScalar,
+        value: NewScalar,
         shape: GlobalId,
         rng: &mut impl Rng,
     ) -> GlobalId {
@@ -201,7 +201,7 @@ impl ConstantOfShape {
 
     pub fn push_new_with_label(
         graph: &mut MilliOpGraph,
-        value: NumericScalar,
+        value: NewScalar,
         shape: GlobalId,
         label: Option<String>,
         rng: &mut impl Rng,
@@ -270,20 +270,20 @@ impl MilliOp for ConstantOfShape {
 
         // If shape is concrete, produce the filled tensor directly.
         if let Some(shape_values) = shape_info.to_i64_vec() {
-            let shape_usize = shape_values.iter().map(|x| *x as u64).collect::<Vec<_>>();
-            let out: NumericTensor<DynRank> =
-                NDArrayNumericTensor::<DynRank>::fill(self.value.clone(), &shape_usize)
-                    .map_err(|_| MilliOpGraphError::UnableToInfer)?
-                    .into();
-            return Ok(vec![(self.output, TensorInfo::from_legacy(&out, pool))]);
+            let shape_u64 = shape_values.iter().map(|x| *x as u64).collect::<Vec<_>>();
+            let numel = shape_u64.iter().product::<u64>() as usize;
+            let ndt = self.value.dtype();
+            let layout = crate::numeric_tensor::TensorLayout::<DynRank>::row_major(shape_u64, ndt);
+            if let Ok(buf) = pool.allocate(layout.buffer_size_bytes()) {
+                let mut tensor: crate::numeric_tensor::NumericTensor<'_, DynRank, P> = crate::numeric_tensor::NumericTensor::from_parts(buf, layout);
+                for i in 0..numel {
+                    tensor.write_element(i, self.value);
+                }
+                return Ok(vec![(self.output, TensorInfo::from_view(&tensor.view(), pool))]);
+            }
         }
 
-        // Shape-only inference: the shape tensor's VALUES are the output dims.
-        // If shape tensor is Ranked with known dims, each dim value tells us
-        // the rank of the output but not the actual dim sizes.
-        // If shape tensor is Shaped (1D with known length), we at least know the output rank.
-        let out_dtype = crate::numeric_dtype::NumericDType::from_legacy(self.value.dtype())
-            .expect("unsupported ConstantOfShape value dtype");
+        let out_dtype = self.value.dtype();
         if let Some(rank) = shape_info.rank_if_known() {
             // shape is 1D — its first dim tells us the output rank.
             if rank == 1
@@ -324,9 +324,10 @@ impl MilliOp for ConstantOfShape {
     ) -> Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, MilliOpGraphError>
     {
         let shape: Vec<i64> = inputs[&self.shape].try_to_rank::<P1>()?.try_into()?;
-        let shape_usize = shape.iter().map(|x| *x as u64).collect::<Vec<_>>();
+        let shape_u64 = shape.iter().map(|x| *x as u64).collect::<Vec<_>>();
+        let legacy_scalar = crate::nano_graph::lower::new_scalar_to_legacy(&self.value);
         let out: NumericTensor<DynRank> =
-            NDArrayNumericTensor::<DynRank>::fill(self.value.clone(), &shape_usize)?.into();
+            NDArrayNumericTensor::<DynRank>::fill(legacy_scalar, &shape_u64)?.into();
         Ok(Box::new([(self.output, out)].into_iter()))
     }
 
@@ -344,13 +345,8 @@ impl MilliOp for ConstantOfShape {
             .map(|i| shape_tensor.read_element(i).to_i64() as u64)
             .collect();
 
-        let legacy_dtype = self.value.dtype();
-        let ndt = crate::numeric_dtype::NumericDType::from_legacy(legacy_dtype)
-            .ok_or_else(|| crate::nano_graph::pool_eval::PoolEvalError::Unsupported(
-                format!("ConstantOfShape: unsupported dtype {:?}", legacy_dtype),
-            ))?;
-
-        let fill_val = crate::numeric_scalar::NumericScalar::from_f64(self.value.to_f64()).cast_to(ndt);
+        let ndt = self.value.dtype();
+        let fill_val = self.value;
         let numel: usize = shape.iter().product::<u64>() as usize;
 
         let layout = TensorLayout::<DynRank>::row_major(shape, ndt);
