@@ -1901,10 +1901,70 @@ impl crate::graph::Link for MilliOpGraphTensor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backends::eval_backend::EvalBackend;
-    use crate::backends::ndarray_backend::NDArrayNumericTensor;
     use crate::graph::Graph;
     use crate::milli_graph::ops::{Constant, SimpleBinary};
+    use crate::numeric_dtype::NumericDType;
+    use crate::numeric_scalar::NumericScalar;
+    use crate::numeric_tensor::NumericTensor as PoolTensor;
+    use crate::pool::SystemPool;
+    use crate::symbolic_graph::SharedPoolTensor;
+
+    static POOL: SystemPool = SystemPool;
+
+    /// Create an f32 pool tensor from values and shape.
+    fn make_f32(shape: Vec<u64>, values: &[f32]) -> PoolTensor<'static, DynRank, SystemPool> {
+        let mut t = PoolTensor::zeros(shape, NumericDType::F32, &POOL).unwrap();
+        for (i, &v) in values.iter().enumerate() {
+            t.write_element(i, NumericScalar::from_f32(v));
+        }
+        t
+    }
+
+    /// Create an i64 pool tensor from values and shape.
+    fn make_i64(shape: Vec<u64>, values: &[i64]) -> PoolTensor<'static, DynRank, SystemPool> {
+        let mut t = PoolTensor::zeros(shape, NumericDType::I64, &POOL).unwrap();
+        for (i, &v) in values.iter().enumerate() {
+            t.write_element(i, NumericScalar::from_i64(v));
+        }
+        t
+    }
+
+    /// Create a SharedPoolTensor from f32 values (for Constant::push_new_pool).
+    fn make_shared_f32(shape: Vec<u64>, values: &[f32]) -> SharedPoolTensor {
+        SharedPoolTensor(std::sync::Arc::new(make_f32(shape, values)))
+    }
+
+    /// Create a SharedPoolTensor from i64 values (for Constant::push_new_pool).
+    fn make_shared_i64(shape: Vec<u64>, values: &[i64]) -> SharedPoolTensor {
+        SharedPoolTensor(std::sync::Arc::new(make_i64(shape, values)))
+    }
+
+    /// Read all elements as f32 from a pool tensor.
+    fn read_f32_vec(t: &PoolTensor<'_, DynRank, impl crate::pool::Pool>) -> Vec<f32> {
+        (0..t.numel()).map(|i| t.read_element(i).to_f32()).collect()
+    }
+
+    /// Read all elements as i64 from a pool tensor.
+    fn read_i64_vec(t: &PoolTensor<'_, DynRank, impl crate::pool::Pool>) -> Vec<i64> {
+        (0..t.numel()).map(|i| t.read_element(i).to_i64()).collect()
+    }
+
+    /// Run graph.pool_eval with f32 input tensors keyed by external IDs.
+    fn pool_eval_graph<'p>(
+        graph: &MilliOpGraph,
+        inputs: &HashMap<GlobalId, PoolTensor<'static, DynRank, SystemPool>>,
+        pool: &'p SystemPool,
+    ) -> HashMap<GlobalId, PoolTensor<'p, DynRank, SystemPool>> {
+        let views: HashMap<GlobalId, _> = inputs
+            .iter()
+            .map(|(&id, t)| (id, t.view()))
+            .collect();
+        let view_refs: HashMap<GlobalId, _> = views
+            .iter()
+            .map(|(&id, v)| (id, v))
+            .collect();
+        graph.pool_eval(&view_refs, pool).unwrap()
+    }
 
     #[test]
     fn test_merge_graph_two_small_graphs() {
@@ -1932,9 +1992,10 @@ mod tests {
         let ext_final = GlobalId::new(rng);
         let (mut graph_b, b_input_map) = MilliOpGraph::new([ext_sum_xy], rng);
         let b_in = b_input_map[&ext_sum_xy];
-        let b_const = Constant::push_new(
+        let b_const = Constant::push_new_pool(
             &mut graph_b,
-            NDArrayNumericTensor::<DynRank>::from_vec_shape(vec![10.0f32], &vec![1]).unwrap(),
+            make_shared_f32(vec![1], &[10.0]),
+            None,
             rng,
         );
         let b_out = SimpleBinary::add(&mut graph_b, b_in, b_const, rng);
@@ -1969,22 +2030,11 @@ mod tests {
 
         // Evaluate: x=3, y=5 → add(3,5)=8 → add(8,10)=18
         let mut inputs = HashMap::new();
-        inputs.insert(
-            ext_x,
-            NumericTensor::<DynRank>::from_vec_shape(vec![3.0f32], vec![1]).unwrap(),
-        );
-        inputs.insert(
-            ext_y,
-            NumericTensor::<DynRank>::from_vec_shape(vec![5.0f32], vec![1]).unwrap(),
-        );
+        inputs.insert(ext_x, make_f32(vec![1], &[3.0]));
+        inputs.insert(ext_y, make_f32(vec![1], &[5.0]));
 
-        let mut backend = EvalBackend::NDArray;
-        let results: HashMap<_, _> = combined
-            .eval(&inputs, &mut (), &mut backend)
-            .unwrap()
-            .collect();
-        let result = &results[&ext_final];
-        let values: Vec<f32> = result.flatten().unwrap().try_into().unwrap();
+        let results = pool_eval_graph(&combined, &inputs, &POOL);
+        let values = read_f32_vec(&results[&ext_final]);
         assert_eq!(values, vec![18.0f32]);
     }
 
@@ -2017,9 +2067,10 @@ mod tests {
         graph.op_to_group.insert(op_id_1, g1);
 
         // Push another op into g2 via push_op_in_group
-        let const_tensor = Constant::push_new(
+        let const_tensor = Constant::push_new_pool(
             &mut graph,
-            NDArrayNumericTensor::<DynRank>::from_vec_shape(vec![2.0f32], &vec![1]).unwrap(),
+            make_shared_f32(vec![1], &[2.0]),
+            None,
             rng,
         );
         // The constant op was pushed via push_op, manually assign to g2
@@ -2106,19 +2157,14 @@ mod tests {
     fn eval_loss(
         graph: &MilliOpGraph,
         loss_info: &LossGraphInfo,
-        predictions: NumericTensor<DynRank>,
-        targets: NumericTensor<DynRank>,
+        predictions: PoolTensor<'static, DynRank, SystemPool>,
+        targets: PoolTensor<'static, DynRank, SystemPool>,
     ) -> f32 {
         let mut inputs = HashMap::new();
         inputs.insert(loss_info.predictions_input, predictions);
         inputs.insert(loss_info.targets_input, targets);
-        let mut backend = EvalBackend::NDArray;
-        let results: HashMap<_, _> = graph
-            .eval(&inputs, &mut (), &mut backend)
-            .unwrap()
-            .collect();
-        let result = &results[&loss_info.loss_output];
-        let values: Vec<f32> = result.flatten().unwrap().try_into().unwrap();
+        let results = pool_eval_graph(graph, &inputs, &POOL);
+        let values = read_f32_vec(&results[&loss_info.loss_output]);
         assert_eq!(values.len(), 1);
         values[0]
     }
@@ -2130,19 +2176,15 @@ mod tests {
 
         // batch=1, 3 classes. logits=[0, 0, 100], target=[0, 0, 1] (class 2)
         // Correct class has overwhelming logit → loss ≈ 0
-        let logits =
-            NumericTensor::<DynRank>::from_vec_shape(vec![0.0f32, 0.0, 100.0], vec![1, 3]).unwrap();
-        let targets =
-            NumericTensor::<DynRank>::from_vec_shape(vec![0.0f32, 0.0, 1.0], vec![1, 3]).unwrap();
+        let logits = make_f32(vec![1, 3], &[0.0, 0.0, 100.0]);
+        let targets = make_f32(vec![1, 3], &[0.0, 0.0, 1.0]);
         let loss = eval_loss(&graph, &info, logits, targets);
         assert!(loss.abs() < 1e-4, "expected ~0, got {}", loss);
 
         // Wrong class: logits=[100, 0, 0], target=[0, 0, 1] (class 2)
         // Correct class has logit 0, dominant class has logit 100 → loss ≈ 100
-        let logits2 =
-            NumericTensor::<DynRank>::from_vec_shape(vec![100.0f32, 0.0, 0.0], vec![1, 3]).unwrap();
-        let targets2 =
-            NumericTensor::<DynRank>::from_vec_shape(vec![0.0f32, 0.0, 1.0], vec![1, 3]).unwrap();
+        let logits2 = make_f32(vec![1, 3], &[100.0, 0.0, 0.0]);
+        let targets2 = make_f32(vec![1, 3], &[0.0, 0.0, 1.0]);
         let loss2 = eval_loss(&graph, &info, logits2, targets2);
         assert!(loss2 > 90.0, "expected ~100, got {}", loss2);
     }
@@ -2153,18 +2195,14 @@ mod tests {
         let (graph, info) = MilliOpGraph::mse_loss(rng);
 
         // predictions=[1,2,3], targets=[1,2,3] → MSE = 0
-        let preds =
-            NumericTensor::<DynRank>::from_vec_shape(vec![1.0f32, 2.0, 3.0], vec![1, 3]).unwrap();
-        let targets =
-            NumericTensor::<DynRank>::from_vec_shape(vec![1.0f32, 2.0, 3.0], vec![1, 3]).unwrap();
+        let preds = make_f32(vec![1, 3], &[1.0, 2.0, 3.0]);
+        let targets = make_f32(vec![1, 3], &[1.0, 2.0, 3.0]);
         let loss = eval_loss(&graph, &info, preds, targets);
         assert!(loss.abs() < 1e-6, "expected 0, got {}", loss);
 
         // predictions=[1,2,3], targets=[4,5,6] → diffs=[3,3,3], sq=[9,9,9], mean=9
-        let preds2 =
-            NumericTensor::<DynRank>::from_vec_shape(vec![1.0f32, 2.0, 3.0], vec![1, 3]).unwrap();
-        let targets2 =
-            NumericTensor::<DynRank>::from_vec_shape(vec![4.0f32, 5.0, 6.0], vec![1, 3]).unwrap();
+        let preds2 = make_f32(vec![1, 3], &[1.0, 2.0, 3.0]);
+        let targets2 = make_f32(vec![1, 3], &[4.0, 5.0, 6.0]);
         let loss2 = eval_loss(&graph, &info, preds2, targets2);
         assert!((loss2 - 9.0).abs() < 1e-5, "expected 9, got {}", loss2);
     }
@@ -2175,18 +2213,14 @@ mod tests {
         let (graph, info) = MilliOpGraph::l1_loss(rng);
 
         // predictions=[1,2,3], targets=[1,2,3] → L1 = 0
-        let preds =
-            NumericTensor::<DynRank>::from_vec_shape(vec![1.0f32, 2.0, 3.0], vec![1, 3]).unwrap();
-        let targets =
-            NumericTensor::<DynRank>::from_vec_shape(vec![1.0f32, 2.0, 3.0], vec![1, 3]).unwrap();
+        let preds = make_f32(vec![1, 3], &[1.0, 2.0, 3.0]);
+        let targets = make_f32(vec![1, 3], &[1.0, 2.0, 3.0]);
         let loss = eval_loss(&graph, &info, preds, targets);
         assert!(loss.abs() < 1e-6, "expected 0, got {}", loss);
 
         // predictions=[1,2,3], targets=[4,6,9] → diffs=[3,4,6], mean=13/3≈4.333
-        let preds2 =
-            NumericTensor::<DynRank>::from_vec_shape(vec![1.0f32, 2.0, 3.0], vec![1, 3]).unwrap();
-        let targets2 =
-            NumericTensor::<DynRank>::from_vec_shape(vec![4.0f32, 6.0, 9.0], vec![1, 3]).unwrap();
+        let preds2 = make_f32(vec![1, 3], &[1.0, 2.0, 3.0]);
+        let targets2 = make_f32(vec![1, 3], &[4.0, 6.0, 9.0]);
         let loss2 = eval_loss(&graph, &info, preds2, targets2);
         let expected = 13.0f32 / 3.0;
         assert!(
@@ -2297,21 +2331,12 @@ mod tests {
         // Prepare inputs
         let mut inputs = HashMap::new();
         for (i, ext) in ext_ids.iter().enumerate() {
-            let t = NumericTensor::<DynRank>::from_vec_shape(
-                input_values[i].clone(),
-                input_shapes[i].clone(),
-            )
-            .unwrap();
-            inputs.insert(*ext, t);
+            let shape: Vec<u64> = input_shapes[i].iter().map(|&s| s as u64).collect();
+            inputs.insert(*ext, make_f32(shape, &input_values[i]));
         }
 
-        let mut backend = EvalBackend::NDArray;
-        let results: HashMap<_, _> = graph
-            .eval(&inputs, &mut (), &mut backend)
-            .unwrap()
-            .collect();
-        let val: Vec<f32> = results[&ext_out].flatten().unwrap().try_into().unwrap();
-        val[0]
+        let results = pool_eval_graph(&graph, &inputs, &POOL);
+        read_f32_vec(&results[&ext_out])[0]
     }
 
     /// Finite difference gradient check for a unary op.
@@ -2349,12 +2374,13 @@ mod tests {
         graph.add_output(scalar, ext_out);
 
         // Seed gradient at op_out with shape-matching ones
-        let ones_data = NDArrayNumericTensor::<DynRank>::from_vec_shape(
-            vec![1.0f32; input_values.len()],
-            &input_shape.iter().map(|&s| s as u64).collect::<Vec<_>>(),
-        )
-        .unwrap();
-        let ones = Constant::push_new(&mut graph, ones_data, rng);
+        let shape_u64: Vec<u64> = input_shape.iter().map(|&s| s as u64).collect();
+        let ones = Constant::push_new_pool(
+            &mut graph,
+            make_shared_f32(shape_u64, &vec![1.0f32; input_values.len()]),
+            None,
+            rng,
+        );
         let mut grad_map = HashMap::new();
         grad_map.insert(op_out, ones);
         let grads = generate_milli_backward(&mut graph, group, &grad_map, rng);
@@ -2369,18 +2395,12 @@ mod tests {
         graph.add_output(*grad_tensor_id, ext_grad);
 
         // Evaluate to get analytic gradient
-        let input_tensor =
-            NumericTensor::<DynRank>::from_vec_shape(input_values.clone(), input_shape.clone())
-                .unwrap();
+        let shape_u64: Vec<u64> = input_shape.iter().map(|&s| s as u64).collect();
         let mut inputs = HashMap::new();
-        inputs.insert(ext_in, input_tensor);
+        inputs.insert(ext_in, make_f32(shape_u64, &input_values));
 
-        let mut backend = EvalBackend::NDArray;
-        let results: HashMap<_, _> = graph
-            .eval(&inputs, &mut (), &mut backend)
-            .unwrap()
-            .collect();
-        let analytic_grad: Vec<f32> = results[&ext_grad].flatten().unwrap().try_into().unwrap();
+        let results = pool_eval_graph(&graph, &inputs, &POOL);
+        let analytic_grad = read_f32_vec(&results[&ext_grad]);
 
         // Finite difference check for each element
         for i in 0..input_values.len() {
@@ -2448,12 +2468,13 @@ mod tests {
         graph.add_output(scalar, ext_out);
 
         // Seed gradient at op_out with shape-matching ones
-        let ones_data = NDArrayNumericTensor::<DynRank>::from_vec_shape(
-            vec![1.0f32; a_values.len()],
-            &shape.iter().map(|&s| s as u64).collect::<Vec<_>>(),
-        )
-        .unwrap();
-        let ones = Constant::push_new(&mut graph, ones_data, rng);
+        let shape_u64: Vec<u64> = shape.iter().map(|&s| s as u64).collect();
+        let ones = Constant::push_new_pool(
+            &mut graph,
+            make_shared_f32(shape_u64, &vec![1.0f32; a_values.len()]),
+            None,
+            rng,
+        );
         let mut grad_map = HashMap::new();
         grad_map.insert(op_out, ones);
         let grads = generate_milli_backward(&mut graph, group, &grad_map, rng);
@@ -2472,21 +2493,14 @@ mod tests {
             id
         };
 
-        let input_a =
-            NumericTensor::<DynRank>::from_vec_shape(a_values.clone(), shape.clone()).unwrap();
-        let input_b =
-            NumericTensor::<DynRank>::from_vec_shape(b_values.clone(), shape.clone()).unwrap();
+        let shape_u64: Vec<u64> = shape.iter().map(|&s| s as u64).collect();
         let mut inputs = HashMap::new();
-        inputs.insert(ext_a, input_a);
-        inputs.insert(ext_b, input_b);
+        inputs.insert(ext_a, make_f32(shape_u64.clone(), &a_values));
+        inputs.insert(ext_b, make_f32(shape_u64, &b_values));
 
-        let mut backend = EvalBackend::NDArray;
-        let results: HashMap<_, _> = graph
-            .eval(&inputs, &mut (), &mut backend)
-            .unwrap()
-            .collect();
-        let analytic_grad_a: Vec<f32> = results[&ext_grad_a].flatten().unwrap().try_into().unwrap();
-        let analytic_grad_b: Vec<f32> = results[&ext_grad_b].flatten().unwrap().try_into().unwrap();
+        let results = pool_eval_graph(&graph, &inputs, &POOL);
+        let analytic_grad_a = read_f32_vec(&results[&ext_grad_a]);
+        let analytic_grad_b = read_f32_vec(&results[&ext_grad_b]);
 
         // Check gradients w.r.t. a
         for i in 0..a_values.len() {
@@ -2695,46 +2709,44 @@ mod tests {
         let ext_out = GlobalId::new(rng);
         graph.add_output(scalar, ext_out);
 
-        // Run a forward-only eval to determine op_out's shape for the gradient seed
-        let output_shape = {
-            let mut fwd_graph = MilliOpGraph::new_empty(&mut wyrand::WyRand::new(99));
-            let rng2 = &mut wyrand::WyRand::new(99);
-            let mut fwd_ext = Vec::new();
-            let mut fwd_int = Vec::new();
-            for _ in 0..n {
-                let ext = GlobalId::new(rng2);
-                let int = fwd_graph.add_input_with_id(ext, rng2);
-                fwd_ext.push(ext);
-                fwd_int.push(int);
+        // Infer op_out's shape on the graph so far, to create the right-shaped ones seed.
+        let output_shape: Vec<u64> = {
+            use crate::tensor_info::TensorInfo;
+            use crate::scalar_info::ScalarInfo;
+
+            let mut info_inputs = HashMap::new();
+            for (i, ext) in ext_ids.iter().enumerate() {
+                let shape: Vec<u64> = input_shapes[i].iter().map(|&s| s as u64).collect();
+                let t = make_f32(shape, &input_values[i]);
+                info_inputs.insert(*ext, TensorInfo::from_view(&t.view(), &POOL));
             }
-            let fwd_out = build_fn(&mut fwd_graph, &fwd_int, rng2);
-            let fwd_ext_out = GlobalId::new(rng2);
-            fwd_graph.add_output(fwd_out, fwd_ext_out);
-            let mut fwd_inputs = HashMap::new();
-            for (i, ext) in fwd_ext.iter().enumerate() {
-                let t = NumericTensor::<DynRank>::from_vec_shape(
-                    input_values[i].clone(),
-                    input_shapes[i].clone(),
-                )
-                .unwrap();
-                fwd_inputs.insert(*ext, t);
+            let infos = graph.infer_all(&info_inputs, &POOL).unwrap();
+            let out_info = &infos[&op_out];
+            // Extract concrete shape dims. as_concrete() works if infer constant-folded;
+            // otherwise get shape from the ranked tensor info.
+            if let Some(concrete) = out_info.as_concrete() {
+                concrete.view().shape().to_vec()
+            } else {
+                let ranked = out_info.as_ranked()
+                    .expect("expected ranked tensor info from concrete inputs");
+                ranked.shape()
+                    .iter()
+                    .map(|si| match si {
+                        crate::scalar_info::ScalarInfoTyped::Numeric(v) => *v,
+                        _ => panic!("expected concrete shape dims from concrete inputs"),
+                    })
+                    .collect()
             }
-            let mut backend = EvalBackend::NDArray;
-            let fwd_results: HashMap<_, _> = fwd_graph
-                .eval(&fwd_inputs, &mut (), &mut backend)
-                .unwrap()
-                .collect();
-            fwd_results[&fwd_ext_out].shape().to_vec()
         };
 
         // Seed gradient with shape-matching ones
         let total_elems: usize = output_shape.iter().map(|&s| s as usize).product();
-        let ones_data = NDArrayNumericTensor::<DynRank>::from_vec_shape(
-            vec![1.0f32; total_elems.max(1)],
-            &output_shape,
-        )
-        .unwrap();
-        let ones = Constant::push_new(&mut graph, ones_data, rng);
+        let ones = Constant::push_new_pool(
+            &mut graph,
+            make_shared_f32(output_shape, &vec![1.0f32; total_elems.max(1)]),
+            None,
+            rng,
+        );
         let mut grad_map = HashMap::new();
         grad_map.insert(op_out, ones);
         let grads = generate_milli_backward(&mut graph, group, &grad_map, rng);
@@ -2762,19 +2774,11 @@ mod tests {
         // Evaluate
         let mut inputs = HashMap::new();
         for (i, ext) in ext_ids.iter().enumerate() {
-            let t = NumericTensor::<DynRank>::from_vec_shape(
-                input_values[i].clone(),
-                input_shapes[i].clone(),
-            )
-            .unwrap();
-            inputs.insert(*ext, t);
+            let shape: Vec<u64> = input_shapes[i].iter().map(|&s| s as u64).collect();
+            inputs.insert(*ext, make_f32(shape, &input_values[i]));
         }
 
-        let mut backend = EvalBackend::NDArray;
-        let results: HashMap<_, _> = graph
-            .eval(&inputs, &mut (), &mut backend)
-            .unwrap()
-            .collect();
+        let results = pool_eval_graph(&graph, &inputs, &POOL);
 
         // Check each input's gradient
         for input_idx in 0..n {
@@ -2782,7 +2786,7 @@ mod tests {
                 Some(id) => id,
                 None => continue,
             };
-            let analytic: Vec<f32> = results[&ext_grad].flatten().unwrap().try_into().unwrap();
+            let analytic = read_f32_vec(&results[&ext_grad]);
 
             for elem in 0..input_values[input_idx].len() {
                 let mut plus_vals: Vec<Vec<f32>> = input_values.to_vec();
@@ -3020,10 +3024,10 @@ mod tests {
         // Gradient flows through reshape; d/dx_i = 1 for all i
         check_general_backward(
             |g, ids, r| {
-                let shape = ops::Constant::push_new(
+                let shape = ops::Constant::push_new_pool(
                     g,
-                    NDArrayNumericTensor::<DynRank>::from_vec_shape(vec![3i64, 2], &vec![2])
-                        .unwrap(),
+                    make_shared_i64(vec![2], &[3, 2]),
+                    None,
                     r,
                 );
                 ops::Reshape::push_new(g, ids[0], shape, false, r)
@@ -3043,9 +3047,10 @@ mod tests {
             |g, ids, r| {
                 let two = ops::Constant::new_scalar(g, 2.0f32, r);
                 let scaled = SimpleBinary::mul(g, ids[0], two, r);
-                let shape = ops::Constant::push_new(
+                let shape = ops::Constant::push_new_pool(
                     g,
-                    NDArrayNumericTensor::<DynRank>::from_vec_shape(vec![6i64], &vec![1]).unwrap(),
+                    make_shared_i64(vec![1], &[6]),
+                    None,
                     r,
                 );
                 ops::Reshape::push_new(g, scaled, shape, false, r)
@@ -3099,9 +3104,10 @@ mod tests {
         // f(x) = sum(squeeze(x, axes=[1])) where x is [2, 1, 3]
         check_general_backward(
             |g, ids, r| {
-                let axes = ops::Constant::push_new(
+                let axes = ops::Constant::push_new_pool(
                     g,
-                    NDArrayNumericTensor::<DynRank>::from_vec_shape(vec![1i64], &vec![1]).unwrap(),
+                    make_shared_i64(vec![1], &[1]),
+                    None,
                     r,
                 );
                 ops::Squeeze::push_new(g, ids[0], axes, r)
@@ -3118,9 +3124,10 @@ mod tests {
         // f(x) = sum(unsqueeze(x, axes=[1])) where x is [2, 3]
         check_general_backward(
             |g, ids, r| {
-                let axes = ops::Constant::push_new(
+                let axes = ops::Constant::push_new_pool(
                     g,
-                    NDArrayNumericTensor::<DynRank>::from_vec_shape(vec![1i64], &vec![1]).unwrap(),
+                    make_shared_i64(vec![1], &[1]),
+                    None,
                     r,
                 );
                 ops::Unsqueeze::push_new(g, ids[0], axes, r)
@@ -3140,9 +3147,10 @@ mod tests {
             |g, ids, r| {
                 let two = ops::Constant::new_scalar(g, 2.0f32, r);
                 let scaled = SimpleBinary::mul(g, ids[0], two, r);
-                let axes = ops::Constant::push_new(
+                let axes = ops::Constant::push_new_pool(
                     g,
-                    NDArrayNumericTensor::<DynRank>::from_vec_shape(vec![0i64], &vec![1]).unwrap(),
+                    make_shared_i64(vec![1], &[0]),
+                    None,
                     r,
                 );
                 let unsq = ops::Unsqueeze::push_new(g, scaled, axes, r);
@@ -3423,8 +3431,6 @@ mod tests {
         // f(data) = sum(gather(data, indices, axis=0))
         // Only rows selected by indices get gradient = 1
         let data: Vec<f32> = (1..=12).map(|x| x as f32 * 0.1).collect();
-        // indices are not differentiable, but check_general_backward requires all
-        // inputs to be f32. We'll use a custom test instead.
         let rng = &mut wyrand::WyRand::new(42);
         let mut graph = MilliOpGraph::new_empty(rng);
 
@@ -3432,9 +3438,12 @@ mod tests {
         let data_int = graph.add_input_with_id(data_ext, rng);
 
         // Create indices as a constant (not a differentiable input)
-        let idx_tensor =
-            NDArrayNumericTensor::<DynRank>::from_vec_shape(vec![1i64, 3], &vec![2u64]).unwrap();
-        let idx_id = ops::Constant::push_new(&mut graph, idx_tensor, rng);
+        let idx_id = ops::Constant::push_new_pool(
+            &mut graph,
+            make_shared_i64(vec![2], &[1, 3]),
+            None,
+            rng,
+        );
 
         let group = graph.create_group(MilliOpGroup {
             id: GlobalId::new(rng),
@@ -3451,10 +3460,12 @@ mod tests {
         graph.add_output(scalar, out_ext);
 
         // Shape of gathered output: [2, 3]
-        let ones_data =
-            NDArrayNumericTensor::<DynRank>::from_vec_shape(vec![1.0f32; 6], &vec![2u64, 3])
-                .unwrap();
-        let ones = ops::Constant::push_new(&mut graph, ones_data, rng);
+        let ones = ops::Constant::push_new_pool(
+            &mut graph,
+            make_shared_f32(vec![2, 3], &vec![1.0f32; 6]),
+            None,
+            rng,
+        );
         let mut grad_map = HashMap::new();
         grad_map.insert(gathered, ones);
         let grads = generate_milli_backward(&mut graph, group, &grad_map, rng);
@@ -3464,18 +3475,10 @@ mod tests {
         graph.add_output(grad_data_id, grad_ext);
 
         let mut inputs = HashMap::new();
-        inputs.insert(
-            data_ext,
-            NumericTensor::<DynRank>::from_vec_shape(data.clone(), vec![4, 3]).unwrap(),
-        );
+        inputs.insert(data_ext, make_f32(vec![4, 3], &data));
 
-        let mut backend = EvalBackend::NDArray;
-        let results: HashMap<_, _> = graph
-            .eval(&inputs, &mut (), &mut backend)
-            .unwrap()
-            .collect();
-
-        let grad: Vec<f32> = results[&grad_ext].flatten().unwrap().try_into().unwrap();
+        let results = pool_eval_graph(&graph, &inputs, &POOL);
+        let grad = read_f32_vec(&results[&grad_ext]);
         // Rows 1 and 3 were gathered, so they get gradient 1.0. Rows 0 and 2 get 0.
         assert_eq!(grad.len(), 12);
         // Row 0: [0, 0, 0]
@@ -3499,10 +3502,12 @@ mod tests {
         let data_int = graph.add_input_with_id(data_ext, rng);
 
         // indices = [0, 0, 1, 0] — row 0 gathered 3 times, row 1 once
-        let idx_tensor =
-            NDArrayNumericTensor::<DynRank>::from_vec_shape(vec![0i64, 0, 1, 0], &vec![4u64])
-                .unwrap();
-        let idx_id = ops::Constant::push_new(&mut graph, idx_tensor, rng);
+        let idx_id = ops::Constant::push_new_pool(
+            &mut graph,
+            make_shared_i64(vec![4], &[0, 0, 1, 0]),
+            None,
+            rng,
+        );
 
         let group = graph.create_group(MilliOpGroup {
             id: GlobalId::new(rng),
@@ -3519,10 +3524,12 @@ mod tests {
         graph.add_output(scalar, out_ext);
 
         // gathered shape: [4, 3]
-        let ones_data =
-            NDArrayNumericTensor::<DynRank>::from_vec_shape(vec![1.0f32; 12], &vec![4u64, 3])
-                .unwrap();
-        let ones = ops::Constant::push_new(&mut graph, ones_data, rng);
+        let ones = ops::Constant::push_new_pool(
+            &mut graph,
+            make_shared_f32(vec![4, 3], &vec![1.0f32; 12]),
+            None,
+            rng,
+        );
         let mut grad_map = HashMap::new();
         grad_map.insert(gathered, ones);
         let grads = generate_milli_backward(&mut graph, group, &grad_map, rng);
@@ -3532,18 +3539,10 @@ mod tests {
         graph.add_output(grad_data_id, grad_ext);
 
         let mut inputs = HashMap::new();
-        inputs.insert(
-            data_ext,
-            NumericTensor::<DynRank>::from_vec_shape(data, vec![2, 3]).unwrap(),
-        );
+        inputs.insert(data_ext, make_f32(vec![2, 3], &data));
 
-        let mut backend = EvalBackend::NDArray;
-        let results: HashMap<_, _> = graph
-            .eval(&inputs, &mut (), &mut backend)
-            .unwrap()
-            .collect();
-
-        let grad: Vec<f32> = results[&grad_ext].flatten().unwrap().try_into().unwrap();
+        let results = pool_eval_graph(&graph, &inputs, &POOL);
+        let grad = read_f32_vec(&results[&grad_ext]);
         // Row 0 gathered 3 times → gradient 3.0 per element
         // Row 1 gathered 1 time → gradient 1.0 per element
         assert_eq!(&grad[0..3], &[3.0, 3.0, 3.0]);
@@ -3577,9 +3576,10 @@ mod tests {
 
         // Seed gradient on the forward output (scaled), not on loss.
         // Expand scalar 1.0 to match scaled's shape dynamically.
-        let ones_scalar = ops::Constant::push_new(
+        let ones_scalar = ops::Constant::push_new_pool(
             &mut graph,
-            NDArrayNumericTensor::<DynRank>::from_vec_shape(vec![1.0f32], &vec![1]).unwrap(),
+            make_shared_f32(vec![1], &[1.0]),
+            None,
             rng,
         );
         let scaled_shape = ops::Shape::push_new(&mut graph, scaled, rng);
@@ -3622,22 +3622,11 @@ mod tests {
         graph.add_output(new_param_id, new_param_ext);
 
         // Evaluate
-        let param_val =
-            NumericTensor::<DynRank>::from_vec_shape(vec![1.0f32, 2.0, 3.0, 4.0], vec![4]).unwrap();
         let mut inputs = HashMap::new();
-        inputs.insert(param_ext, param_val);
+        inputs.insert(param_ext, make_f32(vec![4], &[1.0, 2.0, 3.0, 4.0]));
 
-        let mut backend = EvalBackend::NDArray;
-        let results: HashMap<_, _> = graph
-            .eval(&inputs, &mut (), &mut backend)
-            .unwrap()
-            .collect();
-
-        let new_param: Vec<f32> = results[&new_param_ext]
-            .flatten()
-            .unwrap()
-            .try_into()
-            .unwrap();
+        let results = pool_eval_graph(&graph, &inputs, &POOL);
+        let new_param = read_f32_vec(&results[&new_param_ext]);
         // new_param = [1, 2, 3, 4] - 0.1 * 2 = [0.8, 1.8, 2.8, 3.8]
         for (i, &v) in new_param.iter().enumerate() {
             let expected = (i + 1) as f32 - 0.2;
@@ -3693,40 +3682,19 @@ mod tests {
         graph.add_output(t_out_id, t_out_ext);
 
         // Inputs: param, m, v, t
-        let param_val =
-            NumericTensor::<DynRank>::from_vec_shape(vec![1.0f32, 2.0, 3.0, 4.0], vec![4]).unwrap();
         let m_in_id = training_meta.optimizer_state_inputs[&(param, "m".into())];
         let v_in_id = training_meta.optimizer_state_inputs[&(param, "v".into())];
         let t_in_id = training_meta.global_state_inputs["timestep"];
-        let zeros = NumericTensor::<DynRank>::from_vec_shape(vec![0.0f32; 4], vec![4]).unwrap();
-        let t_zero = NumericTensor::<DynRank>::from_vec_shape(vec![0i64], vec![1]).unwrap();
 
         let mut inputs = HashMap::new();
-        inputs.insert(param_ext, param_val);
-        inputs.insert(m_in_id, zeros.clone());
-        inputs.insert(v_in_id, zeros);
-        inputs.insert(t_in_id, t_zero);
+        inputs.insert(param_ext, make_f32(vec![4], &[1.0, 2.0, 3.0, 4.0]));
+        inputs.insert(m_in_id, make_f32(vec![4], &[0.0; 4]));
+        inputs.insert(v_in_id, make_f32(vec![4], &[0.0; 4]));
+        inputs.insert(t_in_id, make_i64(vec![1], &[0]));
 
-        let mut backend = EvalBackend::NDArray;
-        let results: HashMap<_, _> = graph
-            .eval(&inputs, &mut (), &mut backend)
-            .unwrap()
-            .collect();
+        let results = pool_eval_graph(&graph, &inputs, &POOL);
 
-        // Verify manually: grad = 2 for all elements
-        // t_new = 1
-        // m_new = 0.9*0 + 0.1*2 = 0.2
-        // v_new = 0.999*0 + 0.001*4 = 0.004
-        // m_hat = 0.2 / (1 - 0.9^1) = 0.2 / 0.1 = 2.0
-        // v_hat = 0.004 / (1 - 0.999^1) = 0.004 / 0.001 = 4.0
-        // step = lr * m_hat / (sqrt(v_hat) + eps) = 0.001 * 2.0 / (2.0 + 1e-8) ≈ 0.001
-        // new_param = param - step ≈ param - 0.001
-
-        let new_param: Vec<f32> = results[&new_param_ext]
-            .flatten()
-            .unwrap()
-            .try_into()
-            .unwrap();
+        let new_param = read_f32_vec(&results[&new_param_ext]);
         let expected_step = lr * 2.0 / (4.0f32.sqrt() + epsilon);
         for (i, &v) in new_param.iter().enumerate() {
             let expected = (i + 1) as f32 - expected_step;
@@ -3740,8 +3708,8 @@ mod tests {
         }
 
         // Verify m and v outputs
-        let m_out: Vec<f32> = results[&m_out_ext].flatten().unwrap().try_into().unwrap();
-        let v_out: Vec<f32> = results[&v_out_ext].flatten().unwrap().try_into().unwrap();
+        let m_out = read_f32_vec(&results[&m_out_ext]);
+        let v_out = read_f32_vec(&results[&v_out_ext]);
         for &m in &m_out {
             assert!((m - 0.2).abs() < 1e-5, "m: got {}, expected 0.2", m);
         }
@@ -3777,29 +3745,18 @@ mod tests {
         let new_param_ext = GlobalId::new(rng);
         graph.add_output(new_param_id, new_param_ext);
 
-        let param_val =
-            NumericTensor::<DynRank>::from_vec_shape(vec![1.0f32, 2.0, 3.0, 4.0], vec![4]).unwrap();
         let v_in_id = training_meta.optimizer_state_inputs[&(param, "velocity".into())];
-        let v_zeros = NumericTensor::<DynRank>::from_vec_shape(vec![0.0f32; 4], vec![4]).unwrap();
 
         let mut inputs = HashMap::new();
-        inputs.insert(param_ext, param_val);
-        inputs.insert(v_in_id, v_zeros);
+        inputs.insert(param_ext, make_f32(vec![4], &[1.0, 2.0, 3.0, 4.0]));
+        inputs.insert(v_in_id, make_f32(vec![4], &[0.0; 4]));
 
-        let mut backend = EvalBackend::NDArray;
-        let results: HashMap<_, _> = graph
-            .eval(&inputs, &mut (), &mut backend)
-            .unwrap()
-            .collect();
+        let results = pool_eval_graph(&graph, &inputs, &POOL);
 
         // grad = 2, v_old = 0
         // v_new = 0.9 * 0 + 2 = 2
         // new_param = param - 0.1 * 2 = param - 0.2
-        let new_param: Vec<f32> = results[&new_param_ext]
-            .flatten()
-            .unwrap()
-            .try_into()
-            .unwrap();
+        let new_param = read_f32_vec(&results[&new_param_ext]);
         for (i, &v) in new_param.iter().enumerate() {
             let expected = (i + 1) as f32 - 0.2;
             assert!(
@@ -3839,30 +3796,19 @@ mod tests {
         let new_param_ext = GlobalId::new(rng);
         graph.add_output(new_param_id, new_param_ext);
 
-        let param_val =
-            NumericTensor::<DynRank>::from_vec_shape(vec![1.0f32, 2.0, 3.0, 4.0], vec![4]).unwrap();
         let v_in_id = training_meta.optimizer_state_inputs[&(param, "velocity".into())];
-        let v_zeros = NumericTensor::<DynRank>::from_vec_shape(vec![0.0f32; 4], vec![4]).unwrap();
 
         let mut inputs = HashMap::new();
-        inputs.insert(param_ext, param_val);
-        inputs.insert(v_in_id, v_zeros);
+        inputs.insert(param_ext, make_f32(vec![4], &[1.0, 2.0, 3.0, 4.0]));
+        inputs.insert(v_in_id, make_f32(vec![4], &[0.0; 4]));
 
-        let mut backend = EvalBackend::NDArray;
-        let results: HashMap<_, _> = graph
-            .eval(&inputs, &mut (), &mut backend)
-            .unwrap()
-            .collect();
+        let results = pool_eval_graph(&graph, &inputs, &POOL);
 
         // grad = 2, v_old = 0
         // v_new = 0.9 * 0 + 2 = 2
         // nesterov update = momentum * v_new + grad = 0.9 * 2 + 2 = 3.8
         // new_param = param - 0.1 * 3.8 = param - 0.38
-        let new_param: Vec<f32> = results[&new_param_ext]
-            .flatten()
-            .unwrap()
-            .try_into()
-            .unwrap();
+        let new_param = read_f32_vec(&results[&new_param_ext]);
         for (i, &v) in new_param.iter().enumerate() {
             let expected = (i + 1) as f32 - 0.38;
             assert!(
@@ -3908,25 +3854,17 @@ mod tests {
         graph.add_output(new_param_id, new_param_ext);
 
         let param_vals = vec![1.0f32, 2.0, 3.0, 4.0];
-        let param_val =
-            NumericTensor::<DynRank>::from_vec_shape(param_vals.clone(), vec![4]).unwrap();
         let m_in_id = training_meta.optimizer_state_inputs[&(param, "m".into())];
         let v_in_id = training_meta.optimizer_state_inputs[&(param, "v".into())];
         let t_in_id = training_meta.global_state_inputs["timestep"];
-        let zeros = NumericTensor::<DynRank>::from_vec_shape(vec![0.0f32; 4], vec![4]).unwrap();
-        let t_zero = NumericTensor::<DynRank>::from_vec_shape(vec![0i64], vec![1]).unwrap();
 
         let mut inputs = HashMap::new();
-        inputs.insert(param_ext, param_val);
-        inputs.insert(m_in_id, zeros.clone());
-        inputs.insert(v_in_id, zeros);
-        inputs.insert(t_in_id, t_zero);
+        inputs.insert(param_ext, make_f32(vec![4], &param_vals));
+        inputs.insert(m_in_id, make_f32(vec![4], &[0.0; 4]));
+        inputs.insert(v_in_id, make_f32(vec![4], &[0.0; 4]));
+        inputs.insert(t_in_id, make_i64(vec![1], &[0]));
 
-        let mut backend = EvalBackend::NDArray;
-        let results: HashMap<_, _> = graph
-            .eval(&inputs, &mut (), &mut backend)
-            .unwrap()
-            .collect();
+        let results = pool_eval_graph(&graph, &inputs, &POOL);
 
         // grad = 2 (unmodified for AdamW, no L2 on grad)
         // m_new = 0.1 * 2 = 0.2, v_new = 0.001 * 4 = 0.004
@@ -3935,11 +3873,7 @@ mod tests {
         // decay_step = lr * weight_decay * param
         // new_param = param - adam_step - decay_step
         let adam_step = lr * 2.0 / (4.0f32.sqrt() + epsilon);
-        let new_param: Vec<f32> = results[&new_param_ext]
-            .flatten()
-            .unwrap()
-            .try_into()
-            .unwrap();
+        let new_param = read_f32_vec(&results[&new_param_ext]);
         for (i, &v) in new_param.iter().enumerate() {
             let p = param_vals[i];
             let decay_step = lr * weight_decay * p;
@@ -4007,28 +3941,12 @@ mod tests {
 
         for step in 0..2 {
             let mut inputs = HashMap::new();
-            inputs.insert(
-                param_ext,
-                NumericTensor::<DynRank>::from_vec_shape(p.clone(), vec![4]).unwrap(),
-            );
-            inputs.insert(
-                m_in_id,
-                NumericTensor::<DynRank>::from_vec_shape(vec![m; 4], vec![4]).unwrap(),
-            );
-            inputs.insert(
-                v_in_id,
-                NumericTensor::<DynRank>::from_vec_shape(vec![v; 4], vec![4]).unwrap(),
-            );
-            inputs.insert(
-                t_in_id,
-                NumericTensor::<DynRank>::from_vec_shape(vec![t], vec![1]).unwrap(),
-            );
+            inputs.insert(param_ext, make_f32(vec![4], &p));
+            inputs.insert(m_in_id, make_f32(vec![4], &vec![m; 4]));
+            inputs.insert(v_in_id, make_f32(vec![4], &vec![v; 4]));
+            inputs.insert(t_in_id, make_i64(vec![1], &[t]));
 
-            let mut backend = EvalBackend::NDArray;
-            let results: HashMap<_, _> = graph
-                .eval(&inputs, &mut (), &mut backend)
-                .unwrap()
-                .collect();
+            let results = pool_eval_graph(&graph, &inputs, &POOL);
 
             // Compute expected values
             t += 1;
@@ -4041,11 +3959,7 @@ mod tests {
                 *x -= adam_step;
             }
 
-            let actual_param: Vec<f32> = results[&new_param_ext]
-                .flatten()
-                .unwrap()
-                .try_into()
-                .unwrap();
+            let actual_param = read_f32_vec(&results[&new_param_ext]);
             for (i, &actual) in actual_param.iter().enumerate() {
                 assert!(
                     (actual - p[i]).abs() < 1e-4,
@@ -4058,8 +3972,8 @@ mod tests {
             }
 
             // Carry state forward
-            let m_out: Vec<f32> = results[&m_out_ext].flatten().unwrap().try_into().unwrap();
-            let v_out: Vec<f32> = results[&v_out_ext].flatten().unwrap().try_into().unwrap();
+            let m_out = read_f32_vec(&results[&m_out_ext]);
+            let v_out = read_f32_vec(&results[&v_out_ext]);
             assert!(
                 (m_out[0] - m).abs() < 1e-5,
                 "step {} m: got {}, expected {}",
@@ -4130,9 +4044,10 @@ mod tests {
         graph.set_default_group(None);
 
         // Backward: seed with ones on loss, backward through loss group then forward group
-        let ones = ops::Constant::push_new(
+        let ones = ops::Constant::push_new_pool(
             &mut graph,
-            NDArrayNumericTensor::<DynRank>::from_vec_shape(vec![1.0f32], &vec![1]).unwrap(),
+            make_shared_f32(vec![1], &[1.0]),
+            None,
             rng,
         );
         let mut grad_map = HashMap::new();
@@ -4199,30 +4114,14 @@ mod tests {
 
         for _step in 0..500 {
             let mut inputs = HashMap::new();
-            inputs.insert(
-                x_ext,
-                NumericTensor::<DynRank>::from_vec_shape(x_data.clone(), vec![4, 2]).unwrap(),
-            );
-            inputs.insert(
-                w_ext,
-                NumericTensor::<DynRank>::from_vec_shape(w_vals.clone(), vec![2, 1]).unwrap(),
-            );
-            inputs.insert(
-                targets_ext,
-                NumericTensor::<DynRank>::from_vec_shape(targets_data.clone(), vec![4, 1]).unwrap(),
-            );
+            inputs.insert(x_ext, make_f32(vec![4, 2], &x_data));
+            inputs.insert(w_ext, make_f32(vec![2, 1], &w_vals));
+            inputs.insert(targets_ext, make_f32(vec![4, 1], &targets_data));
 
-            let mut backend = EvalBackend::NDArray;
-            let results: HashMap<_, _> = graph
-                .eval(&inputs, &mut (), &mut backend)
-                .unwrap()
-                .collect();
+            let results = pool_eval_graph(&graph, &inputs, &POOL);
 
-            let loss_val: Vec<f32> = results[&loss_ext].flatten().unwrap().try_into().unwrap();
-            losses.push(loss_val[0]);
-
-            let new_w: Vec<f32> = results[&new_w_ext].flatten().unwrap().try_into().unwrap();
-            w_vals = new_w;
+            losses.push(read_f32_vec(&results[&loss_ext])[0]);
+            w_vals = read_f32_vec(&results[&new_w_ext]);
         }
 
         // Loss should decrease significantly
@@ -4279,9 +4178,10 @@ mod tests {
         let loss = ops::ReduceMean::push_new(&mut graph, diff_sq, None, false, false, rng);
         graph.set_default_group(None);
 
-        let ones = ops::Constant::push_new(
+        let ones = ops::Constant::push_new_pool(
             &mut graph,
-            NDArrayNumericTensor::<DynRank>::from_vec_shape(vec![1.0f32], &vec![1]).unwrap(),
+            make_shared_f32(vec![1], &[1.0]),
+            None,
             rng,
         );
         let mut grad_map = HashMap::new();
@@ -4342,45 +4242,20 @@ mod tests {
 
         for _step in 0..100 {
             let mut inputs = HashMap::new();
-            inputs.insert(
-                x_ext,
-                NumericTensor::<DynRank>::from_vec_shape(x_data.clone(), vec![4, 2]).unwrap(),
-            );
-            inputs.insert(
-                w_ext,
-                NumericTensor::<DynRank>::from_vec_shape(w_vals.clone(), vec![2, 1]).unwrap(),
-            );
-            inputs.insert(
-                targets_ext,
-                NumericTensor::<DynRank>::from_vec_shape(targets_data.clone(), vec![4, 1]).unwrap(),
-            );
-            inputs.insert(
-                m_in_id,
-                NumericTensor::<DynRank>::from_vec_shape(m_vals.clone(), vec![2, 1]).unwrap(),
-            );
-            inputs.insert(
-                v_in_id,
-                NumericTensor::<DynRank>::from_vec_shape(v_vals.clone(), vec![2, 1]).unwrap(),
-            );
-            inputs.insert(
-                t_in_id,
-                NumericTensor::<DynRank>::from_vec_shape(vec![t_val], vec![1]).unwrap(),
-            );
+            inputs.insert(x_ext, make_f32(vec![4, 2], &x_data));
+            inputs.insert(w_ext, make_f32(vec![2, 1], &w_vals));
+            inputs.insert(targets_ext, make_f32(vec![4, 1], &targets_data));
+            inputs.insert(m_in_id, make_f32(vec![2, 1], &m_vals));
+            inputs.insert(v_in_id, make_f32(vec![2, 1], &v_vals));
+            inputs.insert(t_in_id, make_i64(vec![1], &[t_val]));
 
-            let mut backend = EvalBackend::NDArray;
-            let results: HashMap<_, _> = graph
-                .eval(&inputs, &mut (), &mut backend)
-                .unwrap()
-                .collect();
+            let results = pool_eval_graph(&graph, &inputs, &POOL);
 
-            let loss_val: Vec<f32> = results[&loss_ext].flatten().unwrap().try_into().unwrap();
-            losses.push(loss_val[0]);
-
-            w_vals = results[&new_w_ext].flatten().unwrap().try_into().unwrap();
-            m_vals = results[&m_out_ext].flatten().unwrap().try_into().unwrap();
-            v_vals = results[&v_out_ext].flatten().unwrap().try_into().unwrap();
-            let t_out_val: Vec<i64> = results[&t_out_ext].flatten().unwrap().try_into().unwrap();
-            t_val = t_out_val[0];
+            losses.push(read_f32_vec(&results[&loss_ext])[0]);
+            w_vals = read_f32_vec(&results[&new_w_ext]);
+            m_vals = read_f32_vec(&results[&m_out_ext]);
+            v_vals = read_f32_vec(&results[&v_out_ext]);
+            t_val = read_i64_vec(&results[&t_out_ext])[0];
         }
 
         // Adam with lr=0.1 should converge quickly
@@ -4443,9 +4318,10 @@ mod tests {
         graph.set_default_group(None);
 
         // Backward
-        let ones = ops::Constant::push_new(
+        let ones = ops::Constant::push_new_pool(
             &mut graph,
-            NDArrayNumericTensor::<DynRank>::from_vec_shape(vec![1.0f32], &vec![1]).unwrap(),
+            make_shared_f32(vec![1], &[1.0]),
+            None,
             rng,
         );
         let mut grad_map = HashMap::new();
@@ -4535,61 +4411,28 @@ mod tests {
 
         for _step in 0..1000 {
             let mut inputs = HashMap::new();
-            inputs.insert(
-                x_ext,
-                NumericTensor::<DynRank>::from_vec_shape(x_data.clone(), vec![4, 2]).unwrap(),
-            );
-            inputs.insert(
-                w1_ext,
-                NumericTensor::<DynRank>::from_vec_shape(w1_vals.clone(), vec![2, 8]).unwrap(),
-            );
-            inputs.insert(
-                w2_ext,
-                NumericTensor::<DynRank>::from_vec_shape(w2_vals.clone(), vec![8, 1]).unwrap(),
-            );
-            inputs.insert(
-                targets_ext,
-                NumericTensor::<DynRank>::from_vec_shape(targets_data.clone(), vec![4, 1]).unwrap(),
-            );
-            inputs.insert(
-                m1_in,
-                NumericTensor::<DynRank>::from_vec_shape(m1_vals.clone(), vec![2, 8]).unwrap(),
-            );
-            inputs.insert(
-                v1_in,
-                NumericTensor::<DynRank>::from_vec_shape(v1_vals.clone(), vec![2, 8]).unwrap(),
-            );
-            inputs.insert(
-                m2_in,
-                NumericTensor::<DynRank>::from_vec_shape(m2_vals.clone(), vec![8, 1]).unwrap(),
-            );
-            inputs.insert(
-                v2_in,
-                NumericTensor::<DynRank>::from_vec_shape(v2_vals.clone(), vec![8, 1]).unwrap(),
-            );
-            inputs.insert(
-                t_in,
-                NumericTensor::<DynRank>::from_vec_shape(vec![t_val], vec![1]).unwrap(),
-            );
+            inputs.insert(x_ext, make_f32(vec![4, 2], &x_data));
+            inputs.insert(w1_ext, make_f32(vec![2, 8], &w1_vals));
+            inputs.insert(w2_ext, make_f32(vec![8, 1], &w2_vals));
+            inputs.insert(targets_ext, make_f32(vec![4, 1], &targets_data));
+            inputs.insert(m1_in, make_f32(vec![2, 8], &m1_vals));
+            inputs.insert(v1_in, make_f32(vec![2, 8], &v1_vals));
+            inputs.insert(m2_in, make_f32(vec![8, 1], &m2_vals));
+            inputs.insert(v2_in, make_f32(vec![8, 1], &v2_vals));
+            inputs.insert(t_in, make_i64(vec![1], &[t_val]));
 
-            let mut backend = EvalBackend::NDArray;
-            let results: HashMap<_, _> = graph
-                .eval(&inputs, &mut (), &mut backend)
-                .unwrap()
-                .collect();
+            let results = pool_eval_graph(&graph, &inputs, &POOL);
 
-            let loss_val: Vec<f32> = results[&loss_ext].flatten().unwrap().try_into().unwrap();
-            losses.push(loss_val[0]);
+            losses.push(read_f32_vec(&results[&loss_ext])[0]);
 
             // Update state
-            w1_vals = results[&new_w1_ext].flatten().unwrap().try_into().unwrap();
-            w2_vals = results[&new_w2_ext].flatten().unwrap().try_into().unwrap();
-            m1_vals = results[&m1_out_ext].flatten().unwrap().try_into().unwrap();
-            v1_vals = results[&v1_out_ext].flatten().unwrap().try_into().unwrap();
-            m2_vals = results[&m2_out_ext].flatten().unwrap().try_into().unwrap();
-            v2_vals = results[&v2_out_ext].flatten().unwrap().try_into().unwrap();
-            let t_out_val: Vec<i64> = results[&t_out_ext].flatten().unwrap().try_into().unwrap();
-            t_val = t_out_val[0];
+            w1_vals = read_f32_vec(&results[&new_w1_ext]);
+            w2_vals = read_f32_vec(&results[&new_w2_ext]);
+            m1_vals = read_f32_vec(&results[&m1_out_ext]);
+            v1_vals = read_f32_vec(&results[&v1_out_ext]);
+            m2_vals = read_f32_vec(&results[&m2_out_ext]);
+            v2_vals = read_f32_vec(&results[&v2_out_ext]);
+            t_val = read_i64_vec(&results[&t_out_ext])[0];
         }
 
         // MLP should learn XOR — loss should be very small
@@ -4625,9 +4468,10 @@ mod tests {
 
         let (mut graph, input_map) = MilliOpGraph::new([ext_x], rng);
         let x = input_map[&ext_x];
-        let c = Constant::push_new(
+        let c = Constant::push_new_pool(
             &mut graph,
-            NDArrayNumericTensor::<DynRank>::from_vec_shape(vec![10.0f32], &vec![1]).unwrap(),
+            make_shared_f32(vec![1], &[10.0]),
+            None,
             rng,
         );
         let out = SimpleBinary::add(&mut graph, x, c, rng);
@@ -4636,21 +4480,21 @@ mod tests {
         graph.set_output_map(output_map);
 
         // Provide a concrete tensor as TensorInfo for input x.
-        let x_tensor = NumericTensor::<DynRank>::from_vec_shape(vec![3.0f32], vec![1]).unwrap();
+        let x_tensor = make_f32(vec![1], &[3.0]);
         let mut inputs = HashMap::new();
-        inputs.insert(ext_x, TensorInfo::from_legacy(&x_tensor, &crate::pool::SystemPool));
+        inputs.insert(ext_x, TensorInfo::from_view(&x_tensor.view(), &POOL));
 
-        let result = graph.infer_all(&inputs, &crate::pool::SystemPool).unwrap();
+        let result = graph.infer_all(&inputs, &POOL).unwrap();
 
         // The output tensor should be inferred as Numeric (concrete).
         let out_info = &result[&out];
         assert!(
-            out_info.as_numeric().is_some(),
+            out_info.as_concrete().is_some(),
             "Expected concrete output, got {:?}",
             out_info
         );
-        let out_tensor = out_info.as_numeric().unwrap();
-        let values: Vec<f32> = out_tensor.flatten().unwrap().try_into().unwrap();
+        let out_tensor = out_info.as_concrete().unwrap();
+        let values = read_f32_vec(out_tensor);
         assert_eq!(values, vec![13.0f32]);
     }
 
@@ -4681,7 +4525,7 @@ mod tests {
                 ext_id,
                 TensorInfo::Minimal(MinimalTensor::new(
                     ScalarInfo::Symbolic(SymbolicScalar::new(
-                        crate::numeric_dtype::NumericDType::from_legacy(crate::dtype::DType::F32).unwrap(),
+                        NumericDType::F32,
                         &mut resolver,
                     )),
                     SymbolicScalarTyped::new(&mut resolver),
@@ -4693,7 +4537,7 @@ mod tests {
 
         // Output should exist and have F32 dtype.
         let neg_info = &result[&neg];
-        assert_eq!(neg_info.dtype(), crate::numeric_dtype::NumericDType::from_legacy(crate::dtype::DType::F32).unwrap());
+        assert_eq!(neg_info.dtype(), NumericDType::F32);
 
         // It won't be concrete (no numeric values), so as_numeric should be None.
         assert!(neg_info.as_numeric().is_none());
@@ -4713,17 +4557,16 @@ mod tests {
         let shape_out = crate::milli_graph::ops::Shape::push_new(&mut graph, x, rng);
 
         // Provide a concrete 2x3 tensor.
-        let x_tensor =
-            NumericTensor::<DynRank>::from_vec_shape(vec![1.0f32; 6], vec![2, 3]).unwrap();
+        let x_tensor = make_f32(vec![2, 3], &[1.0f32; 6]);
         let mut inputs = HashMap::new();
-        inputs.insert(ext_x, TensorInfo::from_legacy(&x_tensor, &crate::pool::SystemPool));
+        inputs.insert(ext_x, TensorInfo::from_view(&x_tensor.view(), &POOL));
 
-        let result = graph.infer_all(&inputs, &crate::pool::SystemPool).unwrap();
+        let result = graph.infer_all(&inputs, &POOL).unwrap();
 
         let shape_info = &result[&shape_out];
-        assert!(shape_info.as_numeric().is_some());
-        let shape_tensor = shape_info.as_numeric().unwrap();
-        let values: Vec<i64> = shape_tensor.flatten().unwrap().try_into().unwrap();
+        assert!(shape_info.as_concrete().is_some());
+        let shape_tensor = shape_info.as_concrete().unwrap();
+        let values = read_i64_vec(shape_tensor);
         assert_eq!(values, vec![2, 3]);
     }
 
@@ -4764,7 +4607,7 @@ mod tests {
     }
 
     #[test]
-    fn test_eval_rejects_invalid_structure_without_panicking() {
+    fn test_pool_eval_rejects_invalid_structure_without_panicking() {
         let rng = &mut rand::rng();
         let ext_input = GlobalId::new(rng);
         let (mut graph, _) = MilliOpGraph::new([ext_input], rng);
@@ -4773,9 +4616,10 @@ mod tests {
         graph.output_map = Some(HashMap::from([(missing_internal, ext_input)]));
         graph.output_ordering = Some(vec![ext_input]);
 
-        let mut backend = EvalBackend::NDArray;
-        let result = graph.eval(&HashMap::new(), &mut (), &mut backend);
-        assert!(matches!(result, Err(MilliOpGraphError::InvalidGraph(_))));
+        let view_refs: HashMap<GlobalId, &crate::numeric_tensor::NumericTensorView<'_, DynRank>> =
+            HashMap::new();
+        let result = graph.pool_eval(&view_refs, &POOL);
+        assert!(result.is_err(), "Expected error for invalid graph structure");
     }
 
     #[test]
