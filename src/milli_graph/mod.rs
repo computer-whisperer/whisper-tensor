@@ -1198,14 +1198,46 @@ impl MilliOpGraph {
             let numel = tam.count as usize;
             let dtype = tam.dtype;
 
-            // Get the full output shape from inference. If all dims are concrete,
-            // use them. Otherwise fall back to tensor_map's known_dims.
+            // Get the full output shape from inference.
+            // Prefer inferred shape (preserves rank). If some dims are symbolic,
+            // try to resolve the single unknown dim from numel / known_product.
+            // Fall back to tensor_map's known_dims if resolution fails.
             let shape: Vec<u64> = if let Some(info) = all_infos.get(&internal_id) {
                 if let Some(ranked) = info.as_ranked() {
-                    let inferred: Option<Vec<u64>> = ranked.shape().iter().map(|s| {
+                    let inferred_shape = ranked.shape();
+                    // Try all-numeric first.
+                    let all_numeric: Option<Vec<u64>> = inferred_shape.iter().map(|s| {
                         if let crate::scalar_info::ScalarInfoTyped::Numeric(v) = s { Some(*v) } else { None }
                     }).collect();
-                    inferred.unwrap_or_else(|| tam.known_dims.clone())
+                    if let Some(shape) = all_numeric {
+                        shape
+                    } else {
+                        // Some dims symbolic. Try single-unknown resolution.
+                        let known_product: u64 = inferred_shape.iter().filter_map(|s| {
+                            if let crate::scalar_info::ScalarInfoTyped::Numeric(v) = s { Some(*v) } else { None }
+                        }).product::<u64>().max(1);
+                        let sym_count = inferred_shape.iter().filter(|s| {
+                            !matches!(s, crate::scalar_info::ScalarInfoTyped::Numeric(_))
+                        }).count();
+                        if sym_count > 0 && known_product > 0 && numel as u64 % known_product == 0 {
+                            let sym_total = numel as u64 / known_product;
+                            if sym_count == 1 {
+                                // Single unknown dim: resolve directly.
+                                inferred_shape.iter().map(|s| {
+                                    if let crate::scalar_info::ScalarInfoTyped::Numeric(v) = s { *v } else { sym_total }
+                                }).collect()
+                            } else if sym_total == 1 {
+                                // All unknown dims must be 1.
+                                inferred_shape.iter().map(|s| {
+                                    if let crate::scalar_info::ScalarInfoTyped::Numeric(v) = s { *v } else { 1 }
+                                }).collect()
+                            } else {
+                                tam.known_dims.clone()
+                            }
+                        } else {
+                            tam.known_dims.clone()
+                        }
+                    }
                 } else {
                     tam.known_dims.clone()
                 }

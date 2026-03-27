@@ -209,7 +209,34 @@ impl Split {
             let offset: i64 = vals[..output_id_idx].iter().sum();
             return offset as u64;
         }
-        // Fallback: assume equal splits.
+        // For num_outputs splits: compute uneven sizes per ONNX spec.
+        // The first (dim % n) chunks get ceil(dim/n), the rest get floor(dim/n).
+        if let Some(n) = self.num_outputs {
+            let in_id = Node::inputs(self).next().unwrap();
+            let axis = if self.axis < 0 {
+                let rank = ctx.tensor_map.get(&in_id).map(|m| m.layout.len()).unwrap_or(1);
+                (self.axis + rank as i64) as usize
+            } else {
+                self.axis as usize
+            };
+            if let Some(in_info) = all_infos.get(&in_id)
+                && let Some(ranked) = in_info.as_ranked()
+            {
+                let shape = ranked.shape();
+                if axis < shape.len() {
+                    if let crate::scalar_info::ScalarInfoTyped::Numeric(dim) = &shape[axis] {
+                        let base = *dim / n as u64;
+                        let extra = *dim % n as u64;
+                        let mut offset = 0u64;
+                        for i in 0..output_id_idx {
+                            offset += base + if (i as u64) < extra { 1 } else { 0 };
+                        }
+                        return offset;
+                    }
+                }
+            }
+        }
+        // Last resort: assume equal splits.
         output_id_idx as u64 * out_split_size
     }
 
