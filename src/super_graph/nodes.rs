@@ -531,23 +531,22 @@ impl SuperGraphNode for SuperGraphNodeModelExecution {
 
         let symbolic_graph = context.symbolic_graphs[self.symbolic_graph_id];
 
-        // Bridge SharedPoolTensor inputs to legacy for model execution.
-        let legacy_inputs: HashMap<String, NumericTensor<DynRank>> = inputs
-            .into_iter()
-            .map(|(k, v)| (k, v.to_legacy()))
-            .collect();
-
-        let global_id = node_path
-            .iter()
-            .chain(core::iter::once(&self.global_id))
-            .cloned()
-            .collect::<Vec<_>>();
-        let mut observer =
-            SymbolicGraphObserverWrapper::new(context.observer, global_id.as_slice());
-        let mut backend = EvalBackend::NDArray;
         if context.use_compiled_models
             && let Some(compiled_models) = &context.compiled_models
         {
+            // Compiled path: still uses legacy eval via CompiledProgram.
+            let legacy_inputs: HashMap<String, NumericTensor<DynRank>> = inputs
+                .into_iter()
+                .map(|(k, v)| (k, v.to_legacy()))
+                .collect();
+            let global_id = node_path
+                .iter()
+                .chain(core::iter::once(&self.global_id))
+                .cloned()
+                .collect::<Vec<_>>();
+            let mut observer =
+                SymbolicGraphObserverWrapper::new(context.observer, global_id.as_slice());
+            let mut backend = EvalBackend::NDArray;
             let compiled_model = &compiled_models
                 .iter()
                 .find(|(x, _y)| core::ptr::addr_eq(*x, symbolic_graph))
@@ -567,18 +566,43 @@ impl SuperGraphNode for SuperGraphNodeModelExecution {
                     .insert(link, SharedPoolTensor::from_legacy(outputs.get(name).unwrap()));
             }
         } else {
-            let outputs = eval_backend::run(
-                symbolic_graph,
-                tensor_store,
-                tensor_cache,
-                &mut backend,
-                &mut observer,
-                legacy_inputs,
-            )?;
-            for (name, link) in &self.tensor_outputs {
-                let link = require_node_link(*link, "ModelExecution", "tensor_outputs")?;
-                data.tensors
-                    .insert(link, SharedPoolTensor::from_legacy(outputs.get(name).unwrap()));
+            // Pool eval path: no legacy types.
+            use crate::pool::{Pool, SystemPool};
+            static POOL: SystemPool = SystemPool;
+            let tensors_by_name = symbolic_graph.get_tensors_by_name();
+            let input_views: Vec<_> = inputs
+                .iter()
+                .filter_map(|(name, shared)| {
+                    let &tensor_id = tensors_by_name.get(name)?;
+                    Some((tensor_id, shared.clone()))
+                })
+                .collect();
+            let views: Vec<_> = input_views
+                .iter()
+                .map(|(id, shared)| (*id, shared.0.view()))
+                .collect();
+            let view_map: HashMap<GlobalId, &crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>> =
+                views.iter().map(|(id, view)| (*id, view)).collect();
+
+            let mut rng = rand::rng();
+            let results = symbolic_graph.pool_eval(&view_map, tensor_store, &POOL, &mut rng)?;
+
+            let tensors_by_id: HashMap<GlobalId, &str> = tensors_by_name
+                .iter()
+                .map(|(name, &id)| (id, name.as_str()))
+                .collect();
+
+            for (id, tensor) in results {
+                if let Some(&name) = tensors_by_id.get(&id) {
+                    for (out_name, link) in &self.tensor_outputs {
+                        if out_name == name {
+                            let link = require_node_link(*link, "ModelExecution", "tensor_outputs")?;
+                            data.tensors
+                                .insert(link, SharedPoolTensor(std::sync::Arc::new(tensor)));
+                            break;
+                        }
+                    }
+                }
             }
         };
 
@@ -2231,35 +2255,36 @@ impl SuperGraphNode for SuperGraphNodeMilliOpGraph {
     }
     fn eval<T: SuperGraphObserver>(
         &self,
-        node_path: &[GlobalId],
+        _node_path: &[GlobalId],
         data: &mut SuperGraphData,
-        context: &mut SuperGraphContext<T>,
+        _context: &mut SuperGraphContext<T>,
     ) -> Result<(), SuperGraphError> {
-        let legacy_inputs = {
-            let mut inputs = HashMap::new();
-            for input in self.graph.get_inputs() {
-                inputs.insert(
-                    input,
-                    data.tensors
-                        .get(&SuperGraphLink::tensor(input))
-                        .unwrap()
-                        .to_legacy(),
-                );
-            }
-            inputs
-        };
-        let node_path = node_path
+        use crate::pool::SystemPool;
+        static POOL: SystemPool = SystemPool;
+
+        // Build input views from SuperGraphData.
+        let input_entries: Vec<_> = self.graph.get_inputs()
+            .into_iter()
+            .filter_map(|id| {
+                let shared = data.tensors.get(&SuperGraphLink::tensor(id))?;
+                Some((id, shared.clone()))
+            })
+            .collect();
+        let input_views: Vec<_> = input_entries
             .iter()
-            .chain(core::iter::once(&self.global_id))
-            .copied()
-            .collect::<Vec<_>>();
-        let mut observer = MilliOpGraphObserverWrapper::new(context.observer, node_path.as_slice());
-        let mut backend = EvalBackend::NDArray;
-        let res = self
-            .graph
-            .eval(&legacy_inputs, &mut observer, &mut backend)?;
-        data.tensors
-            .extend(res.map(|(k, v)| (SuperGraphLink::tensor(k), SharedPoolTensor::from(v))));
+            .map(|(id, shared)| (*id, shared.0.view()))
+            .collect();
+        let input_map: HashMap<GlobalId, &crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>> =
+            input_views.iter().map(|(id, view)| (*id, view)).collect();
+
+        let results = self.graph.pool_eval(&input_map, &POOL)?;
+
+        for (id, tensor) in results {
+            data.tensors.insert(
+                SuperGraphLink::tensor(id),
+                SharedPoolTensor(std::sync::Arc::new(tensor)),
+            );
+        }
         Ok(())
     }
     fn op_kind(&self) -> String {
