@@ -1349,6 +1349,83 @@ impl SymbolicGraph {
 
         Ok(active_tensors)
     }
+
+    /// Pool-based op-by-op evaluation.
+    ///
+    /// Same interpreter loop as `eval`, but uses pool-allocated tensors throughout.
+    /// Each op is evaluated via `Operation::eval_pool`, which by default lowers to
+    /// a milli graph and runs pool_eval. Ops with sub-graphs (Scan, If) override
+    /// eval_pool to recursively call this method.
+    pub fn eval_pool<'p, P: crate::pool::Pool + 'p>(
+        &self,
+        inputs: &HashMap<GlobalId, &crate::numeric_tensor::NumericTensorView<'_, DynRank>>,
+        pool: &'p P,
+    ) -> Result<
+        HashMap<GlobalId, crate::numeric_tensor::NumericTensor<'p, DynRank, P>>,
+        EvalError,
+    > {
+        use crate::numeric_tensor::NumericTensor as PoolTensor;
+
+        // Seed active tensors from inputs. We need owned pool tensors, so copy
+        // the input views into pool-allocated buffers.
+        let mut active_tensors: HashMap<GlobalId, PoolTensor<'p, DynRank, P>> = HashMap::new();
+        for (&id, &view) in inputs {
+            let layout = crate::numeric_tensor::TensorLayout::<DynRank>::row_major(
+                view.shape().to_vec(),
+                view.dtype(),
+            );
+            let buf = pool
+                .allocate(layout.buffer_size_bytes())
+                .map_err(|e| EvalError::InvalidInput(format!("pool allocation: {e}")))?;
+            let mut tensor = PoolTensor::from_parts(buf, layout);
+            for i in 0..view.numel() {
+                tensor.write_element(i, view.read_element(i));
+            }
+            active_tensors.insert(id, tensor);
+        }
+
+        let ops = self.get_operations();
+        let mut remaining_ops_to_complete: Vec<GlobalId> = ops.keys().copied().collect();
+        loop {
+            let mut ops_completed_now = vec![];
+
+            for op_id in &remaining_ops_to_complete {
+                let GraphOperation { name: _, op } = ops.get(op_id).unwrap();
+                let input_ids: Vec<GlobalId> = op.inputs().collect();
+
+                // Collect input views, skip if not all ready yet.
+                let mut input_views = HashMap::new();
+                let mut ready = true;
+                for &tensor_id in &input_ids {
+                    if let Some(tensor) = active_tensors.get(&tensor_id) {
+                        input_views.insert(tensor_id, tensor.view());
+                    } else {
+                        ready = false;
+                        break;
+                    }
+                }
+                if !ready {
+                    continue;
+                }
+
+                // Build view-ref map for eval_pool.
+                let view_refs: HashMap<GlobalId, &crate::numeric_tensor::NumericTensorView<'_, DynRank>> =
+                    input_views.iter().map(|(&id, v)| (id, v)).collect();
+
+                let outputs = op.eval_pool(&view_refs, pool)?;
+                for (tensor_id, value) in outputs {
+                    active_tensors.insert(tensor_id, value);
+                }
+                ops_completed_now.push(*op_id);
+            }
+            remaining_ops_to_complete.retain(|x| !ops_completed_now.contains(x));
+            if ops_completed_now.is_empty() {
+                break;
+            }
+        }
+
+        Ok(active_tensors)
+    }
 }
 
 /// Unpack ONNX 4-bit packed data: each byte holds two elements,

@@ -147,6 +147,26 @@ pub trait Operation: Node {
         let milli_graph = self.get_milli_op_graph(&ctx, &mut rng);
         Ok(milli_graph.eval(inputs, &mut (), backend)?)
     }
+
+    /// Pool-based evaluation. Default: lower to milli graph → pool_eval.
+    ///
+    /// Ops with sub-graphs (Scan, If) override this to recursively call
+    /// SymbolicGraph::eval_pool on their sub-graphs.
+    fn eval_pool<'p, P: crate::pool::Pool + 'p>(
+        &self,
+        inputs: &HashMap<GlobalId, &crate::numeric_tensor::NumericTensorView<'_, DynRank>>,
+        pool: &'p P,
+    ) -> Result<HashMap<GlobalId, crate::numeric_tensor::NumericTensor<'p, DynRank, P>>, EvalError> {
+        let tensor_dtypes: HashMap<GlobalId, DType> = inputs
+            .iter()
+            .map(|(id, view)| (*id, view.dtype().to_legacy()))
+            .collect();
+        let ctx = MilliLoweringContext::new(tensor_dtypes);
+        let mut rng = WyRand::new(Default::default());
+        let milli_graph = self.get_milli_op_graph(&ctx, &mut rng);
+        Ok(milli_graph.pool_eval(inputs, pool)?)
+    }
+
     fn get_milli_op_graph(&self, ctx: &MilliLoweringContext, rng: &mut impl Rng) -> MilliOpGraph;
     fn get_sub_graphs(&self) -> Vec<&SymbolicGraph> {
         vec![]

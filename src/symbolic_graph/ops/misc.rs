@@ -203,6 +203,39 @@ impl Operation for IfOperation {
         Ok(Box::new(outputs.into_iter()))
     }
 
+    fn eval_pool<'p, P: crate::pool::Pool + 'p>(
+        &self,
+        inputs: &HashMap<GlobalId, &crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>>,
+        pool: &'p P,
+    ) -> Result<HashMap<GlobalId, crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P>>, EvalError> {
+        let cond_view = inputs.get(&self.condition).unwrap();
+        let condition: bool = cond_view.read_element(0).to_f64() != 0.0;
+        let (branch_results, output_ids) = if condition {
+            (self.then_branch.eval_pool(inputs, pool)?, &self.then_branch.ordered_outputs)
+        } else {
+            (self.else_branch.eval_pool(inputs, pool)?, &self.else_branch.ordered_outputs)
+        };
+
+        let mut outputs = HashMap::new();
+        for (to_id, from_id) in self.outputs.iter().zip(output_ids.iter()) {
+            if let Some(tensor) = branch_results.get(from_id) {
+                // Copy into a new allocation so branch_results can be dropped.
+                let view = tensor.view();
+                let layout = crate::numeric_tensor::TensorLayout::<crate::tensor_rank::DynRank>::row_major(
+                    view.shape().to_vec(), view.dtype(),
+                );
+                let buf = pool.allocate(layout.buffer_size_bytes())
+                    .map_err(|e| EvalError::InvalidInput(format!("pool allocation: {e}")))?;
+                let mut out = crate::numeric_tensor::NumericTensor::from_parts(buf, layout);
+                for i in 0..view.numel() {
+                    out.write_element(i, view.read_element(i));
+                }
+                outputs.insert(*to_id, out);
+            }
+        }
+        Ok(outputs)
+    }
+
     fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, _rng: &mut impl Rng) -> MilliOpGraph {
         todo!()
     }
