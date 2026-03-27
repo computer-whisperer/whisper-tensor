@@ -3401,9 +3401,14 @@ mod tests {
     use super::*;
     use crate::backends::eval_backend::EvalBackend;
 
-    /// Helper: load an ONNX node test, evaluate via SymbolicGraph::eval and
-    /// via generate_milli_graph, assert outputs match.
+    /// Helper: load an ONNX node test, evaluate via generate_milli_graph + pool_eval,
+    /// compare against ONNX expected outputs.
     fn test_equivalence_for_onnx_dir(dir: &str) {
+        use crate::pool::SystemPool;
+        use crate::symbolic_graph::SharedPoolTensor;
+
+        static POOL: SystemPool = SystemPool;
+
         let dir_path = std::path::Path::new(dir);
         let model_path = dir_path.join("model.onnx");
         if !model_path.exists() {
@@ -3416,22 +3421,19 @@ mod tests {
             .unwrap()
             .get_inner();
 
-        // Load test data set 0
+        // Load test data set 0 — load ONNX tensors via legacy bridge then convert to pool.
         let test_data_dir = dir_path.join("test_data_set_0");
-        let mut user_inputs: HashMap<
-            String,
-            crate::migration::numeric_tensor::NumericTensor<crate::tensor_rank::DynRank>,
-        > = HashMap::new();
+        let mut pool_inputs: HashMap<GlobalId, crate::numeric_tensor::NumericTensor<'static, crate::tensor_rank::DynRank, SystemPool>> = HashMap::new();
+        let mut expected_outputs: HashMap<GlobalId, crate::numeric_tensor::NumericTensor<'static, crate::tensor_rank::DynRank, SystemPool>> = HashMap::new();
+
         for entry in std::fs::read_dir(&test_data_dir).unwrap() {
             let entry = entry.unwrap();
             let name = entry.file_name().to_string_lossy().to_string();
             if name.starts_with("input_") && name.ends_with(".pb") {
                 let data = std::fs::read(entry.path()).unwrap();
                 let tensor_proto = crate::onnx::TensorProto::decode(data.as_slice()).unwrap();
-                let tensor = crate::backends::ndarray_backend::NDArrayNumericTensor::<
-                    crate::tensor_rank::DynRank,
-                >::try_from(&tensor_proto)
-                .unwrap();
+                let pool_tensor = tensor_proto_to_pool_tensor(&tensor_proto)
+                    .expect("failed to load input tensor proto");
                 let idx: usize = name
                     .strip_prefix("input_")
                     .unwrap()
@@ -3439,82 +3441,75 @@ mod tests {
                     .unwrap()
                     .parse()
                     .unwrap();
-                // Map by input ordering
                 let input_id = graph.ordered_inputs[idx];
-                let input_name = graph.get_tensor_name(input_id).unwrap().to_string();
-                user_inputs.insert(input_name, tensor.into());
+                pool_inputs.insert(input_id, pool_tensor);
+            }
+            if name.starts_with("output_") && name.ends_with(".pb") {
+                let data = std::fs::read(entry.path()).unwrap();
+                let tensor_proto = crate::onnx::TensorProto::decode(data.as_slice()).unwrap();
+                let pool_tensor = tensor_proto_to_pool_tensor(&tensor_proto)
+                    .expect("failed to load output tensor proto");
+                let idx: usize = name
+                    .strip_prefix("output_")
+                    .unwrap()
+                    .strip_suffix(".pb")
+                    .unwrap()
+                    .parse()
+                    .unwrap();
+                let output_id = graph.ordered_outputs[idx];
+                expected_outputs.insert(output_id, pool_tensor);
             }
         }
 
-        // Build full inputs (initialized tensors + user inputs)
-        let initialized_tensors = graph.get_initialized_tensors(&tensor_store);
-        let mut all_inputs: HashMap<
-            GlobalId,
-            crate::migration::numeric_tensor::NumericTensor<crate::tensor_rank::DynRank>,
-        > = initialized_tensors;
-        let tensors_by_name = graph.get_tensors_by_name();
-        for (name, tensor) in &user_inputs {
-            let tensor_id = tensors_by_name[name];
-            all_inputs.insert(tensor_id, tensor.clone());
+        // Add initialized tensors (weights/constants) via legacy bridge.
+        let initialized = graph.get_initialized_tensors(&tensor_store);
+        for (id, legacy_tensor) in &initialized {
+            let shared = SharedPoolTensor::from_legacy(legacy_tensor);
+            // SAFETY: SystemPool is 'static.
+            let pool_tensor: crate::numeric_tensor::NumericTensor<'static, crate::tensor_rank::DynRank, SystemPool> =
+                unsafe { std::mem::transmute(std::sync::Arc::try_unwrap(shared.0).unwrap_or_else(|arc| {
+                    // Clone the data if Arc has multiple refs
+                    let view = arc.view();
+                    let mut t = crate::numeric_tensor::NumericTensor::zeros(
+                        view.shape().to_vec(), view.dtype(), &POOL
+                    ).unwrap();
+                    for i in 0..view.numel() { t.write_element(i, view.read_element(i)); }
+                    t
+                })) };
+            pool_inputs.insert(*id, pool_tensor);
         }
 
-        // Evaluate via SymbolicGraph::eval
-        let mut backend = EvalBackend::NDArray;
-        let symbolic_result = graph.eval(&all_inputs, &mut backend).unwrap();
-
-        // Evaluate via generate_milli_graph
+        // Evaluate via generate_milli_graph + pool_eval.
         let combined = graph.generate_milli_graph(rng);
-        let milli_result: HashMap<_, _> = combined
-            .eval(&all_inputs, &mut (), &mut backend)
-            .unwrap()
-            .collect();
+        let views: HashMap<_, _> = pool_inputs.iter().map(|(&id, t)| (id, t.view())).collect();
+        let view_refs: HashMap<_, _> = views.iter().map(|(&id, v)| (id, v)).collect();
+        let milli_result = combined.pool_eval(&view_refs, &POOL).unwrap();
 
-        // Compare outputs
+        // Compare against ONNX expected outputs.
         for &output_id in &graph.ordered_outputs {
-            let sym_tensor = &symbolic_result[&output_id];
-            let milli_tensor = &milli_result[&output_id];
+            let milli_tensor = milli_result.get(&output_id)
+                .unwrap_or_else(|| panic!("Missing milli output {output_id:?}"));
 
-            assert_eq!(
-                sym_tensor.shape(),
-                milli_tensor.shape(),
-                "Shape mismatch for output {:?}",
-                output_id
-            );
-            assert_eq!(
-                sym_tensor.dtype(),
-                milli_tensor.dtype(),
-                "DType mismatch for output {:?}",
-                output_id
-            );
+            if let Some(expected) = expected_outputs.get(&output_id) {
+                let m_view = milli_tensor.view();
+                let e_view = expected.view();
 
-            let sym_values: Vec<f64> = sym_tensor
-                .cast(crate::dtype::DType::F64, &mut EvalBackend::NDArray)
-                .unwrap()
-                .to_ndarray()
-                .unwrap()
-                .flatten()
-                .try_to_vec()
-                .unwrap();
-            let milli_values: Vec<f64> = milli_tensor
-                .cast(crate::dtype::DType::F64, &mut EvalBackend::NDArray)
-                .unwrap()
-                .to_ndarray()
-                .unwrap()
-                .flatten()
-                .try_to_vec()
-                .unwrap();
-
-            for (i, (s, m)) in sym_values.iter().zip(milli_values.iter()).enumerate() {
-                let diff = (s - m).abs();
-                let tol = 1e-5 + 1e-3 * s.abs();
-                assert!(
-                    diff <= tol,
-                    "Value mismatch at index {} for output {:?}: symbolic={}, milli={}",
-                    i,
-                    output_id,
-                    s,
-                    m
+                assert_eq!(
+                    m_view.shape(), e_view.shape(),
+                    "Shape mismatch for output {:?}", output_id
                 );
+
+                for i in 0..m_view.numel() {
+                    let m = m_view.read_element(i).to_f64();
+                    let e = e_view.read_element(i).to_f64();
+                    let diff = (m - e).abs();
+                    let tol = 1e-5 + 1e-3 * e.abs();
+                    assert!(
+                        diff <= tol,
+                        "Value mismatch at index {} for output {:?}: milli={}, expected={}",
+                        i, output_id, m, e
+                    );
+                }
             }
         }
     }
@@ -3662,15 +3657,27 @@ mod tests {
         // Test that external_gradients seeds backward correctly.
         // Build a simple y = x @ W graph. Provide an external upstream gradient
         // for y. Verify that W gets a gradient and x gets an input_gradient.
-        use crate::backends::eval_backend::EvalBackend;
         use crate::dtype::DType;
         use crate::milli_graph::{
             BackwardGenOptions, ExternalGradient, LossInputSource, LossWiring,
             MilliGraphGenOptions, MilliOpGraph,
         };
-        use crate::migration::numeric_tensor::NumericTensor;
+        use crate::numeric_dtype::NumericDType;
+        use crate::numeric_scalar::NumericScalar;
+        use crate::numeric_tensor::NumericTensor as PoolTensor;
+        use crate::pool::SystemPool;
         use crate::scalar_info::ScalarInfoTyped;
         use crate::tensor_rank::DynRank;
+
+        fn make_f32(shape: Vec<u64>, values: &[f32]) -> PoolTensor<'static, DynRank, SystemPool> {
+            static P: SystemPool = SystemPool;
+            let mut t = PoolTensor::zeros(shape, NumericDType::F32, &P).unwrap();
+            for (i, &v) in values.iter().enumerate() { t.write_element(i, NumericScalar::from_f32(v)); }
+            t
+        }
+        fn read_f32_vec(t: &PoolTensor<'_, DynRank, impl crate::pool::Pool>) -> Vec<f32> {
+            (0..t.numel()).map(|i| t.read_element(i).to_f32()).collect()
+        }
 
         let rng = &mut rand::rng();
         let mut m = SymbolicGraphMutator::new(rng);
@@ -3749,44 +3756,21 @@ mod tests {
 
         // Eval: x = ones, W = ones, targets = zeros, ext_grad = ones
         let mut inputs = std::collections::HashMap::new();
-        inputs.insert(
-            x,
-            NumericTensor::<DynRank>::from_vec_shape(vec![1.0f32; 6], vec![2, 3]).unwrap(),
-        );
-        inputs.insert(
-            w,
-            NumericTensor::<DynRank>::from_vec_shape(vec![1.0f32; 12], vec![3, 4]).unwrap(),
-        );
-        // targets = zeros [2, 4]
-        inputs.insert(
-            meta.external_inputs[0],
-            NumericTensor::<DynRank>::from_vec_shape(vec![0.0f32; 8], vec![2, 4]).unwrap(),
-        );
-        // external upstream gradient = ones [2, 4]
-        inputs.insert(
-            ext_grad_input,
-            NumericTensor::<DynRank>::from_vec_shape(vec![1.0f32; 8], vec![2, 4]).unwrap(),
-        );
+        inputs.insert(x, make_f32(vec![2, 3], &[1.0f32; 6]));
+        inputs.insert(w, make_f32(vec![3, 4], &[1.0f32; 12]));
+        inputs.insert(meta.external_inputs[0], make_f32(vec![2, 4], &[0.0f32; 8]));
+        inputs.insert(ext_grad_input, make_f32(vec![2, 4], &[1.0f32; 8]));
 
-        let mut backend = EvalBackend::NDArray;
-        let results: std::collections::HashMap<_, _> = combined
-            .eval(&inputs, &mut (), &mut backend)
-            .unwrap()
-            .collect();
+        static POOL: SystemPool = SystemPool;
+        let views: std::collections::HashMap<_, _> = inputs.iter().map(|(&id, t)| (id, t.view())).collect();
+        let view_refs: std::collections::HashMap<_, _> = views.iter().map(|(&id, v)| (id, v)).collect();
+        let results = combined.pool_eval(&view_refs, &POOL).unwrap();
 
         // Verify loss exists
         assert!(results.contains_key(&meta.loss.unwrap()));
 
         // Verify x gradient exists and is non-zero
-        let x_grad = &results[&x_grad_output];
-        let x_grad_data: Vec<f32> = x_grad
-            .cast(DType::F32, &mut backend)
-            .unwrap()
-            .to_ndarray()
-            .unwrap()
-            .flatten()
-            .try_into()
-            .unwrap();
+        let x_grad_data = read_f32_vec(&results[&x_grad_output]);
         assert!(
             x_grad_data.iter().any(|v| *v != 0.0),
             "x gradient should be non-zero"
@@ -3808,11 +3792,20 @@ mod tests {
         // Build: x [2,3] -> MatMul(x, W) -> y [2,4] -> Relu -> z [2,4]
         // Surgery: interpose Add(y, lora_out) = combined, redirect Relu to use combined
         // This simulates LoRA adapter injection.
-        use crate::backends::eval_backend::EvalBackend;
         use crate::dtype::DType;
-        use crate::migration::numeric_tensor::NumericTensor;
+        use crate::numeric_dtype::NumericDType;
+        use crate::numeric_scalar::NumericScalar;
+        use crate::numeric_tensor::NumericTensor as PoolTensor;
+        use crate::pool::SystemPool;
         use crate::scalar_info::ScalarInfoTyped;
         use crate::tensor_rank::DynRank;
+
+        fn make_f32(shape: Vec<u64>, values: &[f32]) -> PoolTensor<'static, DynRank, SystemPool> {
+            static P: SystemPool = SystemPool;
+            let mut t = PoolTensor::zeros(shape, NumericDType::F32, &P).unwrap();
+            for (i, &v) in values.iter().enumerate() { t.write_element(i, NumericScalar::from_f32(v)); }
+            t
+        }
 
         let rng = &mut rand::rng();
         let s = |v: u64| ScalarInfoTyped::Numeric(v);
@@ -3901,31 +3894,18 @@ mod tests {
         let milli = graph.generate_milli_graph(rng);
 
         let mut inputs = HashMap::new();
-        inputs.insert(
-            x,
-            NumericTensor::<DynRank>::from_vec_shape(vec![1.0f32; 6], vec![2, 3]).unwrap(),
-        );
-        inputs.insert(
-            w,
-            NumericTensor::<DynRank>::from_vec_shape(vec![1.0f32; 12], vec![3, 4]).unwrap(),
-        );
-        // A = ones [3,2], B = 0.1 * ones [2,4]
-        inputs.insert(
-            a,
-            NumericTensor::<DynRank>::from_vec_shape(vec![1.0f32; 6], vec![3, 2]).unwrap(),
-        );
-        inputs.insert(
-            b,
-            NumericTensor::<DynRank>::from_vec_shape(vec![0.1f32; 8], vec![2, 4]).unwrap(),
-        );
+        inputs.insert(x, make_f32(vec![2, 3], &[1.0f32; 6]));
+        inputs.insert(w, make_f32(vec![3, 4], &[1.0f32; 12]));
+        inputs.insert(a, make_f32(vec![3, 2], &[1.0f32; 6]));
+        inputs.insert(b, make_f32(vec![2, 4], &[0.1f32; 8]));
 
-        let mut backend = EvalBackend::NDArray;
-        let results: HashMap<_, _> = milli
-            .eval(&inputs, &mut (), &mut backend)
-            .unwrap()
+        static POOL2: SystemPool = SystemPool;
+        let views: HashMap<_, _> = inputs.iter().map(|(&id, t)| (id, t.view())).collect();
+        let view_refs: HashMap<_, _> = views.iter().map(|(&id, v)| (id, v)).collect();
+        let results = milli.pool_eval(&view_refs, &POOL2).unwrap();
+        let values: Vec<f32> = (0..results[&z].numel())
+            .map(|i| results[&z].read_element(i).to_f32())
             .collect();
-        let output = &results[&z];
-        let values: Vec<f32> = output.flatten().unwrap().try_into().unwrap();
 
         // x @ W = [[3,3,3,3],[3,3,3,3]]
         // x @ A = [[3,3],[3,3]], (x@A) @ B = [[0.6,0.6,0.6,0.6],[0.6,0.6,0.6,0.6]]

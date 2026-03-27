@@ -1057,12 +1057,36 @@ impl Operation for BatchNormalizationOperation {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backends::eval_backend::EvalBackend;
-    use crate::backends::ndarray_backend::NDArrayNumericTensor;
     use crate::graph::GlobalId;
-    use crate::migration::numeric_tensor::NumericTensor;
+    use crate::numeric_dtype::NumericDType;
+    use crate::numeric_scalar::NumericScalar;
+    use crate::numeric_tensor::NumericTensor as PoolTensor;
+    use crate::pool::SystemPool;
     use crate::tensor_rank::DynRank;
     use half::bf16;
+
+    static POOL: SystemPool = SystemPool;
+
+    fn make_bf16(shape: Vec<u64>, values: &[bf16]) -> PoolTensor<'static, DynRank, SystemPool> {
+        let mut t = PoolTensor::zeros(shape, NumericDType::BF16, &POOL).unwrap();
+        for (i, &v) in values.iter().enumerate() {
+            t.write_element(i, NumericScalar::from_bf16(v));
+        }
+        t
+    }
+
+    fn read_f32_vec(t: &PoolTensor<'_, DynRank, impl crate::pool::Pool>) -> Vec<f32> {
+        (0..t.numel()).map(|i| t.read_element(i).to_f32()).collect()
+    }
+
+    fn pool_eval_milli(
+        graph: &crate::milli_graph::MilliOpGraph,
+        inputs: &HashMap<GlobalId, PoolTensor<'static, DynRank, SystemPool>>,
+    ) -> HashMap<GlobalId, PoolTensor<'static, DynRank, SystemPool>> {
+        let views: HashMap<GlobalId, _> = inputs.iter().map(|(&id, t)| (id, t.view())).collect();
+        let view_refs: HashMap<GlobalId, _> = views.iter().map(|(&id, v)| (id, v)).collect();
+        graph.pool_eval(&view_refs, &POOL).unwrap()
+    }
 
     #[test]
     fn test_rmsnorm_bf16_matches_pytorch() {
@@ -1070,19 +1094,9 @@ mod tests {
         // PyTorch result: [0.1826171875, 0.365234375, 0.546875, 0.73046875]
         let mut rng = wyrand::WyRand::new(42);
 
-        let x_vals: Vec<bf16> = [1.0f32, 2.0, 3.0, 4.0]
-            .iter()
-            .map(|v| bf16::from_f32(*v))
-            .collect();
-        let w_vals: Vec<bf16> = [0.5f32, 0.5, 0.5, 0.5]
-            .iter()
-            .map(|v| bf16::from_f32(*v))
-            .collect();
+        let x_vals: Vec<bf16> = [1.0f32, 2.0, 3.0, 4.0].iter().map(|v| bf16::from_f32(*v)).collect();
+        let w_vals: Vec<bf16> = [0.5f32, 0.5, 0.5, 0.5].iter().map(|v| bf16::from_f32(*v)).collect();
         let expected: Vec<f32> = vec![0.1826171875, 0.365234375, 0.546875, 0.73046875];
-
-        let x_tensor =
-            NDArrayNumericTensor::<DynRank>::from_vec_shape(x_vals, &vec![1, 4]).unwrap();
-        let w_tensor = NDArrayNumericTensor::<DynRank>::from_vec_shape(w_vals, &vec![4]).unwrap();
 
         let x_id = GlobalId::new(&mut rng);
         let w_id = GlobalId::new(&mut rng);
@@ -1105,19 +1119,12 @@ mod tests {
         let ctx = crate::milli_graph::MilliLoweringContext::new(tensor_dtypes);
         let milli_graph = op.get_milli_op_graph(&ctx, &mut rng);
 
-        let mut inputs: HashMap<GlobalId, NumericTensor<DynRank>> = HashMap::new();
-        inputs.insert(x_id, NumericTensor::NDArray(x_tensor.to_dyn()));
-        inputs.insert(w_id, NumericTensor::NDArray(w_tensor.to_dyn()));
+        let mut inputs = HashMap::new();
+        inputs.insert(x_id, make_bf16(vec![1, 4], &x_vals));
+        inputs.insert(w_id, make_bf16(vec![4], &w_vals));
 
-        let mut backend = EvalBackend::NDArray;
-        let results: HashMap<_, _> = milli_graph
-            .eval(&inputs, &mut (), &mut backend)
-            .unwrap()
-            .collect();
-
-        let result = &results[&out_id];
-        let result_nd = result.to_ndarray().unwrap().cast(DType::F32).unwrap();
-        let result_f32: Vec<f32> = result_nd.flatten().try_into().unwrap();
+        let results = pool_eval_milli(&milli_graph, &inputs);
+        let result_f32 = read_f32_vec(&results[&out_id]);
 
         for (i, (got, want)) in result_f32.iter().zip(expected.iter()).enumerate() {
             assert!(
@@ -1131,19 +1138,9 @@ mod tests {
     #[test]
     fn test_rmsnorm_bf16_rank3() {
         let mut rng = wyrand::WyRand::new(42);
-        let x_vals: Vec<bf16> = [1.0f32, 2.0, 3.0, 4.0]
-            .iter()
-            .map(|v| bf16::from_f32(*v))
-            .collect();
-        let w_vals: Vec<bf16> = [0.5f32, 0.5, 0.5, 0.5]
-            .iter()
-            .map(|v| bf16::from_f32(*v))
-            .collect();
+        let x_vals: Vec<bf16> = [1.0f32, 2.0, 3.0, 4.0].iter().map(|v| bf16::from_f32(*v)).collect();
+        let w_vals: Vec<bf16> = [0.5f32, 0.5, 0.5, 0.5].iter().map(|v| bf16::from_f32(*v)).collect();
         let expected: Vec<f32> = vec![0.1826171875, 0.365234375, 0.546875, 0.73046875];
-
-        let x_tensor =
-            NDArrayNumericTensor::<DynRank>::from_vec_shape(x_vals, &vec![1, 1, 4]).unwrap();
-        let w_tensor = NDArrayNumericTensor::<DynRank>::from_vec_shape(w_vals, &vec![4]).unwrap();
 
         let x_id = GlobalId::new(&mut rng);
         let w_id = GlobalId::new(&mut rng);
@@ -1166,20 +1163,14 @@ mod tests {
         let ctx = crate::milli_graph::MilliLoweringContext::new(tensor_dtypes);
         let milli_graph = op.get_milli_op_graph(&ctx, &mut rng);
 
-        let mut inputs: HashMap<GlobalId, NumericTensor<DynRank>> = HashMap::new();
-        inputs.insert(x_id, NumericTensor::NDArray(x_tensor));
-        inputs.insert(w_id, NumericTensor::NDArray(w_tensor));
+        let mut inputs = HashMap::new();
+        inputs.insert(x_id, make_bf16(vec![1, 1, 4], &x_vals));
+        inputs.insert(w_id, make_bf16(vec![4], &w_vals));
 
-        let mut backend = EvalBackend::NDArray;
-        let results: HashMap<_, _> = milli_graph
-            .eval(&inputs, &mut (), &mut backend)
-            .unwrap()
-            .collect();
+        let results = pool_eval_milli(&milli_graph, &inputs);
         let result = &results[&out_id];
-        assert_eq!(result.shape(), &[1, 1, 4]);
-
-        let result_nd = result.to_ndarray().unwrap().cast(DType::F32).unwrap();
-        let result_f32: Vec<f32> = result_nd.flatten().try_into().unwrap();
+        assert_eq!(result.view().shape(), &[1u64, 1, 4]);
+        let result_f32 = read_f32_vec(result);
 
         for (i, (got, want)) in result_f32.iter().zip(expected.iter()).enumerate() {
             assert!(

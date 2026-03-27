@@ -1140,16 +1140,17 @@ impl MilliOpGraph {
             })
             .collect();
 
-        // Build output AtomRanges.
-        let output_ids: Vec<GlobalId> = self
-            .output_ordering
-            .as_ref()
-            .cloned()
-            .unwrap_or_default();
-
         let output_map = self.output_map.as_ref().ok_or_else(|| {
             MilliOpGraphError::InvalidGraph("output_map is not configured".into())
         })?;
+
+        // Build output AtomRanges.
+        let output_ids: Vec<GlobalId> = if let Some(ordering) = &self.output_ordering {
+            ordering.clone()
+        } else {
+            // No explicit ordering — use output_map values.
+            output_map.values().copied().collect()
+        };
 
         // Map external output IDs → internal IDs for tensor_map lookup.
         let reverse_output: HashMap<GlobalId, GlobalId> = output_map
@@ -1221,6 +1222,7 @@ impl MilliOpGraph {
 
             for i in 0..numel {
                 let atom = tam.atom_id_for_element(i as u64);
+                // Try eval results (groups) first.
                 let scalar = output_ranges
                     .iter()
                     .enumerate()
@@ -1233,9 +1235,20 @@ impl MilliOpGraph {
                             None
                         }
                     })
+                    // Fall back to input tensors (zero-cost ops like Split/Concat
+                    // may produce outputs that are just views of input atoms).
+                    .or_else(|| {
+                        let (ti, offset) = lower_result.graph.find_input_idx(atom)?;
+                        // Find which eval_input corresponds to this input tensor.
+                        let input_view = eval_inputs.iter().find_map(|&(base, view)| {
+                            let it = &lower_result.graph.input_tensors()[ti];
+                            if base == it.base_id { Some(view) } else { None }
+                        })?;
+                        Some(input_view.read_element(offset as usize))
+                    })
                     .ok_or_else(|| {
                         MilliOpGraphError::InvalidGraph(format!(
-                            "output atom {atom} not in any eval range"
+                            "output atom {atom} not in any eval range or input"
                         ))
                     })?;
                 out_tensor.write_element(i, scalar.cast_to(dtype));

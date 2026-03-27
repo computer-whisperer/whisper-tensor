@@ -226,10 +226,6 @@ pub fn assert_tensors_close(
 // Test runners
 // ---------------------------------------------------------------------------
 
-use crate::migration::bridge;
-use crate::migration::numeric_tensor::NumericTensor as LegacyNumericTensor;
-use crate::DynRank as LegacyDynRank;
-
 /// Collect all test cases from all submodules.
 pub fn build_test_set() -> Vec<TestCase> {
     let mut cases = Vec::new();
@@ -245,43 +241,6 @@ pub fn build_test_set() -> Vec<TestCase> {
     cases
 }
 
-/// Run all data sets of a test case through the MilliOpGraph interpreter.
-pub fn run_case_via_milli_eval(case: &TestCase) -> Result<(), String> {
-    use crate::backends::eval_backend::EvalBackend;
-
-    let mut backend = EvalBackend::NDArray;
-
-    for ds in &case.data_sets {
-        let legacy_inputs: HashMap<GlobalId, LegacyNumericTensor<LegacyDynRank>> = ds
-            .inputs
-            .iter()
-            .map(|(&id, t)| (id, bridge::view_to_legacy(&t.view())))
-            .collect();
-
-        let mut observer = ();
-        let results: HashMap<GlobalId, LegacyNumericTensor<LegacyDynRank>> = case
-            .graph
-            .eval(&legacy_inputs, &mut observer, &mut backend)
-            .map_err(|e| format!("{}[{}]: eval failed: {e}", case.name, ds.label))?
-            .collect();
-
-        for (&expected_id, expected_tensor) in &ds.expected_outputs {
-            let legacy_actual = results.get(&expected_id).ok_or_else(|| {
-                format!("{}[{}]: missing output {expected_id}", case.name, ds.label)
-            })?;
-            let actual = bridge::legacy_to_new(legacy_actual);
-            let ctx = format!("{}[{}]", case.name, ds.label);
-            assert_tensors_close(
-                &actual.view(),
-                &expected_tensor.view(),
-                &ds.tolerance,
-                &ctx,
-            )?;
-        }
-    }
-    Ok(())
-}
-
 /// Run all data sets of a test case through the pool-based nano eval.
 ///
 /// Flow: MilliOpGraph → lower_to_nano → pool_eval → compare
@@ -294,15 +253,10 @@ pub fn run_case_via_pool_eval(case: &TestCase) -> Result<(), String> {
 
     for ds in &case.data_sets {
         // Build TensorInfo for each input (needed by lower).
-        let legacy_inputs: HashMap<GlobalId, LegacyNumericTensor<LegacyDynRank>> = ds
+        let info_inputs: HashMap<GlobalId, TensorInfo<'_, crate::pool::SystemPool>> = ds
             .inputs
             .iter()
-            .map(|(&id, t)| (id, bridge::view_to_legacy(&t.view())))
-            .collect();
-
-        let info_inputs: HashMap<GlobalId, TensorInfo<'_, crate::pool::SystemPool>> = legacy_inputs
-            .iter()
-            .map(|(&id, t)| (id, TensorInfo::from_legacy(t, &crate::pool::SystemPool)))
+            .map(|(&id, t)| (id, TensorInfo::from_view(&t.view(), &crate::pool::SystemPool)))
             .collect();
 
         // Lower MilliOpGraph → NanoGraph.
@@ -460,21 +414,6 @@ pub fn run_case_via_graph_pool_eval(case: &TestCase) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_all_cases_via_milli_eval() {
-        let cases = build_test_set();
-        assert!(!cases.is_empty(), "test set should not be empty");
-        let mut total_data_sets = 0;
-        for case in &cases {
-            run_case_via_milli_eval(case).unwrap_or_else(|e| panic!("{e}"));
-            total_data_sets += case.data_sets.len();
-        }
-        eprintln!(
-            "{} test cases ({total_data_sets} data sets) passed via milli eval",
-            cases.len()
-        );
-    }
 
     #[test]
     fn test_all_cases_via_pool_eval() {

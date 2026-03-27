@@ -463,12 +463,37 @@ impl MilliOp for Split {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dtype::DType;
+    use crate::numeric_dtype::NumericDType;
+    use crate::numeric_scalar::NumericScalar;
+    use crate::numeric_tensor::NumericTensor as PoolTensor;
+    use crate::pool::SystemPool;
+
+    static POOL: SystemPool = SystemPool;
+
+    fn make_f32(shape: Vec<u64>, values: &[f32]) -> PoolTensor<'static, DynRank, SystemPool> {
+        let mut t = PoolTensor::zeros(shape, NumericDType::F32, &POOL).unwrap();
+        for (i, &v) in values.iter().enumerate() {
+            t.write_element(i, NumericScalar::from_f32(v));
+        }
+        t
+    }
+
+    fn read_f32_vec(t: &PoolTensor<'_, DynRank, impl crate::pool::Pool>) -> Vec<f32> {
+        (0..t.numel()).map(|i| t.read_element(i).to_f32()).collect()
+    }
+
+    fn pool_eval_graph(
+        graph: &MilliOpGraph,
+        inputs: &HashMap<GlobalId, PoolTensor<'static, DynRank, SystemPool>>,
+    ) -> HashMap<GlobalId, PoolTensor<'static, DynRank, SystemPool>> {
+        let views: HashMap<GlobalId, _> = inputs.iter().map(|(&id, t)| (id, t.view())).collect();
+        let view_refs: HashMap<GlobalId, _> = views.iter().map(|(&id, v)| (id, v)).collect();
+        graph.pool_eval(&view_refs, &POOL).unwrap()
+    }
 
     #[test]
     fn test_split_num_outputs_even_axis0() {
         let rng = &mut rand::rng();
-        // Build a tiny graph with one input and two split outputs, then run eval
 
         let input_id = GlobalId::new(rng);
         let (mut graph, input_map) = MilliOpGraph::new(std::iter::once(input_id), rng);
@@ -483,27 +508,17 @@ mod tests {
         graph.set_output_map(output_map);
 
         let mut inputs = HashMap::new();
-        let x = NumericTensor::<DynRank>::from_vec_shape(vec![1f32, 2., 3., 4.], vec![4]).unwrap();
-        inputs.insert(input_id, x);
+        inputs.insert(input_id, make_f32(vec![4], &[1., 2., 3., 4.]));
 
-        let mut backend = EvalBackend::NDArray;
-        let mut obs = ();
-        let res = graph
-            .eval(&inputs, &mut obs, &mut backend)
-            .unwrap()
-            .collect::<HashMap<_, _>>();
-        let out0 = res[&out0_id].clone();
-        let out1 = res[&out1_id].clone();
+        let res = pool_eval_graph(&graph, &inputs);
 
-        assert_eq!(out0.shape(), vec![2u64]);
-        assert_eq!(out1.shape(), vec![2u64]);
-        assert_eq!(out0.dtype(), DType::F32);
-        assert_eq!(out1.dtype(), DType::F32);
+        assert_eq!(res[&out0_id].view().shape(), &[2u64]);
+        assert_eq!(res[&out1_id].view().shape(), &[2u64]);
+        assert_eq!(res[&out0_id].view().dtype(), NumericDType::F32);
+        assert_eq!(res[&out1_id].view().dtype(), NumericDType::F32);
 
-        let v0: Vec<f32> = out0.flatten().unwrap().try_into().unwrap();
-        let v1: Vec<f32> = out1.flatten().unwrap().try_into().unwrap();
-        assert_eq!(v0, vec![1., 2.]);
-        assert_eq!(v1, vec![3., 4.]);
+        assert_eq!(read_f32_vec(&res[&out0_id]), vec![1., 2.]);
+        assert_eq!(read_f32_vec(&res[&out1_id]), vec![3., 4.]);
     }
 
     #[test]
@@ -519,25 +534,14 @@ mod tests {
         graph.set_output_map(output_map);
 
         let mut inputs = HashMap::new();
-        // 2x4
-        let x = NumericTensor::<DynRank>::from_vec_shape(
-            (1..=8).map(|v| v as f32).collect::<Vec<_>>(),
-            vec![2, 4],
-        )
-        .unwrap();
-        inputs.insert(input_id, x);
+        inputs.insert(
+            input_id,
+            make_f32(vec![2, 4], &(1..=8).map(|v| v as f32).collect::<Vec<_>>()),
+        );
 
-        let mut backend = EvalBackend::NDArray;
-        let mut obs = ();
-        let res = graph
-            .eval(&inputs, &mut obs, &mut backend)
-            .unwrap()
-            .collect::<HashMap<_, _>>();
-        let out = res[&output_id].clone();
-        assert_eq!(out.shape(), vec![2u64, 2u64]);
-        let v: Vec<f32> = out.flatten().unwrap().try_into().unwrap();
-        // Expect second half along last axis: [[3,4],[7,8]]
-        assert_eq!(v, vec![3., 4., 7., 8.]);
+        let res = pool_eval_graph(&graph, &inputs);
+        assert_eq!(res[&output_id].view().shape(), &[2u64, 2u64]);
+        assert_eq!(read_f32_vec(&res[&output_id]), vec![3., 4., 7., 8.]);
     }
 
     #[test]
@@ -546,7 +550,6 @@ mod tests {
         let input_id = GlobalId::new(rng);
         let (mut graph, input_map) = MilliOpGraph::new(std::iter::once(input_id), rng);
         let data_id = input_map[&input_id];
-        // dim=5, num_outputs=2 -> sizes [3,2]
         let out0_id = GlobalId::new(rng);
         let out1_id = GlobalId::new(rng);
         let out0 = Split::push_new(&mut graph, data_id, None, 0, Some(2), 0, rng);
@@ -557,24 +560,13 @@ mod tests {
         graph.set_output_map(output_map);
 
         let mut inputs = HashMap::new();
-        let x =
-            NumericTensor::<DynRank>::from_vec_shape(vec![1f32, 2., 3., 4., 5.], vec![5]).unwrap();
-        inputs.insert(input_id, x);
+        inputs.insert(input_id, make_f32(vec![5], &[1., 2., 3., 4., 5.]));
 
-        let mut backend = EvalBackend::NDArray;
-        let mut obs = ();
-        let res = graph
-            .eval(&inputs, &mut obs, &mut backend)
-            .unwrap()
-            .collect::<HashMap<_, _>>();
-        let out0 = res[&out0_id].clone();
-        let out1 = res[&out1_id].clone();
+        let res = pool_eval_graph(&graph, &inputs);
 
-        assert_eq!(out0.shape(), vec![3u64]);
-        assert_eq!(out1.shape(), vec![2u64]);
-        let v0: Vec<f32> = out0.flatten().unwrap().try_into().unwrap();
-        let v1: Vec<f32> = out1.flatten().unwrap().try_into().unwrap();
-        assert_eq!(v0, vec![1., 2., 3.]);
-        assert_eq!(v1, vec![4., 5.]);
+        assert_eq!(res[&out0_id].view().shape(), &[3u64]);
+        assert_eq!(res[&out1_id].view().shape(), &[2u64]);
+        assert_eq!(read_f32_vec(&res[&out0_id]), vec![1., 2., 3.]);
+        assert_eq!(read_f32_vec(&res[&out1_id]), vec![4., 5.]);
     }
 }
