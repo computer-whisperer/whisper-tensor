@@ -621,6 +621,24 @@ impl Node for GatherGrad {
 }
 
 impl MilliOp for GatherGrad {
+    fn infer<'p, P: Pool + 'p>(
+        &self,
+        known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'p, P>>,
+        _symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
+        _pool: &'p P,
+    ) -> Result<Vec<(GlobalId, crate::tensor_info::TensorInfo<'p, P>)>, MilliOpGraphError> {
+        // Output shape = data input shape (scatter-add back into data's shape).
+        let data_info = known_inputs
+            .get(&self.data)
+            .ok_or(MilliOpGraphError::UnableToInfer)?;
+        let ranked = data_info.as_ranked().ok_or(MilliOpGraphError::UnableToInfer)?;
+        let out = crate::tensor_info::TensorInfo::from_dtype_and_shape_scalars(
+            data_info.dtype(),
+            &ranked.shape(),
+        );
+        Ok(vec![(self.output, out)])
+    }
+
     fn eval(
         &self,
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,

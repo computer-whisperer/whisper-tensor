@@ -1330,6 +1330,24 @@ impl Node for ConvInputGrad {
 }
 
 impl MilliOp for ConvInputGrad {
+    fn infer<'p, P: crate::pool::Pool + 'p>(
+        &self,
+        known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'p, P>>,
+        _symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
+        _pool: &'p P,
+    ) -> Result<Vec<(GlobalId, crate::tensor_info::TensorInfo<'p, P>)>, MilliOpGraphError> {
+        // Output shape = original input shape.
+        let input_info = known_inputs
+            .get(&self.input)
+            .ok_or(MilliOpGraphError::UnableToInfer)?;
+        let ranked = input_info.as_ranked().ok_or(MilliOpGraphError::UnableToInfer)?;
+        let out = crate::tensor_info::TensorInfo::from_dtype_and_shape_scalars(
+            input_info.dtype(),
+            &ranked.shape(),
+        );
+        Ok(vec![(self.output, out)])
+    }
+
     fn eval(
         &self,
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
@@ -1590,6 +1608,44 @@ impl Node for ConvWeightGrad {
 }
 
 impl MilliOp for ConvWeightGrad {
+    fn infer<'p, P: crate::pool::Pool + 'p>(
+        &self,
+        known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'p, P>>,
+        _symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
+        pool: &'p P,
+    ) -> Result<Vec<(GlobalId, crate::tensor_info::TensorInfo<'p, P>)>, MilliOpGraphError> {
+        // Weight shape: [out_channels, in_channels/groups, *kernel_shape]
+        let grad_info = known_inputs.get(&self.grad_output).ok_or(MilliOpGraphError::UnableToInfer)?;
+        let input_info = known_inputs.get(&self.input).ok_or(MilliOpGraphError::UnableToInfer)?;
+        let grad_ranked = grad_info.as_ranked().ok_or(MilliOpGraphError::UnableToInfer)?;
+        let input_ranked = input_info.as_ranked().ok_or(MilliOpGraphError::UnableToInfer)?;
+        let grad_shape = grad_ranked.shape();
+        let input_shape = input_ranked.shape();
+        if grad_shape.len() < 2 || input_shape.len() < 2 {
+            return Err(MilliOpGraphError::UnableToInfer);
+        }
+        use crate::scalar_info::ScalarInfoTyped;
+        let out_channels = match &grad_shape[1] {
+            ScalarInfoTyped::Numeric(v) => *v,
+            _ => return Err(MilliOpGraphError::UnableToInfer),
+        };
+        let in_channels = match &input_shape[1] {
+            ScalarInfoTyped::Numeric(v) => *v,
+            _ => return Err(MilliOpGraphError::UnableToInfer),
+        };
+        let group = self.group.max(1) as u64;
+        let channels_per_group = in_channels / group;
+        let mut weight_shape = vec![
+            ScalarInfoTyped::Numeric(out_channels),
+            ScalarInfoTyped::Numeric(channels_per_group),
+        ];
+        for &k in &self.kernel_shape {
+            weight_shape.push(ScalarInfoTyped::Numeric(k as u64));
+        }
+        let out = crate::tensor_info::TensorInfo::from_dtype_and_shape_scalars(grad_info.dtype(), &weight_shape);
+        Ok(vec![(self.output, out)])
+    }
+
     fn eval(
         &self,
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
