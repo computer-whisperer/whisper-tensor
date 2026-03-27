@@ -314,6 +314,36 @@ impl NanoGraph {
         output_bases
     }
 
+    /// Allocate contiguous atoms and create Identity groups that copy from a
+    /// non-contiguous TensorAtomMap (segmented or non-row-major strides).
+    /// Returns the base AtomId of the new contiguous range.
+    pub fn alloc_contiguous_copy(
+        &mut self,
+        tam: &crate::nano_graph::lower::TensorAtomMap,
+        count: u64,
+    ) -> AtomId {
+        let base = self.alloc_ids(count);
+        let dtype = tam.dtype;
+        // Build explicit mapping from each element to its source atom.
+        let source_atoms: Vec<AtomId> = (0..count)
+            .map(|i| tam.atom_id_for_element(i))
+            .collect();
+        self.groups.insert(
+            base.0,
+            count,
+            AtomGroup {
+                base_id: base,
+                count,
+                atom_offset: 0,
+                output_dtype: dtype,
+                op: ScalarOp::Identity,
+                sym_dims: vec![],
+                inputs: vec![InputRef::Explicit(source_atoms)],
+            },
+        );
+        base
+    }
+
     /// Access the opaque ops list.
     pub fn opaque_ops(&self) -> &[super::ops::OpaqueOp] {
         &self.opaque_ops
@@ -711,6 +741,21 @@ impl NanoGraph {
         gi: usize,
         out: &mut std::collections::HashSet<usize>,
     ) {
+        // OpaqueOutput groups read their inputs' full atom ranges at eval time,
+        // not just the broadcast base. Use the actual input mappings.
+        if let ScalarOp::OpaqueOutput { opaque_idx, .. } = &group.op {
+            let opaque_op = &self.opaque_ops[*opaque_idx];
+            for inp in &opaque_op.inputs {
+                if inp.count > 0 {
+                    let lo = inp.base.0;
+                    let hi = lo + inp.count - 1;
+                    self.insert_groups_in_id_range(lo, hi, out);
+                }
+            }
+            out.remove(&gi);
+            return;
+        }
+
         for input in &group.inputs {
             self.collect_producer_indices(input, group.count, group.atom_offset, out);
         }

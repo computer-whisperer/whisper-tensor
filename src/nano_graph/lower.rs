@@ -412,6 +412,16 @@ impl TensorAtomMap {
         strides
     }
 
+    /// Returns true if this tensor's atoms are a contiguous range base..base+count
+    /// with row-major strides (i.e. atom_id_for_element(i) == base + i for all i).
+    pub fn is_contiguous(&self) -> bool {
+        if !self.segments.is_empty() {
+            return false;
+        }
+        let known_dims = self.known_dims();
+        self.known_strides == Self::compute_strides(&known_dims)
+    }
+
     /// Get the known dim sizes from the layout.
     pub fn known_dims(&self) -> Vec<u64> {
         self.layout
@@ -1274,17 +1284,35 @@ impl<'a> NanoLoweringContext<'a> {
         use crate::nano_graph::ops::{OpaqueOp, OpaqueTensorMapping};
 
         // Build input mappings from tensor_map.
+        // Opaque ops expect contiguous atom ranges (base..base+count).
+        // If a tensor map is segmented (e.g. from zero-cost Concat) or has
+        // non-row-major strides, flatten it into a contiguous range first
+        // by inserting identity-copy groups.
         let inputs: Vec<OpaqueTensorMapping> = input_ids
             .iter()
             .filter_map(|&id| {
                 let tam = self.tensor_map.get(&id)?;
                 let known_dims = tam.known_dims();
-                Some(OpaqueTensorMapping {
-                    base: tam.base_id,
-                    count: tam.count,
-                    shape: known_dims,
-                    dtype: tam.dtype,
-                })
+
+                if !tam.segments.is_empty() || !tam.is_contiguous() {
+                    // Non-contiguous: allocate contiguous atoms and insert identity copies.
+                    let count = tam.count;
+                    let dtype = tam.dtype;
+                    let base = self.nano.alloc_contiguous_copy(tam, count);
+                    Some(OpaqueTensorMapping {
+                        base,
+                        count,
+                        shape: known_dims,
+                        dtype,
+                    })
+                } else {
+                    Some(OpaqueTensorMapping {
+                        base: tam.base_id,
+                        count: tam.count,
+                        shape: known_dims,
+                        dtype: tam.dtype,
+                    })
+                }
             })
             .collect();
 
