@@ -20,22 +20,6 @@ pub fn interpret_milli_graph<'p, P: crate::pool::Pool + 'p>(
     graph.pool_eval(inputs, pool)
 }
 
-/// Legacy interpreter — uses old eval path. Kept for examples/callers not yet migrated.
-pub fn interpret_milli_graph_legacy(
-    graph: &MilliOpGraph,
-    inputs: &std::collections::HashMap<GlobalId, NumericTensor<DynRank>>,
-) -> Result<std::collections::HashMap<GlobalId, NumericTensor<DynRank>>, crate::milli_graph::MilliOpGraphError> {
-    let mut backend = EvalBackend::NDArray;
-    Ok(graph.eval(inputs, &mut (), &mut backend)?.collect())
-}
-
-/// Legacy: return ALL intermediate tensors via old eval path.
-pub fn interpret_milli_graph_all_intermediates(
-    graph: &MilliOpGraph,
-    inputs: &std::collections::HashMap<GlobalId, NumericTensor<DynRank>>,
-) -> Result<std::collections::HashMap<GlobalId, NumericTensor<DynRank>>, crate::milli_graph::MilliOpGraphError> {
-    graph.collect_all_intermediate_values(inputs)
-}
 
 /// Legacy: map each output tensor to its producing op info.
 pub fn tensor_producers(

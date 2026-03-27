@@ -1397,41 +1397,6 @@ impl MilliOpGraph {
         Ok((shapes, dtypes))
     }
 
-    /// Like collect_all_shapes_and_dtypes, but also returns all intermediate tensor values.
-    /// The returned values map uses internal (milli graph) GlobalIds.
-    pub fn collect_all_intermediate_values(
-        &self,
-        inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
-    ) -> Result<HashMap<GlobalId, NumericTensor<DynRank>>, MilliOpGraphError> {
-        self.validate_ready_for_interpreter()?;
-        let mut backend = EvalBackend::NDArray;
-        let mut intermediate_values = HashMap::new();
-        for (ext_id, tensor_value) in inputs {
-            let int_id = self.input_map.get(ext_id).copied().ok_or_else(|| {
-                MilliOpGraphError::InvalidGraph(format!(
-                    "missing external input mapping for {ext_id}"
-                ))
-            })?;
-            intermediate_values.insert(int_id, tensor_value.clone());
-        }
-        for op_id in &self.op_ordering {
-            let op = self.ops.get(op_id).ok_or_else(|| {
-                MilliOpGraphError::InvalidGraph(format!("missing op {op_id} in op_ordering"))
-            })?;
-            let out_vec: Vec<_> = op
-                .eval(
-                    &intermediate_values,
-                    &crate::milli_graph::ops::MilliEvalConfig::default(),
-                    &mut backend,
-                )?
-                .collect();
-            for (tensor_id, value) in out_vec {
-                intermediate_values.insert(tensor_id, value);
-            }
-        }
-        Ok(intermediate_values)
-    }
-
     /// Propagate shape/dtype/value information through the graph using `infer()`.
     ///
     /// Unlike `collect_all_intermediate_values`, this does not require concrete

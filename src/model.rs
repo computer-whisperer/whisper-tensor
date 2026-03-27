@@ -1,18 +1,15 @@
 use std::collections::HashMap;
 
-use crate::backends::eval_backend::{EvalBackend, EvalRuntimeError};
-use crate::backends::{ModelLoadedTensorCache, eval_backend};
+use crate::backends::eval_backend::EvalRuntimeError;
 use crate::dtype::DType;
-use crate::migration::numeric_tensor::{NumericTensor, NumericTensorError};
+use crate::migration::numeric_tensor::NumericTensorError;
 use prost::DecodeError;
 use rand::Rng;
 
 use crate::symbolic_graph::tensor_store::TensorStore;
 use crate::symbolic_graph::{ONNXDecodingError, SymbolicGraph, SymbolicGraphMutator, TensorType};
 
-use crate::DynRank;
 use crate::scalar_info::ScalarInfoTyped;
-use crate::symbolic_graph::observer::SymbolicGraphObserver;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ModelError {
@@ -28,9 +25,6 @@ pub enum ModelError {
     UnconfiguredBackend,
 }
 
-pub enum ModelExecutionRuntime<'a> {
-    Eval(EvalBackend<'a>),
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ModelID {
@@ -79,62 +73,6 @@ impl Model {
             tensor_store,
             onnx_data: onnx_data.to_vec(),
         })
-    }
-
-    pub fn load_tensors(
-        &self,
-        cache: &mut ModelLoadedTensorCache,
-        eval_backend: &mut EvalBackend,
-    ) -> Result<(), ModelError> {
-        for (key, tensor) in self.graph.get_tensors() {
-            if !cache.tensors.contains_key(key) {
-                let tensor = match &tensor.tensor_type {
-                    TensorType::Constant(x) => Some(x.get_tensor(&self.tensor_store)),
-                    TensorType::Input(Some(x)) => Some(x.get_tensor(&self.tensor_store)),
-                    _ => None,
-                };
-                if let Some(tensor) = tensor {
-                    cache
-                        .tensors
-                        .insert(*key, eval_backend.to_native_type(&tensor));
-                }
-            }
-        }
-        Ok(())
-    }
-
-    pub fn run(
-        &self,
-        inputs: HashMap<String, NumericTensor<DynRank>>,
-        observer: &mut impl SymbolicGraphObserver,
-        selected_runtime: &mut ModelExecutionRuntime,
-    ) -> Result<HashMap<String, NumericTensor<DynRank>>, ModelError> {
-        let ModelExecutionRuntime::Eval(eval_backend) = selected_runtime;
-        Ok(eval_backend::run(
-            &self.graph,
-            &self.tensor_store,
-            None,
-            eval_backend,
-            observer,
-            inputs,
-        )?)
-    }
-
-    pub fn eval<T: SymbolicGraphObserver>(
-        &self,
-        inputs: HashMap<String, NumericTensor<DynRank>>,
-        observer: &mut T,
-        tensor_cache: Option<&mut ModelLoadedTensorCache>,
-        eval_backend: &mut EvalBackend,
-    ) -> Result<HashMap<String, NumericTensor<DynRank>>, ModelError> {
-        Ok(eval_backend::run(
-            &self.graph,
-            &self.tensor_store,
-            tensor_cache,
-            eval_backend,
-            observer,
-            inputs,
-        )?)
     }
 
     pub fn get_symbolic_graph(&self) -> &SymbolicGraph {
