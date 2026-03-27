@@ -163,6 +163,28 @@ impl<'de> serde::Deserialize<'de> for SharedPoolTensor {
     }
 }
 
+impl SharedPoolTensor {
+    /// Convert a legacy `NumericTensor<DynRank>` into a `SharedPoolTensor`.
+    pub fn from_legacy(legacy: &crate::migration::numeric_tensor::NumericTensor<DynRank>) -> Self {
+        let pool_tensor = crate::nano_graph::lower::legacy_numeric_to_new(legacy, &crate::pool::SystemPool);
+        // SAFETY: SystemPool allocations are 'static.
+        let static_tensor: crate::numeric_tensor::NumericTensor<'static, DynRank, crate::pool::SystemPool> =
+            unsafe { std::mem::transmute(pool_tensor) };
+        Self(std::sync::Arc::new(static_tensor))
+    }
+
+    /// Convert back to a legacy `NumericTensor<DynRank>`.
+    pub fn to_legacy(&self) -> crate::migration::numeric_tensor::NumericTensor<DynRank> {
+        crate::nano_graph::lower::new_numeric_to_legacy(&*self.0)
+    }
+}
+
+impl From<crate::migration::numeric_tensor::NumericTensor<DynRank>> for SharedPoolTensor {
+    fn from(legacy: crate::migration::numeric_tensor::NumericTensor<DynRank>) -> Self {
+        Self::from_legacy(&legacy)
+    }
+}
+
 type PoolTensor = crate::numeric_tensor::NumericTensor<'static, DynRank, crate::pool::SystemPool>;
 
 /// Decode TensorProto into StoredOrNotTensor using new types.

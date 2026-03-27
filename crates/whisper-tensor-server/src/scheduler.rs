@@ -20,6 +20,7 @@ use whisper_tensor::super_graph::SuperGraphContext;
 use whisper_tensor::super_graph::cache::{SuperGraphCache, SuperGraphTensorCache};
 use whisper_tensor::super_graph::data::SuperGraphData;
 use whisper_tensor::super_graph::observer::SuperGraphObserver;
+use whisper_tensor::symbolic_graph::SharedPoolTensor;
 use whisper_tensor::{DynRank, compiler};
 
 #[derive(Debug)]
@@ -282,7 +283,6 @@ impl SuperGraphObserver for LocalSuperGraphObserver {
         op_kind: &str,
         start_instant: Instant,
         end_instant: Instant,
-        _backend: &mut EvalBackend,
     ) {
         self.refresh_dynamic_settings();
         if let Some(reporter) = &mut self.reporter
@@ -303,17 +303,17 @@ impl SuperGraphObserver for LocalSuperGraphObserver {
     fn on_tensor_assigned(
         &mut self,
         path: &[GlobalId],
-        tensor: &NumericTensor<DynRank>,
-        backend: &mut EvalBackend,
+        tensor: &SharedPoolTensor,
     ) {
         self.refresh_dynamic_settings();
+        let tensor_legacy = tensor.to_legacy();
         if let Some(reporter) = &mut self.reporter {
             if self.subscribed_tensors.contains(path) {
                 let report = SchedulerReport::SuperGraphTensorAssignedFull(
                     SchedulerReportSuperGraphTensorAssigned {
                         attention: self.attention,
                         path: path.to_vec(),
-                        value: tensor.to_ndarray().unwrap(),
+                        value: tensor_legacy.to_ndarray().unwrap(),
                     },
                 );
                 reporter.push_report(report);
@@ -326,14 +326,15 @@ impl SuperGraphObserver for LocalSuperGraphObserver {
                         false
                     };
                 if do_it {
+                    let mut backend = EvalBackend::NDArray;
                     let report = SchedulerReport::SuperGraphTensorAssignedAbbreviated(
                         SchedulerReportSuperGraphTensorAssignedAbbreviated {
                             attention: self.attention,
                             path: path.to_vec(),
                             value: AbbreviatedTensorValue::from_tensor(
-                                tensor,
+                                &tensor_legacy,
                                 settings.downsampled_size,
-                                backend,
+                                &mut backend,
                             ),
                         },
                     );
@@ -491,13 +492,13 @@ pub async fn scheduler(
                                 for (link, tensor) in req.tensor_inputs {
                                     super_graph_data
                                         .tensors
-                                        .insert(link, NumericTensor::from(tensor));
+                                        .insert(link, SharedPoolTensor::from(NumericTensor::from(tensor)));
                                 }
                                 for (link, clip) in req.audio_inputs {
                                     super_graph_data.audio_clips.insert(
                                         link,
                                         whisper_tensor::super_graph::data::SuperGraphAudioClip::new(
-                                            NumericTensor::from(clip.samples),
+                                            SharedPoolTensor::from(NumericTensor::from(clip.samples)),
                                             clip.sample_rate_hz,
                                         ),
                                     );
@@ -568,7 +569,6 @@ pub async fn scheduler(
                                         .collect();
                                     let mut context = SuperGraphContext {
                                         observer: &mut observer,
-                                        eval_backend: backend,
                                         caches: cache,
                                         use_compiled_models: use_compiler,
                                         symbolic_graphs: symbolic_graph_refs,
@@ -602,13 +602,13 @@ pub async fn scheduler(
 
                                 let mut tensor_outputs = tensors
                                     .iter()
-                                    .map(|(k, v)| (*k, v.to_ndarray().unwrap()))
+                                    .map(|(k, v)| (*k, v.to_legacy().to_ndarray().unwrap()))
                                     .collect::<HashMap<_, _>>();
                                 for (link, image) in images {
-                                    tensor_outputs.insert(link, image.tensor.to_ndarray().unwrap());
+                                    tensor_outputs.insert(link, image.tensor.to_legacy().to_ndarray().unwrap());
                                 }
                                 for (link, clip) in audio_clips {
-                                    tensor_outputs.insert(link, clip.samples.to_ndarray().unwrap());
+                                    tensor_outputs.insert(link, clip.samples.to_legacy().to_ndarray().unwrap());
                                 }
 
                                 Ok(SuperGraphResponseData {

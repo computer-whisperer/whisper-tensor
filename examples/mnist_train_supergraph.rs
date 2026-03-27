@@ -27,7 +27,7 @@ use whisper_tensor::super_graph::nodes::{
 use whisper_tensor::super_graph::{
     SuperGraphAnyLink, SuperGraphBuilder, SuperGraphContext, SuperGraphLink, SuperGraphLinkKind,
 };
-use whisper_tensor::symbolic_graph::{SymbolicGraphMutator, TensorType};
+use whisper_tensor::symbolic_graph::{SharedPoolTensor, SymbolicGraphMutator, TensorType};
 use whisper_tensor::tensor_rank::DynRank;
 
 // --- Data (shared with mnist_train.rs) ---
@@ -476,28 +476,29 @@ fn main() {
         let mut sg_data = SuperGraphData::new();
         sg_data
             .tensors
-            .insert(iter_count_link, iter_count_tensor.clone());
+            .insert(iter_count_link, SharedPoolTensor::from(iter_count_tensor.clone()));
         sg_data
             .tensors
-            .insert(outer_images_link, batched_images.clone());
+            .insert(outer_images_link, SharedPoolTensor::from(batched_images.clone()));
         sg_data
             .tensors
-            .insert(outer_labels_link, batched_labels.clone());
+            .insert(outer_labels_link, SharedPoolTensor::from(batched_labels.clone()));
         for &(ext_param, outer_initial, _) in &outer_param_links {
             sg_data
                 .tensors
-                .insert(outer_initial, params[&ext_param].clone());
+                .insert(outer_initial, SharedPoolTensor::from(params[&ext_param].clone()));
         }
 
         // Run one epoch
         let mut tensor_cache = SuperGraphTensorCache::new();
         let mut observer = ();
-        let mut context = SuperGraphContext::new(&mut backend, &mut observer, &mut tensor_cache);
+        let mut context = SuperGraphContext::new(&mut observer, &mut tensor_cache);
 
         let results = epoch_graph.run(sg_data, &mut context).unwrap();
 
         // Extract collected losses and average
-        let losses: Vec<f32> = results.tensors[&collected_losses_link]
+        let losses_legacy = results.tensors[&collected_losses_link].to_legacy();
+        let losses: Vec<f32> = losses_legacy
             .flatten()
             .unwrap()
             .try_into()
@@ -506,7 +507,7 @@ fn main() {
 
         // Extract updated params
         for &(ext_param, _, outer_final) in &outer_param_links {
-            params.insert(ext_param, results.tensors[&outer_final].clone());
+            params.insert(ext_param, results.tensors[&outer_final].to_legacy());
         }
 
         let acc = eval_accuracy(

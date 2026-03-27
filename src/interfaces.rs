@@ -8,6 +8,7 @@ use crate::super_graph::cache::{SuperGraphCache, SuperGraphTensorCache};
 use crate::super_graph::data::{SuperGraphData, SuperGraphImage};
 use crate::super_graph::links::SuperGraphLink;
 use crate::super_graph::{SuperGraph, SuperGraphContext, SuperGraphError};
+use crate::symbolic_graph::SharedPoolTensor;
 use crate::tensor_rank::DynRank;
 use crate::tokenizer::{AnyTokenizer, Tokenizer};
 use serde::{Deserialize, Serialize};
@@ -91,7 +92,7 @@ impl TextInferenceTokensInLogitOutInterface {
                 .insert(self.model_input_link, model.get_tensor_store());
             super_graph_data
                 .tensors
-                .insert(self.token_context_input_link, tokens_tensor);
+                .insert(self.token_context_input_link, SharedPoolTensor::from(tokens_tensor));
             super_graph_data.hashes.insert(self.cache_key_input_link, 0);
             super_graph_data
         };
@@ -112,7 +113,6 @@ impl TextInferenceTokensInLogitOutInterface {
             };
             let mut context = SuperGraphContext {
                 observer: &mut observer,
-                eval_backend: backend,
                 super_graph_tensor_cache: &mut super_graph_tensor_cache,
                 caches: super_graph_caches,
                 symbolic_graphs: vec![model.get_symbolic_graph()],
@@ -129,6 +129,7 @@ impl TextInferenceTokensInLogitOutInterface {
             .tensors
             .get(&self.logit_output_link)
             .unwrap();
+        let logits = logits.to_legacy();
         let logits_shape = logits.shape();
         // Select last position
         let logits = logits.slice(
@@ -212,10 +213,12 @@ impl MultimodalLanguageInterface {
             super_graph_data
                 .tensor_maps
                 .insert(self.model_input_link, model.get_tensor_store());
-            super_graph_data.tensors.extend(modal_inputs);
+            super_graph_data.tensors.extend(
+                modal_inputs.into_iter().map(|(k, v)| (k, SharedPoolTensor::from(v)))
+            );
             super_graph_data
                 .tensors
-                .insert(self.token_context_input_link, tokens_tensor);
+                .insert(self.token_context_input_link, SharedPoolTensor::from(tokens_tensor));
             super_graph_data.hashes.insert(self.cache_key_input_link, 0);
             super_graph_data
         };
@@ -236,7 +239,6 @@ impl MultimodalLanguageInterface {
             };
             let mut context = SuperGraphContext {
                 observer: &mut observer,
-                eval_backend: backend,
                 super_graph_tensor_cache: &mut super_graph_tensor_cache,
                 caches: super_graph_caches,
                 symbolic_graphs: vec![model.get_symbolic_graph()],
@@ -253,6 +255,7 @@ impl MultimodalLanguageInterface {
             .tensors
             .get(&self.logit_output_link)
             .unwrap();
+        let logits = logits.to_legacy();
         let logits_shape = logits.shape();
         let logits = logits.slice(
             &[logits_shape[0] - 1..logits_shape[0], 0..logits_shape[1]],
@@ -529,15 +532,15 @@ impl ImageGenerationInterface {
                 .insert(negative_link, negative_prompt.unwrap_or_default());
         }
         data.tensors
-            .insert(self.initial_latent_input, latent_tensor);
-        data.tensors.insert(self.timesteps_input, timesteps_tensor);
-        data.tensors.insert(self.dt_input, dt_tensor);
-        data.tensors.insert(self.sigmas_input, sigmas_tensor);
-        data.tensors.insert(self.iteration_count_input, iter_count);
+            .insert(self.initial_latent_input, SharedPoolTensor::from(latent_tensor));
+        data.tensors.insert(self.timesteps_input, SharedPoolTensor::from(timesteps_tensor));
+        data.tensors.insert(self.dt_input, SharedPoolTensor::from(dt_tensor));
+        data.tensors.insert(self.sigmas_input, SharedPoolTensor::from(sigmas_tensor));
+        data.tensors.insert(self.iteration_count_input, SharedPoolTensor::from(iter_count));
         if let Some(gs_link) = self.guidance_scale_input {
             let guidance =
                 NumericTensor::<DynRank>::from_vec_shape(vec![guidance_scale], vec![]).unwrap();
-            data.tensors.insert(gs_link, guidance);
+            data.tensors.insert(gs_link, SharedPoolTensor::from(guidance));
         }
         for (weight_link, model) in self.model_weights.iter().zip(models.iter()) {
             data.tensor_maps
@@ -550,7 +553,6 @@ impl ImageGenerationInterface {
         let symbolic_graphs: Vec<_> = models.iter().map(|m| m.get_symbolic_graph()).collect();
         let mut context = SuperGraphContext {
             observer: &mut observer,
-            eval_backend: backend,
             super_graph_tensor_cache: &mut tensor_cache,
             caches: None,
             symbolic_graphs,

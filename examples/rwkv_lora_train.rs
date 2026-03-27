@@ -49,7 +49,7 @@ use whisper_tensor::super_graph::nodes::{
 use whisper_tensor::super_graph::{
     SuperGraphAnyLink, SuperGraphBuilder, SuperGraphContext, SuperGraphLink, SuperGraphLinkKind,
 };
-use whisper_tensor::symbolic_graph::{SymbolicGraphMutator, TensorType};
+use whisper_tensor::symbolic_graph::{SharedPoolTensor, SymbolicGraphMutator, TensorType};
 use whisper_tensor::tensor_rank::DynRank;
 use whisper_tensor::tokenizer::{AnyTokenizer, Tokenizer};
 
@@ -579,18 +579,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         sg_data
             .tensors
-            .insert(iter_count_link, iter_count_tensor.clone());
+            .insert(iter_count_link, SharedPoolTensor::from(iter_count_tensor.clone()));
         sg_data
             .tensors
-            .insert(outer_tokens_link, batched_tokens.clone());
+            .insert(outer_tokens_link, SharedPoolTensor::from(batched_tokens.clone()));
         sg_data
             .tensors
-            .insert(outer_targets_link, batched_targets.clone());
+            .insert(outer_targets_link, SharedPoolTensor::from(batched_targets.clone()));
 
         // Constants (simple inputs)
         for &(outer_link, inner_id) in &constant_simple_inputs {
             if let Some(t) = base_constants.get(&inner_id) {
-                sg_data.tensors.insert(outer_link, t.clone());
+                sg_data.tensors.insert(outer_link, SharedPoolTensor::from(t.clone()));
             }
         }
 
@@ -598,24 +598,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         for &(ext_param, outer_init, _) in &outer_param_links {
             sg_data
                 .tensors
-                .insert(outer_init, current_params[&ext_param].clone());
+                .insert(outer_init, SharedPoolTensor::from(current_params[&ext_param].clone()));
         }
 
         // RNN state (state init)
         for &(si, _, outer_init, _) in &outer_rnn_links {
             sg_data
                 .tensors
-                .insert(outer_init, current_state[&si].clone());
+                .insert(outer_init, SharedPoolTensor::from(current_state[&si].clone()));
         }
 
         let mut tensor_cache = SuperGraphTensorCache::new();
         let mut observer = ();
-        let mut context = SuperGraphContext::new(&mut backend, &mut observer, &mut tensor_cache);
+        let mut context = SuperGraphContext::new(&mut observer, &mut tensor_cache);
 
         let results = epoch_graph.run(sg_data, &mut context)?;
 
         // Extract results
-        let losses: Vec<f32> = results.tensors[&collected_losses_link]
+        let losses_legacy = results.tensors[&collected_losses_link].to_legacy();
+        let losses: Vec<f32> = losses_legacy
             .flatten()?
             .try_into()?;
         let avg_loss = losses.iter().map(|&v| v as f64).sum::<f64>() / losses.len() as f64;
@@ -630,12 +631,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Update params
         for &(ext_param, _, outer_final) in &outer_param_links {
-            current_params.insert(ext_param, results.tensors[&outer_final].clone());
+            current_params.insert(ext_param, results.tensors[&outer_final].to_legacy());
         }
 
         // Update state for next epoch (or reset to zeros)
         for &(si, _, _, outer_final) in &outer_rnn_links {
-            current_state.insert(si, results.tensors[&outer_final].clone());
+            current_state.insert(si, results.tensors[&outer_final].to_legacy());
         }
     }
 

@@ -10,6 +10,7 @@ use whisper_tensor::interfaces::AnyInterface;
 use whisper_tensor::loader::{ConfigValue, ConfigValues, Loader, LoaderOutput};
 use whisper_tensor::migration::numeric_tensor::NumericTensor;
 use whisper_tensor::super_graph::cache::SuperGraphCache;
+use whisper_tensor::symbolic_graph::SharedPoolTensor;
 use whisper_tensor::tensor_rank::DynRank;
 use whisper_tensor::tokenizer::Tokenizer;
 
@@ -487,7 +488,7 @@ fn cmd_image(
 
     eprintln!("Generated in {:.2?}", start.elapsed());
 
-    save_image_tensor(&image_tensor, &output_path, &mut backend);
+    save_image_tensor(&image_tensor.to_legacy(), &output_path, &mut backend);
     eprintln!("Saved to {}", output_path.display());
 }
 
@@ -590,8 +591,8 @@ fn cmd_tts(output: LoaderOutput, opts: TtsRunOptions) {
             let speed_tensor =
                 NumericTensor::<DynRank>::from_vec_shape(vec![speed], vec![1]).unwrap();
 
-            data.tensors.insert(*style_link, style_tensor);
-            data.tensors.insert(*speed_link, speed_tensor);
+            data.tensors.insert(*style_link, SharedPoolTensor::from(style_tensor));
+            data.tensors.insert(*speed_link, SharedPoolTensor::from(speed_tensor));
         }
         TTSInputConfig::Piper {
             scales_link,
@@ -605,11 +606,11 @@ fn cmd_tts(output: LoaderOutput, opts: TtsRunOptions) {
             )
             .unwrap();
 
-            data.tensors.insert(*scales_link, scales_tensor);
+            data.tensors.insert(*scales_link, SharedPoolTensor::from(scales_tensor));
             if let Some(sid_link) = speaker_id_link {
                 data.tensors.insert(
                     *sid_link,
-                    NumericTensor::<DynRank>::from_vec_shape(vec![0i64], vec![1]).unwrap(),
+                    SharedPoolTensor::from(NumericTensor::<DynRank>::from_vec_shape(vec![0i64], vec![1]).unwrap()),
                 );
             }
         }
@@ -680,11 +681,11 @@ fn cmd_tts(output: LoaderOutput, opts: TtsRunOptions) {
             let iteration_count_tensor =
                 NumericTensor::<DynRank>::from_vec_shape(vec![iterations as i64], vec![]).unwrap();
 
-            data.tensors.insert(*ref_audio_link, ref_audio_tensor);
-            data.tensors.insert(*max_duration_link, max_duration_tensor);
-            data.tensors.insert(*time_steps_link, time_steps_tensor);
+            data.tensors.insert(*ref_audio_link, SharedPoolTensor::from(ref_audio_tensor));
+            data.tensors.insert(*max_duration_link, SharedPoolTensor::from(max_duration_tensor));
+            data.tensors.insert(*time_steps_link, SharedPoolTensor::from(time_steps_tensor));
             data.tensors
-                .insert(*iteration_count_link, iteration_count_tensor);
+                .insert(*iteration_count_link, SharedPoolTensor::from(iteration_count_tensor));
         }
     }
 
@@ -703,7 +704,6 @@ fn cmd_tts(output: LoaderOutput, opts: TtsRunOptions) {
         let mut super_graph_tensor_cache = SuperGraphTensorCache::new();
         let mut context = SuperGraphContext {
             observer: &mut observer,
-            eval_backend: &mut backend,
             super_graph_tensor_cache: &mut super_graph_tensor_cache,
             caches: None,
             symbolic_graphs,
@@ -726,7 +726,7 @@ fn cmd_tts(output: LoaderOutput, opts: TtsRunOptions) {
 
     eprintln!("Generated in {:.2?}", start.elapsed());
 
-    let samples = audio_tensor_to_samples(&audio.samples, &mut backend);
+    let samples = audio_tensor_to_samples(&audio.samples.to_legacy(), &mut backend);
     save_wav(&samples, audio.sample_rate_hz, &output_path);
     eprintln!(
         "Saved {:.1}s of audio to {}",
@@ -838,7 +838,7 @@ fn cmd_stt(output: LoaderOutput, audio_path: PathBuf, _model_dir: Option<PathBuf
         let mut data = SuperGraphData::new();
         data.audio_clips.insert(
             interface.audio_input_link,
-            SuperGraphAudioClip::new(audio_tensor, interface.sample_rate),
+            SuperGraphAudioClip::new(SharedPoolTensor::from(audio_tensor), interface.sample_rate),
         );
         data.tensor_maps.insert(
             interface.encoder_weights_link,
@@ -856,7 +856,6 @@ fn cmd_stt(output: LoaderOutput, audio_path: PathBuf, _model_dir: Option<PathBuf
         let mut tensor_cache = SuperGraphTensorCache::new();
         let mut context = SuperGraphContext {
             observer: &mut observer,
-            eval_backend: &mut backend,
             super_graph_tensor_cache: &mut tensor_cache,
             caches: None,
             symbolic_graphs,
@@ -876,7 +875,7 @@ fn cmd_stt(output: LoaderOutput, audio_path: PathBuf, _model_dir: Option<PathBuf
         .tensors
         .get(&interface.output_token_link)
         .expect("No STT output token tensor");
-    let token_nd = token_tensor.to_ndarray().expect("to_ndarray failed");
+    let token_nd = token_tensor.to_legacy().to_ndarray().expect("to_ndarray failed");
     let mut token_ids: Vec<u32> = token_nd.flatten().try_into().expect("flatten failed");
     if let Some(pos) = token_ids.iter().position(|&t| t == interface.eos_token_id) {
         token_ids.truncate(pos);

@@ -136,7 +136,6 @@ fn main() {
             super_graph_data,
             &mut SuperGraphContext {
                 observer: &mut (),
-                eval_backend: &mut EvalBackend::NDArray,
                 caches: None,
                 super_graph_tensor_cache: &mut SuperGraphTensorCache::new(),
                 symbolic_graphs: vec![model.get_symbolic_graph()],

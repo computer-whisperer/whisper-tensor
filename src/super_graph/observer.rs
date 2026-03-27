@@ -1,7 +1,6 @@
 use crate::DynRank;
-use crate::backends::eval_backend::EvalBackend;
 use crate::graph::GlobalId;
-use crate::migration::numeric_tensor::NumericTensor;
+use crate::symbolic_graph::SharedPoolTensor;
 use std::time::Instant;
 
 pub trait SuperGraphObserver {
@@ -11,13 +10,11 @@ pub trait SuperGraphObserver {
         op_kind: &str,
         start_instant: Instant,
         end_instant: Instant,
-        backend: &mut EvalBackend,
     );
     fn on_tensor_assigned(
         &mut self,
         path: &[GlobalId],
-        tensor: &NumericTensor<DynRank>,
-        backend: &mut EvalBackend,
+        tensor: &SharedPoolTensor,
     );
     fn on_loading_weight(&mut self, path: &[GlobalId], weight_name: Option<String>);
     fn on_progress(&mut self, path: &[GlobalId], tier: i64, numerator: f64, denominator: f64);
@@ -33,14 +30,12 @@ impl SuperGraphObserver for () {
         _op_kind: &str,
         _start_instant: Instant,
         _end_instant: Instant,
-        _backend: &mut EvalBackend,
     ) {
     }
     fn on_tensor_assigned(
         &mut self,
         _path: &[GlobalId],
-        _tensor: &NumericTensor<DynRank>,
-        _backend: &mut EvalBackend,
+        _tensor: &SharedPoolTensor,
     ) {
     }
     fn on_loading_weight(&mut self, _path: &[GlobalId], _weight_name: Option<String>) {}

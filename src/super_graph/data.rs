@@ -1,5 +1,4 @@
-use crate::DynRank;
-use crate::migration::numeric_tensor::NumericTensor;
+use crate::symbolic_graph::SharedPoolTensor;
 use crate::super_graph::links::{
     SuperGraphAnyLink, SuperGraphAtomicLinkKind, SuperGraphLink, SuperGraphLinkDouble,
     SuperGraphLinkKind,
@@ -11,29 +10,29 @@ use std::collections::HashMap;
 
 #[derive(Clone, Debug)]
 pub struct SuperGraphImage {
-    pub tensor: NumericTensor<DynRank>,
+    pub tensor: SharedPoolTensor,
 }
 
 impl SuperGraphImage {
-    pub fn new(tensor: NumericTensor<DynRank>) -> Self {
+    pub fn new(tensor: SharedPoolTensor) -> Self {
         Self { tensor }
     }
 }
 
-impl From<NumericTensor<DynRank>> for SuperGraphImage {
-    fn from(value: NumericTensor<DynRank>) -> Self {
+impl From<SharedPoolTensor> for SuperGraphImage {
+    fn from(value: SharedPoolTensor) -> Self {
         Self::new(value)
     }
 }
 
 #[derive(Clone, Debug)]
 pub struct SuperGraphAudioClip {
-    pub samples: NumericTensor<DynRank>,
+    pub samples: SharedPoolTensor,
     pub sample_rate_hz: u32,
 }
 
 impl SuperGraphAudioClip {
-    pub fn new(samples: NumericTensor<DynRank>, sample_rate_hz: u32) -> Self {
+    pub fn new(samples: SharedPoolTensor, sample_rate_hz: u32) -> Self {
         Self {
             samples,
             sample_rate_hz,
@@ -43,12 +42,12 @@ impl SuperGraphAudioClip {
 
 #[derive(Clone, Debug)]
 pub struct SuperGraphVideoClip {
-    pub frames: NumericTensor<DynRank>,
+    pub frames: SharedPoolTensor,
     pub fps: f32,
 }
 
 impl SuperGraphVideoClip {
-    pub fn new(frames: NumericTensor<DynRank>, fps: f32) -> Self {
+    pub fn new(frames: SharedPoolTensor, fps: f32) -> Self {
         Self { frames, fps }
     }
 }
@@ -63,7 +62,7 @@ pub enum SuperGraphMultimodalItem {
 
 #[derive(Clone)]
 pub enum SuperGraphListValue<'models> {
-    Tensor(Vec<NumericTensor<DynRank>>),
+    Tensor(Vec<SharedPoolTensor>),
     String(Vec<String>),
     Tokenizer(Vec<AnyTokenizer>),
     TensorMap(Vec<&'models TensorStore>),
@@ -92,7 +91,7 @@ impl<'models> SuperGraphListValue<'models> {
 
 #[derive(Clone, Default)]
 pub struct SuperGraphData<'models> {
-    pub tensors: HashMap<SuperGraphLink, NumericTensor<DynRank>>,
+    pub tensors: HashMap<SuperGraphLink, SharedPoolTensor>,
     pub strings: HashMap<SuperGraphLink, String>,
     pub tokenizers: HashMap<SuperGraphLink, AnyTokenizer>,
     pub tensor_maps: HashMap<SuperGraphLink, &'models TensorStore>,

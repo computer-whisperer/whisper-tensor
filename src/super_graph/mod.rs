@@ -4,7 +4,7 @@ pub mod links;
 pub mod nodes;
 pub mod observer;
 
-use crate::backends::eval_backend::{EvalBackend, EvalRuntimeError};
+use crate::backends::eval_backend::EvalRuntimeError;
 use crate::compiler::{CompiledProgram, CompilerError};
 use crate::graph::{GlobalId, Graph, Link, collect_disconnected_node_slots};
 use crate::milli_graph::MilliOpGraphError;
@@ -56,9 +56,8 @@ pub enum SuperGraphError {
 
 pub type SuperGraphHash = u64;
 
-pub struct SuperGraphContext<'short, 'model, 'c, 'd, T: SuperGraphObserver> {
+pub struct SuperGraphContext<'short, 'model, T: SuperGraphObserver> {
     pub observer: &'short mut T,
-    pub eval_backend: &'c mut EvalBackend<'d>,
     pub caches: Option<&'short mut SuperGraphCache>,
     pub super_graph_tensor_cache: &'short mut SuperGraphTensorCache<'model>,
     pub use_compiled_models: bool,
@@ -66,17 +65,15 @@ pub struct SuperGraphContext<'short, 'model, 'c, 'd, T: SuperGraphObserver> {
     pub compiled_models: Option<Vec<(&'model Model, &'short CompiledProgram)>>,
 }
 
-impl<'short, 'model, 'c, 'd, T: SuperGraphObserver> SuperGraphContext<'short, 'model, 'c, 'd, T> {
+impl<'short, 'model, T: SuperGraphObserver> SuperGraphContext<'short, 'model, T> {
     /// Construct a context with only the required fields; caches, compiled
     /// models, and symbolic graphs default to empty/None.
     pub fn new(
-        eval_backend: &'c mut EvalBackend<'d>,
         observer: &'short mut T,
         tensor_cache: &'short mut SuperGraphTensorCache<'model>,
     ) -> Self {
         Self {
             observer,
-            eval_backend,
             caches: None,
             super_graph_tensor_cache: tensor_cache,
             use_compiled_models: false,
@@ -96,19 +93,19 @@ pub struct SuperGraph {
 }
 
 impl SuperGraph {
-    pub fn run<'short, 'model, 'c, 'd, T: SuperGraphObserver>(
+    pub fn run<'short, 'model, T: SuperGraphObserver>(
         &'short self,
         data: SuperGraphData<'model>,
-        context: &mut SuperGraphContext<'short, 'model, 'c, 'd, T>,
+        context: &mut SuperGraphContext<'short, 'model, T>,
     ) -> Result<SuperGraphData<'model>, SuperGraphError> {
         self.eval(&[], data, context)
     }
 
-    pub fn eval<'a, 'b, 'c, 'd, T: SuperGraphObserver>(
+    pub fn eval<'a, 'b, T: SuperGraphObserver>(
         &'a self,
         node_path: &[GlobalId],
         data: SuperGraphData<'b>,
-        context: &mut SuperGraphContext<'a, 'b, 'c, 'd, T>,
+        context: &mut SuperGraphContext<'a, 'b, T>,
     ) -> Result<SuperGraphData<'b>, SuperGraphError> {
         if let Some(first_issue) = self.validate_structure().into_iter().next() {
             return Err(SuperGraphError::InvalidGraph(first_issue));
@@ -159,7 +156,6 @@ impl SuperGraph {
                     &op.op_kind(),
                     start_instant,
                     end_instant,
-                    context.eval_backend,
                 );
                 remaining_ops.retain(|x| *x != op_id);
             } else {
@@ -404,7 +400,6 @@ impl Graph for SuperGraph {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backends::eval_backend::EvalBackend;
     use crate::super_graph::cache::SuperGraphTensorCache;
     use crate::super_graph::data::SuperGraphData;
 
@@ -437,10 +432,9 @@ mod tests {
         let dangling_output = SuperGraphLink::new(SuperGraphLinkKind::Tensor, &mut rng).to_any();
         graph.output_links.insert(dangling_output);
 
-        let mut backend = EvalBackend::NDArray;
         let mut observer = ();
         let mut tensor_cache = SuperGraphTensorCache::new();
-        let mut context = SuperGraphContext::new(&mut backend, &mut observer, &mut tensor_cache);
+        let mut context = SuperGraphContext::new(&mut observer, &mut tensor_cache);
 
         let result = graph.eval(&[], SuperGraphData::new(), &mut context);
         assert!(matches!(result, Err(SuperGraphError::InvalidGraph(_))));

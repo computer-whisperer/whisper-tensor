@@ -79,19 +79,20 @@ fn main() {
         .expect("Interface run failed")
         .tensor;
 
+    let image_legacy = image_tensor.to_legacy();
     println!(
         "  Output: dtype={:?}, shape={:?}, took {:.2?}",
-        image_tensor.dtype(),
-        image_tensor.shape(),
+        image_legacy.dtype(),
+        image_legacy.shape(),
         start.elapsed(),
     );
 
-    let f32_tensor = image_tensor
+    let f32_tensor = image_legacy
         .cast(whisper_tensor::dtype::DType::F32, &mut backend)
         .expect("cast failed");
     let ndarray = f32_tensor.to_ndarray().expect("to_ndarray failed");
     let flat: Vec<f32> = ndarray.flatten().try_into().expect("flatten failed");
-    let nan_count = flat.iter().filter(|v| v.is_nan()).count();
+    let nan_count = flat.iter().filter(|v: &&f32| v.is_nan()).count();
     let min_val = flat.iter().cloned().fold(f32::INFINITY, f32::min);
     let max_val = flat.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
     println!("  Image: min={min_val:.4}, max={max_val:.4}, nan={nan_count}");
