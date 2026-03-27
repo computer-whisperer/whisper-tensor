@@ -1192,33 +1192,23 @@ impl SymbolicGraph {
         Ok(combined)
     }
 
-    /// Execute this symbolic graph through the pool-based pipeline.
+    /// Execute this symbolic graph through the pool-based op-by-op pipeline.
     ///
-    /// Flow: generate_milli_graph → load weights → pool_eval.
-    /// Uses only new types — no EvalBackend, no legacy NumericTensor.
-    ///
-    /// `user_inputs` are keyed by tensor GlobalId (the symbolic graph's tensor IDs).
-    /// Initialized tensors (weights/constants) are loaded from `tensor_store`
-    /// and combined with user inputs automatically.
-    pub fn pool_eval<'p, P: crate::pool::Pool + 'p>(
+    /// Loads initialized tensors (weights/constants) from `tensor_store`,
+    /// combines with `user_inputs`, then runs `eval_pool` (op-by-op interpreter).
+    pub fn pool_eval_with_store<'p, P: crate::pool::Pool + 'p>(
         &self,
         user_inputs: &HashMap<GlobalId, &crate::numeric_tensor::NumericTensorView<'_, DynRank>>,
         tensor_store: &TensorStore,
         pool: &'p P,
-        rng: &mut impl Rng,
     ) -> Result<
         HashMap<GlobalId, crate::numeric_tensor::NumericTensor<'p, DynRank, P>>,
-        crate::milli_graph::MilliOpGraphError,
+        EvalError,
     > {
         use crate::numeric_tensor::TensorLayout;
         use crate::pool::{Pool, SystemPool};
-        use crate::tensor_info::TensorInfo;
-
-        // Generate the combined milli graph.
-        let milli_graph = self.generate_milli_graph(rng);
 
         // Load initialized tensors (weights/constants) into pool tensors.
-        // Uses StoredTensor::to_pool_tensor for stored tensors, bridges for inline ones.
         static POOL_S: SystemPool = SystemPool;
         let bridged_tensors: Vec<(GlobalId, crate::numeric_tensor::NumericTensor<'_, DynRank, SystemPool>)> = {
             let mut out = Vec::new();
@@ -1237,11 +1227,8 @@ impl SymbolicGraph {
                             }
                         }
                         StoredOrNotTensor::Inline(shared) => {
-                            // Copy from shared tensor into pool.
                             let src = &*shared.0;
-                            let ndt = src.dtype();
-                            let shape = src.shape().clone();
-                            let layout = TensorLayout::<DynRank>::row_major(shape, ndt);
+                            let layout = TensorLayout::<DynRank>::row_major(src.shape().clone(), src.dtype());
                             if let Ok(buf) = POOL_S.allocate(layout.buffer_size_bytes()) {
                                 let mut tensor = crate::numeric_tensor::NumericTensor::from_parts(buf, layout);
                                 for i in 0..src.numel() {
@@ -1251,20 +1238,16 @@ impl SymbolicGraph {
                             }
                         }
                         StoredOrNotTensor::NotStored(nd_tensor) => {
-                            // Legacy fallback — bridge via TensorInfo.
                             let legacy = NumericTensor::NDArray(nd_tensor.clone());
-                            let info = TensorInfo::from_legacy(&legacy, &POOL_S);
-                            if let Some(concrete) = info.as_concrete() {
-                                let ndt = concrete.dtype();
-                                let shape = concrete.shape().clone();
-                                let layout = TensorLayout::<DynRank>::row_major(shape, ndt);
-                                if let Ok(buf) = POOL_S.allocate(layout.buffer_size_bytes()) {
-                                    let mut tensor = crate::numeric_tensor::NumericTensor::from_parts(buf, layout);
-                                    for i in 0..concrete.numel() {
-                                        tensor.write_element(i, concrete.read_element(i));
-                                    }
-                                    out.push((tensor_id, tensor));
+                            let shared = SharedPoolTensor::from_legacy(&legacy);
+                            let src = &*shared.0;
+                            let layout = TensorLayout::<DynRank>::row_major(src.shape().clone(), src.dtype());
+                            if let Ok(buf) = POOL_S.allocate(layout.buffer_size_bytes()) {
+                                let mut tensor = crate::numeric_tensor::NumericTensor::from_parts(buf, layout);
+                                for i in 0..src.numel() {
+                                    tensor.write_element(i, src.read_element(i));
                                 }
+                                out.push((tensor_id, tensor));
                             }
                         }
                     }
@@ -1288,7 +1271,7 @@ impl SymbolicGraph {
             input_map.insert(id, view);
         }
 
-        milli_graph.pool_eval(&input_map, pool)
+        self.eval_pool(&input_map, pool)
     }
 
     fn eval(

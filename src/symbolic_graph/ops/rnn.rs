@@ -326,6 +326,14 @@ impl Operation for SimpleRnnOperation {
         Ok(Box::new(result.into_iter()))
     }
 
+    fn eval_pool<'p, P: crate::pool::Pool + 'p>(
+        &self,
+        inputs: &HashMap<GlobalId, &crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>>,
+        pool: &'p P,
+    ) -> Result<HashMap<GlobalId, crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P>>, super::EvalError> {
+        super::eval_pool_via_legacy(self, inputs, pool)
+    }
+
     fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, _rng: &mut impl Rng) -> MilliOpGraph {
         panic!("SimpleRNN uses custom eval, not milli-op decomposition")
     }
@@ -666,6 +674,14 @@ impl Operation for GruOperation {
         }
 
         Ok(Box::new(result.into_iter()))
+    }
+
+    fn eval_pool<'p, P: crate::pool::Pool + 'p>(
+        &self,
+        inputs: &HashMap<GlobalId, &crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>>,
+        pool: &'p P,
+    ) -> Result<HashMap<GlobalId, crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P>>, super::EvalError> {
+        super::eval_pool_via_legacy(self, inputs, pool)
     }
 
     fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, _rng: &mut impl Rng) -> MilliOpGraph {

@@ -512,6 +512,121 @@ impl Operation for AnyOperation {
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>
     ) -> Result<Box<dyn Iterator<Item=(GlobalId, NumericTensor<DynRank>)>>, EvalError>);
 
+    fn eval_pool<'p, P: crate::pool::Pool + 'p>(
+        &self,
+        inputs: &HashMap<GlobalId, &crate::numeric_tensor::NumericTensorView<'_, DynRank>>,
+        pool: &'p P,
+    ) -> Result<HashMap<GlobalId, crate::numeric_tensor::NumericTensor<'p, DynRank, P>>, EvalError> {
+        match self {
+            AnyOperation::Unary(x) => x.eval_pool(inputs, pool),
+            AnyOperation::Binary(x) => x.eval_pool(inputs, pool),
+            AnyOperation::Cast(x) => x.eval_pool(inputs, pool),
+            AnyOperation::CastLike(x) => x.eval_pool(inputs, pool),
+            AnyOperation::Squeeze(x) => x.eval_pool(inputs, pool),
+            AnyOperation::Unsqueeze(x) => x.eval_pool(inputs, pool),
+            AnyOperation::Transpose(x) => x.eval_pool(inputs, pool),
+            AnyOperation::Reshape(x) => x.eval_pool(inputs, pool),
+            AnyOperation::CumSum(x) => x.eval_pool(inputs, pool),
+            AnyOperation::Gather(x) => x.eval_pool(inputs, pool),
+            AnyOperation::LpNormalization(x) => x.eval_pool(inputs, pool),
+            AnyOperation::GroupNormalization(x) => x.eval_pool(inputs, pool),
+            AnyOperation::LayerNormalization(x) => x.eval_pool(inputs, pool),
+            AnyOperation::RMSNormalization(x) => x.eval_pool(inputs, pool),
+            AnyOperation::Shape(x) => x.eval_pool(inputs, pool),
+            AnyOperation::Concat(x) => x.eval_pool(inputs, pool),
+            AnyOperation::ConstantOfShape(x) => x.eval_pool(inputs, pool),
+            AnyOperation::ReduceMean(x) => x.eval_pool(inputs, pool),
+            AnyOperation::ReduceSum(x) => x.eval_pool(inputs, pool),
+            AnyOperation::ReduceProd(x) => x.eval_pool(inputs, pool),
+            AnyOperation::ReduceMax(x) => x.eval_pool(inputs, pool),
+            AnyOperation::ReduceMin(x) => x.eval_pool(inputs, pool),
+            AnyOperation::Pow(x) => x.eval_pool(inputs, pool),
+            AnyOperation::Gemm(x) => x.eval_pool(inputs, pool),
+            AnyOperation::Split(x) => x.eval_pool(inputs, pool),
+            AnyOperation::Slice(x) => x.eval_pool(inputs, pool),
+            AnyOperation::Where(x) => x.eval_pool(inputs, pool),
+            AnyOperation::Softmax(x) => x.eval_pool(inputs, pool),
+            AnyOperation::LogSoftmax(x) => x.eval_pool(inputs, pool),
+            AnyOperation::Size(x) => x.eval_pool(inputs, pool),
+            AnyOperation::Range(x) => x.eval_pool(inputs, pool),
+            AnyOperation::Flatten(x) => x.eval_pool(inputs, pool),
+            AnyOperation::Constant(x) => x.eval_pool(inputs, pool),
+            AnyOperation::Identity(x) => x.eval_pool(inputs, pool),
+            AnyOperation::IsInf(x) => x.eval_pool(inputs, pool),
+            AnyOperation::Clip(x) => x.eval_pool(inputs, pool),
+            AnyOperation::Modulo(x) => x.eval_pool(inputs, pool),
+            AnyOperation::Expand(x) => x.eval_pool(inputs, pool),
+            AnyOperation::Conv(x) => x.eval_pool(inputs, pool),
+            AnyOperation::AveragePool(x) => x.eval_pool(inputs, pool),
+            AnyOperation::MaxPool(x) => x.eval_pool(inputs, pool),
+            AnyOperation::InstanceNormalization(x) => x.eval_pool(inputs, pool),
+            AnyOperation::Resize(x) => x.eval_pool(inputs, pool),
+            AnyOperation::Pad(x) => x.eval_pool(inputs, pool),
+            AnyOperation::RandomNormalLike(x) => x.eval_pool(inputs, pool),
+            AnyOperation::ArgMax(x) => x.eval_pool(inputs, pool),
+            AnyOperation::ArgMin(x) => x.eval_pool(inputs, pool),
+            AnyOperation::Max(x) => x.eval_pool(inputs, pool),
+            AnyOperation::Min(x) => x.eval_pool(inputs, pool),
+            AnyOperation::If(x) => x.eval_pool(inputs, pool),
+            AnyOperation::Scan(x) => x.eval_pool(inputs, pool),
+            AnyOperation::RotaryEmbedding(x) => x.eval_pool(inputs, pool),
+            AnyOperation::QuantMatMul(x) => x.eval_pool(inputs, pool),
+            AnyOperation::LeakyRelu(x) => x.eval_pool(inputs, pool),
+            AnyOperation::Lstm(x) => x.eval_pool(inputs, pool),
+            AnyOperation::ConvTranspose(x) => x.eval_pool(inputs, pool),
+            AnyOperation::Stft(x) => x.eval_pool(inputs, pool),
+            AnyOperation::ScatterND(x) => x.eval_pool(inputs, pool),
+            AnyOperation::GatherElements(x) => x.eval_pool(inputs, pool),
+            AnyOperation::GatherND(x) => x.eval_pool(inputs, pool),
+            AnyOperation::Gelu(x) => x.eval_pool(inputs, pool),
+            AnyOperation::BiasGelu(x) => x.eval_pool(inputs, pool),
+            AnyOperation::ReduceL2(x) => x.eval_pool(inputs, pool),
+            AnyOperation::ReduceL1(x) => x.eval_pool(inputs, pool),
+            AnyOperation::ReduceSumSquare(x) => x.eval_pool(inputs, pool),
+            AnyOperation::ReduceLogSum(x) => x.eval_pool(inputs, pool),
+            AnyOperation::ReduceLogSumExp(x) => x.eval_pool(inputs, pool),
+            AnyOperation::TopK(x) => x.eval_pool(inputs, pool),
+            AnyOperation::Elu(x) => x.eval_pool(inputs, pool),
+            AnyOperation::Selu(x) => x.eval_pool(inputs, pool),
+            AnyOperation::Celu(x) => x.eval_pool(inputs, pool),
+            AnyOperation::HardSigmoid(x) => x.eval_pool(inputs, pool),
+            AnyOperation::HardSwish(x) => x.eval_pool(inputs, pool),
+            AnyOperation::Mish(x) => x.eval_pool(inputs, pool),
+            AnyOperation::Softsign(x) => x.eval_pool(inputs, pool),
+            AnyOperation::ThresholdedRelu(x) => x.eval_pool(inputs, pool),
+            AnyOperation::PRelu(x) => x.eval_pool(inputs, pool),
+            AnyOperation::BatchNormalization(x) => x.eval_pool(inputs, pool),
+            AnyOperation::Tile(x) => x.eval_pool(inputs, pool),
+            AnyOperation::Dropout(x) => x.eval_pool(inputs, pool),
+            AnyOperation::GlobalAveragePool(x) => x.eval_pool(inputs, pool),
+            AnyOperation::GlobalMaxPool(x) => x.eval_pool(inputs, pool),
+            AnyOperation::MeanOp(x) => x.eval_pool(inputs, pool),
+            AnyOperation::SumOp(x) => x.eval_pool(inputs, pool),
+            AnyOperation::SpaceToDepth(x) => x.eval_pool(inputs, pool),
+            AnyOperation::DepthToSpace(x) => x.eval_pool(inputs, pool),
+            AnyOperation::Trilu(x) => x.eval_pool(inputs, pool),
+            AnyOperation::BitShift(x) => x.eval_pool(inputs, pool),
+            AnyOperation::EyeLike(x) => x.eval_pool(inputs, pool),
+            AnyOperation::Shrink(x) => x.eval_pool(inputs, pool),
+            AnyOperation::Hardmax(x) => x.eval_pool(inputs, pool),
+            AnyOperation::Compress(x) => x.eval_pool(inputs, pool),
+            AnyOperation::ScatterElements(x) => x.eval_pool(inputs, pool),
+            AnyOperation::MeanVarianceNormalization(x) => x.eval_pool(inputs, pool),
+            AnyOperation::ReverseSequence(x) => x.eval_pool(inputs, pool),
+            AnyOperation::NegativeLogLikelihoodLoss(x) => x.eval_pool(inputs, pool),
+            AnyOperation::Einsum(x) => x.eval_pool(inputs, pool),
+            AnyOperation::SoftmaxCrossEntropyLoss(x) => x.eval_pool(inputs, pool),
+            AnyOperation::OneHot(x) => x.eval_pool(inputs, pool),
+            AnyOperation::LpPool(x) => x.eval_pool(inputs, pool),
+            AnyOperation::Lrn(x) => x.eval_pool(inputs, pool),
+            AnyOperation::SimpleRnn(x) => x.eval_pool(inputs, pool),
+            AnyOperation::Gru(x) => x.eval_pool(inputs, pool),
+            AnyOperation::Window(x) => x.eval_pool(inputs, pool),
+            AnyOperation::MatMulInteger(x) => x.eval_pool(inputs, pool),
+            AnyOperation::MelWeightMatrix(x) => x.eval_pool(inputs, pool),
+        }
+    }
+
     delegate!(get_milli_op_graph(ctx: &MilliLoweringContext, rng: &mut impl Rng) -> MilliOpGraph);
 
     delegate!(parameters() -> Vec<Property>);
@@ -568,4 +683,54 @@ fn remap_u64s_in_json(value: &mut serde_json::Value, map: &HashMap<u64, u64>) {
         }
         _ => {}
     }
+}
+
+/// Bridge: run a legacy Operation::eval through pool types.
+///
+/// Converts pool tensor views → legacy NumericTensor, calls op.eval(),
+/// converts results back → pool tensors. Temporary compatibility shim
+/// for ops that haven't been ported to pool-native eval_pool yet.
+/// Bridge: run a legacy Operation::eval through pool types.
+///
+/// Converts pool tensor views → legacy NumericTensor, calls op.eval(),
+/// converts results back → pool tensors. Temporary compatibility shim
+/// for ops that haven't been ported to pool-native eval_pool yet.
+pub(crate) fn eval_pool_via_legacy<'p, O, P>(
+    op: &O,
+    inputs: &HashMap<GlobalId, &crate::numeric_tensor::NumericTensorView<'_, DynRank>>,
+    pool: &'p P,
+) -> Result<HashMap<GlobalId, crate::numeric_tensor::NumericTensor<'p, DynRank, P>>, EvalError>
+where
+    O: Operation,
+    P: crate::pool::Pool + 'p,
+{
+    use crate::migration::bridge;
+    use crate::numeric_tensor::TensorLayout;
+
+    // Convert pool views → legacy tensors.
+    let legacy_inputs: HashMap<GlobalId, NumericTensor<DynRank>> = inputs
+        .iter()
+        .map(|(&id, view)| (id, bridge::view_to_legacy(view)))
+        .collect();
+
+    // Run legacy eval.
+    let mut backend = EvalBackend::NDArray;
+    let legacy_outputs: HashMap<GlobalId, NumericTensor<DynRank>> =
+        op.eval(&mut backend, &legacy_inputs)?.collect();
+
+    // Convert legacy results → pool tensors.
+    let mut pool_outputs = HashMap::new();
+    for (id, legacy_tensor) in &legacy_outputs {
+        let new_tensor = bridge::legacy_to_new(legacy_tensor);
+        let view = new_tensor.view();
+        let layout = TensorLayout::<DynRank>::row_major(view.shape().to_vec(), view.dtype());
+        let buf = pool.allocate(layout.buffer_size_bytes())
+            .map_err(|e| EvalError::InvalidInput(format!("pool allocation: {e}")))?;
+        let mut out = crate::numeric_tensor::NumericTensor::from_parts(buf, layout);
+        for i in 0..view.numel() {
+            out.write_element(i, view.read_element(i));
+        }
+        pool_outputs.insert(*id, out);
+    }
+    Ok(pool_outputs)
 }

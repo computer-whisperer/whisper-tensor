@@ -50,6 +50,8 @@ pub enum SuperGraphError {
     InvalidGraph(String),
     #[error(transparent)]
     EvalRuntimeError(#[from] EvalRuntimeError),
+    #[error(transparent)]
+    SymbolicEvalError(#[from] crate::symbolic_graph::ops::EvalError),
     #[error("Execution cancelled")]
     Cancelled,
 }

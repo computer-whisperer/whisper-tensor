@@ -584,8 +584,7 @@ impl SuperGraphNode for SuperGraphNodeModelExecution {
             let view_map: HashMap<GlobalId, &crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>> =
                 views.iter().map(|(id, view)| (*id, view)).collect();
 
-            let mut rng = rand::rng();
-            let results = symbolic_graph.pool_eval(&view_map, tensor_store, &POOL, &mut rng)?;
+            let results = symbolic_graph.pool_eval_with_store(&view_map, tensor_store, &POOL)?;
 
             let tensors_by_id: HashMap<GlobalId, &str> = tensors_by_name
                 .iter()
