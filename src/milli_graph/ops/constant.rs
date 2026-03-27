@@ -8,26 +8,31 @@ use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
 use crate::migration::numeric_scalar::NumericScalar;
 use crate::migration::numeric_tensor::NumericTensor;
+use crate::numeric_scalar::NumericScalar as NewScalar;
+use crate::symbolic_graph::SharedPoolTensor;
 
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use typenum::P1;
 
+type PoolTensor = crate::numeric_tensor::NumericTensor<'static, DynRank, crate::pool::SystemPool>;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Constant {
     global_id: GlobalId,
     pub(crate) label: Option<String>,
     output: GlobalId,
-    data: NDArrayNumericTensor<DynRank>,
+    data: SharedPoolTensor,
 }
 
 impl Constant {
-    #[allow(dead_code)] // used by compiler (cranelift feature)
-    pub(crate) fn data(&self) -> &NDArrayNumericTensor<DynRank> {
-        &self.data
+    #[allow(dead_code)]
+    pub(crate) fn pool_data(&self) -> &PoolTensor {
+        &self.data.0
     }
 
+    /// Push a constant from a legacy NDArrayNumericTensor (bridges internally).
     pub fn push_new(
         graph: &mut MilliOpGraph,
         a: NDArrayNumericTensor<DynRank>,
@@ -42,11 +47,24 @@ impl Constant {
         label: Option<String>,
         rng: &mut impl Rng,
     ) -> GlobalId {
+        // Bridge legacy → pool tensor.
+        let pool_tensor = crate::symbolic_graph::tensor_proto_to_pool_tensor_from_ndarray(&a)
+            .expect("bridge constant to pool tensor");
+        Self::push_new_pool(graph, SharedPoolTensor(std::sync::Arc::new(pool_tensor)), label, rng)
+    }
+
+    /// Push a constant from a pool tensor directly.
+    pub fn push_new_pool(
+        graph: &mut MilliOpGraph,
+        data: SharedPoolTensor,
+        label: Option<String>,
+        rng: &mut impl Rng,
+    ) -> GlobalId {
         let node = Self {
             global_id: GlobalId::new(rng),
             label,
             output: graph.get_new_tensor_id(rng),
-            data: a,
+            data,
         };
         let out = node.output;
         graph.push_op(AnyMilliOp::Constant(node));
@@ -70,15 +88,7 @@ impl Constant {
         T: NDArrayNumericTensorType,
     {
         let data = NDArrayNumericTensor::<DynRank>::from_vec_shape(vec![v], &vec![1]).unwrap();
-        let node = Self {
-            global_id: GlobalId::new(rng),
-            label,
-            output: graph.get_new_tensor_id(rng),
-            data,
-        };
-        let out = node.output;
-        graph.push_op(AnyMilliOp::Constant(node));
-        out
+        Self::push_new_with_label(graph, data, label, rng)
     }
 }
 
@@ -126,8 +136,7 @@ impl MilliOp for Constant {
         MilliOpGraphError,
     > {
         use crate::tensor_info::TensorInfo;
-        let out: NumericTensor<DynRank> = self.data.clone().into();
-        Ok(vec![(self.output, TensorInfo::from_legacy(&out, pool))])
+        Ok(vec![(self.output, TensorInfo::from_view(&self.data.0.view(), pool))])
     }
 
     fn eval(
@@ -137,9 +146,9 @@ impl MilliOp for Constant {
         _backend: &mut EvalBackend,
     ) -> Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, MilliOpGraphError>
     {
-        Ok(Box::new(
-            [(self.output, self.data.clone().into())].into_iter(),
-        ))
+        // Bridge to legacy for old eval path.
+        let legacy = crate::nano_graph::lower::new_numeric_to_legacy(&*self.data.0);
+        Ok(Box::new([(self.output, legacy)].into_iter()))
     }
 
     fn eval_new<'p, P2: crate::pool::Pool + 'p>(
@@ -150,29 +159,20 @@ impl MilliOp for Constant {
         use crate::numeric_tensor::{NumericTensor, TensorLayout};
         use crate::tensor_rank::DynRank;
 
-        // Convert the NDArrayNumericTensor data to contiguous bytes
-        let raw_bytes = self.data.to_contiguous_bytes();
-        let legacy_dtype = self.data.dtype();
-        let ndt = crate::numeric_dtype::NumericDType::from_legacy(legacy_dtype)
-            .ok_or_else(|| crate::nano_graph::pool_eval::PoolEvalError::Unsupported(
-                format!("Constant: unsupported dtype {:?}", legacy_dtype),
-            ))?;
-
-        let shape: Vec<u64> = {
-            let s = self.data.shape();
-            s.iter().map(|&d| d as u64).collect()
-        };
+        let src = &*self.data.0;
+        let ndt = src.dtype();
+        let shape = src.shape().clone();
 
         let layout = TensorLayout::<DynRank>::row_major(shape, ndt);
         let buf_size = layout.buffer_size_bytes();
-        let mut buf = pool.allocate(buf_size)
+        let buf = pool.allocate(buf_size)
             .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
 
-        // Copy raw bytes into pool buffer
-        let copy_len = raw_bytes.len().min(buf_size);
-        buf[..copy_len].copy_from_slice(&raw_bytes[..copy_len]);
-
-        Ok(vec![NumericTensor::from_parts(buf, layout)])
+        let mut out = NumericTensor::from_parts(buf, layout);
+        for i in 0..src.numel() {
+            out.write_element(i, src.read_element(i));
+        }
+        Ok(vec![out])
     }
 
     fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
