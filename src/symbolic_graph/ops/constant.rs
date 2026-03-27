@@ -3,10 +3,12 @@ use crate::graph::{GlobalId, Graph, Node, Property, PropertyValue};
 use crate::milli_graph::ops::*;
 use crate::milli_graph::{MilliLoweringContext, MilliOpGraph};
 use crate::migration::numeric_scalar::NumericScalar;
+use crate::numeric_scalar::NumericScalar as NewNumericScalar;
 use crate::symbolic_graph::ops::Operation;
 use crate::symbolic_graph::{
-    ONNXDecodingError, query_attribute_float, query_attribute_floats, query_attribute_int,
-    query_attribute_ints, query_attribute_tensor,
+    ONNXDecodingError, SharedPoolTensor, PoolTensor,
+    query_attribute_float, query_attribute_floats, query_attribute_int,
+    query_attribute_ints, query_attribute_tensor, tensor_proto_to_pool_tensor,
 };
 use crate::{DynRank, onnx};
 use rand::Rng;
@@ -16,7 +18,7 @@ use std::collections::HashMap;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ConstantOfShapeOperation {
     global_id: GlobalId,
-    value: NumericScalar,
+    value: NewNumericScalar,
     input: GlobalId,
     output: GlobalId,
 }
@@ -36,8 +38,11 @@ impl ConstantOfShapeOperation {
         }
 
         let value = query_attribute_tensor(attributes, "value")
-            .map(|x| x.first_element())
-            .unwrap_or(NumericScalar::F32(0.0));
+            .map(|x| {
+                // Extract first element as new-type scalar.
+                crate::nano_graph::lower::legacy_scalar_to_new(&x.first_element())
+            })
+            .unwrap_or(NewNumericScalar::from_f32(0.0));
 
         Ok(Self {
             global_id: GlobalId::new(rng),
@@ -67,23 +72,14 @@ impl Node for ConstantOfShapeOperation {
 
 impl Operation for ConstantOfShapeOperation {
     fn parameters(&self) -> Vec<Property> {
-        let value_str = match &self.value {
-            NumericScalar::F32(v) => format!("{}", v),
-            NumericScalar::F64(v) => format!("{}", v),
-            NumericScalar::I32(v) => format!("{}", v),
-            NumericScalar::I64(v) => format!("{}", v),
-            NumericScalar::U8(v) => format!("{}", v),
-            NumericScalar::U32(v) => format!("{}", v),
-            NumericScalar::BOOL(v) => format!("{}", v),
-            _ => format!("{:?}", self.value),
-        };
-        vec![Property::new("value", PropertyValue::String(value_str))]
+        vec![Property::new("value", PropertyValue::String(format!("{}", self.value)))]
     }
 
     fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
+        let legacy_scalar = crate::nano_graph::lower::new_scalar_to_legacy(&self.value);
         let node =
-            ConstantOfShape::push_new(&mut graph, self.value.clone(), input_map[&self.input], rng);
+            ConstantOfShape::push_new(&mut graph, legacy_scalar, input_map[&self.input], rng);
         let out = match graph.get_node_by_id(&node) {
             Some(AnyMilliOp::ConstantOfShape(op)) => op.outputs().next().unwrap(),
             _ => unreachable!(),
@@ -98,17 +94,46 @@ impl Operation for ConstantOfShapeOperation {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ConstantOperation {
     global_id: GlobalId,
-    pub value: NDArrayNumericTensor<DynRank>,
+    pub value: SharedPoolTensor,
     output: GlobalId,
 }
 
 impl ConstantOperation {
-    pub fn new(value: NDArrayNumericTensor<DynRank>, output: GlobalId, rng: &mut impl Rng) -> Self {
+    pub fn new(value: SharedPoolTensor, output: GlobalId, rng: &mut impl Rng) -> Self {
         Self {
             global_id: GlobalId::new(rng),
             value,
             output,
         }
+    }
+
+    /// Helper: create a pool tensor from typed scalar values.
+    fn pool_tensor_from_f32(vals: Vec<f32>) -> SharedPoolTensor {
+        use crate::numeric_dtype::NumericDType;
+        use crate::numeric_tensor::{NumericTensor, TensorLayout};
+        use crate::pool::{Pool, SystemPool};
+        let shape = vec![vals.len() as u64];
+        let layout = TensorLayout::<DynRank>::row_major(shape, NumericDType::F32);
+        let buf = SystemPool.allocate(layout.buffer_size_bytes()).unwrap();
+        let mut t = NumericTensor::from_parts(buf, layout);
+        for (i, &v) in vals.iter().enumerate() {
+            t.write_element(i, NewNumericScalar::from_f32(v));
+        }
+        SharedPoolTensor(std::sync::Arc::new(t))
+    }
+
+    fn pool_tensor_from_i64(vals: Vec<i64>) -> SharedPoolTensor {
+        use crate::numeric_dtype::NumericDType;
+        use crate::numeric_tensor::{NumericTensor, TensorLayout};
+        use crate::pool::{Pool, SystemPool};
+        let shape = vec![vals.len() as u64];
+        let layout = TensorLayout::<DynRank>::row_major(shape, NumericDType::I64);
+        let buf = SystemPool.allocate(layout.buffer_size_bytes()).unwrap();
+        let mut t = NumericTensor::from_parts(buf, layout);
+        for (i, &v) in vals.iter().enumerate() {
+            t.write_element(i, NewNumericScalar::from_i64(v));
+        }
+        SharedPoolTensor(std::sync::Arc::new(t))
     }
 
     pub(crate) fn from_onnx(
@@ -125,15 +150,17 @@ impl ConstantOperation {
         }
 
         let value = if let Some(tensor) = query_attribute_tensor(attributes, "value") {
-            tensor
+            // Bridge legacy NDArray → pool tensor.
+            let pool_t = crate::symbolic_graph::tensor_proto_to_pool_tensor_from_ndarray(&tensor)?;
+            SharedPoolTensor(std::sync::Arc::new(pool_t))
         } else if let Some(value_float) = query_attribute_float(attributes, "value_float") {
-            NDArrayNumericTensor::from(vec![value_float]).try_to_rank()?
+            Self::pool_tensor_from_f32(vec![value_float])
         } else if let Some(value_floats) = query_attribute_floats(attributes, "value_floats") {
-            NDArrayNumericTensor::from(value_floats).try_to_rank()?
+            Self::pool_tensor_from_f32(value_floats)
         } else if let Some(value_int) = query_attribute_int(attributes, "value_int") {
-            NDArrayNumericTensor::from(vec![value_int]).try_to_rank()?
+            Self::pool_tensor_from_i64(vec![value_int])
         } else if let Some(value_ints) = query_attribute_ints(attributes, "value_ints") {
-            NDArrayNumericTensor::from(value_ints).try_to_rank()?
+            Self::pool_tensor_from_i64(value_ints)
         } else {
             Err(ONNXDecodingError::MissingAttribute(
                 "Constant".to_string(),
@@ -167,28 +194,25 @@ impl Node for ConstantOperation {
 
 impl Operation for ConstantOperation {
     fn parameters(&self) -> Vec<Property> {
-        let shape: Vec<i64> = self.value.shape().iter().map(|&x| x as i64).collect();
-        let total_elements: usize = shape.iter().map(|&x| x as usize).product();
+        let t = &*self.value.0;
+        let shape: Vec<i64> = t.shape().iter().map(|&x| x as i64).collect();
+        let total_elements = t.numel();
 
         let mut params = vec![
-            Property::new("dtype", PropertyValue::DType(self.value.dtype())),
+            Property::new("dtype", PropertyValue::DType(t.dtype().to_legacy())),
             Property::new("shape", PropertyValue::IntList(shape)),
         ];
 
-        // For small constants, show the actual value
         if total_elements == 1 {
-            let value_str = format!("{}", self.value.first_element());
-            params.push(Property::new("value", PropertyValue::String(value_str)));
+            params.push(Property::new("value", PropertyValue::String(format!("{}", t.read_element(0)))));
         } else if total_elements <= 8 {
-            // Show first few elements for small tensors
-            let flat = self.value.flatten();
-            if let Ok(values) = TryInto::<Vec<f32>>::try_into(flat) {
-                let preview: Vec<String> = values.iter().map(|v| format!("{:.4}", v)).collect();
-                params.push(Property::new(
-                    "values",
-                    PropertyValue::String(format!("[{}]", preview.join(", "))),
-                ));
-            }
+            let preview: Vec<String> = (0..total_elements)
+                .map(|i| format!("{:.4}", t.read_element(i).to_f32()))
+                .collect();
+            params.push(Property::new(
+                "values",
+                PropertyValue::String(format!("[{}]", preview.join(", "))),
+            ));
         }
 
         params
@@ -197,7 +221,13 @@ impl Operation for ConstantOperation {
     fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, _input_map) = MilliOpGraph::new(self.inputs(), rng);
 
-        let out = Constant::push_new(&mut graph, self.value.clone(), rng);
+        // Bridge to legacy for Constant::push_new (milli op takes NDArrayNumericTensor).
+        let legacy = crate::nano_graph::lower::new_numeric_to_legacy(&*self.value.0);
+        let nd = match legacy {
+            crate::migration::numeric_tensor::NumericTensor::NDArray(nd) => nd,
+            _ => panic!("expected NDArray"),
+        };
+        let out = Constant::push_new(&mut graph, nd, rng);
 
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);

@@ -13,6 +13,23 @@ use super::{SymbolicGraphMutator, TensorType};
 use crate::backends::ndarray_backend::NDArrayNumericTensor;
 use crate::dtype::DType;
 use crate::graph::GlobalId;
+use crate::numeric_dtype::NumericDType;
+use crate::numeric_scalar::NumericScalar;
+
+/// Create a small pool-backed I64 constant tensor from a slice.
+fn pool_tensor_i64(vals: &[i64]) -> super::PoolTensor {
+    use crate::numeric_tensor::{NumericTensor, TensorLayout};
+    use crate::pool::{Pool, SystemPool};
+    use crate::tensor_rank::DynRank;
+    let shape = vec![vals.len() as u64];
+    let layout = TensorLayout::<DynRank>::row_major(shape, NumericDType::I64);
+    let buf = SystemPool.allocate(layout.buffer_size_bytes()).unwrap();
+    let mut t = NumericTensor::from_parts(buf, layout);
+    for (i, &v) in vals.iter().enumerate() {
+        t.write_element(i, NumericScalar::from_i64(v));
+    }
+    t
+}
 use rand::Rng;
 
 impl SymbolicGraphMutator {
@@ -158,9 +175,8 @@ impl SymbolicGraphMutator {
         shape: &[i64],
         rng: &mut impl Rng,
     ) -> GlobalId {
-        let shape_tensor = self.push_constant_tensor(
-            NDArrayNumericTensor::from_vec_shape(shape.to_vec(), &vec![shape.len() as u64])
-                .unwrap(),
+        let shape_tensor = self.push_constant_pool_tensor(
+            pool_tensor_i64(shape),
             None,
             rng,
         );
@@ -359,21 +375,9 @@ impl SymbolicGraphMutator {
         end: i64,
         rng: &mut impl Rng,
     ) -> GlobalId {
-        let starts = self.push_constant_tensor(
-            NDArrayNumericTensor::from_vec_shape(vec![start], &vec![1u64]).unwrap(),
-            None,
-            rng,
-        );
-        let ends = self.push_constant_tensor(
-            NDArrayNumericTensor::from_vec_shape(vec![end], &vec![1u64]).unwrap(),
-            None,
-            rng,
-        );
-        let axes = self.push_constant_tensor(
-            NDArrayNumericTensor::from_vec_shape(vec![axis], &vec![1u64]).unwrap(),
-            None,
-            rng,
-        );
+        let starts = self.push_constant_pool_tensor(pool_tensor_i64(&[start]), None, rng);
+        let ends = self.push_constant_pool_tensor(pool_tensor_i64(&[end]), None, rng);
+        let axes = self.push_constant_pool_tensor(pool_tensor_i64(&[axis]), None, rng);
         let out = self.push_intermediate(name, rng);
         let op = SliceOperation::new_from_parts(data, starts, ends, Some(axes), None, out, rng);
         self.push_op(name, AnyOperation::Slice(op), rng);

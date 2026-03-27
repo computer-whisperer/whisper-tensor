@@ -18,7 +18,7 @@ use crate::numeric_dtype::NumericDType;
 /// Stores raw little-endian bits for any numeric type up to 64 bits.
 /// Only the first `dtype.bytes_per_element()` bytes are meaningful;
 /// the rest are zero-padded.
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, serde::Serialize, serde::Deserialize)]
 pub struct NumericScalar {
     pub(crate) bits: [u8; 8],
     pub(crate) dtype: NumericDType,

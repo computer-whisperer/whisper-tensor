@@ -1428,6 +1428,31 @@ fn tensor_proto_to_pool_tensor(
     Ok(out)
 }
 
+/// Bridge: convert a legacy NDArrayNumericTensor to a pool tensor.
+pub(crate) fn tensor_proto_to_pool_tensor_from_ndarray(
+    nd: &NDArrayNumericTensor<DynRank>,
+) -> Result<PoolTensor, ONNXDecodingError> {
+    use crate::numeric_dtype::NumericDType;
+    use crate::numeric_tensor::TensorLayout;
+    use crate::pool::{Pool, SystemPool};
+    use crate::tensor_info::TensorInfo;
+
+    let info = TensorInfo::from_legacy(&crate::migration::numeric_tensor::NumericTensor::NDArray(nd.clone()), &SystemPool);
+    let concrete = info.as_concrete().ok_or_else(|| {
+        ONNXDecodingError::UnsupportedONNX("cannot bridge NDArray to pool tensor".into())
+    })?;
+    let ndt = concrete.dtype();
+    let shape = concrete.shape().clone();
+    let layout = TensorLayout::<DynRank>::row_major(shape, ndt);
+    let buf = SystemPool.allocate(layout.buffer_size_bytes())
+        .map_err(|_| ONNXDecodingError::UnsupportedONNX("allocation failed".into()))?;
+    let mut tensor: PoolTensor = crate::numeric_tensor::NumericTensor::from_parts(buf, layout);
+    for i in 0..concrete.numel() {
+        tensor.write_element(i, concrete.read_element(i));
+    }
+    Ok(tensor)
+}
+
 impl TryFrom<&onnx::TensorProto> for NDArrayNumericTensor<DynRank> {
     type Error = ONNXDecodingError;
 
@@ -2036,6 +2061,36 @@ impl SymbolicGraphMutator {
         };
         g.tensors.insert(global_id, tensor);
         self.tensors_by_name.insert(name.to_string(), global_id);
+        global_id
+    }
+
+    pub fn push_constant_pool_tensor(
+        &mut self,
+        value: PoolTensor,
+        name: Option<String>,
+        rng: &mut impl Rng,
+    ) -> GlobalId {
+        let mut shape = Vec::new();
+        for &s in value.shape().iter() {
+            shape.push(ScalarInfoTyped::Numeric(s));
+        }
+        let global_id = GlobalId::new(rng);
+        let g = self.graph.as_mut().unwrap();
+        g.tensors.insert(
+            global_id,
+            ONNXTensorInfo {
+                onnx_name: name.clone(),
+                dtype: Some(value.dtype().to_legacy()),
+                shape: Some(shape),
+                tensor_type: TensorType::Constant(StoredOrNotTensor::Inline(
+                    SharedPoolTensor(std::sync::Arc::new(value))
+                )),
+                global_id,
+            },
+        );
+        if let Some(name) = name {
+            self.tensors_by_name.insert(name, global_id);
+        }
         global_id
     }
 
