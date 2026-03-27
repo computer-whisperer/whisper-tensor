@@ -1503,6 +1503,127 @@ impl MilliOp for ConvInputGrad {
         let result = NumericTensor::<DynRank>::from_vec_shape(dx, result_shape)?;
         Ok(Box::new(std::iter::once((self.output, result))))
     }
+
+    fn eval_new<'p, P2: crate::pool::Pool + 'p>(
+        &self,
+        inputs: &[crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>],
+        pool: &'p P2,
+    ) -> Result<Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>, crate::nano_graph::pool_eval::PoolEvalError> {
+        use crate::numeric_scalar::NumericScalar;
+        use crate::numeric_tensor::{NumericTensor as PoolTensor, TensorLayout};
+        use crate::tensor_rank::DynRank;
+
+        // inputs: [grad_output, weight, input]
+        let grad_view = &inputs[0];
+        let weight_view = &inputs[1];
+        let orig_input_view = &inputs[2];
+
+        let grad_shape = grad_view.shape();
+        let weight_shape = weight_view.shape();
+        let input_shape = orig_input_view.shape();
+        let n_spatial = grad_shape.len() - 2;
+        let batch_size = grad_shape[0] as usize;
+        let out_channels = grad_shape[1] as usize;
+        let group = self.group as usize;
+        let channels_per_group_in = weight_shape[1] as usize;
+        let channels_per_group_out = out_channels / group;
+        let in_channels = channels_per_group_in * group;
+
+        let kernel_shape: Vec<usize> = if self.kernel_shape.is_empty() {
+            (0..n_spatial).map(|i| weight_shape[i + 2] as usize).collect()
+        } else {
+            self.kernel_shape.iter().map(|&x| x as usize).collect()
+        };
+        let strides: Vec<usize> = if self.strides.is_empty() {
+            vec![1; n_spatial]
+        } else {
+            self.strides.iter().map(|&x| x as usize).collect()
+        };
+        let dilations: Vec<usize> = if self.dilations.is_empty() {
+            vec![1; n_spatial]
+        } else {
+            self.dilations.iter().map(|&x| x as usize).collect()
+        };
+
+        let out_spatial: Vec<usize> = (0..n_spatial).map(|i| grad_shape[i + 2] as usize).collect();
+        let out_spatial_size: usize = out_spatial.iter().product();
+        let k_per_group: usize = channels_per_group_in * kernel_shape.iter().product::<usize>();
+
+        let input_spatial: Vec<usize> = (0..n_spatial).map(|i| input_shape[i + 2] as usize).collect();
+
+        let dilated_kernel: Vec<usize> = (0..n_spatial)
+            .map(|i| dilations[i] * (kernel_shape[i] - 1) + 1)
+            .collect();
+        let (pad_begin, _) = resolve_padding(
+            self.auto_pad, &self.pads, n_spatial, &input_spatial, &strides, &dilated_kernel,
+        );
+
+        // Extract f32 data.
+        let weight_data: Vec<f32> = (0..weight_view.numel()).map(|i| weight_view.read_element(i).to_f32()).collect();
+        let grad_data: Vec<f32> = (0..grad_view.numel()).map(|i| grad_view.read_element(i).to_f32()).collect();
+
+        let in_spatial_size: usize = input_spatial.iter().product();
+        let mut dx = vec![0.0f32; batch_size * in_channels * in_spatial_size];
+
+        assert_eq!(n_spatial, 2, "ConvInputGrad currently supports 2D only");
+        let in_h = input_spatial[0];
+        let in_w = input_spatial[1];
+        let out_h = out_spatial[0];
+        let out_w = out_spatial[1];
+
+        for n in 0..batch_size {
+            for g in 0..group {
+                let grad_offset = n * out_channels * out_spatial_size
+                    + g * channels_per_group_out * out_spatial_size;
+                let grad_slice = &grad_data[grad_offset..grad_offset + channels_per_group_out * out_spatial_size];
+
+                // Weight for this group: [cpg_out, K] from flat weight_data.
+                let w_offset = g * channels_per_group_out * k_per_group;
+                let w_slice = &weight_data[w_offset..w_offset + channels_per_group_out * k_per_group];
+
+                // d_col = W^T @ dY  →  [K, out_spatial_size]
+                let mut d_col = vec![0.0f32; k_per_group * out_spatial_size];
+                for k in 0..k_per_group {
+                    for s in 0..out_spatial_size {
+                        let mut sum = 0.0f32;
+                        for co in 0..channels_per_group_out {
+                            sum += w_slice[co * k_per_group + k] * grad_slice[co * out_spatial_size + s];
+                        }
+                        d_col[k * out_spatial_size + s] = sum;
+                    }
+                }
+
+                // col2im: scatter d_col back to input space
+                let dx_offset = n * in_channels * in_spatial_size + g * channels_per_group_in * in_spatial_size;
+                let dx_slice = &mut dx[dx_offset..dx_offset + channels_per_group_in * in_spatial_size];
+                col2im_2d(
+                    &d_col,
+                    dx_slice,
+                    &Im2Col2dParams {
+                        in_base: 0,
+                        channels_per_group_in,
+                        in_h, in_w, out_h, out_w,
+                        kernel_h: kernel_shape[0], kernel_w: kernel_shape[1],
+                        stride_h: strides[0], stride_w: strides[1],
+                        dilation_h: dilations[0], dilation_w: dilations[1],
+                        pad_top: pad_begin[0], pad_left: pad_begin[1],
+                    },
+                );
+            }
+        }
+
+        let mut result_shape: Vec<u64> = vec![batch_size as u64, in_channels as u64];
+        result_shape.extend(input_spatial.iter().map(|&s| s as u64));
+        let dtype = grad_view.dtype();
+        let layout = TensorLayout::<DynRank>::row_major(result_shape, dtype);
+        let buf = pool.allocate(layout.buffer_size_bytes())
+            .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
+        let mut out = PoolTensor::from_parts(buf, layout);
+        for (i, &v) in dx.iter().enumerate() {
+            out.write_element(i, NumericScalar::from_f32(v).cast_to(dtype));
+        }
+        Ok(vec![out])
+    }
 }
 
 // -- ConvWeightGrad: dW = sum_n(dY @ im2col(X)^T) --
@@ -1780,6 +1901,121 @@ impl MilliOp for ConvWeightGrad {
         result_shape.extend_from_slice(&kernel_shape);
         let result = NumericTensor::<DynRank>::from_vec_shape(dw, result_shape)?;
         Ok(Box::new(std::iter::once((self.output, result))))
+    }
+
+    fn eval_new<'p, P2: crate::pool::Pool + 'p>(
+        &self,
+        inputs: &[crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>],
+        pool: &'p P2,
+    ) -> Result<Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>, crate::nano_graph::pool_eval::PoolEvalError> {
+        use crate::numeric_scalar::NumericScalar;
+        use crate::numeric_tensor::{NumericTensor as PoolTensor, TensorLayout};
+        use crate::tensor_rank::DynRank;
+
+        // inputs: [grad_output, input]
+        let grad_view = &inputs[0];
+        let input_view = &inputs[1];
+
+        let input_shape = input_view.shape();
+        let grad_shape = grad_view.shape();
+        let n_spatial = input_shape.len() - 2;
+        let batch_size = input_shape[0] as usize;
+        let out_channels = grad_shape[1] as usize;
+        let group = self.group as usize;
+        let channels_per_group_in = (input_shape[1] as usize) / group;
+        let channels_per_group_out = out_channels / group;
+
+        let kernel_shape: Vec<usize> = if self.kernel_shape.is_empty() {
+            panic!("ConvWeightGrad requires explicit kernel_shape");
+        } else {
+            self.kernel_shape.iter().map(|&x| x as usize).collect()
+        };
+        let strides: Vec<usize> = if self.strides.is_empty() {
+            vec![1; n_spatial]
+        } else {
+            self.strides.iter().map(|&x| x as usize).collect()
+        };
+        let dilations: Vec<usize> = if self.dilations.is_empty() {
+            vec![1; n_spatial]
+        } else {
+            self.dilations.iter().map(|&x| x as usize).collect()
+        };
+
+        let input_spatial: Vec<usize> = (0..n_spatial).map(|i| input_shape[i + 2] as usize).collect();
+        let out_spatial: Vec<usize> = (0..n_spatial).map(|i| grad_shape[i + 2] as usize).collect();
+        let out_spatial_size: usize = out_spatial.iter().product();
+        let k_per_group: usize = channels_per_group_in * kernel_shape.iter().product::<usize>();
+
+        let dilated_kernel: Vec<usize> = (0..n_spatial)
+            .map(|i| dilations[i] * (kernel_shape[i] - 1) + 1)
+            .collect();
+        let (pad_begin, _) = resolve_padding(
+            self.auto_pad, &self.pads, n_spatial, &input_spatial, &strides, &dilated_kernel,
+        );
+
+        // Extract f32 data.
+        let input_data: Vec<f32> = (0..input_view.numel()).map(|i| input_view.read_element(i).to_f32()).collect();
+        let grad_data: Vec<f32> = (0..grad_view.numel()).map(|i| grad_view.read_element(i).to_f32()).collect();
+
+        assert_eq!(n_spatial, 2, "ConvWeightGrad currently supports 2D only");
+        let in_h = input_spatial[0];
+        let in_w = input_spatial[1];
+        let out_h = out_spatial[0];
+        let out_w = out_spatial[1];
+        let in_batch_stride = input_shape[1] as usize * in_h * in_w;
+
+        let mut dw = vec![0.0f32; group * channels_per_group_out * k_per_group];
+
+        for n in 0..batch_size {
+            for g in 0..group {
+                // im2col of input for this (n, g)
+                let in_base = n * in_batch_stride + g * channels_per_group_in * in_h * in_w;
+                let mut col = vec![0.0f32; k_per_group * out_spatial_size];
+                im2col_2d(
+                    &input_data,
+                    &mut col,
+                    &Im2Col2dParams {
+                        in_base,
+                        channels_per_group_in,
+                        in_h, in_w, out_h, out_w,
+                        kernel_h: kernel_shape[0], kernel_w: kernel_shape[1],
+                        stride_h: strides[0], stride_w: strides[1],
+                        dilation_h: dilations[0], dilation_w: dilations[1],
+                        pad_top: pad_begin[0], pad_left: pad_begin[1],
+                    },
+                );
+
+                // dY for this (n, g): [cpg_out, out_spatial_size]
+                let grad_offset = n * out_channels * out_spatial_size
+                    + g * channels_per_group_out * out_spatial_size;
+                let grad_slice = &grad_data[grad_offset..grad_offset + channels_per_group_out * out_spatial_size];
+
+                // dW_g += dY @ col^T  →  [cpg_out, K]
+                let dw_offset = g * channels_per_group_out * k_per_group;
+                for co in 0..channels_per_group_out {
+                    for k in 0..k_per_group {
+                        let mut sum = 0.0f32;
+                        for s in 0..out_spatial_size {
+                            sum += grad_slice[co * out_spatial_size + s] * col[k * out_spatial_size + s];
+                        }
+                        dw[dw_offset + co * k_per_group + k] += sum;
+                    }
+                }
+            }
+        }
+
+        // Reshape to [C_out, C_in/g, *kernel]
+        let mut result_shape: Vec<u64> = vec![out_channels as u64, channels_per_group_in as u64];
+        result_shape.extend(kernel_shape.iter().map(|&s| s as u64));
+        let dtype = grad_view.dtype();
+        let layout = TensorLayout::<DynRank>::row_major(result_shape, dtype);
+        let buf = pool.allocate(layout.buffer_size_bytes())
+            .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
+        let mut out = PoolTensor::from_parts(buf, layout);
+        for (i, &v) in dw.iter().enumerate() {
+            out.write_element(i, NumericScalar::from_f32(v).cast_to(dtype));
+        }
+        Ok(vec![out])
     }
 }
 
