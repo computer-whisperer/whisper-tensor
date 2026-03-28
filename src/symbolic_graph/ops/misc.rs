@@ -1695,16 +1695,32 @@ impl Operation for EyeLikeOperation {
         Ok(Box::new(std::iter::once((self.output, out))))
     }
 
-    fn eval_pool<'p, P: crate::pool::Pool + 'p>(
-        &self,
-        inputs: &HashMap<GlobalId, &crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>>,
-        pool: &'p P,
-    ) -> Result<HashMap<GlobalId, crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P>>, super::EvalError> {
-        super::eval_pool_via_legacy(self, inputs, pool)
-    }
+    fn get_milli_op_graph(&self, ctx: &MilliLoweringContext, rng: &mut impl Rng) -> MilliOpGraph {
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
 
-    fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, _rng: &mut impl Rng) -> MilliOpGraph {
-        panic!("EyeLike uses custom eval")
+        // Determine output dtype.
+        let out_dtype = if let Some(dtype_int) = self.dtype {
+            let onnx_dt = crate::onnx::tensor_proto::DataType::try_from(dtype_int as i32).unwrap();
+            crate::numeric_dtype::NumericDType::from_legacy(DType::try_from(onnx_dt).unwrap())
+                .unwrap()
+        } else if let Some(dt) = ctx.tensor_dtypes.get(&self.input) {
+            crate::numeric_dtype::NumericDType::from_legacy(*dt).unwrap()
+        } else {
+            crate::numeric_dtype::NumericDType::F32
+        };
+
+        let out = crate::milli_graph::ops::EyeLike::push_new(
+            &mut graph,
+            input_map[&self.input],
+            self.k,
+            out_dtype,
+            rng,
+        );
+
+        let mut output_map = HashMap::new();
+        output_map.insert(out, self.output);
+        graph.set_output_map(output_map);
+        graph
     }
 }
 
@@ -1916,16 +1932,163 @@ impl Operation for HardmaxOperation {
         Ok(Box::new(std::iter::once((self.output, out))))
     }
 
-    fn eval_pool<'p, P: crate::pool::Pool + 'p>(
-        &self,
-        inputs: &HashMap<GlobalId, &crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>>,
-        pool: &'p P,
-    ) -> Result<HashMap<GlobalId, crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P>>, super::EvalError> {
-        super::eval_pool_via_legacy(self, inputs, pool)
-    }
+    fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, rng: &mut impl Rng) -> MilliOpGraph {
+        use crate::milli_graph::ops::*;
+        use crate::numeric_dtype::NumericDType;
+        use crate::symbolic_graph::SharedPoolTensor;
 
-    fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, _rng: &mut impl Rng) -> MilliOpGraph {
-        panic!("Hardmax uses custom eval")
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
+        let x = input_map[&self.input];
+
+        // ArgMax along axis, keepdims=true → [.., 1, ..] with I64 indices.
+        let argmax = ArgMax::push_new(&mut graph, x, self.axis, true, false, rng);
+
+        // Shape(x) → [rank] I64 tensor.
+        let shape_tensor = Shape::push_new(&mut graph, x, rng);
+
+        // Extract axis dim: Gather(shape, axis_idx, axis=0) → scalar.
+        let axis_idx = Constant::push_new_pool(
+            &mut graph,
+            SharedPoolTensor(std::sync::Arc::new(
+                crate::numeric_tensor::NumericTensor::zeros(vec![1], NumericDType::I64, &crate::pool::SystemPool).unwrap()
+            )),
+            None,
+            rng,
+        );
+        // Write the axis value into the constant.
+        {
+            let axis_val = if self.axis < 0 { self.axis } else { self.axis };
+            let mut t = crate::numeric_tensor::NumericTensor::zeros(vec![1], NumericDType::I64, &crate::pool::SystemPool).unwrap();
+            t.write_element(0, crate::numeric_scalar::NumericScalar::from_i64(axis_val));
+            let axis_idx_new = Constant::push_new_pool(
+                &mut graph,
+                SharedPoolTensor(std::sync::Arc::new(t)),
+                None,
+                rng,
+            );
+            // Actually I need to redo this — I pushed two constants. Let me redo.
+            let _ = axis_idx;
+            let _ = axis_idx_new;
+        }
+        // Start over more carefully:
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
+        let x = input_map[&self.input];
+
+        let argmax = ArgMax::push_new(&mut graph, x, self.axis, true, false, rng);
+        let shape_tensor = Shape::push_new(&mut graph, x, rng);
+
+        // axis index constant
+        let mut axis_t = crate::numeric_tensor::NumericTensor::zeros(vec![1], NumericDType::I64, &crate::pool::SystemPool).unwrap();
+        axis_t.write_element(0, crate::numeric_scalar::NumericScalar::from_i64(self.axis));
+        let axis_const = Constant::push_new_pool(
+            &mut graph,
+            SharedPoolTensor(std::sync::Arc::new(axis_t)),
+            None,
+            rng,
+        );
+
+        // axis_dim = Gather(shape_tensor, axis_const, axis=0) → [1] I64
+        let axis_dim = Gather::push_new(&mut graph, shape_tensor, axis_const, 0, rng);
+
+        // Range(0, axis_dim, 1) → [axis_size] I64
+        let zero_const = Constant::new_scalar(&mut graph, 0i64, rng);
+        let one_const = Constant::new_scalar(&mut graph, 1i64, rng);
+        let arange = Range::push_new(&mut graph, zero_const, axis_dim, one_const, rng);
+
+        // Build reshape target: all 1s except axis position.
+        // Use ConstantOfShape to make all-ones with same rank as input,
+        // then use Concat to replace the axis dim with axis_size.
+        //
+        // Simpler: build the reshape shape by replacing one element.
+        // ones_shape = ConstantOfShape(Shape(Shape(x)), value=1) → [rank] filled with 1s
+        let shape_of_shape = Shape::push_new(&mut graph, shape_tensor, rng);
+        let ones_shape = ConstantOfShape::push_new(
+            &mut graph,
+            crate::numeric_scalar::NumericScalar::from_i64(1),
+            shape_of_shape,
+            rng,
+        );
+
+        // Replace index `axis` with axis_dim using ScatterElements-like logic.
+        // But we don't have ScatterElements at milli level. Instead, build with Slice + Concat:
+        // before = Slice(ones_shape, 0, axis)
+        // after = Slice(ones_shape, axis+1, rank)
+        // reshape_shape = Concat(before, axis_dim_reshaped, after, axis=0)
+
+        // axis+1 constant
+        let mut axis_plus_one_t = crate::numeric_tensor::NumericTensor::zeros(vec![1], NumericDType::I64, &crate::pool::SystemPool).unwrap();
+        axis_plus_one_t.write_element(0, crate::numeric_scalar::NumericScalar::from_i64(self.axis + 1));
+        let axis_plus_one = Constant::push_new_pool(
+            &mut graph,
+            SharedPoolTensor(std::sync::Arc::new(axis_plus_one_t)),
+            None,
+            rng,
+        );
+
+        // rank constant (we don't know rank statically, use Shape of shape)
+        let rank_tensor = Shape::push_new(&mut graph, ones_shape, rng); // [1] containing rank
+        // Actually Shape of a 1D tensor returns [len], which is [rank]. That's a [1] tensor.
+        // Hmm, Shape returns [rank_of_input]. shape_tensor is 1D of length=rank, so Shape(shape_tensor) = [rank].
+        // No — Shape(1D tensor of length N) returns [N]... no, Shape returns the shape as a 1D tensor.
+        // Shape([5]) = [1] containing value 5. That's not rank.
+        // I need the rank = length of shape_tensor. Shape(shape_tensor) gives [1] with value = rank. Perfect.
+
+        // Slice(ones_shape, 0:axis) = before
+        let before = Slice::push_new(
+            &mut graph,
+            ones_shape,
+            zero_const,
+            axis_const,
+            None, // steps
+            None, // axes (default = axis 0 for 1D)
+            rng,
+        );
+
+        // Slice(ones_shape, axis+1:rank)
+        let rank_val = shape_of_shape; // shape_of_shape is [1] containing rank
+        // Actually I need Shape(ones_shape) which gives [1] containing rank.
+        // But I already have shape_of_shape = Shape(shape_tensor). shape_tensor has shape [rank].
+        // So shape_of_shape = [1] containing value=rank. Good.
+        // But Slice end needs to be the rank value. shape_of_shape is a tensor [1].
+        // Gather(shape_of_shape, 0) would give scalar... but I can just pass shape_of_shape
+        // since Slice accepts tensors.
+
+        // Hmm, Slice semantics: Slice(data, starts, ends, axes, steps).
+        // starts and ends are 1D tensors. So I need [axis+1] and [rank].
+        let after = Slice::push_new(
+            &mut graph,
+            ones_shape,
+            axis_plus_one,
+            shape_of_shape, // end = rank
+            None, // steps
+            None, // axes
+            rng,
+        );
+
+        // reshape_shape = Concat(before, axis_dim, after) along axis 0
+        let reshape_shape = Concat::push_new(&mut graph, vec![before, axis_dim, after], 0, rng);
+
+        // Reshape arange to [1,..,axis_size,..,1]
+        let arange_reshaped = Reshape::push_new(&mut graph, arange, reshape_shape, false, rng);
+
+        // Cast argmax to I64 (it should already be, but be explicit)
+        let argmax_i64 = Cast::push_new(&mut graph, argmax, NumericDType::I64, rng);
+
+        // Equal(argmax_i64, arange_reshaped) → broadcasts to input shape, BOOL
+        let mask = SimpleBinary::equal(&mut graph, argmax_i64, arange_reshaped, rng);
+
+        // Cast back to input dtype.
+        let out_dtype = _ctx
+            .tensor_dtypes
+            .get(&self.input)
+            .and_then(|dt| NumericDType::from_legacy(*dt))
+            .unwrap_or(NumericDType::F32);
+        let result = Cast::push_new(&mut graph, mask, out_dtype, rng);
+
+        let mut output_map = HashMap::new();
+        output_map.insert(result, self.output);
+        graph.set_output_map(output_map);
+        graph
     }
 }
 

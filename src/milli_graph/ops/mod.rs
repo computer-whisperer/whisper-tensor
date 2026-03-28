@@ -8,6 +8,7 @@ mod constant;
 mod conv;
 mod cumsum;
 mod expand;
+mod eye_like;
 mod gather;
 mod nonzero;
 mod pad;
@@ -42,6 +43,7 @@ pub use constant::*;
 pub use conv::*;
 pub use cumsum::*;
 pub use expand::*;
+pub use eye_like::*;
 pub use gather::*;
 pub use nonzero::*;
 pub use pad::*;
@@ -705,6 +707,7 @@ pub enum AnyMilliOp {
     Where(Where),
     Range(Range),
     Expand(Expand),
+    EyeLike(EyeLike),
     SumTo(SumTo),
     ArgMax(ArgMax),
     ArgMin(ArgMin),
@@ -735,6 +738,7 @@ impl AnyMilliOp {
             AnyMilliOp::Unsqueeze(x) => x.lower_to_nano(ctx),
             AnyMilliOp::Transpose(x) => x.lower_to_nano(ctx),
             AnyMilliOp::Expand(x) => x.lower_to_nano(ctx),
+            AnyMilliOp::EyeLike(x) => x.lower_to_nano(ctx),
             AnyMilliOp::Pow(x) => x.lower_to_nano(ctx),
             AnyMilliOp::Where(x) => x.lower_to_nano(ctx),
             AnyMilliOp::Concat(x) => x.lower_to_nano(ctx),
@@ -785,6 +789,7 @@ impl AnyMilliOp {
             AnyMilliOp::Where(x) => x.label.clone(),
             AnyMilliOp::Range(x) => x.label.clone(),
             AnyMilliOp::Expand(x) => x.label.clone(),
+            AnyMilliOp::EyeLike(x) => x.label.clone(),
             AnyMilliOp::SumTo(x) => x.label.clone(),
             AnyMilliOp::ArgMax(x) => x.label.clone(),
             AnyMilliOp::ArgMin(x) => x.label.clone(),
@@ -831,6 +836,7 @@ impl AnyMilliOp {
             AnyMilliOp::Where(x) => x.remap_tensors(map, rng),
             AnyMilliOp::Range(x) => x.remap_tensors(map, rng),
             AnyMilliOp::Expand(x) => x.remap_tensors(map, rng),
+            AnyMilliOp::EyeLike(x) => x.remap_tensors(map, rng),
             AnyMilliOp::SumTo(x) => x.remap_tensors(map, rng),
             AnyMilliOp::ArgMax(x) => x.remap_tensors(map, rng),
             AnyMilliOp::ArgMin(x) => x.remap_tensors(map, rng),
@@ -880,6 +886,7 @@ macro_rules! delegate {
                 AnyMilliOp::Where(x) => x.$name($($arg),*),
                 AnyMilliOp::Range(x) => x.$name($($arg),*),
                 AnyMilliOp::Expand(x) => x.$name($($arg),*),
+                AnyMilliOp::EyeLike(x) => x.$name($($arg),*),
                 AnyMilliOp::SumTo(x) => x.$name($($arg),*),
                 AnyMilliOp::ArgMax(x) => x.$name($($arg),*),
                 AnyMilliOp::ArgMin(x) => x.$name($($arg),*),
@@ -943,6 +950,7 @@ impl MilliOp for AnyMilliOp {
             AnyMilliOp::Where(x) => x.infer(known_inputs, symbolic_resolver, pool),
             AnyMilliOp::Range(x) => x.infer(known_inputs, symbolic_resolver, pool),
             AnyMilliOp::Expand(x) => x.infer(known_inputs, symbolic_resolver, pool),
+            AnyMilliOp::EyeLike(x) => x.infer(known_inputs, symbolic_resolver, pool),
             AnyMilliOp::SumTo(x) => x.infer(known_inputs, symbolic_resolver, pool),
             AnyMilliOp::ArgMax(x) => x.infer(known_inputs, symbolic_resolver, pool),
             AnyMilliOp::ArgMin(x) => x.infer(known_inputs, symbolic_resolver, pool),
@@ -993,6 +1001,7 @@ impl MilliOp for AnyMilliOp {
             AnyMilliOp::Where(x) => x.backward(output_grads, graph, rng),
             AnyMilliOp::Range(x) => x.backward(output_grads, graph, rng),
             AnyMilliOp::Expand(x) => x.backward(output_grads, graph, rng),
+            AnyMilliOp::EyeLike(x) => x.backward(output_grads, graph, rng),
             AnyMilliOp::SumTo(x) => x.backward(output_grads, graph, rng),
             AnyMilliOp::ArgMax(x) => x.backward(output_grads, graph, rng),
             AnyMilliOp::ArgMin(x) => x.backward(output_grads, graph, rng),
@@ -1044,6 +1053,7 @@ impl MilliOp for AnyMilliOp {
             AnyMilliOp::Where(x) => x.eval_new(inputs, pool),
             AnyMilliOp::Range(x) => x.eval_new(inputs, pool),
             AnyMilliOp::Expand(x) => x.eval_new(inputs, pool),
+            AnyMilliOp::EyeLike(x) => x.eval_new(inputs, pool),
             AnyMilliOp::SumTo(x) => x.eval_new(inputs, pool),
             AnyMilliOp::ArgMax(x) => x.eval_new(inputs, pool),
             AnyMilliOp::ArgMin(x) => x.eval_new(inputs, pool),
