@@ -3,6 +3,7 @@ mod argmin;
 pub(crate) mod binary;
 mod cast;
 mod cast_like;
+mod compress;
 mod concat;
 mod constant;
 mod conv;
@@ -10,6 +11,8 @@ mod cumsum;
 mod expand;
 mod eye_like;
 mod gather;
+mod gather_elements;
+mod gather_nd;
 mod nonzero;
 mod pad;
 
@@ -22,6 +25,10 @@ mod reduce_prod;
 mod reduce_sum;
 mod reshape;
 mod resize;
+mod reverse_sequence;
+mod scatter_elements;
+mod scatter_nd;
+pub(crate) mod scatter_reduction;
 mod shape;
 mod slice;
 mod split;
@@ -38,6 +45,7 @@ pub use argmin::*;
 pub use binary::*;
 pub use cast::*;
 pub use cast_like::*;
+pub use compress::*;
 pub use concat::*;
 pub use constant::*;
 pub use conv::*;
@@ -45,6 +53,8 @@ pub use cumsum::*;
 pub use expand::*;
 pub use eye_like::*;
 pub use gather::*;
+pub use gather_elements::*;
+pub use gather_nd::*;
 pub use nonzero::*;
 pub use pad::*;
 
@@ -57,6 +67,10 @@ pub use reduce_prod::*;
 pub use reduce_sum::*;
 pub use reshape::*;
 pub use resize::*;
+pub use reverse_sequence::*;
+pub use scatter_elements::*;
+pub use scatter_nd::*;
+pub use scatter_reduction::*;
 pub use shape::*;
 pub use slice::*;
 pub use split::*;
@@ -701,6 +715,8 @@ pub enum AnyMilliOp {
     Squeeze(Squeeze),
     Unsqueeze(Unsqueeze),
     Gather(Gather),
+    GatherElements(GatherElements),
+    GatherND(GatherND),
     GatherGrad(GatherGrad),
     Concat(Concat),
     Split(Split),
@@ -717,6 +733,10 @@ pub enum AnyMilliOp {
     ConvWeightGrad(ConvWeightGrad),
     ConvBiasGrad(ConvBiasGrad),
     Pad(Pad),
+    Compress(Compress),
+    ReverseSequence(ReverseSequence),
+    ScatterElements(ScatterElements),
+    ScatterND(ScatterND),
 
     TopK(TopK),
     RandomNormalLike(RandomNormalLike),
@@ -749,6 +769,7 @@ impl AnyMilliOp {
             AnyMilliOp::ReduceMax(x) => x.lower_to_nano(ctx),
             AnyMilliOp::ReduceMean(x) => x.lower_to_nano(ctx),
             AnyMilliOp::Gather(x) => x.lower_to_nano(ctx),
+            AnyMilliOp::GatherElements(x) => x.lower_to_nano(ctx),
             AnyMilliOp::ReduceMin(x) => x.lower_to_nano(ctx),
             AnyMilliOp::ReduceProd(x) => x.lower_to_nano(ctx),
             AnyMilliOp::Conv(x) => x.lower_to_nano(ctx),
@@ -783,6 +804,8 @@ impl AnyMilliOp {
             AnyMilliOp::Squeeze(x) => x.label.clone(),
             AnyMilliOp::Unsqueeze(x) => x.label.clone(),
             AnyMilliOp::Gather(x) => x.label.clone(),
+            AnyMilliOp::GatherElements(x) => x.label.clone(),
+            AnyMilliOp::GatherND(x) => x.label.clone(),
             AnyMilliOp::GatherGrad(x) => x.label.clone(),
             AnyMilliOp::Concat(x) => x.label.clone(),
             AnyMilliOp::Split(x) => x.label.clone(),
@@ -799,6 +822,10 @@ impl AnyMilliOp {
             AnyMilliOp::ConvWeightGrad(x) => x.label.clone(),
             AnyMilliOp::ConvBiasGrad(x) => x.label.clone(),
             AnyMilliOp::Pad(x) => x.label.clone(),
+            AnyMilliOp::Compress(x) => x.label.clone(),
+            AnyMilliOp::ReverseSequence(x) => x.label.clone(),
+            AnyMilliOp::ScatterElements(x) => x.label.clone(),
+            AnyMilliOp::ScatterND(x) => x.label.clone(),
 
             AnyMilliOp::TopK(x) => x.label.clone(),
             AnyMilliOp::RandomNormalLike(x) => x.label.clone(),
@@ -830,6 +857,8 @@ impl AnyMilliOp {
             AnyMilliOp::Squeeze(x) => x.remap_tensors(map, rng),
             AnyMilliOp::Unsqueeze(x) => x.remap_tensors(map, rng),
             AnyMilliOp::Gather(x) => x.remap_tensors(map, rng),
+            AnyMilliOp::GatherElements(x) => x.remap_tensors(map, rng),
+            AnyMilliOp::GatherND(x) => x.remap_tensors(map, rng),
             AnyMilliOp::GatherGrad(x) => x.remap_tensors(map, rng),
             AnyMilliOp::Concat(x) => x.remap_tensors(map, rng),
             AnyMilliOp::Split(x) => x.remap_tensors(map, rng),
@@ -846,6 +875,10 @@ impl AnyMilliOp {
             AnyMilliOp::ConvWeightGrad(x) => x.remap_tensors(map, rng),
             AnyMilliOp::ConvBiasGrad(x) => x.remap_tensors(map, rng),
             AnyMilliOp::Pad(x) => x.remap_tensors(map, rng),
+            AnyMilliOp::Compress(x) => x.remap_tensors(map, rng),
+            AnyMilliOp::ReverseSequence(x) => x.remap_tensors(map, rng),
+            AnyMilliOp::ScatterElements(x) => x.remap_tensors(map, rng),
+            AnyMilliOp::ScatterND(x) => x.remap_tensors(map, rng),
 
             AnyMilliOp::TopK(x) => x.remap_tensors(map, rng),
             AnyMilliOp::RandomNormalLike(x) => x.remap_tensors(map, rng),
@@ -880,6 +913,8 @@ macro_rules! delegate {
                 AnyMilliOp::Squeeze(x) => x.$name($($arg),*),
                 AnyMilliOp::Unsqueeze(x) => x.$name($($arg),*),
                 AnyMilliOp::Gather(x) => x.$name($($arg),*),
+                AnyMilliOp::GatherElements(x) => x.$name($($arg),*),
+                AnyMilliOp::GatherND(x) => x.$name($($arg),*),
                 AnyMilliOp::GatherGrad(x) => x.$name($($arg),*),
                 AnyMilliOp::Concat(x) => x.$name($($arg),*),
                 AnyMilliOp::Split(x) => x.$name($($arg),*),
@@ -896,6 +931,10 @@ macro_rules! delegate {
                 AnyMilliOp::ConvWeightGrad(x) => x.$name($($arg),*),
                 AnyMilliOp::ConvBiasGrad(x) => x.$name($($arg),*),
                 AnyMilliOp::Pad(x) => x.$name($($arg),*),
+                AnyMilliOp::Compress(x) => x.$name($($arg),*),
+                AnyMilliOp::ReverseSequence(x) => x.$name($($arg),*),
+                AnyMilliOp::ScatterElements(x) => x.$name($($arg),*),
+                AnyMilliOp::ScatterND(x) => x.$name($($arg),*),
 
                 AnyMilliOp::TopK(x) => x.$name($($arg),*),
                 AnyMilliOp::RandomNormalLike(x) => x.$name($($arg),*),
@@ -944,6 +983,8 @@ impl MilliOp for AnyMilliOp {
             AnyMilliOp::Squeeze(x) => x.infer(known_inputs, symbolic_resolver, pool),
             AnyMilliOp::Unsqueeze(x) => x.infer(known_inputs, symbolic_resolver, pool),
             AnyMilliOp::Gather(x) => x.infer(known_inputs, symbolic_resolver, pool),
+            AnyMilliOp::GatherElements(x) => x.infer(known_inputs, symbolic_resolver, pool),
+            AnyMilliOp::GatherND(x) => x.infer(known_inputs, symbolic_resolver, pool),
             AnyMilliOp::GatherGrad(x) => x.infer(known_inputs, symbolic_resolver, pool),
             AnyMilliOp::Concat(x) => x.infer(known_inputs, symbolic_resolver, pool),
             AnyMilliOp::Split(x) => x.infer(known_inputs, symbolic_resolver, pool),
@@ -960,6 +1001,10 @@ impl MilliOp for AnyMilliOp {
             AnyMilliOp::ConvWeightGrad(x) => x.infer(known_inputs, symbolic_resolver, pool),
             AnyMilliOp::ConvBiasGrad(x) => x.infer(known_inputs, symbolic_resolver, pool),
             AnyMilliOp::Pad(x) => x.infer(known_inputs, symbolic_resolver, pool),
+            AnyMilliOp::Compress(x) => x.infer(known_inputs, symbolic_resolver, pool),
+            AnyMilliOp::ReverseSequence(x) => x.infer(known_inputs, symbolic_resolver, pool),
+            AnyMilliOp::ScatterElements(x) => x.infer(known_inputs, symbolic_resolver, pool),
+            AnyMilliOp::ScatterND(x) => x.infer(known_inputs, symbolic_resolver, pool),
             AnyMilliOp::TopK(x) => x.infer(known_inputs, symbolic_resolver, pool),
             AnyMilliOp::RandomNormalLike(x) => x.infer(known_inputs, symbolic_resolver, pool),
         }
@@ -995,6 +1040,8 @@ impl MilliOp for AnyMilliOp {
             AnyMilliOp::Squeeze(x) => x.backward(output_grads, graph, rng),
             AnyMilliOp::Unsqueeze(x) => x.backward(output_grads, graph, rng),
             AnyMilliOp::Gather(x) => x.backward(output_grads, graph, rng),
+            AnyMilliOp::GatherElements(x) => x.backward(output_grads, graph, rng),
+            AnyMilliOp::GatherND(x) => x.backward(output_grads, graph, rng),
             AnyMilliOp::GatherGrad(x) => x.backward(output_grads, graph, rng),
             AnyMilliOp::Concat(x) => x.backward(output_grads, graph, rng),
             AnyMilliOp::Split(x) => x.backward(output_grads, graph, rng),
@@ -1011,6 +1058,10 @@ impl MilliOp for AnyMilliOp {
             AnyMilliOp::ConvWeightGrad(x) => x.backward(output_grads, graph, rng),
             AnyMilliOp::ConvBiasGrad(x) => x.backward(output_grads, graph, rng),
             AnyMilliOp::Pad(x) => x.backward(output_grads, graph, rng),
+            AnyMilliOp::Compress(x) => x.backward(output_grads, graph, rng),
+            AnyMilliOp::ReverseSequence(x) => x.backward(output_grads, graph, rng),
+            AnyMilliOp::ScatterElements(x) => x.backward(output_grads, graph, rng),
+            AnyMilliOp::ScatterND(x) => x.backward(output_grads, graph, rng),
             AnyMilliOp::RandomNormalLike(x) => x.backward(output_grads, graph, rng),
             AnyMilliOp::TopK(x) => x.backward(output_grads, graph, rng),
         }
@@ -1047,6 +1098,8 @@ impl MilliOp for AnyMilliOp {
             AnyMilliOp::Squeeze(x) => x.eval_new(inputs, pool),
             AnyMilliOp::Unsqueeze(x) => x.eval_new(inputs, pool),
             AnyMilliOp::Gather(x) => x.eval_new(inputs, pool),
+            AnyMilliOp::GatherElements(x) => x.eval_new(inputs, pool),
+            AnyMilliOp::GatherND(x) => x.eval_new(inputs, pool),
             AnyMilliOp::GatherGrad(x) => x.eval_new(inputs, pool),
             AnyMilliOp::Concat(x) => x.eval_new(inputs, pool),
             AnyMilliOp::Split(x) => x.eval_new(inputs, pool),
@@ -1063,6 +1116,10 @@ impl MilliOp for AnyMilliOp {
             AnyMilliOp::ConvWeightGrad(x) => x.eval_new(inputs, pool),
             AnyMilliOp::ConvBiasGrad(x) => x.eval_new(inputs, pool),
             AnyMilliOp::Pad(x) => x.eval_new(inputs, pool),
+            AnyMilliOp::Compress(x) => x.eval_new(inputs, pool),
+            AnyMilliOp::ReverseSequence(x) => x.eval_new(inputs, pool),
+            AnyMilliOp::ScatterElements(x) => x.eval_new(inputs, pool),
+            AnyMilliOp::ScatterND(x) => x.eval_new(inputs, pool),
             AnyMilliOp::Constant(x) => x.eval_new(inputs, pool),
             AnyMilliOp::ConstantOfShape(x) => x.eval_new(inputs, pool),
             AnyMilliOp::RandomNormalLike(x) => x.eval_new(inputs, pool),

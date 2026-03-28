@@ -205,15 +205,27 @@ impl Operation for ScatterElementsOperation {
         Ok(Box::new(result.into_iter()))
     }
 
-    fn eval_pool<'p, P: crate::pool::Pool + 'p>(
-        &self,
-        inputs: &HashMap<GlobalId, &crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>>,
-        pool: &'p P,
-    ) -> Result<HashMap<GlobalId, crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P>>, super::EvalError> {
-        super::eval_pool_via_legacy(self, inputs, pool)
-    }
-
-    fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, _rng: &mut impl Rng) -> MilliOpGraph {
-        panic!("ScatterElements uses custom eval")
+    fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, rng: &mut impl Rng) -> MilliOpGraph {
+        let reduction = match self.reduction {
+            Reduction::None => crate::milli_graph::ops::ScatterReduction::None,
+            Reduction::Add => crate::milli_graph::ops::ScatterReduction::Add,
+            Reduction::Mul => crate::milli_graph::ops::ScatterReduction::Mul,
+            Reduction::Max => crate::milli_graph::ops::ScatterReduction::Max,
+            Reduction::Min => crate::milli_graph::ops::ScatterReduction::Min,
+        };
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
+        let out = crate::milli_graph::ops::ScatterElements::push_new(
+            &mut graph,
+            input_map[&self.data],
+            input_map[&self.indices],
+            input_map[&self.updates],
+            self.axis,
+            reduction,
+            rng,
+        );
+        let mut output_map = HashMap::new();
+        output_map.insert(out, self.output);
+        graph.set_output_map(output_map);
+        graph
     }
 }
