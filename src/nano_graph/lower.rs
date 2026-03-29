@@ -26,7 +26,9 @@ type LowerTensorInfo = TensorInfo<'static, SystemPool>;
 ///
 /// Uses the raw bits where possible, falling back to f64 roundtrip for floats.
 /// Precision is preserved for all types that fit in the new format.
-pub fn legacy_scalar_to_new(old: &crate::migration::numeric_scalar::NumericScalar) -> NumericScalar {
+pub fn legacy_scalar_to_new(
+    old: &crate::migration::numeric_scalar::NumericScalar,
+) -> NumericScalar {
     use crate::migration::numeric_scalar::NumericScalar as OldScalar;
     match old {
         OldScalar::F64(v) => NumericScalar::from_f64(*v),
@@ -53,24 +55,46 @@ pub fn legacy_scalar_to_new(old: &crate::migration::numeric_scalar::NumericScala
 /// Convert a new `NumericScalar` back to the legacy `migration::numeric_scalar::NumericScalar`.
 ///
 /// Extracts raw LE bytes from the new scalar and reconstructs the legacy variant.
-pub fn new_scalar_to_legacy(new: &NumericScalar) -> crate::migration::numeric_scalar::NumericScalar {
+pub fn new_scalar_to_legacy(
+    new: &NumericScalar,
+) -> crate::migration::numeric_scalar::NumericScalar {
     use crate::migration::numeric_scalar::NumericScalar as OldScalar;
     let bytes = new.raw_bits();
     let legacy_dtype = new.dtype().to_legacy();
     match legacy_dtype {
-        crate::dtype::DType::F64 => OldScalar::F64(f64::from_le_bytes(bytes[..8].try_into().unwrap())),
-        crate::dtype::DType::F32 => OldScalar::F32(f32::from_le_bytes(bytes[..4].try_into().unwrap())),
-        crate::dtype::DType::BF16 => OldScalar::BF16(half::bf16::from_bits(u16::from_le_bytes(bytes[..2].try_into().unwrap()))),
-        crate::dtype::DType::F16 => OldScalar::F16(half::f16::from_bits(u16::from_le_bytes(bytes[..2].try_into().unwrap()))),
+        crate::dtype::DType::F64 => {
+            OldScalar::F64(f64::from_le_bytes(bytes[..8].try_into().unwrap()))
+        }
+        crate::dtype::DType::F32 => {
+            OldScalar::F32(f32::from_le_bytes(bytes[..4].try_into().unwrap()))
+        }
+        crate::dtype::DType::BF16 => OldScalar::BF16(half::bf16::from_bits(u16::from_le_bytes(
+            bytes[..2].try_into().unwrap(),
+        ))),
+        crate::dtype::DType::F16 => OldScalar::F16(half::f16::from_bits(u16::from_le_bytes(
+            bytes[..2].try_into().unwrap(),
+        ))),
         crate::dtype::DType::F8E4M3FN => OldScalar::F8E4M3FN(float8::F8E4M3::from_bits(bytes[0])),
         crate::dtype::DType::F8E5M2 => OldScalar::F8E5M2(float8::F8E5M2::from_bits(bytes[0])),
-        crate::dtype::DType::I64 => OldScalar::I64(i64::from_le_bytes(bytes[..8].try_into().unwrap())),
-        crate::dtype::DType::I32 => OldScalar::I32(i32::from_le_bytes(bytes[..4].try_into().unwrap())),
-        crate::dtype::DType::I16 => OldScalar::I16(i16::from_le_bytes(bytes[..2].try_into().unwrap())),
+        crate::dtype::DType::I64 => {
+            OldScalar::I64(i64::from_le_bytes(bytes[..8].try_into().unwrap()))
+        }
+        crate::dtype::DType::I32 => {
+            OldScalar::I32(i32::from_le_bytes(bytes[..4].try_into().unwrap()))
+        }
+        crate::dtype::DType::I16 => {
+            OldScalar::I16(i16::from_le_bytes(bytes[..2].try_into().unwrap()))
+        }
         crate::dtype::DType::I8 => OldScalar::I8(bytes[0] as i8),
-        crate::dtype::DType::U64 => OldScalar::U64(u64::from_le_bytes(bytes[..8].try_into().unwrap())),
-        crate::dtype::DType::U32 => OldScalar::U32(u32::from_le_bytes(bytes[..4].try_into().unwrap())),
-        crate::dtype::DType::U16 => OldScalar::U16(u16::from_le_bytes(bytes[..2].try_into().unwrap())),
+        crate::dtype::DType::U64 => {
+            OldScalar::U64(u64::from_le_bytes(bytes[..8].try_into().unwrap()))
+        }
+        crate::dtype::DType::U32 => {
+            OldScalar::U32(u32::from_le_bytes(bytes[..4].try_into().unwrap()))
+        }
+        crate::dtype::DType::U16 => {
+            OldScalar::U16(u16::from_le_bytes(bytes[..2].try_into().unwrap()))
+        }
         crate::dtype::DType::U8 => OldScalar::U8(bytes[0]),
         crate::dtype::DType::I4 => OldScalar::I4(arbitrary_int::i4::new((bytes[0] & 0x0F) as i8)),
         crate::dtype::DType::U4 => OldScalar::U4(arbitrary_int::u4::new(bytes[0] & 0x0F)),
@@ -138,8 +162,14 @@ impl crate::nano_graph::ops::OpaqueEval for MilliOpOpaqueEval {
     fn eval(
         &self,
         inputs: &[crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>],
-        ) -> Result<
-        Vec<crate::numeric_tensor::NumericTensor<'static, crate::tensor_rank::DynRank, crate::pool::SystemPool>>,
+    ) -> Result<
+        Vec<
+            crate::numeric_tensor::NumericTensor<
+                'static,
+                crate::tensor_rank::DynRank,
+                crate::pool::SystemPool,
+            >,
+        >,
         crate::nano_graph::pool_eval::PoolEvalError,
     > {
         use crate::milli_graph::ops::MilliOp;
@@ -698,9 +728,7 @@ impl<'a> NanoLoweringContext<'a> {
 
         // Extract flat scalar values from the tensor.
         let n_elems = concrete.numel();
-        let scalars: Vec<NumericScalar> = (0..n_elems)
-            .map(|i| concrete.read_element(i))
-            .collect();
+        let scalars: Vec<NumericScalar> = (0..n_elems).map(|i| concrete.read_element(i)).collect();
 
         if scalars.is_empty() {
             self.register_input(id, info);
@@ -771,7 +799,12 @@ impl<'a> NanoLoweringContext<'a> {
 
     /// Register a tensor as a boundary (opaque) group.
     /// Boundary atoms are leaves — they use Literal(0) with no inputs.
-    pub fn register_boundary(&mut self, output_id: GlobalId, info: &LowerTensorInfo, _op_kind: &str) {
+    pub fn register_boundary(
+        &mut self,
+        output_id: GlobalId,
+        info: &LowerTensorInfo,
+        _op_kind: &str,
+    ) {
         let dt = Self::ndt(info);
         let Some((layout, known_dims, sym_dims, count)) = self.classify_dims(info) else {
             let base_id = self.nano.push_atom(
@@ -1226,7 +1259,6 @@ impl<'a> NanoLoweringContext<'a> {
     /// Otherwise, registers an OpaqueOp that calls `eval_new` on the op
     /// through pool_eval. Falls back to boundary if output info is missing.
     pub fn lower_default(&mut self, op: &AnyMilliOp) {
-
         let all_infos = self.all_infos;
         let op_kind = op.op_kind();
 
@@ -1247,7 +1279,9 @@ impl<'a> NanoLoweringContext<'a> {
 
         // Check all outputs have shape info (needed for opaque op registration).
         let all_outputs_known = op.outputs().all(|out_id| {
-            all_infos.get(&out_id).is_some_and(|i| i.rank_if_known().is_some())
+            all_infos
+                .get(&out_id)
+                .is_some_and(|i| i.rank_if_known().is_some())
         });
 
         if !all_outputs_known {
@@ -1407,7 +1441,10 @@ impl<'a> NanoLoweringContext<'a> {
     ///
     /// If input and output dtypes match, this is a zero-cost view (no atoms created).
     /// Otherwise, emits an Identity group that performs the dtype cast.
-    pub fn lower_identity_passthrough<T: Node>(&mut self, op: &T) -> crate::milli_graph::ops::LowerResult {
+    pub fn lower_identity_passthrough<T: Node>(
+        &mut self,
+        op: &T,
+    ) -> crate::milli_graph::ops::LowerResult {
         let all_infos = self.all_infos;
         let in_id = Node::inputs(op).next().unwrap();
         let out_id = Node::outputs(op).next().unwrap();
@@ -1736,7 +1773,10 @@ impl<'a> NanoLoweringContext<'a> {
         };
 
         let out_dt = Self::ndt(out_info);
-        let in_dt = all_infos.get(&in_id).map(|i| Self::ndt(i)).unwrap_or(out_dt);
+        let in_dt = all_infos
+            .get(&in_id)
+            .map(|i| Self::ndt(i))
+            .unwrap_or(out_dt);
         let compute_dt = match in_dt {
             NumericDType::BF16 | NumericDType::F16 => NumericDType::F32,
             other => other,
@@ -1839,10 +1879,10 @@ mod tests {
     use crate::milli_graph::ops::MilliOp;
     use crate::nano_graph::pool_eval;
     // Old NumericScalar still needed for MilliOp constructors (ConstantOfShape, etc.)
-    use crate::migration::numeric_scalar::NumericScalar as OldNumericScalar;
-    use crate::nano_graph::pattern::AtomRange;
-    use crate::migration::numeric_tensor::NumericTensor;
     use crate::migration::bridge;
+    use crate::migration::numeric_scalar::NumericScalar as OldNumericScalar;
+    use crate::migration::numeric_tensor::NumericTensor;
+    use crate::nano_graph::pattern::AtomRange;
     use crate::pool::TrackedPool;
 
     /// Extract flat values from a NumericTensor, returned as f64.
@@ -1967,12 +2007,8 @@ mod tests {
 
         // Eval NanoGraph via pool_eval.
         let pool = TrackedPool::new(None);
-        let nano_results = pool_eval::pool_eval(
-            &result.graph,
-            &eval_inputs,
-            &all_output_ranges,
-            &pool,
-        ).unwrap();
+        let nano_results =
+            pool_eval::pool_eval(&result.graph, &eval_inputs, &all_output_ranges, &pool).unwrap();
 
         // Build a lookup from AtomId -> f64.
         let mut atom_vals: std::collections::HashMap<u64, f64> = std::collections::HashMap::new();
@@ -2361,20 +2397,11 @@ mod tests {
     #[test]
     fn test_slice_zero_cost() {
         // Slice [6] with start=1, end=4, step=1 → [3]
-        use crate::backends::ndarray_backend::NDArrayNumericTensor;
         check_integrity(
             |graph, rng| {
                 let data = graph.add_input(rng);
-                let starts = crate::milli_graph::ops::Constant::push_new(
-                    graph,
-                    NDArrayNumericTensor::<DynRank>::from_vec_shape(vec![1i64], &vec![1]).unwrap(),
-                    rng,
-                );
-                let ends = crate::milli_graph::ops::Constant::push_new(
-                    graph,
-                    NDArrayNumericTensor::<DynRank>::from_vec_shape(vec![4i64], &vec![1]).unwrap(),
-                    rng,
-                );
+                let starts = crate::milli_graph::ops::Constant::from_vec(graph, vec![1i64], rng);
+                let ends = crate::milli_graph::ops::Constant::from_vec(graph, vec![4i64], rng);
                 let out = crate::milli_graph::ops::Slice::push_new(
                     graph, data, starts, ends, None, None, rng,
                 );
@@ -2390,25 +2417,12 @@ mod tests {
     #[test]
     fn test_slice_zero_cost_2d() {
         // Slice [3, 4] along axis 0 with start=1, end=3 → [2, 4]
-        use crate::backends::ndarray_backend::NDArrayNumericTensor;
         check_integrity(
             |graph, rng| {
                 let data = graph.add_input(rng);
-                let starts = crate::milli_graph::ops::Constant::push_new(
-                    graph,
-                    NDArrayNumericTensor::<DynRank>::from_vec_shape(vec![1i64], &vec![1]).unwrap(),
-                    rng,
-                );
-                let ends = crate::milli_graph::ops::Constant::push_new(
-                    graph,
-                    NDArrayNumericTensor::<DynRank>::from_vec_shape(vec![3i64], &vec![1]).unwrap(),
-                    rng,
-                );
-                let axes = crate::milli_graph::ops::Constant::push_new(
-                    graph,
-                    NDArrayNumericTensor::<DynRank>::from_vec_shape(vec![0i64], &vec![1]).unwrap(),
-                    rng,
-                );
+                let starts = crate::milli_graph::ops::Constant::from_vec(graph, vec![1i64], rng);
+                let ends = crate::milli_graph::ops::Constant::from_vec(graph, vec![3i64], rng);
+                let axes = crate::milli_graph::ops::Constant::from_vec(graph, vec![0i64], rng);
                 let out = crate::milli_graph::ops::Slice::push_new(
                     graph,
                     data,
@@ -2430,30 +2444,13 @@ mod tests {
     #[test]
     fn test_slice_then_add() {
         // Slice [4] two ways and add: data[0:2] + data[2:4]
-        use crate::backends::ndarray_backend::NDArrayNumericTensor;
         check_integrity(
             |graph, rng| {
                 let data = graph.add_input(rng);
-                let s0 = crate::milli_graph::ops::Constant::push_new(
-                    graph,
-                    NDArrayNumericTensor::<DynRank>::from_vec_shape(vec![0i64], &vec![1]).unwrap(),
-                    rng,
-                );
-                let e0 = crate::milli_graph::ops::Constant::push_new(
-                    graph,
-                    NDArrayNumericTensor::<DynRank>::from_vec_shape(vec![2i64], &vec![1]).unwrap(),
-                    rng,
-                );
-                let s1 = crate::milli_graph::ops::Constant::push_new(
-                    graph,
-                    NDArrayNumericTensor::<DynRank>::from_vec_shape(vec![2i64], &vec![1]).unwrap(),
-                    rng,
-                );
-                let e1 = crate::milli_graph::ops::Constant::push_new(
-                    graph,
-                    NDArrayNumericTensor::<DynRank>::from_vec_shape(vec![4i64], &vec![1]).unwrap(),
-                    rng,
-                );
+                let s0 = crate::milli_graph::ops::Constant::from_vec(graph, vec![0i64], rng);
+                let e0 = crate::milli_graph::ops::Constant::from_vec(graph, vec![2i64], rng);
+                let s1 = crate::milli_graph::ops::Constant::from_vec(graph, vec![2i64], rng);
+                let e1 = crate::milli_graph::ops::Constant::from_vec(graph, vec![4i64], rng);
                 let out0 =
                     crate::milli_graph::ops::Slice::push_new(graph, data, s0, e0, None, None, rng);
                 let out1 =
@@ -2470,25 +2467,12 @@ mod tests {
         // Slice [3, 4] along axis 1 with start=1, end=3 → [3, 2]
         // This is an inner-axis slice that falls back to Explicit, but
         // should still produce correct results.
-        use crate::backends::ndarray_backend::NDArrayNumericTensor;
         check_integrity(
             |graph, rng| {
                 let data = graph.add_input(rng);
-                let starts = crate::milli_graph::ops::Constant::push_new(
-                    graph,
-                    NDArrayNumericTensor::<DynRank>::from_vec_shape(vec![1i64], &vec![1]).unwrap(),
-                    rng,
-                );
-                let ends = crate::milli_graph::ops::Constant::push_new(
-                    graph,
-                    NDArrayNumericTensor::<DynRank>::from_vec_shape(vec![3i64], &vec![1]).unwrap(),
-                    rng,
-                );
-                let axes = crate::milli_graph::ops::Constant::push_new(
-                    graph,
-                    NDArrayNumericTensor::<DynRank>::from_vec_shape(vec![1i64], &vec![1]).unwrap(),
-                    rng,
-                );
+                let starts = crate::milli_graph::ops::Constant::from_vec(graph, vec![1i64], rng);
+                let ends = crate::milli_graph::ops::Constant::from_vec(graph, vec![3i64], rng);
+                let axes = crate::milli_graph::ops::Constant::from_vec(graph, vec![1i64], rng);
                 let out = crate::milli_graph::ops::Slice::push_new(
                     graph,
                     data,
@@ -2510,20 +2494,11 @@ mod tests {
     #[test]
     fn test_slice_no_identity_groups() {
         // Verify Slice [6] start=1 end=4 creates no Identity groups (zero-cost).
-        use crate::backends::ndarray_backend::NDArrayNumericTensor;
         let mut rng = rand::rng();
         let (mut milli, _) = MilliOpGraph::new(std::iter::empty(), &mut rng);
         let data = milli.add_input(&mut rng);
-        let starts = crate::milli_graph::ops::Constant::push_new(
-            &mut milli,
-            NDArrayNumericTensor::<DynRank>::from_vec_shape(vec![1i64], &vec![1]).unwrap(),
-            &mut rng,
-        );
-        let ends = crate::milli_graph::ops::Constant::push_new(
-            &mut milli,
-            NDArrayNumericTensor::<DynRank>::from_vec_shape(vec![4i64], &vec![1]).unwrap(),
-            &mut rng,
-        );
+        let starts = crate::milli_graph::ops::Constant::from_vec(&mut milli, vec![1i64], &mut rng);
+        let ends = crate::milli_graph::ops::Constant::from_vec(&mut milli, vec![4i64], &mut rng);
         let _out = crate::milli_graph::ops::Slice::push_new(
             &mut milli, data, starts, ends, None, None, &mut rng,
         );
@@ -2708,11 +2683,9 @@ mod tests {
     /// MatMul -> Transpose -> LayerNorm-like chain.
     #[test]
     fn test_three_way_transpose_layernorm() {
-        use crate::backends::ndarray_backend::NDArrayNumericTensor;
         use crate::milli_graph::ops::{
             Constant, MatMul, Pow, ReduceMean, SimpleBinary, SimpleUnaryOp, Transpose,
         };
-        use ndarray::{ArcArray, IxDyn};
 
         check_integrity(
             |graph, rng| {
@@ -2733,32 +2706,17 @@ mod tests {
                 );
                 let transposed = Transpose::push_new(graph, mm, Some(vec![0, 2, 1]), rng);
 
-                let axes_tensor = NDArrayNumericTensor::I64(
-                    ArcArray::from_shape_vec(IxDyn(&[1]), vec![-1i64]).unwrap(),
-                );
-                let axes_id = Constant::push_new(graph, axes_tensor, rng);
+                let axes_id = Constant::from_vec(graph, vec![-1i64], rng);
                 let mean = ReduceMean::push_new(graph, transposed, Some(axes_id), true, false, rng);
                 let centered = SimpleBinary::sub(graph, transposed, mean, rng);
 
-                let pow2_tensor = NDArrayNumericTensor::F32(
-                    ArcArray::from_shape_vec(IxDyn(&[1]), vec![2.0f32]).unwrap(),
-                );
-                let pow2_id = Constant::push_new(graph, pow2_tensor, rng);
+                let pow2_id = Constant::from_vec(graph, vec![2.0f32], rng);
                 let squared = Pow::push_new(graph, centered, pow2_id, rng);
 
-                let axes_id2 = Constant::push_new(
-                    graph,
-                    NDArrayNumericTensor::I64(
-                        ArcArray::from_shape_vec(IxDyn(&[1]), vec![-1i64]).unwrap(),
-                    ),
-                    rng,
-                );
+                let axes_id2 = Constant::from_vec(graph, vec![-1i64], rng);
                 let var = ReduceMean::push_new(graph, squared, Some(axes_id2), true, false, rng);
 
-                let eps_tensor = NDArrayNumericTensor::F32(
-                    ArcArray::from_shape_vec(IxDyn(&[1]), vec![1e-5f32]).unwrap(),
-                );
-                let eps_id = Constant::push_new(graph, eps_tensor, rng);
+                let eps_id = Constant::from_vec(graph, vec![1e-5f32], rng);
                 let var_eps = SimpleBinary::add(graph, var, eps_id, rng);
                 let std_dev = SimpleUnaryOp::sqrt(graph, var_eps, rng);
                 let normed = SimpleBinary::div(graph, centered, std_dev, rng);
@@ -3195,8 +3153,7 @@ mod tests {
         check_integrity(
             |g, rng| {
                 let a = g.add_input(rng);
-                let b =
-                    crate::milli_graph::ops::Cast::push_new(g, a, NumericDType::F64, rng);
+                let b = crate::milli_graph::ops::Cast::push_new(g, a, NumericDType::F64, rng);
                 (vec![a], vec![b])
             },
             vec![NumericTensor::from_vec_shape(vec![1.5f32, -2.5, 0.0, 3.14], vec![4]).unwrap()],
@@ -3212,13 +3169,8 @@ mod tests {
         // [3, 4] → reduce sum axis 0 → [4]
         check_integrity(
             |g, rng| {
-                use crate::backends::ndarray_backend::NDArrayNumericTensor;
-                use ndarray::{ArcArray, IxDyn};
                 let a = g.add_input(rng);
-                let axes_tensor = NDArrayNumericTensor::I64(
-                    ArcArray::from_shape_vec(IxDyn(&[1]), vec![0i64]).unwrap(),
-                );
-                let axes = crate::milli_graph::ops::Constant::push_new(g, axes_tensor, rng);
+                let axes = crate::milli_graph::ops::Constant::from_vec(g, vec![0i64], rng);
                 let b = crate::milli_graph::ops::ReduceSum::push_new(
                     g,
                     a,
@@ -3241,13 +3193,8 @@ mod tests {
         // [3, 4] → reduce sum axis 1 → [3]
         check_integrity(
             |g, rng| {
-                use crate::backends::ndarray_backend::NDArrayNumericTensor;
-                use ndarray::{ArcArray, IxDyn};
                 let a = g.add_input(rng);
-                let axes_tensor = NDArrayNumericTensor::I64(
-                    ArcArray::from_shape_vec(IxDyn(&[1]), vec![1i64]).unwrap(),
-                );
-                let axes = crate::milli_graph::ops::Constant::push_new(g, axes_tensor, rng);
+                let axes = crate::milli_graph::ops::Constant::from_vec(g, vec![1i64], rng);
                 let b = crate::milli_graph::ops::ReduceSum::push_new(
                     g,
                     a,
@@ -3270,13 +3217,8 @@ mod tests {
         // [3, 4] → reduce max axis 1 → [3]
         check_integrity(
             |g, rng| {
-                use crate::backends::ndarray_backend::NDArrayNumericTensor;
-                use ndarray::{ArcArray, IxDyn};
                 let a = g.add_input(rng);
-                let axes_tensor = NDArrayNumericTensor::I64(
-                    ArcArray::from_shape_vec(IxDyn(&[1]), vec![1i64]).unwrap(),
-                );
-                let axes = crate::milli_graph::ops::Constant::push_new(g, axes_tensor, rng);
+                let axes = crate::milli_graph::ops::Constant::from_vec(g, vec![1i64], rng);
                 let b = crate::milli_graph::ops::ReduceMax::push_new(
                     g,
                     a,
@@ -3304,13 +3246,8 @@ mod tests {
         // [3, 4] → reduce mean axis 1 → [3]
         check_integrity(
             |g, rng| {
-                use crate::backends::ndarray_backend::NDArrayNumericTensor;
-                use ndarray::{ArcArray, IxDyn};
                 let a = g.add_input(rng);
-                let axes_tensor = NDArrayNumericTensor::I64(
-                    ArcArray::from_shape_vec(IxDyn(&[1]), vec![1i64]).unwrap(),
-                );
-                let axes = crate::milli_graph::ops::Constant::push_new(g, axes_tensor, rng);
+                let axes = crate::milli_graph::ops::Constant::from_vec(g, vec![1i64], rng);
                 let b = crate::milli_graph::ops::ReduceMean::push_new(
                     g,
                     a,
@@ -3431,19 +3368,12 @@ mod tests {
             |g, rng| {
                 let shape = g.add_input(rng);
                 let x = g.add_input(rng);
-                // Note: ConstantOfShape::push_new returns the OP id (not output tensor id).
-                let cos_op_id = crate::milli_graph::ops::ConstantOfShape::push_new(
+                let constant = crate::milli_graph::ops::ConstantOfShape::push_new(
                     g,
                     NumericScalar::from_f32(7.0),
                     shape,
                     rng,
                 );
-                let constant = g
-                    .get_node_by_id(&cos_op_id)
-                    .unwrap()
-                    .outputs()
-                    .next()
-                    .unwrap();
                 let out = crate::milli_graph::ops::SimpleBinary::add(g, x, constant, rng);
                 (vec![shape, x], vec![out])
             },
@@ -3711,21 +3641,9 @@ mod tests {
         // input [2, 4]
         check_integrity(
             |g, rng| {
-                use crate::backends::ndarray_backend::NDArrayNumericTensor;
-                use ndarray::{ArcArray, IxDyn};
-
                 let x = g.add_input(rng);
-                let axes_tensor = NDArrayNumericTensor::I64(
-                    ArcArray::from_shape_vec(IxDyn(&[1]), vec![1i64]).unwrap(),
-                );
-                let axes = crate::milli_graph::ops::Constant::push_new(g, axes_tensor, rng);
-                let axes2 = crate::milli_graph::ops::Constant::push_new(
-                    g,
-                    NDArrayNumericTensor::I64(
-                        ArcArray::from_shape_vec(IxDyn(&[1]), vec![1i64]).unwrap(),
-                    ),
-                    rng,
-                );
+                let axes = crate::milli_graph::ops::Constant::from_vec(g, vec![1i64], rng);
+                let axes2 = crate::milli_graph::ops::Constant::from_vec(g, vec![1i64], rng);
 
                 // max_val = ReduceMax(x, axis=1, keepdims=true)
                 let max_val = crate::milli_graph::ops::ReduceMax::push_new(
@@ -3770,41 +3688,14 @@ mod tests {
         // input [2, 4], gamma [4], beta [4]
         check_integrity(
             |g, rng| {
-                use crate::backends::ndarray_backend::NDArrayNumericTensor;
-                use ndarray::{ArcArray, IxDyn};
-
                 let x = g.add_input(rng);
                 let gamma = g.add_input(rng);
                 let beta = g.add_input(rng);
 
-                let axes1 = crate::milli_graph::ops::Constant::push_new(
-                    g,
-                    NDArrayNumericTensor::I64(
-                        ArcArray::from_shape_vec(IxDyn(&[1]), vec![-1i64]).unwrap(),
-                    ),
-                    rng,
-                );
-                let axes2 = crate::milli_graph::ops::Constant::push_new(
-                    g,
-                    NDArrayNumericTensor::I64(
-                        ArcArray::from_shape_vec(IxDyn(&[1]), vec![-1i64]).unwrap(),
-                    ),
-                    rng,
-                );
-                let pow2 = crate::milli_graph::ops::Constant::push_new(
-                    g,
-                    NDArrayNumericTensor::F32(
-                        ArcArray::from_shape_vec(IxDyn(&[1]), vec![2.0f32]).unwrap(),
-                    ),
-                    rng,
-                );
-                let eps = crate::milli_graph::ops::Constant::push_new(
-                    g,
-                    NDArrayNumericTensor::F32(
-                        ArcArray::from_shape_vec(IxDyn(&[1]), vec![1e-5f32]).unwrap(),
-                    ),
-                    rng,
-                );
+                let axes1 = crate::milli_graph::ops::Constant::from_vec(g, vec![-1i64], rng);
+                let axes2 = crate::milli_graph::ops::Constant::from_vec(g, vec![-1i64], rng);
+                let pow2 = crate::milli_graph::ops::Constant::from_vec(g, vec![2.0f32], rng);
+                let eps = crate::milli_graph::ops::Constant::from_vec(g, vec![1e-5f32], rng);
 
                 let mean = crate::milli_graph::ops::ReduceMean::push_new(
                     g,
@@ -4039,13 +3930,8 @@ mod tests {
         // This should be bit-perfect with sequential accumulation.
         check_integrity(
             |g, rng| {
-                use crate::backends::ndarray_backend::NDArrayNumericTensor;
-                use ndarray::{ArcArray, IxDyn};
                 let a = g.add_input(rng);
-                let axes_tensor = NDArrayNumericTensor::I64(
-                    ArcArray::from_shape_vec(IxDyn(&[1]), vec![-1i64]).unwrap(),
-                );
-                let axes = crate::milli_graph::ops::Constant::push_new(g, axes_tensor, rng);
+                let axes = crate::milli_graph::ops::Constant::from_vec(g, vec![-1i64], rng);
                 let b = crate::milli_graph::ops::ReduceMean::push_new(
                     g,
                     a,
@@ -4073,13 +3959,8 @@ mod tests {
         // ReduceMean on [2, 4, 64] axis -1 → [2, 4, 1] (GPT-2 layernorm scale)
         check_integrity(
             |g, rng| {
-                use crate::backends::ndarray_backend::NDArrayNumericTensor;
-                use ndarray::{ArcArray, IxDyn};
                 let a = g.add_input(rng);
-                let axes_tensor = NDArrayNumericTensor::I64(
-                    ArcArray::from_shape_vec(IxDyn(&[1]), vec![-1i64]).unwrap(),
-                );
-                let axes = crate::milli_graph::ops::Constant::push_new(g, axes_tensor, rng);
+                let axes = crate::milli_graph::ops::Constant::from_vec(g, vec![-1i64], rng);
                 let b = crate::milli_graph::ops::ReduceMean::push_new(
                     g,
                     a,
@@ -4206,18 +4087,13 @@ mod tests {
         // Then add each piece with a bias to force evaluation.
         check_integrity(
             |g, rng| {
-                use crate::backends::ndarray_backend::NDArrayNumericTensor;
-                use ndarray::{ArcArray, IxDyn};
-
                 let x = g.add_input(rng);
                 let bias_q = g.add_input(rng);
                 let bias_k = g.add_input(rng);
                 let bias_v = g.add_input(rng);
 
-                let split_tensor = NDArrayNumericTensor::I64(
-                    ArcArray::from_shape_vec(IxDyn(&[3]), vec![4i64, 4, 4]).unwrap(),
-                );
-                let split_sizes = crate::milli_graph::ops::Constant::push_new(g, split_tensor, rng);
+                let split_sizes =
+                    crate::milli_graph::ops::Constant::from_vec(g, vec![4i64, 4, 4], rng);
 
                 let q = crate::milli_graph::ops::Split::push_new(
                     g,
@@ -4281,9 +4157,6 @@ mod tests {
         // x [2, 3, 4] @ W [4, 6] → [2, 3, 6] → split axis=-1 into 3 × [2, 3, 2]
         check_integrity(
             |g, rng| {
-                use crate::backends::ndarray_backend::NDArrayNumericTensor;
-                use ndarray::{ArcArray, IxDyn};
-
                 let x = g.add_input(rng);
                 let w = g.add_input(rng);
                 let proj = crate::milli_graph::ops::MatMul::push_new_default_precision(
@@ -4294,10 +4167,8 @@ mod tests {
                     rng,
                 );
 
-                let split_tensor = NDArrayNumericTensor::I64(
-                    ArcArray::from_shape_vec(IxDyn(&[3]), vec![2i64, 2, 2]).unwrap(),
-                );
-                let split_sizes = crate::milli_graph::ops::Constant::push_new(g, split_tensor, rng);
+                let split_sizes =
+                    crate::milli_graph::ops::Constant::from_vec(g, vec![2i64, 2, 2], rng);
 
                 let q = crate::milli_graph::ops::Split::push_new(
                     g,
@@ -4360,9 +4231,6 @@ mod tests {
         // output = scores @ V → [1, 2, 4, 4]
         check_integrity(
             |g, rng| {
-                use crate::backends::ndarray_backend::NDArrayNumericTensor;
-                use ndarray::{ArcArray, IxDyn};
-
                 let x = g.add_input(rng);
                 let wqkv = g.add_input(rng);
 
@@ -4376,10 +4244,8 @@ mod tests {
                 );
 
                 // Split into Q, K, V each [1, 4, 8]
-                let split_tensor = NDArrayNumericTensor::I64(
-                    ArcArray::from_shape_vec(IxDyn(&[3]), vec![8i64, 8, 8]).unwrap(),
-                );
-                let split_sizes = crate::milli_graph::ops::Constant::push_new(g, split_tensor, rng);
+                let split_sizes =
+                    crate::milli_graph::ops::Constant::from_vec(g, vec![8i64, 8, 8], rng);
 
                 let q_raw = crate::milli_graph::ops::Split::push_new(
                     g,

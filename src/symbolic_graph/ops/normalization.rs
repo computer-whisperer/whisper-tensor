@@ -1,4 +1,3 @@
-use crate::backends::ndarray_backend::NDArrayNumericTensor;
 use crate::dtype::DType;
 use crate::graph::{GlobalId, Node, Property, PropertyValue};
 use crate::milli_graph::{MilliLoweringContext, MilliOpGraph, ops_helpers};
@@ -98,7 +97,8 @@ impl Operation for LpNormalizationOperation {
         if self.p == 2 {
             x_tid = milli_graph::ops::SimpleUnaryOp::sqrt(&mut graph, x_tid, rng);
         }
-        let input_cast_tid = milli_graph::ops::Cast::push_new(&mut graph, input, NumericDType::F32, rng);
+        let input_cast_tid =
+            milli_graph::ops::Cast::push_new(&mut graph, input, NumericDType::F32, rng);
         let out_tid = milli_graph::ops::SimpleBinary::div(&mut graph, input_cast_tid, x_tid, rng);
         let out = milli_graph::ops::CastLike::push_new(&mut graph, out_tid, input, rng);
 
@@ -204,8 +204,12 @@ impl Operation for GroupNormalizationOperation {
     fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let original_input = input_map[&self.input];
-        let input_cast =
-            milli_graph::ops::Cast::push_new(&mut graph, original_input, NumericDType::from_legacy(self.stash_type).unwrap(), rng);
+        let input_cast = milli_graph::ops::Cast::push_new(
+            &mut graph,
+            original_input,
+            NumericDType::from_legacy(self.stash_type).unwrap(),
+            rng,
+        );
 
         let input_shape = milli_graph::ops::Shape::push_new(&mut graph, input_cast, rng);
         let num_channels = {
@@ -222,10 +226,11 @@ impl Operation for GroupNormalizationOperation {
             )
         };
         let reshaped_input = {
-            let new_shape_tensor =
-                NDArrayNumericTensor::from(vec![0i64, self.num_groups as i64, -1]);
-            let new_shape =
-                milli_graph::ops::Constant::push_new(&mut graph, new_shape_tensor.to_dyn(), rng);
+            let new_shape = milli_graph::ops::Constant::from_vec(
+                &mut graph,
+                vec![0i64, self.num_groups as i64, -1],
+                rng,
+            );
             milli_graph::ops::Reshape::push_new(&mut graph, input_cast, new_shape, false, rng)
         };
 
@@ -453,8 +458,12 @@ impl Operation for RMSNormalizationOperation {
         let input_data = input_map[&self.input];
         let input_scale = input_map[&self.scale];
 
-        let input_f32 =
-            milli_graph::ops::Cast::push_new(&mut graph, input_data, NumericDType::from_legacy(self.stash_type).unwrap(), rng);
+        let input_f32 = milli_graph::ops::Cast::push_new(
+            &mut graph,
+            input_data,
+            NumericDType::from_legacy(self.stash_type).unwrap(),
+            rng,
+        );
 
         let axis = ops_helpers::scalar_const(&mut graph, self.axis, rng);
         let axis = ops_helpers::resolve_axes(&mut graph, axis, input_data, rng);
@@ -658,8 +667,12 @@ impl Operation for LayerNormalizationOperation {
         let input_data = input_map[&self.input];
         let input_scale = input_map[&self.scale];
 
-        let input_f32 =
-            milli_graph::ops::Cast::push_new(&mut graph, input_data, NumericDType::from_legacy(self.stash_type).unwrap(), rng);
+        let input_f32 = milli_graph::ops::Cast::push_new(
+            &mut graph,
+            input_data,
+            NumericDType::from_legacy(self.stash_type).unwrap(),
+            rng,
+        );
 
         let axis = ops_helpers::scalar_const(&mut graph, self.axis, rng);
         let axis = ops_helpers::resolve_axes(&mut graph, axis, input_data, rng);
@@ -811,9 +824,8 @@ impl Operation for InstanceNormalizationOperation {
 
         // Reshape [N, C, D1, D2, ...] → [N, C, -1]
         let reshaped_input = {
-            let new_shape_tensor = NDArrayNumericTensor::from(vec![0i64, 0i64, -1]);
             let new_shape =
-                milli_graph::ops::Constant::push_new(&mut graph, new_shape_tensor.to_dyn(), rng);
+                milli_graph::ops::Constant::from_vec(&mut graph, vec![0i64, 0i64, -1i64], rng);
             milli_graph::ops::Reshape::push_new(&mut graph, input_cast, new_shape, false, rng)
         };
 
@@ -1007,19 +1019,26 @@ impl Operation for BatchNormalizationOperation {
         let orig_shape = milli_graph::ops::Shape::push_new(&mut graph, x, rng);
 
         // Reshape [N, C, D1, D2, ...] → [N, C, -1]
-        let new_shape_tensor = NDArrayNumericTensor::from(vec![0i64, 0i64, -1]);
         let new_shape =
-            milli_graph::ops::Constant::push_new(&mut graph, new_shape_tensor.to_dyn(), rng);
+            milli_graph::ops::Constant::from_vec(&mut graph, vec![0i64, 0i64, -1i64], rng);
         let x3d = milli_graph::ops::Reshape::push_new(&mut graph, x, new_shape, false, rng);
 
         // Unsqueeze 1-D params [C] → [C, 1] so they broadcast over the spatial dim,
         // casting each to F32.
         let axis1 = milli_graph::ops::Constant::new_scalar(&mut graph, 1i64, rng);
-        let scale =
-            milli_graph::ops::Cast::push_new(&mut graph, input_map[&self.scale], NumericDType::F32, rng);
+        let scale = milli_graph::ops::Cast::push_new(
+            &mut graph,
+            input_map[&self.scale],
+            NumericDType::F32,
+            rng,
+        );
         let scale = milli_graph::ops::Unsqueeze::push_new(&mut graph, scale, axis1, rng);
-        let bias =
-            milli_graph::ops::Cast::push_new(&mut graph, input_map[&self.bias], NumericDType::F32, rng);
+        let bias = milli_graph::ops::Cast::push_new(
+            &mut graph,
+            input_map[&self.bias],
+            NumericDType::F32,
+            rng,
+        );
         let bias = milli_graph::ops::Unsqueeze::push_new(&mut graph, bias, axis1, rng);
         let mean = milli_graph::ops::Cast::push_new(
             &mut graph,
@@ -1094,8 +1113,14 @@ mod tests {
         // PyTorch result: [0.1826171875, 0.365234375, 0.546875, 0.73046875]
         let mut rng = wyrand::WyRand::new(42);
 
-        let x_vals: Vec<bf16> = [1.0f32, 2.0, 3.0, 4.0].iter().map(|v| bf16::from_f32(*v)).collect();
-        let w_vals: Vec<bf16> = [0.5f32, 0.5, 0.5, 0.5].iter().map(|v| bf16::from_f32(*v)).collect();
+        let x_vals: Vec<bf16> = [1.0f32, 2.0, 3.0, 4.0]
+            .iter()
+            .map(|v| bf16::from_f32(*v))
+            .collect();
+        let w_vals: Vec<bf16> = [0.5f32, 0.5, 0.5, 0.5]
+            .iter()
+            .map(|v| bf16::from_f32(*v))
+            .collect();
         let expected: Vec<f32> = vec![0.1826171875, 0.365234375, 0.546875, 0.73046875];
 
         let x_id = GlobalId::new(&mut rng);
@@ -1138,8 +1163,14 @@ mod tests {
     #[test]
     fn test_rmsnorm_bf16_rank3() {
         let mut rng = wyrand::WyRand::new(42);
-        let x_vals: Vec<bf16> = [1.0f32, 2.0, 3.0, 4.0].iter().map(|v| bf16::from_f32(*v)).collect();
-        let w_vals: Vec<bf16> = [0.5f32, 0.5, 0.5, 0.5].iter().map(|v| bf16::from_f32(*v)).collect();
+        let x_vals: Vec<bf16> = [1.0f32, 2.0, 3.0, 4.0]
+            .iter()
+            .map(|v| bf16::from_f32(*v))
+            .collect();
+        let w_vals: Vec<bf16> = [0.5f32, 0.5, 0.5, 0.5]
+            .iter()
+            .map(|v| bf16::from_f32(*v))
+            .collect();
         let expected: Vec<f32> = vec![0.1826171875, 0.365234375, 0.546875, 0.73046875];
 
         let x_id = GlobalId::new(&mut rng);

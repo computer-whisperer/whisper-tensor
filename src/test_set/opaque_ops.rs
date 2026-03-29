@@ -5,18 +5,15 @@
 
 use std::collections::HashMap;
 
-use ndarray::{ArcArray, IxDyn};
-use rand::SeedableRng;
-use rand::rngs::SmallRng;
-
-use crate::backends::ndarray_backend::NDArrayNumericTensor;
 use crate::graph::GlobalId;
 use crate::milli_graph::MilliOpGraph;
 use crate::milli_graph::ops::{self, Constant};
 use crate::numeric_dtype::NumericDType;
+use rand::SeedableRng;
+use rand::rngs::SmallRng;
 
-use super::{TestCase, TestDataSet, Tolerance};
 use super::tensor_f32_shaped;
+use super::{TestCase, TestDataSet, Tolerance};
 
 pub fn build_cases() -> Vec<TestCase> {
     vec![
@@ -61,13 +58,15 @@ fn build_reduce_min_graph(axis: i64, keepdims: bool) -> (MilliOpGraph, ReduceIds
     let (mut graph, input_map) = MilliOpGraph::new([ext_data], &mut rng);
     let int_data = input_map[&ext_data];
 
-    let axes_tensor = NDArrayNumericTensor::I64(
-        ArcArray::from_shape_vec(IxDyn(&[1]), vec![axis]).unwrap(),
-    );
-    let axes_id = Constant::push_new(&mut graph, axes_tensor, &mut rng);
+    let axes_id = Constant::from_vec(&mut graph, vec![axis], &mut rng);
 
     let out = ops::ReduceMin::push_new(
-        &mut graph, int_data, Some(axes_id), keepdims, false, &mut rng,
+        &mut graph,
+        int_data,
+        Some(axes_id),
+        keepdims,
+        false,
+        &mut rng,
     );
     graph.set_outputs(vec![out]);
     (graph, ReduceIds { ext_data, out })
@@ -80,7 +79,10 @@ fn reduce_min_axis1() -> TestCase {
         graph,
         data_sets: vec![TestDataSet {
             label: "2x3_f32".to_string(),
-            inputs: HashMap::from([(ids.ext_data, tensor_f32_shaped(vec![2, 3], &[3.0, 1.0, 4.0, 1.0, 5.0, 9.0]))]),
+            inputs: HashMap::from([(
+                ids.ext_data,
+                tensor_f32_shaped(vec![2, 3], &[3.0, 1.0, 4.0, 1.0, 5.0, 9.0]),
+            )]),
             expected_outputs: HashMap::from([(ids.out, tensor_f32_shaped(vec![2], &[1.0, 1.0]))]),
             tolerance: Tolerance::for_dtype(NumericDType::F32),
         }],
@@ -94,8 +96,14 @@ fn reduce_min_axis0() -> TestCase {
         graph,
         data_sets: vec![TestDataSet {
             label: "2x3_f32".to_string(),
-            inputs: HashMap::from([(ids.ext_data, tensor_f32_shaped(vec![2, 3], &[3.0, 1.0, 4.0, 1.0, 5.0, 9.0]))]),
-            expected_outputs: HashMap::from([(ids.out, tensor_f32_shaped(vec![3], &[1.0, 1.0, 4.0]))]),
+            inputs: HashMap::from([(
+                ids.ext_data,
+                tensor_f32_shaped(vec![2, 3], &[3.0, 1.0, 4.0, 1.0, 5.0, 9.0]),
+            )]),
+            expected_outputs: HashMap::from([(
+                ids.out,
+                tensor_f32_shaped(vec![3], &[1.0, 1.0, 4.0]),
+            )]),
             tolerance: Tolerance::for_dtype(NumericDType::F32),
         }],
     }
@@ -108,8 +116,14 @@ fn reduce_min_keepdims() -> TestCase {
         graph,
         data_sets: vec![TestDataSet {
             label: "2x3_f32".to_string(),
-            inputs: HashMap::from([(ids.ext_data, tensor_f32_shaped(vec![2, 3], &[3.0, 1.0, 4.0, 1.0, 5.0, 9.0]))]),
-            expected_outputs: HashMap::from([(ids.out, tensor_f32_shaped(vec![2, 1], &[1.0, 1.0]))]),
+            inputs: HashMap::from([(
+                ids.ext_data,
+                tensor_f32_shaped(vec![2, 3], &[3.0, 1.0, 4.0, 1.0, 5.0, 9.0]),
+            )]),
+            expected_outputs: HashMap::from([(
+                ids.out,
+                tensor_f32_shaped(vec![2, 1], &[1.0, 1.0]),
+            )]),
             tolerance: Tolerance::for_dtype(NumericDType::F32),
         }],
     }
@@ -125,13 +139,15 @@ fn build_reduce_prod_graph(axis: i64, keepdims: bool) -> (MilliOpGraph, ReduceId
     let (mut graph, input_map) = MilliOpGraph::new([ext_data], &mut rng);
     let int_data = input_map[&ext_data];
 
-    let axes_tensor = NDArrayNumericTensor::I64(
-        ArcArray::from_shape_vec(IxDyn(&[1]), vec![axis]).unwrap(),
-    );
-    let axes_id = Constant::push_new(&mut graph, axes_tensor, &mut rng);
+    let axes_id = Constant::from_vec(&mut graph, vec![axis], &mut rng);
 
     let out = ops::ReduceProd::push_new(
-        &mut graph, int_data, Some(axes_id), keepdims, false, &mut rng,
+        &mut graph,
+        int_data,
+        Some(axes_id),
+        keepdims,
+        false,
+        &mut rng,
     );
     graph.set_outputs(vec![out]);
     (graph, ReduceIds { ext_data, out })
@@ -144,7 +160,10 @@ fn reduce_prod_axis0() -> TestCase {
         graph,
         data_sets: vec![TestDataSet {
             label: "2x2_f32".to_string(),
-            inputs: HashMap::from([(ids.ext_data, tensor_f32_shaped(vec![2, 2], &[1.0, 2.0, 3.0, 4.0]))]),
+            inputs: HashMap::from([(
+                ids.ext_data,
+                tensor_f32_shaped(vec![2, 2], &[1.0, 2.0, 3.0, 4.0]),
+            )]),
             expected_outputs: HashMap::from([(ids.out, tensor_f32_shaped(vec![2], &[3.0, 8.0]))]),
             tolerance: Tolerance::for_dtype(NumericDType::F32),
         }],
@@ -158,7 +177,10 @@ fn reduce_prod_axis1() -> TestCase {
         graph,
         data_sets: vec![TestDataSet {
             label: "2x2_f32".to_string(),
-            inputs: HashMap::from([(ids.ext_data, tensor_f32_shaped(vec![2, 2], &[1.0, 2.0, 3.0, 4.0]))]),
+            inputs: HashMap::from([(
+                ids.ext_data,
+                tensor_f32_shaped(vec![2, 2], &[1.0, 2.0, 3.0, 4.0]),
+            )]),
             expected_outputs: HashMap::from([(ids.out, tensor_f32_shaped(vec![2], &[2.0, 12.0]))]),
             tolerance: Tolerance::for_dtype(NumericDType::F32),
         }],
@@ -175,14 +197,10 @@ fn build_reduce_mean_graph(axis: i64) -> (MilliOpGraph, ReduceIds) {
     let (mut graph, input_map) = MilliOpGraph::new([ext_data], &mut rng);
     let int_data = input_map[&ext_data];
 
-    let axes_tensor = NDArrayNumericTensor::I64(
-        ArcArray::from_shape_vec(IxDyn(&[1]), vec![axis]).unwrap(),
-    );
-    let axes_id = Constant::push_new(&mut graph, axes_tensor, &mut rng);
+    let axes_id = Constant::from_vec(&mut graph, vec![axis], &mut rng);
 
-    let out = ops::ReduceMean::push_new(
-        &mut graph, int_data, Some(axes_id), false, false, &mut rng,
-    );
+    let out =
+        ops::ReduceMean::push_new(&mut graph, int_data, Some(axes_id), false, false, &mut rng);
     graph.set_outputs(vec![out]);
     (graph, ReduceIds { ext_data, out })
 }
@@ -195,7 +213,10 @@ fn reduce_mean_axis1() -> TestCase {
         graph,
         data_sets: vec![TestDataSet {
             label: "2x3_f32".to_string(),
-            inputs: HashMap::from([(ids.ext_data, tensor_f32_shaped(vec![2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]))]),
+            inputs: HashMap::from([(
+                ids.ext_data,
+                tensor_f32_shaped(vec![2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
+            )]),
             expected_outputs: HashMap::from([(ids.out, tensor_f32_shaped(vec![2], &[2.0, 5.0]))]),
             tolerance: Tolerance::for_dtype(NumericDType::F32),
         }],
@@ -212,14 +233,9 @@ fn build_reduce_sum_multi_axis_graph(axes: Vec<i64>) -> (MilliOpGraph, ReduceIds
     let (mut graph, input_map) = MilliOpGraph::new([ext_data], &mut rng);
     let int_data = input_map[&ext_data];
 
-    let axes_tensor = NDArrayNumericTensor::I64(
-        ArcArray::from_shape_vec(IxDyn(&[axes.len()]), axes).unwrap(),
-    );
-    let axes_id = Constant::push_new(&mut graph, axes_tensor, &mut rng);
+    let axes_id = Constant::from_vec(&mut graph, axes, &mut rng);
 
-    let out = ops::ReduceSum::push_new(
-        &mut graph, int_data, Some(axes_id), false, false, &mut rng,
-    );
+    let out = ops::ReduceSum::push_new(&mut graph, int_data, Some(axes_id), false, false, &mut rng);
     graph.set_outputs(vec![out]);
     (graph, ReduceIds { ext_data, out })
 }
@@ -234,11 +250,19 @@ fn reduce_sum_multi_axis() -> TestCase {
         graph,
         data_sets: vec![TestDataSet {
             label: "2x3x2_f32".to_string(),
-            inputs: HashMap::from([(ids.ext_data, tensor_f32_shaped(
-                vec![2, 3, 2],
-                &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0],
-            ))]),
-            expected_outputs: HashMap::from([(ids.out, tensor_f32_shaped(vec![3], &[18.0, 26.0, 34.0]))]),
+            inputs: HashMap::from([(
+                ids.ext_data,
+                tensor_f32_shaped(
+                    vec![2, 3, 2],
+                    &[
+                        1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
+                    ],
+                ),
+            )]),
+            expected_outputs: HashMap::from([(
+                ids.out,
+                tensor_f32_shaped(vec![3], &[18.0, 26.0, 34.0]),
+            )]),
             tolerance: Tolerance::for_dtype(NumericDType::F32),
         }],
     }
@@ -254,14 +278,9 @@ fn build_cumsum_graph(axis: i64) -> (MilliOpGraph, ReduceIds) {
     let (mut graph, input_map) = MilliOpGraph::new([ext_data], &mut rng);
     let int_data = input_map[&ext_data];
 
-    let axis_tensor = NDArrayNumericTensor::I64(
-        ArcArray::from_shape_vec(IxDyn(&[1]), vec![axis]).unwrap(),
-    );
-    let axis_id = Constant::push_new(&mut graph, axis_tensor, &mut rng);
+    let axis_id = Constant::from_vec(&mut graph, vec![axis], &mut rng);
 
-    let out = ops::CumSum::push_new(
-        &mut graph, int_data, axis_id, false, false, &mut rng,
-    );
+    let out = ops::CumSum::push_new(&mut graph, int_data, axis_id, false, false, &mut rng);
     graph.set_outputs(vec![out]);
     (graph, ReduceIds { ext_data, out })
 }
@@ -275,7 +294,10 @@ fn cumsum_axis0() -> TestCase {
         data_sets: vec![TestDataSet {
             label: "3_f32".to_string(),
             inputs: HashMap::from([(ids.ext_data, tensor_f32_shaped(vec![3], &[1.0, 2.0, 3.0]))]),
-            expected_outputs: HashMap::from([(ids.out, tensor_f32_shaped(vec![3], &[1.0, 3.0, 6.0]))]),
+            expected_outputs: HashMap::from([(
+                ids.out,
+                tensor_f32_shaped(vec![3], &[1.0, 3.0, 6.0]),
+            )]),
             tolerance: Tolerance::for_dtype(NumericDType::F32),
         }],
     }
@@ -289,8 +311,14 @@ fn cumsum_axis1() -> TestCase {
         graph,
         data_sets: vec![TestDataSet {
             label: "2x3_f32".to_string(),
-            inputs: HashMap::from([(ids.ext_data, tensor_f32_shaped(vec![2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]))]),
-            expected_outputs: HashMap::from([(ids.out, tensor_f32_shaped(vec![2, 3], &[1.0, 3.0, 6.0, 4.0, 9.0, 15.0]))]),
+            inputs: HashMap::from([(
+                ids.ext_data,
+                tensor_f32_shaped(vec![2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
+            )]),
+            expected_outputs: HashMap::from([(
+                ids.out,
+                tensor_f32_shaped(vec![2, 3], &[1.0, 3.0, 6.0, 4.0, 9.0, 15.0]),
+            )]),
             tolerance: Tolerance::for_dtype(NumericDType::F32),
         }],
     }
@@ -306,9 +334,7 @@ fn build_argmax_graph(axis: i64, keepdims: bool) -> (MilliOpGraph, ReduceIds) {
     let (mut graph, input_map) = MilliOpGraph::new([ext_data], &mut rng);
     let int_data = input_map[&ext_data];
 
-    let out = ops::ArgMax::push_new(
-        &mut graph, int_data, axis, keepdims, false, &mut rng,
-    );
+    let out = ops::ArgMax::push_new(&mut graph, int_data, axis, keepdims, false, &mut rng);
     graph.set_outputs(vec![out]);
     (graph, ReduceIds { ext_data, out })
 }
@@ -321,8 +347,14 @@ fn argmax_axis1() -> TestCase {
         graph,
         data_sets: vec![TestDataSet {
             label: "2x3_f32".to_string(),
-            inputs: HashMap::from([(ids.ext_data, tensor_f32_shaped(vec![2, 3], &[3.0, 1.0, 4.0, 1.0, 5.0, 9.0]))]),
-            expected_outputs: HashMap::from([(ids.out, super::tensor_i64_shaped(vec![2], &[2, 2]))]),
+            inputs: HashMap::from([(
+                ids.ext_data,
+                tensor_f32_shaped(vec![2, 3], &[3.0, 1.0, 4.0, 1.0, 5.0, 9.0]),
+            )]),
+            expected_outputs: HashMap::from([(
+                ids.out,
+                super::tensor_i64_shaped(vec![2], &[2, 2]),
+            )]),
             tolerance: Tolerance::for_dtype(NumericDType::I64),
         }],
     }
@@ -336,8 +368,14 @@ fn argmax_axis0() -> TestCase {
         graph,
         data_sets: vec![TestDataSet {
             label: "2x3_f32".to_string(),
-            inputs: HashMap::from([(ids.ext_data, tensor_f32_shaped(vec![2, 3], &[3.0, 1.0, 4.0, 1.0, 5.0, 9.0]))]),
-            expected_outputs: HashMap::from([(ids.out, super::tensor_i64_shaped(vec![3], &[0, 1, 1]))]),
+            inputs: HashMap::from([(
+                ids.ext_data,
+                tensor_f32_shaped(vec![2, 3], &[3.0, 1.0, 4.0, 1.0, 5.0, 9.0]),
+            )]),
+            expected_outputs: HashMap::from([(
+                ids.out,
+                super::tensor_i64_shaped(vec![3], &[0, 1, 1]),
+            )]),
             tolerance: Tolerance::for_dtype(NumericDType::I64),
         }],
     }
@@ -353,22 +391,16 @@ fn build_pad_graph(pads: Vec<i64>, constant_value: f32) -> (MilliOpGraph, Reduce
     let (mut graph, input_map) = MilliOpGraph::new([ext_data], &mut rng);
     let int_data = input_map[&ext_data];
 
-    let pads_tensor = NDArrayNumericTensor::I64(
-        ArcArray::from_shape_vec(IxDyn(&[pads.len()]), pads).unwrap(),
-    );
-    let pads_id = Constant::push_new(&mut graph, pads_tensor, &mut rng);
+    let pads_id = Constant::from_vec(&mut graph, pads, &mut rng);
 
-    let const_tensor = NDArrayNumericTensor::F32(
-        ArcArray::from_shape_vec(IxDyn(&[1]), vec![constant_value]).unwrap(),
-    );
-    let const_id = Constant::push_new(&mut graph, const_tensor, &mut rng);
+    let const_id = Constant::from_vec(&mut graph, vec![constant_value], &mut rng);
 
     let out = ops::Pad::push_new(
         &mut graph,
         int_data,
         pads_id,
         Some(const_id),
-        None,     // no axes
+        None, // no axes
         ops::PadMode::Constant,
         &mut rng,
     );
@@ -386,9 +418,7 @@ fn build_argmin_graph(axis: i64, keepdims: bool) -> (MilliOpGraph, ReduceIds) {
     let (mut graph, input_map) = MilliOpGraph::new([ext_data], &mut rng);
     let int_data = input_map[&ext_data];
 
-    let out = ops::ArgMin::push_new(
-        &mut graph, int_data, axis, keepdims, false, &mut rng,
-    );
+    let out = ops::ArgMin::push_new(&mut graph, int_data, axis, keepdims, false, &mut rng);
     graph.set_outputs(vec![out]);
     (graph, ReduceIds { ext_data, out })
 }
@@ -401,8 +431,14 @@ fn argmin_axis1() -> TestCase {
         graph,
         data_sets: vec![TestDataSet {
             label: "2x3_f32".to_string(),
-            inputs: HashMap::from([(ids.ext_data, tensor_f32_shaped(vec![2, 3], &[3.0, 1.0, 4.0, 9.0, 5.0, 1.0]))]),
-            expected_outputs: HashMap::from([(ids.out, super::tensor_i64_shaped(vec![2], &[1, 2]))]),
+            inputs: HashMap::from([(
+                ids.ext_data,
+                tensor_f32_shaped(vec![2, 3], &[3.0, 1.0, 4.0, 9.0, 5.0, 1.0]),
+            )]),
+            expected_outputs: HashMap::from([(
+                ids.out,
+                super::tensor_i64_shaped(vec![2], &[1, 2]),
+            )]),
             tolerance: Tolerance::for_dtype(NumericDType::I64),
         }],
     }
@@ -416,8 +452,14 @@ fn argmin_axis0() -> TestCase {
         graph,
         data_sets: vec![TestDataSet {
             label: "2x3_f32".to_string(),
-            inputs: HashMap::from([(ids.ext_data, tensor_f32_shaped(vec![2, 3], &[3.0, 1.0, 4.0, 1.0, 5.0, 9.0]))]),
-            expected_outputs: HashMap::from([(ids.out, super::tensor_i64_shaped(vec![3], &[1, 0, 0]))]),
+            inputs: HashMap::from([(
+                ids.ext_data,
+                tensor_f32_shaped(vec![2, 3], &[3.0, 1.0, 4.0, 1.0, 5.0, 9.0]),
+            )]),
+            expected_outputs: HashMap::from([(
+                ids.out,
+                super::tensor_i64_shaped(vec![3], &[1, 0, 0]),
+            )]),
             tolerance: Tolerance::for_dtype(NumericDType::I64),
         }],
     }
@@ -442,8 +484,14 @@ fn nonzero_2d() -> TestCase {
         graph,
         data_sets: vec![TestDataSet {
             label: "2x2_f32".to_string(),
-            inputs: HashMap::from([(ext_data, tensor_f32_shaped(vec![2, 2], &[1.0, 0.0, 0.0, 2.0]))]),
-            expected_outputs: HashMap::from([(out, super::tensor_i64_shaped(vec![2, 2], &[0, 1, 0, 1]))]),
+            inputs: HashMap::from([(
+                ext_data,
+                tensor_f32_shaped(vec![2, 2], &[1.0, 0.0, 0.0, 2.0]),
+            )]),
+            expected_outputs: HashMap::from([(
+                out,
+                super::tensor_i64_shaped(vec![2, 2], &[0, 1, 0, 1]),
+            )]),
             tolerance: Tolerance::for_dtype(NumericDType::I64),
         }],
     }
@@ -472,7 +520,15 @@ fn build_range_graph() -> (MilliOpGraph, RangeIds) {
 
     let out = ops::Range::push_new(&mut graph, int_start, int_end, int_delta, &mut rng);
     graph.set_outputs(vec![out]);
-    (graph, RangeIds { ext_start, ext_end, ext_delta, out })
+    (
+        graph,
+        RangeIds {
+            ext_start,
+            ext_end,
+            ext_delta,
+            out,
+        },
+    )
 }
 
 fn range_int() -> TestCase {
@@ -488,7 +544,10 @@ fn range_int() -> TestCase {
                 (ids.ext_end, super::tensor_i64_shaped(vec![1], &[5])),
                 (ids.ext_delta, super::tensor_i64_shaped(vec![1], &[1])),
             ]),
-            expected_outputs: HashMap::from([(ids.out, super::tensor_i64_shaped(vec![5], &[0, 1, 2, 3, 4]))]),
+            expected_outputs: HashMap::from([(
+                ids.out,
+                super::tensor_i64_shaped(vec![5], &[0, 1, 2, 3, 4]),
+            )]),
             tolerance: Tolerance::for_dtype(NumericDType::I64),
         }],
     }
@@ -507,7 +566,10 @@ fn range_float() -> TestCase {
                 (ids.ext_end, tensor_f32_shaped(vec![1], &[1.0])),
                 (ids.ext_delta, tensor_f32_shaped(vec![1], &[0.25])),
             ]),
-            expected_outputs: HashMap::from([(ids.out, tensor_f32_shaped(vec![4], &[0.0, 0.25, 0.5, 0.75]))]),
+            expected_outputs: HashMap::from([(
+                ids.out,
+                tensor_f32_shaped(vec![4], &[0.0, 0.25, 0.5, 0.75]),
+            )]),
             tolerance: Tolerance::for_dtype(NumericDType::F32),
         }],
     }
@@ -536,10 +598,16 @@ fn sum_to_unbroadcast() -> TestCase {
         data_sets: vec![TestDataSet {
             label: "2x3_to_1x3".to_string(),
             inputs: HashMap::from([
-                (ext_data, tensor_f32_shaped(vec![2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0])),
+                (
+                    ext_data,
+                    tensor_f32_shaped(vec![2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
+                ),
                 (ext_shape, super::tensor_i64_shaped(vec![2], &[1, 3])),
             ]),
-            expected_outputs: HashMap::from([(out, tensor_f32_shaped(vec![1, 3], &[5.0, 7.0, 9.0]))]),
+            expected_outputs: HashMap::from([(
+                out,
+                tensor_f32_shaped(vec![1, 3], &[5.0, 7.0, 9.0]),
+            )]),
             tolerance: Tolerance::for_dtype(NumericDType::F32),
         }],
     }
@@ -589,7 +657,10 @@ fn pad_constant_1d() -> TestCase {
         data_sets: vec![TestDataSet {
             label: "3_f32".to_string(),
             inputs: HashMap::from([(ids.ext_data, tensor_f32_shaped(vec![3], &[1.0, 2.0, 3.0]))]),
-            expected_outputs: HashMap::from([(ids.out, tensor_f32_shaped(vec![6], &[0.0, 0.0, 1.0, 2.0, 3.0, 0.0]))]),
+            expected_outputs: HashMap::from([(
+                ids.out,
+                tensor_f32_shaped(vec![6], &[0.0, 0.0, 1.0, 2.0, 3.0, 0.0]),
+            )]),
             tolerance: Tolerance::for_dtype(NumericDType::F32),
         }],
     }

@@ -1,4 +1,3 @@
-use crate::backends::ndarray_backend::NDArrayNumericTensor;
 use crate::graph::{GlobalId, Node, Property, PropertyValue};
 use crate::milli_graph::ops as milli_ops;
 use crate::milli_graph::{MilliLoweringContext, MilliOpGraph, ops_helpers};
@@ -151,7 +150,8 @@ impl Operation for AveragePoolOperation {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let original_input = input_map[&self.input];
 
-        let input_f32 = milli_ops::Cast::push_new(&mut graph, original_input, NumericDType::F32, rng);
+        let input_f32 =
+            milli_ops::Cast::push_new(&mut graph, original_input, NumericDType::F32, rng);
 
         let n_spatial = self.kernel_shape.len();
         let kernel_shape: Vec<i64> = self.kernel_shape.clone();
@@ -181,11 +181,7 @@ impl Operation for AveragePoolOperation {
                     pv[2..2 + n_spatial].copy_from_slice(&self.pads[..n_spatial]);
                     pv.extend(std::iter::repeat_n(0i64, 2));
                     pv.extend_from_slice(&self.pads[n_spatial..2 * n_spatial]);
-                    Some(milli_ops::Constant::push_new(
-                        &mut graph,
-                        NDArrayNumericTensor::from(pv).to_dyn(),
-                        rng,
-                    ))
+                    Some(milli_ops::Constant::from_vec(&mut graph, pv, rng))
                 }
             }
             auto_pad @ (PoolAutoPad::SameUpper | PoolAutoPad::SameLower) => {
@@ -204,16 +200,8 @@ impl Operation for AveragePoolOperation {
                     None,
                     rng,
                 );
-                let strides_t = milli_ops::Constant::push_new(
-                    &mut graph,
-                    NDArrayNumericTensor::from(strides.clone()).to_dyn(),
-                    rng,
-                );
-                let dk_t = milli_ops::Constant::push_new(
-                    &mut graph,
-                    NDArrayNumericTensor::from(dilated_kernel.clone()).to_dyn(),
-                    rng,
-                );
+                let strides_t = milli_ops::Constant::from_vec(&mut graph, strides.clone(), rng);
+                let dk_t = milli_ops::Constant::from_vec(&mut graph, dilated_kernel.clone(), rng);
                 let one = ops_helpers::scalar_const(&mut graph, 1i64, rng);
                 let zero = ops_helpers::scalar_const(&mut graph, 0i64, rng);
 
@@ -240,11 +228,7 @@ impl Operation for AveragePoolOperation {
                 };
 
                 // Build [0, 0, pad_begin..., 0, 0, pad_end...]
-                let zeros_2 = milli_ops::Constant::push_new(
-                    &mut graph,
-                    NDArrayNumericTensor::from(vec![0i64, 0]).to_dyn(),
-                    rng,
-                );
+                let zeros_2 = milli_ops::Constant::from_vec(&mut graph, vec![0i64, 0], rng);
                 let pads = milli_ops::Concat::push_new(
                     &mut graph,
                     vec![zeros_2, pad_begin, zeros_2, pad_end],
@@ -324,16 +308,8 @@ impl Operation for AveragePoolOperation {
         };
 
         // out_spatial = (spatial_shape - dilated_kernel) / strides + 1
-        let dk_const = milli_ops::Constant::push_new(
-            &mut graph,
-            NDArrayNumericTensor::from(dilated_kernel).to_dyn(),
-            rng,
-        );
-        let strides_const = milli_ops::Constant::push_new(
-            &mut graph,
-            NDArrayNumericTensor::from(strides.clone()).to_dyn(),
-            rng,
-        );
+        let dk_const = milli_ops::Constant::from_vec(&mut graph, dilated_kernel, rng);
+        let strides_const = milli_ops::Constant::from_vec(&mut graph, strides.clone(), rng);
         let one_const = ops_helpers::scalar_const(&mut graph, 1i64, rng);
 
         // numerator = spatial_shape - dilated_kernel
@@ -378,11 +354,7 @@ impl Operation for AveragePoolOperation {
                     let pb: Vec<i64> = (0..n_spatial)
                         .map(|i| if i < self.pads.len() { self.pads[i] } else { 0 })
                         .collect();
-                    milli_ops::Constant::push_new(
-                        &mut graph,
-                        NDArrayNumericTensor::from(pb).to_dyn(),
-                        rng,
-                    )
+                    milli_ops::Constant::from_vec(&mut graph, pb, rng)
                 }
                 _ => {
                     // For SAME_*: pad_begin = (padded - input) spatial dims, but only the begin half.
@@ -423,11 +395,7 @@ impl Operation for AveragePoolOperation {
         let max_start: Vec<i64> = (0..n_spatial)
             .map(|i| (kernel_shape[i] - 1) * dilations[i])
             .collect();
-        let max_start_const = milli_ops::Constant::push_new(
-            &mut graph,
-            NDArrayNumericTensor::from(max_start).to_dyn(),
-            rng,
-        );
+        let max_start_const = milli_ops::Constant::from_vec(&mut graph, max_start, rng);
         let out_m1 = milli_ops::SimpleBinary::sub(&mut graph, out_spatial, one_const, rng);
         let out_m1_times_s = milli_ops::SimpleBinary::mul(&mut graph, out_m1, strides_const, rng);
         let required =
@@ -439,16 +407,9 @@ impl Operation for AveragePoolOperation {
         let extra_pad = milli_ops::SimpleBinary::max(&mut graph, extra_pad, zero_const, rng);
 
         // Build pad tensor [0,0,0,...0, 0,0,extra_d0,extra_d1,...] for trailing pad only
-        let zeros_batch_ch = milli_ops::Constant::push_new(
-            &mut graph,
-            NDArrayNumericTensor::from(vec![0i64; 2 + n_spatial]).to_dyn(),
-            rng,
-        );
-        let zeros_bc2 = milli_ops::Constant::push_new(
-            &mut graph,
-            NDArrayNumericTensor::from(vec![0i64; 2]).to_dyn(),
-            rng,
-        );
+        let zeros_batch_ch =
+            milli_ops::Constant::from_vec(&mut graph, vec![0i64; 2 + n_spatial], rng);
+        let zeros_bc2 = milli_ops::Constant::from_vec(&mut graph, vec![0i64; 2], rng);
         let extra_pads = milli_ops::Concat::push_new(
             &mut graph,
             vec![zeros_batch_ch, zeros_bc2, extra_pad],
@@ -497,16 +458,8 @@ impl Operation for AveragePoolOperation {
 
         let kernel_size: usize = kernel_shape.iter().map(|&x| x as usize).product();
         let axes: Vec<i64> = (0..n_spatial).map(|i| (i + 2) as i64).collect();
-        let axes_const = milli_ops::Constant::push_new(
-            &mut graph,
-            NDArrayNumericTensor::from(axes).to_dyn(),
-            rng,
-        );
-        let steps_const = milli_ops::Constant::push_new(
-            &mut graph,
-            NDArrayNumericTensor::from(strides.clone()).to_dyn(),
-            rng,
-        );
+        let axes_const = milli_ops::Constant::from_vec(&mut graph, axes, rng);
+        let steps_const = milli_ops::Constant::from_vec(&mut graph, strides.clone(), rng);
 
         let mut sum_acc: Option<GlobalId> = None;
         let mut count_acc: Option<GlobalId> = None;
@@ -525,11 +478,7 @@ impl Operation for AveragePoolOperation {
                 starts.push(k_coord as i64 * dilations[d]);
             }
 
-            let starts_const = milli_ops::Constant::push_new(
-                &mut graph,
-                NDArrayNumericTensor::from(starts).to_dyn(),
-                rng,
-            );
+            let starts_const = milli_ops::Constant::from_vec(&mut graph, starts, rng);
 
             // end = start + out_spatial * strides
             let ends_const =
@@ -709,7 +658,8 @@ impl Operation for MaxPoolOperation {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let original_input = input_map[&self.input];
 
-        let input_f32 = milli_ops::Cast::push_new(&mut graph, original_input, NumericDType::F32, rng);
+        let input_f32 =
+            milli_ops::Cast::push_new(&mut graph, original_input, NumericDType::F32, rng);
 
         let n_spatial = self.kernel_shape.len();
         let kernel_shape: Vec<i64> = self.kernel_shape.clone();
@@ -739,11 +689,7 @@ impl Operation for MaxPoolOperation {
                     pv[2..2 + n_spatial].copy_from_slice(&self.pads[..n_spatial]);
                     pv.extend(std::iter::repeat_n(0i64, 2));
                     pv.extend_from_slice(&self.pads[n_spatial..2 * n_spatial]);
-                    Some(milli_ops::Constant::push_new(
-                        &mut graph,
-                        NDArrayNumericTensor::from(pv).to_dyn(),
-                        rng,
-                    ))
+                    Some(milli_ops::Constant::from_vec(&mut graph, pv, rng))
                 }
             }
             auto_pad @ (PoolAutoPad::SameUpper | PoolAutoPad::SameLower) => {
@@ -759,16 +705,8 @@ impl Operation for MaxPoolOperation {
                     None,
                     rng,
                 );
-                let strides_t = milli_ops::Constant::push_new(
-                    &mut graph,
-                    NDArrayNumericTensor::from(strides.clone()).to_dyn(),
-                    rng,
-                );
-                let dk_t = milli_ops::Constant::push_new(
-                    &mut graph,
-                    NDArrayNumericTensor::from(dilated_kernel.clone()).to_dyn(),
-                    rng,
-                );
+                let strides_t = milli_ops::Constant::from_vec(&mut graph, strides.clone(), rng);
+                let dk_t = milli_ops::Constant::from_vec(&mut graph, dilated_kernel.clone(), rng);
                 let one = ops_helpers::scalar_const(&mut graph, 1i64, rng);
                 let zero = ops_helpers::scalar_const(&mut graph, 0i64, rng);
 
@@ -791,11 +729,7 @@ impl Operation for MaxPoolOperation {
                     (other_half, half_pad)
                 };
 
-                let zeros_2 = milli_ops::Constant::push_new(
-                    &mut graph,
-                    NDArrayNumericTensor::from(vec![0i64, 0]).to_dyn(),
-                    rng,
-                );
+                let zeros_2 = milli_ops::Constant::from_vec(&mut graph, vec![0i64, 0], rng);
                 let pads = milli_ops::Concat::push_new(
                     &mut graph,
                     vec![zeros_2, pad_begin, zeros_2, pad_end],
@@ -830,16 +764,8 @@ impl Operation for MaxPoolOperation {
             milli_ops::Slice::push_new(&mut graph, padded_shape, s, e, None, None, rng)
         };
 
-        let dk_const = milli_ops::Constant::push_new(
-            &mut graph,
-            NDArrayNumericTensor::from(dilated_kernel).to_dyn(),
-            rng,
-        );
-        let strides_const = milli_ops::Constant::push_new(
-            &mut graph,
-            NDArrayNumericTensor::from(strides.clone()).to_dyn(),
-            rng,
-        );
+        let dk_const = milli_ops::Constant::from_vec(&mut graph, dilated_kernel, rng);
+        let strides_const = milli_ops::Constant::from_vec(&mut graph, strides.clone(), rng);
         let one_const = ops_helpers::scalar_const(&mut graph, 1i64, rng);
 
         let numer = milli_ops::SimpleBinary::sub(&mut graph, spatial_shape, dk_const, rng);
@@ -869,11 +795,7 @@ impl Operation for MaxPoolOperation {
                     let pb: Vec<i64> = (0..n_spatial)
                         .map(|i| if i < self.pads.len() { self.pads[i] } else { 0 })
                         .collect();
-                    milli_ops::Constant::push_new(
-                        &mut graph,
-                        NDArrayNumericTensor::from(pb).to_dyn(),
-                        rng,
-                    )
+                    milli_ops::Constant::from_vec(&mut graph, pb, rng)
                 }
                 _ => {
                     let total_pad =
@@ -903,11 +825,7 @@ impl Operation for MaxPoolOperation {
         let max_start: Vec<i64> = (0..n_spatial)
             .map(|i| (kernel_shape[i] - 1) * dilations[i])
             .collect();
-        let max_start_const = milli_ops::Constant::push_new(
-            &mut graph,
-            NDArrayNumericTensor::from(max_start).to_dyn(),
-            rng,
-        );
+        let max_start_const = milli_ops::Constant::from_vec(&mut graph, max_start, rng);
         let out_m1 = milli_ops::SimpleBinary::sub(&mut graph, out_spatial, one_const, rng);
         let out_m1_times_s = milli_ops::SimpleBinary::mul(&mut graph, out_m1, strides_const, rng);
         let required =
@@ -918,16 +836,9 @@ impl Operation for MaxPoolOperation {
         let zero_const = ops_helpers::scalar_const(&mut graph, 0i64, rng);
         let extra_pad = milli_ops::SimpleBinary::max(&mut graph, extra_pad, zero_const, rng);
 
-        let zeros_batch_ch = milli_ops::Constant::push_new(
-            &mut graph,
-            NDArrayNumericTensor::from(vec![0i64; 2 + n_spatial]).to_dyn(),
-            rng,
-        );
-        let zeros_bc2 = milli_ops::Constant::push_new(
-            &mut graph,
-            NDArrayNumericTensor::from(vec![0i64; 2]).to_dyn(),
-            rng,
-        );
+        let zeros_batch_ch =
+            milli_ops::Constant::from_vec(&mut graph, vec![0i64; 2 + n_spatial], rng);
+        let zeros_bc2 = milli_ops::Constant::from_vec(&mut graph, vec![0i64; 2], rng);
         let extra_pads = milli_ops::Concat::push_new(
             &mut graph,
             vec![zeros_batch_ch, zeros_bc2, extra_pad],
@@ -954,16 +865,8 @@ impl Operation for MaxPoolOperation {
 
         let kernel_size: usize = kernel_shape.iter().map(|&x| x as usize).product();
         let axes: Vec<i64> = (0..n_spatial).map(|i| (i + 2) as i64).collect();
-        let axes_const = milli_ops::Constant::push_new(
-            &mut graph,
-            NDArrayNumericTensor::from(axes).to_dyn(),
-            rng,
-        );
-        let steps_const = milli_ops::Constant::push_new(
-            &mut graph,
-            NDArrayNumericTensor::from(strides.clone()).to_dyn(),
-            rng,
-        );
+        let axes_const = milli_ops::Constant::from_vec(&mut graph, axes, rng);
+        let steps_const = milli_ops::Constant::from_vec(&mut graph, strides.clone(), rng);
 
         let mut max_acc: Option<GlobalId> = None;
 
@@ -981,11 +884,7 @@ impl Operation for MaxPoolOperation {
                 starts.push(k_coord as i64 * dilations[d]);
             }
 
-            let starts_const = milli_ops::Constant::push_new(
-                &mut graph,
-                NDArrayNumericTensor::from(starts).to_dyn(),
-                rng,
-            );
+            let starts_const = milli_ops::Constant::from_vec(&mut graph, starts, rng);
 
             let ends_const =
                 milli_ops::SimpleBinary::add(&mut graph, starts_const, out_times_strides, rng);
@@ -1147,7 +1046,8 @@ impl Operation for LpPoolOperation {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let original_input = input_map[&self.input];
 
-        let input_f32 = milli_ops::Cast::push_new(&mut graph, original_input, NumericDType::F32, rng);
+        let input_f32 =
+            milli_ops::Cast::push_new(&mut graph, original_input, NumericDType::F32, rng);
 
         let n_spatial = self.kernel_shape.len();
         let kernel_shape: Vec<i64> = self.kernel_shape.clone();
@@ -1177,11 +1077,7 @@ impl Operation for LpPoolOperation {
                     pv[2..2 + n_spatial].copy_from_slice(&self.pads[..n_spatial]);
                     pv.extend(std::iter::repeat_n(0i64, 2));
                     pv.extend_from_slice(&self.pads[n_spatial..2 * n_spatial]);
-                    Some(milli_ops::Constant::push_new(
-                        &mut graph,
-                        NDArrayNumericTensor::from(pv).to_dyn(),
-                        rng,
-                    ))
+                    Some(milli_ops::Constant::from_vec(&mut graph, pv, rng))
                 }
             }
             auto_pad @ (PoolAutoPad::SameUpper | PoolAutoPad::SameLower) => {
@@ -1197,16 +1093,8 @@ impl Operation for LpPoolOperation {
                     None,
                     rng,
                 );
-                let strides_t = milli_ops::Constant::push_new(
-                    &mut graph,
-                    NDArrayNumericTensor::from(strides.clone()).to_dyn(),
-                    rng,
-                );
-                let dk_t = milli_ops::Constant::push_new(
-                    &mut graph,
-                    NDArrayNumericTensor::from(dilated_kernel.clone()).to_dyn(),
-                    rng,
-                );
+                let strides_t = milli_ops::Constant::from_vec(&mut graph, strides.clone(), rng);
+                let dk_t = milli_ops::Constant::from_vec(&mut graph, dilated_kernel.clone(), rng);
                 let one = ops_helpers::scalar_const(&mut graph, 1i64, rng);
                 let zero = ops_helpers::scalar_const(&mut graph, 0i64, rng);
 
@@ -1229,11 +1117,7 @@ impl Operation for LpPoolOperation {
                     (other_half, half_pad)
                 };
 
-                let zeros_2 = milli_ops::Constant::push_new(
-                    &mut graph,
-                    NDArrayNumericTensor::from(vec![0i64, 0]).to_dyn(),
-                    rng,
-                );
+                let zeros_2 = milli_ops::Constant::from_vec(&mut graph, vec![0i64, 0], rng);
                 let pads = milli_ops::Concat::push_new(
                     &mut graph,
                     vec![zeros_2, pad_begin, zeros_2, pad_end],
@@ -1268,16 +1152,8 @@ impl Operation for LpPoolOperation {
             milli_ops::Slice::push_new(&mut graph, padded_shape, s, e, None, None, rng)
         };
 
-        let dk_const = milli_ops::Constant::push_new(
-            &mut graph,
-            NDArrayNumericTensor::from(dilated_kernel).to_dyn(),
-            rng,
-        );
-        let strides_const = milli_ops::Constant::push_new(
-            &mut graph,
-            NDArrayNumericTensor::from(strides.clone()).to_dyn(),
-            rng,
-        );
+        let dk_const = milli_ops::Constant::from_vec(&mut graph, dilated_kernel, rng);
+        let strides_const = milli_ops::Constant::from_vec(&mut graph, strides.clone(), rng);
         let one_const = ops_helpers::scalar_const(&mut graph, 1i64, rng);
 
         let numer = milli_ops::SimpleBinary::sub(&mut graph, spatial_shape, dk_const, rng);
@@ -1307,11 +1183,7 @@ impl Operation for LpPoolOperation {
                     let pb: Vec<i64> = (0..n_spatial)
                         .map(|i| if i < self.pads.len() { self.pads[i] } else { 0 })
                         .collect();
-                    milli_ops::Constant::push_new(
-                        &mut graph,
-                        NDArrayNumericTensor::from(pb).to_dyn(),
-                        rng,
-                    )
+                    milli_ops::Constant::from_vec(&mut graph, pb, rng)
                 }
                 _ => {
                     let total_pad =
@@ -1341,11 +1213,7 @@ impl Operation for LpPoolOperation {
         let max_start: Vec<i64> = (0..n_spatial)
             .map(|i| (kernel_shape[i] - 1) * dilations[i])
             .collect();
-        let max_start_const = milli_ops::Constant::push_new(
-            &mut graph,
-            NDArrayNumericTensor::from(max_start).to_dyn(),
-            rng,
-        );
+        let max_start_const = milli_ops::Constant::from_vec(&mut graph, max_start, rng);
         let out_m1 = milli_ops::SimpleBinary::sub(&mut graph, out_spatial, one_const, rng);
         let out_m1_times_s = milli_ops::SimpleBinary::mul(&mut graph, out_m1, strides_const, rng);
         let required =
@@ -1356,16 +1224,9 @@ impl Operation for LpPoolOperation {
         let zero_const = ops_helpers::scalar_const(&mut graph, 0i64, rng);
         let extra_pad = milli_ops::SimpleBinary::max(&mut graph, extra_pad, zero_const, rng);
 
-        let zeros_batch_ch = milli_ops::Constant::push_new(
-            &mut graph,
-            NDArrayNumericTensor::from(vec![0i64; 2 + n_spatial]).to_dyn(),
-            rng,
-        );
-        let zeros_bc2 = milli_ops::Constant::push_new(
-            &mut graph,
-            NDArrayNumericTensor::from(vec![0i64; 2]).to_dyn(),
-            rng,
-        );
+        let zeros_batch_ch =
+            milli_ops::Constant::from_vec(&mut graph, vec![0i64; 2 + n_spatial], rng);
+        let zeros_bc2 = milli_ops::Constant::from_vec(&mut graph, vec![0i64; 2], rng);
         let extra_pads = milli_ops::Concat::push_new(
             &mut graph,
             vec![zeros_batch_ch, zeros_bc2, extra_pad],
@@ -1398,16 +1259,8 @@ impl Operation for LpPoolOperation {
 
         let kernel_size: usize = kernel_shape.iter().map(|&x| x as usize).product();
         let axes: Vec<i64> = (0..n_spatial).map(|i| (i + 2) as i64).collect();
-        let axes_const = milli_ops::Constant::push_new(
-            &mut graph,
-            NDArrayNumericTensor::from(axes).to_dyn(),
-            rng,
-        );
-        let steps_const = milli_ops::Constant::push_new(
-            &mut graph,
-            NDArrayNumericTensor::from(strides).to_dyn(),
-            rng,
-        );
+        let axes_const = milli_ops::Constant::from_vec(&mut graph, axes, rng);
+        let steps_const = milli_ops::Constant::from_vec(&mut graph, strides, rng);
 
         let mut sum_acc: Option<GlobalId> = None;
 
@@ -1425,11 +1278,7 @@ impl Operation for LpPoolOperation {
                 starts.push(k_coord as i64 * dilations[d]);
             }
 
-            let starts_const = milli_ops::Constant::push_new(
-                &mut graph,
-                NDArrayNumericTensor::from(starts).to_dyn(),
-                rng,
-            );
+            let starts_const = milli_ops::Constant::from_vec(&mut graph, starts, rng);
 
             let ends_const =
                 milli_ops::SimpleBinary::add(&mut graph, starts_const, out_times_strides, rng);

@@ -5,7 +5,7 @@ mod cast;
 mod cast_like;
 mod compress;
 mod concat;
-mod constant;
+pub(crate) mod constant;
 mod conv;
 mod cumsum;
 mod expand;
@@ -82,12 +82,12 @@ pub use unary::*;
 pub use unsqueeze::*;
 pub use where_op::*;
 
-use crate::pool::Pool;
 use crate::backends::eval_backend::EvalBackend;
 use crate::backends::ndarray_backend::NDArrayNumericTensor;
 use crate::graph::{GlobalId, Node, NodeMetadata, NodeSlotEditError, SlotDirection};
-use crate::milli_graph::MilliOpGraphError;
 use crate::migration::numeric_tensor::NumericTensor;
+use crate::milli_graph::MilliOpGraphError;
+use crate::pool::Pool;
 use crate::scalar_info::ScalarInfoTyped;
 use crate::symbolic_scalar::{SymbolicResolver, SymbolicScalarTyped};
 use crate::tensor_info::{TensorInfo, TensorInfoTypedRanked};
@@ -213,7 +213,10 @@ pub fn constant_fold<'p, P: Pool + 'p>(
                     ),
                 })
                 .collect();
-            sys_infos.insert(*id, LowerTensorInfo::from_dtype_and_shape_scalars(dtype, &dims));
+            sys_infos.insert(
+                *id,
+                LowerTensorInfo::from_dtype_and_shape_scalars(dtype, &dims),
+            );
         } else {
             sys_infos.insert(
                 *id,
@@ -279,8 +282,7 @@ pub fn constant_fold<'p, P: Pool + 'p>(
     }
 
     // 5. Run pool_eval (no external inputs — all data in Literal groups).
-    let eval_results =
-        pool_eval::pool_eval(&ctx.nano, &[], &output_ranges, pool).ok()?;
+    let eval_results = pool_eval::pool_eval(&ctx.nano, &[], &output_ranges, pool).ok()?;
 
     // 6. Build result TensorInfos.
     //
@@ -333,10 +335,16 @@ pub(crate) fn reduce_eval_new<'p, P2: Pool + 'p>(
     keepdims: bool,
     noop_with_empty_axes: bool,
     init: crate::numeric_scalar::NumericScalar,
-    acc: impl Fn(crate::numeric_scalar::NumericScalar, crate::numeric_scalar::NumericScalar) -> crate::numeric_scalar::NumericScalar,
+    acc: impl Fn(
+        crate::numeric_scalar::NumericScalar,
+        crate::numeric_scalar::NumericScalar,
+    ) -> crate::numeric_scalar::NumericScalar,
     finalize: impl Fn(crate::numeric_scalar::NumericScalar, u64) -> crate::numeric_scalar::NumericScalar,
     pool: &'p P2,
-) -> Result<Vec<crate::numeric_tensor::NumericTensor<'p, DynRank, P2>>, crate::nano_graph::pool_eval::PoolEvalError> {
+) -> Result<
+    Vec<crate::numeric_tensor::NumericTensor<'p, DynRank, P2>>,
+    crate::nano_graph::pool_eval::PoolEvalError,
+> {
     use crate::numeric_tensor::{NumericTensor, TensorLayout};
 
     let data = &inputs[0];
@@ -348,19 +356,32 @@ pub(crate) fn reduce_eval_new<'p, P2: Pool + 'p>(
     let axes: Vec<usize> = if let Some(ax_idx) = axes_input_idx {
         if ax_idx < inputs.len() {
             let ax_view = &inputs[ax_idx];
-            let raw: Vec<i64> = (0..ax_view.numel()).map(|i| ax_view.read_element(i).to_i64()).collect();
+            let raw: Vec<i64> = (0..ax_view.numel())
+                .map(|i| ax_view.read_element(i).to_i64())
+                .collect();
             if raw.is_empty() && noop_with_empty_axes {
                 let layout = TensorLayout::<DynRank>::row_major(shape.clone(), dtype);
-                let buf = pool.allocate(layout.buffer_size_bytes())
+                let buf = pool
+                    .allocate(layout.buffer_size_bytes())
                     .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
                 let mut out = NumericTensor::from_parts(buf, layout);
-                for i in 0..data.numel() { out.write_element(i, data.read_element(i)); }
+                for i in 0..data.numel() {
+                    out.write_element(i, data.read_element(i));
+                }
                 return Ok(vec![out]);
             }
             if raw.is_empty() {
                 (0..rank).collect()
             } else {
-                raw.iter().map(|&a| if a < 0 { (a + rank as i64) as usize } else { a as usize }).collect()
+                raw.iter()
+                    .map(|&a| {
+                        if a < 0 {
+                            (a + rank as i64) as usize
+                        } else {
+                            a as usize
+                        }
+                    })
+                    .collect()
             }
         } else {
             (0..rank).collect()
@@ -373,19 +394,24 @@ pub(crate) fn reduce_eval_new<'p, P2: Pool + 'p>(
     let mut out_shape = Vec::new();
     for (i, &dim) in shape.iter().enumerate() {
         if axes.contains(&i) {
-            if keepdims { out_shape.push(1u64); }
+            if keepdims {
+                out_shape.push(1u64);
+            }
         } else {
             out_shape.push(dim);
         }
     }
-    if out_shape.is_empty() { out_shape.push(1); }
+    if out_shape.is_empty() {
+        out_shape.push(1);
+    }
 
     // Compute reduce count (product of reduced dims) for finalize.
     let reduce_count: u64 = axes.iter().map(|&a| shape[a]).product();
 
     let out_numel: usize = out_shape.iter().product::<u64>() as usize;
     let layout = TensorLayout::<DynRank>::row_major(out_shape.clone(), dtype);
-    let buf = pool.allocate(layout.buffer_size_bytes())
+    let buf = pool
+        .allocate(layout.buffer_size_bytes())
         .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
     let mut out = NumericTensor::from_parts(buf, layout);
 
@@ -397,12 +423,16 @@ pub(crate) fn reduce_eval_new<'p, P2: Pool + 'p>(
     // Strides for index decomposition.
     let in_strides = {
         let mut s = vec![1usize; rank];
-        for i in (0..rank.saturating_sub(1)).rev() { s[i] = s[i + 1] * shape[i + 1] as usize; }
+        for i in (0..rank.saturating_sub(1)).rev() {
+            s[i] = s[i + 1] * shape[i + 1] as usize;
+        }
         s
     };
     let out_strides = {
         let mut s = vec![1usize; out_shape.len()];
-        for i in (0..out_shape.len().saturating_sub(1)).rev() { s[i] = s[i + 1] * out_shape[i + 1] as usize; }
+        for i in (0..out_shape.len().saturating_sub(1)).rev() {
+            s[i] = s[i + 1] * out_shape[i + 1] as usize;
+        }
         s
     };
 
@@ -486,7 +516,10 @@ pub trait MilliOp: Node<OpKind = String> {
         &self,
         _inputs: &[crate::numeric_tensor::NumericTensorView<'_, DynRank>],
         _pool: &'p P2,
-    ) -> Result<Vec<crate::numeric_tensor::NumericTensor<'p, DynRank, P2>>, crate::nano_graph::pool_eval::PoolEvalError>
+    ) -> Result<
+        Vec<crate::numeric_tensor::NumericTensor<'p, DynRank, P2>>,
+        crate::nano_graph::pool_eval::PoolEvalError,
+    >
     where
         Self: Sized,
     {
@@ -1075,7 +1108,10 @@ impl MilliOp for AnyMilliOp {
         &self,
         inputs: &[crate::numeric_tensor::NumericTensorView<'_, DynRank>],
         pool: &'p P2,
-    ) -> Result<Vec<crate::numeric_tensor::NumericTensor<'p, DynRank, P2>>, crate::nano_graph::pool_eval::PoolEvalError> {
+    ) -> Result<
+        Vec<crate::numeric_tensor::NumericTensor<'p, DynRank, P2>>,
+        crate::nano_graph::pool_eval::PoolEvalError,
+    > {
         match self {
             AnyMilliOp::SimpleBinary(x) => x.eval_new(inputs, pool),
             AnyMilliOp::MatMul(x) => x.eval_new(inputs, pool),

@@ -4,20 +4,17 @@
 
 use std::collections::HashMap;
 
-use ndarray::{ArcArray, IxDyn};
-use rand::rngs::SmallRng;
-use rand::SeedableRng;
-
-use crate::backends::ndarray_backend::NDArrayNumericTensor;
 use crate::graph::GlobalId;
 use crate::milli_graph::MilliOpGraph;
 use crate::milli_graph::ops::Constant;
 use crate::milli_graph::ops::ReduceMax;
 use crate::milli_graph::ops::ReduceSum;
 use crate::numeric_dtype::NumericDType;
+use rand::SeedableRng;
+use rand::rngs::SmallRng;
 
-use super::{TestCase, TestDataSet, TestTensor, Tolerance};
 use super::tensor_f32_shaped;
+use super::{TestCase, TestDataSet, TestTensor, Tolerance};
 
 pub fn build_cases() -> Vec<TestCase> {
     vec![
@@ -49,10 +46,7 @@ fn build_reduce_sum_graph(axis: i64) -> (MilliOpGraph, ReduceGraphIds) {
     let int_data = input_map[&ext_data];
 
     // Create the axes constant tensor (1D i64 with one element)
-    let axes_tensor = NDArrayNumericTensor::I64(
-        ArcArray::from_shape_vec(IxDyn(&[1]), vec![axis]).unwrap(),
-    );
-    let axes_id = Constant::push_new(&mut graph, axes_tensor, &mut rng);
+    let axes_id = Constant::from_vec(&mut graph, vec![axis], &mut rng);
 
     let out = ReduceSum::push_new(
         &mut graph,
@@ -73,10 +67,7 @@ fn build_reduce_max_graph(axis: i64) -> (MilliOpGraph, ReduceGraphIds) {
     let (mut graph, input_map) = MilliOpGraph::new([ext_data], &mut rng);
     let int_data = input_map[&ext_data];
 
-    let axes_tensor = NDArrayNumericTensor::I64(
-        ArcArray::from_shape_vec(IxDyn(&[1]), vec![axis]).unwrap(),
-    );
-    let axes_id = Constant::push_new(&mut graph, axes_tensor, &mut rng);
+    let axes_id = Constant::from_vec(&mut graph, vec![axis], &mut rng);
 
     let out = ReduceMax::push_new(
         &mut graph,
@@ -120,13 +111,15 @@ fn reduce_sum_axis1_case() -> TestCase {
         graph,
         data_sets: vec![
             reduce_data_set(
-                "f32_2x3", &ids,
+                "f32_2x3",
+                &ids,
                 tensor_f32_shaped(vec![2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
                 tensor_f32_shaped(vec![2], &[6.0, 15.0]),
                 Tolerance::for_dtype(NumericDType::F32),
             ),
             reduce_data_set(
-                "f32_2x3_negatives", &ids,
+                "f32_2x3_negatives",
+                &ids,
                 tensor_f32_shaped(vec![2, 3], &[-1.0, 2.0, -3.0, 0.0, 0.5, -0.5]),
                 // row 0: -1+2-3 = -2, row 1: 0+0.5-0.5 = 0
                 tensor_f32_shaped(vec![2], &[-2.0, 0.0]),
@@ -148,14 +141,13 @@ fn reduce_sum_axis0_case() -> TestCase {
     TestCase {
         name: "reduce_sum_axis0".to_string(),
         graph,
-        data_sets: vec![
-            reduce_data_set(
-                "f32_2x3", &ids,
-                tensor_f32_shaped(vec![2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
-                tensor_f32_shaped(vec![3], &[5.0, 7.0, 9.0]),
-                Tolerance::for_dtype(NumericDType::F32),
-            ),
-        ],
+        data_sets: vec![reduce_data_set(
+            "f32_2x3",
+            &ids,
+            tensor_f32_shaped(vec![2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
+            tensor_f32_shaped(vec![3], &[5.0, 7.0, 9.0]),
+            Tolerance::for_dtype(NumericDType::F32),
+        )],
     }
 }
 
@@ -174,13 +166,15 @@ fn reduce_max_axis1_case() -> TestCase {
         graph,
         data_sets: vec![
             reduce_data_set(
-                "f32_2x3", &ids,
+                "f32_2x3",
+                &ids,
                 tensor_f32_shaped(vec![2, 3], &[1.0, 5.0, 3.0, 4.0, 2.0, 6.0]),
                 tensor_f32_shaped(vec![2], &[5.0, 6.0]),
                 Tolerance::for_dtype(NumericDType::F32),
             ),
             reduce_data_set(
-                "f32_negatives", &ids,
+                "f32_negatives",
+                &ids,
                 tensor_f32_shaped(vec![2, 3], &[-10.0, -5.0, -1.0, -3.0, -7.0, -2.0]),
                 // row 0: max(-10,-5,-1) = -1, row 1: max(-3,-7,-2) = -2
                 tensor_f32_shaped(vec![2], &[-1.0, -2.0]),
@@ -202,13 +196,12 @@ fn reduce_max_axis0_case() -> TestCase {
     TestCase {
         name: "reduce_max_axis0".to_string(),
         graph,
-        data_sets: vec![
-            reduce_data_set(
-                "f32_2x3", &ids,
-                tensor_f32_shaped(vec![2, 3], &[1.0, 5.0, 3.0, 4.0, 2.0, 6.0]),
-                tensor_f32_shaped(vec![3], &[4.0, 5.0, 6.0]),
-                Tolerance::for_dtype(NumericDType::F32),
-            ),
-        ],
+        data_sets: vec![reduce_data_set(
+            "f32_2x3",
+            &ids,
+            tensor_f32_shaped(vec![2, 3], &[1.0, 5.0, 3.0, 4.0, 2.0, 6.0]),
+            tensor_f32_shaped(vec![3], &[4.0, 5.0, 6.0]),
+            Tolerance::for_dtype(NumericDType::F32),
+        )],
     }
 }

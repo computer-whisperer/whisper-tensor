@@ -5,8 +5,8 @@
 use std::collections::HashMap;
 
 use ndarray::{ArcArray, IxDyn};
-use rand::rngs::SmallRng;
 use rand::SeedableRng;
+use rand::rngs::SmallRng;
 
 use crate::backends::ndarray_backend::NDArrayNumericTensor;
 use crate::graph::GlobalId;
@@ -14,8 +14,8 @@ use crate::milli_graph::MilliOpGraph;
 use crate::milli_graph::ops::{self, Constant};
 use crate::numeric_dtype::NumericDType;
 
-use super::{TestCase, TestDataSet, Tolerance};
 use super::tensor_f32_shaped;
+use super::{TestCase, TestDataSet, Tolerance};
 
 pub fn build_cases() -> Vec<TestCase> {
     vec![
@@ -34,14 +34,18 @@ fn rng() -> SmallRng {
     SmallRng::seed_from_u64(700)
 }
 
-fn f32_const(graph: &mut MilliOpGraph, vals: Vec<f32>, shape: Vec<usize>, rng: &mut SmallRng) -> GlobalId {
+fn f32_const(
+    graph: &mut MilliOpGraph,
+    vals: Vec<f32>,
+    shape: Vec<usize>,
+    rng: &mut SmallRng,
+) -> GlobalId {
     let t = NDArrayNumericTensor::F32(ArcArray::from_shape_vec(IxDyn(&shape), vals).unwrap());
     Constant::push_new(graph, t, rng)
 }
 
 fn i64_const(graph: &mut MilliOpGraph, vals: Vec<i64>, rng: &mut SmallRng) -> GlobalId {
-    let t = NDArrayNumericTensor::I64(ArcArray::from_shape_vec(IxDyn(&[vals.len()]), vals).unwrap());
-    Constant::push_new(graph, t, rng)
+    Constant::from_vec(graph, vals, rng)
 }
 
 // ---------------------------------------------------------------------------
@@ -55,7 +59,12 @@ fn linear_relu() -> TestCase {
     let x = imap[&ext_x];
 
     // W [3, 2], b [2]
-    let w = f32_const(&mut graph, vec![1.0, -1.0, 0.5, 0.5, -0.5, 1.0], vec![3, 2], &mut rng);
+    let w = f32_const(
+        &mut graph,
+        vec![1.0, -1.0, 0.5, 0.5, -0.5, 1.0],
+        vec![3, 2],
+        &mut rng,
+    );
     let b = f32_const(&mut graph, vec![0.1, -0.1], vec![1, 2], &mut rng);
 
     // y = ClampMin(x @ W + b, 0)
@@ -75,9 +84,18 @@ fn linear_relu() -> TestCase {
         graph,
         data_sets: vec![TestDataSet {
             label: "2x3".into(),
-            inputs: HashMap::from([(ext_x, tensor_f32_shaped(vec![2, 3], &[1.0, 0.0, -1.0, 2.0, 1.0, 0.0]))]),
-            expected_outputs: HashMap::from([(out, tensor_f32_shaped(vec![2, 2], &[1.6, 0.0, 2.6, 0.0]))]),
-            tolerance: Tolerance { atol: 1e-5, rtol: 1e-5 },
+            inputs: HashMap::from([(
+                ext_x,
+                tensor_f32_shaped(vec![2, 3], &[1.0, 0.0, -1.0, 2.0, 1.0, 0.0]),
+            )]),
+            expected_outputs: HashMap::from([(
+                out,
+                tensor_f32_shaped(vec![2, 2], &[1.6, 0.0, 2.6, 0.0]),
+            )]),
+            tolerance: Tolerance {
+                atol: 1e-5,
+                rtol: 1e-5,
+            },
         }],
     }
 }
@@ -126,8 +144,14 @@ fn softmax_1d() -> TestCase {
         data_sets: vec![TestDataSet {
             label: "1x3".into(),
             inputs: HashMap::from([(ext_x, tensor_f32_shaped(vec![1, 3], &[1.0, 2.0, 3.0]))]),
-            expected_outputs: HashMap::from([(out, tensor_f32_shaped(vec![1, 3], &[e0/s, e1/s, e2/s]))]),
-            tolerance: Tolerance { atol: 1e-5, rtol: 1e-5 },
+            expected_outputs: HashMap::from([(
+                out,
+                tensor_f32_shaped(vec![1, 3], &[e0 / s, e1 / s, e2 / s]),
+            )]),
+            tolerance: Tolerance {
+                atol: 1e-5,
+                rtol: 1e-5,
+            },
         }],
     }
 }
@@ -178,7 +202,7 @@ fn layernorm() -> TestCase {
     // std = sqrt(1.25 + 1e-5) ≈ 1.11803
     // With gamma=1, beta=0: just the normalized values
     let c = [-1.5f32, -0.5, 0.5, 1.5];
-    let v = (c[0]*c[0] + c[1]*c[1] + c[2]*c[2] + c[3]*c[3]) / 4.0;
+    let v = (c[0] * c[0] + c[1] * c[1] + c[2] * c[2] + c[3] * c[3]) / 4.0;
     let s = (v + 1e-5).sqrt();
     let expected: Vec<f32> = c.iter().map(|&ci| ci / s).collect();
 
@@ -189,7 +213,10 @@ fn layernorm() -> TestCase {
             label: "1x4".into(),
             inputs: HashMap::from([(ext_x, tensor_f32_shaped(vec![1, 4], &[1.0, 2.0, 3.0, 4.0]))]),
             expected_outputs: HashMap::from([(out, tensor_f32_shaped(vec![1, 4], &expected))]),
-            tolerance: Tolerance { atol: 1e-4, rtol: 1e-4 },
+            tolerance: Tolerance {
+                atol: 1e-4,
+                rtol: 1e-4,
+            },
         }],
     }
 }
@@ -207,8 +234,17 @@ fn residual_add() -> TestCase {
     // Simple 1x1 conv (identity-ish): weight [1, 1, 1, 1], no bias
     let w = f32_const(&mut graph, vec![2.0], vec![1, 1, 1, 1], &mut rng);
     let conv_out = ops::Conv::push_new(
-        &mut graph, x, w, None,
-        ops::ConvAutoPad::Valid, vec![], 1, vec![1, 1], vec![], vec![1, 1], &mut rng,
+        &mut graph,
+        x,
+        w,
+        None,
+        ops::ConvAutoPad::Valid,
+        vec![],
+        1,
+        vec![1, 1],
+        vec![],
+        vec![1, 1],
+        &mut rng,
     );
 
     // residual = x + conv(x)
@@ -225,8 +261,14 @@ fn residual_add() -> TestCase {
         graph,
         data_sets: vec![TestDataSet {
             label: "1x1x2x2".into(),
-            inputs: HashMap::from([(ext_x, tensor_f32_shaped(vec![1, 1, 2, 2], &[1.0, -1.0, 2.0, -2.0]))]),
-            expected_outputs: HashMap::from([(out, tensor_f32_shaped(vec![1, 1, 2, 2], &[3.0, 0.0, 6.0, 0.0]))]),
+            inputs: HashMap::from([(
+                ext_x,
+                tensor_f32_shaped(vec![1, 1, 2, 2], &[1.0, -1.0, 2.0, -2.0]),
+            )]),
+            expected_outputs: HashMap::from([(
+                out,
+                tensor_f32_shaped(vec![1, 1, 2, 2], &[3.0, 0.0, 6.0, 0.0]),
+            )]),
             tolerance: Tolerance::for_dtype(NumericDType::F32),
         }],
     }
@@ -244,7 +286,13 @@ fn attention_scores() -> TestCase {
 
     // Q [1, 2, 3], K [1, 2, 3] → K^T [1, 3, 2] → Q @ K^T [1, 2, 2]
     let k_t = ops::Transpose::push_new(&mut graph, imap[&ext_k], Some(vec![0, 2, 1]), &mut rng);
-    let qk = ops::MatMul::push_new_default_precision(&mut graph, imap[&ext_q], k_t, NumericDType::F32, &mut rng);
+    let qk = ops::MatMul::push_new_default_precision(
+        &mut graph,
+        imap[&ext_q],
+        k_t,
+        NumericDType::F32,
+        &mut rng,
+    );
 
     // / sqrt(d_k) where d_k = 3
     let sqrt_dk = f32_const(&mut graph, vec![3.0f32.sqrt()], vec![1, 1, 1], &mut rng);
@@ -263,11 +311,23 @@ fn attention_scores() -> TestCase {
         data_sets: vec![TestDataSet {
             label: "1x2x3".into(),
             inputs: HashMap::from([
-                (ext_q, tensor_f32_shaped(vec![1, 2, 3], &[1.0,0.0,0.0, 0.0,1.0,0.0])),
-                (ext_k, tensor_f32_shaped(vec![1, 2, 3], &[1.0,0.0,0.0, 0.0,0.0,1.0])),
+                (
+                    ext_q,
+                    tensor_f32_shaped(vec![1, 2, 3], &[1.0, 0.0, 0.0, 0.0, 1.0, 0.0]),
+                ),
+                (
+                    ext_k,
+                    tensor_f32_shaped(vec![1, 2, 3], &[1.0, 0.0, 0.0, 0.0, 0.0, 1.0]),
+                ),
             ]),
-            expected_outputs: HashMap::from([(out, tensor_f32_shaped(vec![1, 2, 2], &[s, 0.0, 0.0, 0.0]))]),
-            tolerance: Tolerance { atol: 1e-5, rtol: 1e-5 },
+            expected_outputs: HashMap::from([(
+                out,
+                tensor_f32_shaped(vec![1, 2, 2], &[s, 0.0, 0.0, 0.0]),
+            )]),
+            tolerance: Tolerance {
+                atol: 1e-5,
+                rtol: 1e-5,
+            },
         }],
     }
 }
@@ -283,7 +343,12 @@ fn gelu_approx() -> TestCase {
     let x = imap[&ext_x];
 
     let half = f32_const(&mut graph, vec![0.5], vec![1], &mut rng);
-    let sqrt2 = f32_const(&mut graph, vec![std::f32::consts::SQRT_2], vec![1], &mut rng);
+    let sqrt2 = f32_const(
+        &mut graph,
+        vec![std::f32::consts::SQRT_2],
+        vec![1],
+        &mut rng,
+    );
     let one = f32_const(&mut graph, vec![1.0], vec![1], &mut rng);
 
     // x / sqrt(2)
@@ -303,7 +368,9 @@ fn gelu_approx() -> TestCase {
         let sign = x.signum();
         let x = x.abs();
         let t = 1.0 / (1.0 + 0.3275911 * x);
-        let poly = t * (0.254829592 + t * (-0.284496736 + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429))));
+        let poly = t
+            * (0.254829592
+                + t * (-0.284496736 + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429))));
         sign * (1.0 - poly * (-x * x).exp())
     }
 
@@ -318,10 +385,14 @@ fn gelu_approx() -> TestCase {
         data_sets: vec![TestDataSet {
             label: "4elem".into(),
             inputs: HashMap::from([(ext_x, tensor_f32_shaped(vec![4], &[-1.0, 0.0, 1.0, 2.0]))]),
-            expected_outputs: HashMap::from([(out, tensor_f32_shaped(vec![4], &[
-                gelu(-1.0), gelu(0.0), gelu(1.0), gelu(2.0),
-            ]))]),
-            tolerance: Tolerance { atol: 1e-4, rtol: 1e-4 },
+            expected_outputs: HashMap::from([(
+                out,
+                tensor_f32_shaped(vec![4], &[gelu(-1.0), gelu(0.0), gelu(1.0), gelu(2.0)]),
+            )]),
+            tolerance: Tolerance {
+                atol: 1e-4,
+                rtol: 1e-4,
+            },
         }],
     }
 }
@@ -338,16 +409,26 @@ fn conv_relu() -> TestCase {
 
     // 3x3 conv with bias, then ReLU
     // Input [1,1,4,4], Weight [1,1,3,3], Bias [1]
-    let w = f32_const(&mut graph, vec![
-        0.0, 1.0, 0.0,
-        1.0,-4.0, 1.0,
-        0.0, 1.0, 0.0,
-    ], vec![1, 1, 3, 3], &mut rng);
+    let w = f32_const(
+        &mut graph,
+        vec![0.0, 1.0, 0.0, 1.0, -4.0, 1.0, 0.0, 1.0, 0.0],
+        vec![1, 1, 3, 3],
+        &mut rng,
+    );
     let b = f32_const(&mut graph, vec![1.0], vec![1], &mut rng);
 
     let conv = ops::Conv::push_new(
-        &mut graph, x, w, Some(b),
-        ops::ConvAutoPad::Valid, vec![], 1, vec![3, 3], vec![], vec![1, 1], &mut rng,
+        &mut graph,
+        x,
+        w,
+        Some(b),
+        ops::ConvAutoPad::Valid,
+        vec![],
+        1,
+        vec![3, 3],
+        vec![],
+        vec![1, 1],
+        &mut rng,
     );
     let out = ops::ClampMin::push_new(&mut graph, conv, 0.0, &mut rng);
     graph.set_outputs(vec![out]);
@@ -361,7 +442,10 @@ fn conv_relu() -> TestCase {
         data_sets: vec![TestDataSet {
             label: "1x1x4x4_ones".into(),
             inputs: HashMap::from([(ext_x, tensor_f32_shaped(vec![1, 1, 4, 4], &[1.0; 16]))]),
-            expected_outputs: HashMap::from([(out, tensor_f32_shaped(vec![1, 1, 2, 2], &[1.0, 1.0, 1.0, 1.0]))]),
+            expected_outputs: HashMap::from([(
+                out,
+                tensor_f32_shaped(vec![1, 1, 2, 2], &[1.0, 1.0, 1.0, 1.0]),
+            )]),
             tolerance: Tolerance::for_dtype(NumericDType::F32),
         }],
     }
@@ -378,12 +462,17 @@ fn gather_layernorm() -> TestCase {
     let ids = imap[&ext_ids];
 
     // Embedding table [4, 3] (4 tokens, dim 3)
-    let table = f32_const(&mut graph, vec![
-        1.0, 0.0, 0.0,   // token 0
-        0.0, 2.0, 0.0,   // token 1
-        0.0, 0.0, 3.0,   // token 2
-        1.0, 1.0, 1.0,   // token 3
-    ], vec![4, 3], &mut rng);
+    let table = f32_const(
+        &mut graph,
+        vec![
+            1.0, 0.0, 0.0, // token 0
+            0.0, 2.0, 0.0, // token 1
+            0.0, 0.0, 3.0, // token 2
+            1.0, 1.0, 1.0, // token 3
+        ],
+        vec![4, 3],
+        &mut rng,
+    );
 
     // Gather: lookup tokens
     let emb = ops::Gather::push_new(&mut graph, table, ids, 0, &mut rng);
@@ -413,7 +502,7 @@ fn gather_layernorm() -> TestCase {
     //        ≈ [1.4142, -0.7071, -0.7071]
     let m0 = 1.0f32 / 3.0;
     let c0 = [1.0 - m0, 0.0 - m0, 0.0 - m0];
-    let v0 = (c0[0]*c0[0] + c0[1]*c0[1] + c0[2]*c0[2]) / 3.0;
+    let v0 = (c0[0] * c0[0] + c0[1] * c0[1] + c0[2] * c0[2]) / 3.0;
     let s0 = (v0 + 1e-5).sqrt();
 
     TestCase {
@@ -422,11 +511,17 @@ fn gather_layernorm() -> TestCase {
         data_sets: vec![TestDataSet {
             label: "2_tokens".into(),
             inputs: HashMap::from([(ext_ids, super::tensor_i64_shaped(vec![2], &[3, 0]))]),
-            expected_outputs: HashMap::from([(out, tensor_f32_shaped(vec![2, 3], &[
-                0.0, 0.0, 0.0,
-                c0[0]/s0, c0[1]/s0, c0[2]/s0,
-            ]))]),
-            tolerance: Tolerance { atol: 1e-3, rtol: 1e-3 },
+            expected_outputs: HashMap::from([(
+                out,
+                tensor_f32_shaped(
+                    vec![2, 3],
+                    &[0.0, 0.0, 0.0, c0[0] / s0, c0[1] / s0, c0[2] / s0],
+                ),
+            )]),
+            tolerance: Tolerance {
+                atol: 1e-3,
+                rtol: 1e-3,
+            },
         }],
     }
 }

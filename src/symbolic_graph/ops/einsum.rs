@@ -1,12 +1,9 @@
-use crate::backends::eval_backend::EvalBackend;
-use crate::dtype::DType;
 use crate::graph::{GlobalId, Node, Property, PropertyValue};
-use crate::milli_graph::{MilliLoweringContext, MilliOpGraph};
-use crate::migration::numeric_tensor::NumericTensor;
+use crate::milli_graph::{self, MilliLoweringContext, MilliOpGraph};
+use crate::numeric_dtype::NumericDType;
 use crate::onnx::AttributeProto;
 use crate::symbolic_graph::ops::{EvalError, Operation};
 use crate::symbolic_graph::{ONNXDecodingError, query_attribute_string};
-use crate::tensor_rank::DynRank;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -14,6 +11,7 @@ use std::collections::HashMap;
 /// ONNX Einsum operator.
 ///
 /// Evaluates Einstein summation convention on the inputs.
+/// Lowered to milli ops via transpose + matmul decomposition.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EinsumOperation {
     global_id: GlobalId,
@@ -66,9 +64,8 @@ impl Node for EinsumOperation {
     }
 }
 
-/// Parse an einsum equation like "bij, bjk -> bik" or "ij->i".
-/// Returns (input_subscripts, output_subscripts).
-/// Each subscript is a list of chars representing axes.
+// ── Equation parsing ─────────────────────────────────────────────────────────
+
 fn parse_equation(eq: &str) -> Result<(Vec<Vec<char>>, Vec<char>), EvalError> {
     let eq = eq.replace(' ', "");
     let (lhs, rhs) = if let Some((l, r)) = eq.split_once("->") {
@@ -82,7 +79,6 @@ fn parse_equation(eq: &str) -> Result<(Vec<Vec<char>>, Vec<char>), EvalError> {
     let output_sub = if let Some(r) = rhs {
         parse_subscript(r)
     } else {
-        // Implicit output: sorted unique labels that appear exactly once
         let mut counts: HashMap<char, usize> = HashMap::new();
         for sub in &input_subs {
             for &c in sub {
@@ -101,15 +97,13 @@ fn parse_equation(eq: &str) -> Result<(Vec<Vec<char>>, Vec<char>), EvalError> {
     Ok((input_subs, output_sub))
 }
 
-/// Parse a single subscript, handling ellipsis (...) by expanding to uppercase placeholders.
 fn parse_subscript(s: &str) -> Vec<char> {
     let mut result = Vec::new();
     let chars: Vec<char> = s.chars().collect();
     let mut i = 0;
     while i < chars.len() {
         if i + 2 < chars.len() && chars[i] == '.' && chars[i + 1] == '.' && chars[i + 2] == '.' {
-            // Ellipsis placeholder — we'll expand later
-            result.push('\u{2026}'); // Unicode ellipsis as placeholder
+            result.push('\u{2026}');
             i += 3;
         } else {
             result.push(chars[i]);
@@ -119,6 +113,380 @@ fn parse_subscript(s: &str) -> Vec<char> {
     result
 }
 
+fn has_ellipsis(input_subs: &[Vec<char>], output_sub: &[char]) -> bool {
+    let e = '\u{2026}';
+    input_subs.iter().any(|s| s.contains(&e)) || output_sub.contains(&e)
+}
+
+fn has_diagonal(input_subs: &[Vec<char>]) -> bool {
+    for sub in input_subs {
+        let mut seen = std::collections::HashSet::new();
+        for &c in sub {
+            if !seen.insert(c) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+// ── Single-input lowering (transpose + reduce) ──────────────────────────────
+
+fn lower_single_input(
+    graph: &mut MilliOpGraph,
+    input: GlobalId,
+    input_sub: &[char],
+    output_sub: &[char],
+    rng: &mut impl Rng,
+) -> GlobalId {
+    let mut perm = Vec::new();
+    let mut contract_axes = Vec::new();
+
+    for &out_label in output_sub {
+        let pos = input_sub
+            .iter()
+            .position(|&c| c == out_label)
+            .unwrap_or_else(|| panic!("Einsum: output label '{out_label}' not in input"));
+        perm.push(pos);
+    }
+
+    for (pos, &label) in input_sub.iter().enumerate() {
+        if !output_sub.contains(&label) {
+            perm.push(pos);
+            contract_axes.push(output_sub.len() + contract_axes.len());
+        }
+    }
+
+    let is_identity = perm.iter().enumerate().all(|(i, &p)| p == i);
+    let current = if !is_identity {
+        let perm_i64: Vec<i64> = perm.iter().map(|&p| p as i64).collect();
+        milli_graph::ops::Transpose::push_new(graph, input, Some(perm_i64), rng)
+    } else {
+        input
+    };
+
+    if contract_axes.is_empty() {
+        current
+    } else {
+        let axes_vec: Vec<i64> = contract_axes.iter().map(|&a| a as i64).collect();
+        let axes_id = milli_graph::ops::Constant::from_vec(graph, axes_vec, rng);
+        milli_graph::ops::ReduceSum::push_new(graph, current, Some(axes_id), false, false, rng)
+    }
+}
+
+// ── Two-input lowering (transpose + reshape + matmul) ────────────────────────
+
+fn lower_two_input(
+    graph: &mut MilliOpGraph,
+    a_id: GlobalId,
+    b_id: GlobalId,
+    a_sub: &[char],
+    b_sub: &[char],
+    output_sub: &[char],
+    rng: &mut impl Rng,
+) -> GlobalId {
+    // Classify labels
+    let mut batch = Vec::new();
+    let mut free_a = Vec::new();
+    let mut free_b = Vec::new();
+    let mut contract = Vec::new();
+    let mut reduce_a = Vec::new(); // in A only, not in output — pre-reduce
+    let mut reduce_b = Vec::new(); // in B only, not in output — pre-reduce
+
+    let mut all_labels = Vec::new();
+    for &c in a_sub.iter().chain(b_sub.iter()) {
+        if !all_labels.contains(&c) {
+            all_labels.push(c);
+        }
+    }
+
+    let a_set: std::collections::HashSet<char> = a_sub.iter().copied().collect();
+    let b_set: std::collections::HashSet<char> = b_sub.iter().copied().collect();
+    let out_set: std::collections::HashSet<char> = output_sub.iter().copied().collect();
+
+    for &label in &all_labels {
+        let in_a = a_set.contains(&label);
+        let in_b = b_set.contains(&label);
+        let in_out = out_set.contains(&label);
+        match (in_a, in_b, in_out) {
+            (true, true, true) => batch.push(label),
+            (true, true, false) => contract.push(label),
+            (true, false, true) => free_a.push(label),
+            (false, true, true) => free_b.push(label),
+            (true, false, false) => reduce_a.push(label),
+            (false, true, false) => reduce_b.push(label),
+            _ => panic!("Einsum: output label '{label}' not found in any input"),
+        }
+    }
+
+    // Pre-reduce labels that appear in only one input and not in the output.
+    // These can't be handled by matmul contraction — sum them out first.
+    let (mut a_current, mut a_sub_current) = (a_id, a_sub.to_vec());
+    if !reduce_a.is_empty() {
+        let axes: Vec<i64> = reduce_a
+            .iter()
+            .map(|label| a_sub_current.iter().position(|c| c == label).unwrap() as i64)
+            .collect();
+        let axes_id = milli_graph::ops::Constant::from_vec(graph, axes, rng);
+        a_current = milli_graph::ops::ReduceSum::push_new(
+            graph,
+            a_current,
+            Some(axes_id),
+            false,
+            false,
+            rng,
+        );
+        a_sub_current.retain(|c| !reduce_a.contains(c));
+    }
+
+    let (mut b_current, mut b_sub_current) = (b_id, b_sub.to_vec());
+    if !reduce_b.is_empty() {
+        let axes: Vec<i64> = reduce_b
+            .iter()
+            .map(|label| b_sub_current.iter().position(|c| c == label).unwrap() as i64)
+            .collect();
+        let axes_id = milli_graph::ops::Constant::from_vec(graph, axes, rng);
+        b_current = milli_graph::ops::ReduceSum::push_new(
+            graph,
+            b_current,
+            Some(axes_id),
+            false,
+            false,
+            rng,
+        );
+        b_sub_current.retain(|c| !reduce_b.contains(c));
+    }
+
+    // Build transpose permutations
+    // A target: [batch..., free_A..., contract...]
+    let a_perm: Vec<i64> = batch
+        .iter()
+        .chain(free_a.iter())
+        .chain(contract.iter())
+        .map(|label| a_sub_current.iter().position(|c| c == label).unwrap() as i64)
+        .collect();
+
+    // B target: [batch..., contract..., free_B...]
+    let b_perm: Vec<i64> = batch
+        .iter()
+        .chain(contract.iter())
+        .chain(free_b.iter())
+        .map(|label| b_sub_current.iter().position(|c| c == label).unwrap() as i64)
+        .collect();
+
+    let a_t = if a_perm.iter().enumerate().all(|(i, &p)| p == i as i64) {
+        a_current
+    } else {
+        milli_graph::ops::Transpose::push_new(graph, a_current, Some(a_perm), rng)
+    };
+
+    let b_t = if b_perm.iter().enumerate().all(|(i, &p)| p == i as i64) {
+        b_current
+    } else {
+        milli_graph::ops::Transpose::push_new(graph, b_current, Some(b_perm), rng)
+    };
+
+    let n_batch = batch.len();
+    let n_free_a = free_a.len();
+    let n_free_b = free_b.len();
+    let n_contract = contract.len();
+
+    let needs_reshape = n_free_a > 1 || n_free_b > 1 || n_contract > 1;
+
+    let (a_mm, b_mm) = if needs_reshape {
+        let a_shape = milli_graph::ops::Shape::push_new(graph, a_t, rng);
+        let b_shape = milli_graph::ops::Shape::push_new(graph, b_t, rng);
+
+        let a_new = build_collapsed_shape(graph, a_shape, n_batch, n_free_a, n_contract, rng);
+        let b_new = build_collapsed_shape(graph, b_shape, n_batch, n_contract, n_free_b, rng);
+
+        (
+            milli_graph::ops::Reshape::push_new(graph, a_t, a_new, false, rng),
+            milli_graph::ops::Reshape::push_new(graph, b_t, b_new, false, rng),
+        )
+    } else {
+        (a_t, b_t)
+    };
+
+    // Cast to F32, matmul, cast back
+    let a_f32 = milli_graph::ops::Cast::push_new(graph, a_mm, NumericDType::F32, rng);
+    let b_f32 = milli_graph::ops::Cast::push_new(graph, b_mm, NumericDType::F32, rng);
+
+    let mm = milli_graph::ops::MatMul::push_new_default_precision(
+        graph,
+        a_f32,
+        b_f32,
+        NumericDType::F32,
+        rng,
+    );
+
+    let mm_cast = milli_graph::ops::CastLike::push_new(graph, mm, a_id, rng);
+
+    // Reshape back if collapsed
+    let after_mm = if needs_reshape {
+        let a_orig_shape = milli_graph::ops::Shape::push_new(graph, a_t, rng);
+        let b_orig_shape = milli_graph::ops::Shape::push_new(graph, b_t, rng);
+        let expand_shape = build_expanded_shape(
+            graph,
+            a_orig_shape,
+            b_orig_shape,
+            n_batch,
+            n_free_a,
+            n_contract,
+            n_free_b,
+            rng,
+        );
+        milli_graph::ops::Reshape::push_new(graph, mm_cast, expand_shape, false, rng)
+    } else {
+        mm_cast
+    };
+
+    // Final transpose to match output label order
+    let result_labels: Vec<char> = batch
+        .iter()
+        .chain(free_a.iter())
+        .chain(free_b.iter())
+        .copied()
+        .collect();
+
+    let final_perm: Vec<i64> = output_sub
+        .iter()
+        .map(|label| {
+            result_labels
+                .iter()
+                .position(|c| c == label)
+                .unwrap_or_else(|| panic!("Einsum: output label '{label}' not in result"))
+                as i64
+        })
+        .collect();
+
+    if final_perm.iter().enumerate().all(|(i, &p)| p == i as i64) {
+        after_mm
+    } else {
+        milli_graph::ops::Transpose::push_new(graph, after_mm, Some(final_perm), rng)
+    }
+}
+
+// ── Shape helpers for dynamic reshape ────────────────────────────────────────
+
+/// Build [batch_dim0, ..., prod(group1), prod(group2)] shape tensor.
+fn build_collapsed_shape(
+    graph: &mut MilliOpGraph,
+    shape_id: GlobalId,
+    n_batch: usize,
+    n_group1: usize,
+    n_group2: usize,
+    rng: &mut impl Rng,
+) -> GlobalId {
+    let mut parts: Vec<GlobalId> = Vec::new();
+
+    // Batch dims kept individually
+    for i in 0..n_batch {
+        let idx_id = milli_graph::ops::Constant::from_vec(graph, vec![i as i64], rng);
+        let dim = milli_graph::ops::Gather::push_new(graph, shape_id, idx_id, 0, rng);
+        parts.push(dim);
+    }
+
+    if n_group1 > 0 {
+        let prod = gather_and_product(graph, shape_id, n_batch, n_group1, rng);
+        let axes = milli_graph::ops::Constant::from_vec(graph, vec![0i64], rng);
+        parts.push(milli_graph::ops::Unsqueeze::push_new(
+            graph, prod, axes, rng,
+        ));
+    }
+
+    if n_group2 > 0 {
+        let prod = gather_and_product(graph, shape_id, n_batch + n_group1, n_group2, rng);
+        let axes = milli_graph::ops::Constant::from_vec(graph, vec![0i64], rng);
+        parts.push(milli_graph::ops::Unsqueeze::push_new(
+            graph, prod, axes, rng,
+        ));
+    }
+
+    if parts.len() == 1 {
+        parts.into_iter().next().unwrap()
+    } else {
+        milli_graph::ops::Concat::push_new(graph, parts, 0, rng)
+    }
+}
+
+/// Gather dims at [offset..offset+count) from shape tensor and multiply them together.
+fn gather_and_product(
+    graph: &mut MilliOpGraph,
+    shape_id: GlobalId,
+    offset: usize,
+    count: usize,
+    rng: &mut impl Rng,
+) -> GlobalId {
+    assert!(count > 0);
+    if count == 1 {
+        let idx = milli_graph::ops::Constant::new_scalar(graph, offset as i64, rng);
+        return milli_graph::ops::Gather::push_new(graph, shape_id, idx, 0, rng);
+    }
+    let indices: Vec<i64> = (offset..offset + count).map(|i| i as i64).collect();
+    let idx_id = milli_graph::ops::Constant::from_vec(graph, indices, rng);
+    let gathered = milli_graph::ops::Gather::push_new(graph, shape_id, idx_id, 0, rng);
+
+    let mut product = {
+        let i0 = milli_graph::ops::Constant::new_scalar(graph, 0i64, rng);
+        milli_graph::ops::Gather::push_new(graph, gathered, i0, 0, rng)
+    };
+    for i in 1..count {
+        let idx = milli_graph::ops::Constant::new_scalar(graph, i as i64, rng);
+        let dim = milli_graph::ops::Gather::push_new(graph, gathered, idx, 0, rng);
+        product = milli_graph::ops::SimpleBinary::mul(graph, product, dim, rng);
+    }
+    product
+}
+
+/// Build expanded shape: [batch_dims..., free_A_dims..., free_B_dims...]
+#[allow(clippy::too_many_arguments)]
+fn build_expanded_shape(
+    graph: &mut MilliOpGraph,
+    a_shape_id: GlobalId,
+    b_shape_id: GlobalId,
+    n_batch: usize,
+    n_free_a: usize,
+    n_contract: usize,
+    n_free_b: usize,
+    rng: &mut impl Rng,
+) -> GlobalId {
+    let mut parts: Vec<GlobalId> = Vec::new();
+
+    if n_batch > 0 {
+        let idx: Vec<i64> = (0..n_batch).map(|i| i as i64).collect();
+        let idx_id = milli_graph::ops::Constant::from_vec(graph, idx, rng);
+        parts.push(milli_graph::ops::Gather::push_new(
+            graph, a_shape_id, idx_id, 0, rng,
+        ));
+    }
+
+    if n_free_a > 0 {
+        let idx: Vec<i64> = (n_batch..n_batch + n_free_a).map(|i| i as i64).collect();
+        let idx_id = milli_graph::ops::Constant::from_vec(graph, idx, rng);
+        parts.push(milli_graph::ops::Gather::push_new(
+            graph, a_shape_id, idx_id, 0, rng,
+        ));
+    }
+
+    if n_free_b > 0 {
+        let start = n_batch + n_contract;
+        let idx: Vec<i64> = (start..start + n_free_b).map(|i| i as i64).collect();
+        let idx_id = milli_graph::ops::Constant::from_vec(graph, idx, rng);
+        parts.push(milli_graph::ops::Gather::push_new(
+            graph, b_shape_id, idx_id, 0, rng,
+        ));
+    }
+
+    if parts.len() == 1 {
+        parts.into_iter().next().unwrap()
+    } else {
+        milli_graph::ops::Concat::push_new(graph, parts, 0, rng)
+    }
+}
+
+// ── Operation impl ───────────────────────────────────────────────────────────
+
 impl Operation for EinsumOperation {
     fn parameters(&self) -> Vec<Property> {
         vec![Property::new(
@@ -127,192 +495,99 @@ impl Operation for EinsumOperation {
         )]
     }
 
-    fn eval(
-        &self,
-        backend: &mut EvalBackend,
-        inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
-    ) -> Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, EvalError> {
-        let tensors: Vec<&NumericTensor<DynRank>> =
-            self.inputs.iter().map(|id| &inputs[id]).collect();
-
-        let orig_dtype = tensors[0].dtype();
-
-        let (mut input_subs, mut output_sub) = parse_equation(&self.equation)?;
-
-        // Expand ellipsis: determine how many dimensions the ellipsis covers
-        let ellipsis_char = '\u{2026}';
-        let has_ellipsis = input_subs.iter().any(|s| s.contains(&ellipsis_char))
-            || output_sub.contains(&ellipsis_char);
-
-        if has_ellipsis {
-            // Find the number of ellipsis dimensions from the first input that has one
-            let mut ellipsis_ndim = 0;
-            for (i, sub) in input_subs.iter().enumerate() {
-                if sub.contains(&ellipsis_char) {
-                    let explicit_dims = sub.len() - 1; // subtract the ellipsis placeholder
-                    ellipsis_ndim = tensors[i].rank() - explicit_dims;
-                    break;
-                }
-            }
-
-            // Generate unique labels for ellipsis dims (use Unicode private use area
-            // to avoid collision with any valid einsum label)
-            let ellipsis_labels: Vec<char> = (0..ellipsis_ndim)
-                .map(|i| char::from_u32(0xE000 + i as u32).unwrap())
-                .collect();
-
-            // Replace ellipsis in all subscripts
-            for sub in input_subs.iter_mut() {
-                if let Some(pos) = sub.iter().position(|&c| c == ellipsis_char) {
-                    sub.splice(pos..pos + 1, ellipsis_labels.iter().copied());
-                }
-            }
-            if let Some(pos) = output_sub.iter().position(|&c| c == ellipsis_char) {
-                output_sub.splice(pos..pos + 1, ellipsis_labels.iter().copied());
-            }
-        }
-
-        // Collect all unique labels and assign dimension sizes
-        let mut label_to_dim: HashMap<char, usize> = HashMap::new();
-        for (i, sub) in input_subs.iter().enumerate() {
-            let shape = tensors[i].shape();
-            assert_eq!(
-                sub.len(),
-                shape.len(),
-                "Einsum subscript rank mismatch for input {}: {} vs {}",
-                i,
-                sub.len(),
-                shape.len()
-            );
-            for (j, &label) in sub.iter().enumerate() {
-                label_to_dim.entry(label).or_insert(shape[j] as usize);
-            }
-        }
-
-        // Build ordered list of all labels: output labels first, then contracted labels
-        let mut all_labels: Vec<char> = output_sub.clone();
-        for sub in &input_subs {
-            for &c in sub {
-                if !all_labels.contains(&c) {
-                    all_labels.push(c);
-                }
-            }
-        }
-
-        let n_labels = all_labels.len();
-        let label_sizes: Vec<usize> = all_labels
-            .iter()
-            .map(|c| *label_to_dim.get(c).unwrap())
-            .collect();
-
-        // Compute total iterations and strides for the multi-index
-        let total: usize = label_sizes.iter().product();
-        let mut strides = vec![1usize; n_labels];
-        for i in (0..n_labels.saturating_sub(1)).rev() {
-            strides[i] = strides[i + 1] * label_sizes[i + 1];
-        }
-
-        // Pre-compute input flat strides: for each input, for each label in all_labels,
-        // what stride does it contribute (0 if the label isn't in this input's subscript)
-        let input_data: Vec<Vec<f64>> = tensors
-            .iter()
-            .map(|t| {
-                let t_f64 = t.cast(DType::F64, backend).unwrap();
-                let flat: Vec<f64> = t_f64.to_ndarray().unwrap().flatten().try_into().unwrap();
-                flat
-            })
-            .collect();
-
-        let input_strides: Vec<Vec<usize>> = input_subs
-            .iter()
-            .enumerate()
-            .map(|(inp_idx, sub)| {
-                let shape = tensors[inp_idx].shape();
-                // Input's own strides
-                let mut inp_strides = vec![1usize; sub.len()];
-                for i in (0..sub.len().saturating_sub(1)).rev() {
-                    inp_strides[i] = inp_strides[i + 1] * shape[i + 1] as usize;
-                }
-                // Map to all_labels — sum strides for repeated labels (diagonal)
-                all_labels
-                    .iter()
-                    .map(|label| {
-                        let mut total_stride = 0usize;
-                        for (pos, c) in sub.iter().enumerate() {
-                            if c == label {
-                                total_stride += inp_strides[pos];
-                            }
-                        }
-                        total_stride
-                    })
-                    .collect()
-            })
-            .collect();
-
-        // Compute output
-        let out_rank = output_sub.len();
-        let out_shape: Vec<usize> = output_sub
-            .iter()
-            .map(|c| *label_to_dim.get(c).unwrap())
-            .collect();
-        let out_total: usize = out_shape.iter().product::<usize>().max(1);
-        let mut out_flat = vec![0.0f64; out_total];
-
-        // Output strides in the all_labels space (output labels are the first ones)
-        let mut out_strides = vec![1usize; out_rank];
-        for i in (0..out_rank.saturating_sub(1)).rev() {
-            out_strides[i] = out_strides[i + 1] * out_shape[i + 1];
-        }
-
-        // Main loop over all label combinations
-        for flat_idx in 0..total {
-            // Decompose into multi-index
-            let mut remaining = flat_idx;
-            let mut multi_idx = vec![0usize; n_labels];
-            for d in 0..n_labels {
-                multi_idx[d] = remaining / strides[d];
-                remaining %= strides[d];
-            }
-
-            // Compute product of all input values at this multi-index
-            let mut product = 1.0f64;
-            for (inp_idx, data) in input_data.iter().enumerate() {
-                let mut inp_flat = 0;
-                for d in 0..n_labels {
-                    inp_flat += multi_idx[d] * input_strides[inp_idx][d];
-                }
-                product *= data[inp_flat];
-            }
-
-            // Compute output flat index (first out_rank labels)
-            let mut out_idx = 0;
-            for d in 0..out_rank {
-                out_idx += multi_idx[d] * out_strides[d];
-            }
-
-            out_flat[out_idx] += product;
-        }
-
-        let output = NumericTensor::<DynRank>::from_vec_shape(out_flat, out_shape)
-            .map_err(|e| EvalError::InvalidInput(format!("Einsum: {e}")))?;
-        let output = output.cast(orig_dtype, backend)?;
-
-        Ok(Box::new([(self.output, output)].into_iter()))
-    }
-
     fn is_differentiable(&self) -> bool {
         false
     }
 
-    fn eval_pool<'p, P: crate::pool::Pool + 'p>(
-        &self,
-        inputs: &HashMap<GlobalId, &crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>>,
-        pool: &'p P,
-    ) -> Result<HashMap<GlobalId, crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P>>, super::EvalError> {
-        super::eval_pool_via_legacy(self, inputs, pool)
-    }
+    fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, rng: &mut impl Rng) -> MilliOpGraph {
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
 
-    fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, _rng: &mut impl Rng) -> MilliOpGraph {
-        panic!("Einsum uses custom eval")
+        let (input_subs, output_sub) =
+            parse_equation(&self.equation).expect("Einsum: failed to parse equation");
+
+        assert_eq!(
+            input_subs.len(),
+            self.inputs.len(),
+            "Einsum: equation has {} inputs but operation has {}",
+            input_subs.len(),
+            self.inputs.len()
+        );
+
+        if has_ellipsis(&input_subs, &output_sub) {
+            panic!(
+                "Einsum: ellipsis ('...') requires runtime rank not available during \
+                 milli lowering. Equation: '{}'",
+                self.equation
+            );
+        }
+        if has_diagonal(&input_subs) {
+            panic!(
+                "Einsum: diagonal labels (e.g. 'ii->i') not supported. Equation: '{}'",
+                self.equation
+            );
+        }
+
+        let result = if self.inputs.len() == 1 {
+            let inp = input_map[&self.inputs[0]];
+            lower_single_input(&mut graph, inp, &input_subs[0], &output_sub, rng)
+        } else if self.inputs.len() == 2 {
+            let a = input_map[&self.inputs[0]];
+            let b = input_map[&self.inputs[1]];
+            lower_two_input(
+                &mut graph,
+                a,
+                b,
+                &input_subs[0],
+                &input_subs[1],
+                &output_sub,
+                rng,
+            )
+        } else {
+            // >2 inputs: chain pairwise left to right
+            let mut current = input_map[&self.inputs[0]];
+            let mut current_sub = input_subs[0].clone();
+
+            for i in 1..self.inputs.len() {
+                let next = input_map[&self.inputs[i]];
+                let next_sub = &input_subs[i];
+
+                let intermediate_out = if i == self.inputs.len() - 1 {
+                    output_sub.clone()
+                } else {
+                    // Keep labels needed by future inputs or the final output
+                    let mut future: std::collections::HashSet<char> =
+                        output_sub.iter().copied().collect();
+                    for j in (i + 1)..self.inputs.len() {
+                        for &c in &input_subs[j] {
+                            future.insert(c);
+                        }
+                    }
+                    let mut intermediate = Vec::new();
+                    for &c in current_sub.iter().chain(next_sub.iter()) {
+                        if future.contains(&c) && !intermediate.contains(&c) {
+                            intermediate.push(c);
+                        }
+                    }
+                    intermediate
+                };
+
+                current = lower_two_input(
+                    &mut graph,
+                    current,
+                    next,
+                    &current_sub,
+                    next_sub,
+                    &intermediate_out,
+                    rng,
+                );
+                current_sub = intermediate_out;
+            }
+            current
+        };
+
+        let mut output_map = HashMap::new();
+        output_map.insert(result, self.output);
+        graph.set_output_map(output_map);
+        graph
     }
 }

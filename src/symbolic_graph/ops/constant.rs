@@ -1,14 +1,11 @@
-use crate::backends::ndarray_backend::NDArrayNumericTensor;
 use crate::graph::{GlobalId, Graph, Node, Property, PropertyValue};
 use crate::milli_graph::ops::*;
 use crate::milli_graph::{MilliLoweringContext, MilliOpGraph};
-use crate::migration::numeric_scalar::NumericScalar;
 use crate::numeric_scalar::NumericScalar as NewNumericScalar;
 use crate::symbolic_graph::ops::Operation;
 use crate::symbolic_graph::{
-    ONNXDecodingError, SharedPoolTensor, PoolTensor,
-    query_attribute_float, query_attribute_floats, query_attribute_int,
-    query_attribute_ints, query_attribute_tensor, tensor_proto_to_pool_tensor,
+    ONNXDecodingError, SharedPoolTensor, query_attribute_float, query_attribute_floats,
+    query_attribute_int, query_attribute_ints, query_attribute_tensor,
 };
 use crate::{DynRank, onnx};
 use rand::Rng;
@@ -72,17 +69,15 @@ impl Node for ConstantOfShapeOperation {
 
 impl Operation for ConstantOfShapeOperation {
     fn parameters(&self) -> Vec<Property> {
-        vec![Property::new("value", PropertyValue::String(format!("{}", self.value)))]
+        vec![Property::new(
+            "value",
+            PropertyValue::String(format!("{}", self.value)),
+        )]
     }
 
     fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
-        let node =
-            ConstantOfShape::push_new(&mut graph, self.value, input_map[&self.input], rng);
-        let out = match graph.get_node_by_id(&node) {
-            Some(AnyMilliOp::ConstantOfShape(op)) => op.outputs().next().unwrap(),
-            _ => unreachable!(),
-        };
+        let out = ConstantOfShape::push_new(&mut graph, self.value, input_map[&self.input], rng);
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);
         graph.set_output_map(output_map);
@@ -203,7 +198,10 @@ impl Operation for ConstantOperation {
         ];
 
         if total_elements == 1 {
-            params.push(Property::new("value", PropertyValue::String(format!("{}", t.read_element(0)))));
+            params.push(Property::new(
+                "value",
+                PropertyValue::String(format!("{}", t.read_element(0))),
+            ));
         } else if total_elements <= 8 {
             let preview: Vec<String> = (0..total_elements)
                 .map(|i| format!("{:.4}", t.read_element(i).to_f32()))
@@ -220,13 +218,7 @@ impl Operation for ConstantOperation {
     fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, _input_map) = MilliOpGraph::new(self.inputs(), rng);
 
-        // Bridge to legacy for Constant::push_new (milli op takes NDArrayNumericTensor).
-        let legacy = crate::nano_graph::lower::new_numeric_to_legacy(&*self.value.0);
-        let nd = match legacy {
-            crate::migration::numeric_tensor::NumericTensor::NDArray(nd) => nd,
-            _ => panic!("expected NDArray"),
-        };
-        let out = Constant::push_new(&mut graph, nd, rng);
+        let out = Constant::push_new_pool(&mut graph, self.value.clone(), None, rng);
 
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);

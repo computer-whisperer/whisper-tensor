@@ -1,14 +1,13 @@
-use crate::pool::Pool;
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
 use crate::backends::ndarray_backend::NDArrayNumericTensor;
-use crate::backends::ndarray_backend::conversions::NDArrayNumericTensorType;
 use crate::graph::{GlobalId, Node};
+use crate::migration::numeric_tensor::NumericTensor;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
-use crate::migration::numeric_scalar::NumericScalar;
-use crate::migration::numeric_tensor::NumericTensor;
+use crate::numeric_dtype::NumericDType;
 use crate::numeric_scalar::NumericScalar as NewScalar;
+use crate::pool::Pool;
 use crate::symbolic_graph::SharedPoolTensor;
 
 use rand::Rng;
@@ -17,6 +16,77 @@ use std::collections::HashMap;
 use typenum::P1;
 
 type PoolTensor = crate::numeric_tensor::NumericTensor<'static, DynRank, crate::pool::SystemPool>;
+
+/// Trait for Rust types that can be stored as constant tensor elements.
+pub trait ConstantValue: Copy {
+    fn to_scalar(self) -> NewScalar;
+    fn dtype() -> NumericDType;
+}
+
+impl ConstantValue for i64 {
+    fn to_scalar(self) -> NewScalar {
+        NewScalar::from_i64(self)
+    }
+    fn dtype() -> NumericDType {
+        NumericDType::I64
+    }
+}
+impl ConstantValue for i32 {
+    fn to_scalar(self) -> NewScalar {
+        NewScalar::from_i32(self)
+    }
+    fn dtype() -> NumericDType {
+        NumericDType::I32
+    }
+}
+impl ConstantValue for f32 {
+    fn to_scalar(self) -> NewScalar {
+        NewScalar::from_f32(self)
+    }
+    fn dtype() -> NumericDType {
+        NumericDType::F32
+    }
+}
+impl ConstantValue for f64 {
+    fn to_scalar(self) -> NewScalar {
+        NewScalar::from_f64(self)
+    }
+    fn dtype() -> NumericDType {
+        NumericDType::F64
+    }
+}
+impl ConstantValue for u8 {
+    fn to_scalar(self) -> NewScalar {
+        NewScalar::from_u8(self)
+    }
+    fn dtype() -> NumericDType {
+        NumericDType::U8
+    }
+}
+impl ConstantValue for bool {
+    fn to_scalar(self) -> NewScalar {
+        NewScalar::from_bool(self)
+    }
+    fn dtype() -> NumericDType {
+        NumericDType::BOOL
+    }
+}
+
+/// Build a `SharedPoolTensor` from values + shape on the system pool.
+fn build_pool_tensor<T: ConstantValue>(values: &[T], shape: Vec<u64>) -> SharedPoolTensor {
+    use crate::numeric_tensor::{NumericTensor, TensorLayout};
+    use crate::pool::{Pool, SystemPool};
+
+    let layout = TensorLayout::<DynRank>::row_major(shape, T::dtype());
+    let buf = SystemPool
+        .allocate(layout.buffer_size_bytes())
+        .expect("system pool allocation for constant");
+    let mut tensor = NumericTensor::from_parts(buf, layout);
+    for (i, v) in values.iter().enumerate() {
+        tensor.write_element(i, v.to_scalar());
+    }
+    SharedPoolTensor(std::sync::Arc::new(tensor))
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Constant {
@@ -32,7 +102,49 @@ impl Constant {
         &self.data.0
     }
 
+    /// Push a 1D constant tensor from a vec of typed values.
+    pub fn from_vec<T: ConstantValue>(
+        graph: &mut MilliOpGraph,
+        values: Vec<T>,
+        rng: &mut impl Rng,
+    ) -> GlobalId {
+        Self::from_vec_with_label(graph, values, None, rng)
+    }
+
+    /// Push a 1D constant tensor with a debug label.
+    pub fn from_vec_with_label<T: ConstantValue>(
+        graph: &mut MilliOpGraph,
+        values: Vec<T>,
+        label: Option<String>,
+        rng: &mut impl Rng,
+    ) -> GlobalId {
+        let len = values.len() as u64;
+        let data = build_pool_tensor(&values, vec![len]);
+        Self::push_new_pool(graph, data, label, rng)
+    }
+
+    /// Push a scalar (shape [1]) constant.
+    pub fn new_scalar<T: ConstantValue>(
+        graph: &mut MilliOpGraph,
+        v: T,
+        rng: &mut impl Rng,
+    ) -> GlobalId {
+        Self::new_scalar_with_label(graph, v, None, rng)
+    }
+
+    /// Push a scalar constant with a debug label.
+    pub fn new_scalar_with_label<T: ConstantValue>(
+        graph: &mut MilliOpGraph,
+        v: T,
+        label: Option<String>,
+        rng: &mut impl Rng,
+    ) -> GlobalId {
+        let data = build_pool_tensor(&[v], vec![1]);
+        Self::push_new_pool(graph, data, label, rng)
+    }
+
     /// Push a constant from a legacy NDArrayNumericTensor (bridges internally).
+    /// Prefer `from_vec` or `new_scalar` for new code.
     pub fn push_new(
         graph: &mut MilliOpGraph,
         a: NDArrayNumericTensor<DynRank>,
@@ -41,16 +153,21 @@ impl Constant {
         Self::push_new_with_label(graph, a, None, rng)
     }
 
+    /// Push from legacy NDArray with label. Prefer `from_vec_with_label` for new code.
     pub fn push_new_with_label(
         graph: &mut MilliOpGraph,
         a: NDArrayNumericTensor<DynRank>,
         label: Option<String>,
         rng: &mut impl Rng,
     ) -> GlobalId {
-        // Bridge legacy → pool tensor.
         let pool_tensor = crate::symbolic_graph::tensor_proto_to_pool_tensor_from_ndarray(&a)
             .expect("bridge constant to pool tensor");
-        Self::push_new_pool(graph, SharedPoolTensor(std::sync::Arc::new(pool_tensor)), label, rng)
+        Self::push_new_pool(
+            graph,
+            SharedPoolTensor(std::sync::Arc::new(pool_tensor)),
+            label,
+            rng,
+        )
     }
 
     /// Push a constant from a pool tensor directly.
@@ -70,30 +187,13 @@ impl Constant {
         graph.push_op(AnyMilliOp::Constant(node));
         out
     }
-
-    pub(crate) fn new_scalar<T>(graph: &mut MilliOpGraph, v: T, rng: &mut impl Rng) -> GlobalId
-    where
-        T: NDArrayNumericTensorType,
-    {
-        Self::new_scalar_with_label(graph, v, None, rng)
-    }
-
-    pub(crate) fn new_scalar_with_label<T>(
-        graph: &mut MilliOpGraph,
-        v: T,
-        label: Option<String>,
-        rng: &mut impl Rng,
-    ) -> GlobalId
-    where
-        T: NDArrayNumericTensorType,
-    {
-        let data = NDArrayNumericTensor::<DynRank>::from_vec_shape(vec![v], &vec![1]).unwrap();
-        Self::push_new_with_label(graph, data, label, rng)
-    }
 }
 
 impl Constant {
-    pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
+    pub fn lower_to_nano(
+        &self,
+        ctx: &mut crate::nano_graph::NanoLoweringContext,
+    ) -> crate::milli_graph::ops::LowerResult {
         let out_id = self.output;
         if let Some(info) = ctx.all_infos.get(&out_id) {
             ctx.register_constant(out_id, info);
@@ -131,12 +231,12 @@ impl MilliOp for Constant {
         _known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'p, P>>,
         _symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
         pool: &'p P,
-    ) -> Result<
-        Vec<(GlobalId, crate::tensor_info::TensorInfo<'p, P>)>,
-        MilliOpGraphError,
-    > {
+    ) -> Result<Vec<(GlobalId, crate::tensor_info::TensorInfo<'p, P>)>, MilliOpGraphError> {
         use crate::tensor_info::TensorInfo;
-        Ok(vec![(self.output, TensorInfo::from_view(&self.data.0.view(), pool))])
+        Ok(vec![(
+            self.output,
+            TensorInfo::from_view(&self.data.0.view(), pool),
+        )])
     }
 
     fn eval(
@@ -155,7 +255,10 @@ impl MilliOp for Constant {
         &self,
         _inputs: &[crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>],
         pool: &'p P2,
-    ) -> Result<Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>, crate::nano_graph::pool_eval::PoolEvalError> {
+    ) -> Result<
+        Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>,
+        crate::nano_graph::pool_eval::PoolEvalError,
+    > {
         use crate::numeric_tensor::{NumericTensor, TensorLayout};
         use crate::tensor_rank::DynRank;
 
@@ -165,7 +268,8 @@ impl MilliOp for Constant {
 
         let layout = TensorLayout::<DynRank>::row_major(shape, ndt);
         let buf_size = layout.buffer_size_bytes();
-        let buf = pool.allocate(buf_size)
+        let buf = pool
+            .allocate(buf_size)
             .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
 
         let mut out = NumericTensor::from_parts(buf, layout);
@@ -175,7 +279,10 @@ impl MilliOp for Constant {
         Ok(vec![out])
     }
 
-    fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
+    fn lower_to_nano(
+        &self,
+        ctx: &mut crate::nano_graph::NanoLoweringContext,
+    ) -> crate::milli_graph::ops::LowerResult {
         Constant::lower_to_nano(self, ctx)
     }
 }
@@ -206,19 +313,24 @@ impl ConstantOfShape {
         label: Option<String>,
         rng: &mut impl Rng,
     ) -> GlobalId {
+        let output = graph.get_new_tensor_id(rng);
         let node = Self {
             global_id: GlobalId::new(rng),
             label,
-            output: graph.get_new_tensor_id(rng),
+            output,
             value,
             shape,
         };
-        graph.push_op(AnyMilliOp::ConstantOfShape(node))
+        graph.push_op(AnyMilliOp::ConstantOfShape(node));
+        output
     }
 }
 
 impl ConstantOfShape {
-    pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
+    pub fn lower_to_nano(
+        &self,
+        ctx: &mut crate::nano_graph::NanoLoweringContext,
+    ) -> crate::milli_graph::ops::LowerResult {
         let out_id = self.output;
         if let Some(info) = ctx.all_infos.get(&out_id) {
             ctx.register_constant(out_id, info);
@@ -257,10 +369,7 @@ impl MilliOp for ConstantOfShape {
         known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'p, P>>,
         _symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
         pool: &'p P,
-    ) -> Result<
-        Vec<(GlobalId, crate::tensor_info::TensorInfo<'p, P>)>,
-        MilliOpGraphError,
-    > {
+    ) -> Result<Vec<(GlobalId, crate::tensor_info::TensorInfo<'p, P>)>, MilliOpGraphError> {
         use crate::scalar_info::ScalarInfoTyped;
         use crate::tensor_info::TensorInfo;
 
@@ -275,11 +384,15 @@ impl MilliOp for ConstantOfShape {
             let ndt = self.value.dtype();
             let layout = crate::numeric_tensor::TensorLayout::<DynRank>::row_major(shape_u64, ndt);
             if let Ok(buf) = pool.allocate(layout.buffer_size_bytes()) {
-                let mut tensor: crate::numeric_tensor::NumericTensor<'_, DynRank, P> = crate::numeric_tensor::NumericTensor::from_parts(buf, layout);
+                let mut tensor: crate::numeric_tensor::NumericTensor<'_, DynRank, P> =
+                    crate::numeric_tensor::NumericTensor::from_parts(buf, layout);
                 for i in 0..numel {
                     tensor.write_element(i, self.value);
                 }
-                return Ok(vec![(self.output, TensorInfo::from_view(&tensor.view(), pool))]);
+                return Ok(vec![(
+                    self.output,
+                    TensorInfo::from_view(&tensor.view(), pool),
+                )]);
             }
         }
 
@@ -335,7 +448,10 @@ impl MilliOp for ConstantOfShape {
         &self,
         inputs: &[crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>],
         pool: &'p P2,
-    ) -> Result<Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>, crate::nano_graph::pool_eval::PoolEvalError> {
+    ) -> Result<
+        Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>,
+        crate::nano_graph::pool_eval::PoolEvalError,
+    > {
         use crate::numeric_tensor::{NumericTensor, TensorLayout};
         use crate::tensor_rank::DynRank;
 
@@ -350,7 +466,8 @@ impl MilliOp for ConstantOfShape {
         let numel: usize = shape.iter().product::<u64>() as usize;
 
         let layout = TensorLayout::<DynRank>::row_major(shape, ndt);
-        let buf = pool.allocate(layout.buffer_size_bytes())
+        let buf = pool
+            .allocate(layout.buffer_size_bytes())
             .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
         let mut out = NumericTensor::from_parts(buf, layout);
         for i in 0..numel {
@@ -360,7 +477,10 @@ impl MilliOp for ConstantOfShape {
         Ok(vec![out])
     }
 
-    fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
+    fn lower_to_nano(
+        &self,
+        ctx: &mut crate::nano_graph::NanoLoweringContext,
+    ) -> crate::milli_graph::ops::LowerResult {
         ConstantOfShape::lower_to_nano(self, ctx)
     }
 }

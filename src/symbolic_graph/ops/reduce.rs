@@ -1,4 +1,3 @@
-use crate::backends::ndarray_backend::NDArrayNumericTensor;
 use crate::graph::{GlobalId, Node, Property, PropertyValue};
 use crate::milli_graph::{self, MilliLoweringContext, MilliOpGraph};
 use crate::onnx;
@@ -154,8 +153,7 @@ impl Operation for ReduceMeanOperation {
         let axes = if let Some(input_axes) = &self.input_axes {
             Some(input_map[input_axes])
         } else if let Some(axes) = &self.axes_attr {
-            let tensor = NDArrayNumericTensor::from(axes.clone());
-            let tid = milli_graph::ops::Constant::push_new(&mut graph, tensor.to_dyn(), rng);
+            let tid = milli_graph::ops::Constant::from_vec(&mut graph, axes.clone(), rng);
             Some(tid)
         } else {
             None
@@ -280,8 +278,7 @@ impl Operation for ReduceSumOperation {
         let axes = if let Some(input_axes) = &self.input_axes {
             Some(input_map[input_axes])
         } else if let Some(axes) = &self.axes_attr {
-            let tensor = NDArrayNumericTensor::from(axes.clone());
-            let tid = milli_graph::ops::Constant::push_new(&mut graph, tensor.to_dyn(), rng);
+            let tid = milli_graph::ops::Constant::from_vec(&mut graph, axes.clone(), rng);
             Some(tid)
         } else {
             None
@@ -389,8 +386,7 @@ impl Operation for ReduceMaxOperation {
         let axes = if let Some(input_axes) = &self.input_axes {
             Some(input_map[input_axes])
         } else if let Some(axes) = &self.axes_attr {
-            let tensor = NDArrayNumericTensor::from(axes.clone());
-            let tid = milli_graph::ops::Constant::push_new(&mut graph, tensor.to_dyn(), rng);
+            let tid = milli_graph::ops::Constant::from_vec(&mut graph, axes.clone(), rng);
             Some(tid)
         } else {
             None
@@ -499,8 +495,7 @@ impl Operation for ReduceMinOperation {
         let axes = if let Some(input_axes) = &self.input_axes {
             Some(input_map[input_axes])
         } else if let Some(axes) = &self.axes_attr {
-            let tensor = NDArrayNumericTensor::from(axes.clone());
-            let tid = milli_graph::ops::Constant::push_new(&mut graph, tensor.to_dyn(), rng);
+            let tid = milli_graph::ops::Constant::from_vec(&mut graph, axes.clone(), rng);
             Some(tid)
         } else {
             None
@@ -609,8 +604,7 @@ impl Operation for ReduceProdOperation {
         let axes = if let Some(input_axes) = &self.input_axes {
             Some(input_map[input_axes])
         } else if let Some(axes) = &self.axes_attr {
-            let tensor = NDArrayNumericTensor::from(axes.clone());
-            let tid = milli_graph::ops::Constant::push_new(&mut graph, tensor.to_dyn(), rng);
+            let tid = milli_graph::ops::Constant::from_vec(&mut graph, axes.clone(), rng);
             Some(tid)
         } else {
             None
@@ -688,8 +682,7 @@ macro_rules! define_reduce_variant {
                 if let Some(input_axes) = &self.input_axes {
                     Some(input_map[input_axes])
                 } else if let Some(axes) = &self.axes_attr {
-                    let tensor = NDArrayNumericTensor::from(axes.clone());
-                    let tid = milli_graph::ops::Constant::push_new(graph, tensor.to_dyn(), rng);
+                    let tid = milli_graph::ops::Constant::from_vec(graph, axes.clone(), rng);
                     Some(tid)
                 } else {
                     None
@@ -955,8 +948,7 @@ impl Operation for ReduceL2Operation {
         let axes = if let Some(input_axes) = &self.input_axes {
             Some(input_map[input_axes])
         } else if let Some(axes) = &self.axes_attr {
-            let tensor = NDArrayNumericTensor::from(axes.clone());
-            let tid = milli_graph::ops::Constant::push_new(&mut graph, tensor.to_dyn(), rng);
+            let tid = milli_graph::ops::Constant::from_vec(&mut graph, axes.clone(), rng);
             Some(tid)
         } else {
             None

@@ -2,9 +2,9 @@ use crate::backends::eval_backend::EvalBackend;
 use crate::backends::ndarray_backend::NDArrayNumericTensor;
 use crate::dtype::DType;
 use crate::graph::{GlobalId, Graph, Node, Property, PropertyValue};
+use crate::migration::numeric_tensor::NumericTensor;
 use crate::milli_graph::ops::*;
 use crate::milli_graph::{MilliLoweringContext, MilliOpGraph};
-use crate::migration::numeric_tensor::NumericTensor;
 use crate::symbolic_graph::ops::{EvalError, Operation};
 use crate::symbolic_graph::{
     ONNXDecodingError, SymbolicGraph, SymbolicGraphMutator, query_attribute_float,
@@ -205,15 +205,27 @@ impl Operation for IfOperation {
 
     fn eval_pool<'p, P: crate::pool::Pool + 'p>(
         &self,
-        inputs: &HashMap<GlobalId, &crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>>,
+        inputs: &HashMap<
+            GlobalId,
+            &crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>,
+        >,
         pool: &'p P,
-    ) -> Result<HashMap<GlobalId, crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P>>, EvalError> {
+    ) -> Result<
+        HashMap<GlobalId, crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P>>,
+        EvalError,
+    > {
         let cond_view = inputs.get(&self.condition).unwrap();
         let condition: bool = cond_view.read_element(0).to_f64() != 0.0;
         let (branch_results, output_ids) = if condition {
-            (self.then_branch.eval_pool(inputs, pool)?, &self.then_branch.ordered_outputs)
+            (
+                self.then_branch.eval_pool(inputs, pool)?,
+                &self.then_branch.ordered_outputs,
+            )
         } else {
-            (self.else_branch.eval_pool(inputs, pool)?, &self.else_branch.ordered_outputs)
+            (
+                self.else_branch.eval_pool(inputs, pool)?,
+                &self.else_branch.ordered_outputs,
+            )
         };
 
         let mut outputs = HashMap::new();
@@ -221,10 +233,13 @@ impl Operation for IfOperation {
             if let Some(tensor) = branch_results.get(from_id) {
                 // Copy into a new allocation so branch_results can be dropped.
                 let view = tensor.view();
-                let layout = crate::numeric_tensor::TensorLayout::<crate::tensor_rank::DynRank>::row_major(
-                    view.shape().to_vec(), view.dtype(),
-                );
-                let buf = pool.allocate(layout.buffer_size_bytes())
+                let layout =
+                    crate::numeric_tensor::TensorLayout::<crate::tensor_rank::DynRank>::row_major(
+                        view.shape().to_vec(),
+                        view.dtype(),
+                    );
+                let buf = pool
+                    .allocate(layout.buffer_size_bytes())
                     .map_err(|e| EvalError::InvalidInput(format!("pool allocation: {e}")))?;
                 let mut out = crate::numeric_tensor::NumericTensor::from_parts(buf, layout);
                 for i in 0..view.numel() {
@@ -746,18 +761,12 @@ impl Operation for TileOperation {
         // ones = ConstantOfShape(Shape(input_shape), value=1)
         let shape_of_shape = Shape::push_new(&mut graph, input_shape, rng);
         let ones = {
-            let op_id = crate::milli_graph::ops::ConstantOfShape::push_new(
+            crate::milli_graph::ops::ConstantOfShape::push_new(
                 &mut graph,
                 crate::numeric_scalar::NumericScalar::from_i64(1),
                 shape_of_shape,
                 rng,
-            );
-            graph
-                .get_node_by_id(&op_id)
-                .unwrap()
-                .outputs()
-                .next()
-                .unwrap()
+            )
         };
 
         let axis1 = Constant::new_scalar(&mut graph, 1i64, rng);
@@ -766,11 +775,7 @@ impl Operation for TileOperation {
         let ones_us = Unsqueeze::push_new(&mut graph, ones, axis1, rng);
         let shape_us1 = Unsqueeze::push_new(&mut graph, input_shape, axis1, rng);
         let stacked1 = Concat::push_new(&mut graph, vec![ones_us, shape_us1], 1, rng);
-        let neg1_shape1 = Constant::push_new(
-            &mut graph,
-            NDArrayNumericTensor::from(vec![-1i64]).to_dyn(),
-            rng,
-        );
+        let neg1_shape1 = Constant::from_vec(&mut graph, vec![-1i64], rng);
         let interleaved_shape = Reshape::push_new(&mut graph, stacked1, neg1_shape1, false, rng);
 
         let reshaped = Reshape::push_new(&mut graph, input, interleaved_shape, false, rng);
@@ -779,11 +784,7 @@ impl Operation for TileOperation {
         let repeats_us = Unsqueeze::push_new(&mut graph, repeats, axis1, rng);
         let shape_us2 = Unsqueeze::push_new(&mut graph, input_shape, axis1, rng);
         let stacked2 = Concat::push_new(&mut graph, vec![repeats_us, shape_us2], 1, rng);
-        let neg1_shape2 = Constant::push_new(
-            &mut graph,
-            NDArrayNumericTensor::from(vec![-1i64]).to_dyn(),
-            rng,
-        );
+        let neg1_shape2 = Constant::from_vec(&mut graph, vec![-1i64], rng);
         let expand_shape = Reshape::push_new(&mut graph, stacked2, neg1_shape2, false, rng);
 
         let expanded = Expand::push_new(&mut graph, reshaped, expand_shape, rng);
@@ -914,11 +915,7 @@ impl Operation for GlobalAveragePoolOperation {
         let input = input_map[&self.input];
         let input_shape = Shape::push_new(&mut graph, input, rng);
 
-        let shape_3d = Constant::push_new(
-            &mut graph,
-            NDArrayNumericTensor::from(vec![0i64, 0i64, -1]).to_dyn(),
-            rng,
-        );
+        let shape_3d = Constant::from_vec(&mut graph, vec![0i64, 0i64, -1], rng);
         let x3d = Reshape::push_new(&mut graph, input, shape_3d, false, rng);
 
         let axis2 = Constant::new_scalar(&mut graph, 2i64, rng);
@@ -932,23 +929,11 @@ impl Operation for GlobalAveragePoolOperation {
         );
 
         // Output shape: replace spatial dims with 1s
-        let c_zero = Constant::push_new(
-            &mut graph,
-            NDArrayNumericTensor::from(vec![0i64]).to_dyn(),
-            rng,
-        );
-        let c_two = Constant::push_new(
-            &mut graph,
-            NDArrayNumericTensor::from(vec![2i64]).to_dyn(),
-            rng,
-        );
+        let c_zero = Constant::from_vec(&mut graph, vec![0i64], rng);
+        let c_two = Constant::from_vec(&mut graph, vec![2i64], rng);
         let bc = Slice::push_new(&mut graph, input_shape, c_zero, c_two, None, None, rng);
         let shape_len = Shape::push_new(&mut graph, input_shape, rng);
-        let two_1d = Constant::push_new(
-            &mut graph,
-            NDArrayNumericTensor::from(vec![2i64]).to_dyn(),
-            rng,
-        );
+        let two_1d = Constant::from_vec(&mut graph, vec![2i64], rng);
         let n_spatial = SimpleBinary::sub(&mut graph, shape_len, two_1d, rng);
         let spatial_ones = {
             let op_id = crate::milli_graph::ops::ConstantOfShape::push_new(
@@ -1025,11 +1010,7 @@ impl Operation for GlobalMaxPoolOperation {
         let input = input_map[&self.input];
         let input_shape = Shape::push_new(&mut graph, input, rng);
 
-        let shape_3d = Constant::push_new(
-            &mut graph,
-            NDArrayNumericTensor::from(vec![0i64, 0i64, -1]).to_dyn(),
-            rng,
-        );
+        let shape_3d = Constant::from_vec(&mut graph, vec![0i64, 0i64, -1], rng);
         let x3d = Reshape::push_new(&mut graph, input, shape_3d, false, rng);
 
         let axis2 = Constant::new_scalar(&mut graph, 2i64, rng);
@@ -1042,23 +1023,11 @@ impl Operation for GlobalMaxPoolOperation {
             rng,
         );
 
-        let c_zero = Constant::push_new(
-            &mut graph,
-            NDArrayNumericTensor::from(vec![0i64]).to_dyn(),
-            rng,
-        );
-        let c_two = Constant::push_new(
-            &mut graph,
-            NDArrayNumericTensor::from(vec![2i64]).to_dyn(),
-            rng,
-        );
+        let c_zero = Constant::from_vec(&mut graph, vec![0i64], rng);
+        let c_two = Constant::from_vec(&mut graph, vec![2i64], rng);
         let bc = Slice::push_new(&mut graph, input_shape, c_zero, c_two, None, None, rng);
         let shape_len = Shape::push_new(&mut graph, input_shape, rng);
-        let two_1d = Constant::push_new(
-            &mut graph,
-            NDArrayNumericTensor::from(vec![2i64]).to_dyn(),
-            rng,
-        );
+        let two_1d = Constant::from_vec(&mut graph, vec![2i64], rng);
         let n_spatial = SimpleBinary::sub(&mut graph, shape_len, two_1d, rng);
         let spatial_ones = {
             let op_id = crate::milli_graph::ops::ConstantOfShape::push_new(
@@ -1275,40 +1244,16 @@ impl Operation for SpaceToDepthOperation {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let input = input_map[&self.input];
         let input_shape = Shape::push_new(&mut graph, input, rng);
-        let c0 = Constant::push_new(
-            &mut graph,
-            NDArrayNumericTensor::from(vec![0i64]).to_dyn(),
-            rng,
-        );
-        let c1 = Constant::push_new(
-            &mut graph,
-            NDArrayNumericTensor::from(vec![1i64]).to_dyn(),
-            rng,
-        );
-        let c2 = Constant::push_new(
-            &mut graph,
-            NDArrayNumericTensor::from(vec![2i64]).to_dyn(),
-            rng,
-        );
-        let c3 = Constant::push_new(
-            &mut graph,
-            NDArrayNumericTensor::from(vec![3i64]).to_dyn(),
-            rng,
-        );
-        let c4 = Constant::push_new(
-            &mut graph,
-            NDArrayNumericTensor::from(vec![4i64]).to_dyn(),
-            rng,
-        );
+        let c0 = Constant::from_vec(&mut graph, vec![0i64], rng);
+        let c1 = Constant::from_vec(&mut graph, vec![1i64], rng);
+        let c2 = Constant::from_vec(&mut graph, vec![2i64], rng);
+        let c3 = Constant::from_vec(&mut graph, vec![3i64], rng);
+        let c4 = Constant::from_vec(&mut graph, vec![4i64], rng);
         let s0 = Slice::push_new(&mut graph, input_shape, c0, c1, None, None, rng);
         let s1 = Slice::push_new(&mut graph, input_shape, c1, c2, None, None, rng);
         let s2 = Slice::push_new(&mut graph, input_shape, c2, c3, None, None, rng);
         let s3 = Slice::push_new(&mut graph, input_shape, c3, c4, None, None, rng);
-        let bs_t = Constant::push_new(
-            &mut graph,
-            NDArrayNumericTensor::from(vec![bs]).to_dyn(),
-            rng,
-        );
+        let bs_t = Constant::from_vec(&mut graph, vec![bs], rng);
         let h_div = SimpleBinary::div(&mut graph, s2, bs_t, rng);
         let w_div = SimpleBinary::div(&mut graph, s3, bs_t, rng);
         let inter = Concat::push_new(&mut graph, vec![s0, s1, h_div, bs_t, w_div, bs_t], 0, rng);
@@ -1390,45 +1335,17 @@ impl Operation for DepthToSpaceOperation {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let input = input_map[&self.input];
         let input_shape = Shape::push_new(&mut graph, input, rng);
-        let c0 = Constant::push_new(
-            &mut graph,
-            NDArrayNumericTensor::from(vec![0i64]).to_dyn(),
-            rng,
-        );
-        let c1 = Constant::push_new(
-            &mut graph,
-            NDArrayNumericTensor::from(vec![1i64]).to_dyn(),
-            rng,
-        );
-        let c2 = Constant::push_new(
-            &mut graph,
-            NDArrayNumericTensor::from(vec![2i64]).to_dyn(),
-            rng,
-        );
-        let c3 = Constant::push_new(
-            &mut graph,
-            NDArrayNumericTensor::from(vec![3i64]).to_dyn(),
-            rng,
-        );
-        let c4 = Constant::push_new(
-            &mut graph,
-            NDArrayNumericTensor::from(vec![4i64]).to_dyn(),
-            rng,
-        );
+        let c0 = Constant::from_vec(&mut graph, vec![0i64], rng);
+        let c1 = Constant::from_vec(&mut graph, vec![1i64], rng);
+        let c2 = Constant::from_vec(&mut graph, vec![2i64], rng);
+        let c3 = Constant::from_vec(&mut graph, vec![3i64], rng);
+        let c4 = Constant::from_vec(&mut graph, vec![4i64], rng);
         let s0 = Slice::push_new(&mut graph, input_shape, c0, c1, None, None, rng);
         let s1 = Slice::push_new(&mut graph, input_shape, c1, c2, None, None, rng);
         let s2 = Slice::push_new(&mut graph, input_shape, c2, c3, None, None, rng);
         let s3 = Slice::push_new(&mut graph, input_shape, c3, c4, None, None, rng);
-        let bs_t = Constant::push_new(
-            &mut graph,
-            NDArrayNumericTensor::from(vec![bs]).to_dyn(),
-            rng,
-        );
-        let bs_sq = Constant::push_new(
-            &mut graph,
-            NDArrayNumericTensor::from(vec![bs * bs]).to_dyn(),
-            rng,
-        );
+        let bs_t = Constant::from_vec(&mut graph, vec![bs], rng);
+        let bs_sq = Constant::from_vec(&mut graph, vec![bs * bs], rng);
         let c_red = SimpleBinary::div(&mut graph, s1, bs_sq, rng);
         let h_mul = SimpleBinary::mul(&mut graph, s2, bs_t, rng);
         let w_mul = SimpleBinary::mul(&mut graph, s3, bs_t, rng);
@@ -1524,41 +1441,21 @@ impl Operation for TriluOperation {
 
         let input_shape = Shape::push_new(&mut graph, input, rng);
         // rows = shape[-2], cols = shape[-1]
-        let neg1 = Constant::push_new(
-            &mut graph,
-            NDArrayNumericTensor::from(vec![-1i64]).to_dyn(),
-            rng,
-        );
-        let neg2 = Constant::push_new(
-            &mut graph,
-            NDArrayNumericTensor::from(vec![-2i64]).to_dyn(),
-            rng,
-        );
-        let big = Constant::push_new(
-            &mut graph,
-            NDArrayNumericTensor::from(vec![i64::MAX]).to_dyn(),
-            rng,
-        );
+        let neg1 = Constant::from_vec(&mut graph, vec![-1i64], rng);
+        let neg2 = Constant::from_vec(&mut graph, vec![-2i64], rng);
+        let big = Constant::from_vec(&mut graph, vec![i64::MAX], rng);
         let rows = Slice::push_new(&mut graph, input_shape, neg2, neg1, None, None, rng);
         let cols = Slice::push_new(&mut graph, input_shape, neg1, big, None, None, rng);
 
         let zero = Constant::new_scalar(&mut graph, 0i64, rng);
         let one = Constant::new_scalar(&mut graph, 1i64, rng);
-        let empty_shape = Constant::push_new(
-            &mut graph,
-            NDArrayNumericTensor::from(Vec::<i64>::new()).to_dyn(),
-            rng,
-        );
+        let empty_shape = Constant::from_vec(&mut graph, Vec::<i64>::new(), rng);
         let rows_s = Reshape::push_new(&mut graph, rows, empty_shape, false, rng);
         let cols_s = Reshape::push_new(&mut graph, cols, empty_shape, false, rng);
         let row_idx = crate::milli_graph::ops::Range::push_new(&mut graph, zero, rows_s, one, rng);
         let col_idx = crate::milli_graph::ops::Range::push_new(&mut graph, zero, cols_s, one, rng);
 
-        let one_1d = Constant::push_new(
-            &mut graph,
-            NDArrayNumericTensor::from(vec![1i64]).to_dyn(),
-            rng,
-        );
+        let one_1d = Constant::from_vec(&mut graph, vec![1i64], rng);
         let row_shape = Concat::push_new(&mut graph, vec![rows, one_1d], 0, rng);
         let col_shape = Concat::push_new(&mut graph, vec![one_1d, cols], 0, rng);
         let row_mat = Reshape::push_new(&mut graph, row_idx, row_shape, false, rng);
@@ -1950,7 +1847,12 @@ impl Operation for HardmaxOperation {
         let axis_idx = Constant::push_new_pool(
             &mut graph,
             SharedPoolTensor(std::sync::Arc::new(
-                crate::numeric_tensor::NumericTensor::zeros(vec![1], NumericDType::I64, &crate::pool::SystemPool).unwrap()
+                crate::numeric_tensor::NumericTensor::zeros(
+                    vec![1],
+                    NumericDType::I64,
+                    &crate::pool::SystemPool,
+                )
+                .unwrap(),
             )),
             None,
             rng,
@@ -1958,7 +1860,12 @@ impl Operation for HardmaxOperation {
         // Write the axis value into the constant.
         {
             let axis_val = if self.axis < 0 { self.axis } else { self.axis };
-            let mut t = crate::numeric_tensor::NumericTensor::zeros(vec![1], NumericDType::I64, &crate::pool::SystemPool).unwrap();
+            let mut t = crate::numeric_tensor::NumericTensor::zeros(
+                vec![1],
+                NumericDType::I64,
+                &crate::pool::SystemPool,
+            )
+            .unwrap();
             t.write_element(0, crate::numeric_scalar::NumericScalar::from_i64(axis_val));
             let axis_idx_new = Constant::push_new_pool(
                 &mut graph,
@@ -1978,7 +1885,12 @@ impl Operation for HardmaxOperation {
         let shape_tensor = Shape::push_new(&mut graph, x, rng);
 
         // axis index constant
-        let mut axis_t = crate::numeric_tensor::NumericTensor::zeros(vec![1], NumericDType::I64, &crate::pool::SystemPool).unwrap();
+        let mut axis_t = crate::numeric_tensor::NumericTensor::zeros(
+            vec![1],
+            NumericDType::I64,
+            &crate::pool::SystemPool,
+        )
+        .unwrap();
         axis_t.write_element(0, crate::numeric_scalar::NumericScalar::from_i64(self.axis));
         let axis_const = Constant::push_new_pool(
             &mut graph,
@@ -2016,8 +1928,16 @@ impl Operation for HardmaxOperation {
         // reshape_shape = Concat(before, axis_dim_reshaped, after, axis=0)
 
         // axis+1 constant
-        let mut axis_plus_one_t = crate::numeric_tensor::NumericTensor::zeros(vec![1], NumericDType::I64, &crate::pool::SystemPool).unwrap();
-        axis_plus_one_t.write_element(0, crate::numeric_scalar::NumericScalar::from_i64(self.axis + 1));
+        let mut axis_plus_one_t = crate::numeric_tensor::NumericTensor::zeros(
+            vec![1],
+            NumericDType::I64,
+            &crate::pool::SystemPool,
+        )
+        .unwrap();
+        axis_plus_one_t.write_element(
+            0,
+            crate::numeric_scalar::NumericScalar::from_i64(self.axis + 1),
+        );
         let axis_plus_one = Constant::push_new_pool(
             &mut graph,
             SharedPoolTensor(std::sync::Arc::new(axis_plus_one_t)),
@@ -2035,11 +1955,7 @@ impl Operation for HardmaxOperation {
 
         // Slice(ones_shape, 0:axis) = before
         let before = Slice::push_new(
-            &mut graph,
-            ones_shape,
-            zero_const,
-            axis_const,
-            None, // steps
+            &mut graph, ones_shape, zero_const, axis_const, None, // steps
             None, // axes (default = axis 0 for 1D)
             rng,
         );
@@ -2060,8 +1976,8 @@ impl Operation for HardmaxOperation {
             ones_shape,
             axis_plus_one,
             shape_of_shape, // end = rank
-            None, // steps
-            None, // axes
+            None,           // steps
+            None,           // axes
             rng,
         );
 
@@ -2334,8 +2250,7 @@ impl Operation for MeanVarianceNormalizationOperation {
         let x = input_map[&self.input];
 
         // Create axes constant
-        let axes_tensor = NDArrayNumericTensor::from(self.axes.clone());
-        let axes_tid = Constant::push_new(&mut graph, axes_tensor.to_dyn(), rng);
+        let axes_tid = Constant::from_vec(&mut graph, self.axes.clone(), rng);
 
         // mean = ReduceMean(x, axes, keepdims=true)
         let mean = ReduceMean::push_new(&mut graph, x, Some(axes_tid), true, false, rng);
@@ -2346,8 +2261,7 @@ impl Operation for MeanVarianceNormalizationOperation {
         // variance = ReduceMean(x_centered * x_centered, axes, keepdims=true)
         let x_sq = SimpleBinary::mul(&mut graph, x_centered, x_centered, rng);
         // Need a separate axes constant for the second reduce
-        let axes_tensor2 = NDArrayNumericTensor::from(self.axes.clone());
-        let axes_tid2 = Constant::push_new(&mut graph, axes_tensor2.to_dyn(), rng);
+        let axes_tid2 = Constant::from_vec(&mut graph, self.axes.clone(), rng);
         let variance = ReduceMean::push_new(&mut graph, x_sq, Some(axes_tid2), true, false, rng);
 
         // epsilon = 1e-9

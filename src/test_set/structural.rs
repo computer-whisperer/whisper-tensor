@@ -4,8 +4,8 @@
 use std::collections::HashMap;
 
 use ndarray::{ArcArray, IxDyn};
-use rand::rngs::SmallRng;
 use rand::SeedableRng;
+use rand::rngs::SmallRng;
 
 use crate::backends::ndarray_backend::NDArrayNumericTensor;
 use crate::graph::GlobalId;
@@ -14,7 +14,7 @@ use crate::milli_graph::ops::{self, Constant};
 use crate::numeric_dtype::NumericDType;
 
 use super::{TestCase, TestDataSet, Tolerance};
-use super::{tensor_f32_shaped, tensor_i64_shaped, tensor_bool_shaped};
+use super::{tensor_bool_shaped, tensor_f32_shaped, tensor_i64_shaped};
 
 pub fn build_cases() -> Vec<TestCase> {
     vec![
@@ -44,24 +44,26 @@ fn rng() -> SmallRng {
     SmallRng::seed_from_u64(600)
 }
 
-
 // ---------------------------------------------------------------------------
 // Helpers for constant tensor creation
 // ---------------------------------------------------------------------------
 
 fn i64_const(graph: &mut MilliOpGraph, vals: Vec<i64>, rng: &mut SmallRng) -> GlobalId {
-    let t = NDArrayNumericTensor::I64(ArcArray::from_shape_vec(IxDyn(&[vals.len()]), vals).unwrap());
-    Constant::push_new(graph, t, rng)
+    Constant::from_vec(graph, vals, rng)
 }
 
-fn f32_const(graph: &mut MilliOpGraph, vals: Vec<f32>, shape: Vec<usize>, rng: &mut SmallRng) -> GlobalId {
+fn f32_const(
+    graph: &mut MilliOpGraph,
+    vals: Vec<f32>,
+    shape: Vec<usize>,
+    rng: &mut SmallRng,
+) -> GlobalId {
     let t = NDArrayNumericTensor::F32(ArcArray::from_shape_vec(IxDyn(&shape), vals).unwrap());
     Constant::push_new(graph, t, rng)
 }
 
 fn scalar_i64_const(graph: &mut MilliOpGraph, val: i64, rng: &mut SmallRng) -> GlobalId {
-    let t = NDArrayNumericTensor::I64(ArcArray::from_shape_vec(IxDyn(&[1]), vec![val]).unwrap());
-    Constant::push_new(graph, t, rng)
+    Constant::from_vec(graph, vec![val], rng)
 }
 
 // ---------------------------------------------------------------------------
@@ -84,8 +86,14 @@ fn transpose_2d() -> TestCase {
         graph,
         data_sets: vec![TestDataSet {
             label: "2x3".into(),
-            inputs: HashMap::from([(ext, tensor_f32_shaped(vec![2, 3], &[1.0,2.0,3.0,4.0,5.0,6.0]))]),
-            expected_outputs: HashMap::from([(out, tensor_f32_shaped(vec![3, 2], &[1.0,4.0,2.0,5.0,3.0,6.0]))]),
+            inputs: HashMap::from([(
+                ext,
+                tensor_f32_shaped(vec![2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
+            )]),
+            expected_outputs: HashMap::from([(
+                out,
+                tensor_f32_shaped(vec![3, 2], &[1.0, 4.0, 2.0, 5.0, 3.0, 6.0]),
+            )]),
             tolerance: Tolerance::for_dtype(NumericDType::F32),
         }],
     }
@@ -109,8 +117,14 @@ fn transpose_3d() -> TestCase {
         graph,
         data_sets: vec![TestDataSet {
             label: "1x2x3_perm201".into(),
-            inputs: HashMap::from([(ext, tensor_f32_shaped(vec![1, 2, 3], &[1.0,2.0,3.0,4.0,5.0,6.0]))]),
-            expected_outputs: HashMap::from([(out, tensor_f32_shaped(vec![3, 1, 2], &[1.0,4.0,2.0,5.0,3.0,6.0]))]),
+            inputs: HashMap::from([(
+                ext,
+                tensor_f32_shaped(vec![1, 2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
+            )]),
+            expected_outputs: HashMap::from([(
+                out,
+                tensor_f32_shaped(vec![3, 1, 2], &[1.0, 4.0, 2.0, 5.0, 3.0, 6.0]),
+            )]),
             tolerance: Tolerance::for_dtype(NumericDType::F32),
         }],
     }
@@ -134,8 +148,14 @@ fn reshape_basic() -> TestCase {
         graph,
         data_sets: vec![TestDataSet {
             label: "2x3_to_3x2".into(),
-            inputs: HashMap::from([(ext, tensor_f32_shaped(vec![2, 3], &[1.0,2.0,3.0,4.0,5.0,6.0]))]),
-            expected_outputs: HashMap::from([(out, tensor_f32_shaped(vec![3, 2], &[1.0,2.0,3.0,4.0,5.0,6.0]))]),
+            inputs: HashMap::from([(
+                ext,
+                tensor_f32_shaped(vec![2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
+            )]),
+            expected_outputs: HashMap::from([(
+                out,
+                tensor_f32_shaped(vec![3, 2], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
+            )]),
             tolerance: Tolerance::for_dtype(NumericDType::F32),
         }],
     }
@@ -181,7 +201,10 @@ fn unsqueeze_basic() -> TestCase {
         data_sets: vec![TestDataSet {
             label: "3_to_1x3x1".into(),
             inputs: HashMap::from([(ext, tensor_f32_shaped(vec![3], &[1.0, 2.0, 3.0]))]),
-            expected_outputs: HashMap::from([(out, tensor_f32_shaped(vec![1, 3, 1], &[1.0, 2.0, 3.0]))]),
+            expected_outputs: HashMap::from([(
+                out,
+                tensor_f32_shaped(vec![1, 3, 1], &[1.0, 2.0, 3.0]),
+            )]),
             tolerance: Tolerance::for_dtype(NumericDType::F32),
         }],
     }
@@ -206,7 +229,10 @@ fn expand_broadcast() -> TestCase {
         data_sets: vec![TestDataSet {
             label: "1x3_to_2x3".into(),
             inputs: HashMap::from([(ext, tensor_f32_shaped(vec![1, 3], &[1.0, 2.0, 3.0]))]),
-            expected_outputs: HashMap::from([(out, tensor_f32_shaped(vec![2, 3], &[1.0,2.0,3.0,1.0,2.0,3.0]))]),
+            expected_outputs: HashMap::from([(
+                out,
+                tensor_f32_shaped(vec![2, 3], &[1.0, 2.0, 3.0, 1.0, 2.0, 3.0]),
+            )]),
             tolerance: Tolerance::for_dtype(NumericDType::F32),
         }],
     }
@@ -249,7 +275,15 @@ fn slice_basic() -> TestCase {
     let ends = i64_const(&mut graph, vec![2, 3], &mut rng);
     let axes = i64_const(&mut graph, vec![0, 1], &mut rng);
     let steps = i64_const(&mut graph, vec![1, 1], &mut rng);
-    let out = ops::Slice::push_new(&mut graph, ident, starts, ends, Some(steps), Some(axes), &mut rng);
+    let out = ops::Slice::push_new(
+        &mut graph,
+        ident,
+        starts,
+        ends,
+        Some(steps),
+        Some(axes),
+        &mut rng,
+    );
     graph.set_outputs(vec![out]);
 
     // Input: [[1,2,3,4],[5,6,7,8]]
@@ -259,8 +293,14 @@ fn slice_basic() -> TestCase {
         graph,
         data_sets: vec![TestDataSet {
             label: "2x4_slice".into(),
-            inputs: HashMap::from([(ext, tensor_f32_shaped(vec![2, 4], &[1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0]))]),
-            expected_outputs: HashMap::from([(out, tensor_f32_shaped(vec![2, 2], &[2.0,3.0,6.0,7.0]))]),
+            inputs: HashMap::from([(
+                ext,
+                tensor_f32_shaped(vec![2, 4], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]),
+            )]),
+            expected_outputs: HashMap::from([(
+                out,
+                tensor_f32_shaped(vec![2, 2], &[2.0, 3.0, 6.0, 7.0]),
+            )]),
             tolerance: Tolerance::for_dtype(NumericDType::F32),
         }],
     }
@@ -275,7 +315,15 @@ fn slice_negative_step() -> TestCase {
     let ends = i64_const(&mut graph, vec![-7], &mut rng); // effectively -1 past start
     let axes = i64_const(&mut graph, vec![0], &mut rng);
     let steps = i64_const(&mut graph, vec![-1], &mut rng);
-    let out = ops::Slice::push_new(&mut graph, ident, starts, ends, Some(steps), Some(axes), &mut rng);
+    let out = ops::Slice::push_new(
+        &mut graph,
+        ident,
+        starts,
+        ends,
+        Some(steps),
+        Some(axes),
+        &mut rng,
+    );
     graph.set_outputs(vec![out]);
 
     // [1,2,3,4,5,6] reversed → [6,5,4,3,2,1]
@@ -284,8 +332,14 @@ fn slice_negative_step() -> TestCase {
         graph,
         data_sets: vec![TestDataSet {
             label: "reverse_6".into(),
-            inputs: HashMap::from([(ext, tensor_f32_shaped(vec![6], &[1.0,2.0,3.0,4.0,5.0,6.0]))]),
-            expected_outputs: HashMap::from([(out, tensor_f32_shaped(vec![6], &[6.0,5.0,4.0,3.0,2.0,1.0]))]),
+            inputs: HashMap::from([(
+                ext,
+                tensor_f32_shaped(vec![6], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
+            )]),
+            expected_outputs: HashMap::from([(
+                out,
+                tensor_f32_shaped(vec![6], &[6.0, 5.0, 4.0, 3.0, 2.0, 1.0]),
+            )]),
             tolerance: Tolerance::for_dtype(NumericDType::F32),
         }],
     }
@@ -311,10 +365,16 @@ fn concat_axis0() -> TestCase {
         data_sets: vec![TestDataSet {
             label: "2x3_1x3".into(),
             inputs: HashMap::from([
-                (ext_a, tensor_f32_shaped(vec![2, 3], &[1.0,2.0,3.0,4.0,5.0,6.0])),
-                (ext_b, tensor_f32_shaped(vec![1, 3], &[7.0,8.0,9.0])),
+                (
+                    ext_a,
+                    tensor_f32_shaped(vec![2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
+                ),
+                (ext_b, tensor_f32_shaped(vec![1, 3], &[7.0, 8.0, 9.0])),
             ]),
-            expected_outputs: HashMap::from([(out, tensor_f32_shaped(vec![3, 3], &[1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0,9.0]))]),
+            expected_outputs: HashMap::from([(
+                out,
+                tensor_f32_shaped(vec![3, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]),
+            )]),
             tolerance: Tolerance::for_dtype(NumericDType::F32),
         }],
     }
@@ -336,10 +396,13 @@ fn concat_axis1() -> TestCase {
         data_sets: vec![TestDataSet {
             label: "2x2_2x1".into(),
             inputs: HashMap::from([
-                (ext_a, tensor_f32_shaped(vec![2, 2], &[1.0,2.0,3.0,4.0])),
-                (ext_b, tensor_f32_shaped(vec![2, 1], &[5.0,6.0])),
+                (ext_a, tensor_f32_shaped(vec![2, 2], &[1.0, 2.0, 3.0, 4.0])),
+                (ext_b, tensor_f32_shaped(vec![2, 1], &[5.0, 6.0])),
             ]),
-            expected_outputs: HashMap::from([(out, tensor_f32_shaped(vec![2, 3], &[1.0,2.0,5.0,3.0,4.0,6.0]))]),
+            expected_outputs: HashMap::from([(
+                out,
+                tensor_f32_shaped(vec![2, 3], &[1.0, 2.0, 5.0, 3.0, 4.0, 6.0]),
+            )]),
             tolerance: Tolerance::for_dtype(NumericDType::F32),
         }],
     }
@@ -356,11 +419,19 @@ fn split_axis0() -> TestCase {
     let ext = GlobalId::new(&mut rng);
     let (mut graph, imap) = MilliOpGraph::new([ext], &mut rng);
 
-    let split_lit = ops::MilliOpTensorIDOrLiteral::Literal(
-        NDArrayNumericTensor::I64(ArcArray::from_shape_vec(IxDyn(&[2]), vec![2, 2]).unwrap()),
-    );
+    let split_lit = ops::MilliOpTensorIDOrLiteral::Literal(NDArrayNumericTensor::I64(
+        ArcArray::from_shape_vec(IxDyn(&[2]), vec![2, 2]).unwrap(),
+    ));
     let ident = ops::ClampMin::push_new(&mut graph, imap[&ext], f32::NEG_INFINITY, &mut rng);
-    let out0 = ops::Split::push_new(&mut graph, ident, Some(split_lit.clone()), 0, None, 0, &mut rng);
+    let out0 = ops::Split::push_new(
+        &mut graph,
+        ident,
+        Some(split_lit.clone()),
+        0,
+        None,
+        0,
+        &mut rng,
+    );
     let out1 = ops::Split::push_new(&mut graph, ident, Some(split_lit), 0, None, 1, &mut rng);
     graph.set_outputs(vec![out0, out1]);
 
@@ -369,10 +440,13 @@ fn split_axis0() -> TestCase {
         graph,
         data_sets: vec![TestDataSet {
             label: "4x2_to_2x2x2".into(),
-            inputs: HashMap::from([(ext, tensor_f32_shaped(vec![4, 2], &[1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0]))]),
+            inputs: HashMap::from([(
+                ext,
+                tensor_f32_shaped(vec![4, 2], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]),
+            )]),
             expected_outputs: HashMap::from([
-                (out0, tensor_f32_shaped(vec![2, 2], &[1.0,2.0,3.0,4.0])),
-                (out1, tensor_f32_shaped(vec![2, 2], &[5.0,6.0,7.0,8.0])),
+                (out0, tensor_f32_shaped(vec![2, 2], &[1.0, 2.0, 3.0, 4.0])),
+                (out1, tensor_f32_shaped(vec![2, 2], &[5.0, 6.0, 7.0, 8.0])),
             ]),
             tolerance: Tolerance::for_dtype(NumericDType::F32),
         }],
@@ -390,7 +464,13 @@ fn where_basic() -> TestCase {
     let ext_x = GlobalId::new(&mut rng);
     let ext_y = GlobalId::new(&mut rng);
     let (mut graph, imap) = MilliOpGraph::new([ext_c, ext_x, ext_y], &mut rng);
-    let out = ops::Where::push_new(&mut graph, imap[&ext_c], imap[&ext_x], imap[&ext_y], &mut rng);
+    let out = ops::Where::push_new(
+        &mut graph,
+        imap[&ext_c],
+        imap[&ext_x],
+        imap[&ext_y],
+        &mut rng,
+    );
     graph.set_outputs(vec![out]);
 
     TestCase {
@@ -416,7 +496,13 @@ fn where_broadcast() -> TestCase {
     let ext_x = GlobalId::new(&mut rng);
     let ext_y = GlobalId::new(&mut rng);
     let (mut graph, imap) = MilliOpGraph::new([ext_c, ext_x, ext_y], &mut rng);
-    let out = ops::Where::push_new(&mut graph, imap[&ext_c], imap[&ext_x], imap[&ext_y], &mut rng);
+    let out = ops::Where::push_new(
+        &mut graph,
+        imap[&ext_c],
+        imap[&ext_x],
+        imap[&ext_y],
+        &mut rng,
+    );
     graph.set_outputs(vec![out]);
 
     TestCase {
@@ -429,7 +515,10 @@ fn where_broadcast() -> TestCase {
                 (ext_x, tensor_f32_shaped(vec![2, 2], &[1.0, 2.0, 3.0, 4.0])),
                 (ext_y, tensor_f32_shaped(vec![1], &[10.0])),
             ]),
-            expected_outputs: HashMap::from([(out, tensor_f32_shaped(vec![2, 2], &[1.0, 10.0, 3.0, 10.0]))]),
+            expected_outputs: HashMap::from([(
+                out,
+                tensor_f32_shaped(vec![2, 2], &[1.0, 10.0, 3.0, 10.0]),
+            )]),
             tolerance: Tolerance::for_dtype(NumericDType::F32),
         }],
     }
@@ -452,8 +541,14 @@ fn clampmin_basic() -> TestCase {
         graph,
         data_sets: vec![TestDataSet {
             label: "5elem".into(),
-            inputs: HashMap::from([(ext, tensor_f32_shaped(vec![5], &[-2.0, -1.0, 0.0, 1.0, 2.0]))]),
-            expected_outputs: HashMap::from([(out, tensor_f32_shaped(vec![5], &[0.0, 0.0, 0.0, 1.0, 2.0]))]),
+            inputs: HashMap::from([(
+                ext,
+                tensor_f32_shaped(vec![5], &[-2.0, -1.0, 0.0, 1.0, 2.0]),
+            )]),
+            expected_outputs: HashMap::from([(
+                out,
+                tensor_f32_shaped(vec![5], &[0.0, 0.0, 0.0, 1.0, 2.0]),
+            )]),
             tolerance: Tolerance::for_dtype(NumericDType::F32),
         }],
     }
@@ -478,10 +573,16 @@ fn gather_axis0() -> TestCase {
         data_sets: vec![TestDataSet {
             label: "3x2_idx2".into(),
             inputs: HashMap::from([
-                (ext_data, tensor_f32_shaped(vec![3, 2], &[1.0,2.0,3.0,4.0,5.0,6.0])),
+                (
+                    ext_data,
+                    tensor_f32_shaped(vec![3, 2], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
+                ),
                 (ext_idx, tensor_i64_shaped(vec![2], &[0, 2])),
             ]),
-            expected_outputs: HashMap::from([(out, tensor_f32_shaped(vec![2, 2], &[1.0,2.0,5.0,6.0]))]),
+            expected_outputs: HashMap::from([(
+                out,
+                tensor_f32_shaped(vec![2, 2], &[1.0, 2.0, 5.0, 6.0]),
+            )]),
             tolerance: Tolerance::for_dtype(NumericDType::F32),
         }],
     }
@@ -502,10 +603,16 @@ fn gather_axis1() -> TestCase {
         data_sets: vec![TestDataSet {
             label: "2x3_axis1".into(),
             inputs: HashMap::from([
-                (ext_data, tensor_f32_shaped(vec![2, 3], &[1.0,2.0,3.0,4.0,5.0,6.0])),
+                (
+                    ext_data,
+                    tensor_f32_shaped(vec![2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
+                ),
                 (ext_idx, tensor_i64_shaped(vec![2], &[2, 0])),
             ]),
-            expected_outputs: HashMap::from([(out, tensor_f32_shaped(vec![2, 2], &[3.0,1.0,6.0,4.0]))]),
+            expected_outputs: HashMap::from([(
+                out,
+                tensor_f32_shaped(vec![2, 2], &[3.0, 1.0, 6.0, 4.0]),
+            )]),
             tolerance: Tolerance::for_dtype(NumericDType::F32),
         }],
     }
@@ -521,7 +628,8 @@ fn topk_basic() -> TestCase {
     let ext = GlobalId::new(&mut rng);
     let (mut graph, imap) = MilliOpGraph::new([ext], &mut rng);
     let k_id = scalar_i64_const(&mut graph, 2, &mut rng);
-    let (val_out, idx_out) = ops::TopK::push_new(&mut graph, imap[&ext], k_id, 1, true, true, &mut rng);
+    let (val_out, idx_out) =
+        ops::TopK::push_new(&mut graph, imap[&ext], k_id, 1, true, true, &mut rng);
     graph.set_outputs(vec![val_out, idx_out]);
 
     // Input: [[1,4,2,3],[8,5,7,6],[9,10,12,11]]
@@ -534,14 +642,21 @@ fn topk_basic() -> TestCase {
         graph,
         data_sets: vec![TestDataSet {
             label: "3x4_k2".into(),
-            inputs: HashMap::from([(ext, tensor_f32_shaped(vec![3, 4], &[
-                1.0, 4.0, 2.0, 3.0,
-                8.0, 5.0, 7.0, 6.0,
-                9.0, 10.0, 12.0, 11.0,
-            ]))]),
+            inputs: HashMap::from([(
+                ext,
+                tensor_f32_shaped(
+                    vec![3, 4],
+                    &[
+                        1.0, 4.0, 2.0, 3.0, 8.0, 5.0, 7.0, 6.0, 9.0, 10.0, 12.0, 11.0,
+                    ],
+                ),
+            )]),
             expected_outputs: HashMap::from([
-                (val_out, tensor_f32_shaped(vec![3, 2], &[4.0,3.0, 8.0,7.0, 12.0,11.0])),
-                (idx_out, tensor_i64_shaped(vec![3, 2], &[1,3, 0,2, 2,3])),
+                (
+                    val_out,
+                    tensor_f32_shaped(vec![3, 2], &[4.0, 3.0, 8.0, 7.0, 12.0, 11.0]),
+                ),
+                (idx_out, tensor_i64_shaped(vec![3, 2], &[1, 3, 0, 2, 2, 3])),
             ]),
             tolerance: Tolerance::for_dtype(NumericDType::F32),
         }],
@@ -588,13 +703,20 @@ fn resize_nearest() -> TestCase {
         graph,
         data_sets: vec![TestDataSet {
             label: "2x2_to_4x4".into(),
-            inputs: HashMap::from([(ext, tensor_f32_shaped(vec![1, 1, 2, 2], &[1.0, 2.0, 3.0, 4.0]))]),
-            expected_outputs: HashMap::from([(out, tensor_f32_shaped(vec![1, 1, 4, 4], &[
-                1.0, 1.0, 2.0, 2.0,
-                1.0, 1.0, 2.0, 2.0,
-                3.0, 3.0, 4.0, 4.0,
-                3.0, 3.0, 4.0, 4.0,
-            ]))]),
+            inputs: HashMap::from([(
+                ext,
+                tensor_f32_shaped(vec![1, 1, 2, 2], &[1.0, 2.0, 3.0, 4.0]),
+            )]),
+            expected_outputs: HashMap::from([(
+                out,
+                tensor_f32_shaped(
+                    vec![1, 1, 4, 4],
+                    &[
+                        1.0, 1.0, 2.0, 2.0, 1.0, 1.0, 2.0, 2.0, 3.0, 3.0, 4.0, 4.0, 3.0, 3.0, 4.0,
+                        4.0,
+                    ],
+                ),
+            )]),
             tolerance: Tolerance::for_dtype(NumericDType::F32),
         }],
     }

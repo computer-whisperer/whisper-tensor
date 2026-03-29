@@ -1,15 +1,12 @@
-use crate::backends::eval_backend::EvalBackend;
-use crate::backends::ndarray_backend::NDArrayNumericTensor;
-use crate::dtype::DType;
 use crate::graph::{GlobalId, Node, Property, PropertyValue};
+use crate::milli_graph::ops as milli_ops;
 use crate::milli_graph::{MilliLoweringContext, MilliOpGraph};
-use crate::migration::numeric_tensor::NumericTensor;
+use crate::numeric_dtype::NumericDType;
 use crate::onnx;
-use crate::symbolic_graph::ops::{EvalError, Operation};
+use crate::symbolic_graph::ops::Operation;
 use crate::symbolic_graph::{
     ONNXDecodingError, query_attribute_int, query_attribute_ints, query_attribute_string,
 };
-use crate::tensor_rank::DynRank;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -24,7 +21,11 @@ enum AutoPad {
 
 /// ONNX ConvTranspose (transposed / deconvolution).
 ///
-/// Currently supports 1D only (sufficient for Kokoro and most audio models).
+/// Lowered to milli ops by decomposing into:
+/// 1. Weight transpose + spatial flip
+/// 2. Input dilation (insert zeros between elements for stride > 1)
+/// 3. Explicit padding
+/// 4. Standard Conv with stride=1
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ConvTransposeOperation {
     global_id: GlobalId,
@@ -79,6 +80,22 @@ impl ConvTransposeOperation {
             strides: query_attribute_ints(attributes, "strides").unwrap_or_default(),
         })
     }
+
+    fn infer_nd(&self) -> Option<usize> {
+        if !self.kernel_shape.is_empty() {
+            Some(self.kernel_shape.len())
+        } else if !self.strides.is_empty() {
+            Some(self.strides.len())
+        } else if !self.dilations.is_empty() {
+            Some(self.dilations.len())
+        } else if !self.pads.is_empty() {
+            Some(self.pads.len() / 2)
+        } else if !self.output_padding.is_empty() {
+            Some(self.output_padding.len())
+        } else {
+            None
+        }
+    }
 }
 
 impl Node for ConvTransposeOperation {
@@ -99,6 +116,14 @@ impl Node for ConvTransposeOperation {
     fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         Box::new(std::iter::once(self.output))
     }
+}
+
+fn const_i64_vec(graph: &mut MilliOpGraph, values: Vec<i64>, rng: &mut impl Rng) -> GlobalId {
+    milli_ops::Constant::from_vec(graph, values, rng)
+}
+
+fn const_i64_scalar(graph: &mut MilliOpGraph, value: i64, rng: &mut impl Rng) -> GlobalId {
+    milli_ops::Constant::new_scalar(graph, value, rng)
 }
 
 impl Operation for ConvTransposeOperation {
@@ -130,273 +155,330 @@ impl Operation for ConvTransposeOperation {
         false
     }
 
-    fn eval(
-        &self,
-        backend: &mut EvalBackend,
-        inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
-    ) -> Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, EvalError> {
-        let x = &inputs[&self.input];
-        let w = &inputs[&self.weight];
-        let original_dtype = x.dtype();
+    fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, rng: &mut impl Rng) -> MilliOpGraph {
+        assert!(
+            matches!(self.auto_pad, AutoPad::NotSet | AutoPad::Valid),
+            "ConvTranspose: auto_pad SAME_UPPER/SAME_LOWER not yet supported"
+        );
+        assert!(
+            self.output_shape.is_empty(),
+            "ConvTranspose: output_shape attribute not yet supported"
+        );
 
-        let x_shape: Vec<usize> = x.shape().iter().map(|&v| v as usize).collect();
-        let w_shape: Vec<usize> = w.shape().iter().map(|&v| v as usize).collect();
-        let nd = x_shape.len() - 2; // number of spatial dimensions
+        let nd = self.infer_nd().expect(
+            "ConvTranspose: cannot infer spatial dims — provide kernel_shape, strides, or dilations",
+        );
 
-        let batch = x_shape[0];
-        let c_in = x_shape[1];
-        let groups = self.group as usize;
-        // W shape: [C_in, C_out/group, K0, K1, ...]
-        let c_out_per_group = w_shape[1];
-        let c_out = c_out_per_group * groups;
-        let c_in_per_group = c_in / groups;
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
+
+        let x_in = input_map[&self.input];
+        let w_in = input_map[&self.weight];
+
+        // Cast to F32
+        let x_f32 = milli_ops::Cast::push_new(&mut graph, x_in, NumericDType::F32, rng);
+        let w_f32 = milli_ops::Cast::push_new(&mut graph, w_in, NumericDType::F32, rng);
 
         // Per-axis parameters with defaults
-        let kernel: Vec<usize> = (0..nd)
-            .map(|i| {
-                if i < self.kernel_shape.len() {
-                    self.kernel_shape[i] as usize
-                } else {
-                    w_shape[2 + i]
-                }
-            })
+        let kernel: Vec<i64> = (0..nd)
+            .map(|i| self.kernel_shape.get(i).copied().unwrap_or(0))
             .collect();
-        let stride: Vec<usize> = (0..nd)
-            .map(|i| {
-                if i < self.strides.len() {
-                    self.strides[i] as usize
-                } else {
-                    1
-                }
-            })
+        let stride: Vec<i64> = (0..nd)
+            .map(|i| self.strides.get(i).copied().unwrap_or(1))
             .collect();
-        let dilation: Vec<usize> = (0..nd)
-            .map(|i| {
-                if i < self.dilations.len() {
-                    self.dilations[i] as usize
-                } else {
-                    1
-                }
-            })
+        let dilation: Vec<i64> = (0..nd)
+            .map(|i| self.dilations.get(i).copied().unwrap_or(1))
             .collect();
-        let output_pad: Vec<usize> = (0..nd)
-            .map(|i| {
-                if i < self.output_padding.len() {
-                    self.output_padding[i] as usize
-                } else {
-                    0
-                }
-            })
+        let output_pad: Vec<i64> = (0..nd)
+            .map(|i| self.output_padding.get(i).copied().unwrap_or(0))
             .collect();
-        let in_spatial: Vec<usize> = (0..nd).map(|i| x_shape[2 + i]).collect();
 
-        // Compute pads: either explicit, derived from output_shape, or from auto_pad.
-        let (pad_begin, pad_end, output_pad) = if !self.output_shape.is_empty() {
-            // output_shape given: compute pads and output_padding to achieve it.
-            // ONNX formula: output_shape[i] = stride[i]*(in-1) + output_padding[i] + ek - pbegin - pend
-            // First compute no-pad output, then derive what adjustments are needed.
-            let mut pb = vec![0usize; nd];
-            let mut pe = vec![0usize; nd];
-            let mut op = output_pad.clone();
-            for i in 0..nd {
-                let ek = (kernel[i] - 1) * dilation[i] + 1;
-                let no_pad_out = (in_spatial[i] - 1) * stride[i] + ek;
-                let target = self.output_shape[i] as usize;
-                if no_pad_out >= target {
-                    let total_pad = no_pad_out - target;
-                    pb[i] = total_pad / 2;
-                    pe[i] = total_pad - pb[i];
-                } else {
-                    // Need output_padding to reach target
-                    op[i] = target - no_pad_out;
-                }
+        // ─── Step 1: Weight rearrangement ────────────────────────────────────
+        let w_conv = build_weight(&mut graph, w_f32, self.group, nd, rng);
+
+        // ─── Step 2: Input dilation ──────────────────────────────────────────
+        let mut current = x_f32;
+        for (i, &s) in stride.iter().enumerate() {
+            if s > 1 {
+                current = dilate_spatial_dim(&mut graph, current, i, nd, s, rng);
             }
-            (pb, pe, op)
+        }
+
+        // ─── Step 3: Padding ─────────────────────────────────────────────────
+        let has_kernel_attr = kernel.iter().all(|&k| k > 0);
+        let padded = if has_kernel_attr {
+            let orig_pb: Vec<i64> = (0..nd)
+                .map(|i| self.pads.get(i).copied().unwrap_or(0))
+                .collect();
+            let orig_pe: Vec<i64> = (0..nd)
+                .map(|i| self.pads.get(nd + i).copied().unwrap_or(0))
+                .collect();
+            let new_pb: Vec<i64> = (0..nd)
+                .map(|i| dilation[i] * (kernel[i] - 1) - orig_pb[i])
+                .collect();
+            let new_pe: Vec<i64> = (0..nd)
+                .map(|i| dilation[i] * (kernel[i] - 1) - orig_pe[i] + output_pad[i])
+                .collect();
+
+            if new_pb.iter().all(|&p| p == 0) && new_pe.iter().all(|&p| p == 0) {
+                current
+            } else {
+                let rank = 2 + nd;
+                let mut pv = vec![0i64; 2 * rank];
+                for i in 0..nd {
+                    pv[2 + i] = new_pb[i];
+                    pv[rank + 2 + i] = new_pe[i];
+                }
+                let pads_id = const_i64_vec(&mut graph, pv, rng);
+                let zero_val = milli_ops::Constant::new_scalar(&mut graph, 0.0f32, rng);
+                milli_ops::Pad::push_new(
+                    &mut graph,
+                    current,
+                    pads_id,
+                    Some(zero_val),
+                    None,
+                    milli_ops::PadMode::Constant,
+                    rng,
+                )
+            }
         } else {
-            match self.auto_pad {
-                AutoPad::SameUpper | AutoPad::SameLower => {
-                    let mut pb = vec![0usize; nd];
-                    let mut pe = vec![0usize; nd];
-                    for i in 0..nd {
-                        let out_i = in_spatial[i] * stride[i];
-                        let ek = (kernel[i] - 1) * dilation[i] + 1;
-                        let total_pad =
-                            stride[i] * (in_spatial[i] - 1) + output_pad[i] + ek - out_i;
-                        if matches!(self.auto_pad, AutoPad::SameLower) {
-                            pe[i] = total_pad / 2;
-                            pb[i] = total_pad - pe[i];
-                        } else {
-                            pb[i] = total_pad / 2;
-                            pe[i] = total_pad - pb[i];
-                        }
-                    }
-                    (pb, pe, output_pad)
-                }
-                _ => {
-                    let pb = (0..nd)
-                        .map(|i| {
-                            if i < self.pads.len() {
-                                self.pads[i] as usize
-                            } else {
-                                0
-                            }
-                        })
-                        .collect();
-                    let pe = (0..nd)
-                        .map(|i| {
-                            if nd + i < self.pads.len() {
-                                self.pads[nd + i] as usize
-                            } else {
-                                0
-                            }
-                        })
-                        .collect();
-                    (pb, pe, output_pad)
-                }
-            }
+            build_dynamic_padding(
+                &mut graph,
+                current,
+                w_f32,
+                nd,
+                &dilation,
+                &output_pad,
+                &self.pads,
+                rng,
+            )
         };
 
-        // Compute spatial output sizes
-        let out_spatial: Vec<usize> = (0..nd)
-            .map(|i| {
-                let ek = (kernel[i] - 1) * dilation[i] + 1;
-                (in_spatial[i] - 1) * stride[i] - pad_begin[i] - pad_end[i] + ek + output_pad[i]
-            })
-            .collect();
+        // ─── Step 4: Conv with stride=1 ──────────────────────────────────────
+        let conv_bias = self.bias.map(|id| {
+            let b_in = input_map[&id];
+            milli_ops::Cast::push_new(&mut graph, b_in, NumericDType::F32, rng)
+        });
 
-        // Compute strides for flat indexing
-        let in_spatial_stride = {
-            let mut s = vec![1usize; nd];
-            for i in (0..nd - 1).rev() {
-                s[i] = s[i + 1] * in_spatial[i + 1];
-            }
-            s
-        };
-        let out_spatial_stride = {
-            let mut s = vec![1usize; nd];
-            for i in (0..nd - 1).rev() {
-                s[i] = s[i + 1] * out_spatial[i + 1];
-            }
-            s
-        };
-        let kernel_stride = {
-            let mut s = vec![1usize; nd];
-            for i in (0..nd - 1).rev() {
-                s[i] = s[i + 1] * kernel[i + 1];
-            }
-            s
-        };
+        let conv_out = milli_ops::Conv::push_new(
+            &mut graph,
+            padded,
+            w_conv,
+            conv_bias,
+            milli_ops::ConvAutoPad::NotSet,
+            dilation,
+            self.group,
+            if has_kernel_attr {
+                self.kernel_shape.clone()
+            } else {
+                vec![]
+            },
+            vec![],
+            vec![1; nd],
+            rng,
+        );
 
-        let in_spatial_total: usize = in_spatial.iter().product();
-        let out_spatial_total: usize = out_spatial.iter().product();
-        let kernel_total: usize = kernel.iter().product();
+        let result = milli_ops::CastLike::push_new(&mut graph, conv_out, x_in, rng);
 
-        // Cast to f32 for computation
-        let x_f32 = x.cast(DType::F32, backend)?;
-        let w_f32 = w.cast(DType::F32, backend)?;
-        let x_data: Vec<f32> = x_f32.to_ndarray()?.flatten().try_into()?;
-        let w_data: Vec<f32> = w_f32.to_ndarray()?.flatten().try_into()?;
-
-        let mut out_data = vec![0.0f32; batch * c_out * out_spatial_total];
-
-        for b in 0..batch {
-            for g in 0..groups {
-                for c_i in 0..c_in_per_group {
-                    let in_ch = g * c_in_per_group + c_i;
-                    for c_o in 0..c_out_per_group {
-                        let out_ch = g * c_out_per_group + c_o;
-                        for in_flat in 0..in_spatial_total {
-                            let x_val = x_data
-                                [b * c_in * in_spatial_total + in_ch * in_spatial_total + in_flat];
-                            if x_val == 0.0 {
-                                continue;
-                            }
-                            // Decompose in_flat into per-axis indices
-                            let mut in_idx = vec![0usize; nd];
-                            {
-                                let mut rem = in_flat;
-                                for d in 0..nd {
-                                    in_idx[d] = rem / in_spatial_stride[d];
-                                    rem %= in_spatial_stride[d];
-                                }
-                            }
-                            for k_flat in 0..kernel_total {
-                                // Decompose k_flat into per-axis kernel indices
-                                let mut valid = true;
-                                let mut out_flat = 0usize;
-                                {
-                                    let mut rem = k_flat;
-                                    for d in 0..nd {
-                                        let kd = rem / kernel_stride[d];
-                                        rem %= kernel_stride[d];
-                                        let o = in_idx[d] as isize * stride[d] as isize
-                                            + kd as isize * dilation[d] as isize
-                                            - pad_begin[d] as isize;
-                                        if o < 0 || o as usize >= out_spatial[d] {
-                                            valid = false;
-                                            break;
-                                        }
-                                        out_flat += o as usize * out_spatial_stride[d];
-                                    }
-                                }
-                                if valid {
-                                    out_data[b * c_out * out_spatial_total
-                                        + out_ch * out_spatial_total
-                                        + out_flat] += x_val
-                                        * w_data[in_ch * c_out_per_group * kernel_total
-                                            + c_o * kernel_total
-                                            + k_flat];
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Add bias
-        if let Some(bias_id) = self.bias {
-            let bias = &inputs[&bias_id];
-            let bias_f32 = bias.cast(DType::F32, backend)?;
-            let bias_data: Vec<f32> = bias_f32.to_ndarray()?.flatten().try_into()?;
-            for b in 0..batch {
-                for c in 0..c_out {
-                    let bias_val = bias_data[c];
-                    for s in 0..out_spatial_total {
-                        out_data[b * c_out * out_spatial_total + c * out_spatial_total + s] +=
-                            bias_val;
-                    }
-                }
-            }
-        }
-
-        let mut out_shape_full = vec![batch as u64, c_out as u64];
-        out_shape_full.extend(out_spatial.iter().map(|&s| s as u64));
-
-        let mut out = NumericTensor::NDArray(NDArrayNumericTensor::from_vec_shape(
-            out_data,
-            &out_shape_full,
-        )?);
-
-        // Cast back to original dtype if needed
-        if original_dtype != DType::F32 {
-            out = out.cast(original_dtype, backend)?;
-        }
-
-        let mut result = HashMap::new();
-        result.insert(self.output, out);
-        Ok(Box::new(result.into_iter()))
+        let mut output_map = HashMap::new();
+        output_map.insert(result, self.output);
+        graph.set_output_map(output_map);
+        graph
     }
+}
 
-    fn eval_pool<'p, P: crate::pool::Pool + 'p>(
-        &self,
-        inputs: &HashMap<GlobalId, &crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>>,
-        pool: &'p P,
-    ) -> Result<HashMap<GlobalId, crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P>>, super::EvalError> {
-        super::eval_pool_via_legacy(self, inputs, pool)
-    }
+/// W: [C_in, C_out/g, K...] → [C_out, C_in/g, K_reversed...]
+fn build_weight(
+    graph: &mut MilliOpGraph,
+    w: GlobalId,
+    group: i64,
+    nd: usize,
+    rng: &mut impl Rng,
+) -> GlobalId {
+    let w_transposed = if group == 1 {
+        let perm: Vec<i64> = [1, 0].into_iter().chain(2..2 + nd as i64).collect();
+        milli_ops::Transpose::push_new(graph, w, Some(perm), rng)
+    } else {
+        let w_shape = milli_ops::Shape::push_new(graph, w, rng);
+        let idx_0 = const_i64_scalar(graph, 0, rng);
+        let idx_1 = const_i64_scalar(graph, 1, rng);
+        let g_const = const_i64_scalar(graph, group, rng);
+        let c_in = milli_ops::Gather::push_new(graph, w_shape, idx_0, 0, rng);
+        let c_in_per_g = milli_ops::SimpleBinary::div(graph, c_in, g_const, rng);
+        let c_out_per_g = milli_ops::Gather::push_new(graph, w_shape, idx_1, 0, rng);
+        let minus_one = const_i64_scalar(graph, -1, rng);
 
-    fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, _rng: &mut impl Rng) -> MilliOpGraph {
-        panic!("ConvTranspose uses custom eval")
+        let grouped_shape = milli_ops::Concat::push_new(
+            graph,
+            vec![g_const, c_in_per_g, c_out_per_g, minus_one],
+            0,
+            rng,
+        );
+        let w_grouped = milli_ops::Reshape::push_new(graph, w, grouped_shape, false, rng);
+        let w_swapped =
+            milli_ops::Transpose::push_new(graph, w_grouped, Some(vec![0, 2, 1, 3]), rng);
+
+        let c_out = milli_ops::SimpleBinary::mul(graph, c_out_per_g, g_const, rng);
+        let slice_start = const_i64_vec(graph, vec![2], rng);
+        let slice_end = const_i64_vec(graph, vec![i64::MAX], rng);
+        let spatial_shape =
+            milli_ops::Slice::push_new(graph, w_shape, slice_start, slice_end, None, None, rng);
+        let final_shape =
+            milli_ops::Concat::push_new(graph, vec![c_out, c_in_per_g, spatial_shape], 0, rng);
+        milli_ops::Reshape::push_new(graph, w_swapped, final_shape, false, rng)
+    };
+
+    // Reverse spatial dims via Slice with step=-1
+    if nd == 0 {
+        return w_transposed;
     }
+    let starts = const_i64_vec(graph, vec![i64::MAX; nd], rng);
+    let ends = const_i64_vec(graph, vec![i64::MIN; nd], rng);
+    let steps = const_i64_vec(graph, vec![-1i64; nd], rng);
+    let axes: Vec<i64> = (2..2 + nd as i64).collect();
+    let axes_id = const_i64_vec(graph, axes, rng);
+    milli_ops::Slice::push_new(
+        graph,
+        w_transposed,
+        starts,
+        ends,
+        Some(steps),
+        Some(axes_id),
+        rng,
+    )
+}
+
+/// Insert (stride-1) zeros between elements along spatial dim `dim_idx`.
+fn dilate_spatial_dim(
+    graph: &mut MilliOpGraph,
+    input: GlobalId,
+    dim_idx: usize,
+    nd: usize,
+    s: i64,
+    rng: &mut impl Rng,
+) -> GlobalId {
+    let spatial_axis = 2 + dim_idx;
+    let rank_after = 2 + nd + 1;
+
+    // 1. Unsqueeze at spatial_axis+1
+    let unsq_axes = const_i64_vec(graph, vec![spatial_axis as i64 + 1], rng);
+    let unsqueezed = milli_ops::Unsqueeze::push_new(graph, input, unsq_axes, rng);
+
+    // 2. Pad with (0, s-1) zeros along the new dim
+    let mut pv = vec![0i64; 2 * rank_after];
+    pv[rank_after + spatial_axis + 1] = s - 1;
+    let pads_id = const_i64_vec(graph, pv, rng);
+    let zero_val = milli_ops::Constant::new_scalar(graph, 0.0f32, rng);
+    let padded = milli_ops::Pad::push_new(
+        graph,
+        unsqueezed,
+        pads_id,
+        Some(zero_val),
+        None,
+        milli_ops::PadMode::Constant,
+        rng,
+    );
+
+    // 3. Reshape: merge dims [spatial_axis, spatial_axis+1]
+    let padded_shape = milli_ops::Shape::push_new(graph, padded, rng);
+
+    let prefix_start = const_i64_vec(graph, vec![0], rng);
+    let prefix_end = const_i64_vec(graph, vec![spatial_axis as i64], rng);
+    let prefix = milli_ops::Slice::push_new(
+        graph,
+        padded_shape,
+        prefix_start,
+        prefix_end,
+        None,
+        None,
+        rng,
+    );
+
+    let idx_sa = const_i64_scalar(graph, spatial_axis as i64, rng);
+    let idx_sa1 = const_i64_scalar(graph, spatial_axis as i64 + 1, rng);
+    let dim_l = milli_ops::Gather::push_new(graph, padded_shape, idx_sa, 0, rng);
+    let dim_s = milli_ops::Gather::push_new(graph, padded_shape, idx_sa1, 0, rng);
+    let merged = milli_ops::SimpleBinary::mul(graph, dim_l, dim_s, rng);
+
+    let suffix_start = const_i64_vec(graph, vec![spatial_axis as i64 + 2], rng);
+    let suffix_end = const_i64_vec(graph, vec![rank_after as i64], rng);
+    let suffix = milli_ops::Slice::push_new(
+        graph,
+        padded_shape,
+        suffix_start,
+        suffix_end,
+        None,
+        None,
+        rng,
+    );
+
+    let new_shape = milli_ops::Concat::push_new(graph, vec![prefix, merged, suffix], 0, rng);
+    let reshaped = milli_ops::Reshape::push_new(graph, padded, new_shape, false, rng);
+
+    // 4. Slice to trim trailing zeros: keep [0, L*s - (s-1))
+    let s_minus_1 = const_i64_scalar(graph, s - 1, rng);
+    let dilated_end = milli_ops::SimpleBinary::sub(graph, merged, s_minus_1, rng);
+    let slice_starts = const_i64_vec(graph, vec![0], rng);
+    let slice_axes = const_i64_vec(graph, vec![spatial_axis as i64], rng);
+    milli_ops::Slice::push_new(
+        graph,
+        reshaped,
+        slice_starts,
+        dilated_end,
+        None,
+        Some(slice_axes),
+        rng,
+    )
+}
+
+/// Dynamic padding when kernel_shape not in attributes.
+#[allow(clippy::too_many_arguments)]
+fn build_dynamic_padding(
+    graph: &mut MilliOpGraph,
+    input: GlobalId,
+    w: GlobalId,
+    nd: usize,
+    dilation: &[i64],
+    output_pad: &[i64],
+    orig_pads: &[i64],
+    rng: &mut impl Rng,
+) -> GlobalId {
+    let w_shape = milli_ops::Shape::push_new(graph, w, rng);
+    let s2 = const_i64_vec(graph, vec![2], rng);
+    let s2nd = const_i64_vec(graph, vec![2 + nd as i64], rng);
+    let kernel_dims = milli_ops::Slice::push_new(graph, w_shape, s2, s2nd, None, None, rng);
+
+    let ones = const_i64_vec(graph, vec![1i64; nd], rng);
+    let km1 = milli_ops::SimpleBinary::sub(graph, kernel_dims, ones, rng);
+
+    let dil_t = const_i64_vec(graph, dilation.to_vec(), rng);
+    let dkm1 = milli_ops::SimpleBinary::mul(graph, dil_t, km1, rng);
+
+    let orig_pb: Vec<i64> = (0..nd)
+        .map(|i| orig_pads.get(i).copied().unwrap_or(0))
+        .collect();
+    let orig_pe: Vec<i64> = (0..nd)
+        .map(|i| orig_pads.get(nd + i).copied().unwrap_or(0))
+        .collect();
+    let pb_t = const_i64_vec(graph, orig_pb, rng);
+    let pe_t = const_i64_vec(graph, orig_pe, rng);
+    let opad_t = const_i64_vec(graph, output_pad.to_vec(), rng);
+
+    let new_pb = milli_ops::SimpleBinary::sub(graph, dkm1, pb_t, rng);
+    let new_pe_no_op = milli_ops::SimpleBinary::sub(graph, dkm1, pe_t, rng);
+    let new_pe = milli_ops::SimpleBinary::add(graph, new_pe_no_op, opad_t, rng);
+
+    let zeros_2 = const_i64_vec(graph, vec![0, 0], rng);
+    let pad_tensor =
+        milli_ops::Concat::push_new(graph, vec![zeros_2, new_pb, zeros_2, new_pe], 0, rng);
+
+    let zero_val = milli_ops::Constant::new_scalar(graph, 0.0f32, rng);
+    milli_ops::Pad::push_new(
+        graph,
+        input,
+        pad_tensor,
+        Some(zero_val),
+        None,
+        milli_ops::PadMode::Constant,
+        rng,
+    )
 }

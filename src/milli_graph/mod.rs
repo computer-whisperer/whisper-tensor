@@ -1,11 +1,11 @@
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
 use crate::dtype::{DType, DTypeError};
-use crate::numeric_dtype::NumericDType;
 use crate::graph::{GlobalId, Graph, Link, Node, collect_disconnected_node_slots};
+use crate::migration::numeric_tensor::NumericTensor;
 use crate::milli_graph::observer::MilliOpGraphObserver;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
-use crate::migration::numeric_tensor::NumericTensor;
+use crate::numeric_dtype::NumericDType;
 use crate::scalar_info::ScalarInfo;
 use crate::symbolic_scalar::{SymbolicResolver, SymbolicScalar, SymbolicScalarTyped};
 use crate::tensor_info::{MinimalTensor, TensorInfo, TensorInfoError};
@@ -780,9 +780,7 @@ impl MilliOpGraph {
 
     /// Push a scalar `1.0f32` constant op. Useful as backward pass loss gradient seed.
     pub fn add_scalar_one(&mut self, rng: &mut impl Rng) -> GlobalId {
-        use crate::backends::ndarray_backend::NDArrayNumericTensor;
-        let data = NDArrayNumericTensor::<DynRank>::from_vec_shape(vec![1.0f32], &vec![1]).unwrap();
-        ops::Constant::push_new(self, data, rng)
+        ops::Constant::from_vec(self, vec![1.0f32], rng)
     }
 
     // --- Loss graph helpers ---
@@ -1180,13 +1178,9 @@ impl MilliOpGraph {
         }
 
         // Run pool_eval.
-        let eval_results = pool_eval::pool_eval(
-            &lower_result.graph,
-            &eval_inputs,
-            &output_ranges,
-            pool,
-        )
-        .map_err(|e| MilliOpGraphError::InvalidInput(format!("pool_eval: {e}")))?;
+        let eval_results =
+            pool_eval::pool_eval(&lower_result.graph, &eval_inputs, &output_ranges, pool)
+                .map_err(|e| MilliOpGraphError::InvalidInput(format!("pool_eval: {e}")))?;
 
         // Reconstruct output tensors.
         let mut outputs = HashMap::new();
@@ -1206,31 +1200,63 @@ impl MilliOpGraph {
                 if let Some(ranked) = info.as_ranked() {
                     let inferred_shape = ranked.shape();
                     // Try all-numeric first.
-                    let all_numeric: Option<Vec<u64>> = inferred_shape.iter().map(|s| {
-                        if let crate::scalar_info::ScalarInfoTyped::Numeric(v) = s { Some(*v) } else { None }
-                    }).collect();
+                    let all_numeric: Option<Vec<u64>> = inferred_shape
+                        .iter()
+                        .map(|s| {
+                            if let crate::scalar_info::ScalarInfoTyped::Numeric(v) = s {
+                                Some(*v)
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
                     if let Some(shape) = all_numeric {
                         shape
                     } else {
                         // Some dims symbolic. Try single-unknown resolution.
-                        let known_product: u64 = inferred_shape.iter().filter_map(|s| {
-                            if let crate::scalar_info::ScalarInfoTyped::Numeric(v) = s { Some(*v) } else { None }
-                        }).product::<u64>().max(1);
-                        let sym_count = inferred_shape.iter().filter(|s| {
-                            !matches!(s, crate::scalar_info::ScalarInfoTyped::Numeric(_))
-                        }).count();
+                        let known_product: u64 = inferred_shape
+                            .iter()
+                            .filter_map(|s| {
+                                if let crate::scalar_info::ScalarInfoTyped::Numeric(v) = s {
+                                    Some(*v)
+                                } else {
+                                    None
+                                }
+                            })
+                            .product::<u64>()
+                            .max(1);
+                        let sym_count = inferred_shape
+                            .iter()
+                            .filter(|s| {
+                                !matches!(s, crate::scalar_info::ScalarInfoTyped::Numeric(_))
+                            })
+                            .count();
                         if sym_count > 0 && known_product > 0 && numel as u64 % known_product == 0 {
                             let sym_total = numel as u64 / known_product;
                             if sym_count == 1 {
                                 // Single unknown dim: resolve directly.
-                                inferred_shape.iter().map(|s| {
-                                    if let crate::scalar_info::ScalarInfoTyped::Numeric(v) = s { *v } else { sym_total }
-                                }).collect()
+                                inferred_shape
+                                    .iter()
+                                    .map(|s| {
+                                        if let crate::scalar_info::ScalarInfoTyped::Numeric(v) = s {
+                                            *v
+                                        } else {
+                                            sym_total
+                                        }
+                                    })
+                                    .collect()
                             } else if sym_total == 1 {
                                 // All unknown dims must be 1.
-                                inferred_shape.iter().map(|s| {
-                                    if let crate::scalar_info::ScalarInfoTyped::Numeric(v) = s { *v } else { 1 }
-                                }).collect()
+                                inferred_shape
+                                    .iter()
+                                    .map(|s| {
+                                        if let crate::scalar_info::ScalarInfoTyped::Numeric(v) = s {
+                                            *v
+                                        } else {
+                                            1
+                                        }
+                                    })
+                                    .collect()
                             } else {
                                 tam.known_dims.clone()
                             }
@@ -1249,8 +1275,7 @@ impl MilliOpGraph {
             let buf = pool
                 .allocate(layout.buffer_size_bytes())
                 .map_err(|e| MilliOpGraphError::InvalidInput(format!("allocation: {e}")))?;
-            let mut out_tensor =
-                crate::numeric_tensor::NumericTensor::from_parts(buf, layout);
+            let mut out_tensor = crate::numeric_tensor::NumericTensor::from_parts(buf, layout);
 
             for i in 0..numel {
                 let atom = tam.atom_id_for_element(i as u64);
@@ -1455,7 +1480,8 @@ impl MilliOpGraph {
                         known.entry(out_id).or_insert_with(|| {
                             TensorInfo::Minimal(MinimalTensor::new(
                                 ScalarInfo::Symbolic(SymbolicScalar::new(
-                                    crate::numeric_dtype::NumericDType::from_legacy(DType::F32).unwrap(),
+                                    crate::numeric_dtype::NumericDType::from_legacy(DType::F32)
+                                        .unwrap(),
                                     &mut resolver,
                                 )),
                                 SymbolicScalarTyped::new(&mut resolver),
@@ -1572,7 +1598,10 @@ pub struct BroadcastAnalysis {
 ///
 /// Returns `None` if rank is unknown for either input.
 /// Used at generation time to insert correct ReduceSum ops in backward pass.
-pub fn analyze_broadcast(a_shape: &TensorInfo<'_, impl crate::pool::Pool>, b_shape: &TensorInfo<'_, impl crate::pool::Pool>) -> Option<BroadcastAnalysis> {
+pub fn analyze_broadcast(
+    a_shape: &TensorInfo<'_, impl crate::pool::Pool>,
+    b_shape: &TensorInfo<'_, impl crate::pool::Pool>,
+) -> Option<BroadcastAnalysis> {
     let a_rank = a_shape.rank_if_known()?;
     let b_rank = b_shape.rank_if_known()?;
     let target_rank = a_rank.max(b_rank);
@@ -1965,14 +1994,8 @@ mod tests {
         inputs: &HashMap<GlobalId, PoolTensor<'static, DynRank, SystemPool>>,
         pool: &'p SystemPool,
     ) -> HashMap<GlobalId, PoolTensor<'p, DynRank, SystemPool>> {
-        let views: HashMap<GlobalId, _> = inputs
-            .iter()
-            .map(|(&id, t)| (id, t.view()))
-            .collect();
-        let view_refs: HashMap<GlobalId, _> = views
-            .iter()
-            .map(|(&id, v)| (id, v))
-            .collect();
+        let views: HashMap<GlobalId, _> = inputs.iter().map(|(&id, t)| (id, t.view())).collect();
+        let view_refs: HashMap<GlobalId, _> = views.iter().map(|(&id, v)| (id, v)).collect();
         graph.pool_eval(&view_refs, pool).unwrap()
     }
 
@@ -2002,12 +2025,8 @@ mod tests {
         let ext_final = GlobalId::new(rng);
         let (mut graph_b, b_input_map) = MilliOpGraph::new([ext_sum_xy], rng);
         let b_in = b_input_map[&ext_sum_xy];
-        let b_const = Constant::push_new_pool(
-            &mut graph_b,
-            make_shared_f32(vec![1], &[10.0]),
-            None,
-            rng,
-        );
+        let b_const =
+            Constant::push_new_pool(&mut graph_b, make_shared_f32(vec![1], &[10.0]), None, rng);
         let b_out = SimpleBinary::add(&mut graph_b, b_in, b_const, rng);
         let mut b_output_map = HashMap::new();
         b_output_map.insert(b_out, ext_final);
@@ -2077,12 +2096,8 @@ mod tests {
         graph.op_to_group.insert(op_id_1, g1);
 
         // Push another op into g2 via push_op_in_group
-        let const_tensor = Constant::push_new_pool(
-            &mut graph,
-            make_shared_f32(vec![1], &[2.0]),
-            None,
-            rng,
-        );
+        let const_tensor =
+            Constant::push_new_pool(&mut graph, make_shared_f32(vec![1], &[2.0]), None, rng);
         // The constant op was pushed via push_op, manually assign to g2
         let op_id_2 = graph.op_ordering[1];
         graph.op_to_group.insert(op_id_2, g2);
@@ -2269,7 +2284,8 @@ mod tests {
     fn test_broadcast_analysis_rank_mismatch() {
         // a=[batch, seq, hidden], b=[hidden] — b left-padded to [1, 1, hidden]
         use crate::tensor_info::TensorInfo;
-        let a: TensorInfo<'_, crate::pool::SystemPool> = TensorInfo::from_shape_u64(&[32, 128, 256]);
+        let a: TensorInfo<'_, crate::pool::SystemPool> =
+            TensorInfo::from_shape_u64(&[32, 128, 256]);
         let b: TensorInfo<'_, crate::pool::SystemPool> = TensorInfo::from_shape_u64(&[256]);
         let result = analyze_broadcast(&a, &b).unwrap();
         assert!(result.a_broadcast_axes.is_empty());
@@ -2721,8 +2737,8 @@ mod tests {
 
         // Infer op_out's shape on the graph so far, to create the right-shaped ones seed.
         let output_shape: Vec<u64> = {
-            use crate::tensor_info::TensorInfo;
             use crate::scalar_info::ScalarInfo;
+            use crate::tensor_info::TensorInfo;
 
             let mut info_inputs = HashMap::new();
             for (i, ext) in ext_ids.iter().enumerate() {
@@ -2737,9 +2753,11 @@ mod tests {
             if let Some(concrete) = out_info.as_concrete() {
                 concrete.view().shape().to_vec()
             } else {
-                let ranked = out_info.as_ranked()
+                let ranked = out_info
+                    .as_ranked()
                     .expect("expected ranked tensor info from concrete inputs");
-                ranked.shape()
+                ranked
+                    .shape()
                     .iter()
                     .map(|si| match si {
                         crate::scalar_info::ScalarInfoTyped::Numeric(v) => *v,
@@ -3034,12 +3052,8 @@ mod tests {
         // Gradient flows through reshape; d/dx_i = 1 for all i
         check_general_backward(
             |g, ids, r| {
-                let shape = ops::Constant::push_new_pool(
-                    g,
-                    make_shared_i64(vec![2], &[3, 2]),
-                    None,
-                    r,
-                );
+                let shape =
+                    ops::Constant::push_new_pool(g, make_shared_i64(vec![2], &[3, 2]), None, r);
                 ops::Reshape::push_new(g, ids[0], shape, false, r)
             },
             &[vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]],
@@ -3057,12 +3071,8 @@ mod tests {
             |g, ids, r| {
                 let two = ops::Constant::new_scalar(g, 2.0f32, r);
                 let scaled = SimpleBinary::mul(g, ids[0], two, r);
-                let shape = ops::Constant::push_new_pool(
-                    g,
-                    make_shared_i64(vec![1], &[6]),
-                    None,
-                    r,
-                );
+                let shape =
+                    ops::Constant::push_new_pool(g, make_shared_i64(vec![1], &[6]), None, r);
                 ops::Reshape::push_new(g, scaled, shape, false, r)
             },
             &[vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]],
@@ -3114,12 +3124,7 @@ mod tests {
         // f(x) = sum(squeeze(x, axes=[1])) where x is [2, 1, 3]
         check_general_backward(
             |g, ids, r| {
-                let axes = ops::Constant::push_new_pool(
-                    g,
-                    make_shared_i64(vec![1], &[1]),
-                    None,
-                    r,
-                );
+                let axes = ops::Constant::push_new_pool(g, make_shared_i64(vec![1], &[1]), None, r);
                 ops::Squeeze::push_new(g, ids[0], axes, r)
             },
             &[vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]],
@@ -3134,12 +3139,7 @@ mod tests {
         // f(x) = sum(unsqueeze(x, axes=[1])) where x is [2, 3]
         check_general_backward(
             |g, ids, r| {
-                let axes = ops::Constant::push_new_pool(
-                    g,
-                    make_shared_i64(vec![1], &[1]),
-                    None,
-                    r,
-                );
+                let axes = ops::Constant::push_new_pool(g, make_shared_i64(vec![1], &[1]), None, r);
                 ops::Unsqueeze::push_new(g, ids[0], axes, r)
             },
             &[vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]],
@@ -3157,12 +3157,7 @@ mod tests {
             |g, ids, r| {
                 let two = ops::Constant::new_scalar(g, 2.0f32, r);
                 let scaled = SimpleBinary::mul(g, ids[0], two, r);
-                let axes = ops::Constant::push_new_pool(
-                    g,
-                    make_shared_i64(vec![1], &[0]),
-                    None,
-                    r,
-                );
+                let axes = ops::Constant::push_new_pool(g, make_shared_i64(vec![1], &[0]), None, r);
                 let unsq = ops::Unsqueeze::push_new(g, scaled, axes, r);
                 ops::Squeeze::push_new(g, unsq, axes, r)
             },
@@ -3448,12 +3443,8 @@ mod tests {
         let data_int = graph.add_input_with_id(data_ext, rng);
 
         // Create indices as a constant (not a differentiable input)
-        let idx_id = ops::Constant::push_new_pool(
-            &mut graph,
-            make_shared_i64(vec![2], &[1, 3]),
-            None,
-            rng,
-        );
+        let idx_id =
+            ops::Constant::push_new_pool(&mut graph, make_shared_i64(vec![2], &[1, 3]), None, rng);
 
         let group = graph.create_group(MilliOpGroup {
             id: GlobalId::new(rng),
@@ -3586,12 +3577,8 @@ mod tests {
 
         // Seed gradient on the forward output (scaled), not on loss.
         // Expand scalar 1.0 to match scaled's shape dynamically.
-        let ones_scalar = ops::Constant::push_new_pool(
-            &mut graph,
-            make_shared_f32(vec![1], &[1.0]),
-            None,
-            rng,
-        );
+        let ones_scalar =
+            ops::Constant::push_new_pool(&mut graph, make_shared_f32(vec![1], &[1.0]), None, rng);
         let scaled_shape = ops::Shape::push_new(&mut graph, scaled, rng);
         let ones = ops::Expand::push_new(&mut graph, ones_scalar, scaled_shape, rng);
         let mut grad_map = HashMap::new();
@@ -4054,12 +4041,8 @@ mod tests {
         graph.set_default_group(None);
 
         // Backward: seed with ones on loss, backward through loss group then forward group
-        let ones = ops::Constant::push_new_pool(
-            &mut graph,
-            make_shared_f32(vec![1], &[1.0]),
-            None,
-            rng,
-        );
+        let ones =
+            ops::Constant::push_new_pool(&mut graph, make_shared_f32(vec![1], &[1.0]), None, rng);
         let mut grad_map = HashMap::new();
         grad_map.insert(loss, ones);
 
@@ -4188,12 +4171,8 @@ mod tests {
         let loss = ops::ReduceMean::push_new(&mut graph, diff_sq, None, false, false, rng);
         graph.set_default_group(None);
 
-        let ones = ops::Constant::push_new_pool(
-            &mut graph,
-            make_shared_f32(vec![1], &[1.0]),
-            None,
-            rng,
-        );
+        let ones =
+            ops::Constant::push_new_pool(&mut graph, make_shared_f32(vec![1], &[1.0]), None, rng);
         let mut grad_map = HashMap::new();
         grad_map.insert(loss, ones);
         let loss_grads = generate_milli_backward(&mut graph, loss_group, &grad_map, rng);
@@ -4310,7 +4289,8 @@ mod tests {
             ..Default::default()
         });
         graph.set_default_group(Some(fwd_group));
-        let h_pre = ops::MatMul::push_new_default_precision(&mut graph, x, w1, NumericDType::F32, rng);
+        let h_pre =
+            ops::MatMul::push_new_default_precision(&mut graph, x, w1, NumericDType::F32, rng);
         let h = ops::ClampMin::push_new(&mut graph, h_pre, 0.0, rng);
         let y = ops::MatMul::push_new_default_precision(&mut graph, h, w2, NumericDType::F32, rng);
         graph.set_default_group(None);
@@ -4328,12 +4308,8 @@ mod tests {
         graph.set_default_group(None);
 
         // Backward
-        let ones = ops::Constant::push_new_pool(
-            &mut graph,
-            make_shared_f32(vec![1], &[1.0]),
-            None,
-            rng,
-        );
+        let ones =
+            ops::Constant::push_new_pool(&mut graph, make_shared_f32(vec![1], &[1.0]), None, rng);
         let mut grad_map = HashMap::new();
         grad_map.insert(loss, ones);
         let loss_grads = generate_milli_backward(&mut graph, loss_group, &grad_map, rng);
@@ -4478,12 +4454,7 @@ mod tests {
 
         let (mut graph, input_map) = MilliOpGraph::new([ext_x], rng);
         let x = input_map[&ext_x];
-        let c = Constant::push_new_pool(
-            &mut graph,
-            make_shared_f32(vec![1], &[10.0]),
-            None,
-            rng,
-        );
+        let c = Constant::push_new_pool(&mut graph, make_shared_f32(vec![1], &[10.0]), None, rng);
         let out = SimpleBinary::add(&mut graph, x, c, rng);
         let mut output_map = HashMap::new();
         output_map.insert(out, ext_out);
@@ -4534,10 +4505,7 @@ mod tests {
             inputs.insert(
                 ext_id,
                 TensorInfo::Minimal(MinimalTensor::new(
-                    ScalarInfo::Symbolic(SymbolicScalar::new(
-                        NumericDType::F32,
-                        &mut resolver,
-                    )),
+                    ScalarInfo::Symbolic(SymbolicScalar::new(NumericDType::F32, &mut resolver)),
                     SymbolicScalarTyped::new(&mut resolver),
                 )),
             );
@@ -4629,7 +4597,10 @@ mod tests {
         let view_refs: HashMap<GlobalId, &crate::numeric_tensor::NumericTensorView<'_, DynRank>> =
             HashMap::new();
         let result = graph.pool_eval(&view_refs, &POOL);
-        assert!(result.is_err(), "Expected error for invalid graph structure");
+        assert!(
+            result.is_err(),
+            "Expected error for invalid graph structure"
+        );
     }
 
     #[test]

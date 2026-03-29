@@ -1,12 +1,12 @@
-use crate::pool::Pool;
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
 use crate::graph::{GlobalId, Node};
+use crate::migration::numeric_tensor::NumericTensor;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp, MilliOpTensorIDOrLiteral};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
 use crate::nano_graph::lower::{ConcatSegment, DimKind, TensorAtomMap};
 use crate::nano_graph::pattern::AtomId;
-use crate::migration::numeric_tensor::NumericTensor;
+use crate::pool::Pool;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -59,7 +59,10 @@ impl Concat {
         &self.inputs
     }
 
-    pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
+    pub fn lower_to_nano(
+        &self,
+        ctx: &mut crate::nano_graph::NanoLoweringContext,
+    ) -> crate::milli_graph::ops::LowerResult {
         let all_infos = ctx.all_infos;
         let axis_raw = self.axis();
         let out_id = Node::outputs(self).next().unwrap();
@@ -162,7 +165,7 @@ impl Concat {
                         out_sym_dims,
                     ),
                 );
-            return crate::milli_graph::ops::LowerResult::Lowered;
+                return crate::milli_graph::ops::LowerResult::Lowered;
             }
         }
 
@@ -225,10 +228,7 @@ impl MilliOp for Concat {
         known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'p, P>>,
         symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
         pool: &'p P,
-    ) -> Result<
-        Vec<(GlobalId, crate::tensor_info::TensorInfo<'p, P>)>,
-        MilliOpGraphError,
-    > {
+    ) -> Result<Vec<(GlobalId, crate::tensor_info::TensorInfo<'p, P>)>, MilliOpGraphError> {
         use crate::tensor_info::TensorInfo;
 
         // Collect input infos.
@@ -269,7 +269,9 @@ impl MilliOp for Concat {
                     }
                     match total {
                         Some(v) => out_dims.push(ScalarInfoTyped::Numeric(v)),
-                        None => out_dims.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(symbolic_resolver))),
+                        None => out_dims.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(
+                            symbolic_resolver,
+                        ))),
                     }
                 } else {
                     let known_dim = input_infos
@@ -278,7 +280,9 @@ impl MilliOp for Concat {
                         .next();
                     match known_dim {
                         Some(v) => out_dims.push(ScalarInfoTyped::Numeric(v)),
-                        None => out_dims.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(symbolic_resolver))),
+                        None => out_dims.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(
+                            symbolic_resolver,
+                        ))),
                     }
                 }
             }
@@ -288,7 +292,9 @@ impl MilliOp for Concat {
         };
 
         // If all inputs are concrete, try constant fold via nano+pool_eval path.
-        if let Some(results) = super::constant_fold(self, known_inputs, &[(self.output, output_hint)], pool) {
+        if let Some(results) =
+            super::constant_fold(self, known_inputs, &[(self.output, output_hint)], pool)
+        {
             return Ok(results);
         }
 
@@ -370,15 +376,7 @@ impl MilliOp for Concat {
         let n = self.inputs.len();
 
         // Build split sizes by gathering each input's dim along the concat axis
-        let axis_idx = super::Constant::push_new(
-            graph,
-            crate::backends::ndarray_backend::NDArrayNumericTensor::<DynRank>::from_vec_shape(
-                vec![self.axis],
-                &vec![1],
-            )
-            .unwrap(),
-            rng,
-        );
+        let axis_idx = super::Constant::from_vec(graph, vec![self.axis], rng);
         let mut size_tensors = Vec::new();
         for &input_id in &self.inputs {
             let shape = super::Shape::push_new(graph, input_id, rng);
@@ -433,17 +431,26 @@ impl MilliOp for Concat {
         &self,
         inputs: &[crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>],
         pool: &'p P2,
-    ) -> Result<Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>, crate::nano_graph::pool_eval::PoolEvalError> {
+    ) -> Result<
+        Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>,
+        crate::nano_graph::pool_eval::PoolEvalError,
+    > {
         use crate::numeric_tensor::{NumericTensor, TensorLayout};
         use crate::tensor_rank::DynRank;
 
         if inputs.is_empty() {
-            return Err(crate::nano_graph::pool_eval::PoolEvalError::Unsupported("Concat: no inputs".to_string()));
+            return Err(crate::nano_graph::pool_eval::PoolEvalError::Unsupported(
+                "Concat: no inputs".to_string(),
+            ));
         }
 
         let dtype = inputs[0].dtype();
         let rank = inputs[0].shape().len();
-        let axis = if self.axis < 0 { (self.axis + rank as i64) as usize } else { self.axis as usize };
+        let axis = if self.axis < 0 {
+            (self.axis + rank as i64) as usize
+        } else {
+            self.axis as usize
+        };
 
         // Compute output shape: same as first input except concat axis is sum
         let mut output_shape: Vec<u64> = inputs[0].shape().clone();
@@ -452,7 +459,8 @@ impl MilliOp for Concat {
         }
 
         let layout = TensorLayout::<DynRank>::row_major(output_shape.clone(), dtype);
-        let buf = pool.allocate(layout.buffer_size_bytes())
+        let buf = pool
+            .allocate(layout.buffer_size_bytes())
             .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
         let mut out = NumericTensor::from_parts(buf, layout);
 
@@ -478,7 +486,11 @@ impl MilliOp for Concat {
                 for d in 0..rank {
                     let coord = rem / inp_strides[d];
                     rem %= inp_strides[d];
-                    let out_coord = if d == axis { coord + axis_offset } else { coord };
+                    let out_coord = if d == axis {
+                        coord + axis_offset
+                    } else {
+                        coord
+                    };
                     out_flat += out_coord * out_strides[d];
                 }
                 out.write_element(out_flat, inp.read_element(inp_flat));
@@ -489,7 +501,10 @@ impl MilliOp for Concat {
         Ok(vec![out])
     }
 
-    fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
+    fn lower_to_nano(
+        &self,
+        ctx: &mut crate::nano_graph::NanoLoweringContext,
+    ) -> crate::milli_graph::ops::LowerResult {
         Concat::lower_to_nano(self, ctx)
     }
 }

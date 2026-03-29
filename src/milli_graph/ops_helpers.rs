@@ -1,5 +1,5 @@
+use super::ops::constant::ConstantValue;
 use super::ops::*;
-use crate::backends::ndarray_backend::conversions::NDArrayNumericTensorType;
 use crate::milli_graph::{GlobalId, MilliOpGraph};
 use rand::Rng;
 
@@ -10,7 +10,7 @@ pub(crate) fn rank(graph: &mut MilliOpGraph, tensor: GlobalId, rng: &mut impl Rn
 
 pub(crate) fn scalar_const<T>(graph: &mut MilliOpGraph, value: T, rng: &mut impl Rng) -> GlobalId
 where
-    T: NDArrayNumericTensorType,
+    T: ConstantValue,
 {
     Constant::new_scalar(graph, value, rng)
 }
