@@ -629,6 +629,7 @@ impl NanoGraph {
                     crate::nano_graph::ScalarBinOp::Max => "Max",
                     crate::nano_graph::ScalarBinOp::Min => "Min",
                     crate::nano_graph::ScalarBinOp::Mod => "Mod",
+                    crate::nano_graph::ScalarBinOp::IMod => "IMod",
                     crate::nano_graph::ScalarBinOp::Pow => "Pow",
                     crate::nano_graph::ScalarBinOp::Equal => "Equal",
                     crate::nano_graph::ScalarBinOp::Greater => "Greater",

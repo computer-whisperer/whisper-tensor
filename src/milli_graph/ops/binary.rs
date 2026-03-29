@@ -273,10 +273,24 @@ impl SimpleBinary {
                 op: ScalarBinOp::Min,
                 compute_dtype: compute_dt,
             },
-            WhichSimpleBinaryOp::Modulo(_) => ScalarOp::Binary {
-                op: ScalarBinOp::Mod,
-                compute_dtype: compute_dt,
-            },
+            WhichSimpleBinaryOp::Modulo(fmod) => {
+                // Float types always use fmod (C remainder). For integers,
+                // fmod=0 (default) means mathematical modulo (IMod).
+                let is_float = compute_dt.is_float();
+                let use_fmod = if is_float {
+                    true
+                } else {
+                    fmod.unwrap_or(false)
+                };
+                ScalarOp::Binary {
+                    op: if use_fmod {
+                        ScalarBinOp::Mod
+                    } else {
+                        ScalarBinOp::IMod
+                    },
+                    compute_dtype: compute_dt,
+                }
+            }
             WhichSimpleBinaryOp::Equal => ScalarOp::Binary {
                 op: ScalarBinOp::Equal,
                 compute_dtype: compute_dt,

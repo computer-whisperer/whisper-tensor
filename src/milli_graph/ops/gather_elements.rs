@@ -275,6 +275,60 @@ impl MilliOp for GatherElements {
             vec![],
         );
 
+        // Normalize negative indices: normalized = index + (index < 0) * axis_len
+        let axis_len = data_known[0]; // rows for axis=0
+        let axis_len_lit = ctx.nano.push_atom(
+            NumericDType::F32,
+            ScalarOp::Literal(NumericScalar::from_f32(axis_len as f32)),
+            vec![],
+            vec![],
+        );
+        let zero_lit = ctx.nano.push_atom(
+            NumericDType::F32,
+            ScalarOp::Literal(NumericScalar::from_f32(0.0)),
+            vec![],
+            vec![],
+        );
+        let cmp_base = ctx.nano.push_group(
+            out_count,
+            NumericDType::F32,
+            ScalarOp::Binary {
+                op: ScalarBinOp::Less,
+                compute_dtype: NumericDType::F32,
+            },
+            out_sym_dims.clone(),
+            vec![
+                InputRef::affine(indices_map.base_id, 1),
+                InputRef::Broadcast(zero_lit),
+            ],
+        );
+        let offset_base = ctx.nano.push_group(
+            out_count,
+            NumericDType::F32,
+            ScalarOp::Binary {
+                op: ScalarBinOp::Mul,
+                compute_dtype: NumericDType::F32,
+            },
+            out_sym_dims.clone(),
+            vec![
+                InputRef::affine(cmp_base, 1),
+                InputRef::Broadcast(axis_len_lit),
+            ],
+        );
+        let norm_base = ctx.nano.push_group(
+            out_count,
+            NumericDType::F32,
+            ScalarOp::Binary {
+                op: ScalarBinOp::Add,
+                compute_dtype: NumericDType::F32,
+            },
+            out_sym_dims.clone(),
+            vec![
+                InputRef::affine(indices_map.base_id, 1),
+                InputRef::affine(offset_base, 1),
+            ],
+        );
+
         // Column offset literals: 0..cols
         let col_lit_base = ctx.nano.push_atom(
             NumericDType::F32,
@@ -291,7 +345,7 @@ impl MilliOp for GatherElements {
             );
         }
 
-        // Mul group: indices[i] * cols
+        // Mul group: normalized_index[i] * cols
         let mul_base = ctx.nano.push_group(
             out_count,
             NumericDType::F32,
@@ -301,7 +355,7 @@ impl MilliOp for GatherElements {
             },
             out_sym_dims.clone(),
             vec![
-                InputRef::affine(indices_map.base_id, 1),
+                InputRef::affine(norm_base, 1),
                 InputRef::Broadcast(stride_lit),
             ],
         );

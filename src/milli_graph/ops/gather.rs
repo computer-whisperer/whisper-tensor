@@ -171,10 +171,26 @@ impl Gather {
         //   3. An Add group: (indices[i] * D_total) + j  (j is the column offset per atom)
         //   4. An IndirectLoad group: load from data table at the computed index
 
+        let axis_len = data_known[0];
+
         // Step 1: stride literal (single atom)
         let stride_lit = ctx.nano.push_atom(
             NumericDType::F32,
             ScalarOp::Literal(NumericScalar::from_f32(d_total as f32)),
+            vec![],
+            vec![],
+        );
+
+        // Axis length literal — needed for negative index normalization.
+        let axis_len_lit = ctx.nano.push_atom(
+            NumericDType::F32,
+            ScalarOp::Literal(NumericScalar::from_f32(axis_len as f32)),
+            vec![],
+            vec![],
+        );
+        let zero_lit = ctx.nano.push_atom(
+            NumericDType::F32,
+            ScalarOp::Literal(NumericScalar::from_f32(0.0)),
             vec![],
             vec![],
         );
@@ -191,7 +207,45 @@ impl Gather {
                 return crate::milli_graph::ops::LowerResult::Unsupported;
             }
 
-            // Mul group: 1 atom * broadcast stride → 1 atom (sym_dims from indices)
+            // Normalize negative indices: normalized = index + (index < 0) * axis_len
+            let cmp_id = ctx.nano.push_atom(
+                NumericDType::F32,
+                ScalarOp::Binary {
+                    op: ScalarBinOp::Less,
+                    compute_dtype: NumericDType::F32,
+                },
+                indices_map.sym_dims.clone(),
+                vec![
+                    InputRef::Broadcast(indices_map.base_id),
+                    InputRef::Broadcast(zero_lit),
+                ],
+            );
+            let offset_id = ctx.nano.push_atom(
+                NumericDType::F32,
+                ScalarOp::Binary {
+                    op: ScalarBinOp::Mul,
+                    compute_dtype: NumericDType::F32,
+                },
+                indices_map.sym_dims.clone(),
+                vec![
+                    InputRef::Broadcast(cmp_id),
+                    InputRef::Broadcast(axis_len_lit),
+                ],
+            );
+            let norm_idx = ctx.nano.push_atom(
+                NumericDType::F32,
+                ScalarOp::Binary {
+                    op: ScalarBinOp::Add,
+                    compute_dtype: NumericDType::F32,
+                },
+                indices_map.sym_dims.clone(),
+                vec![
+                    InputRef::Broadcast(indices_map.base_id),
+                    InputRef::Broadcast(offset_id),
+                ],
+            );
+
+            // Mul group: normalized_index * D_total
             let mul_id = ctx.nano.push_atom(
                 NumericDType::F32,
                 ScalarOp::Binary {
@@ -200,7 +254,7 @@ impl Gather {
                 },
                 indices_map.sym_dims.clone(),
                 vec![
-                    InputRef::Broadcast(indices_map.base_id),
+                    InputRef::Broadcast(norm_idx),
                     InputRef::Broadcast(stride_lit),
                 ],
             );
@@ -260,23 +314,62 @@ impl Gather {
             );
         } else {
             // Indices are fully known (constant). out_count = indices_count * D_total.
-            let _indices_count = indices_map.count;
+            let indices_count = indices_map.count;
 
-            // Build the indices InputRef: for output atom `flat`, row = flat / D_total
+            // Normalize negative indices for the concrete case.
+            let cmp_base = ctx.nano.push_group(
+                indices_count,
+                NumericDType::F32,
+                ScalarOp::Binary {
+                    op: ScalarBinOp::Less,
+                    compute_dtype: NumericDType::F32,
+                },
+                vec![],
+                vec![
+                    InputRef::affine(indices_map.base_id, 1),
+                    InputRef::Broadcast(zero_lit),
+                ],
+            );
+            let offset_base = ctx.nano.push_group(
+                indices_count,
+                NumericDType::F32,
+                ScalarOp::Binary {
+                    op: ScalarBinOp::Mul,
+                    compute_dtype: NumericDType::F32,
+                },
+                vec![],
+                vec![
+                    InputRef::affine(cmp_base, 1),
+                    InputRef::Broadcast(axis_len_lit),
+                ],
+            );
+            let norm_base = ctx.nano.push_group(
+                indices_count,
+                NumericDType::F32,
+                ScalarOp::Binary {
+                    op: ScalarBinOp::Add,
+                    compute_dtype: NumericDType::F32,
+                },
+                vec![],
+                vec![
+                    InputRef::affine(indices_map.base_id, 1),
+                    InputRef::affine(offset_base, 1),
+                ],
+            );
+
+            // Build the normalized indices InputRef: for output atom `flat`, row = flat / D_total
             let indices_ref = if d_total == 1 {
-                // 1:1 mapping
-                InputRef::affine(indices_map.base_id, 1)
+                InputRef::affine(norm_base, 1)
             } else {
-                // For each output flat index, the row is flat / D_total
                 let mut ids = Vec::with_capacity(out_count as usize);
                 for flat in 0..out_count {
                     let row = flat / d_total;
-                    ids.push(indices_map.base_id.offset(row));
+                    ids.push(norm_base.offset(row));
                 }
                 InputRef::Explicit(ids)
             };
 
-            // Mul group: out_count atoms, each computes indices[row] * D_total
+            // Mul group: out_count atoms, each computes normalized_index[row] * D_total
             let mul_base = ctx.nano.push_group(
                 out_count,
                 NumericDType::F32,

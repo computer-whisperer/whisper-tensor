@@ -489,7 +489,7 @@ fn eval_binop(op: &ScalarBinOp, a: u64, b: u64, dtype: NumericDType) -> u64 {
             ScalarBinOp::Div => crate::scalar_ops::div::float_div(a, b, &ft),
             ScalarBinOp::Max => crate::scalar_ops::max::float_max(a, b, &ft),
             ScalarBinOp::Min => crate::scalar_ops::min::float_min(a, b, &ft),
-            ScalarBinOp::Mod => crate::scalar_ops::modulo::float_mod(a, b, &ft),
+            ScalarBinOp::Mod | ScalarBinOp::IMod => crate::scalar_ops::modulo::float_mod(a, b, &ft),
             ScalarBinOp::Pow => crate::scalar_ops::pow::float_pow(a, b, &ft),
             ScalarBinOp::Equal => {
                 bool_to_dtype_raw(crate::scalar_ops::cmp::float_equal(a, b, &ft), dtype)
@@ -533,6 +533,7 @@ fn eval_binop(op: &ScalarBinOp, a: u64, b: u64, dtype: NumericDType) -> u64 {
             ScalarBinOp::Max => crate::scalar_ops::max::signed_max(a, b, &it),
             ScalarBinOp::Min => crate::scalar_ops::min::signed_min(a, b, &it),
             ScalarBinOp::Mod => crate::scalar_ops::modulo::signed_mod(a, b, &it),
+            ScalarBinOp::IMod => crate::scalar_ops::modulo::signed_imod(a, b, &it),
             ScalarBinOp::Pow => crate::scalar_ops::pow::signed_pow(a, b, &it),
             ScalarBinOp::Equal => {
                 bool_to_dtype_raw(crate::scalar_ops::cmp::signed_equal(a, b, &it), dtype)
@@ -573,7 +574,9 @@ fn eval_binop(op: &ScalarBinOp, a: u64, b: u64, dtype: NumericDType) -> u64 {
             ScalarBinOp::Div => crate::scalar_ops::div::unsigned_div_wrapping(a, b, &it),
             ScalarBinOp::Max => crate::scalar_ops::max::unsigned_max(a, b, &it),
             ScalarBinOp::Min => crate::scalar_ops::min::unsigned_min(a, b, &it),
-            ScalarBinOp::Mod => crate::scalar_ops::modulo::unsigned_mod(a, b, &it),
+            ScalarBinOp::Mod | ScalarBinOp::IMod => {
+                crate::scalar_ops::modulo::unsigned_mod(a, b, &it)
+            }
             ScalarBinOp::Pow => crate::scalar_ops::pow::unsigned_pow(a, b, &it),
             ScalarBinOp::Equal => {
                 bool_to_dtype_raw(crate::scalar_ops::cmp::unsigned_equal(a, b, &it), dtype)

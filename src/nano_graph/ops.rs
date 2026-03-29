@@ -17,7 +17,12 @@ pub enum ScalarBinOp {
     Div,
     Max,
     Min,
+    /// C remainder (truncated division) — result sign matches dividend.
+    /// ONNX `Mod` with `fmod=1`, or float mod.
     Mod,
+    /// Mathematical modulo — result sign matches divisor.
+    /// ONNX `Mod` with `fmod=0` (default for integers).
+    IMod,
     Pow,
     // Comparison ops — return 1.0 for true, 0.0 for false (ONNX convention).
     Equal,

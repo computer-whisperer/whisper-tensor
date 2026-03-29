@@ -18,6 +18,24 @@ pub fn signed_mod(a: u64, b: u64, it: &IntType) -> u64 {
     it.encode_signed(va % vb)
 }
 
+/// Signed integer mathematical modulo (result sign matches divisor).
+/// ONNX `Mod` with `fmod=0` on integer types.
+/// Division by zero returns 0.
+pub fn signed_imod(a: u64, b: u64, it: &IntType) -> u64 {
+    let va = it.decode_signed(a);
+    let vb = it.decode_signed(b);
+    if vb == 0 {
+        return 0;
+    }
+    let rem = va % vb;
+    let result = if rem != 0 && (rem ^ vb) < 0 {
+        rem + vb
+    } else {
+        rem
+    };
+    it.encode_signed(result)
+}
+
 /// Unsigned integer remainder. Division by zero returns 0.
 pub fn unsigned_mod(a: u64, b: u64, it: &IntType) -> u64 {
     let va = it.decode_unsigned(a);
