@@ -1252,10 +1252,22 @@ impl MilliOp for Resize {
         use crate::numeric_tensor::{NumericTensor, TensorLayout};
         use crate::tensor_rank::DynRank;
 
-        // Only nearest-neighbor with default coordinate transform is implemented.
+        // Only nearest-neighbor mode is partially implemented. Non-nearest modes
+        // and non-default coordinate transforms need the full resize_generic path.
         if !matches!(self.mode, ResizeMode::Nearest) {
             return Err(crate::nano_graph::pool_eval::PoolEvalError::Unsupported(
                 format!("Resize eval_new: mode {:?} not implemented", self.mode),
+            ));
+        }
+        if !matches!(
+            self.coord_transform,
+            ResizeCoordTransform::HalfPixel | ResizeCoordTransform::Asymmetric
+        ) {
+            return Err(crate::nano_graph::pool_eval::PoolEvalError::Unsupported(
+                format!(
+                    "Resize eval_new: coord_transform {:?} not implemented",
+                    self.coord_transform
+                ),
             ));
         }
 
@@ -1355,7 +1367,7 @@ impl MilliOp for Resize {
             .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
         let mut out = NumericTensor::from_parts(buf, layout);
 
-        // Nearest-neighbor interpolation for all modes (correctness fallback)
+        // Nearest-neighbor interpolation with coordinate transform.
         for out_flat in 0..out_numel {
             let mut rem = out_flat;
             let mut in_flat = 0usize;
@@ -1367,8 +1379,25 @@ impl MilliOp for Resize {
                 } else {
                     1.0
                 };
-                let in_coord = ((coord as f64 + 0.5) * scale).floor() as usize;
-                let in_coord = in_coord.min(input_shape[d] as usize - 1);
+                let in_coord_f = match self.coord_transform {
+                    ResizeCoordTransform::HalfPixel => (coord as f64 + 0.5) * scale - 0.5,
+                    ResizeCoordTransform::Asymmetric => coord as f64 * scale,
+                    _ => unreachable!(), // guarded above
+                };
+                // Apply nearest_mode rounding.
+                let in_coord_rounded = match self.nearest_mode {
+                    ResizeNearestMode::RoundPreferFloor => {
+                        if in_coord_f == (in_coord_f.ceil() - 0.5) {
+                            in_coord_f.ceil() as i64 - 1
+                        } else {
+                            in_coord_f.round() as i64
+                        }
+                    }
+                    ResizeNearestMode::RoundPreferCeil => in_coord_f.round() as i64,
+                    ResizeNearestMode::Floor => in_coord_f.floor() as i64,
+                    ResizeNearestMode::Ceil => in_coord_f.ceil() as i64,
+                };
+                let in_coord = in_coord_rounded.max(0).min(input_shape[d] as i64 - 1) as usize;
                 in_flat += in_coord * in_strides[d];
             }
             out.write_element(out_flat, data.read_element(in_flat));
