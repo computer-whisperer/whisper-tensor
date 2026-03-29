@@ -465,6 +465,21 @@ fn write_atom<P: Pool>(
 // Op dispatch
 // ---------------------------------------------------------------------------
 
+/// Apply a bitwise operation on raw integer bits, masked to the type's bit width.
+fn bitwise_op_int(
+    a: u64,
+    b: u64,
+    it: &crate::numeric_dtype::IntType,
+    f: impl Fn(u64, u64) -> u64,
+) -> u64 {
+    let mask = if it.bits >= 64 {
+        u64::MAX
+    } else {
+        (1u64 << it.bits) - 1
+    };
+    f(a & mask, b & mask) & mask
+}
+
 fn eval_binop(op: &ScalarBinOp, a: u64, b: u64, dtype: NumericDType) -> u64 {
     match dtype {
         NumericDType::Float(ft) => match op {
@@ -502,6 +517,13 @@ fn eval_binop(op: &ScalarBinOp, a: u64, b: u64, dtype: NumericDType) -> u64 {
             ScalarBinOp::Xor => {
                 bool_to_dtype_raw(crate::scalar_ops::logical::logical_xor(a, b), dtype)
             }
+            ScalarBinOp::BitwiseAnd
+            | ScalarBinOp::BitwiseOr
+            | ScalarBinOp::BitwiseXor
+            | ScalarBinOp::BitShiftLeft
+            | ScalarBinOp::BitShiftRight => {
+                panic!("bitwise ops not supported on float type {ft:?}")
+            }
         },
         NumericDType::SignedInt(it) => match op {
             ScalarBinOp::Add => crate::scalar_ops::add::signed_add_wrapping(a, b, &it),
@@ -538,6 +560,11 @@ fn eval_binop(op: &ScalarBinOp, a: u64, b: u64, dtype: NumericDType) -> u64 {
             ScalarBinOp::Xor => {
                 bool_to_dtype_raw(crate::scalar_ops::logical::logical_xor(a, b), dtype)
             }
+            ScalarBinOp::BitwiseAnd => bitwise_op_int(a, b, &it, |x, y| x & y),
+            ScalarBinOp::BitwiseOr => bitwise_op_int(a, b, &it, |x, y| x | y),
+            ScalarBinOp::BitwiseXor => bitwise_op_int(a, b, &it, |x, y| x ^ y),
+            ScalarBinOp::BitShiftLeft => bitwise_op_int(a, b, &it, |x, y| x << y),
+            ScalarBinOp::BitShiftRight => bitwise_op_int(a, b, &it, |x, y| x >> y),
         },
         NumericDType::UnsignedInt(it) => match op {
             ScalarBinOp::Add => crate::scalar_ops::add::unsigned_add_wrapping(a, b, &it),
@@ -574,6 +601,11 @@ fn eval_binop(op: &ScalarBinOp, a: u64, b: u64, dtype: NumericDType) -> u64 {
             ScalarBinOp::Xor => {
                 bool_to_dtype_raw(crate::scalar_ops::logical::logical_xor(a, b), dtype)
             }
+            ScalarBinOp::BitwiseAnd => bitwise_op_int(a, b, &it, |x, y| x & y),
+            ScalarBinOp::BitwiseOr => bitwise_op_int(a, b, &it, |x, y| x | y),
+            ScalarBinOp::BitwiseXor => bitwise_op_int(a, b, &it, |x, y| x ^ y),
+            ScalarBinOp::BitShiftLeft => bitwise_op_int(a, b, &it, |x, y| x << y),
+            ScalarBinOp::BitShiftRight => bitwise_op_int(a, b, &it, |x, y| x >> y),
         },
         NumericDType::Bool => {
             // Comparisons and logical ops on Bool
@@ -585,8 +617,14 @@ fn eval_binop(op: &ScalarBinOp, a: u64, b: u64, dtype: NumericDType) -> u64 {
                 ScalarBinOp::Or => {
                     bool_to_dtype_raw(crate::scalar_ops::logical::logical_or(a, b), dtype)
                 }
-                ScalarBinOp::Xor => {
+                ScalarBinOp::Xor | ScalarBinOp::BitwiseXor => {
                     bool_to_dtype_raw(crate::scalar_ops::logical::logical_xor(a, b), dtype)
+                }
+                ScalarBinOp::BitwiseAnd => {
+                    bool_to_dtype_raw(crate::scalar_ops::logical::logical_and(a, b), dtype)
+                }
+                ScalarBinOp::BitwiseOr => {
+                    bool_to_dtype_raw(crate::scalar_ops::logical::logical_or(a, b), dtype)
                 }
                 _ => panic!("unsupported binop {op:?} for Bool"),
             }

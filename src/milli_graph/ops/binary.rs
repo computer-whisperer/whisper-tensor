@@ -305,21 +305,30 @@ impl SimpleBinary {
                 op: ScalarBinOp::Or,
                 compute_dtype: compute_dt,
             },
-            WhichSimpleBinaryOp::Xor | WhichSimpleBinaryOp::BitwiseXor => ScalarOp::Binary {
+            WhichSimpleBinaryOp::Xor => ScalarOp::Binary {
                 op: ScalarBinOp::Xor,
                 compute_dtype: compute_dt,
             },
             WhichSimpleBinaryOp::BitwiseAnd => ScalarOp::Binary {
-                op: ScalarBinOp::And,
+                op: ScalarBinOp::BitwiseAnd,
                 compute_dtype: compute_dt,
             },
             WhichSimpleBinaryOp::BitwiseOr => ScalarOp::Binary {
-                op: ScalarBinOp::Or,
+                op: ScalarBinOp::BitwiseOr,
                 compute_dtype: compute_dt,
             },
-            WhichSimpleBinaryOp::BitShiftLeft | WhichSimpleBinaryOp::BitShiftRight => {
-                return crate::milli_graph::ops::LowerResult::Unsupported;
-            }
+            WhichSimpleBinaryOp::BitwiseXor => ScalarOp::Binary {
+                op: ScalarBinOp::BitwiseXor,
+                compute_dtype: compute_dt,
+            },
+            WhichSimpleBinaryOp::BitShiftLeft => ScalarOp::Binary {
+                op: ScalarBinOp::BitShiftLeft,
+                compute_dtype: compute_dt,
+            },
+            WhichSimpleBinaryOp::BitShiftRight => ScalarOp::Binary {
+                op: ScalarBinOp::BitShiftRight,
+                compute_dtype: compute_dt,
+            },
         };
 
         let Some((layout, known_dims, sym_dims, count)) = ctx.classify_dims(out_info) else {

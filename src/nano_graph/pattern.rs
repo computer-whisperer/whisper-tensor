@@ -638,6 +638,11 @@ impl NanoGraph {
                     crate::nano_graph::ScalarBinOp::And => "And",
                     crate::nano_graph::ScalarBinOp::Or => "Or",
                     crate::nano_graph::ScalarBinOp::Xor => "Xor",
+                    crate::nano_graph::ScalarBinOp::BitwiseAnd => "BitwiseAnd",
+                    crate::nano_graph::ScalarBinOp::BitwiseOr => "BitwiseOr",
+                    crate::nano_graph::ScalarBinOp::BitwiseXor => "BitwiseXor",
+                    crate::nano_graph::ScalarBinOp::BitShiftLeft => "BitShiftLeft",
+                    crate::nano_graph::ScalarBinOp::BitShiftRight => "BitShiftRight",
                 },
                 ScalarOp::Unary { op, .. } => match op {
                     crate::nano_graph::ScalarUnaryOp::Neg => "Neg",

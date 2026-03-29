@@ -29,6 +29,12 @@ pub enum ScalarBinOp {
     And,
     Or,
     Xor,
+    // Bitwise ops — operate on raw integer bits.
+    BitwiseAnd,
+    BitwiseOr,
+    BitwiseXor,
+    BitShiftLeft,
+    BitShiftRight,
 }
 
 /// Unary scalar operations.
