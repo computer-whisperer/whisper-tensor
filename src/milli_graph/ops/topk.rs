@@ -177,6 +177,12 @@ impl MilliOp for TopK {
         Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>,
         crate::nano_graph::pool_eval::PoolEvalError,
     > {
+        if !self.sorted {
+            return Err(crate::nano_graph::pool_eval::PoolEvalError::Unsupported(
+                "TopK eval_new: sorted=false not implemented".into(),
+            ));
+        }
+
         use crate::numeric_scalar::NumericScalar;
         use crate::numeric_tensor::{NumericTensor, TensorLayout};
         use crate::tensor_rank::DynRank;

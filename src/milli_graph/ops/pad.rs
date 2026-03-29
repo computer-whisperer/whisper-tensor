@@ -367,6 +367,12 @@ impl MilliOp for Pad {
         use crate::numeric_tensor::{NumericTensor, TensorLayout};
         use crate::tensor_rank::DynRank;
 
+        if !matches!(self.mode, PadMode::Constant) {
+            return Err(crate::nano_graph::pool_eval::PoolEvalError::Unsupported(
+                format!("Pad eval_new: mode {:?} not implemented", self.mode),
+            ));
+        }
+
         let data = &inputs[0];
         let shape = data.shape();
         let rank = shape.len();

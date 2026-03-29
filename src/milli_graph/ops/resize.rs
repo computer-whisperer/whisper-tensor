@@ -1252,6 +1252,13 @@ impl MilliOp for Resize {
         use crate::numeric_tensor::{NumericTensor, TensorLayout};
         use crate::tensor_rank::DynRank;
 
+        // Only nearest-neighbor with default coordinate transform is implemented.
+        if !matches!(self.mode, ResizeMode::Nearest) {
+            return Err(crate::nano_graph::pool_eval::PoolEvalError::Unsupported(
+                format!("Resize eval_new: mode {:?} not implemented", self.mode),
+            ));
+        }
+
         let data = &inputs[0];
         let input_shape = data.shape();
         let rank = input_shape.len();
