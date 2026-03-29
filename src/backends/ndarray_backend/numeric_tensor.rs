@@ -5,8 +5,8 @@ use super::ops::{
 };
 use crate::TrigOp;
 use crate::dtype::DType;
-use crate::milli_graph::ops::AccumulationMode;
 use crate::migration::numeric_scalar::NumericScalar;
+use crate::milli_graph::ops::AccumulationMode;
 use crate::tensor_rank::{DimContainer, DimProduct, DynRank, Rank, RankError};
 use arbitrary_int::traits::Integer;
 use arbitrary_int::{i4, u4};

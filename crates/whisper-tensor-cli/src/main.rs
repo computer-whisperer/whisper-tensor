@@ -591,8 +591,10 @@ fn cmd_tts(output: LoaderOutput, opts: TtsRunOptions) {
             let speed_tensor =
                 NumericTensor::<DynRank>::from_vec_shape(vec![speed], vec![1]).unwrap();
 
-            data.tensors.insert(*style_link, SharedPoolTensor::from(style_tensor));
-            data.tensors.insert(*speed_link, SharedPoolTensor::from(speed_tensor));
+            data.tensors
+                .insert(*style_link, SharedPoolTensor::from(style_tensor));
+            data.tensors
+                .insert(*speed_link, SharedPoolTensor::from(speed_tensor));
         }
         TTSInputConfig::Piper {
             scales_link,
@@ -606,11 +608,14 @@ fn cmd_tts(output: LoaderOutput, opts: TtsRunOptions) {
             )
             .unwrap();
 
-            data.tensors.insert(*scales_link, SharedPoolTensor::from(scales_tensor));
+            data.tensors
+                .insert(*scales_link, SharedPoolTensor::from(scales_tensor));
             if let Some(sid_link) = speaker_id_link {
                 data.tensors.insert(
                     *sid_link,
-                    SharedPoolTensor::from(NumericTensor::<DynRank>::from_vec_shape(vec![0i64], vec![1]).unwrap()),
+                    SharedPoolTensor::from(
+                        NumericTensor::<DynRank>::from_vec_shape(vec![0i64], vec![1]).unwrap(),
+                    ),
                 );
             }
         }
@@ -681,11 +686,18 @@ fn cmd_tts(output: LoaderOutput, opts: TtsRunOptions) {
             let iteration_count_tensor =
                 NumericTensor::<DynRank>::from_vec_shape(vec![iterations as i64], vec![]).unwrap();
 
-            data.tensors.insert(*ref_audio_link, SharedPoolTensor::from(ref_audio_tensor));
-            data.tensors.insert(*max_duration_link, SharedPoolTensor::from(max_duration_tensor));
-            data.tensors.insert(*time_steps_link, SharedPoolTensor::from(time_steps_tensor));
             data.tensors
-                .insert(*iteration_count_link, SharedPoolTensor::from(iteration_count_tensor));
+                .insert(*ref_audio_link, SharedPoolTensor::from(ref_audio_tensor));
+            data.tensors.insert(
+                *max_duration_link,
+                SharedPoolTensor::from(max_duration_tensor),
+            );
+            data.tensors
+                .insert(*time_steps_link, SharedPoolTensor::from(time_steps_tensor));
+            data.tensors.insert(
+                *iteration_count_link,
+                SharedPoolTensor::from(iteration_count_tensor),
+            );
         }
     }
 
@@ -875,7 +887,10 @@ fn cmd_stt(output: LoaderOutput, audio_path: PathBuf, _model_dir: Option<PathBuf
         .tensors
         .get(&interface.output_token_link)
         .expect("No STT output token tensor");
-    let token_nd = token_tensor.to_legacy().to_ndarray().expect("to_ndarray failed");
+    let token_nd = token_tensor
+        .to_legacy()
+        .to_ndarray()
+        .expect("to_ndarray failed");
     let mut token_ids: Vec<u32> = token_nd.flatten().try_into().expect("flatten failed");
     if let Some(pos) = token_ids.iter().position(|&t| t == interface.eos_token_id) {
         token_ids.truncate(pos);

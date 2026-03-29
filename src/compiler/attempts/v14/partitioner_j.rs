@@ -25,10 +25,10 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
-use crate::numeric_dtype::NumericDType;
 use crate::graph::GlobalId;
 use crate::nano_graph::pattern::InputTensor;
 use crate::nano_graph::{AtomGroup, AtomId, AtomRange, InputRef, NanoGraph, ScalarOp, SymDim};
+use crate::numeric_dtype::NumericDType;
 
 use super::types::{Phase, Span};
 
@@ -1186,11 +1186,11 @@ fn input_ref_source_range(input: &InputRef, count: u64, atom_offset: u64) -> (u6
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::numeric_dtype::NumericDType;
     use crate::graph::GlobalId;
     use crate::nano_graph::ops::{ReduceKind, ScalarBinOp, ScalarUnaryOp};
     use crate::nano_graph::pattern::InputTensor;
     use crate::nano_graph::{AtomId, InputRef, NanoGraph, ScalarOp};
+    use crate::numeric_dtype::NumericDType;
     use crate::numeric_scalar::NumericScalar;
 
     /// Helper: create an input tensor in the graph.

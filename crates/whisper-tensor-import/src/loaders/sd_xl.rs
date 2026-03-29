@@ -234,7 +234,12 @@ fn build_sdxl_interface(
 
         // Concat along last dim: [1,77,768] + [1,77,1280] -> [1,77,2048]
         let ctx = MilliConcat::push_new(&mut mg, vec![h1, p2], -1, rng);
-        let ctx_cast = Cast::push_new(&mut mg, ctx, NumericDType::from_legacy(model_dtype).unwrap(), rng);
+        let ctx_cast = Cast::push_new(
+            &mut mg,
+            ctx,
+            NumericDType::from_legacy(model_dtype).unwrap(),
+            rng,
+        );
 
         // Pad pooled [1,1280] -> [1,2816] (add 1536 zeros on right of dim 1)
         let pads = Constant::push_new(
@@ -243,7 +248,12 @@ fn build_sdxl_interface(
             rng,
         );
         let padded = Pad::push_new(&mut mg, pooled, pads, None, None, PadMode::Constant, rng);
-        let y_cast = Cast::push_new(&mut mg, padded, NumericDType::from_legacy(model_dtype).unwrap(), rng);
+        let y_cast = Cast::push_new(
+            &mut mg,
+            padded,
+            NumericDType::from_legacy(model_dtype).unwrap(),
+            rng,
+        );
 
         mg.set_output_map([
             (ctx_cast, cond_context.global_id()),
@@ -307,7 +317,12 @@ fn build_sdxl_interface(
         let pooled = *input_map.get(&uncond_pooled_f32.global_id()).unwrap();
 
         let ctx = MilliConcat::push_new(&mut mg, vec![h1, p2], -1, rng);
-        let ctx_cast = Cast::push_new(&mut mg, ctx, NumericDType::from_legacy(model_dtype).unwrap(), rng);
+        let ctx_cast = Cast::push_new(
+            &mut mg,
+            ctx,
+            NumericDType::from_legacy(model_dtype).unwrap(),
+            rng,
+        );
 
         let pads = Constant::push_new(
             &mut mg,
@@ -315,7 +330,12 @@ fn build_sdxl_interface(
             rng,
         );
         let padded = Pad::push_new(&mut mg, pooled, pads, None, None, PadMode::Constant, rng);
-        let y_cast = Cast::push_new(&mut mg, padded, NumericDType::from_legacy(model_dtype).unwrap(), rng);
+        let y_cast = Cast::push_new(
+            &mut mg,
+            padded,
+            NumericDType::from_legacy(model_dtype).unwrap(),
+            rng,
+        );
 
         mg.set_output_map([
             (ctx_cast, uncond_context.global_id()),

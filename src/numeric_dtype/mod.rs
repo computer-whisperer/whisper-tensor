@@ -515,10 +515,23 @@ mod tests {
     #[test]
     fn legacy_roundtrip() {
         let types = [
-            DType::F64, DType::F32, DType::BF16, DType::F16,
-            DType::F8E4M3FN, DType::F8E5M2, DType::F4E2M1,
-            DType::I64, DType::I32, DType::I16, DType::I8, DType::I4,
-            DType::U64, DType::U32, DType::U16, DType::U8, DType::U4,
+            DType::F64,
+            DType::F32,
+            DType::BF16,
+            DType::F16,
+            DType::F8E4M3FN,
+            DType::F8E5M2,
+            DType::F4E2M1,
+            DType::I64,
+            DType::I32,
+            DType::I16,
+            DType::I8,
+            DType::I4,
+            DType::U64,
+            DType::U32,
+            DType::U16,
+            DType::U8,
+            DType::U4,
             DType::BOOL,
         ];
         for dt in types {
@@ -573,8 +586,24 @@ mod tests {
         assert!(FloatType::F4E2M1.is_supported());
         assert!(FloatType::F6E3M2.is_supported());
         // mantissa_bits=0 is unsupported
-        assert!(!(FloatType { exponent_bits: 8, mantissa_bits: 0, has_infinity: false, has_nan: false }).is_supported());
+        assert!(
+            !(FloatType {
+                exponent_bits: 8,
+                mantissa_bits: 0,
+                has_infinity: false,
+                has_nan: false
+            })
+            .is_supported()
+        );
         // exponent_bits > 11 is unsupported
-        assert!(!(FloatType { exponent_bits: 12, mantissa_bits: 4, has_infinity: true, has_nan: true }).is_supported());
+        assert!(
+            !(FloatType {
+                exponent_bits: 12,
+                mantissa_bits: 4,
+                has_infinity: true,
+                has_nan: true
+            })
+            .is_supported()
+        );
     }
 }

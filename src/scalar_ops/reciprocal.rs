@@ -15,9 +15,18 @@ mod tests {
     fn float_reciprocal_f64() {
         let ft = FloatType::F64;
 
-        assert_eq!(ft.decode_f64(float_reciprocal(ft.encode_f64(2.0), &ft)), 0.5);
-        assert_eq!(ft.decode_f64(float_reciprocal(ft.encode_f64(1.0), &ft)), 1.0);
-        assert_eq!(ft.decode_f64(float_reciprocal(ft.encode_f64(-4.0), &ft)), -0.25);
+        assert_eq!(
+            ft.decode_f64(float_reciprocal(ft.encode_f64(2.0), &ft)),
+            0.5
+        );
+        assert_eq!(
+            ft.decode_f64(float_reciprocal(ft.encode_f64(1.0), &ft)),
+            1.0
+        );
+        assert_eq!(
+            ft.decode_f64(float_reciprocal(ft.encode_f64(-4.0), &ft)),
+            -0.25
+        );
     }
 
     #[test]
@@ -44,8 +53,14 @@ mod tests {
     fn float_reciprocal_special_values() {
         let ft = FloatType::F64;
 
-        assert!(ft.decode_f64(float_reciprocal(ft.encode_f64(f64::NAN), &ft)).is_nan());
-        assert_eq!(ft.decode_f64(float_reciprocal(ft.encode_f64(f64::INFINITY), &ft)), 0.0);
+        assert!(
+            ft.decode_f64(float_reciprocal(ft.encode_f64(f64::NAN), &ft))
+                .is_nan()
+        );
+        assert_eq!(
+            ft.decode_f64(float_reciprocal(ft.encode_f64(f64::INFINITY), &ft)),
+            0.0
+        );
     }
 
     #[test]

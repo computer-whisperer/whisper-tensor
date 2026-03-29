@@ -1,12 +1,12 @@
-use crate::pool::Pool;
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
 use crate::dtype::DType;
 use crate::graph::{GlobalId, Node};
+use crate::migration::numeric_tensor::NumericTensor;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
 use crate::nano_graph::lower::{DimKind, NanoLoweringContext, TensorAtomMap};
-use crate::migration::numeric_tensor::NumericTensor;
+use crate::pool::Pool;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use typenum::P1;
@@ -80,7 +80,10 @@ impl Slice {
         self.axes
     }
 
-    pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
+    pub fn lower_to_nano(
+        &self,
+        ctx: &mut crate::nano_graph::NanoLoweringContext,
+    ) -> crate::milli_graph::ops::LowerResult {
         let all_infos = ctx.all_infos;
         let data_id = self.data_id();
         let out_id = Node::outputs(self).next().unwrap();
@@ -235,7 +238,7 @@ impl Slice {
                         out_sym_dims,
                     ),
                 );
-            return crate::milli_graph::ops::LowerResult::Lowered;
+                return crate::milli_graph::ops::LowerResult::Lowered;
             }
         }
 
@@ -307,10 +310,7 @@ impl MilliOp for Slice {
         known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'p, P>>,
         _symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
         pool: &'p P,
-    ) -> Result<
-        Vec<(GlobalId, crate::tensor_info::TensorInfo<'p, P>)>,
-        MilliOpGraphError,
-    > {
+    ) -> Result<Vec<(GlobalId, crate::tensor_info::TensorInfo<'p, P>)>, MilliOpGraphError> {
         use crate::scalar_info::ScalarInfoTyped;
         use crate::tensor_info::TensorInfo;
 
@@ -404,7 +404,12 @@ impl MilliOp for Slice {
         let out_info = TensorInfo::from_dtype_and_shape_scalars(out_dtype, &out_dims);
 
         // If all inputs are concrete, try constant fold via nano+pool_eval path.
-        if let Some(results) = super::constant_fold(self, known_inputs, &[(self.output, out_info.clone_with_pool(pool))], pool) {
+        if let Some(results) = super::constant_fold(
+            self,
+            known_inputs,
+            &[(self.output, out_info.clone_with_pool(pool))],
+            pool,
+        ) {
             return Ok(results);
         }
 
@@ -494,7 +499,10 @@ impl MilliOp for Slice {
         &self,
         inputs: &[crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>],
         pool: &'p P2,
-    ) -> Result<Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>, crate::nano_graph::pool_eval::PoolEvalError> {
+    ) -> Result<
+        Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>,
+        crate::nano_graph::pool_eval::PoolEvalError,
+    > {
         use crate::numeric_tensor::{NumericTensor, TensorLayout};
         use crate::tensor_rank::DynRank;
 
@@ -504,29 +512,42 @@ impl MilliOp for Slice {
         let dtype = data.dtype();
 
         // Parse starts (inputs[1]) and ends (inputs[2])
-        let starts: Vec<i64> = (0..inputs[1].numel()).map(|i| inputs[1].read_element(i).to_i64()).collect();
-        let ends: Vec<i64> = (0..inputs[2].numel()).map(|i| inputs[2].read_element(i).to_i64()).collect();
+        let starts: Vec<i64> = (0..inputs[1].numel())
+            .map(|i| inputs[1].read_element(i).to_i64())
+            .collect();
+        let ends: Vec<i64> = (0..inputs[2].numel())
+            .map(|i| inputs[2].read_element(i).to_i64())
+            .collect();
 
         // Parse steps and axes from optional inputs
         let mut input_idx = 3;
         let steps: Vec<i64> = if self.steps.is_some() && inputs.len() > input_idx {
-            let s: Vec<i64> = (0..inputs[input_idx].numel()).map(|i| inputs[input_idx].read_element(i).to_i64()).collect();
+            let s: Vec<i64> = (0..inputs[input_idx].numel())
+                .map(|i| inputs[input_idx].read_element(i).to_i64())
+                .collect();
             input_idx += 1;
             s
         } else {
             starts.iter().map(|_| 1i64).collect()
         };
         let axes: Vec<usize> = if self.axes.is_some() && inputs.len() > input_idx {
-            (0..inputs[input_idx].numel()).map(|i| {
-                let a = inputs[input_idx].read_element(i).to_i64();
-                if a < 0 { (a + input_rank as i64) as usize } else { a as usize }
-            }).collect()
+            (0..inputs[input_idx].numel())
+                .map(|i| {
+                    let a = inputs[input_idx].read_element(i).to_i64();
+                    if a < 0 {
+                        (a + input_rank as i64) as usize
+                    } else {
+                        a as usize
+                    }
+                })
+                .collect()
         } else {
             (0..starts.len()).collect()
         };
 
         // Build per-axis (start, end, step)
-        let mut slices: Vec<(i64, i64, i64)> = input_shape.iter().map(|&d| (0, d as i64, 1)).collect();
+        let mut slices: Vec<(i64, i64, i64)> =
+            input_shape.iter().map(|&d| (0, d as i64, 1)).collect();
         for (i, &axis) in axes.iter().enumerate() {
             let dim = input_shape[axis] as i64;
             let step = steps[i];
@@ -547,9 +568,10 @@ impl MilliOp for Slice {
         }
 
         // Compute output shape
-        let output_shape: Vec<u64> = slices.iter().map(|&(s, e, step)| {
-            ((e - s + (step - step.signum())) / step).max(0) as u64
-        }).collect();
+        let output_shape: Vec<u64> = slices
+            .iter()
+            .map(|&(s, e, step)| ((e - s + (step - step.signum())) / step).max(0) as u64)
+            .collect();
 
         let out_numel: usize = output_shape.iter().product::<u64>() as usize;
 
@@ -565,7 +587,8 @@ impl MilliOp for Slice {
         }
 
         let layout = TensorLayout::<DynRank>::row_major(output_shape.clone(), dtype);
-        let buf = pool.allocate(layout.buffer_size_bytes())
+        let buf = pool
+            .allocate(layout.buffer_size_bytes())
             .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
         let mut out = NumericTensor::from_parts(buf, layout);
 
@@ -585,7 +608,10 @@ impl MilliOp for Slice {
         Ok(vec![out])
     }
 
-    fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
+    fn lower_to_nano(
+        &self,
+        ctx: &mut crate::nano_graph::NanoLoweringContext,
+    ) -> crate::milli_graph::ops::LowerResult {
         Slice::lower_to_nano(self, ctx)
     }
 }

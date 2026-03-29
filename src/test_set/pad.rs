@@ -2,8 +2,8 @@
 
 use std::collections::HashMap;
 
-use rand::rngs::SmallRng;
 use rand::SeedableRng;
+use rand::rngs::SmallRng;
 
 use crate::graph::GlobalId;
 use crate::milli_graph::MilliOpGraph;
@@ -36,7 +36,11 @@ fn build_pad_graph(has_constant_value: bool) -> (MilliOpGraph, PadGraphIds) {
     let mut rng = rng();
     let ext_data = GlobalId::new(&mut rng);
     let ext_pads = GlobalId::new(&mut rng);
-    let ext_cv = if has_constant_value { Some(GlobalId::new(&mut rng)) } else { None };
+    let ext_cv = if has_constant_value {
+        Some(GlobalId::new(&mut rng))
+    } else {
+        None
+    };
 
     let mut ext_ids: Vec<GlobalId> = vec![ext_data, ext_pads];
     if let Some(cv) = ext_cv {
@@ -58,7 +62,15 @@ fn build_pad_graph(has_constant_value: bool) -> (MilliOpGraph, PadGraphIds) {
         &mut rng,
     );
     graph.set_outputs(vec![out]);
-    (graph, PadGraphIds { ext_data, ext_pads, ext_cv, out })
+    (
+        graph,
+        PadGraphIds {
+            ext_data,
+            ext_pads,
+            ext_cv,
+            out,
+        },
+    )
 }
 
 fn pad_data_set(
@@ -70,10 +82,7 @@ fn pad_data_set(
     expected: super::TestTensor,
     tolerance: Tolerance,
 ) -> TestDataSet {
-    let mut inputs = HashMap::from([
-        (ids.ext_data, data),
-        (ids.ext_pads, pads),
-    ]);
+    let mut inputs = HashMap::from([(ids.ext_data, data), (ids.ext_pads, pads)]);
     if let (Some(ext_cv), Some(cv_tensor)) = (ids.ext_cv, cv) {
         inputs.insert(ext_cv, cv_tensor);
     }
@@ -149,7 +158,12 @@ fn pad_1d_constant() -> TestCase {
         name: "pad_1d_constant".to_string(),
         graph,
         data_sets: vec![pad_data_set(
-            "f32_1d", &ids, data, pads, None, expected,
+            "f32_1d",
+            &ids,
+            data,
+            pads,
+            None,
+            expected,
             Tolerance::for_dtype(NumericDType::F32),
         )],
     }
@@ -174,7 +188,12 @@ fn pad_2d_constant() -> TestCase {
         name: "pad_2d_constant".to_string(),
         graph,
         data_sets: vec![pad_data_set(
-            "f32_3x4", &ids, data, pads, None, expected,
+            "f32_3x4",
+            &ids,
+            data,
+            pads,
+            None,
+            expected,
             Tolerance::for_dtype(NumericDType::F32),
         )],
     }
@@ -199,7 +218,12 @@ fn pad_4d_spatial() -> TestCase {
         name: "pad_4d_spatial".to_string(),
         graph,
         data_sets: vec![pad_data_set(
-            "f32_1x1x3x3", &ids, data, pads, None, expected,
+            "f32_1x1x3x3",
+            &ids,
+            data,
+            pads,
+            None,
+            expected,
             Tolerance::for_dtype(NumericDType::F32),
         )],
     }
@@ -225,7 +249,12 @@ fn pad_with_value() -> TestCase {
         name: "pad_with_value".to_string(),
         graph,
         data_sets: vec![pad_data_set(
-            "f32_fill_neg1", &ids, data, pads, Some(cv), expected,
+            "f32_fill_neg1",
+            &ids,
+            data,
+            pads,
+            Some(cv),
+            expected,
             Tolerance::for_dtype(NumericDType::F32),
         )],
     }

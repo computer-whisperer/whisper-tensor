@@ -135,7 +135,13 @@ impl<'a> NumericScalarView<'a> {
                 use crate::numeric_dtype::IntType;
                 IntType::BITS_64.float_to_signed(ft.decode_f64(raw)) as i64
             }
-            NumericDType::Bool => if raw != 0 { 1 } else { 0 },
+            NumericDType::Bool => {
+                if raw != 0 {
+                    1
+                } else {
+                    0
+                }
+            }
         }
     }
 
@@ -169,7 +175,12 @@ impl<'a> NumericScalarViewMut<'a> {
     pub fn write_cast(&mut self, scalar: &NumericScalar) {
         let raw = read_raw_bits(&scalar.bits, 0, scalar.dtype.total_bits());
         let cast_raw = scalar.dtype.cast_raw(raw, self.dtype);
-        write_raw_bits(self.data, self.bit_offset, self.dtype.total_bits(), cast_raw);
+        write_raw_bits(
+            self.data,
+            self.bit_offset,
+            self.dtype.total_bits(),
+            cast_raw,
+        );
     }
 
     /// Write an f64 value, converting to this view's dtype.
@@ -235,14 +246,18 @@ fn raw_to_scalar(raw: u64, dtype: NumericDType) -> NumericScalar {
 mod tests {
     use super::*;
     use crate::numeric_dtype::FloatType;
-    use half::{bf16, f16};
     use float8::{F8E4M3, F8E5M2};
+    use half::{bf16, f16};
 
     macro_rules! assert_bits {
         ($actual:expr, $expected:expr, $msg:expr) => {
             assert_eq!(
-                $actual.as_le_bytes(), $expected.as_le_bytes(),
-                "{}: actual {:?} != expected {:?}", $msg, $actual, $expected
+                $actual.as_le_bytes(),
+                $expected.as_le_bytes(),
+                "{}: actual {:?} != expected {:?}",
+                $msg,
+                $actual,
+                $expected
             );
         };
     }
@@ -295,8 +310,10 @@ mod tests {
                 let value = 0xDEAD_BEEFu64 & ((1u64 << total_bits.min(64)) - 1);
                 write_raw_bits(&mut data, bit_offset, total_bits, value);
                 let readback = read_raw_bits(&data, bit_offset, total_bits);
-                assert_eq!(readback, value,
-                    "roundtrip failed: offset={bit_offset}, bits={total_bits}");
+                assert_eq!(
+                    readback, value,
+                    "roundtrip failed: offset={bit_offset}, bits={total_bits}"
+                );
             }
         }
     }
@@ -308,8 +325,7 @@ mod tests {
             let value = 0xDEAD_BEEF_CAFE_BABEu64;
             write_raw_bits(&mut data, bit_offset, 64, value);
             let readback = read_raw_bits(&data, bit_offset, 64);
-            assert_eq!(readback, value,
-                "64-bit roundtrip at offset {bit_offset}");
+            assert_eq!(readback, value, "64-bit roundtrip at offset {bit_offset}");
         }
     }
 
@@ -321,7 +337,11 @@ mod tests {
     fn view_to_f64_byte_aligned_f32() {
         let mut buf = [0u8; 8];
         buf[..4].copy_from_slice(&3.14f32.to_le_bytes());
-        let view = NumericScalarView { data: &buf, bit_offset: 0, dtype: NumericDType::F32 };
+        let view = NumericScalarView {
+            data: &buf,
+            bit_offset: 0,
+            dtype: NumericDType::F32,
+        };
         let f = view.to_f64();
         assert!((f - 3.14f32 as f64).abs() < 1e-6);
     }
@@ -331,8 +351,16 @@ mod tests {
         let mut buf = [0u8; 8];
         buf[..4].copy_from_slice(&1.5f32.to_le_bytes());
         buf[4..8].copy_from_slice(&2.5f32.to_le_bytes());
-        let v0 = NumericScalarView { data: &buf, bit_offset: 0, dtype: NumericDType::F32 };
-        let v1 = NumericScalarView { data: &buf, bit_offset: 32, dtype: NumericDType::F32 };
+        let v0 = NumericScalarView {
+            data: &buf,
+            bit_offset: 0,
+            dtype: NumericDType::F32,
+        };
+        let v1 = NumericScalarView {
+            data: &buf,
+            bit_offset: 32,
+            dtype: NumericDType::F32,
+        };
         assert!((v0.to_f64() - 1.5).abs() < 1e-6);
         assert!((v1.to_f64() - 2.5).abs() < 1e-6);
     }
@@ -342,7 +370,11 @@ mod tests {
         let bf = bf16::from_f32(3.14);
         let mut buf = [0u8; 2];
         buf.copy_from_slice(&bf.to_le_bytes());
-        let view = NumericScalarView { data: &buf, bit_offset: 0, dtype: NumericDType::BF16 };
+        let view = NumericScalarView {
+            data: &buf,
+            bit_offset: 0,
+            dtype: NumericDType::BF16,
+        };
         let result = view.cast_to(NumericDType::F32);
         let expected = NumericScalar::from_f32(bf.to_f32());
         assert_bits!(result, expected, "view bf16 → f32");
@@ -351,7 +383,11 @@ mod tests {
     #[test]
     fn view_mut_write_f64() {
         let mut buf = [0u8; 4];
-        let mut view = NumericScalarViewMut { data: &mut buf, bit_offset: 0, dtype: NumericDType::F32 };
+        let mut view = NumericScalarViewMut {
+            data: &mut buf,
+            bit_offset: 0,
+            dtype: NumericDType::F32,
+        };
         view.write_f64(3.14);
         let written = f32::from_le_bytes(buf);
         assert!((written - 3.14f32 as f32).abs() < 0.01);
@@ -360,21 +396,37 @@ mod tests {
     #[test]
     fn view_mut_write_at_bit_offset_bool() {
         let mut buf = [0u8; 1];
-        let mut view = NumericScalarViewMut { data: &mut buf, bit_offset: 3, dtype: NumericDType::BOOL };
+        let mut view = NumericScalarViewMut {
+            data: &mut buf,
+            bit_offset: 3,
+            dtype: NumericDType::BOOL,
+        };
         let scalar = NumericScalar::from_bool(true);
         view.write_scalar(&scalar);
         assert_eq!(buf[0], 0b0000_1000);
-        let rview = NumericScalarView { data: &buf, bit_offset: 3, dtype: NumericDType::BOOL };
+        let rview = NumericScalarView {
+            data: &buf,
+            bit_offset: 3,
+            dtype: NumericDType::BOOL,
+        };
         assert!(rview.is_nonzero());
     }
 
     #[test]
     fn view_mut_write_cast() {
         let mut buf = [0u8; 2];
-        let mut view = NumericScalarViewMut { data: &mut buf, bit_offset: 0, dtype: NumericDType::BF16 };
+        let mut view = NumericScalarViewMut {
+            data: &mut buf,
+            bit_offset: 0,
+            dtype: NumericDType::BF16,
+        };
         let src = NumericScalar::from_f64(3.14);
         view.write_cast(&src);
-        let rview = NumericScalarView { data: &buf, bit_offset: 0, dtype: NumericDType::BF16 };
+        let rview = NumericScalarView {
+            data: &buf,
+            bit_offset: 0,
+            dtype: NumericDType::BF16,
+        };
         let result = rview.to_owned_scalar();
         let expected = NumericScalar::from_bf16(bf16::from_f64(3.14));
         assert_bits!(result, expected, "write_cast f64→bf16");
@@ -384,18 +436,40 @@ mod tests {
     fn view_sub_byte_u4_packed() {
         let mut buf = [0u8; 1];
         {
-            let mut v0 = NumericScalarViewMut { data: &mut buf, bit_offset: 0, dtype: NumericDType::U4 };
+            let mut v0 = NumericScalarViewMut {
+                data: &mut buf,
+                bit_offset: 0,
+                dtype: NumericDType::U4,
+            };
             v0.write_scalar(&NumericScalar::from_u4(arbitrary_int::u4::new(5)));
         }
         {
-            let mut v1 = NumericScalarViewMut { data: &mut buf, bit_offset: 4, dtype: NumericDType::U4 };
+            let mut v1 = NumericScalarViewMut {
+                data: &mut buf,
+                bit_offset: 4,
+                dtype: NumericDType::U4,
+            };
             v1.write_scalar(&NumericScalar::from_u4(arbitrary_int::u4::new(12)));
         }
         assert_eq!(buf[0], 0xC5);
-        let r0 = NumericScalarView { data: &buf, bit_offset: 0, dtype: NumericDType::U4 };
-        let r1 = NumericScalarView { data: &buf, bit_offset: 4, dtype: NumericDType::U4 };
-        assert_eq!(r0.to_owned_scalar(), NumericScalar::from_u4(arbitrary_int::u4::new(5)));
-        assert_eq!(r1.to_owned_scalar(), NumericScalar::from_u4(arbitrary_int::u4::new(12)));
+        let r0 = NumericScalarView {
+            data: &buf,
+            bit_offset: 0,
+            dtype: NumericDType::U4,
+        };
+        let r1 = NumericScalarView {
+            data: &buf,
+            bit_offset: 4,
+            dtype: NumericDType::U4,
+        };
+        assert_eq!(
+            r0.to_owned_scalar(),
+            NumericScalar::from_u4(arbitrary_int::u4::new(5))
+        );
+        assert_eq!(
+            r1.to_owned_scalar(),
+            NumericScalar::from_u4(arbitrary_int::u4::new(12))
+        );
     }
 
     // ===================================================================
@@ -404,33 +478,97 @@ mod tests {
 
     #[test]
     fn f64_to_f32() {
-        for &v in &[0.0f64, -0.0, 1.0, -1.0, 0.5, 3.14, f64::INFINITY, f64::NEG_INFINITY, f64::NAN, 1e-45, 1e38, std::f64::consts::PI] {
+        for &v in &[
+            0.0f64,
+            -0.0,
+            1.0,
+            -1.0,
+            0.5,
+            3.14,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NAN,
+            1e-45,
+            1e38,
+            std::f64::consts::PI,
+        ] {
             let dst = NumericScalar::from_f64(v).cast_to(NumericDType::F32);
-            assert_bits!(dst, NumericScalar::from_f32(v as f32), format!("f64({v}) → f32"));
+            assert_bits!(
+                dst,
+                NumericScalar::from_f32(v as f32),
+                format!("f64({v}) → f32")
+            );
         }
     }
 
     #[test]
     fn f32_to_bf16() {
-        for &v in &[0.0f32, -0.0, 1.0, -1.0, 3.14, 0.5, f32::INFINITY, f32::NAN, f32::MAX, f32::MIN_POSITIVE, 256.0, 256.5, 257.0] {
+        for &v in &[
+            0.0f32,
+            -0.0,
+            1.0,
+            -1.0,
+            3.14,
+            0.5,
+            f32::INFINITY,
+            f32::NAN,
+            f32::MAX,
+            f32::MIN_POSITIVE,
+            256.0,
+            256.5,
+            257.0,
+        ] {
             let dst = NumericScalar::from_f32(v).cast_to(NumericDType::BF16);
-            assert_bits!(dst, NumericScalar::from_bf16(bf16::from_f32(v)), format!("f32({v}) → bf16"));
+            assert_bits!(
+                dst,
+                NumericScalar::from_bf16(bf16::from_f32(v)),
+                format!("f32({v}) → bf16")
+            );
         }
     }
 
     #[test]
     fn f32_to_f16() {
-        for &v in &[0.0f32, -0.0, 1.0, -1.0, 3.14, f32::INFINITY, f32::NAN, 65504.0, 65536.0, 5.96e-8, 1.5, 2.5] {
+        for &v in &[
+            0.0f32,
+            -0.0,
+            1.0,
+            -1.0,
+            3.14,
+            f32::INFINITY,
+            f32::NAN,
+            65504.0,
+            65536.0,
+            5.96e-8,
+            1.5,
+            2.5,
+        ] {
             let dst = NumericScalar::from_f32(v).cast_to(NumericDType::F16);
-            assert_bits!(dst, NumericScalar::from_f16(f16::from_f32(v)), format!("f32({v}) → f16"));
+            assert_bits!(
+                dst,
+                NumericScalar::from_f16(f16::from_f32(v)),
+                format!("f32({v}) → f16")
+            );
         }
     }
 
     #[test]
     fn f32_to_i32() {
-        for &(f, expected) in &[(0.0f32, 0i32), (1.0, 1), (-1.0, -1), (3.7, 3), (-3.7, -3), (f32::NAN, 0), (f32::INFINITY, i32::MAX)] {
+        for &(f, expected) in &[
+            (0.0f32, 0i32),
+            (1.0, 1),
+            (-1.0, -1),
+            (3.7, 3),
+            (-3.7, -3),
+            (f32::NAN, 0),
+            (f32::INFINITY, i32::MAX),
+        ] {
             let dst = NumericScalar::from_f32(f).cast_to(NumericDType::I32);
-            assert_bits!(dst, NumericScalar::from_i32(expected), format!("f32({f}) → i32"));
+            assert_bits!(
+                dst,
+                NumericScalar::from_i32(expected),
+                format!("f32({f}) → i32")
+            );
         }
     }
 
@@ -438,13 +576,21 @@ mod tests {
     fn i32_to_f32() {
         for &v in &[0i32, 1, -1, i32::MAX, i32::MIN, 16777217] {
             let dst = NumericScalar::from_i32(v).cast_to(NumericDType::F32);
-            assert_bits!(dst, NumericScalar::from_f32(v as f32), format!("i32({v}) → f32"));
+            assert_bits!(
+                dst,
+                NumericScalar::from_f32(v as f32),
+                format!("i32({v}) → f32")
+            );
         }
     }
 
     #[test]
     fn identity_cast() {
-        for s in [NumericScalar::from_f32(3.14), NumericScalar::from_i64(i64::MAX), NumericScalar::from_bool(true)] {
+        for s in [
+            NumericScalar::from_f32(3.14),
+            NumericScalar::from_i64(i64::MAX),
+            NumericScalar::from_bool(true),
+        ] {
             assert_eq!(s.cast_to(s.dtype()), s);
         }
     }
@@ -453,8 +599,16 @@ mod tests {
     fn rte_f64_to_f32() {
         let mid_low = 1.0f64 + 0.5 * f32::EPSILON as f64;
         let mid_high = 1.0f64 + 1.5 * f32::EPSILON as f64;
-        assert_bits!(NumericScalar::from_f64(mid_low).cast_to(NumericDType::F32), NumericScalar::from_f32(mid_low as f32), "RTE down");
-        assert_bits!(NumericScalar::from_f64(mid_high).cast_to(NumericDType::F32), NumericScalar::from_f32(mid_high as f32), "RTE up");
+        assert_bits!(
+            NumericScalar::from_f64(mid_low).cast_to(NumericDType::F32),
+            NumericScalar::from_f32(mid_low as f32),
+            "RTE down"
+        );
+        assert_bits!(
+            NumericScalar::from_f64(mid_high).cast_to(NumericDType::F32),
+            NumericScalar::from_f32(mid_high as f32),
+            "RTE up"
+        );
     }
 
     #[test]
@@ -481,10 +635,15 @@ mod tests {
         let ft = FloatType::F4E2M1;
         for bits in 0u8..16 {
             let decoded = ft.decode_f64(bits as u64);
-            if decoded.is_nan() { continue; }
+            if decoded.is_nan() {
+                continue;
+            }
             let reencoded = ft.encode_f64(decoded);
-            assert_eq!(reencoded, bits as u64,
-                "F4E2M1 roundtrip 0b{:04b}: decoded {decoded}, reencoded 0b{:04b}", bits, reencoded);
+            assert_eq!(
+                reencoded, bits as u64,
+                "F4E2M1 roundtrip 0b{:04b}: decoded {decoded}, reencoded 0b{:04b}",
+                bits, reencoded
+            );
         }
     }
 
@@ -496,12 +655,21 @@ mod tests {
             // Verify against crate
             let crate_val = F8E4M3::from_bits(bits);
             if crate_val.is_nan() {
-                assert!(our_val.is_nan(), "F8E4M3FN 0x{:02X}: crate=NaN, us={our_val}", bits);
+                assert!(
+                    our_val.is_nan(),
+                    "F8E4M3FN 0x{:02X}: crate=NaN, us={our_val}",
+                    bits
+                );
                 continue;
             }
             let crate_f64 = crate_val.to_f64();
             if crate_f64 == 0.0 {
-                assert_eq!(our_val.to_bits(), crate_f64.to_bits(), "F8E4M3FN 0x{:02X} zero sign", bits);
+                assert_eq!(
+                    our_val.to_bits(),
+                    crate_f64.to_bits(),
+                    "F8E4M3FN 0x{:02X} zero sign",
+                    bits
+                );
             } else {
                 assert_eq!(our_val, crate_f64, "F8E4M3FN 0x{:02X}", bits);
             }
@@ -516,7 +684,9 @@ mod tests {
         let ft = FloatType::F16;
         for bits in 0u16..=u16::MAX {
             let hf = f16::from_bits(bits);
-            if hf.is_nan() { continue; }
+            if hf.is_nan() {
+                continue;
+            }
             let decoded = ft.decode_f64(bits as u64);
             let reencoded = ft.encode_f64(decoded);
             assert_eq!(reencoded, bits as u64, "F16 roundtrip 0x{:04X}", bits);

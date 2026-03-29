@@ -1,7 +1,7 @@
 use crate::backends::eval_backend::EvalBackend;
 use crate::graph::{GlobalId, Node, Property, PropertyValue};
-use crate::milli_graph::{MilliLoweringContext, MilliOpGraph};
 use crate::migration::numeric_tensor::NumericTensor;
+use crate::milli_graph::{MilliLoweringContext, MilliOpGraph};
 use crate::symbolic_graph::ops::{EvalError, Operation};
 use crate::symbolic_graph::{
     ONNXDecodingError, SymbolicGraph, SymbolicGraphMutator, query_attribute_graph,
@@ -293,7 +293,8 @@ impl Operation for ScanOperation {
         &self,
         inputs: &HashMap<GlobalId, &crate::numeric_tensor::NumericTensorView<'_, DynRank>>,
         pool: &'p P,
-    ) -> Result<HashMap<GlobalId, crate::numeric_tensor::NumericTensor<'p, DynRank, P>>, EvalError> {
+    ) -> Result<HashMap<GlobalId, crate::numeric_tensor::NumericTensor<'p, DynRank, P>>, EvalError>
+    {
         use crate::numeric_dtype::NumericDType;
         use crate::numeric_scalar::NumericScalar;
         use crate::numeric_tensor::{NumericTensor as PoolTensor, NumericTensorView, TensorLayout};
@@ -309,12 +310,15 @@ impl Operation for ScanOperation {
             let rank = shape.len();
             let mut out_shape = Vec::with_capacity(rank - 1);
             for (i, &d) in shape.iter().enumerate() {
-                if i != axis { out_shape.push(d); }
+                if i != axis {
+                    out_shape.push(d);
+                }
             }
             let dtype = src.dtype();
             let out_numel: usize = out_shape.iter().product::<u64>() as usize;
             let layout = TensorLayout::<DynRank>::row_major(out_shape, dtype);
-            let buf = pool.allocate(layout.buffer_size_bytes())
+            let buf = pool
+                .allocate(layout.buffer_size_bytes())
                 .map_err(|e| EvalError::InvalidInput(format!("pool allocation: {e}")))?;
             let mut out = PoolTensor::from_parts(buf, layout);
 
@@ -331,7 +335,9 @@ impl Operation for ScanOperation {
                 let mut src_flat = index as usize * strides[axis];
                 let mut dim_idx = 0;
                 for i in 0..rank {
-                    if i == axis { continue; }
+                    if i == axis {
+                        continue;
+                    }
                     let out_dim_size = if dim_idx + 1 < out_numel.max(1) {
                         // compute stride in output space
                         let mut s = 1usize;
@@ -339,7 +345,9 @@ impl Operation for ScanOperation {
                             s *= out.view().shape()[j] as usize;
                         }
                         s
-                    } else { 1 };
+                    } else {
+                        1
+                    };
                     let _ = out_dim_size; // unused in this approach
 
                     // Simpler: just use the source strides directly.
@@ -362,7 +370,13 @@ impl Operation for ScanOperation {
                 let mut src_idx = 0usize;
                 let mut oi = 0;
                 for i in 0..rank {
-                    let idx = if i == axis { index } else { let v = out_indices[oi]; oi += 1; v };
+                    let idx = if i == axis {
+                        index
+                    } else {
+                        let v = out_indices[oi];
+                        oi += 1;
+                        v
+                    };
                     src_idx += idx as usize * strides[i];
                 }
                 out.write_element(flat_out, src.read_element(src_idx));
@@ -380,7 +394,8 @@ impl Operation for ScanOperation {
             let mut new_shape: Vec<u64> = src_view.shape().to_vec();
             new_shape.insert(axis, 1);
             let layout = TensorLayout::<DynRank>::row_major(new_shape, src_view.dtype());
-            let buf = pool.allocate(layout.buffer_size_bytes())
+            let buf = pool
+                .allocate(layout.buffer_size_bytes())
                 .map_err(|e| EvalError::InvalidInput(format!("pool allocation: {e}")))?;
             let mut out = PoolTensor::from_parts(buf, layout);
             for i in 0..src_view.numel() {
@@ -408,7 +423,8 @@ impl Operation for ScanOperation {
             }
             let out_numel: usize = out_shape.iter().product::<u64>() as usize;
             let layout = TensorLayout::<DynRank>::row_major(out_shape.clone(), dtype);
-            let buf = pool.allocate(layout.buffer_size_bytes())
+            let buf = pool
+                .allocate(layout.buffer_size_bytes())
                 .map_err(|e| EvalError::InvalidInput(format!("pool allocation: {e}")))?;
             let mut out = PoolTensor::from_parts(buf, layout);
 
@@ -434,7 +450,11 @@ impl Operation for ScanOperation {
                     for i in 0..rank {
                         let idx = rem / t_strides[i];
                         rem %= t_strides[i];
-                        let out_idx = if i == axis { idx + axis_offset as usize } else { idx };
+                        let out_idx = if i == axis {
+                            idx + axis_offset as usize
+                        } else {
+                            idx
+                        };
                         out_flat += out_idx * out_strides[i];
                     }
                     out.write_element(out_flat, tv.read_element(flat));
@@ -447,15 +467,23 @@ impl Operation for ScanOperation {
         // --- Main Scan loop ---
 
         // Collect scan input views.
-        let scan_input_views: Vec<_> = self.scan_inputs.iter()
+        let scan_input_views: Vec<_> = self
+            .scan_inputs
+            .iter()
             .map(|x| *inputs.get(&x.unwrap()).unwrap())
             .collect();
 
         let scan_input_axes = if let Some(axes) = &self.scan_input_axes {
-            axes.iter().enumerate().map(|(i, &a)| {
-                if a >= 0 { a as usize }
-                else { (scan_input_views[i].shape().len() as i64 + a) as usize }
-            }).collect::<Vec<_>>()
+            axes.iter()
+                .enumerate()
+                .map(|(i, &a)| {
+                    if a >= 0 {
+                        a as usize
+                    } else {
+                        (scan_input_views[i].shape().len() as i64 + a) as usize
+                    }
+                })
+                .collect::<Vec<_>>()
         } else {
             vec![0; scan_input_views.len()]
         };
@@ -466,15 +494,19 @@ impl Operation for ScanOperation {
         assert!(self.scan_output_directions.is_none());
 
         // Initialize state tensors from inputs.
-        let mut state_tensors: Vec<Option<PoolTensor<'p, DynRank, P>>> = self.state_inputs
+        let mut state_tensors: Vec<Option<PoolTensor<'p, DynRank, P>>> = self
+            .state_inputs
             .iter()
             .map(|x| {
                 x.map(|id| {
                     let view = inputs[&id];
-                    let layout = TensorLayout::<DynRank>::row_major(view.shape().to_vec(), view.dtype());
+                    let layout =
+                        TensorLayout::<DynRank>::row_major(view.shape().to_vec(), view.dtype());
                     let buf = pool.allocate(layout.buffer_size_bytes()).unwrap();
                     let mut t = PoolTensor::from_parts(buf, layout);
-                    for i in 0..view.numel() { t.write_element(i, view.read_element(i)); }
+                    for i in 0..view.numel() {
+                        t.write_element(i, view.read_element(i));
+                    }
                     t
                 })
             })
@@ -485,7 +517,8 @@ impl Operation for ScanOperation {
 
         for iter_idx in 0..iter_count {
             // Slice scan inputs for this iteration.
-            let iter_scan_inputs: Vec<PoolTensor<'p, DynRank, P>> = scan_input_views.iter()
+            let iter_scan_inputs: Vec<PoolTensor<'p, DynRank, P>> = scan_input_views
+                .iter()
                 .enumerate()
                 .map(|(j, view)| slice_and_squeeze(view, scan_input_axes[j], iter_idx, pool))
                 .collect::<Result<Vec<_>, _>>()?;
@@ -496,11 +529,15 @@ impl Operation for ScanOperation {
             for st in &state_tensors {
                 if let Some(t) = st {
                     let view = t.view();
-                    let layout = TensorLayout::<DynRank>::row_major(view.shape().to_vec(), view.dtype());
-                    let buf = pool.allocate(layout.buffer_size_bytes())
+                    let layout =
+                        TensorLayout::<DynRank>::row_major(view.shape().to_vec(), view.dtype());
+                    let buf = pool
+                        .allocate(layout.buffer_size_bytes())
                         .map_err(|e| EvalError::InvalidInput(format!("pool allocation: {e}")))?;
                     let mut copy = PoolTensor::from_parts(buf, layout);
-                    for i in 0..view.numel() { copy.write_element(i, view.read_element(i)); }
+                    for i in 0..view.numel() {
+                        copy.write_element(i, view.read_element(i));
+                    }
                     body_input_views.push((self.body.ordered_inputs[input_idx], copy));
                     input_idx += 1;
                 }
@@ -509,11 +546,15 @@ impl Operation for ScanOperation {
                 body_input_views.push((self.body.ordered_inputs[input_idx], {
                     // Already a pool tensor from slice_and_squeeze.
                     let view = t.view();
-                    let layout = TensorLayout::<DynRank>::row_major(view.shape().to_vec(), view.dtype());
-                    let buf = pool.allocate(layout.buffer_size_bytes())
+                    let layout =
+                        TensorLayout::<DynRank>::row_major(view.shape().to_vec(), view.dtype());
+                    let buf = pool
+                        .allocate(layout.buffer_size_bytes())
                         .map_err(|e| EvalError::InvalidInput(format!("pool allocation: {e}")))?;
                     let mut copy = PoolTensor::from_parts(buf, layout);
-                    for i in 0..view.numel() { copy.write_element(i, view.read_element(i)); }
+                    for i in 0..view.numel() {
+                        copy.write_element(i, view.read_element(i));
+                    }
                     copy
                 }));
                 input_idx += 1;
@@ -521,34 +562,50 @@ impl Operation for ScanOperation {
             // Foreign tensors (outer-scope tensors referenced by the body).
             for foreign_id in self.body.get_foreign_tensor_ids() {
                 if let Some(&view) = inputs.get(&foreign_id) {
-                    let layout = TensorLayout::<DynRank>::row_major(view.shape().to_vec(), view.dtype());
-                    let buf = pool.allocate(layout.buffer_size_bytes())
+                    let layout =
+                        TensorLayout::<DynRank>::row_major(view.shape().to_vec(), view.dtype());
+                    let buf = pool
+                        .allocate(layout.buffer_size_bytes())
                         .map_err(|e| EvalError::InvalidInput(format!("pool allocation: {e}")))?;
                     let mut copy = PoolTensor::from_parts(buf, layout);
-                    for i in 0..view.numel() { copy.write_element(i, view.read_element(i)); }
+                    for i in 0..view.numel() {
+                        copy.write_element(i, view.read_element(i));
+                    }
                     body_input_views.push((foreign_id, copy));
                 }
             }
 
             // Build view refs and call body.eval_pool.
-            let body_views: HashMap<GlobalId, crate::numeric_tensor::NumericTensorView<'_, DynRank>> =
-                body_input_views.iter().map(|(id, t)| (*id, t.view())).collect();
-            let body_view_refs: HashMap<GlobalId, &crate::numeric_tensor::NumericTensorView<'_, DynRank>> =
-                body_views.iter().map(|(&id, v)| (id, v)).collect();
+            let body_views: HashMap<
+                GlobalId,
+                crate::numeric_tensor::NumericTensorView<'_, DynRank>,
+            > = body_input_views
+                .iter()
+                .map(|(id, t)| (*id, t.view()))
+                .collect();
+            let body_view_refs: HashMap<
+                GlobalId,
+                &crate::numeric_tensor::NumericTensorView<'_, DynRank>,
+            > = body_views.iter().map(|(&id, v)| (id, v)).collect();
             let eval_outputs = self.body.eval_pool(&body_view_refs, pool)?;
 
             // Extract state outputs (first N body outputs).
             let new_state: Vec<Option<PoolTensor<'p, DynRank, P>>> = self.body.ordered_outputs
                 [..state_tensors.len()]
                 .iter()
-                .map(|id| eval_outputs.get(id).map(|t| {
-                    let view = t.view();
-                    let layout = TensorLayout::<DynRank>::row_major(view.shape().to_vec(), view.dtype());
-                    let buf = pool.allocate(layout.buffer_size_bytes()).unwrap();
-                    let mut copy = PoolTensor::from_parts(buf, layout);
-                    for i in 0..view.numel() { copy.write_element(i, view.read_element(i)); }
-                    copy
-                }))
+                .map(|id| {
+                    eval_outputs.get(id).map(|t| {
+                        let view = t.view();
+                        let layout =
+                            TensorLayout::<DynRank>::row_major(view.shape().to_vec(), view.dtype());
+                        let buf = pool.allocate(layout.buffer_size_bytes()).unwrap();
+                        let mut copy = PoolTensor::from_parts(buf, layout);
+                        for i in 0..view.numel() {
+                            copy.write_element(i, view.read_element(i));
+                        }
+                        copy
+                    })
+                })
                 .collect();
 
             // Extract scan outputs (remaining body outputs).
@@ -556,11 +613,15 @@ impl Operation for ScanOperation {
             for (i, id) in scan_out_ids.iter().enumerate() {
                 if let Some(t) = eval_outputs.get(id) {
                     let view = t.view();
-                    let layout = TensorLayout::<DynRank>::row_major(view.shape().to_vec(), view.dtype());
-                    let buf = pool.allocate(layout.buffer_size_bytes())
+                    let layout =
+                        TensorLayout::<DynRank>::row_major(view.shape().to_vec(), view.dtype());
+                    let buf = pool
+                        .allocate(layout.buffer_size_bytes())
                         .map_err(|e| EvalError::InvalidInput(format!("pool allocation: {e}")))?;
                     let mut copy = PoolTensor::from_parts(buf, layout);
-                    for j in 0..view.numel() { copy.write_element(j, view.read_element(j)); }
+                    for j in 0..view.numel() {
+                        copy.write_element(j, view.read_element(j));
+                    }
                     accumulated_scan_outputs[i].push(copy);
                 }
             }
@@ -574,11 +635,15 @@ impl Operation for ScanOperation {
             if let Some(out_id) = self.state_outputs[i] {
                 if let Some(t) = st {
                     let view = t.view();
-                    let layout = TensorLayout::<DynRank>::row_major(view.shape().to_vec(), view.dtype());
-                    let buf = pool.allocate(layout.buffer_size_bytes())
+                    let layout =
+                        TensorLayout::<DynRank>::row_major(view.shape().to_vec(), view.dtype());
+                    let buf = pool
+                        .allocate(layout.buffer_size_bytes())
                         .map_err(|e| EvalError::InvalidInput(format!("pool allocation: {e}")))?;
                     let mut copy = PoolTensor::from_parts(buf, layout);
-                    for j in 0..view.numel() { copy.write_element(j, view.read_element(j)); }
+                    for j in 0..view.numel() {
+                        copy.write_element(j, view.read_element(j));
+                    }
                     outputs.insert(out_id, copy);
                 }
             }
@@ -596,7 +661,8 @@ impl Operation for ScanOperation {
                 } else {
                     0
                 };
-                let unsqueezed: Vec<PoolTensor<'p, DynRank, P>> = acc.iter()
+                let unsqueezed: Vec<PoolTensor<'p, DynRank, P>> = acc
+                    .iter()
                     .map(|t| unsqueeze(t, concat_axis, pool))
                     .collect::<Result<Vec<_>, _>>()?;
                 let concatenated = concat_along(&unsqueezed, concat_axis, pool)?;

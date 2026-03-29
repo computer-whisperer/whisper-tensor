@@ -164,7 +164,12 @@ impl Operation for WindowOperation {
 
         // Cast to requested output dtype
         if out_dtype != DType::F32 {
-            w = Cast::push_new(&mut g, w, NumericDType::from_legacy(out_dtype).unwrap(), rng);
+            w = Cast::push_new(
+                &mut g,
+                w,
+                NumericDType::from_legacy(out_dtype).unwrap(),
+                rng,
+            );
         }
 
         let mut output_map = HashMap::new();

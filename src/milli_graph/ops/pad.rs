@@ -2,9 +2,9 @@ use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
 use crate::dtype::DType;
 use crate::graph::GlobalId;
+use crate::migration::numeric_tensor::NumericTensor;
 use crate::milli_graph::MilliOpGraphError;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
-use crate::migration::numeric_tensor::NumericTensor;
 use crate::pool::Pool;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -106,7 +106,10 @@ impl Pad {
     /// Lower Pad (constant mode) to nano ops: Literal + Identity atoms in row-major order.
     ///
     /// All dimensions must be known. Pads tensor must be constant-folded.
-    pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
+    pub fn lower_to_nano(
+        &self,
+        ctx: &mut crate::nano_graph::NanoLoweringContext,
+    ) -> crate::milli_graph::ops::LowerResult {
         use crate::nano_graph::lower::{DimKind, NanoLoweringContext, TensorAtomMap};
         use crate::nano_graph::ops::ScalarOp;
         use crate::nano_graph::pattern::InputRef;
@@ -140,7 +143,10 @@ impl Pad {
         let in_known: Vec<u64> = in_map
             .layout
             .iter()
-            .filter_map(|d| match d { DimKind::Known(s) => Some(*s), _ => None })
+            .filter_map(|d| match d {
+                DimKind::Known(s) => Some(*s),
+                _ => None,
+            })
             .collect();
         if in_known.len() != in_map.layout.len() {
             return crate::milli_graph::ops::LowerResult::Unsupported;
@@ -154,7 +160,13 @@ impl Pad {
             };
             axes_raw
                 .iter()
-                .map(|&a| if a < 0 { (a + rank as i64) as usize } else { a as usize })
+                .map(|&a| {
+                    if a < 0 {
+                        (a + rank as i64) as usize
+                    } else {
+                        a as usize
+                    }
+                })
                 .collect()
         } else {
             (0..rank).collect()
@@ -191,7 +203,10 @@ impl Pad {
         // Extract constant fill value (default 0.0).
         let fill_val = if let Some(cv_id) = self.constant_value {
             if let Some(cv_info) = all_infos.get(&cv_id) {
-                cv_info.to_f64_vec().and_then(|v| v.first().copied()).unwrap_or(0.0)
+                cv_info
+                    .to_f64_vec()
+                    .and_then(|v| v.first().copied())
+                    .unwrap_or(0.0)
             } else {
                 0.0
             }
@@ -208,7 +223,11 @@ impl Pad {
         let out_strides = TensorAtomMap::compute_strides(&out_shape);
 
         // Number of "rows" (all dims except last).
-        let n_rows = if rank > 0 { out_shape[..rank - 1].iter().product::<u64>() } else { 1 };
+        let n_rows = if rank > 0 {
+            out_shape[..rank - 1].iter().product::<u64>()
+        } else {
+            1
+        };
         let last = rank - 1;
         let last_out = out_shape[last] as usize;
         let last_in = in_known[last] as usize;
@@ -235,8 +254,7 @@ impl Pad {
             // Check if this row is entirely in padding (any outer dim in pad region).
             let mut is_pad_row = false;
             for d in 0..rank - 1 {
-                if coords[d] < pad_begin[d] as u64
-                    || coords[d] >= pad_begin[d] as u64 + in_known[d]
+                if coords[d] < pad_begin[d] as u64 || coords[d] >= pad_begin[d] as u64 + in_known[d]
                 {
                     is_pad_row = true;
                     break;
@@ -260,7 +278,9 @@ impl Pad {
                         sym_dims.clone(),
                         vec![],
                     );
-                    if first_base.is_none() { first_base = Some(b); }
+                    if first_base.is_none() {
+                        first_base = Some(b);
+                    }
                     pending_zeros = 0;
                 }
 
@@ -279,7 +299,9 @@ impl Pad {
                     sym_dims.clone(),
                     vec![InputRef::affine(in_row_base, in_last_stride)],
                 );
-                if first_base.is_none() { first_base = Some(b); }
+                if first_base.is_none() {
+                    first_base = Some(b);
+                }
 
                 // Right pad (accumulated, will merge with next row's left or trailing zeros).
                 pending_zeros += last_pe as u64;
@@ -344,7 +366,10 @@ impl MilliOp for Pad {
         &self,
         inputs: &[crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>],
         pool: &'p P2,
-    ) -> Result<Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>, crate::nano_graph::pool_eval::PoolEvalError> {
+    ) -> Result<
+        Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>,
+        crate::nano_graph::pool_eval::PoolEvalError,
+    > {
         use crate::numeric_tensor::{NumericTensor, TensorLayout};
         use crate::tensor_rank::DynRank;
 
@@ -355,7 +380,9 @@ impl MilliOp for Pad {
 
         // Parse pads from inputs[1] (1D i64 tensor).
         let pads_view = &inputs[1];
-        let pads_raw: Vec<i64> = (0..pads_view.numel()).map(|i| pads_view.read_element(i).to_i64()).collect();
+        let pads_raw: Vec<i64> = (0..pads_view.numel())
+            .map(|i| pads_view.read_element(i).to_i64())
+            .collect();
 
         // Get constant value (default 0.0) from inputs[2] if present.
         let const_val: f64 = if self.constant_value.is_some() && inputs.len() > 2 {
@@ -369,10 +396,16 @@ impl MilliOp for Pad {
             let axes_input_idx = if self.constant_value.is_some() { 3 } else { 2 };
             if inputs.len() > axes_input_idx {
                 let ax_view = &inputs[axes_input_idx];
-                (0..ax_view.numel()).map(|i| {
-                    let a = ax_view.read_element(i).to_i64();
-                    if a < 0 { (a + rank as i64) as usize } else { a as usize }
-                }).collect()
+                (0..ax_view.numel())
+                    .map(|i| {
+                        let a = ax_view.read_element(i).to_i64();
+                        if a < 0 {
+                            (a + rank as i64) as usize
+                        } else {
+                            a as usize
+                        }
+                    })
+                    .collect()
             } else {
                 (0..rank).collect()
             }
@@ -383,7 +416,11 @@ impl MilliOp for Pad {
         let num_axes = axes.len();
         if pads_raw.len() != 2 * num_axes {
             return Err(crate::nano_graph::pool_eval::PoolEvalError::Unsupported(
-                format!("Pad: expected pads length {}, got {}", 2 * num_axes, pads_raw.len()),
+                format!(
+                    "Pad: expected pads length {}, got {}",
+                    2 * num_axes,
+                    pads_raw.len()
+                ),
             ));
         }
 
@@ -402,7 +439,8 @@ impl MilliOp for Pad {
 
         let out_numel: usize = out_shape.iter().product::<u64>() as usize;
         let layout = TensorLayout::<DynRank>::row_major(out_shape.clone(), dtype);
-        let buf = pool.allocate(layout.buffer_size_bytes())
+        let buf = pool
+            .allocate(layout.buffer_size_bytes())
             .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
         let mut out = NumericTensor::from_parts(buf, layout);
 
@@ -474,9 +512,7 @@ impl MilliOp for Pad {
             None => {
                 // Pads are symbolic — return same rank with symbolic dims
                 let out_dims: Vec<ScalarInfoTyped<u64>> = (0..rank)
-                    .map(|_| {
-                        ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(symbolic_resolver))
-                    })
+                    .map(|_| ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(symbolic_resolver)))
                     .collect();
                 return Ok(vec![(
                     self.output,
@@ -536,9 +572,7 @@ impl MilliOp for Pad {
             } else {
                 match dim {
                     ScalarInfoTyped::Numeric(v) => {
-                        out_dims.push(ScalarInfoTyped::Numeric(
-                            (*v as i64 + pad_total) as u64,
-                        ));
+                        out_dims.push(ScalarInfoTyped::Numeric((*v as i64 + pad_total) as u64));
                     }
                     ScalarInfoTyped::Symbolic(_) => {
                         out_dims.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(

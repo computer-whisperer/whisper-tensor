@@ -3,10 +3,10 @@ use std::collections::HashMap;
 use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
 use whisper_tensor::dtype::DType;
 use whisper_tensor::milli_graph::MilliOpGraph;
-use whisper_tensor::numeric_dtype::NumericDType;
 use whisper_tensor::milli_graph::ops::{
     ArgMax, Cast, Concat as MilliConcat, Constant, SimpleBinary, Squeeze, Unsqueeze, Where,
 };
+use whisper_tensor::numeric_dtype::NumericDType;
 use whisper_tensor::super_graph::SuperGraphBuilder;
 use whisper_tensor::super_graph::links::{
     SuperGraphLink, SuperGraphLinkDouble, SuperGraphLinkTriple,

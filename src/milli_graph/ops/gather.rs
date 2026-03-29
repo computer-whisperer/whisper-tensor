@@ -1,8 +1,8 @@
-use crate::pool::Pool;
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
 use crate::dtype::DType;
 use crate::graph::{GlobalId, Node};
+use crate::migration::numeric_tensor::NumericTensor;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
 use crate::nano_graph::NanoLoweringContext;
@@ -11,7 +11,7 @@ use crate::nano_graph::ops::{ScalarBinOp, ScalarOp};
 use crate::nano_graph::pattern::InputRef;
 use crate::numeric_dtype::NumericDType;
 use crate::numeric_scalar::NumericScalar;
-use crate::migration::numeric_tensor::NumericTensor;
+use crate::pool::Pool;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -73,7 +73,10 @@ impl Gather {
         self.output
     }
 
-    pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
+    pub fn lower_to_nano(
+        &self,
+        ctx: &mut crate::nano_graph::NanoLoweringContext,
+    ) -> crate::milli_graph::ops::LowerResult {
         let all_infos = ctx.all_infos;
         let data_id = self.data_id();
         let indices_id = self.indices_id();
@@ -460,7 +463,10 @@ impl MilliOp for Gather {
         &self,
         inputs: &[crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>],
         pool: &'p P2,
-    ) -> Result<Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>, crate::nano_graph::pool_eval::PoolEvalError> {
+    ) -> Result<
+        Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>,
+        crate::nano_graph::pool_eval::PoolEvalError,
+    > {
         use crate::numeric_tensor::{NumericTensor, TensorLayout};
         use crate::tensor_rank::DynRank;
 
@@ -470,7 +476,11 @@ impl MilliOp for Gather {
         let idx_shape = indices.shape();
         let rank = data_shape.len();
         let dtype = data.dtype();
-        let axis = if self.axis() < 0 { (self.axis() + rank as i64) as usize } else { self.axis() as usize };
+        let axis = if self.axis() < 0 {
+            (self.axis() + rank as i64) as usize
+        } else {
+            self.axis() as usize
+        };
 
         // Output shape: data_shape[..axis] ++ idx_shape ++ data_shape[axis+1..]
         let mut out_shape = Vec::new();
@@ -480,21 +490,28 @@ impl MilliOp for Gather {
         let out_numel: usize = out_shape.iter().product::<u64>() as usize;
 
         let layout = TensorLayout::<DynRank>::row_major(out_shape.clone(), dtype);
-        let buf = pool.allocate(layout.buffer_size_bytes())
+        let buf = pool
+            .allocate(layout.buffer_size_bytes())
             .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
         let mut out = NumericTensor::from_parts(buf, layout);
 
         // Strides
         let mut data_strides = vec![1usize; rank];
-        for i in (0..rank.saturating_sub(1)).rev() { data_strides[i] = data_strides[i + 1] * data_shape[i + 1] as usize; }
+        for i in (0..rank.saturating_sub(1)).rev() {
+            data_strides[i] = data_strides[i + 1] * data_shape[i + 1] as usize;
+        }
 
         let out_rank = out_shape.len();
         let mut out_strides = vec![1usize; out_rank];
-        for i in (0..out_rank.saturating_sub(1)).rev() { out_strides[i] = out_strides[i + 1] * out_shape[i + 1] as usize; }
+        for i in (0..out_rank.saturating_sub(1)).rev() {
+            out_strides[i] = out_strides[i + 1] * out_shape[i + 1] as usize;
+        }
 
         let idx_ndim = idx_shape.len();
         let mut idx_strides = vec![1usize; idx_ndim];
-        for i in (0..idx_ndim.saturating_sub(1)).rev() { idx_strides[i] = idx_strides[i + 1] * idx_shape[i + 1] as usize; }
+        for i in (0..idx_ndim.saturating_sub(1)).rev() {
+            idx_strides[i] = idx_strides[i + 1] * idx_shape[i + 1] as usize;
+        }
 
         let prefix_dims = axis;
         let suffix_dims = rank - axis - 1;
@@ -530,7 +547,9 @@ impl MilliOp for Gather {
 
             // Look up gather index
             let mut idx_val = indices.read_element(idx_flat).to_i64();
-            if idx_val < 0 { idx_val += axis_len; }
+            if idx_val < 0 {
+                idx_val += axis_len;
+            }
             data_flat += idx_val as usize * data_strides[axis];
 
             out.write_element(out_flat, data.read_element(data_flat));
@@ -539,7 +558,10 @@ impl MilliOp for Gather {
         Ok(vec![out])
     }
 
-    fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
+    fn lower_to_nano(
+        &self,
+        ctx: &mut crate::nano_graph::NanoLoweringContext,
+    ) -> crate::milli_graph::ops::LowerResult {
         Gather::lower_to_nano(self, ctx)
     }
 }
@@ -631,7 +653,9 @@ impl MilliOp for GatherGrad {
         let data_info = known_inputs
             .get(&self.data)
             .ok_or(MilliOpGraphError::UnableToInfer)?;
-        let ranked = data_info.as_ranked().ok_or(MilliOpGraphError::UnableToInfer)?;
+        let ranked = data_info
+            .as_ranked()
+            .ok_or(MilliOpGraphError::UnableToInfer)?;
         let out = crate::tensor_info::TensorInfo::from_dtype_and_shape_scalars(
             data_info.dtype(),
             &ranked.shape(),
@@ -744,7 +768,10 @@ impl MilliOp for GatherGrad {
         &self,
         inputs: &[crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>],
         pool: &'p P2,
-    ) -> Result<Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>, crate::nano_graph::pool_eval::PoolEvalError> {
+    ) -> Result<
+        Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>,
+        crate::nano_graph::pool_eval::PoolEvalError,
+    > {
         use crate::numeric_scalar::NumericScalar;
         use crate::numeric_tensor::{NumericTensor, TensorLayout};
         use crate::tensor_rank::DynRank;
@@ -756,28 +783,41 @@ impl MilliOp for GatherGrad {
         let data_shape = data.shape();
         let rank = data_shape.len();
         let dtype = grad_out.dtype();
-        let axis = if self.axis < 0 { (self.axis + rank as i64) as usize } else { self.axis as usize };
+        let axis = if self.axis < 0 {
+            (self.axis + rank as i64) as usize
+        } else {
+            self.axis as usize
+        };
 
         let out_numel: usize = data_shape.iter().product::<u64>() as usize;
         let layout = TensorLayout::<DynRank>::row_major(data_shape.clone(), dtype);
-        let buf = pool.allocate(layout.buffer_size_bytes())
+        let buf = pool
+            .allocate(layout.buffer_size_bytes())
             .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
         let mut out = NumericTensor::from_parts(buf, layout);
-        for i in 0..out_numel { out.write_element(i, NumericScalar::zero(dtype)); }
+        for i in 0..out_numel {
+            out.write_element(i, NumericScalar::zero(dtype));
+        }
 
         // Strides.
         let mut data_strides = vec![1usize; rank];
-        for i in (0..rank.saturating_sub(1)).rev() { data_strides[i] = data_strides[i + 1] * data_shape[i + 1] as usize; }
+        for i in (0..rank.saturating_sub(1)).rev() {
+            data_strides[i] = data_strides[i + 1] * data_shape[i + 1] as usize;
+        }
 
         let grad_shape = grad_out.shape();
         let grad_rank = grad_shape.len();
         let mut grad_strides = vec![1usize; grad_rank];
-        for i in (0..grad_rank.saturating_sub(1)).rev() { grad_strides[i] = grad_strides[i + 1] * grad_shape[i + 1] as usize; }
+        for i in (0..grad_rank.saturating_sub(1)).rev() {
+            grad_strides[i] = grad_strides[i + 1] * grad_shape[i + 1] as usize;
+        }
 
         let idx_shape = indices.shape();
         let idx_ndim = idx_shape.len();
         let mut idx_strides = vec![1usize; idx_ndim];
-        for i in (0..idx_ndim.saturating_sub(1)).rev() { idx_strides[i] = idx_strides[i + 1] * idx_shape[i + 1] as usize; }
+        for i in (0..idx_ndim.saturating_sub(1)).rev() {
+            idx_strides[i] = idx_strides[i + 1] * idx_shape[i + 1] as usize;
+        }
 
         let prefix_dims = axis;
         let suffix_dims = rank - axis - 1;
@@ -786,7 +826,9 @@ impl MilliOp for GatherGrad {
         for flat_g in 0..grad_out.numel() {
             let val = grad_out.read_element(flat_g);
             // Skip zeros for efficiency.
-            if !val.is_nonzero() { continue; }
+            if !val.is_nonzero() {
+                continue;
+            }
 
             let mut rem = flat_g;
             let mut data_flat = 0usize;
@@ -813,7 +855,9 @@ impl MilliOp for GatherGrad {
             }
 
             let mut idx_val = indices.read_element(idx_flat).to_i64();
-            if idx_val < 0 { idx_val += axis_len; }
+            if idx_val < 0 {
+                idx_val += axis_len;
+            }
             data_flat += idx_val as usize * data_strides[axis];
 
             let cur = out.read_element(data_flat);

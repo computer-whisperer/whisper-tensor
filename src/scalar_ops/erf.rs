@@ -76,7 +76,10 @@ mod tests {
     #[test]
     fn float_erf_special_values() {
         let ft = FloatType::F64;
-        assert!(ft.decode_f64(float_erf(ft.encode_f64(f64::NAN), &ft)).is_nan());
+        assert!(
+            ft.decode_f64(float_erf(ft.encode_f64(f64::NAN), &ft))
+                .is_nan()
+        );
 
         // erf(inf) = 1.0
         let result = ft.decode_f64(float_erf(ft.encode_f64(f64::INFINITY), &ft));

@@ -175,11 +175,7 @@ impl SymbolicGraphMutator {
         shape: &[i64],
         rng: &mut impl Rng,
     ) -> GlobalId {
-        let shape_tensor = self.push_constant_pool_tensor(
-            pool_tensor_i64(shape),
-            None,
-            rng,
-        );
+        let shape_tensor = self.push_constant_pool_tensor(pool_tensor_i64(shape), None, rng);
         let out = self.push_intermediate(name, rng);
         let op = ReshapeOperation::new(input, shape_tensor, out, rng);
         self.push_op(name, AnyOperation::Reshape(op), rng);

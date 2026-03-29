@@ -8,13 +8,13 @@
 use crate::graph::{GlobalId, Node};
 use crate::milli_graph::ops::MilliOp;
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
+use crate::numeric_dtype::NumericDType;
 use crate::numeric_tensor::{NumericTensor as NewNumericTensor, NumericTensorView, TensorLayout};
 use crate::pool::{Pool, SystemPool};
 use crate::scalar_info::{ScalarInfo, ScalarInfoTyped};
 use crate::symbolic_scalar::{SymbolicResolver, SymbolicScalar, SymbolicScalarTyped};
 use crate::tensor_info::{MinimalTensor, ShapedTensor, TensorInfo, TensorInfoRanked};
 use crate::tensor_rank::DynRank;
-use crate::numeric_dtype::NumericDType;
 use std::collections::HashMap;
 use std::fmt;
 
@@ -123,7 +123,9 @@ fn ablate_view<'p, P: Pool + 'p>(
         AblationLevel::Shaped => {
             let first_element = ScalarInfo::Symbolic(SymbolicScalar::new(dtype, resolver));
             TensorInfo::from(ShapedTensor::<DynRank>::new_symbolic(
-                first_element, shape.clone(), resolver,
+                first_element,
+                shape.clone(),
+                resolver,
             ))
         }
         AblationLevel::Ranked => {
@@ -131,11 +133,18 @@ fn ablate_view<'p, P: Pool + 'p>(
             let symbolic_dims: Vec<ScalarInfoTyped<u64>> = (0..rank)
                 .map(|_| ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(resolver)))
                 .collect();
-            TensorInfo::Ranked(TensorInfoRanked::new(first_element, symbolic_dims, resolver))
+            TensorInfo::Ranked(TensorInfoRanked::new(
+                first_element,
+                symbolic_dims,
+                resolver,
+            ))
         }
         AblationLevel::Minimal => {
             let first_element = ScalarInfo::Symbolic(SymbolicScalar::new(dtype, resolver));
-            TensorInfo::from(MinimalTensor::new(first_element, SymbolicScalarTyped::new(resolver)))
+            TensorInfo::from(MinimalTensor::new(
+                first_element,
+                SymbolicScalarTyped::new(resolver),
+            ))
         }
     }
 }
@@ -144,7 +153,10 @@ fn ablate_view<'p, P: Pool + 'p>(
 ///
 /// Returns `Ok(())` if every concrete claim in `inferred` matches `truth`.
 /// Returns `Err(message)` if any concrete claim is wrong.
-fn validate_against_ground_truth(inferred: &TensorInfo<'_, impl crate::pool::Pool>, truth: &GroundTruth) -> Result<(), String> {
+fn validate_against_ground_truth(
+    inferred: &TensorInfo<'_, impl crate::pool::Pool>,
+    truth: &GroundTruth,
+) -> Result<(), String> {
     // Check dtype -- inferred dtype is always concrete in this type system
     let inferred_dtype = inferred.dtype();
     if inferred_dtype != truth.dtype {
@@ -205,10 +217,8 @@ impl MilliOpGraph {
             .map(|(id, info)| (*id, info.as_concrete().expect("must be concrete").clone()))
             .collect();
         let views: Vec<_> = new_tensors.iter().map(|(id, t)| (*id, t.view())).collect();
-        let view_map: HashMap<GlobalId, &NumericTensorView<'_, DynRank>> = views
-            .iter()
-            .map(|(id, view)| (*id, view))
-            .collect();
+        let view_map: HashMap<GlobalId, &NumericTensorView<'_, DynRank>> =
+            views.iter().map(|(id, view)| (*id, view)).collect();
         self.validate_infer_against_pool_eval(&view_map)
     }
 
@@ -393,13 +403,15 @@ mod tests {
         // Build inputs using new types only.
         let layout_x = TensorLayout::<DynRank>::row_major(vec![3], NumericDType::F32);
         let buf_x = SystemPool.allocate(layout_x.buffer_size_bytes()).unwrap();
-        let mut x_tensor: NewNumericTensor<'_, DynRank, SystemPool> = NewNumericTensor::from_parts(buf_x, layout_x);
+        let mut x_tensor: NewNumericTensor<'_, DynRank, SystemPool> =
+            NewNumericTensor::from_parts(buf_x, layout_x);
         for (i, &v) in [1.0f32, 2.0, 3.0].iter().enumerate() {
             x_tensor.write_element(i, NumericScalar::from_f32(v));
         }
         let layout_y = TensorLayout::<DynRank>::row_major(vec![3], NumericDType::F32);
         let buf_y = SystemPool.allocate(layout_y.buffer_size_bytes()).unwrap();
-        let mut y_tensor: NewNumericTensor<'_, DynRank, SystemPool> = NewNumericTensor::from_parts(buf_y, layout_y);
+        let mut y_tensor: NewNumericTensor<'_, DynRank, SystemPool> =
+            NewNumericTensor::from_parts(buf_y, layout_y);
         for (i, &v) in [4.0f32, 5.0, 6.0].iter().enumerate() {
             y_tensor.write_element(i, NumericScalar::from_f32(v));
         }

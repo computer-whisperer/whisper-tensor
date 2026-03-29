@@ -275,7 +275,8 @@ fn main() {
     let input_info = model.get_input_tensor_info().unwrap();
     let tensors_by_name = sym_graph.get_tensors_by_name();
 
-    let mut all_infos: HashMap<GlobalId, TensorInfo<'_, whisper_tensor::pool::SystemPool>> = HashMap::new();
+    let mut all_infos: HashMap<GlobalId, TensorInfo<'_, whisper_tensor::pool::SystemPool>> =
+        HashMap::new();
 
     // User inputs: build concrete tensors and insert as full-data TensorInfo.
     // The lowering's infer_all needs data for user inputs so that downstream
@@ -285,25 +286,34 @@ fn main() {
         let num_elements: u64 = shape.iter().product();
         let shape_usize: Vec<usize> = shape.iter().map(|&d| d as usize).collect();
         println!("Input '{}': {:?} {:?}", name, dtype, shape);
-        let tensor: whisper_tensor::migration::numeric_tensor::NumericTensor<whisper_tensor::DynRank> =
-            match dtype {
-                DType::I64 => {
-                    let data: Vec<i64> = (0..num_elements).map(|i| (i % 64) as i64).collect();
-                    whisper_tensor::migration::numeric_tensor::NumericTensor::from_vec_shape(data, shape_usize)
-                        .unwrap()
-                }
-                DType::F32 => {
-                    let data: Vec<f32> =
-                        (0..num_elements).map(|i| (i % 64) as f32 * 0.01).collect();
-                    whisper_tensor::migration::numeric_tensor::NumericTensor::from_vec_shape(data, shape_usize)
-                        .unwrap()
-                }
-                _ => {
-                    let data: Vec<f32> = vec![0.0; num_elements as usize];
-                    whisper_tensor::migration::numeric_tensor::NumericTensor::from_vec_shape(data, shape_usize)
-                        .unwrap()
-                }
-            };
+        let tensor: whisper_tensor::migration::numeric_tensor::NumericTensor<
+            whisper_tensor::DynRank,
+        > = match dtype {
+            DType::I64 => {
+                let data: Vec<i64> = (0..num_elements).map(|i| (i % 64) as i64).collect();
+                whisper_tensor::migration::numeric_tensor::NumericTensor::from_vec_shape(
+                    data,
+                    shape_usize,
+                )
+                .unwrap()
+            }
+            DType::F32 => {
+                let data: Vec<f32> = (0..num_elements).map(|i| (i % 64) as f32 * 0.01).collect();
+                whisper_tensor::migration::numeric_tensor::NumericTensor::from_vec_shape(
+                    data,
+                    shape_usize,
+                )
+                .unwrap()
+            }
+            _ => {
+                let data: Vec<f32> = vec![0.0; num_elements as usize];
+                whisper_tensor::migration::numeric_tensor::NumericTensor::from_vec_shape(
+                    data,
+                    shape_usize,
+                )
+                .unwrap()
+            }
+        };
         if let Some(id) = tensors_by_name.get(name) {
             all_infos.insert(*id, TensorInfo::from_legacy(&tensor, &SystemPool));
         }
@@ -1024,7 +1034,11 @@ fn main() {
     if std::env::var("RUN_DIRECT").is_ok() {
         // TODO: migrate to pool_eval (nano_graph::eval was deleted).
         let _ = (&output_ranges, &nano_inputs, &output_range_mapping);
-        let _ = (&reverse_output_map, &lower_tensor_map_for_compare, &milli_outputs);
+        let _ = (
+            &reverse_output_map,
+            &lower_tensor_map_for_compare,
+            &milli_outputs,
+        );
         eprintln!("RUN_DIRECT check not yet migrated to pool_eval");
     } // end RUN_DIRECT
 

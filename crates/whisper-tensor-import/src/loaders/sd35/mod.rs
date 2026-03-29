@@ -533,11 +533,21 @@ pub(super) fn build_sd3_interface(
         );
         let combined_context =
             MilliConcat::push_new(&mut mg, vec![clip_hidden_padded, t5_hidden], -2, rng);
-        let combined_context = Cast::push_new(&mut mg, combined_context, NumericDType::from_legacy(model_dtype).unwrap(), rng);
+        let combined_context = Cast::push_new(
+            &mut mg,
+            combined_context,
+            NumericDType::from_legacy(model_dtype).unwrap(),
+            rng,
+        );
 
         // [1,768] + [1,1280] -> [1,2048]
         let pooled = MilliConcat::push_new(&mut mg, vec![l_pooled, g_pooled], -1, rng);
-        let pooled = Cast::push_new(&mut mg, pooled, NumericDType::from_legacy(model_dtype).unwrap(), rng);
+        let pooled = Cast::push_new(
+            &mut mg,
+            pooled,
+            NumericDType::from_legacy(model_dtype).unwrap(),
+            rng,
+        );
 
         mg.set_output_map([
             (combined_context, cond_context.global_id()),
@@ -585,10 +595,20 @@ pub(super) fn build_sd3_interface(
         );
         let combined_context =
             MilliConcat::push_new(&mut mg, vec![clip_hidden_padded, t5_hidden], -2, rng);
-        let combined_context = Cast::push_new(&mut mg, combined_context, NumericDType::from_legacy(model_dtype).unwrap(), rng);
+        let combined_context = Cast::push_new(
+            &mut mg,
+            combined_context,
+            NumericDType::from_legacy(model_dtype).unwrap(),
+            rng,
+        );
 
         let pooled = MilliConcat::push_new(&mut mg, vec![l_pooled, g_pooled], -1, rng);
-        let pooled = Cast::push_new(&mut mg, pooled, NumericDType::from_legacy(model_dtype).unwrap(), rng);
+        let pooled = Cast::push_new(
+            &mut mg,
+            pooled,
+            NumericDType::from_legacy(model_dtype).unwrap(),
+            rng,
+        );
 
         mg.set_output_map([
             (combined_context, uncond_context.global_id()),

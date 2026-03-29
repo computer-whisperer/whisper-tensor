@@ -25,8 +25,13 @@ pub fn build_cast_node(
     let output = builder.new_tensor_link(rng);
     let (mut mg, input_map) = MilliOpGraph::new(std::iter::once(input.global_id()), rng);
     let inp = *input_map.get(&input.global_id()).unwrap();
-    let casted =
-        Cast::push_new_with_label(&mut mg, inp, NumericDType::from_legacy(dtype).unwrap(), Some(format!("cast_to_{dtype:?}")), rng);
+    let casted = Cast::push_new_with_label(
+        &mut mg,
+        inp,
+        NumericDType::from_legacy(dtype).unwrap(),
+        Some(format!("cast_to_{dtype:?}")),
+        rng,
+    );
     mg.set_output_map(std::iter::once((casted, output.global_id())));
     let mut node = SuperGraphNodeMilliOpGraph::new(mg, rng);
     node.label = Some(format!("cast_to_{dtype:?}"));
@@ -95,7 +100,12 @@ pub fn build_input_prep(
     let lat_in = *input_map.get(&inner_latent_in.global_id()).unwrap();
     let ts_in = *input_map.get(&inner_timestep.global_id()).unwrap();
 
-    let lat_cast = Cast::push_new(&mut mg, lat_in, NumericDType::from_legacy(model_dtype).unwrap(), rng);
+    let lat_cast = Cast::push_new(
+        &mut mg,
+        lat_in,
+        NumericDType::from_legacy(model_dtype).unwrap(),
+        rng,
+    );
     let ts_shape = Constant::push_new(
         &mut mg,
         NDArrayNumericTensor::from_vec_shape(vec![1i64], &vec![1]).unwrap(),

@@ -2,8 +2,8 @@ use crate::backends::ModelLoadedTensorCache;
 use crate::backends::eval_backend::EvalBackend;
 use crate::compiler::CompiledProgram;
 use crate::metadata::TokenizerInfo;
-use crate::model::Model;
 use crate::migration::numeric_tensor::NumericTensor;
+use crate::model::Model;
 use crate::super_graph::cache::{SuperGraphCache, SuperGraphTensorCache};
 use crate::super_graph::data::{SuperGraphData, SuperGraphImage};
 use crate::super_graph::links::SuperGraphLink;
@@ -90,9 +90,10 @@ impl TextInferenceTokensInLogitOutInterface {
             super_graph_data
                 .tensor_maps
                 .insert(self.model_input_link, model.get_tensor_store());
-            super_graph_data
-                .tensors
-                .insert(self.token_context_input_link, SharedPoolTensor::from(tokens_tensor));
+            super_graph_data.tensors.insert(
+                self.token_context_input_link,
+                SharedPoolTensor::from(tokens_tensor),
+            );
             super_graph_data.hashes.insert(self.cache_key_input_link, 0);
             super_graph_data
         };
@@ -214,11 +215,14 @@ impl MultimodalLanguageInterface {
                 .tensor_maps
                 .insert(self.model_input_link, model.get_tensor_store());
             super_graph_data.tensors.extend(
-                modal_inputs.into_iter().map(|(k, v)| (k, SharedPoolTensor::from(v)))
+                modal_inputs
+                    .into_iter()
+                    .map(|(k, v)| (k, SharedPoolTensor::from(v))),
             );
-            super_graph_data
-                .tensors
-                .insert(self.token_context_input_link, SharedPoolTensor::from(tokens_tensor));
+            super_graph_data.tensors.insert(
+                self.token_context_input_link,
+                SharedPoolTensor::from(tokens_tensor),
+            );
             super_graph_data.hashes.insert(self.cache_key_input_link, 0);
             super_graph_data
         };
@@ -531,16 +535,27 @@ impl ImageGenerationInterface {
             data.strings
                 .insert(negative_link, negative_prompt.unwrap_or_default());
         }
+        data.tensors.insert(
+            self.initial_latent_input,
+            SharedPoolTensor::from(latent_tensor),
+        );
+        data.tensors.insert(
+            self.timesteps_input,
+            SharedPoolTensor::from(timesteps_tensor),
+        );
         data.tensors
-            .insert(self.initial_latent_input, SharedPoolTensor::from(latent_tensor));
-        data.tensors.insert(self.timesteps_input, SharedPoolTensor::from(timesteps_tensor));
-        data.tensors.insert(self.dt_input, SharedPoolTensor::from(dt_tensor));
-        data.tensors.insert(self.sigmas_input, SharedPoolTensor::from(sigmas_tensor));
-        data.tensors.insert(self.iteration_count_input, SharedPoolTensor::from(iter_count));
+            .insert(self.dt_input, SharedPoolTensor::from(dt_tensor));
+        data.tensors
+            .insert(self.sigmas_input, SharedPoolTensor::from(sigmas_tensor));
+        data.tensors.insert(
+            self.iteration_count_input,
+            SharedPoolTensor::from(iter_count),
+        );
         if let Some(gs_link) = self.guidance_scale_input {
             let guidance =
                 NumericTensor::<DynRank>::from_vec_shape(vec![guidance_scale], vec![]).unwrap();
-            data.tensors.insert(gs_link, SharedPoolTensor::from(guidance));
+            data.tensors
+                .insert(gs_link, SharedPoolTensor::from(guidance));
         }
         for (weight_link, model) in self.model_weights.iter().zip(models.iter()) {
             data.tensor_maps

@@ -1,11 +1,11 @@
-use crate::pool::Pool;
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
 use crate::graph::{GlobalId, Node};
+use crate::migration::numeric_tensor::NumericTensor;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
 use crate::nano_graph::lower::{DimKind, NanoLoweringContext, TensorAtomMap};
-use crate::migration::numeric_tensor::NumericTensor;
+use crate::pool::Pool;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -53,7 +53,10 @@ impl Transpose {
 }
 
 impl Transpose {
-    pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
+    pub fn lower_to_nano(
+        &self,
+        ctx: &mut crate::nano_graph::NanoLoweringContext,
+    ) -> crate::milli_graph::ops::LowerResult {
         let all_infos = ctx.all_infos;
         let in_id = Node::inputs(self).next().unwrap();
         let out_id = Node::outputs(self).next().unwrap();
@@ -203,10 +206,7 @@ impl MilliOp for Transpose {
         known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'p, P>>,
         symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
         pool: &'p P,
-    ) -> Result<
-        Vec<(GlobalId, crate::tensor_info::TensorInfo<'p, P>)>,
-        MilliOpGraphError,
-    > {
+    ) -> Result<Vec<(GlobalId, crate::tensor_info::TensorInfo<'p, P>)>, MilliOpGraphError> {
         use crate::tensor_info::TensorInfo;
 
         let input_info = known_inputs
@@ -266,7 +266,12 @@ impl MilliOp for Transpose {
         };
 
         // If input is concrete, try constant fold via nano+pool_eval path.
-        if let Some(results) = super::constant_fold(self, known_inputs, &[(self.output, out_info.clone_with_pool(pool))], pool) {
+        if let Some(results) = super::constant_fold(
+            self,
+            known_inputs,
+            &[(self.output, out_info.clone_with_pool(pool))],
+            pool,
+        ) {
             return Ok(results);
         }
 
@@ -341,7 +346,10 @@ impl MilliOp for Transpose {
         &self,
         inputs: &[crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>],
         pool: &'p P2,
-    ) -> Result<Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>, crate::nano_graph::pool_eval::PoolEvalError> {
+    ) -> Result<
+        Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>,
+        crate::nano_graph::pool_eval::PoolEvalError,
+    > {
         use crate::numeric_tensor::{NumericTensor, TensorLayout};
         use crate::tensor_rank::DynRank;
 
@@ -362,7 +370,16 @@ impl MilliOp for Transpose {
                 } else {
                     p.clone()
                 };
-                expanded.iter().map(|&x| if x < 0 { (x + rank as i64) as usize } else { x as usize }).collect()
+                expanded
+                    .iter()
+                    .map(|&x| {
+                        if x < 0 {
+                            (x + rank as i64) as usize
+                        } else {
+                            x as usize
+                        }
+                    })
+                    .collect()
             }
         };
 
@@ -383,7 +400,8 @@ impl MilliOp for Transpose {
         }
 
         let layout = TensorLayout::<DynRank>::row_major(output_shape, dtype);
-        let buf = pool.allocate(layout.buffer_size_bytes())
+        let buf = pool
+            .allocate(layout.buffer_size_bytes())
             .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
         let mut out = NumericTensor::from_parts(buf, layout);
 
@@ -410,7 +428,10 @@ impl MilliOp for Transpose {
         Ok(vec![out])
     }
 
-    fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
+    fn lower_to_nano(
+        &self,
+        ctx: &mut crate::nano_graph::NanoLoweringContext,
+    ) -> crate::milli_graph::ops::LowerResult {
         Transpose::lower_to_nano(self, ctx)
     }
 }

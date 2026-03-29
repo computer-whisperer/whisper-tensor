@@ -90,16 +90,17 @@ impl MilliOp for ScatterElements {
             .as_ranked()
             .ok_or(MilliOpGraphError::UnableToInfer)?;
         let shape = ranked.shape();
-        let out_info = crate::tensor_info::TensorInfo::from_dtype_and_shape_scalars(
-            data_info.dtype(),
-            &shape,
-        );
+        let out_info =
+            crate::tensor_info::TensorInfo::from_dtype_and_shape_scalars(data_info.dtype(), &shape);
         Ok(vec![(self.output, out_info)])
     }
 
     fn eval(
         &self,
-        inputs: &HashMap<GlobalId, crate::migration::numeric_tensor::NumericTensor<crate::tensor_rank::DynRank>>,
+        inputs: &HashMap<
+            GlobalId,
+            crate::migration::numeric_tensor::NumericTensor<crate::tensor_rank::DynRank>,
+        >,
         _config: &super::MilliEvalConfig,
         _backend: &mut crate::backends::eval_backend::EvalBackend,
     ) -> super::EvalResult {
@@ -108,7 +109,8 @@ impl MilliOp for ScatterElements {
             .map(|id| crate::symbolic_graph::SharedPoolTensor::from_legacy(&inputs[id]))
             .collect();
         let view_refs: Vec<_> = views.iter().map(|s| s.0.view()).collect();
-        let results = self.eval_new(&view_refs, &crate::pool::SystemPool)
+        let results = self
+            .eval_new(&view_refs, &crate::pool::SystemPool)
             .map_err(|e| MilliOpGraphError::InvalidInput(format!("{e}")))?;
         let output = self.output;
         Ok(Box::new(results.into_iter().map(move |t| {

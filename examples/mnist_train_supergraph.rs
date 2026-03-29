@@ -12,11 +12,11 @@ use rand::RngExt;
 use whisper_tensor::backends::eval_backend::EvalBackend;
 use whisper_tensor::dtype::DType;
 use whisper_tensor::graph::GlobalId;
+use whisper_tensor::migration::numeric_tensor::NumericTensor;
 use whisper_tensor::milli_graph::{
     BackwardGenOptions, LossInputSource, LossWiring, MilliGraphGenOptions, MilliOpGraph,
     OptimizerGenOptions, OptimizerKind,
 };
-use whisper_tensor::migration::numeric_tensor::NumericTensor;
 use whisper_tensor::scalar_info::ScalarInfoTyped;
 use whisper_tensor::super_graph::cache::SuperGraphTensorCache;
 use whisper_tensor::super_graph::data::SuperGraphData;
@@ -474,19 +474,23 @@ fn main() {
     for epoch in 0..num_epochs {
         // Populate outer SuperGraph data
         let mut sg_data = SuperGraphData::new();
-        sg_data
-            .tensors
-            .insert(iter_count_link, SharedPoolTensor::from(iter_count_tensor.clone()));
-        sg_data
-            .tensors
-            .insert(outer_images_link, SharedPoolTensor::from(batched_images.clone()));
-        sg_data
-            .tensors
-            .insert(outer_labels_link, SharedPoolTensor::from(batched_labels.clone()));
+        sg_data.tensors.insert(
+            iter_count_link,
+            SharedPoolTensor::from(iter_count_tensor.clone()),
+        );
+        sg_data.tensors.insert(
+            outer_images_link,
+            SharedPoolTensor::from(batched_images.clone()),
+        );
+        sg_data.tensors.insert(
+            outer_labels_link,
+            SharedPoolTensor::from(batched_labels.clone()),
+        );
         for &(ext_param, outer_initial, _) in &outer_param_links {
-            sg_data
-                .tensors
-                .insert(outer_initial, SharedPoolTensor::from(params[&ext_param].clone()));
+            sg_data.tensors.insert(
+                outer_initial,
+                SharedPoolTensor::from(params[&ext_param].clone()),
+            );
         }
 
         // Run one epoch
@@ -498,11 +502,7 @@ fn main() {
 
         // Extract collected losses and average
         let losses_legacy = results.tensors[&collected_losses_link].to_legacy();
-        let losses: Vec<f32> = losses_legacy
-            .flatten()
-            .unwrap()
-            .try_into()
-            .unwrap();
+        let losses: Vec<f32> = losses_legacy.flatten().unwrap().try_into().unwrap();
         let avg_loss = losses.iter().map(|&v| v as f64).sum::<f64>() / losses.len() as f64;
 
         // Extract updated params

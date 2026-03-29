@@ -16,31 +16,31 @@
 //! Float-only ops (sin, cos, etc.) only have a `float_*` variant.
 
 // Arithmetic
-pub mod add;
-pub mod sub;
-pub mod mul;
-pub mod div;
-pub mod modulo;
-pub mod pow;
-pub mod neg;
 pub mod abs;
-pub mod min;
+pub mod add;
+pub mod div;
 pub mod max;
+pub mod min;
+pub mod modulo;
+pub mod mul;
+pub mod neg;
+pub mod pow;
+pub mod sub;
 
 // Float-only unary
-pub mod exp;
-pub mod ln;
-pub mod sqrt;
-pub mod reciprocal;
-pub mod floor;
 pub mod ceil;
-pub mod round;
 pub mod erf;
+pub mod exp;
+pub mod floor;
+pub mod ln;
+pub mod reciprocal;
+pub mod round;
+pub mod sqrt;
 
 // Trigonometric and hyperbolic
-pub mod trig;
 pub mod sin;
 pub mod tanh;
+pub mod trig;
 
 // Sign
 pub mod sign;
@@ -55,8 +55,8 @@ pub mod logical;
 pub mod bitwise;
 
 // Predicates
-pub mod is_nan;
 pub mod is_inf;
+pub mod is_nan;
 
 use std::fmt;
 

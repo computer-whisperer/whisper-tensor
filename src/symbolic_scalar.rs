@@ -26,8 +26,6 @@ where
         }
     }
 
-
-
     pub(crate) fn to_dyn_type(&self) -> SymbolicScalar {
         SymbolicScalar {
             offset: self.offset,

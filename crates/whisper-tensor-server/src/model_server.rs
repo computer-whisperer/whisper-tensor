@@ -4,8 +4,8 @@ use tokio::sync::{RwLock, watch};
 use whisper_tensor::DynRank;
 use whisper_tensor::compiler::CompiledProgram;
 use whisper_tensor::loader::{ConfigValues, Loader};
-use whisper_tensor::model::Model;
 use whisper_tensor::migration::numeric_tensor::NumericTensor;
+use whisper_tensor::model::Model;
 use whisper_tensor::symbolic_graph::tensor_store::TensorStoreTensorId;
 
 use crate::{

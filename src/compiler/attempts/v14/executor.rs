@@ -12,8 +12,8 @@ use std::time::Instant;
 
 use rayon::prelude::*;
 
-use crate::numeric_dtype::NumericDType;
 use crate::nano_graph::{AtomId, AtomRange};
+use crate::numeric_dtype::NumericDType;
 
 // ─── Inter-phase data types ─────────────────────────────────────────────────
 

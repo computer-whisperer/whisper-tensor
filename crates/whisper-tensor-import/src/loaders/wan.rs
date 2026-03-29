@@ -3,12 +3,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use whisper_tensor::dtype::DType;
 use whisper_tensor::interfaces::{SchedulerType, VideoGenerationInterface};
-use whisper_tensor::numeric_dtype::NumericDType;
 use whisper_tensor::loader::*;
 use whisper_tensor::metadata::TokenizerInfo;
 use whisper_tensor::milli_graph::MilliOpGraph;
 use whisper_tensor::milli_graph::ops::{Cast, SimpleBinary};
 use whisper_tensor::model::Model;
+use whisper_tensor::numeric_dtype::NumericDType;
 use whisper_tensor::super_graph::links::{SuperGraphLinkDouble, SuperGraphLinkTriple};
 use whisper_tensor::super_graph::nodes::{
     SuperGraphNode, SuperGraphNodeMilliOpGraph, SuperGraphNodeModelExecution,

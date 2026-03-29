@@ -38,10 +38,16 @@ mod tests {
         assert!(ft.decode_f64(float_sqrt(ft.encode_f64(-1.0), &ft)).is_nan());
 
         // sqrt(NaN) = NaN
-        assert!(ft.decode_f64(float_sqrt(ft.encode_f64(f64::NAN), &ft)).is_nan());
+        assert!(
+            ft.decode_f64(float_sqrt(ft.encode_f64(f64::NAN), &ft))
+                .is_nan()
+        );
 
         // sqrt(inf) = inf
-        assert_eq!(ft.decode_f64(float_sqrt(ft.encode_f64(f64::INFINITY), &ft)), f64::INFINITY);
+        assert_eq!(
+            ft.decode_f64(float_sqrt(ft.encode_f64(f64::INFINITY), &ft)),
+            f64::INFINITY
+        );
     }
 
     #[test]

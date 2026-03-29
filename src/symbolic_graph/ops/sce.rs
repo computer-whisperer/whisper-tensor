@@ -130,7 +130,8 @@ impl Operation for SoftmaxCrossEntropyLossOperation {
 
         // --- NLL: clamp OOB targets before indexing, then zero out later ---
         let (safe_target, is_ignored) = if let Some(ii) = self.ignore_index {
-            let target_i64 = milli_graph::ops::Cast::push_new(&mut graph, target, NumericDType::I64, rng);
+            let target_i64 =
+                milli_graph::ops::Cast::push_new(&mut graph, target, NumericDType::I64, rng);
             let ii_const = milli_graph::ops::Constant::new_scalar(&mut graph, ii, rng);
             let mask = milli_graph::ops::SimpleBinary::equal(&mut graph, target_i64, ii_const, rng);
             let zero_i64 = milli_graph::ops::Constant::new_scalar(&mut graph, 0i64, rng);

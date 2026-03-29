@@ -1,9 +1,9 @@
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
 use crate::graph::{GlobalId, Node};
+use crate::migration::numeric_tensor::NumericTensor;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
-use crate::migration::numeric_tensor::NumericTensor;
 use crate::pool::Pool;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -63,7 +63,10 @@ impl ArgMax {
         super::remap(&mut self.input, map);
     }
 
-    pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
+    pub fn lower_to_nano(
+        &self,
+        ctx: &mut crate::nano_graph::NanoLoweringContext,
+    ) -> crate::milli_graph::ops::LowerResult {
         let all_infos = ctx.all_infos;
         let data_rank = all_infos
             .get(&self.input)
@@ -100,7 +103,13 @@ impl crate::nano_graph::ops::OpaqueEval for ArgMaxEval {
         &self,
         inputs: &[crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>],
     ) -> Result<
-        Vec<crate::numeric_tensor::NumericTensor<'static, crate::tensor_rank::DynRank, crate::pool::SystemPool>>,
+        Vec<
+            crate::numeric_tensor::NumericTensor<
+                'static,
+                crate::tensor_rank::DynRank,
+                crate::pool::SystemPool,
+            >,
+        >,
         crate::nano_graph::pool_eval::PoolEvalError,
     > {
         use crate::numeric_dtype::NumericDType;
@@ -132,7 +141,8 @@ impl crate::nano_graph::ops::OpaqueEval for ArgMaxEval {
 
         let out_numel: usize = out_shape.iter().product::<u64>() as usize;
         let layout = TensorLayout::<DynRank>::row_major(out_shape.clone(), out_dtype);
-        let buf = POOL.allocate(layout.buffer_size_bytes())
+        let buf = POOL
+            .allocate(layout.buffer_size_bytes())
             .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
         let mut out = NumericTensor::from_parts(buf, layout);
 
@@ -205,7 +215,10 @@ impl MilliOp for ArgMax {
         &self,
         inputs: &[crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>],
         pool: &'p P2,
-    ) -> Result<Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>, crate::nano_graph::pool_eval::PoolEvalError> {
+    ) -> Result<
+        Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>,
+        crate::nano_graph::pool_eval::PoolEvalError,
+    > {
         use crate::numeric_dtype::NumericDType;
         use crate::numeric_tensor::{NumericTensor, TensorLayout};
         use crate::tensor_rank::DynRank;
@@ -213,23 +226,32 @@ impl MilliOp for ArgMax {
         let data = &inputs[0];
         let shape = data.shape();
         let rank = shape.len();
-        let axis = if self.axis < 0 { (self.axis + rank as i64) as usize } else { self.axis as usize };
+        let axis = if self.axis < 0 {
+            (self.axis + rank as i64) as usize
+        } else {
+            self.axis as usize
+        };
         let out_dtype = NumericDType::I64;
 
         // Compute output shape.
         let mut out_shape = Vec::new();
         for (i, &dim) in shape.iter().enumerate() {
             if i == axis {
-                if self.keepdims { out_shape.push(1u64); }
+                if self.keepdims {
+                    out_shape.push(1u64);
+                }
             } else {
                 out_shape.push(dim);
             }
         }
-        if out_shape.is_empty() { out_shape.push(1); }
+        if out_shape.is_empty() {
+            out_shape.push(1);
+        }
 
         let out_numel: usize = out_shape.iter().product::<u64>() as usize;
         let layout = TensorLayout::<DynRank>::row_major(out_shape.clone(), out_dtype);
-        let buf = pool.allocate(layout.buffer_size_bytes())
+        let buf = pool
+            .allocate(layout.buffer_size_bytes())
             .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
         let mut out = NumericTensor::from_parts(buf, layout);
 
@@ -285,7 +307,10 @@ impl MilliOp for ArgMax {
                 }
             }
 
-            out.write_element(out_flat, crate::numeric_scalar::NumericScalar::from_i64(best_idx as i64));
+            out.write_element(
+                out_flat,
+                crate::numeric_scalar::NumericScalar::from_i64(best_idx as i64),
+            );
         }
 
         Ok(vec![out])

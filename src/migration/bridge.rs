@@ -4,6 +4,7 @@
 //! converted to legacy types for code that hasn't been migrated yet, and
 //! legacy outputs can be converted back.
 
+use crate::DynRank as LegacyDynRank;
 use crate::backends::ndarray_backend::NDArrayNumericTensor;
 use crate::migration::numeric_tensor::NumericTensor as LegacyNumericTensor;
 use crate::numeric_dtype::NumericDType;
@@ -11,12 +12,13 @@ use crate::numeric_scalar::NumericScalar;
 use crate::numeric_tensor::{NumericTensor, NumericTensorView};
 use crate::pool::SystemPool;
 use crate::tensor_rank::DynRank;
-use crate::DynRank as LegacyDynRank;
 
 use crate::test_set::POOL;
 
 /// Convert a new-type tensor view to a legacy NumericTensor.
-pub(crate) fn view_to_legacy(view: &NumericTensorView<'_, DynRank>) -> LegacyNumericTensor<LegacyDynRank> {
+pub(crate) fn view_to_legacy(
+    view: &NumericTensorView<'_, DynRank>,
+) -> LegacyNumericTensor<LegacyDynRank> {
     let numel = view.numel();
     let shape: Vec<usize> = view.shape().iter().map(|&d| d as usize).collect();
     let dtype = view.dtype();
@@ -24,7 +26,10 @@ pub(crate) fn view_to_legacy(view: &NumericTensorView<'_, DynRank>) -> LegacyNum
     match dtype {
         NumericDType::F64 => {
             let data: Vec<f64> = (0..numel)
-                .map(|i| { let s = view.read_element(i); f64::from_le_bytes(*s.raw_bits()) })
+                .map(|i| {
+                    let s = view.read_element(i);
+                    f64::from_le_bytes(*s.raw_bits())
+                })
                 .collect();
             LegacyNumericTensor::NDArray(NDArrayNumericTensor::F64(
                 ndarray::ArcArray::from_shape_vec(ndarray::IxDyn(&shape), data).unwrap(),
@@ -68,7 +73,10 @@ pub(crate) fn view_to_legacy(view: &NumericTensorView<'_, DynRank>) -> LegacyNum
         }
         NumericDType::I64 => {
             let data: Vec<i64> = (0..numel)
-                .map(|i| { let s = view.read_element(i); i64::from_le_bytes(*s.raw_bits()) })
+                .map(|i| {
+                    let s = view.read_element(i);
+                    i64::from_le_bytes(*s.raw_bits())
+                })
                 .collect();
             LegacyNumericTensor::NDArray(NDArrayNumericTensor::I64(
                 ndarray::ArcArray::from_shape_vec(ndarray::IxDyn(&shape), data).unwrap(),
@@ -88,7 +96,10 @@ pub(crate) fn view_to_legacy(view: &NumericTensorView<'_, DynRank>) -> LegacyNum
         }
         NumericDType::U8 => {
             let data: Vec<u8> = (0..numel)
-                .map(|i| { let s = view.read_element(i); s.raw_bits()[0] })
+                .map(|i| {
+                    let s = view.read_element(i);
+                    s.raw_bits()[0]
+                })
                 .collect();
             LegacyNumericTensor::NDArray(NDArrayNumericTensor::U8(
                 ndarray::ArcArray::from_shape_vec(ndarray::IxDyn(&shape), data).unwrap(),
@@ -96,7 +107,10 @@ pub(crate) fn view_to_legacy(view: &NumericTensorView<'_, DynRank>) -> LegacyNum
         }
         NumericDType::BOOL => {
             let data: Vec<bool> = (0..numel)
-                .map(|i| { let s = view.read_element(i); s.raw_bits()[0] != 0 })
+                .map(|i| {
+                    let s = view.read_element(i);
+                    s.raw_bits()[0] != 0
+                })
                 .collect();
             LegacyNumericTensor::NDArray(NDArrayNumericTensor::BOOL(
                 ndarray::ArcArray::from_shape_vec(ndarray::IxDyn(&shape), data).unwrap(),
@@ -207,7 +221,11 @@ mod tests {
         let legacy = view_to_legacy(&original.view());
         let back = legacy_to_new(&legacy);
         for i in 0..original.numel() {
-            assert_eq!(original.read_element(i), back.read_element(i), "element {i}");
+            assert_eq!(
+                original.read_element(i),
+                back.read_element(i),
+                "element {i}"
+            );
         }
     }
 
@@ -217,21 +235,27 @@ mod tests {
         let legacy = view_to_legacy(&original.view());
         let back = legacy_to_new(&legacy);
         for i in 0..original.numel() {
-            assert_eq!(original.read_element(i), back.read_element(i), "element {i}");
+            assert_eq!(
+                original.read_element(i),
+                back.read_element(i),
+                "element {i}"
+            );
         }
     }
 
     #[test]
     fn bridge_roundtrip_i64_large() {
         // Values that would lose precision through f64
-        let original = crate::test_set::tensor_i64_shaped(
-            vec![4],
-            &[i64::MAX, i64::MIN, i64::MAX - 1, 0],
-        );
+        let original =
+            crate::test_set::tensor_i64_shaped(vec![4], &[i64::MAX, i64::MIN, i64::MAX - 1, 0]);
         let legacy = view_to_legacy(&original.view());
         let back = legacy_to_new(&legacy);
         for i in 0..original.numel() {
-            assert_eq!(original.read_element(i), back.read_element(i), "element {i}");
+            assert_eq!(
+                original.read_element(i),
+                back.read_element(i),
+                "element {i}"
+            );
         }
     }
 }

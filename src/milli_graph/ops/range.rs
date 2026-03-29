@@ -1,9 +1,9 @@
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
 use crate::graph::GlobalId;
+use crate::migration::numeric_tensor::NumericTensor;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
-use crate::migration::numeric_tensor::NumericTensor;
 use crate::pool::Pool;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -103,15 +103,9 @@ impl MilliOp for Range {
 
         // If all inputs are concrete, compute the output length.
         if let (Some(start_v), Some(end_v), Some(delta_v)) = (
-            start_info
-                .to_f64_vec()
-                .and_then(|v| v.first().copied()),
-            end_info
-                .to_f64_vec()
-                .and_then(|v| v.first().copied()),
-            delta_info
-                .to_f64_vec()
-                .and_then(|v| v.first().copied()),
+            start_info.to_f64_vec().and_then(|v| v.first().copied()),
+            end_info.to_f64_vec().and_then(|v| v.first().copied()),
+            delta_info.to_f64_vec().and_then(|v| v.first().copied()),
         ) {
             let n = ((end_v - start_v) / delta_v).ceil().max(0.0) as u64;
             return Ok(vec![(
@@ -150,7 +144,10 @@ impl MilliOp for Range {
         &self,
         inputs: &[crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>],
         pool: &'p P2,
-    ) -> Result<Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>, crate::nano_graph::pool_eval::PoolEvalError> {
+    ) -> Result<
+        Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>,
+        crate::nano_graph::pool_eval::PoolEvalError,
+    > {
         use crate::numeric_tensor::{NumericTensor, TensorLayout};
         use crate::tensor_rank::DynRank;
 
@@ -166,7 +163,8 @@ impl MilliOp for Range {
         let n = ((end_f - start_f) / delta_f).ceil().max(0.0) as usize;
 
         let layout = TensorLayout::<DynRank>::row_major(vec![n as u64], dtype);
-        let buf = pool.allocate(layout.buffer_size_bytes())
+        let buf = pool
+            .allocate(layout.buffer_size_bytes())
             .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
         let mut out = NumericTensor::from_parts(buf, layout);
 

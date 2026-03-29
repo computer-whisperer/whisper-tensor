@@ -62,7 +62,10 @@ mod tests {
         assert_eq!(ft.decode_f64(float_min(inf, one, &ft)), 1.0);
 
         let neg_inf = ft.encode_f64(f64::NEG_INFINITY);
-        assert_eq!(ft.decode_f64(float_min(neg_inf, one, &ft)), f64::NEG_INFINITY);
+        assert_eq!(
+            ft.decode_f64(float_min(neg_inf, one, &ft)),
+            f64::NEG_INFINITY
+        );
     }
 
     #[test]

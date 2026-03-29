@@ -259,7 +259,6 @@ impl From<u4> for NumericScalar {
     }
 }
 
-
 // ---------------------------------------------------------------------------
 // Tests — every roundtrip asserts bit-equality with the native Rust type path
 // ---------------------------------------------------------------------------
@@ -284,7 +283,17 @@ mod tests {
 
     #[test]
     fn f64_roundtrip() {
-        for v in [0.0f64, 1.0, -1.0, f64::INFINITY, f64::NEG_INFINITY, f64::MIN, f64::MAX, f64::EPSILON, std::f64::consts::PI] {
+        for v in [
+            0.0f64,
+            1.0,
+            -1.0,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::MIN,
+            f64::MAX,
+            f64::EPSILON,
+            std::f64::consts::PI,
+        ] {
             let s = NumericScalar::from_f64(v);
             assert_eq!(s.dtype(), NumericDType::F64);
             assert_bits_eq!(s, &v.to_le_bytes());
@@ -310,7 +319,18 @@ mod tests {
 
     #[test]
     fn f32_roundtrip() {
-        for v in [0.0f32, 1.0, -1.0, f32::INFINITY, f32::NEG_INFINITY, f32::MIN, f32::MAX, f32::EPSILON, std::f32::consts::PI, 3.14] {
+        for v in [
+            0.0f32,
+            1.0,
+            -1.0,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::MIN,
+            f32::MAX,
+            f32::EPSILON,
+            std::f32::consts::PI,
+            3.14,
+        ] {
             let s = NumericScalar::from_f32(v);
             assert_eq!(s.dtype(), NumericDType::F32);
             assert_bits_eq!(s, &v.to_le_bytes());
@@ -326,7 +346,16 @@ mod tests {
 
     #[test]
     fn bf16_roundtrip() {
-        for v in [bf16::ZERO, bf16::ONE, bf16::NEG_ONE, bf16::INFINITY, bf16::NEG_INFINITY, bf16::from_f32(3.14), bf16::MIN_POSITIVE, bf16::MAX] {
+        for v in [
+            bf16::ZERO,
+            bf16::ONE,
+            bf16::NEG_ONE,
+            bf16::INFINITY,
+            bf16::NEG_INFINITY,
+            bf16::from_f32(3.14),
+            bf16::MIN_POSITIVE,
+            bf16::MAX,
+        ] {
             let s = NumericScalar::from_bf16(v);
             assert_eq!(s.dtype(), NumericDType::BF16);
             assert_bits_eq!(s, &v.to_le_bytes());
@@ -335,14 +364,26 @@ mod tests {
 
     #[test]
     fn bf16_nan() {
-        assert_bits_eq!(NumericScalar::from_bf16(bf16::NAN), &bf16::NAN.to_le_bytes());
+        assert_bits_eq!(
+            NumericScalar::from_bf16(bf16::NAN),
+            &bf16::NAN.to_le_bytes()
+        );
     }
 
     // -- f16 --
 
     #[test]
     fn f16_roundtrip() {
-        for v in [f16::ZERO, f16::ONE, f16::NEG_ONE, f16::INFINITY, f16::NEG_INFINITY, f16::from_f32(3.14), f16::MIN_POSITIVE, f16::MAX] {
+        for v in [
+            f16::ZERO,
+            f16::ONE,
+            f16::NEG_ONE,
+            f16::INFINITY,
+            f16::NEG_INFINITY,
+            f16::from_f32(3.14),
+            f16::MIN_POSITIVE,
+            f16::MAX,
+        ] {
             let s = NumericScalar::from_f16(v);
             assert_eq!(s.dtype(), NumericDType::F16);
             assert_bits_eq!(s, &v.to_le_bytes());
@@ -358,7 +399,12 @@ mod tests {
 
     #[test]
     fn f8e4m3fn_roundtrip() {
-        for v in [F8E4M3::ZERO, F8E4M3::ONE, F8E4M3::from(3.0f32), F8E4M3::from(-1.5f32)] {
+        for v in [
+            F8E4M3::ZERO,
+            F8E4M3::ONE,
+            F8E4M3::from(3.0f32),
+            F8E4M3::from(-1.5f32),
+        ] {
             let s = NumericScalar::from_f8e4m3fn(v);
             assert_eq!(s.dtype(), NumericDType::F8E4M3FN);
             assert_eq!(s.bits[0], v.to_bits());
@@ -367,7 +413,12 @@ mod tests {
 
     #[test]
     fn f8e5m2_roundtrip() {
-        for v in [F8E5M2::ZERO, F8E5M2::ONE, F8E5M2::from(2.0f32), F8E5M2::from(-1.0f32)] {
+        for v in [
+            F8E5M2::ZERO,
+            F8E5M2::ONE,
+            F8E5M2::from(2.0f32),
+            F8E5M2::from(-1.0f32),
+        ] {
             let s = NumericScalar::from_f8e5m2(v);
             assert_eq!(s.dtype(), NumericDType::F8E5M2);
             assert_eq!(s.bits[0], v.to_bits());

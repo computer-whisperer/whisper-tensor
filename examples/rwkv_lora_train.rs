@@ -34,11 +34,11 @@ use whisper_tensor::backends::eval_backend::EvalBackend;
 use whisper_tensor::dtype::DType;
 use whisper_tensor::graph::GlobalId;
 use whisper_tensor::metadata::TokenizerInfo;
+use whisper_tensor::migration::numeric_tensor::NumericTensor;
 use whisper_tensor::milli_graph::{
     BackwardGenOptions, LossInputSource, LossWiring, MilliGraphGenOptions, MilliOpGraph,
     OptimizerGenOptions, OptimizerKind,
 };
-use whisper_tensor::migration::numeric_tensor::NumericTensor;
 use whisper_tensor::scalar_info::ScalarInfoTyped;
 use whisper_tensor::super_graph::cache::SuperGraphTensorCache;
 use whisper_tensor::super_graph::data::SuperGraphData;
@@ -577,35 +577,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for epoch in 0..num_epochs {
         let mut sg_data = SuperGraphData::new();
 
-        sg_data
-            .tensors
-            .insert(iter_count_link, SharedPoolTensor::from(iter_count_tensor.clone()));
-        sg_data
-            .tensors
-            .insert(outer_tokens_link, SharedPoolTensor::from(batched_tokens.clone()));
-        sg_data
-            .tensors
-            .insert(outer_targets_link, SharedPoolTensor::from(batched_targets.clone()));
+        sg_data.tensors.insert(
+            iter_count_link,
+            SharedPoolTensor::from(iter_count_tensor.clone()),
+        );
+        sg_data.tensors.insert(
+            outer_tokens_link,
+            SharedPoolTensor::from(batched_tokens.clone()),
+        );
+        sg_data.tensors.insert(
+            outer_targets_link,
+            SharedPoolTensor::from(batched_targets.clone()),
+        );
 
         // Constants (simple inputs)
         for &(outer_link, inner_id) in &constant_simple_inputs {
             if let Some(t) = base_constants.get(&inner_id) {
-                sg_data.tensors.insert(outer_link, SharedPoolTensor::from(t.clone()));
+                sg_data
+                    .tensors
+                    .insert(outer_link, SharedPoolTensor::from(t.clone()));
             }
         }
 
         // LoRA params (state init)
         for &(ext_param, outer_init, _) in &outer_param_links {
-            sg_data
-                .tensors
-                .insert(outer_init, SharedPoolTensor::from(current_params[&ext_param].clone()));
+            sg_data.tensors.insert(
+                outer_init,
+                SharedPoolTensor::from(current_params[&ext_param].clone()),
+            );
         }
 
         // RNN state (state init)
         for &(si, _, outer_init, _) in &outer_rnn_links {
-            sg_data
-                .tensors
-                .insert(outer_init, SharedPoolTensor::from(current_state[&si].clone()));
+            sg_data.tensors.insert(
+                outer_init,
+                SharedPoolTensor::from(current_state[&si].clone()),
+            );
         }
 
         let mut tensor_cache = SuperGraphTensorCache::new();
@@ -616,9 +623,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Extract results
         let losses_legacy = results.tensors[&collected_losses_link].to_legacy();
-        let losses: Vec<f32> = losses_legacy
-            .flatten()?
-            .try_into()?;
+        let losses: Vec<f32> = losses_legacy.flatten()?.try_into()?;
         let avg_loss = losses.iter().map(|&v| v as f64).sum::<f64>() / losses.len() as f64;
         let first_loss = losses.first().copied().unwrap_or(0.0);
         let last_loss = losses.last().copied().unwrap_or(0.0);

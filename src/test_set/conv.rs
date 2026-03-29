@@ -2,8 +2,8 @@
 
 use std::collections::HashMap;
 
-use rand::rngs::SmallRng;
 use rand::SeedableRng;
+use rand::rngs::SmallRng;
 
 use crate::graph::GlobalId;
 use crate::milli_graph::MilliOpGraph;
@@ -46,7 +46,11 @@ fn build_conv_graph(
     let mut rng = rng();
     let ext_input = GlobalId::new(&mut rng);
     let ext_weight = GlobalId::new(&mut rng);
-    let ext_bias = if has_bias { Some(GlobalId::new(&mut rng)) } else { None };
+    let ext_bias = if has_bias {
+        Some(GlobalId::new(&mut rng))
+    } else {
+        None
+    };
 
     let mut ext_ids: Vec<GlobalId> = vec![ext_input, ext_weight];
     if let Some(b) = ext_bias {
@@ -72,7 +76,15 @@ fn build_conv_graph(
         &mut rng,
     );
     graph.set_outputs(vec![out]);
-    (graph, ConvGraphIds { ext_input, ext_weight, ext_bias, out })
+    (
+        graph,
+        ConvGraphIds {
+            ext_input,
+            ext_weight,
+            ext_bias,
+            out,
+        },
+    )
 }
 
 fn conv_data_set(
@@ -84,10 +96,7 @@ fn conv_data_set(
     expected: super::TestTensor,
     tolerance: Tolerance,
 ) -> TestDataSet {
-    let mut inputs = HashMap::from([
-        (ids.ext_input, input),
-        (ids.ext_weight, weight),
-    ]);
+    let mut inputs = HashMap::from([(ids.ext_input, input), (ids.ext_weight, weight)]);
     if let (Some(ext_b), Some(b)) = (ids.ext_bias, bias) {
         inputs.insert(ext_b, b);
     }
@@ -104,11 +113,13 @@ fn conv_data_set(
 // ---------------------------------------------------------------------------
 
 fn conv2d_ref(
-    input: &[f32], in_shape: [usize; 4],   // [N, C_in, IH, IW]
-    weight: &[f32], w_shape: [usize; 4],    // [C_out, C_in, KH, KW]
+    input: &[f32],
+    in_shape: [usize; 4], // [N, C_in, IH, IW]
+    weight: &[f32],
+    w_shape: [usize; 4], // [C_out, C_in, KH, KW]
     bias: Option<&[f32]>,
-    pad: [usize; 4],                         // [top, left, bottom, right]
-    stride: [usize; 2],                      // [sh, sw]
+    pad: [usize; 4],    // [top, left, bottom, right]
+    stride: [usize; 2], // [sh, sw]
 ) -> (Vec<f32>, [usize; 4]) {
     let [n, c_in, ih, iw] = in_shape;
     let [c_out, _w_cin, kh, kw] = w_shape;
@@ -130,17 +141,16 @@ fn conv2d_ref(
                             for kj in 0..kw {
                                 let ih_pos = (ohi * sh + ki) as isize - pt as isize;
                                 let iw_pos = (owi * sw + kj) as isize - pl as isize;
-                                if ih_pos >= 0 && ih_pos < ih as isize
-                                    && iw_pos >= 0 && iw_pos < iw as isize
+                                if ih_pos >= 0
+                                    && ih_pos < ih as isize
+                                    && iw_pos >= 0
+                                    && iw_pos < iw as isize
                                 {
                                     let in_idx = ni * c_in * ih * iw
                                         + ci * ih * iw
                                         + ih_pos as usize * iw
                                         + iw_pos as usize;
-                                    let w_idx = co * c_in * kh * kw
-                                        + ci * kh * kw
-                                        + ki * kw
-                                        + kj;
+                                    let w_idx = co * c_in * kh * kw + ci * kh * kw + ki * kw + kj;
                                     sum += input[in_idx] * weight[w_idx];
                                 }
                             }
@@ -165,7 +175,13 @@ fn conv2d_ref(
 /// 3×3 conv, no padding, stride=1. Input [1,1,5,5], weight [1,1,3,3] → [1,1,3,3].
 fn conv_3x3_no_pad() -> TestCase {
     let (graph, ids) = build_conv_graph(
-        ConvAutoPad::Valid, vec![], 1, vec![3, 3], vec![], vec![1, 1], false,
+        ConvAutoPad::Valid,
+        vec![],
+        1,
+        vec![3, 3],
+        vec![],
+        vec![1, 1],
+        false,
     );
 
     #[rustfmt::skip]
@@ -178,9 +194,13 @@ fn conv_3x3_no_pad() -> TestCase {
     ];
 
     let (expected_vals, out_shape) = conv2d_ref(
-        &input_vals, [1, 1, 5, 5],
-        &weight_vals, [1, 1, 3, 3],
-        None, [0, 0, 0, 0], [1, 1],
+        &input_vals,
+        [1, 1, 5, 5],
+        &weight_vals,
+        [1, 1, 3, 3],
+        None,
+        [0, 0, 0, 0],
+        [1, 1],
     );
 
     let input = tensor_f32_shaped(vec![1, 1, 5, 5], &input_vals);
@@ -194,7 +214,12 @@ fn conv_3x3_no_pad() -> TestCase {
         name: "conv_3x3_no_pad".to_string(),
         graph,
         data_sets: vec![conv_data_set(
-            "f32_1x1x5x5", &ids, input, weight, None, expected,
+            "f32_1x1x5x5",
+            &ids,
+            input,
+            weight,
+            None,
+            expected,
             Tolerance::for_dtype(NumericDType::F32),
         )],
     }
@@ -203,21 +228,27 @@ fn conv_3x3_no_pad() -> TestCase {
 /// 3×3 conv, same padding (SameUpper), stride=1. Input [1,1,5,5] → [1,1,5,5].
 fn conv_3x3_same_pad() -> TestCase {
     let (graph, ids) = build_conv_graph(
-        ConvAutoPad::SameUpper, vec![], 1, vec![3, 3], vec![], vec![1, 1], false,
+        ConvAutoPad::SameUpper,
+        vec![],
+        1,
+        vec![3, 3],
+        vec![],
+        vec![1, 1],
+        false,
     );
 
     let input_vals: Vec<f32> = (0..25).map(|i| (i as f32) * 0.1).collect();
-    let weight_vals: Vec<f32> = vec![
-        1.0, 1.0, 1.0,
-        1.0, 1.0, 1.0,
-        1.0, 1.0, 1.0,
-    ];
+    let weight_vals: Vec<f32> = vec![1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0];
 
     // SameUpper with stride=1, kernel=3: pad_top=1, pad_left=1, pad_bottom=1, pad_right=1
     let (expected_vals, out_shape) = conv2d_ref(
-        &input_vals, [1, 1, 5, 5],
-        &weight_vals, [1, 1, 3, 3],
-        None, [1, 1, 1, 1], [1, 1],
+        &input_vals,
+        [1, 1, 5, 5],
+        &weight_vals,
+        [1, 1, 3, 3],
+        None,
+        [1, 1, 1, 1],
+        [1, 1],
     );
 
     let input = tensor_f32_shaped(vec![1, 1, 5, 5], &input_vals);
@@ -231,7 +262,12 @@ fn conv_3x3_same_pad() -> TestCase {
         name: "conv_3x3_same_pad".to_string(),
         graph,
         data_sets: vec![conv_data_set(
-            "f32_1x1x5x5_same", &ids, input, weight, None, expected,
+            "f32_1x1x5x5_same",
+            &ids,
+            input,
+            weight,
+            None,
+            expected,
             Tolerance::for_dtype(NumericDType::F32),
         )],
     }
@@ -240,20 +276,30 @@ fn conv_3x3_same_pad() -> TestCase {
 /// 1×1 conv, no padding. Input [1,3,4,4], weight [2,3,1,1] → [1,2,4,4].
 fn conv_1x1() -> TestCase {
     let (graph, ids) = build_conv_graph(
-        ConvAutoPad::Valid, vec![], 1, vec![1, 1], vec![], vec![1, 1], false,
+        ConvAutoPad::Valid,
+        vec![],
+        1,
+        vec![1, 1],
+        vec![],
+        vec![1, 1],
+        false,
     );
 
     let input_vals: Vec<f32> = (0..48).map(|i| (i as f32) * 0.01).collect();
     // 2 output channels, 3 input channels, 1×1 kernel
     let weight_vals: Vec<f32> = vec![
-        1.0, 2.0, 3.0,  // co=0
+        1.0, 2.0, 3.0, // co=0
         -1.0, 0.5, 0.0, // co=1
     ];
 
     let (expected_vals, out_shape) = conv2d_ref(
-        &input_vals, [1, 3, 4, 4],
-        &weight_vals, [2, 3, 1, 1],
-        None, [0, 0, 0, 0], [1, 1],
+        &input_vals,
+        [1, 3, 4, 4],
+        &weight_vals,
+        [2, 3, 1, 1],
+        None,
+        [0, 0, 0, 0],
+        [1, 1],
     );
 
     let input = tensor_f32_shaped(vec![1, 3, 4, 4], &input_vals);
@@ -267,7 +313,12 @@ fn conv_1x1() -> TestCase {
         name: "conv_1x1".to_string(),
         graph,
         data_sets: vec![conv_data_set(
-            "f32_1x3x4x4", &ids, input, weight, None, expected,
+            "f32_1x3x4x4",
+            &ids,
+            input,
+            weight,
+            None,
+            expected,
             Tolerance::for_dtype(NumericDType::F32),
         )],
     }
@@ -276,20 +327,26 @@ fn conv_1x1() -> TestCase {
 /// 3×3 conv, stride=2, no padding. Input [1,1,6,6], weight [1,1,3,3] → [1,1,2,2].
 fn conv_3x3_stride2_no_pad() -> TestCase {
     let (graph, ids) = build_conv_graph(
-        ConvAutoPad::Valid, vec![], 1, vec![3, 3], vec![], vec![2, 2], false,
+        ConvAutoPad::Valid,
+        vec![],
+        1,
+        vec![3, 3],
+        vec![],
+        vec![2, 2],
+        false,
     );
 
     let input_vals: Vec<f32> = (0..36).map(|i| i as f32).collect();
-    let weight_vals = vec![
-        1.0, 0.0, 0.0,
-        0.0, 1.0, 0.0,
-        0.0, 0.0, 1.0,
-    ];
+    let weight_vals = vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
 
     let (expected_vals, out_shape) = conv2d_ref(
-        &input_vals, [1, 1, 6, 6],
-        &weight_vals, [1, 1, 3, 3],
-        None, [0, 0, 0, 0], [2, 2],
+        &input_vals,
+        [1, 1, 6, 6],
+        &weight_vals,
+        [1, 1, 3, 3],
+        None,
+        [0, 0, 0, 0],
+        [2, 2],
     );
 
     let input = tensor_f32_shaped(vec![1, 1, 6, 6], &input_vals);
@@ -303,7 +360,12 @@ fn conv_3x3_stride2_no_pad() -> TestCase {
         name: "conv_3x3_stride2_no_pad".to_string(),
         graph,
         data_sets: vec![conv_data_set(
-            "f32_1x1x6x6_s2", &ids, input, weight, None, expected,
+            "f32_1x1x6x6_s2",
+            &ids,
+            input,
+            weight,
+            None,
+            expected,
             Tolerance::for_dtype(NumericDType::F32),
         )],
     }
@@ -312,7 +374,13 @@ fn conv_3x3_stride2_no_pad() -> TestCase {
 /// 3×3 conv with bias, same padding. Input [1,2,4,4], weight [2,2,3,3], bias [2] → [1,2,4,4].
 fn conv_with_bias() -> TestCase {
     let (graph, ids) = build_conv_graph(
-        ConvAutoPad::SameUpper, vec![], 1, vec![3, 3], vec![], vec![1, 1], true,
+        ConvAutoPad::SameUpper,
+        vec![],
+        1,
+        vec![3, 3],
+        vec![],
+        vec![1, 1],
+        true,
     );
 
     let input_vals: Vec<f32> = (0..32).map(|i| (i as f32) * 0.1).collect();
@@ -320,9 +388,13 @@ fn conv_with_bias() -> TestCase {
     let bias_vals = vec![0.5, -0.5];
 
     let (expected_vals, out_shape) = conv2d_ref(
-        &input_vals, [1, 2, 4, 4],
-        &weight_vals, [2, 2, 3, 3],
-        Some(&bias_vals), [1, 1, 1, 1], [1, 1],
+        &input_vals,
+        [1, 2, 4, 4],
+        &weight_vals,
+        [2, 2, 3, 3],
+        Some(&bias_vals),
+        [1, 1, 1, 1],
+        [1, 1],
     );
 
     let input = tensor_f32_shaped(vec![1, 2, 4, 4], &input_vals);
@@ -337,7 +409,12 @@ fn conv_with_bias() -> TestCase {
         name: "conv_with_bias".to_string(),
         graph,
         data_sets: vec![conv_data_set(
-            "f32_1x2x4x4_bias", &ids, input, weight, Some(bias), expected,
+            "f32_1x2x4x4_bias",
+            &ids,
+            input,
+            weight,
+            Some(bias),
+            expected,
             Tolerance::for_dtype(NumericDType::F32),
         )],
     }

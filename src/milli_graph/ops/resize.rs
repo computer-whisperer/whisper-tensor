@@ -2,10 +2,10 @@ use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
 use crate::dtype::DType;
 use crate::graph::GlobalId;
+use crate::migration::numeric_tensor::NumericTensor;
 use crate::milli_graph::MilliOpGraph;
 use crate::milli_graph::MilliOpGraphError;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
-use crate::migration::numeric_tensor::NumericTensor;
 use crate::pool::Pool;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -958,8 +958,7 @@ impl MilliOp for Resize {
                         match self.keep_aspect_ratio_policy {
                             ResizeKeepAspectRatioPolicy::Stretch => {
                                 for (i, &axis) in resolved_axes.iter().enumerate() {
-                                    out_dims[axis] =
-                                        ScalarInfoTyped::Numeric(sizes_vec[i] as u64);
+                                    out_dims[axis] = ScalarInfoTyped::Numeric(sizes_vec[i] as u64);
                                 }
                             }
                             ResizeKeepAspectRatioPolicy::NotLarger
@@ -976,19 +975,14 @@ impl MilliOp for Resize {
                                         self.keep_aspect_ratio_policy,
                                         ResizeKeepAspectRatioPolicy::NotLarger
                                     ) {
-                                        scales
-                                            .iter()
-                                            .copied()
-                                            .fold(f32::INFINITY, f32::min)
+                                        scales.iter().copied().fold(f32::INFINITY, f32::min)
                                     } else {
                                         scales.iter().copied().fold(0.0f32, f32::max)
                                     };
                                     for &axis in &resolved_axes {
-                                        let v = round_half_up(
-                                            chosen_scale * input_conc[axis] as f32,
-                                        );
-                                        out_dims[axis] =
-                                            ScalarInfoTyped::Numeric(v as u64);
+                                        let v =
+                                            round_half_up(chosen_scale * input_conc[axis] as f32);
+                                        out_dims[axis] = ScalarInfoTyped::Numeric(v as u64);
                                     }
                                 } else {
                                     // Input shape is partially symbolic — can't compute aspect ratio
@@ -1013,9 +1007,7 @@ impl MilliOp for Resize {
         if let Some(scales_id) = self.scales {
             if let Some(scales_info) = known_inputs.get(&scales_id) {
                 if let Some(scales_f64) = scales_info.to_f64_vec() {
-                    if !scales_f64.is_empty()
-                        && !scales_f64.iter().all(|&x| x == 0.0)
-                    {
+                    if !scales_f64.is_empty() && !scales_f64.iter().all(|&x| x == 0.0) {
                         let mut out_dims = shape.to_vec();
                         for (i, &axis) in resolved_axes.iter().enumerate() {
                             let scale = scales_f64[i] as f32;
@@ -1251,7 +1243,10 @@ impl MilliOp for Resize {
         &self,
         inputs: &[crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>],
         pool: &'p P2,
-    ) -> Result<Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>, crate::nano_graph::pool_eval::PoolEvalError> {
+    ) -> Result<
+        Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>,
+        crate::nano_graph::pool_eval::PoolEvalError,
+    > {
         use crate::numeric_tensor::{NumericTensor, TensorLayout};
         use crate::tensor_rank::DynRank;
 
@@ -1263,21 +1258,31 @@ impl MilliOp for Resize {
         // Parse optional inputs based on field presence
         let mut input_idx = 1;
         let _roi: Vec<f64> = if self.roi.is_some() && inputs.len() > input_idx {
-            let r: Vec<f64> = (0..inputs[input_idx].numel()).map(|i| inputs[input_idx].read_element(i).to_f64()).collect();
+            let r: Vec<f64> = (0..inputs[input_idx].numel())
+                .map(|i| inputs[input_idx].read_element(i).to_f64())
+                .collect();
             input_idx += 1;
             r
         } else {
             vec![]
         };
         let scales_vec: Option<Vec<f64>> = if self.scales.is_some() && inputs.len() > input_idx {
-            let s: Vec<f64> = (0..inputs[input_idx].numel()).map(|i| inputs[input_idx].read_element(i).to_f64()).collect();
+            let s: Vec<f64> = (0..inputs[input_idx].numel())
+                .map(|i| inputs[input_idx].read_element(i).to_f64())
+                .collect();
             input_idx += 1;
-            if s.iter().all(|&x| x == 0.0) { None } else { Some(s) }
+            if s.iter().all(|&x| x == 0.0) {
+                None
+            } else {
+                Some(s)
+            }
         } else {
             None
         };
         let sizes_vec: Option<Vec<i64>> = if self.sizes.is_some() && inputs.len() > input_idx {
-            let s: Vec<i64> = (0..inputs[input_idx].numel()).map(|i| inputs[input_idx].read_element(i).to_i64()).collect();
+            let s: Vec<i64> = (0..inputs[input_idx].numel())
+                .map(|i| inputs[input_idx].read_element(i).to_i64())
+                .collect();
             Some(s)
         } else {
             None
@@ -1288,7 +1293,11 @@ impl MilliOp for Resize {
             if !self.axes.is_empty() {
                 let mut out = input_shape.iter().map(|&d| d as usize).collect::<Vec<_>>();
                 for (i, &a) in self.axes.iter().enumerate() {
-                    let axis = if a < 0 { (a + rank as i64) as usize } else { a as usize };
+                    let axis = if a < 0 {
+                        (a + rank as i64) as usize
+                    } else {
+                        a as usize
+                    };
                     out[axis] = sizes[i] as usize;
                 }
                 out
@@ -1299,12 +1308,20 @@ impl MilliOp for Resize {
             if !self.axes.is_empty() {
                 let mut out = input_shape.iter().map(|&d| d as usize).collect::<Vec<_>>();
                 for (i, &a) in self.axes.iter().enumerate() {
-                    let axis = if a < 0 { (a + rank as i64) as usize } else { a as usize };
+                    let axis = if a < 0 {
+                        (a + rank as i64) as usize
+                    } else {
+                        a as usize
+                    };
                     out[axis] = (input_shape[axis] as f64 * scales[i]).floor() as usize;
                 }
                 out
             } else {
-                input_shape.iter().zip(scales.iter()).map(|(&d, &s)| (d as f64 * s).floor() as usize).collect()
+                input_shape
+                    .iter()
+                    .zip(scales.iter())
+                    .map(|(&d, &s)| (d as f64 * s).floor() as usize)
+                    .collect()
             }
         } else {
             input_shape.iter().map(|&d| d as usize).collect()
@@ -1315,12 +1332,17 @@ impl MilliOp for Resize {
 
         // Compute input/output strides
         let mut in_strides = vec![1usize; rank];
-        for i in (0..rank.saturating_sub(1)).rev() { in_strides[i] = in_strides[i + 1] * input_shape[i + 1] as usize; }
+        for i in (0..rank.saturating_sub(1)).rev() {
+            in_strides[i] = in_strides[i + 1] * input_shape[i + 1] as usize;
+        }
         let mut out_strides = vec![1usize; rank];
-        for i in (0..rank.saturating_sub(1)).rev() { out_strides[i] = out_strides[i + 1] * output_shape[i + 1]; }
+        for i in (0..rank.saturating_sub(1)).rev() {
+            out_strides[i] = out_strides[i + 1] * output_shape[i + 1];
+        }
 
         let layout = TensorLayout::<DynRank>::row_major(out_shape_u64, dtype);
-        let buf = pool.allocate(layout.buffer_size_bytes())
+        let buf = pool
+            .allocate(layout.buffer_size_bytes())
             .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
         let mut out = NumericTensor::from_parts(buf, layout);
 
@@ -1331,7 +1353,11 @@ impl MilliOp for Resize {
             for d in 0..rank {
                 let coord = rem / out_strides[d];
                 rem %= out_strides[d];
-                let scale = if output_shape[d] > 0 { input_shape[d] as f64 / output_shape[d] as f64 } else { 1.0 };
+                let scale = if output_shape[d] > 0 {
+                    input_shape[d] as f64 / output_shape[d] as f64
+                } else {
+                    1.0
+                };
                 let in_coord = ((coord as f64 + 0.5) * scale).floor() as usize;
                 let in_coord = in_coord.min(input_shape[d] as usize - 1);
                 in_flat += in_coord * in_strides[d];

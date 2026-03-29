@@ -23,7 +23,10 @@ mod tests {
         assert!((result - 1.0).abs() < 1e-15);
 
         // ln(e^2) = 2
-        let result = ft.decode_f64(float_ln(ft.encode_f64(std::f64::consts::E * std::f64::consts::E), &ft));
+        let result = ft.decode_f64(float_ln(
+            ft.encode_f64(std::f64::consts::E * std::f64::consts::E),
+            &ft,
+        ));
         assert!((result - 2.0).abs() < 1e-14);
     }
 
@@ -39,16 +42,25 @@ mod tests {
         let ft = FloatType::F64;
 
         // ln(0) = -inf
-        assert_eq!(ft.decode_f64(float_ln(ft.encode_f64(0.0), &ft)), f64::NEG_INFINITY);
+        assert_eq!(
+            ft.decode_f64(float_ln(ft.encode_f64(0.0), &ft)),
+            f64::NEG_INFINITY
+        );
 
         // ln(-1) = NaN
         assert!(ft.decode_f64(float_ln(ft.encode_f64(-1.0), &ft)).is_nan());
 
         // ln(NaN) = NaN
-        assert!(ft.decode_f64(float_ln(ft.encode_f64(f64::NAN), &ft)).is_nan());
+        assert!(
+            ft.decode_f64(float_ln(ft.encode_f64(f64::NAN), &ft))
+                .is_nan()
+        );
 
         // ln(inf) = inf
-        assert_eq!(ft.decode_f64(float_ln(ft.encode_f64(f64::INFINITY), &ft)), f64::INFINITY);
+        assert_eq!(
+            ft.decode_f64(float_ln(ft.encode_f64(f64::INFINITY), &ft)),
+            f64::INFINITY
+        );
     }
 
     #[test]

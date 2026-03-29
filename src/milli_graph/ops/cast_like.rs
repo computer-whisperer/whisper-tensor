@@ -1,10 +1,10 @@
-use crate::pool::Pool;
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
 use crate::graph::GlobalId;
+use crate::migration::numeric_tensor::NumericTensor;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
-use crate::migration::numeric_tensor::NumericTensor;
+use crate::pool::Pool;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -49,7 +49,10 @@ impl CastLike {
 }
 
 impl CastLike {
-    pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
+    pub fn lower_to_nano(
+        &self,
+        ctx: &mut crate::nano_graph::NanoLoweringContext,
+    ) -> crate::milli_graph::ops::LowerResult {
         ctx.lower_identity_passthrough(self)
     }
 
@@ -83,10 +86,7 @@ impl MilliOp for CastLike {
         known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'p, P>>,
         symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
         pool: &'p P,
-    ) -> Result<
-        Vec<(GlobalId, crate::tensor_info::TensorInfo<'p, P>)>,
-        MilliOpGraphError,
-    > {
+    ) -> Result<Vec<(GlobalId, crate::tensor_info::TensorInfo<'p, P>)>, MilliOpGraphError> {
         use crate::tensor_info::TensorInfo;
 
         let data_info = known_inputs
@@ -114,7 +114,12 @@ impl MilliOp for CastLike {
         };
 
         // If data is concrete and we know target dtype, try constant fold via nano+pool_eval path.
-        if let Some(results) = super::constant_fold(self, known_inputs, &[(self.output, out_info.clone_with_pool(pool))], pool) {
+        if let Some(results) = super::constant_fold(
+            self,
+            known_inputs,
+            &[(self.output, out_info.clone_with_pool(pool))],
+            pool,
+        ) {
             return Ok(results);
         }
 
@@ -150,7 +155,10 @@ impl MilliOp for CastLike {
         &self,
         inputs: &[crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>],
         pool: &'p P2,
-    ) -> Result<Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>, crate::nano_graph::pool_eval::PoolEvalError> {
+    ) -> Result<
+        Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>,
+        crate::nano_graph::pool_eval::PoolEvalError,
+    > {
         use crate::numeric_tensor::{NumericTensor, TensorLayout};
         use crate::tensor_rank::DynRank;
 
@@ -159,7 +167,8 @@ impl MilliOp for CastLike {
         let shape = data.shape().clone();
         let numel = data.numel();
         let layout = TensorLayout::<DynRank>::row_major(shape, target_dtype);
-        let buf = pool.allocate(layout.buffer_size_bytes())
+        let buf = pool
+            .allocate(layout.buffer_size_bytes())
             .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
         let mut out = NumericTensor::from_parts(buf, layout);
         for i in 0..numel {
@@ -168,7 +177,10 @@ impl MilliOp for CastLike {
         Ok(vec![out])
     }
 
-    fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
+    fn lower_to_nano(
+        &self,
+        ctx: &mut crate::nano_graph::NanoLoweringContext,
+    ) -> crate::milli_graph::ops::LowerResult {
         CastLike::lower_to_nano(self, ctx)
     }
 }

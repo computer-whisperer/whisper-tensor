@@ -3,10 +3,10 @@ use crate::graph::GlobalId;
 use crate::migration::numeric_tensor::NumericTensor;
 use std::collections::HashMap;
 
-#[cfg(feature = "vulkan")]
-pub mod vulkan_backend;
 pub mod eval_backend;
 pub mod ndarray_backend;
+#[cfg(feature = "vulkan")]
+pub mod vulkan_backend;
 
 #[derive(Default, Clone)]
 pub struct ModelLoadedTensorCache {

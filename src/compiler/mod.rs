@@ -20,7 +20,6 @@ pub fn interpret_milli_graph<'p, P: crate::pool::Pool + 'p>(
     graph.pool_eval(inputs, pool)
 }
 
-
 /// Legacy: map each output tensor to its producing op info.
 pub fn tensor_producers(
     graph: &MilliOpGraph,
@@ -30,12 +29,20 @@ pub fn tensor_producers(
     use crate::graph::{Graph, Node};
     let mut result = std::collections::HashMap::new();
     for &op_id in graph.op_ordering() {
-        let Some(op) = graph.get_node_by_id(&op_id) else { continue };
+        let Some(op) = graph.get_node_by_id(&op_id) else {
+            continue;
+        };
         let kind = op.op_kind();
-        let input_shapes: Vec<(GlobalId, Vec<u64>)> = op.inputs().map(|id| {
-            let shape = intermediates.get(&id).map(|t| t.shape().to_vec()).unwrap_or_default();
-            (id, shape)
-        }).collect();
+        let input_shapes: Vec<(GlobalId, Vec<u64>)> = op
+            .inputs()
+            .map(|id| {
+                let shape = intermediates
+                    .get(&id)
+                    .map(|t| t.shape().to_vec())
+                    .unwrap_or_default();
+                (id, shape)
+            })
+            .collect();
         for out_id in op.outputs() {
             result.insert(out_id, (kind.clone(), input_shapes.clone()));
         }

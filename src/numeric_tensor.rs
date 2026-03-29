@@ -508,12 +508,16 @@ impl<'a, R: Rank, P: Pool + 'a> NumericTensor<'a, R, P> {
 
     /// Read all elements as i64 values. Useful for extracting shape/axes parameters.
     pub fn to_i64_vec(&self) -> Vec<i64> {
-        (0..self.numel()).map(|i| self.read_element(i).to_i64()).collect()
+        (0..self.numel())
+            .map(|i| self.read_element(i).to_i64())
+            .collect()
     }
 
     /// Read all elements as f64 values.
     pub fn to_f64_vec(&self) -> Vec<f64> {
-        (0..self.numel()).map(|i| self.read_element(i).to_f64()).collect()
+        (0..self.numel())
+            .map(|i| self.read_element(i).to_f64())
+            .collect()
     }
 
     pub fn buffer(&self) -> &[u8] {
@@ -642,9 +646,8 @@ mod tests {
     fn tracked_pool_tensor() {
         use crate::pool::TrackedPool;
         let pool = TrackedPool::new(Some(1024));
-        let t =
-            NumericTensor::<DynRank, TrackedPool>::zeros(vec![4, 4], NumericDType::F32, &pool)
-                .unwrap();
+        let t = NumericTensor::<DynRank, TrackedPool>::zeros(vec![4, 4], NumericDType::F32, &pool)
+            .unwrap();
         assert_eq!(pool.bytes_in_use(), 64);
         drop(t);
         assert_eq!(pool.bytes_in_use(), 0);
@@ -656,20 +659,28 @@ mod tests {
         let pool = TrackedPool::new(Some(32));
         let result =
             NumericTensor::<DynRank, TrackedPool>::zeros(vec![100], NumericDType::F32, &pool);
-        assert!(matches!(result, Err(AllocationError::BudgetExceeded { .. })));
+        assert!(matches!(
+            result,
+            Err(AllocationError::BudgetExceeded { .. })
+        ));
     }
 
     #[test]
     fn bf16_tensor() {
         let pool = SystemPool;
-        let mut t =
-            NumericTensor::<DynRank, SystemPool>::zeros(vec![2], NumericDType::BF16, &pool)
-                .unwrap();
+        let mut t = NumericTensor::<DynRank, SystemPool>::zeros(vec![2], NumericDType::BF16, &pool)
+            .unwrap();
         assert_eq!(t.buffer().len(), 4);
         t.write_element(0, NumericScalar::from_bf16(bf16::from_f32(1.5)));
         t.write_element(1, NumericScalar::from_bf16(bf16::from_f32(-2.0)));
-        assert_eq!(t.read_element(0), NumericScalar::from_bf16(bf16::from_f32(1.5)));
-        assert_eq!(t.read_element(1), NumericScalar::from_bf16(bf16::from_f32(-2.0)));
+        assert_eq!(
+            t.read_element(0),
+            NumericScalar::from_bf16(bf16::from_f32(1.5))
+        );
+        assert_eq!(
+            t.read_element(1),
+            NumericScalar::from_bf16(bf16::from_f32(-2.0))
+        );
     }
 
     #[test]
@@ -706,19 +717,18 @@ mod tests {
     #[test]
     fn simple_block_quant_buffer_sizes() {
         // Verify parametric block_bytes matches the legacy PackedFormat values
-        assert_eq!(simple_block_bytes(4, false), 18);  // Q4_0
-        assert_eq!(simple_block_bytes(4, true), 20);   // Q4_1
-        assert_eq!(simple_block_bytes(5, false), 22);  // Q5_0
-        assert_eq!(simple_block_bytes(5, true), 24);   // Q5_1
-        assert_eq!(simple_block_bytes(8, false), 34);  // Q8_0
-        assert_eq!(simple_block_bytes(8, true), 36);   // Q8_1
+        assert_eq!(simple_block_bytes(4, false), 18); // Q4_0
+        assert_eq!(simple_block_bytes(4, true), 20); // Q4_1
+        assert_eq!(simple_block_bytes(5, false), 22); // Q5_0
+        assert_eq!(simple_block_bytes(5, true), 24); // Q5_1
+        assert_eq!(simple_block_bytes(8, false), 34); // Q8_0
+        assert_eq!(simple_block_bytes(8, true), 36); // Q8_1
     }
 
     #[test]
     fn simple_block_quant_layout() {
         // 1024 elements in Q4_0: 1024/32 = 32 blocks × 18 bytes = 576
-        let layout =
-            TensorLayout::<DynRank>::simple_block_quant(vec![1024], 4, false);
+        let layout = TensorLayout::<DynRank>::simple_block_quant(vec![1024], 4, false);
         assert_eq!(layout.buffer_size_bytes(), 576);
         assert_eq!(layout.element_dtype(), NumericDType::F32);
         assert_eq!(layout.numel(), 1024);

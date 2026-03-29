@@ -84,8 +84,14 @@ mod tests {
     #[test]
     fn sin_special() {
         let ft = FloatType::F64;
-        assert!(ft.decode_f64(float_sin(ft.encode_f64(f64::NAN), &ft)).is_nan());
-        assert!(ft.decode_f64(float_sin(ft.encode_f64(f64::INFINITY), &ft)).is_nan());
+        assert!(
+            ft.decode_f64(float_sin(ft.encode_f64(f64::NAN), &ft))
+                .is_nan()
+        );
+        assert!(
+            ft.decode_f64(float_sin(ft.encode_f64(f64::INFINITY), &ft))
+                .is_nan()
+        );
     }
 
     // -- cos --
@@ -105,8 +111,14 @@ mod tests {
     #[test]
     fn cos_special() {
         let ft = FloatType::F64;
-        assert!(ft.decode_f64(float_cos(ft.encode_f64(f64::NAN), &ft)).is_nan());
-        assert!(ft.decode_f64(float_cos(ft.encode_f64(f64::INFINITY), &ft)).is_nan());
+        assert!(
+            ft.decode_f64(float_cos(ft.encode_f64(f64::NAN), &ft))
+                .is_nan()
+        );
+        assert!(
+            ft.decode_f64(float_cos(ft.encode_f64(f64::INFINITY), &ft))
+                .is_nan()
+        );
     }
 
     // -- tan --
@@ -123,7 +135,10 @@ mod tests {
     #[test]
     fn tan_special() {
         let ft = FloatType::F64;
-        assert!(ft.decode_f64(float_tan(ft.encode_f64(f64::NAN), &ft)).is_nan());
+        assert!(
+            ft.decode_f64(float_tan(ft.encode_f64(f64::NAN), &ft))
+                .is_nan()
+        );
     }
 
     // -- asin --
@@ -185,8 +200,14 @@ mod tests {
     #[test]
     fn sinh_special() {
         let ft = FloatType::F64;
-        assert!(ft.decode_f64(float_sinh(ft.encode_f64(f64::NAN), &ft)).is_nan());
-        assert_eq!(ft.decode_f64(float_sinh(ft.encode_f64(f64::INFINITY), &ft)), f64::INFINITY);
+        assert!(
+            ft.decode_f64(float_sinh(ft.encode_f64(f64::NAN), &ft))
+                .is_nan()
+        );
+        assert_eq!(
+            ft.decode_f64(float_sinh(ft.encode_f64(f64::INFINITY), &ft)),
+            f64::INFINITY
+        );
     }
 
     // -- cosh --
@@ -203,8 +224,14 @@ mod tests {
     #[test]
     fn cosh_special() {
         let ft = FloatType::F64;
-        assert!(ft.decode_f64(float_cosh(ft.encode_f64(f64::NAN), &ft)).is_nan());
-        assert_eq!(ft.decode_f64(float_cosh(ft.encode_f64(f64::INFINITY), &ft)), f64::INFINITY);
+        assert!(
+            ft.decode_f64(float_cosh(ft.encode_f64(f64::NAN), &ft))
+                .is_nan()
+        );
+        assert_eq!(
+            ft.decode_f64(float_cosh(ft.encode_f64(f64::INFINITY), &ft)),
+            f64::INFINITY
+        );
     }
 
     // -- tanh --
@@ -224,8 +251,14 @@ mod tests {
     #[test]
     fn tanh_special() {
         let ft = FloatType::F64;
-        assert!(ft.decode_f64(float_tanh(ft.encode_f64(f64::NAN), &ft)).is_nan());
-        assert_eq!(ft.decode_f64(float_tanh(ft.encode_f64(f64::INFINITY), &ft)), 1.0);
+        assert!(
+            ft.decode_f64(float_tanh(ft.encode_f64(f64::NAN), &ft))
+                .is_nan()
+        );
+        assert_eq!(
+            ft.decode_f64(float_tanh(ft.encode_f64(f64::INFINITY), &ft)),
+            1.0
+        );
     }
 
     // -- Cross-format tests --

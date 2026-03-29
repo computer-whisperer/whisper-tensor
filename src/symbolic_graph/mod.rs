@@ -143,7 +143,11 @@ fn query_attribute_graph<'a>(
 /// A pool tensor wrapped in Arc for cheap cloning in graph structures.
 /// Skips serde — serialization goes through the legacy path.
 #[derive(Debug)]
-pub struct SharedPoolTensor(pub std::sync::Arc<crate::numeric_tensor::NumericTensor<'static, DynRank, crate::pool::SystemPool>>);
+pub struct SharedPoolTensor(
+    pub  std::sync::Arc<
+        crate::numeric_tensor::NumericTensor<'static, DynRank, crate::pool::SystemPool>,
+    >,
+);
 
 impl Clone for SharedPoolTensor {
     fn clone(&self) -> Self {
@@ -153,23 +157,31 @@ impl Clone for SharedPoolTensor {
 
 impl serde::Serialize for SharedPoolTensor {
     fn serialize<S: serde::Serializer>(&self, _serializer: S) -> Result<S::Ok, S::Error> {
-        Err(serde::ser::Error::custom("SharedPoolTensor serialization not yet implemented"))
+        Err(serde::ser::Error::custom(
+            "SharedPoolTensor serialization not yet implemented",
+        ))
     }
 }
 
 impl<'de> serde::Deserialize<'de> for SharedPoolTensor {
     fn deserialize<D: serde::Deserializer<'de>>(_deserializer: D) -> Result<Self, D::Error> {
-        Err(serde::de::Error::custom("SharedPoolTensor deserialization not yet implemented"))
+        Err(serde::de::Error::custom(
+            "SharedPoolTensor deserialization not yet implemented",
+        ))
     }
 }
 
 impl SharedPoolTensor {
     /// Convert a legacy `NumericTensor<DynRank>` into a `SharedPoolTensor`.
     pub fn from_legacy(legacy: &crate::migration::numeric_tensor::NumericTensor<DynRank>) -> Self {
-        let pool_tensor = crate::nano_graph::lower::legacy_numeric_to_new(legacy, &crate::pool::SystemPool);
+        let pool_tensor =
+            crate::nano_graph::lower::legacy_numeric_to_new(legacy, &crate::pool::SystemPool);
         // SAFETY: SystemPool allocations are 'static.
-        let static_tensor: crate::numeric_tensor::NumericTensor<'static, DynRank, crate::pool::SystemPool> =
-            unsafe { std::mem::transmute(pool_tensor) };
+        let static_tensor: crate::numeric_tensor::NumericTensor<
+            'static,
+            DynRank,
+            crate::pool::SystemPool,
+        > = unsafe { std::mem::transmute(pool_tensor) };
         Self(std::sync::Arc::new(static_tensor))
     }
 
@@ -199,7 +211,9 @@ fn decode_tensor_proto_to_stored(
         let id = tensor_store.add_tensor(StoredTensor::Inline(pool_tensor));
         Ok(StoredOrNotTensor::Stored(id))
     } else {
-        Ok(StoredOrNotTensor::Inline(SharedPoolTensor(std::sync::Arc::new(pool_tensor))))
+        Ok(StoredOrNotTensor::Inline(SharedPoolTensor(
+            std::sync::Arc::new(pool_tensor),
+        )))
     }
 }
 
@@ -220,9 +234,11 @@ impl StoredOrNotTensor {
             StoredOrNotTensor::Inline(shared) => {
                 // Bridge to legacy for old eval path.
                 let info = crate::tensor_info::TensorInfo::from_view(
-                    &shared.0.view(), &crate::pool::SystemPool,
+                    &shared.0.view(),
+                    &crate::pool::SystemPool,
                 );
-                info.as_numeric().expect("inline tensor must bridge to legacy")
+                info.as_numeric()
+                    .expect("inline tensor must bridge to legacy")
             }
             StoredOrNotTensor::NotStored(tensor) => NumericTensor::NDArray(tensor.clone()),
         }
@@ -676,7 +692,12 @@ impl SymbolicGraph {
                         graph_mutator.new_stored_tensor(self, x, Some(t.name.clone()), rng);
                     }
                     StoredOrNotTensor::Inline(pool_tensor) => {
-                        graph_mutator.new_constant_pool_tensor(self, pool_tensor, Some(t.name.clone()), rng);
+                        graph_mutator.new_constant_pool_tensor(
+                            self,
+                            pool_tensor,
+                            Some(t.name.clone()),
+                            rng,
+                        );
                     }
                     StoredOrNotTensor::NotStored(x) => {
                         graph_mutator.new_constant_tensor(self, x, Some(t.name.clone()), rng);
@@ -1002,16 +1023,17 @@ impl SymbolicGraph {
                 }
 
                 // Build tensor shape map from ONNXTensorInfo
-                let tensor_shapes: HashMap<GlobalId, TensorInfo<'static, crate::pool::SystemPool>> = graph_op
-                    .op
-                    .inputs()
-                    .chain(graph_op.op.outputs())
-                    .filter_map(|id| {
-                        let info = self.get_tensor_info(id)?;
-                        let shape = info.shape.as_ref()?;
-                        Some((id, TensorInfo::from_shape_scalars(shape)))
-                    })
-                    .collect();
+                let tensor_shapes: HashMap<GlobalId, TensorInfo<'static, crate::pool::SystemPool>> =
+                    graph_op
+                        .op
+                        .inputs()
+                        .chain(graph_op.op.outputs())
+                        .filter_map(|id| {
+                            let info = self.get_tensor_info(id)?;
+                            let shape = info.shape.as_ref()?;
+                            Some((id, TensorInfo::from_shape_scalars(shape)))
+                        })
+                        .collect();
 
                 let ctx = BackwardGenContext {
                     output_grads,
@@ -1201,16 +1223,17 @@ impl SymbolicGraph {
         user_inputs: &HashMap<GlobalId, &crate::numeric_tensor::NumericTensorView<'_, DynRank>>,
         tensor_store: &TensorStore,
         pool: &'p P,
-    ) -> Result<
-        HashMap<GlobalId, crate::numeric_tensor::NumericTensor<'p, DynRank, P>>,
-        EvalError,
-    > {
+    ) -> Result<HashMap<GlobalId, crate::numeric_tensor::NumericTensor<'p, DynRank, P>>, EvalError>
+    {
         use crate::numeric_tensor::TensorLayout;
         use crate::pool::{Pool, SystemPool};
 
         // Load initialized tensors (weights/constants) into pool tensors.
         static POOL_S: SystemPool = SystemPool;
-        let bridged_tensors: Vec<(GlobalId, crate::numeric_tensor::NumericTensor<'_, DynRank, SystemPool>)> = {
+        let bridged_tensors: Vec<(
+            GlobalId,
+            crate::numeric_tensor::NumericTensor<'_, DynRank, SystemPool>,
+        )> = {
             let mut out = Vec::new();
             for (&tensor_id, tensor_meta) in &self.tensors {
                 let stored_ref = match &tensor_meta.tensor_type {
@@ -1228,9 +1251,13 @@ impl SymbolicGraph {
                         }
                         StoredOrNotTensor::Inline(shared) => {
                             let src = &*shared.0;
-                            let layout = TensorLayout::<DynRank>::row_major(src.shape().clone(), src.dtype());
+                            let layout = TensorLayout::<DynRank>::row_major(
+                                src.shape().clone(),
+                                src.dtype(),
+                            );
                             if let Ok(buf) = POOL_S.allocate(layout.buffer_size_bytes()) {
-                                let mut tensor = crate::numeric_tensor::NumericTensor::from_parts(buf, layout);
+                                let mut tensor =
+                                    crate::numeric_tensor::NumericTensor::from_parts(buf, layout);
                                 for i in 0..src.numel() {
                                     tensor.write_element(i, src.read_element(i));
                                 }
@@ -1241,9 +1268,13 @@ impl SymbolicGraph {
                             let legacy = NumericTensor::NDArray(nd_tensor.clone());
                             let shared = SharedPoolTensor::from_legacy(&legacy);
                             let src = &*shared.0;
-                            let layout = TensorLayout::<DynRank>::row_major(src.shape().clone(), src.dtype());
+                            let layout = TensorLayout::<DynRank>::row_major(
+                                src.shape().clone(),
+                                src.dtype(),
+                            );
                             if let Ok(buf) = POOL_S.allocate(layout.buffer_size_bytes()) {
-                                let mut tensor = crate::numeric_tensor::NumericTensor::from_parts(buf, layout);
+                                let mut tensor =
+                                    crate::numeric_tensor::NumericTensor::from_parts(buf, layout);
                                 for i in 0..src.numel() {
                                     tensor.write_element(i, src.read_element(i));
                                 }
@@ -1262,8 +1293,10 @@ impl SymbolicGraph {
             .map(|(id, t)| (*id, t.view()))
             .collect();
 
-        let mut input_map: HashMap<GlobalId, &crate::numeric_tensor::NumericTensorView<'_, DynRank>> =
-            HashMap::new();
+        let mut input_map: HashMap<
+            GlobalId,
+            &crate::numeric_tensor::NumericTensorView<'_, DynRank>,
+        > = HashMap::new();
         for (id, view) in &bridged_views {
             input_map.insert(*id, view);
         }
@@ -1343,10 +1376,8 @@ impl SymbolicGraph {
         &self,
         inputs: &HashMap<GlobalId, &crate::numeric_tensor::NumericTensorView<'_, DynRank>>,
         pool: &'p P,
-    ) -> Result<
-        HashMap<GlobalId, crate::numeric_tensor::NumericTensor<'p, DynRank, P>>,
-        EvalError,
-    > {
+    ) -> Result<HashMap<GlobalId, crate::numeric_tensor::NumericTensor<'p, DynRank, P>>, EvalError>
+    {
         use crate::numeric_tensor::NumericTensor as PoolTensor;
 
         // Seed active tensors from inputs. We need owned pool tensors, so copy
@@ -1392,8 +1423,10 @@ impl SymbolicGraph {
                 }
 
                 // Build view-ref map for eval_pool.
-                let view_refs: HashMap<GlobalId, &crate::numeric_tensor::NumericTensorView<'_, DynRank>> =
-                    input_views.iter().map(|(&id, v)| (id, v)).collect();
+                let view_refs: HashMap<
+                    GlobalId,
+                    &crate::numeric_tensor::NumericTensorView<'_, DynRank>,
+                > = input_views.iter().map(|(&id, v)| (id, v)).collect();
 
                 let outputs = op.eval_pool(&view_refs, pool)?;
                 for (tensor_id, value) in outputs {
@@ -1433,7 +1466,10 @@ fn unpack_4bit_pairs(packed: &[u8], numel: usize) -> Vec<u8> {
 /// and 4-bit packed formats. No legacy NDArrayNumericTensor intermediate.
 fn tensor_proto_to_pool_tensor(
     tensor: &onnx::TensorProto,
-) -> Result<crate::numeric_tensor::NumericTensor<'static, DynRank, crate::pool::SystemPool>, ONNXDecodingError> {
+) -> Result<
+    crate::numeric_tensor::NumericTensor<'static, DynRank, crate::pool::SystemPool>,
+    ONNXDecodingError,
+> {
     use crate::numeric_dtype::NumericDType;
     use crate::numeric_scalar::NumericScalar;
     use crate::numeric_tensor::{NumericTensor as NewTensor, TensorLayout};
@@ -1444,12 +1480,15 @@ fn tensor_proto_to_pool_tensor(
             .map_err(|x| ONNXDecodingError::ProtobufDecodeError(anyhow::Error::from(x)))?,
     )?;
     let ndt = NumericDType::from_legacy(legacy_dt).ok_or_else(|| {
-        ONNXDecodingError::UnsupportedONNX(format!("unsupported dtype {legacy_dt:?} for pool tensor"))
+        ONNXDecodingError::UnsupportedONNX(format!(
+            "unsupported dtype {legacy_dt:?} for pool tensor"
+        ))
     })?;
     let shape: Vec<u64> = tensor.dims.iter().map(|x| *x as u64).collect();
     let numel = shape.iter().product::<u64>() as usize;
     let layout = TensorLayout::<DynRank>::row_major(shape.clone(), ndt);
-    let buf = SystemPool.allocate(layout.buffer_size_bytes())
+    let buf = SystemPool
+        .allocate(layout.buffer_size_bytes())
         .map_err(|_| ONNXDecodingError::UnsupportedONNX("allocation failed".into()))?;
     let mut out: NewTensor<'static, DynRank, SystemPool> = NewTensor::from_parts(buf, layout);
 
@@ -1467,7 +1506,9 @@ fn tensor_proto_to_pool_tensor(
             for i in 0..numel {
                 let bit_offset = i * bits;
                 let raw = crate::numeric_scalar::conversions::read_raw_bits(
-                    &tensor.raw_data, bit_offset, bits as u8,
+                    &tensor.raw_data,
+                    bit_offset,
+                    bits as u8,
                 );
                 out.write_element(i, NumericScalar::from_raw_bits(raw, ndt));
             }
@@ -1519,14 +1560,18 @@ pub(crate) fn tensor_proto_to_pool_tensor_from_ndarray(
     use crate::pool::{Pool, SystemPool};
     use crate::tensor_info::TensorInfo;
 
-    let info = TensorInfo::from_legacy(&crate::migration::numeric_tensor::NumericTensor::NDArray(nd.clone()), &SystemPool);
+    let info = TensorInfo::from_legacy(
+        &crate::migration::numeric_tensor::NumericTensor::NDArray(nd.clone()),
+        &SystemPool,
+    );
     let concrete = info.as_concrete().ok_or_else(|| {
         ONNXDecodingError::UnsupportedONNX("cannot bridge NDArray to pool tensor".into())
     })?;
     let ndt = concrete.dtype();
     let shape = concrete.shape().clone();
     let layout = TensorLayout::<DynRank>::row_major(shape, ndt);
-    let buf = SystemPool.allocate(layout.buffer_size_bytes())
+    let buf = SystemPool
+        .allocate(layout.buffer_size_bytes())
         .map_err(|_| ONNXDecodingError::UnsupportedONNX("allocation failed".into()))?;
     let mut tensor: PoolTensor = crate::numeric_tensor::NumericTensor::from_parts(buf, layout);
     for i in 0..concrete.numel() {
@@ -2164,9 +2209,9 @@ impl SymbolicGraphMutator {
                 onnx_name: name.clone(),
                 dtype: Some(value.dtype().to_legacy()),
                 shape: Some(shape),
-                tensor_type: TensorType::Constant(StoredOrNotTensor::Inline(
-                    SharedPoolTensor(std::sync::Arc::new(value))
-                )),
+                tensor_type: TensorType::Constant(StoredOrNotTensor::Inline(SharedPoolTensor(
+                    std::sync::Arc::new(value),
+                ))),
                 global_id,
             },
         );
@@ -3483,8 +3528,14 @@ mod tests {
 
         // Load test data set 0 — load ONNX tensors via legacy bridge then convert to pool.
         let test_data_dir = dir_path.join("test_data_set_0");
-        let mut pool_inputs: HashMap<GlobalId, crate::numeric_tensor::NumericTensor<'static, crate::tensor_rank::DynRank, SystemPool>> = HashMap::new();
-        let mut expected_outputs: HashMap<GlobalId, crate::numeric_tensor::NumericTensor<'static, crate::tensor_rank::DynRank, SystemPool>> = HashMap::new();
+        let mut pool_inputs: HashMap<
+            GlobalId,
+            crate::numeric_tensor::NumericTensor<'static, crate::tensor_rank::DynRank, SystemPool>,
+        > = HashMap::new();
+        let mut expected_outputs: HashMap<
+            GlobalId,
+            crate::numeric_tensor::NumericTensor<'static, crate::tensor_rank::DynRank, SystemPool>,
+        > = HashMap::new();
 
         for entry in std::fs::read_dir(&test_data_dir).unwrap() {
             let entry = entry.unwrap();
@@ -3526,16 +3577,26 @@ mod tests {
         for (id, legacy_tensor) in &initialized {
             let shared = SharedPoolTensor::from_legacy(legacy_tensor);
             // SAFETY: SystemPool is 'static.
-            let pool_tensor: crate::numeric_tensor::NumericTensor<'static, crate::tensor_rank::DynRank, SystemPool> =
-                unsafe { std::mem::transmute(std::sync::Arc::try_unwrap(shared.0).unwrap_or_else(|arc| {
+            let pool_tensor: crate::numeric_tensor::NumericTensor<
+                'static,
+                crate::tensor_rank::DynRank,
+                SystemPool,
+            > = unsafe {
+                std::mem::transmute(std::sync::Arc::try_unwrap(shared.0).unwrap_or_else(|arc| {
                     // Clone the data if Arc has multiple refs
                     let view = arc.view();
                     let mut t = crate::numeric_tensor::NumericTensor::zeros(
-                        view.shape().to_vec(), view.dtype(), &POOL
-                    ).unwrap();
-                    for i in 0..view.numel() { t.write_element(i, view.read_element(i)); }
+                        view.shape().to_vec(),
+                        view.dtype(),
+                        &POOL,
+                    )
+                    .unwrap();
+                    for i in 0..view.numel() {
+                        t.write_element(i, view.read_element(i));
+                    }
                     t
-                })) };
+                }))
+            };
             pool_inputs.insert(*id, pool_tensor);
         }
 
@@ -3547,7 +3608,8 @@ mod tests {
 
         // Compare against ONNX expected outputs.
         for &output_id in &graph.ordered_outputs {
-            let milli_tensor = milli_result.get(&output_id)
+            let milli_tensor = milli_result
+                .get(&output_id)
                 .unwrap_or_else(|| panic!("Missing milli output {output_id:?}"));
 
             if let Some(expected) = expected_outputs.get(&output_id) {
@@ -3555,8 +3617,10 @@ mod tests {
                 let e_view = expected.view();
 
                 assert_eq!(
-                    m_view.shape(), e_view.shape(),
-                    "Shape mismatch for output {:?}", output_id
+                    m_view.shape(),
+                    e_view.shape(),
+                    "Shape mismatch for output {:?}",
+                    output_id
                 );
 
                 for i in 0..m_view.numel() {
@@ -3567,7 +3631,10 @@ mod tests {
                     assert!(
                         diff <= tol,
                         "Value mismatch at index {} for output {:?}: milli={}, expected={}",
-                        i, output_id, m, e
+                        i,
+                        output_id,
+                        m,
+                        e
                     );
                 }
             }
@@ -3732,7 +3799,9 @@ mod tests {
         fn make_f32(shape: Vec<u64>, values: &[f32]) -> PoolTensor<'static, DynRank, SystemPool> {
             static P: SystemPool = SystemPool;
             let mut t = PoolTensor::zeros(shape, NumericDType::F32, &P).unwrap();
-            for (i, &v) in values.iter().enumerate() { t.write_element(i, NumericScalar::from_f32(v)); }
+            for (i, &v) in values.iter().enumerate() {
+                t.write_element(i, NumericScalar::from_f32(v));
+            }
             t
         }
         fn read_f32_vec(t: &PoolTensor<'_, DynRank, impl crate::pool::Pool>) -> Vec<f32> {
@@ -3822,8 +3891,10 @@ mod tests {
         inputs.insert(ext_grad_input, make_f32(vec![2, 4], &[1.0f32; 8]));
 
         static POOL: SystemPool = SystemPool;
-        let views: std::collections::HashMap<_, _> = inputs.iter().map(|(&id, t)| (id, t.view())).collect();
-        let view_refs: std::collections::HashMap<_, _> = views.iter().map(|(&id, v)| (id, v)).collect();
+        let views: std::collections::HashMap<_, _> =
+            inputs.iter().map(|(&id, t)| (id, t.view())).collect();
+        let view_refs: std::collections::HashMap<_, _> =
+            views.iter().map(|(&id, v)| (id, v)).collect();
         let results = combined.pool_eval(&view_refs, &POOL).unwrap();
 
         // Verify loss exists
@@ -3863,7 +3934,9 @@ mod tests {
         fn make_f32(shape: Vec<u64>, values: &[f32]) -> PoolTensor<'static, DynRank, SystemPool> {
             static P: SystemPool = SystemPool;
             let mut t = PoolTensor::zeros(shape, NumericDType::F32, &P).unwrap();
-            for (i, &v) in values.iter().enumerate() { t.write_element(i, NumericScalar::from_f32(v)); }
+            for (i, &v) in values.iter().enumerate() {
+                t.write_element(i, NumericScalar::from_f32(v));
+            }
             t
         }
 

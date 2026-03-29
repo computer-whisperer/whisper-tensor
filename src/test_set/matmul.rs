@@ -4,16 +4,16 @@
 
 use std::collections::HashMap;
 
-use rand::rngs::SmallRng;
 use rand::SeedableRng;
+use rand::rngs::SmallRng;
 
 use crate::graph::GlobalId;
 use crate::milli_graph::MilliOpGraph;
 use crate::milli_graph::ops::MatMul;
 use crate::numeric_dtype::NumericDType;
 
-use super::{TestCase, TestDataSet, Tolerance};
 use super::tensor_f32_shaped;
+use super::{TestCase, TestDataSet, Tolerance};
 
 pub fn build_cases() -> Vec<TestCase> {
     vec![matmul_case()]
@@ -91,18 +91,12 @@ fn matmul_case() -> TestCase {
     // C[1,1] = 4*0 + 5*1 + 6*0 = 5
     // C[1,2] = 4*2 + 5*0 + 6*1 = 14
     // C[1,3] = 4*1 + 5*2 + 6*0 = 14
-    let a_2x3 = tensor_f32_shaped(
-        vec![2, 3],
-        &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
-    );
+    let a_2x3 = tensor_f32_shaped(vec![2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
     let b_3x4 = tensor_f32_shaped(
         vec![3, 4],
         &[1.0, 0.0, 2.0, 1.0, 0.0, 1.0, 0.0, 2.0, 1.0, 0.0, 1.0, 0.0],
     );
-    let expected_2x4 = tensor_f32_shaped(
-        vec![2, 4],
-        &[4.0, 2.0, 5.0, 5.0, 10.0, 5.0, 14.0, 14.0],
-    );
+    let expected_2x4 = tensor_f32_shaped(vec![2, 4], &[4.0, 2.0, 5.0, 5.0, 10.0, 5.0, 14.0, 14.0]);
 
     // 1x1 @ 1x1 → 1x1 (scalar multiply)
     let a_1x1 = tensor_f32_shaped(vec![1, 1], &[3.0]);
@@ -114,13 +108,19 @@ fn matmul_case() -> TestCase {
         graph,
         data_sets: vec![
             matmul_data_set(
-                "f32_2x3_3x4", &ids,
-                a_2x3, b_3x4, expected_2x4,
+                "f32_2x3_3x4",
+                &ids,
+                a_2x3,
+                b_3x4,
+                expected_2x4,
                 Tolerance::for_dtype(NumericDType::F32),
             ),
             matmul_data_set(
-                "f32_1x1_scalar", &ids,
-                a_1x1, b_1x1, expected_1x1,
+                "f32_1x1_scalar",
+                &ids,
+                a_1x1,
+                b_1x1,
+                expected_1x1,
                 Tolerance::for_dtype(NumericDType::F32),
             ),
         ],

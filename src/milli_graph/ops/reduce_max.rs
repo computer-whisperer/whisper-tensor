@@ -1,10 +1,10 @@
-use crate::pool::Pool;
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
 use crate::graph::{GlobalId, Node};
+use crate::migration::numeric_tensor::NumericTensor;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
-use crate::migration::numeric_tensor::NumericTensor;
+use crate::pool::Pool;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use typenum::P1;
@@ -68,7 +68,10 @@ impl ReduceMax {
 }
 
 impl ReduceMax {
-    pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
+    pub fn lower_to_nano(
+        &self,
+        ctx: &mut crate::nano_graph::NanoLoweringContext,
+    ) -> crate::milli_graph::ops::LowerResult {
         use crate::nano_graph::{ReduceKind, ScalarOp};
         ctx.lower_reduce(self, |compute_dt, count, stride| ScalarOp::Reduce {
             kind: ReduceKind::Max,
@@ -111,10 +114,7 @@ impl MilliOp for ReduceMax {
         known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'p, P>>,
         symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
         pool: &'p P,
-    ) -> Result<
-        Vec<(GlobalId, crate::tensor_info::TensorInfo<'p, P>)>,
-        MilliOpGraphError,
-    > {
+    ) -> Result<Vec<(GlobalId, crate::tensor_info::TensorInfo<'p, P>)>, MilliOpGraphError> {
         use crate::scalar_info::ScalarInfoTyped;
         use crate::tensor_info::TensorInfo;
 
@@ -180,7 +180,12 @@ impl MilliOp for ReduceMax {
         };
 
         // Check if all inputs are concrete; if so, try constant fold with output hints.
-        if let Some(results) = super::constant_fold(self, known_inputs, &[(self.output, out_info.clone_with_pool(pool))], pool) {
+        if let Some(results) = super::constant_fold(
+            self,
+            known_inputs,
+            &[(self.output, out_info.clone_with_pool(pool))],
+            pool,
+        ) {
             return Ok(results);
         }
 
@@ -228,7 +233,10 @@ impl MilliOp for ReduceMax {
         &self,
         inputs: &[crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>],
         pool: &'p P2,
-    ) -> Result<Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>, crate::nano_graph::pool_eval::PoolEvalError> {
+    ) -> Result<
+        Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>,
+        crate::nano_graph::pool_eval::PoolEvalError,
+    > {
         use crate::numeric_scalar::NumericScalar;
         let dtype = inputs[0].dtype();
         super::reduce_eval_new(
@@ -243,7 +251,10 @@ impl MilliOp for ReduceMax {
         )
     }
 
-    fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
+    fn lower_to_nano(
+        &self,
+        ctx: &mut crate::nano_graph::NanoLoweringContext,
+    ) -> crate::milli_graph::ops::LowerResult {
         ReduceMax::lower_to_nano(self, ctx)
     }
 }

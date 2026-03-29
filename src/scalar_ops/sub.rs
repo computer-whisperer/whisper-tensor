@@ -47,7 +47,11 @@ pub fn unsigned_sub_wrapping(a: u64, b: u64, it: &IntType) -> u64 {
 pub fn unsigned_sub_saturating(a: u64, b: u64, it: &IntType) -> u64 {
     let va = it.decode_unsigned(a);
     let vb = it.decode_unsigned(b);
-    if vb > va { 0 } else { it.encode_unsigned(va - vb) }
+    if vb > va {
+        0
+    } else {
+        it.encode_unsigned(va - vb)
+    }
 }
 
 #[cfg(test)]

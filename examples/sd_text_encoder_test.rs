@@ -7,8 +7,8 @@ use std::time::Instant;
 use whisper_tensor::DynRank;
 use whisper_tensor::backends::eval_backend::EvalBackend;
 use whisper_tensor::dtype::DType;
-use whisper_tensor::model::Model;
 use whisper_tensor::migration::numeric_tensor::NumericTensor;
+use whisper_tensor::model::Model;
 use whisper_tensor_import::identify_and_load;
 use whisper_tensor_import::onnx_graph::WeightStorageStrategy;
 

@@ -1,11 +1,11 @@
-use crate::pool::Pool;
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
 use crate::dtype::DType;
 use crate::graph::{GlobalId, Node};
+use crate::migration::numeric_tensor::NumericTensor;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
-use crate::migration::numeric_tensor::NumericTensor;
+use crate::pool::Pool;
 use crate::scalar_info::ScalarInfo;
 use crate::symbolic_scalar::{SymbolicResolver, SymbolicScalar, SymbolicScalarTyped};
 use crate::tensor_info::{MinimalTensor, TensorInfo};
@@ -102,11 +102,9 @@ impl MilliOp for NonZero {
             // Build output: [rank, nnz] I64 tensor.
             // Column j contains the multi-index of the j-th nonzero element.
             let out_shape = vec![rank as u64, nnz as u64];
-            let layout =
-                crate::numeric_tensor::TensorLayout::row_major(out_shape, out_dtype);
+            let layout = crate::numeric_tensor::TensorLayout::row_major(out_shape, out_dtype);
             if let Ok(buf) = pool.allocate(layout.buffer_size_bytes()) {
-                let mut out_tensor =
-                    crate::numeric_tensor::NumericTensor::from_parts(buf, layout);
+                let mut out_tensor = crate::numeric_tensor::NumericTensor::from_parts(buf, layout);
 
                 // Compute row-major strides for decomposing flat index → multi-index.
                 let mut strides = vec![1usize; rank];
@@ -154,7 +152,10 @@ impl MilliOp for NonZero {
         &self,
         inputs: &[crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>],
         pool: &'p P2,
-    ) -> Result<Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>, crate::nano_graph::pool_eval::PoolEvalError> {
+    ) -> Result<
+        Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>,
+        crate::nano_graph::pool_eval::PoolEvalError,
+    > {
         use crate::numeric_dtype::NumericDType;
         use crate::numeric_scalar::NumericScalar;
         use crate::numeric_tensor::{NumericTensor, TensorLayout};
@@ -173,7 +174,8 @@ impl MilliOp for NonZero {
         // Output: [rank, nnz] I64.
         let out_shape = vec![rank as u64, nnz as u64];
         let layout = TensorLayout::<DynRank>::row_major(out_shape, NumericDType::I64);
-        let buf = pool.allocate(layout.buffer_size_bytes())
+        let buf = pool
+            .allocate(layout.buffer_size_bytes())
             .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
         let mut out = NumericTensor::from_parts(buf, layout);
 

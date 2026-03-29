@@ -126,15 +126,9 @@ impl ScalarInfo {
             ScalarInfo::Numeric(x) => {
                 use crate::migration::numeric_scalar::NumericScalar as OldScalar;
                 let old_val = match x.dtype() {
-                    NumericDType::SignedInt(_) | NumericDType::Bool => {
-                        OldScalar::I64(x.to_i64())
-                    }
-                    NumericDType::UnsignedInt(_) => {
-                        OldScalar::U64(x.view().read_raw())
-                    }
-                    NumericDType::Float(_) => {
-                        OldScalar::F64(x.to_f64())
-                    }
+                    NumericDType::SignedInt(_) | NumericDType::Bool => OldScalar::I64(x.to_i64()),
+                    NumericDType::UnsignedInt(_) => OldScalar::U64(x.view().read_raw()),
+                    NumericDType::Float(_) => OldScalar::F64(x.to_f64()),
                 };
                 ScalarInfoTyped::Numeric(T::cast_from_numeric_scalar(&old_val))
             }

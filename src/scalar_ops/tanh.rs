@@ -32,9 +32,18 @@ mod tests {
     #[test]
     fn float_tanh_special_values() {
         let ft = FloatType::F64;
-        assert!(ft.decode_f64(float_tanh(ft.encode_f64(f64::NAN), &ft)).is_nan());
-        assert_eq!(ft.decode_f64(float_tanh(ft.encode_f64(f64::INFINITY), &ft)), 1.0);
-        assert_eq!(ft.decode_f64(float_tanh(ft.encode_f64(f64::NEG_INFINITY), &ft)), -1.0);
+        assert!(
+            ft.decode_f64(float_tanh(ft.encode_f64(f64::NAN), &ft))
+                .is_nan()
+        );
+        assert_eq!(
+            ft.decode_f64(float_tanh(ft.encode_f64(f64::INFINITY), &ft)),
+            1.0
+        );
+        assert_eq!(
+            ft.decode_f64(float_tanh(ft.encode_f64(f64::NEG_INFINITY), &ft)),
+            -1.0
+        );
     }
 
     #[test]

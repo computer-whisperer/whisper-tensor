@@ -13,12 +13,12 @@ use whisper_tensor::compiler::interpret_milli_graph_legacy as interpret_milli_gr
 use whisper_tensor::compiler::op_census;
 use whisper_tensor::dtype::DType;
 use whisper_tensor::graph::GlobalId;
+use whisper_tensor::migration::numeric_scalar::NumericScalar;
+use whisper_tensor::migration::numeric_tensor::NumericTensor;
 use whisper_tensor::model::Model;
 use whisper_tensor::nano_graph::AtomId;
 use whisper_tensor::nano_graph::lower;
 use whisper_tensor::nano_graph::pattern::AtomRange;
-use whisper_tensor::migration::numeric_scalar::NumericScalar;
-use whisper_tensor::migration::numeric_tensor::NumericTensor;
 use whisper_tensor::tensor_info::TensorInfo;
 use whisper_tensor_import::identify_and_load;
 use whisper_tensor_import::onnx_graph::WeightStorageStrategy;
@@ -117,7 +117,8 @@ fn main() {
     println!("  Total input tensors: {}", milli_inputs.len());
 
     // ---- Build TensorInfo for lowering (shapes only for user inputs, full data for weights) ----
-    let mut all_infos: HashMap<GlobalId, TensorInfo<'_, whisper_tensor::pool::SystemPool>> = HashMap::new();
+    let mut all_infos: HashMap<GlobalId, TensorInfo<'_, whisper_tensor::pool::SystemPool>> =
+        HashMap::new();
     for (id, tensor) in &milli_inputs {
         all_infos.insert(*id, TensorInfo::from_legacy(tensor, &SystemPool));
     }

@@ -20,7 +20,13 @@ pub fn float_sign(raw: u64, ft: &FloatType) -> u64 {
 /// Signed integer sign: returns -1, 0, or 1.
 pub fn signed_sign(raw: u64, it: &IntType) -> u64 {
     let v = it.decode_signed(raw);
-    let s = if v > 0 { 1 } else if v < 0 { -1 } else { 0 };
+    let s = if v > 0 {
+        1
+    } else if v < 0 {
+        -1
+    } else {
+        0
+    };
     it.encode_signed(s)
 }
 
@@ -42,9 +48,18 @@ mod tests {
     #[test]
     fn float_sign_special_values() {
         let ft = FloatType::F64;
-        assert!(ft.decode_f64(float_sign(ft.encode_f64(f64::NAN), &ft)).is_nan());
-        assert_eq!(ft.decode_f64(float_sign(ft.encode_f64(f64::INFINITY), &ft)), 1.0);
-        assert_eq!(ft.decode_f64(float_sign(ft.encode_f64(f64::NEG_INFINITY), &ft)), -1.0);
+        assert!(
+            ft.decode_f64(float_sign(ft.encode_f64(f64::NAN), &ft))
+                .is_nan()
+        );
+        assert_eq!(
+            ft.decode_f64(float_sign(ft.encode_f64(f64::INFINITY), &ft)),
+            1.0
+        );
+        assert_eq!(
+            ft.decode_f64(float_sign(ft.encode_f64(f64::NEG_INFINITY), &ft)),
+            -1.0
+        );
     }
 
     #[test]
@@ -60,7 +75,10 @@ mod tests {
     fn signed_sign_basic() {
         let it = IntType::BITS_32;
         assert_eq!(it.decode_signed(signed_sign(it.encode_signed(42), &it)), 1);
-        assert_eq!(it.decode_signed(signed_sign(it.encode_signed(-42), &it)), -1);
+        assert_eq!(
+            it.decode_signed(signed_sign(it.encode_signed(-42), &it)),
+            -1
+        );
         assert_eq!(it.decode_signed(signed_sign(it.encode_signed(0), &it)), 0);
     }
 
@@ -68,6 +86,9 @@ mod tests {
     fn signed_sign_extremes() {
         let it = IntType::BITS_8;
         assert_eq!(it.decode_signed(signed_sign(it.encode_signed(127), &it)), 1);
-        assert_eq!(it.decode_signed(signed_sign(it.encode_signed(-128), &it)), -1);
+        assert_eq!(
+            it.decode_signed(signed_sign(it.encode_signed(-128), &it)),
+            -1
+        );
     }
 }

@@ -111,11 +111,19 @@ impl NumericScalar {
             NumericDType::Float(ft) => Self::from_raw_bits(ft.encode_f64(f64::INFINITY), dtype),
             NumericDType::SignedInt(it) => {
                 // e.g. i8 max = 127 = 2^(bits-1) - 1
-                let max_val = if it.bits >= 64 { i64::MAX as i128 } else { (1i128 << (it.bits - 1)) - 1 };
+                let max_val = if it.bits >= 64 {
+                    i64::MAX as i128
+                } else {
+                    (1i128 << (it.bits - 1)) - 1
+                };
                 Self::from_raw_bits(it.encode_signed(max_val), dtype)
             }
             NumericDType::UnsignedInt(it) => {
-                let max_val = if it.bits >= 64 { u64::MAX as u128 } else { (1u128 << it.bits) - 1 };
+                let max_val = if it.bits >= 64 {
+                    u64::MAX as u128
+                } else {
+                    (1u128 << it.bits) - 1
+                };
                 Self::from_raw_bits(it.encode_unsigned(max_val), dtype)
             }
             NumericDType::Bool => Self::from_raw_bits(1, dtype),

@@ -2,9 +2,9 @@ use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
 use crate::dtype::DType;
 use crate::graph::GlobalId;
+use crate::migration::numeric_tensor::NumericTensor;
 use crate::milli_graph::MilliOpGraphError;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
-use crate::migration::numeric_tensor::NumericTensor;
 use rand::{Rng, RngExt};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -182,7 +182,10 @@ impl MilliOp for RandomNormalLike {
         &self,
         inputs: &[crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>],
         pool: &'p P2,
-    ) -> Result<Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>, crate::nano_graph::pool_eval::PoolEvalError> {
+    ) -> Result<
+        Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>,
+        crate::nano_graph::pool_eval::PoolEvalError,
+    > {
         use crate::numeric_scalar::NumericScalar;
         use crate::numeric_tensor::{NumericTensor, TensorLayout};
         use crate::tensor_rank::DynRank;
@@ -191,12 +194,14 @@ impl MilliOp for RandomNormalLike {
         let shape = input.shape().clone();
         let numel: usize = shape.iter().product::<u64>() as usize;
 
-        let out_dtype = self.dtype
+        let out_dtype = self
+            .dtype
             .and_then(|dt| crate::numeric_dtype::NumericDType::from_legacy(dt))
             .unwrap_or_else(|| input.dtype());
 
         let layout = TensorLayout::<DynRank>::row_major(shape, out_dtype);
-        let buf = pool.allocate(layout.buffer_size_bytes())
+        let buf = pool
+            .allocate(layout.buffer_size_bytes())
             .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
         let mut out = NumericTensor::from_parts(buf, layout);
 

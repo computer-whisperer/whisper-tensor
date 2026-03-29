@@ -28,10 +28,10 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use crate::numeric_dtype::NumericDType;
 use crate::graph::GlobalId;
 use crate::nano_graph::pattern::InputTensor;
 use crate::nano_graph::{AtomGroup, AtomId, AtomRange, InputRef, NanoGraph, ScalarOp, SymDim};
+use crate::numeric_dtype::NumericDType;
 
 use super::types::{Phase, Span};
 
@@ -568,8 +568,14 @@ fn build_span(
     // Build items to insert into span graph, sorted by base_id.
     #[derive(Debug)]
     enum InsertItem {
-        External { base: u64, count: u64, dtype: NumericDType },
-        Literal { gi: usize },
+        External {
+            base: u64,
+            count: u64,
+            dtype: NumericDType,
+        },
+        Literal {
+            gi: usize,
+        },
         Compute(WorkItem),
     }
 
@@ -928,7 +934,12 @@ fn collect_input_tensor_deps(
     }
 }
 
-fn record_external(ranges: &mut BTreeMap<u64, (u64, NumericDType)>, base: u64, count: u64, dtype: NumericDType) {
+fn record_external(
+    ranges: &mut BTreeMap<u64, (u64, NumericDType)>,
+    base: u64,
+    count: u64,
+    dtype: NumericDType,
+) {
     ranges
         .entry(base)
         .and_modify(|(existing_count, _)| {
@@ -937,7 +948,9 @@ fn record_external(ranges: &mut BTreeMap<u64, (u64, NumericDType)>, base: u64, c
         .or_insert((count, dtype));
 }
 
-fn merge_external_ranges(ranges: &BTreeMap<u64, (u64, NumericDType)>) -> Vec<(u64, u64, NumericDType)> {
+fn merge_external_ranges(
+    ranges: &BTreeMap<u64, (u64, NumericDType)>,
+) -> Vec<(u64, u64, NumericDType)> {
     if ranges.is_empty() {
         return vec![];
     }
@@ -1043,8 +1056,8 @@ fn merge_atom_ranges(mut ranges: Vec<AtomRange>) -> Vec<AtomRange> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::numeric_dtype::NumericDType;
     use crate::nano_graph::ops::{ReduceKind, ScalarBinOp, ScalarUnaryOp};
+    use crate::numeric_dtype::NumericDType;
     use crate::numeric_scalar::NumericScalar;
 
     const NUM_LANES: usize = 4;

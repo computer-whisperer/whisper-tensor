@@ -248,7 +248,8 @@ impl Operation for SoftmaxOperation {
         // PyTorch's F.softmax internally computes in F32 for BF16/F16 inputs;
         // without this, each intermediate (sub, exp, reduce_sum, div) truncates
         // to BF16 causing compounding precision loss through every attention layer.
-        let input_f32 = milli_graph::ops::Cast::push_new(&mut graph, raw_input, NumericDType::F32, rng);
+        let input_f32 =
+            milli_graph::ops::Cast::push_new(&mut graph, raw_input, NumericDType::F32, rng);
 
         let axis_tid =
             milli_graph::ops::Constant::new_scalar(&mut graph, self.axis.unwrap_or(-1), rng);
@@ -338,7 +339,8 @@ impl Operation for LogSoftmaxOperation {
         let raw_input = input_map[&self.input];
 
         // Upcast to F32 — same rationale as Softmax.
-        let input_f32 = milli_graph::ops::Cast::push_new(&mut graph, raw_input, NumericDType::F32, rng);
+        let input_f32 =
+            milli_graph::ops::Cast::push_new(&mut graph, raw_input, NumericDType::F32, rng);
 
         let axis_tid =
             milli_graph::ops::Constant::new_scalar(&mut graph, self.axis.unwrap_or(-1), rng);

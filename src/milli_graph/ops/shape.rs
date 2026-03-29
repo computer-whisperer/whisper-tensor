@@ -1,11 +1,11 @@
-use crate::pool::Pool;
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
 use crate::backends::ndarray_backend::NDArrayNumericTensor;
 use crate::graph::{GlobalId, Node};
+use crate::migration::numeric_tensor::NumericTensor;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
-use crate::migration::numeric_tensor::NumericTensor;
+use crate::pool::Pool;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use typenum::P1;
@@ -46,7 +46,10 @@ impl Shape {
 }
 
 impl Shape {
-    pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
+    pub fn lower_to_nano(
+        &self,
+        ctx: &mut crate::nano_graph::NanoLoweringContext,
+    ) -> crate::milli_graph::ops::LowerResult {
         let out_id = self.output;
         if let Some(info) = ctx.all_infos.get(&out_id) {
             ctx.register_constant(out_id, info);
@@ -137,15 +140,22 @@ impl MilliOp for Shape {
         &self,
         inputs: &[crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>],
         pool: &'p P2,
-    ) -> Result<Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>, crate::nano_graph::pool_eval::PoolEvalError> {
+    ) -> Result<
+        Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>,
+        crate::nano_graph::pool_eval::PoolEvalError,
+    > {
         use crate::numeric_scalar::NumericScalar;
         use crate::numeric_tensor::{NumericTensor, TensorLayout};
         use crate::tensor_rank::DynRank;
 
         let input_shape = inputs[0].shape();
         let rank = input_shape.len();
-        let layout = TensorLayout::<DynRank>::row_major(vec![rank as u64], crate::numeric_dtype::NumericDType::I64);
-        let buf = pool.allocate(layout.buffer_size_bytes())
+        let layout = TensorLayout::<DynRank>::row_major(
+            vec![rank as u64],
+            crate::numeric_dtype::NumericDType::I64,
+        );
+        let buf = pool
+            .allocate(layout.buffer_size_bytes())
             .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
         let mut out = NumericTensor::from_parts(buf, layout);
         for (i, &dim) in input_shape.iter().enumerate() {
@@ -154,7 +164,10 @@ impl MilliOp for Shape {
         Ok(vec![out])
     }
 
-    fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
+    fn lower_to_nano(
+        &self,
+        ctx: &mut crate::nano_graph::NanoLoweringContext,
+    ) -> crate::milli_graph::ops::LowerResult {
         Shape::lower_to_nano(self, ctx)
     }
 }

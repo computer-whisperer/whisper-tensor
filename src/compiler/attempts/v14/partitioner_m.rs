@@ -32,10 +32,10 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use crate::numeric_dtype::NumericDType;
 use crate::graph::GlobalId;
 use crate::nano_graph::pattern::InputTensor;
 use crate::nano_graph::{AtomGroup, AtomId, AtomRange, InputRef, NanoGraph, ScalarOp, SymDim};
+use crate::numeric_dtype::NumericDType;
 
 use super::types::{Phase, Span};
 
@@ -737,7 +737,10 @@ fn split_range_aligned(
 
 /// Collect all atom ranges that a group's inputs reference, including
 /// reduce stride ranges and indirect load tables.
-fn collect_input_atom_ranges(group: &AtomGroup, graph: &NanoGraph) -> Vec<(AtomId, u64, NumericDType)> {
+fn collect_input_atom_ranges(
+    group: &AtomGroup,
+    graph: &NanoGraph,
+) -> Vec<(AtomId, u64, NumericDType)> {
     let mut ranges = Vec::new();
     let mut seen_bases = HashSet::new();
 
@@ -1497,10 +1500,10 @@ fn find_covering_input_tensor<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::numeric_dtype::NumericDType;
     use crate::graph::GlobalId;
     use crate::nano_graph::ops::{ReduceKind, ScalarBinOp, ScalarOp, ScalarUnaryOp};
     use crate::nano_graph::pattern::InputTensor;
+    use crate::numeric_dtype::NumericDType;
     use crate::numeric_scalar::NumericScalar;
 
     /// Helper: count total atoms across all lanes in a phase.

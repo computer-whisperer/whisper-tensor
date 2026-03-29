@@ -110,19 +110,28 @@ impl StoredTensor {
     fn load_raw_bytes(&self) -> Option<Vec<u8>> {
         use std::io::{Read, Seek, SeekFrom};
         match self {
-            StoredTensor::ExternalBinary { path, offset, length, .. } => {
+            StoredTensor::ExternalBinary {
+                path,
+                offset,
+                length,
+                ..
+            } => {
                 let mut file = std::fs::File::open(path).ok()?;
                 file.seek(SeekFrom::Start(*offset as u64)).ok()?;
                 let mut buf = vec![0u8; *length];
                 file.read_exact(&mut buf).ok()?;
                 Some(buf)
             }
-            StoredTensor::ExternalPth { path, tensor_name, .. } => {
+            StoredTensor::ExternalPth {
+                path, tensor_name, ..
+            } => {
                 let pth_path = std::path::Path::new(path);
                 let tensors = crate::pth::PthTensors::new(pth_path, None).ok()?;
                 tensors.get_raw_bytes(tensor_name).ok()?
             }
-            StoredTensor::ExternalSafetensors { path, tensor_name, .. } => {
+            StoredTensor::ExternalSafetensors {
+                path, tensor_name, ..
+            } => {
                 #[cfg(feature = "safetensors")]
                 {
                     use memmap2::Mmap;
@@ -139,7 +148,12 @@ impl StoredTensor {
                     None
                 }
             }
-            StoredTensor::ExternalGGUF { path, offset, length, .. } => {
+            StoredTensor::ExternalGGUF {
+                path,
+                offset,
+                length,
+                ..
+            } => {
                 let mut file = std::fs::File::open(path).ok()?;
                 file.seek(SeekFrom::Start(*offset as u64)).ok()?;
                 let mut buf = vec![0u8; *length];
@@ -170,7 +184,8 @@ impl StoredTensor {
         let bits = ndt.total_bits() as usize;
         for i in 0..numel {
             let bit_offset = i * bits;
-            let raw_val = crate::numeric_scalar::conversions::read_raw_bits(&raw, bit_offset, bits as u8);
+            let raw_val =
+                crate::numeric_scalar::conversions::read_raw_bits(&raw, bit_offset, bits as u8);
             tensor.write_element(i, NumericScalar::from_raw_bits(raw_val, ndt));
         }
 
@@ -190,10 +205,13 @@ impl StoredTensor {
                     vals.push(src.read_element(i).to_f64());
                 }
                 // Create f64 ndarray then cast to target dtype.
-                let nd = crate::backends::ndarray_backend::NDArrayNumericTensor::from_vec_shape(vals, &shape)
-                    .expect("build legacy from inline");
+                let nd = crate::backends::ndarray_backend::NDArrayNumericTensor::from_vec_shape(
+                    vals, &shape,
+                )
+                .expect("build legacy from inline");
                 let mut backend = crate::backends::eval_backend::EvalBackend::NDArray;
-                let cast = NumericTensor::NDArray(nd).cast(legacy_dt, &mut backend)
+                let cast = NumericTensor::NDArray(nd)
+                    .cast(legacy_dt, &mut backend)
                     .expect("cast inline to legacy dtype");
                 cast
             }

@@ -10,9 +10,9 @@ use std::time::Instant;
 use whisper_tensor::compiler::op_census;
 use whisper_tensor::graph::GlobalId;
 use whisper_tensor::model::Model;
+use whisper_tensor::pool::SystemPool;
 use whisper_tensor::tensor_info::TensorInfo;
 use whisper_tensor_import::identify_and_load;
-use whisper_tensor::pool::SystemPool;
 use whisper_tensor_import::onnx_graph::WeightStorageStrategy;
 
 fn main() {
@@ -50,7 +50,8 @@ fn main() {
     let tensor_store = model.get_tensor_store();
     let tensors_by_name = sym_graph.get_tensors_by_name();
 
-    let mut all_infos: HashMap<GlobalId, TensorInfo<'_, whisper_tensor::pool::SystemPool>> = HashMap::new();
+    let mut all_infos: HashMap<GlobalId, TensorInfo<'_, whisper_tensor::pool::SystemPool>> =
+        HashMap::new();
     for (name, (dtype, shape_dims)) in &input_info {
         let shape: Vec<u64> = shape_dims.iter().map(|d| d.unwrap_or(4)).collect();
         let ndt = whisper_tensor::numeric_dtype::NumericDType::from_legacy(*dtype)

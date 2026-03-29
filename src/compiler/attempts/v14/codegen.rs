@@ -38,11 +38,11 @@ use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{Linkage, Module};
 
-use crate::numeric_dtype::NumericDType;
 use crate::nano_graph::{
     AtomGroup, AtomId, AtomRange, InputRef, NanoGraph, ReduceKind, ScalarBinOp, ScalarOp,
     ScalarUnaryOp,
 };
+use crate::numeric_dtype::NumericDType;
 
 // ─── Buffer layout types ────────────────────────────────────────────────────
 
@@ -182,7 +182,11 @@ fn write_scalar(buffer: &mut [u8], off: usize, val: &crate::numeric_scalar::Nume
 }
 
 /// Read a NumericScalar from `buffer[off..]` in the given storage dtype.
-fn read_scalar(buffer: &[u8], off: usize, dtype: NumericDType) -> crate::numeric_scalar::NumericScalar {
+fn read_scalar(
+    buffer: &[u8],
+    off: usize,
+    dtype: NumericDType,
+) -> crate::numeric_scalar::NumericScalar {
     let n = dtype.bytes_per_element();
     let mut bits = [0u8; 8];
     bits[..n].copy_from_slice(&buffer[off..off + n]);
@@ -1489,7 +1493,11 @@ fn emit_group_body_forwarded(
 ///
 /// This preserves the dtype truncation contract: BF16 outputs must lose
 /// precision between steps, I32 values must be sign-extended to I64, etc.
-fn emit_store_load_roundtrip(builder: &mut FunctionBuilder, val: Value, dtype: NumericDType) -> Value {
+fn emit_store_load_roundtrip(
+    builder: &mut FunctionBuilder,
+    val: Value,
+    dtype: NumericDType,
+) -> Value {
     match dtype {
         NumericDType::BF16 => {
             // F32 → BF16 round-to-nearest-even → F32
@@ -2174,7 +2182,11 @@ fn emit_group_body(
 // ─── Input loading ──────────────────────────────────────────────────────────
 
 /// Determine the storage dtype that `load_input` will load from for a given InputRef.
-fn input_slot_dtype(input: &InputRef, layout: &BufferLayout, atom_offset: u64) -> Option<NumericDType> {
+fn input_slot_dtype(
+    input: &InputRef,
+    layout: &BufferLayout,
+    atom_offset: u64,
+) -> Option<NumericDType> {
     // Try the InputRef's base first, then fall back to the first accessed atom.
     let try_find = |atom: AtomId| layout.find(atom).map(|(s, _)| s.dtype);
     match input {
@@ -2444,7 +2456,9 @@ enum ReprKind {
 /// Map a NumericDType to its Cranelift representation kind.
 fn repr_of(dtype: NumericDType) -> ReprKind {
     match dtype {
-        NumericDType::F32 | NumericDType::BF16 | NumericDType::F16 | NumericDType::F64 => ReprKind::Float,
+        NumericDType::F32 | NumericDType::BF16 | NumericDType::F16 | NumericDType::F64 => {
+            ReprKind::Float
+        }
         _ => ReprKind::Int,
     }
 }
@@ -3389,7 +3403,11 @@ impl CompiledPlan {
                                                         .layout
                                                         .byte_offset_of(AtomId(src_atom))
                                                         .map(|off| {
-                                                            read_f32_from(&dbg_buf, off, NumericDType::F32)
+                                                            read_f32_from(
+                                                                &dbg_buf,
+                                                                off,
+                                                                NumericDType::F32,
+                                                            )
                                                         });
                                                     k_vals.push((src_atom, val));
                                                 }
@@ -3874,17 +3892,11 @@ fn extract_output_scalar(
             NDArrayNumericTensor::BF16(ArcArray::from_shape_vec(IxDyn(&[len]), data).unwrap())
         }
         NumericDType::U8 => {
-            let data: Vec<u8> = scalars
-                .iter()
-                .map(|s| s.to_i64() as u8)
-                .collect();
+            let data: Vec<u8> = scalars.iter().map(|s| s.to_i64() as u8).collect();
             NDArrayNumericTensor::U8(ArcArray::from_shape_vec(IxDyn(&[len]), data).unwrap())
         }
         NumericDType::BOOL => {
-            let data: Vec<bool> = scalars
-                .iter()
-                .map(|s| s.to_i64() != 0)
-                .collect();
+            let data: Vec<bool> = scalars.iter().map(|s| s.to_i64() != 0).collect();
             NDArrayNumericTensor::BOOL(ArcArray::from_shape_vec(IxDyn(&[len]), data).unwrap())
         }
         _ => {

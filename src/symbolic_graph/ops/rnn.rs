@@ -2,8 +2,8 @@ use crate::TrigOp;
 use crate::backends::eval_backend::EvalBackend;
 use crate::backends::ndarray_backend::NDArrayNumericTensor;
 use crate::graph::{GlobalId, Node, Property, PropertyValue};
-use crate::milli_graph::{MilliLoweringContext, MilliOpGraph};
 use crate::migration::numeric_tensor::NumericTensor;
+use crate::milli_graph::{MilliLoweringContext, MilliOpGraph};
 use crate::onnx;
 use crate::symbolic_graph::ops::{EvalError, Operation};
 use crate::symbolic_graph::{ONNXDecodingError, query_attribute_int, query_attribute_string};
@@ -328,9 +328,15 @@ impl Operation for SimpleRnnOperation {
 
     fn eval_pool<'p, P: crate::pool::Pool + 'p>(
         &self,
-        inputs: &HashMap<GlobalId, &crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>>,
+        inputs: &HashMap<
+            GlobalId,
+            &crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>,
+        >,
         pool: &'p P,
-    ) -> Result<HashMap<GlobalId, crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P>>, super::EvalError> {
+    ) -> Result<
+        HashMap<GlobalId, crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P>>,
+        super::EvalError,
+    > {
         super::eval_pool_via_legacy(self, inputs, pool)
     }
 
@@ -678,9 +684,15 @@ impl Operation for GruOperation {
 
     fn eval_pool<'p, P: crate::pool::Pool + 'p>(
         &self,
-        inputs: &HashMap<GlobalId, &crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>>,
+        inputs: &HashMap<
+            GlobalId,
+            &crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>,
+        >,
         pool: &'p P,
-    ) -> Result<HashMap<GlobalId, crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P>>, super::EvalError> {
+    ) -> Result<
+        HashMap<GlobalId, crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P>>,
+        super::EvalError,
+    > {
         super::eval_pool_via_legacy(self, inputs, pool)
     }
 

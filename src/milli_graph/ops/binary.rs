@@ -1,12 +1,12 @@
-use crate::pool::Pool;
 use super::AccumulationMode;
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
 use crate::dtype::DType;
+use crate::migration::numeric_tensor::NumericTensor;
 use crate::milli_graph::MilliOpGraphError;
 use crate::milli_graph::ops::MilliOp;
-use crate::migration::numeric_tensor::NumericTensor;
 use crate::numeric_dtype::NumericDType;
+use crate::pool::Pool;
 use crate::scalar_info::ScalarInfoTyped;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -212,7 +212,10 @@ impl SimpleBinary {
 }
 
 impl SimpleBinary {
-    pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
+    pub fn lower_to_nano(
+        &self,
+        ctx: &mut crate::nano_graph::NanoLoweringContext,
+    ) -> crate::milli_graph::ops::LowerResult {
         use crate::nano_graph::lower::TensorAtomMap;
         use crate::nano_graph::ops::{ScalarBinOp, ScalarOp};
         use crate::nano_graph::pattern::AtomId;
@@ -368,10 +371,7 @@ impl MilliOp for SimpleBinary {
         known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'p, P>>,
         symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
         pool: &'p P,
-    ) -> Result<
-        Vec<(GlobalId, crate::tensor_info::TensorInfo<'p, P>)>,
-        MilliOpGraphError,
-    > {
+    ) -> Result<Vec<(GlobalId, crate::tensor_info::TensorInfo<'p, P>)>, MilliOpGraphError> {
         use crate::tensor_info::TensorInfo;
 
         let a_info = known_inputs
@@ -416,7 +416,11 @@ impl MilliOp for SimpleBinary {
                     let first_elem = crate::scalar_info::ScalarInfo::Symbolic(
                         crate::symbolic_scalar::SymbolicScalar::new(out_dtype, symbolic_resolver),
                     );
-                    TensorInfo::new_from_first_element_and_rank(first_elem, out_rank, symbolic_resolver)
+                    TensorInfo::new_from_first_element_and_rank(
+                        first_elem,
+                        out_rank,
+                        symbolic_resolver,
+                    )
                 }
             } else {
                 let a_shape = a_info.shape(symbolic_resolver);
@@ -433,7 +437,12 @@ impl MilliOp for SimpleBinary {
         };
 
         // If both inputs are concrete, try constant fold with output hints.
-        if let Some(results) = super::constant_fold(self, known_inputs, &[(self.output, out_info.clone_with_pool(pool))], pool) {
+        if let Some(results) = super::constant_fold(
+            self,
+            known_inputs,
+            &[(self.output, out_info.clone_with_pool(pool))],
+            pool,
+        ) {
             return Ok(results);
         }
 
@@ -503,7 +512,10 @@ impl MilliOp for SimpleBinary {
         &self,
         inputs: &[crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>],
         pool: &'p P2,
-    ) -> Result<Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>, crate::nano_graph::pool_eval::PoolEvalError> {
+    ) -> Result<
+        Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>,
+        crate::nano_graph::pool_eval::PoolEvalError,
+    > {
         use crate::numeric_scalar::NumericScalar;
         use crate::numeric_tensor::{NumericTensor, TensorLayout};
         use crate::tensor_rank::DynRank;
@@ -559,7 +571,8 @@ impl MilliOp for SimpleBinary {
         }
 
         let layout = TensorLayout::<DynRank>::row_major(output_shape.clone(), out_dtype);
-        let buf = pool.allocate(layout.buffer_size_bytes())
+        let buf = pool
+            .allocate(layout.buffer_size_bytes())
             .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
         let mut out = NumericTensor::from_parts(buf, layout);
 
@@ -597,9 +610,15 @@ impl MilliOp for SimpleBinary {
                 WhichSimpleBinaryOp::GreaterOrEqual => NumericScalar::from_bool(!av.lt(bv)),
                 WhichSimpleBinaryOp::Less => NumericScalar::from_bool(av.lt(bv)),
                 WhichSimpleBinaryOp::LessOrEqual => NumericScalar::from_bool(!av.gt(bv)),
-                WhichSimpleBinaryOp::And => NumericScalar::from_bool(av.is_nonzero() && bv.is_nonzero()),
-                WhichSimpleBinaryOp::Or => NumericScalar::from_bool(av.is_nonzero() || bv.is_nonzero()),
-                WhichSimpleBinaryOp::Xor => NumericScalar::from_bool(av.is_nonzero() != bv.is_nonzero()),
+                WhichSimpleBinaryOp::And => {
+                    NumericScalar::from_bool(av.is_nonzero() && bv.is_nonzero())
+                }
+                WhichSimpleBinaryOp::Or => {
+                    NumericScalar::from_bool(av.is_nonzero() || bv.is_nonzero())
+                }
+                WhichSimpleBinaryOp::Xor => {
+                    NumericScalar::from_bool(av.is_nonzero() != bv.is_nonzero())
+                }
                 WhichSimpleBinaryOp::BitwiseAnd => {
                     NumericScalar::from_raw_bits(av.raw() & bv.raw(), a_dtype)
                 }
@@ -679,7 +698,10 @@ impl MilliOp for SimpleBinary {
         Some(result)
     }
 
-    fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
+    fn lower_to_nano(
+        &self,
+        ctx: &mut crate::nano_graph::NanoLoweringContext,
+    ) -> crate::milli_graph::ops::LowerResult {
         SimpleBinary::lower_to_nano(self, ctx)
     }
 }
@@ -724,7 +746,10 @@ impl Pow {
 }
 
 impl Pow {
-    pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
+    pub fn lower_to_nano(
+        &self,
+        ctx: &mut crate::nano_graph::NanoLoweringContext,
+    ) -> crate::milli_graph::ops::LowerResult {
         use crate::nano_graph::lower::TensorAtomMap;
         use crate::nano_graph::ops::{ScalarBinOp, ScalarOp};
         use crate::nano_graph::pattern::AtomId;
@@ -798,10 +823,7 @@ impl MilliOp for Pow {
         known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'p, P>>,
         symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
         pool: &'p P,
-    ) -> Result<
-        Vec<(GlobalId, crate::tensor_info::TensorInfo<'p, P>)>,
-        MilliOpGraphError,
-    > {
+    ) -> Result<Vec<(GlobalId, crate::tensor_info::TensorInfo<'p, P>)>, MilliOpGraphError> {
         use crate::tensor_info::TensorInfo;
 
         let a_info = known_inputs
@@ -836,7 +858,11 @@ impl MilliOp for Pow {
                     let first_elem = crate::scalar_info::ScalarInfo::Symbolic(
                         crate::symbolic_scalar::SymbolicScalar::new(out_dtype, symbolic_resolver),
                     );
-                    TensorInfo::new_from_first_element_and_rank(first_elem, out_rank, symbolic_resolver)
+                    TensorInfo::new_from_first_element_and_rank(
+                        first_elem,
+                        out_rank,
+                        symbolic_resolver,
+                    )
                 }
             } else {
                 let a_shape = a_info.shape(symbolic_resolver);
@@ -853,7 +879,12 @@ impl MilliOp for Pow {
         };
 
         // If both inputs are concrete, try constant fold with output hints.
-        if let Some(results) = super::constant_fold(self, known_inputs, &[(self.output, out_info.clone_with_pool(pool))], pool) {
+        if let Some(results) = super::constant_fold(
+            self,
+            known_inputs,
+            &[(self.output, out_info.clone_with_pool(pool))],
+            pool,
+        ) {
             return Ok(results);
         }
 
@@ -875,7 +906,10 @@ impl MilliOp for Pow {
         &self,
         inputs: &[crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>],
         pool: &'p P2,
-    ) -> Result<Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>, crate::nano_graph::pool_eval::PoolEvalError> {
+    ) -> Result<
+        Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>,
+        crate::nano_graph::pool_eval::PoolEvalError,
+    > {
         use crate::numeric_scalar::NumericScalar;
         use crate::numeric_tensor::{NumericTensor, TensorLayout};
         use crate::tensor_rank::DynRank;
@@ -891,20 +925,33 @@ impl MilliOp for Pow {
         let mut output_shape = vec![0u64; out_rank];
         let mut pa = vec![1u64; out_rank];
         let mut pb = vec![1u64; out_rank];
-        for (i, &d) in a_shape.iter().enumerate() { pa[out_rank - a_shape.len() + i] = d; }
-        for (i, &d) in b_shape.iter().enumerate() { pb[out_rank - b_shape.len() + i] = d; }
-        for i in 0..out_rank { output_shape[i] = pa[i].max(pb[i]); }
+        for (i, &d) in a_shape.iter().enumerate() {
+            pa[out_rank - a_shape.len() + i] = d;
+        }
+        for (i, &d) in b_shape.iter().enumerate() {
+            pb[out_rank - b_shape.len() + i] = d;
+        }
+        for i in 0..out_rank {
+            output_shape[i] = pa[i].max(pb[i]);
+        }
 
         let out_numel: usize = output_shape.iter().product::<u64>() as usize;
         let mut out_strides = vec![1usize; out_rank];
-        for i in (0..out_rank.saturating_sub(1)).rev() { out_strides[i] = out_strides[i + 1] * output_shape[i + 1] as usize; }
+        for i in (0..out_rank.saturating_sub(1)).rev() {
+            out_strides[i] = out_strides[i + 1] * output_shape[i + 1] as usize;
+        }
         let mut a_strides = vec![1usize; out_rank];
-        for i in (0..out_rank.saturating_sub(1)).rev() { a_strides[i] = a_strides[i + 1] * pa[i + 1] as usize; }
+        for i in (0..out_rank.saturating_sub(1)).rev() {
+            a_strides[i] = a_strides[i + 1] * pa[i + 1] as usize;
+        }
         let mut b_strides = vec![1usize; out_rank];
-        for i in (0..out_rank.saturating_sub(1)).rev() { b_strides[i] = b_strides[i + 1] * pb[i + 1] as usize; }
+        for i in (0..out_rank.saturating_sub(1)).rev() {
+            b_strides[i] = b_strides[i + 1] * pb[i + 1] as usize;
+        }
 
         let layout = TensorLayout::<DynRank>::row_major(output_shape, dtype);
-        let buf = pool.allocate(layout.buffer_size_bytes())
+        let buf = pool
+            .allocate(layout.buffer_size_bytes())
             .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
         let mut out = NumericTensor::from_parts(buf, layout);
 
@@ -927,7 +974,10 @@ impl MilliOp for Pow {
         Ok(vec![out])
     }
 
-    fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
+    fn lower_to_nano(
+        &self,
+        ctx: &mut crate::nano_graph::NanoLoweringContext,
+    ) -> crate::milli_graph::ops::LowerResult {
         Pow::lower_to_nano(self, ctx)
     }
 }
@@ -1048,16 +1098,23 @@ impl MatMul {
 
     /// Returns (product_dtype, accumulate_dtype, output_dtype) for the standard
     /// precision convention given an input dtype.
-    pub fn default_precision_for(input_dtype: NumericDType) -> (NumericDType, NumericDType, NumericDType) {
+    pub fn default_precision_for(
+        input_dtype: NumericDType,
+    ) -> (NumericDType, NumericDType, NumericDType) {
         match input_dtype {
-            NumericDType::BF16 | NumericDType::F16 => (NumericDType::F32, NumericDType::F32, input_dtype),
+            NumericDType::BF16 | NumericDType::F16 => {
+                (NumericDType::F32, NumericDType::F32, input_dtype)
+            }
             _ => (input_dtype, input_dtype, input_dtype),
         }
     }
 }
 
 impl MatMul {
-    pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
+    pub fn lower_to_nano(
+        &self,
+        ctx: &mut crate::nano_graph::NanoLoweringContext,
+    ) -> crate::milli_graph::ops::LowerResult {
         use crate::nano_graph::lower::DimKind;
         use crate::nano_graph::lower::TensorAtomMap;
         use crate::nano_graph::ops::{ReduceKind, ScalarBinOp, ScalarOp};
@@ -1408,10 +1465,7 @@ impl MilliOp for MatMul {
         known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'p, P>>,
         symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
         pool: &'p P,
-    ) -> Result<
-        Vec<(GlobalId, crate::tensor_info::TensorInfo<'p, P>)>,
-        MilliOpGraphError,
-    > {
+    ) -> Result<Vec<(GlobalId, crate::tensor_info::TensorInfo<'p, P>)>, MilliOpGraphError> {
         use crate::tensor_info::TensorInfo;
 
         let a_info = known_inputs
@@ -1427,85 +1481,95 @@ impl MilliOp for MatMul {
         // Compute output info: try per-dim shape inference first, then rank-only fallback.
         // A[...,M,K] @ B[...,K,N] -> [...,M,N]
         // Batch dims are broadcast, last two follow matmul rules.
-        let out_info = if let (Some(a_ranked), Some(b_ranked)) = (a_info.as_ranked(), b_info.as_ranked()) {
-            let a_dims = a_ranked.shape();
-            let b_dims = b_ranked.shape();
-            let a_rank = a_dims.len();
-            let b_rank = b_dims.len();
+        let out_info =
+            if let (Some(a_ranked), Some(b_ranked)) = (a_info.as_ranked(), b_info.as_ranked()) {
+                let a_dims = a_ranked.shape();
+                let b_dims = b_ranked.shape();
+                let a_rank = a_dims.len();
+                let b_rank = b_dims.len();
 
-            let out_dims: Option<Vec<ScalarInfoTyped<u64>>> = if a_rank >= 1 && b_rank >= 1 {
-                if a_rank >= 2 && b_rank >= 2 {
-                    // Standard case: batch broadcast + [M,K]@[K,N]->[M,N]
-                    let a_batch = &a_dims[..a_rank - 2];
-                    let b_batch = &b_dims[..b_rank - 2];
-                    let batch = super::infer_multidirectional_broadcasting_shape(
-                        &[a_batch.to_vec(), b_batch.to_vec()],
+                let out_dims: Option<Vec<ScalarInfoTyped<u64>>> = if a_rank >= 1 && b_rank >= 1 {
+                    if a_rank >= 2 && b_rank >= 2 {
+                        // Standard case: batch broadcast + [M,K]@[K,N]->[M,N]
+                        let a_batch = &a_dims[..a_rank - 2];
+                        let b_batch = &b_dims[..b_rank - 2];
+                        let batch = super::infer_multidirectional_broadcasting_shape(
+                            &[a_batch.to_vec(), b_batch.to_vec()],
+                            symbolic_resolver,
+                        )
+                        .ok();
+                        batch.map(|mut out| {
+                            out.push(a_dims[a_rank - 2].clone()); // M
+                            out.push(b_dims[b_rank - 1].clone()); // N
+                            out
+                        })
+                    } else if a_rank == 1 && b_rank >= 2 {
+                        // vector @ matrix: [K] @ [...,K,N] -> [...,N]
+                        let mut out = b_dims[..b_rank - 2].to_vec();
+                        out.push(b_dims[b_rank - 1].clone()); // N
+                        Some(out)
+                    } else if a_rank >= 2 && b_rank == 1 {
+                        // matrix @ vector: [...,M,K] @ [K] -> [...,M]
+                        let mut out = a_dims[..a_rank - 2].to_vec();
+                        out.push(a_dims[a_rank - 2].clone()); // M
+                        Some(out)
+                    } else {
+                        // both rank 1: dot product -> scalar []
+                        Some(vec![])
+                    }
+                } else {
+                    None
+                };
+
+                if let Some(out_dims) = out_dims {
+                    TensorInfo::from_dtype_and_shape_scalars(out_dtype, &out_dims)
+                } else {
+                    // Ranked inputs but couldn't compute shape — fall through to rank-only
+                    let first_elem = crate::scalar_info::ScalarInfo::Symbolic(
+                        crate::symbolic_scalar::SymbolicScalar::new(out_dtype, symbolic_resolver),
+                    );
+                    TensorInfo::new_from_first_element_and_rank(
+                        first_elem,
+                        a_info.rank(),
                         symbolic_resolver,
                     )
-                    .ok();
-                    batch.map(|mut out| {
-                        out.push(a_dims[a_rank - 2].clone()); // M
-                        out.push(b_dims[b_rank - 1].clone()); // N
-                        out
-                    })
-                } else if a_rank == 1 && b_rank >= 2 {
-                    // vector @ matrix: [K] @ [...,K,N] -> [...,N]
-                    let mut out = b_dims[..b_rank - 2].to_vec();
-                    out.push(b_dims[b_rank - 1].clone()); // N
-                    Some(out)
-                } else if a_rank >= 2 && b_rank == 1 {
-                    // matrix @ vector: [...,M,K] @ [K] -> [...,M]
-                    let mut out = a_dims[..a_rank - 2].to_vec();
-                    out.push(a_dims[a_rank - 2].clone()); // M
-                    Some(out)
-                } else {
-                    // both rank 1: dot product -> scalar []
-                    Some(vec![])
                 }
             } else {
-                None
-            };
+                // Fallback: rank-only inference.
+                let out_rank = match (a_info.rank(), b_info.rank()) {
+                    (
+                        crate::scalar_info::ScalarInfoTyped::Numeric(a_rank),
+                        crate::scalar_info::ScalarInfoTyped::Numeric(b_rank),
+                    ) => {
+                        let out_r = if a_rank >= 2 && b_rank >= 2 {
+                            a_rank.max(b_rank)
+                        } else if a_rank == 1 && b_rank >= 2 {
+                            b_rank - 1
+                        } else if a_rank >= 2 && b_rank == 1 {
+                            a_rank - 1
+                        } else {
+                            0
+                        };
+                        crate::scalar_info::ScalarInfoTyped::Numeric(out_r)
+                    }
+                    _ => crate::scalar_info::ScalarInfoTyped::Symbolic(
+                        crate::symbolic_scalar::SymbolicScalarTyped::new(symbolic_resolver),
+                    ),
+                };
 
-            if let Some(out_dims) = out_dims {
-                TensorInfo::from_dtype_and_shape_scalars(out_dtype, &out_dims)
-            } else {
-                // Ranked inputs but couldn't compute shape — fall through to rank-only
                 let first_elem = crate::scalar_info::ScalarInfo::Symbolic(
                     crate::symbolic_scalar::SymbolicScalar::new(out_dtype, symbolic_resolver),
                 );
-                TensorInfo::new_from_first_element_and_rank(first_elem, a_info.rank(), symbolic_resolver)
-            }
-        } else {
-            // Fallback: rank-only inference.
-            let out_rank = match (a_info.rank(), b_info.rank()) {
-                (
-                    crate::scalar_info::ScalarInfoTyped::Numeric(a_rank),
-                    crate::scalar_info::ScalarInfoTyped::Numeric(b_rank),
-                ) => {
-                    let out_r = if a_rank >= 2 && b_rank >= 2 {
-                        a_rank.max(b_rank)
-                    } else if a_rank == 1 && b_rank >= 2 {
-                        b_rank - 1
-                    } else if a_rank >= 2 && b_rank == 1 {
-                        a_rank - 1
-                    } else {
-                        0
-                    };
-                    crate::scalar_info::ScalarInfoTyped::Numeric(out_r)
-                }
-                _ => crate::scalar_info::ScalarInfoTyped::Symbolic(
-                    crate::symbolic_scalar::SymbolicScalarTyped::new(symbolic_resolver),
-                ),
+                TensorInfo::new_from_first_element_and_rank(first_elem, out_rank, symbolic_resolver)
             };
 
-            let first_elem = crate::scalar_info::ScalarInfo::Symbolic(
-                crate::symbolic_scalar::SymbolicScalar::new(out_dtype, symbolic_resolver),
-            );
-            TensorInfo::new_from_first_element_and_rank(first_elem, out_rank, symbolic_resolver)
-        };
-
         // If both inputs are concrete, try constant fold via nano+pool_eval path.
-        if let Some(results) = super::constant_fold(self, known_inputs, &[(self.output, out_info.clone_with_pool(pool))], pool) {
+        if let Some(results) = super::constant_fold(
+            self,
+            known_inputs,
+            &[(self.output, out_info.clone_with_pool(pool))],
+            pool,
+        ) {
             return Ok(results);
         }
 
@@ -1595,7 +1659,10 @@ impl MilliOp for MatMul {
         &self,
         inputs: &[crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>],
         pool: &'p P2,
-    ) -> Result<Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>, crate::nano_graph::pool_eval::PoolEvalError> {
+    ) -> Result<
+        Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>,
+        crate::nano_graph::pool_eval::PoolEvalError,
+    > {
         use crate::numeric_scalar::NumericScalar;
         use crate::numeric_tensor::{NumericTensor, TensorLayout};
         use crate::tensor_rank::DynRank;
@@ -1619,10 +1686,16 @@ impl MilliOp for MatMul {
             let batch_rank = a_bat.len().max(b_bat.len());
             let mut pa = vec![1u64; batch_rank];
             let mut pb = vec![1u64; batch_rank];
-            for (i, &d) in a_bat.iter().enumerate() { pa[batch_rank - a_bat.len() + i] = d; }
-            for (i, &d) in b_bat.iter().enumerate() { pb[batch_rank - b_bat.len() + i] = d; }
+            for (i, &d) in a_bat.iter().enumerate() {
+                pa[batch_rank - a_bat.len() + i] = d;
+            }
+            for (i, &d) in b_bat.iter().enumerate() {
+                pb[batch_rank - b_bat.len() + i] = d;
+            }
             let mut batch_shape = vec![0u64; batch_rank];
-            for i in 0..batch_rank { batch_shape[i] = pa[i].max(pb[i]); }
+            for i in 0..batch_rank {
+                batch_shape[i] = pa[i].max(pb[i]);
+            }
             let mut out_shape = batch_shape.clone();
             out_shape.push(am as u64);
             out_shape.push(bn as u64);
@@ -1662,18 +1735,25 @@ impl MilliOp for MatMul {
         let batch_total: usize = batch_shape.iter().product::<u64>().max(1) as usize;
 
         let layout = TensorLayout::<DynRank>::row_major(output_shape, out_dtype);
-        let buf = pool.allocate(layout.buffer_size_bytes())
+        let buf = pool
+            .allocate(layout.buffer_size_bytes())
             .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
         let mut out = NumericTensor::from_parts(buf, layout);
         // Initialize to zero
         let zero = NumericScalar::zero(out_dtype);
-        for i in 0..out_numel { out.write_element(i, zero); }
+        for i in 0..out_numel {
+            out.write_element(i, zero);
+        }
 
         // Compute strides for A and B
         let mut a_strides = vec![1usize; a_rank];
-        for i in (0..a_rank.saturating_sub(1)).rev() { a_strides[i] = a_strides[i + 1] * a_shape[i + 1] as usize; }
+        for i in (0..a_rank.saturating_sub(1)).rev() {
+            a_strides[i] = a_strides[i + 1] * a_shape[i + 1] as usize;
+        }
         let mut b_strides = vec![1usize; b_rank];
-        for i in (0..b_rank.saturating_sub(1)).rev() { b_strides[i] = b_strides[i + 1] * b_shape[i + 1] as usize; }
+        for i in (0..b_rank.saturating_sub(1)).rev() {
+            b_strides[i] = b_strides[i + 1] * b_shape[i + 1] as usize;
+        }
 
         // Compute batch strides for output
         let mut batch_strides = vec![1usize; batch_rank];
@@ -1706,11 +1786,17 @@ impl MilliOp for MatMul {
                     let mut acc = 0.0f64;
                     for ki in 0..k {
                         let a_idx = a_batch_offset
-                            + if a_rank >= 2 { mi * a_strides[a_rank - 2] + ki * a_strides[a_rank - 1] }
-                              else { ki };
+                            + if a_rank >= 2 {
+                                mi * a_strides[a_rank - 2] + ki * a_strides[a_rank - 1]
+                            } else {
+                                ki
+                            };
                         let b_idx = b_batch_offset
-                            + if b_rank >= 2 { ki * b_strides[b_rank - 2] + ni * b_strides[b_rank - 1] }
-                              else { ki };
+                            + if b_rank >= 2 {
+                                ki * b_strides[b_rank - 2] + ni * b_strides[b_rank - 1]
+                            } else {
+                                ki
+                            };
                         acc += a.read_element(a_idx).to_f64() * b.read_element(b_idx).to_f64();
                     }
                     let out_idx = out_batch_offset + mi * n + ni;
@@ -1722,7 +1808,10 @@ impl MilliOp for MatMul {
         Ok(vec![out])
     }
 
-    fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
+    fn lower_to_nano(
+        &self,
+        ctx: &mut crate::nano_graph::NanoLoweringContext,
+    ) -> crate::milli_graph::ops::LowerResult {
         MatMul::lower_to_nano(self, ctx)
     }
 }

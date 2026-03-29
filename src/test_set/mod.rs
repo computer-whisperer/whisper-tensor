@@ -59,14 +59,38 @@ pub struct Tolerance {
 impl Tolerance {
     pub fn for_dtype(dtype: NumericDType) -> Self {
         match dtype {
-            NumericDType::F64 => Tolerance { atol: 1e-10, rtol: 1e-10 },
-            NumericDType::F32 => Tolerance { atol: 1e-5, rtol: 1.3e-6 },
-            NumericDType::F16 => Tolerance { atol: 1e-3, rtol: 4e-3 },
-            NumericDType::BF16 => Tolerance { atol: 1e-2, rtol: 1.6e-2 },
-            NumericDType::I64 | NumericDType::I32 | NumericDType::I16 | NumericDType::I8
-            | NumericDType::U64 | NumericDType::U32 | NumericDType::U16 | NumericDType::U8
-            | NumericDType::BOOL => Tolerance { atol: 0.0, rtol: 0.0 },
-            _ => Tolerance { atol: 1e-3, rtol: 1e-3 }, // conservative default for exotic types
+            NumericDType::F64 => Tolerance {
+                atol: 1e-10,
+                rtol: 1e-10,
+            },
+            NumericDType::F32 => Tolerance {
+                atol: 1e-5,
+                rtol: 1.3e-6,
+            },
+            NumericDType::F16 => Tolerance {
+                atol: 1e-3,
+                rtol: 4e-3,
+            },
+            NumericDType::BF16 => Tolerance {
+                atol: 1e-2,
+                rtol: 1.6e-2,
+            },
+            NumericDType::I64
+            | NumericDType::I32
+            | NumericDType::I16
+            | NumericDType::I8
+            | NumericDType::U64
+            | NumericDType::U32
+            | NumericDType::U16
+            | NumericDType::U8
+            | NumericDType::BOOL => Tolerance {
+                atol: 0.0,
+                rtol: 0.0,
+            },
+            _ => Tolerance {
+                atol: 1e-3,
+                rtol: 1e-3,
+            }, // conservative default for exotic types
         }
     }
 }
@@ -193,13 +217,15 @@ pub fn assert_tensors_close(
     if actual.shape() != expected.shape() {
         return Err(format!(
             "{context}: shape mismatch: actual {:?} vs expected {:?}",
-            actual.shape(), expected.shape()
+            actual.shape(),
+            expected.shape()
         ));
     }
     if actual.dtype() != expected.dtype() {
         return Err(format!(
             "{context}: dtype mismatch: actual {:?} vs expected {:?}",
-            actual.dtype(), expected.dtype()
+            actual.dtype(),
+            expected.dtype()
         ));
     }
 
@@ -207,8 +233,12 @@ pub fn assert_tensors_close(
     for i in 0..numel {
         let a = actual.read_element(i).to_f64();
         let e = expected.read_element(i).to_f64();
-        if a.is_nan() && e.is_nan() { continue; }
-        if a.is_infinite() && e.is_infinite() && a.signum() == e.signum() { continue; }
+        if a.is_nan() && e.is_nan() {
+            continue;
+        }
+        if a.is_infinite() && e.is_infinite() && a.signum() == e.signum() {
+            continue;
+        }
         let err = (a - e).abs();
         let limit = tolerance.atol + tolerance.rtol * a.abs().max(e.abs());
         if err > limit {
@@ -256,7 +286,12 @@ pub fn run_case_via_pool_eval(case: &TestCase) -> Result<(), String> {
         let info_inputs: HashMap<GlobalId, TensorInfo<'_, crate::pool::SystemPool>> = ds
             .inputs
             .iter()
-            .map(|(&id, t)| (id, TensorInfo::from_view(&t.view(), &crate::pool::SystemPool)))
+            .map(|(&id, t)| {
+                (
+                    id,
+                    TensorInfo::from_view(&t.view(), &crate::pool::SystemPool),
+                )
+            })
             .collect();
 
         // Lower MilliOpGraph → NanoGraph.
@@ -272,11 +307,15 @@ pub fn run_case_via_pool_eval(case: &TestCase) -> Result<(), String> {
 
         // Map input tensors to (AtomId, view) pairs for pool_eval.
         // Collect (AtomId, tensor) pairs, then create views with stable references.
-        let input_pairs: Vec<_> = ds.inputs.iter().filter_map(|(&ext_id, tensor)| {
-            let internal_id = case.graph.input_map.get(&ext_id)?;
-            let tam = lower_result.tensor_map.get(internal_id)?;
-            Some((tam.base_id, tensor))
-        }).collect();
+        let input_pairs: Vec<_> = ds
+            .inputs
+            .iter()
+            .filter_map(|(&ext_id, tensor)| {
+                let internal_id = case.graph.input_map.get(&ext_id)?;
+                let tam = lower_result.tensor_map.get(internal_id)?;
+                Some((tam.base_id, tensor))
+            })
+            .collect();
 
         let input_views: Vec<_> = input_pairs
             .iter()
@@ -290,7 +329,9 @@ pub fn run_case_via_pool_eval(case: &TestCase) -> Result<(), String> {
             .collect();
 
         // Build output AtomRanges from the graph's output ids.
-        let output_ids: Vec<GlobalId> = case.graph.output_ordering
+        let output_ids: Vec<GlobalId> = case
+            .graph
+            .output_ordering
             .as_ref()
             .map(|v| v.clone())
             .unwrap_or_default();
@@ -317,12 +358,9 @@ pub fn run_case_via_pool_eval(case: &TestCase) -> Result<(), String> {
 
         // Run pool_eval.
         let pool = TrackedPool::new(None); // no budget limit for tests
-        let eval_results = pool_eval::pool_eval(
-            &lower_result.graph,
-            &eval_inputs,
-            &output_ranges,
-            &pool,
-        ).map_err(|e| format!("{}[{}]: pool_eval failed: {e}", case.name, ds.label))?;
+        let eval_results =
+            pool_eval::pool_eval(&lower_result.graph, &eval_inputs, &output_ranges, &pool)
+                .map_err(|e| format!("{}[{}]: pool_eval failed: {e}", case.name, ds.label))?;
 
         // Compare outputs.
         for (&expected_id, expected_tensor) in &ds.expected_outputs {
@@ -336,11 +374,9 @@ pub fn run_case_via_pool_eval(case: &TestCase) -> Result<(), String> {
 
             let numel = tam.count as usize;
             let expected_dtype = expected_tensor.dtype();
-            let mut actual = NumericTensor::zeros(
-                expected_tensor.shape().clone(),
-                expected_dtype,
-                &POOL,
-            ).unwrap();
+            let mut actual =
+                NumericTensor::zeros(expected_tensor.shape().clone(), expected_dtype, &POOL)
+                    .unwrap();
 
             // For each logical element, find its atom in the eval results.
             for i in 0..numel {
@@ -357,7 +393,10 @@ pub fn run_case_via_pool_eval(case: &TestCase) -> Result<(), String> {
                         }
                     })
                     .ok_or_else(|| {
-                        format!("{}[{}]: atom {} not in any output range", case.name, ds.label, atom)
+                        format!(
+                            "{}[{}]: atom {} not in any output range",
+                            case.name, ds.label, atom
+                        )
                     })?;
 
                 let scalar = eval_results[rt_idx].read_element(offset);
@@ -382,15 +421,12 @@ pub fn run_case_via_graph_pool_eval(case: &TestCase) -> Result<(), String> {
         let pool = TrackedPool::new(None);
 
         // Build input views keyed by external IDs.
-        let input_views: Vec<(GlobalId, _)> = ds
-            .inputs
-            .iter()
-            .map(|(&id, t)| (id, t.view()))
-            .collect();
-        let input_map: HashMap<GlobalId, &crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>> = input_views
-            .iter()
-            .map(|(id, view)| (*id, view))
-            .collect();
+        let input_views: Vec<(GlobalId, _)> =
+            ds.inputs.iter().map(|(&id, t)| (id, t.view())).collect();
+        let input_map: HashMap<
+            GlobalId,
+            &crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>,
+        > = input_views.iter().map(|(id, view)| (*id, view)).collect();
 
         let results = case
             .graph

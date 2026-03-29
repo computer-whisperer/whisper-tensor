@@ -2,9 +2,9 @@ use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
 use crate::dtype::DType;
 use crate::graph::{GlobalId, Node};
-use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
-use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::migration::numeric_tensor::NumericTensor;
+use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
+use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
 use crate::pool::Pool;
 use rand::Rng;
 use rayon::prelude::*;
@@ -358,7 +358,10 @@ fn make_symbolic_output<'p, P: Pool + 'p>(
     out_channels: &crate::scalar_info::ScalarInfoTyped<u64>,
     n_spatial: usize,
     symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
-) -> Result<Vec<(GlobalId, crate::tensor_info::TensorInfo<'p, P>)>, crate::milli_graph::MilliOpGraphError> {
+) -> Result<
+    Vec<(GlobalId, crate::tensor_info::TensorInfo<'p, P>)>,
+    crate::milli_graph::MilliOpGraphError,
+> {
     use crate::scalar_info::ScalarInfoTyped;
     use crate::symbolic_scalar::SymbolicScalarTyped;
     use crate::tensor_info::TensorInfo;
@@ -381,7 +384,10 @@ impl Conv {
     /// Lower Conv to nano ops: padded input atoms + Mul/ReduceSum per output channel.
     ///
     /// Scope: 2D, group=1, dilation=[1,1], all spatial/channel dims known, batch symbolic.
-    pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
+    pub fn lower_to_nano(
+        &self,
+        ctx: &mut crate::nano_graph::NanoLoweringContext,
+    ) -> crate::milli_graph::ops::LowerResult {
         use crate::nano_graph::lower::DimKind;
         use crate::nano_graph::lower::TensorAtomMap;
         use crate::nano_graph::ops::{ReduceKind, ScalarBinOp, ScalarOp};
@@ -449,7 +455,10 @@ impl Conv {
         // Extract known spatial/channel dims from input.
         let in_known: Vec<u64> = in_layout
             .iter()
-            .filter_map(|d| match d { DimKind::Known(s) => Some(*s), _ => None })
+            .filter_map(|d| match d {
+                DimKind::Known(s) => Some(*s),
+                _ => None,
+            })
             .collect();
         // in_known should be [C_in, IH, IW] (batch is Symbolic).
         if in_known.len() < 3 {
@@ -462,14 +471,25 @@ impl Conv {
         // Weight must be fully known [C_out, C_in/group, KH, KW].
         let w_known: Vec<u64> = w_layout
             .iter()
-            .filter_map(|d| match d { DimKind::Known(s) => Some(*s), _ => None })
+            .filter_map(|d| match d {
+                DimKind::Known(s) => Some(*s),
+                _ => None,
+            })
             .collect();
         if w_known.len() != w_layout.len() || w_known.len() != 4 {
             return crate::milli_graph::ops::LowerResult::Unsupported;
         }
         let c_out = w_known[0];
-        let kh = if self.kernel_shape.is_empty() { w_known[2] as usize } else { self.kernel_shape[0] as usize };
-        let kw = if self.kernel_shape.is_empty() { w_known[3] as usize } else { self.kernel_shape[1] as usize };
+        let kh = if self.kernel_shape.is_empty() {
+            w_known[2] as usize
+        } else {
+            self.kernel_shape[0] as usize
+        };
+        let kw = if self.kernel_shape.is_empty() {
+            w_known[3] as usize
+        } else {
+            self.kernel_shape[1] as usize
+        };
 
         let strides: Vec<usize> = if self.strides.is_empty() {
             vec![1; n_spatial]
@@ -483,7 +503,12 @@ impl Conv {
         let dilated_kernel = vec![kh, kw]; // dilation=1
         let input_spatial = vec![ih, iw];
         let (pad_begin, pad_end) = resolve_padding(
-            self.auto_pad, &self.pads, n_spatial, &input_spatial, &strides, &dilated_kernel,
+            self.auto_pad,
+            &self.pads,
+            n_spatial,
+            &input_spatial,
+            &strides,
+            &dilated_kernel,
         );
         let pad_top = pad_begin[0];
         let pad_left = pad_begin[1];
@@ -501,9 +526,13 @@ impl Conv {
         let k = c_in * kh as u64 * kw as u64; // contraction dim
 
         // Atom count cap.
-        let batch_known: u64 = in_layout.iter()
+        let batch_known: u64 = in_layout
+            .iter()
             .take(in_layout.len() - 3)
-            .filter_map(|d| match d { DimKind::Known(s) => Some(*s), _ => None })
+            .filter_map(|d| match d {
+                DimKind::Known(s) => Some(*s),
+                _ => None,
+            })
             .product::<u64>()
             .max(1);
         let total_mul_atoms = batch_known * c_out * k * s;
@@ -550,13 +579,17 @@ impl Conv {
                         sym_dims.clone(),
                         vec![],
                     );
-                    if first_base.is_none() { first_base = Some(b); }
+                    if first_base.is_none() {
+                        first_base = Some(b);
+                    }
                 }
 
                 // Interior rows.
                 for ih_idx in 0..ih {
                     // Identity group: W input elements for this row.
-                    let in_row_base = in_map.base_id.offset(in_c_offset + ih_idx as u64 * in_h_stride);
+                    let in_row_base = in_map
+                        .base_id
+                        .offset(in_c_offset + ih_idx as u64 * in_h_stride);
                     let b = ctx.nano.push_group(
                         iw as u64,
                         NumericDType::F32,
@@ -564,7 +597,9 @@ impl Conv {
                         sym_dims.clone(),
                         vec![InputRef::affine(in_row_base, in_w_stride)],
                     );
-                    if first_base.is_none() { first_base = Some(b); }
+                    if first_base.is_none() {
+                        first_base = Some(b);
+                    }
 
                     // Merged literal: right pad of this row + left pad of next row.
                     let inter_count = if ih_idx < ih - 1 {
@@ -651,7 +686,9 @@ impl Conv {
                             out_sym_dims.clone(),
                             vec![InputRef::Broadcast(w_atom), input_ref],
                         );
-                        if first_mul_base.is_none() { first_mul_base = Some(b); }
+                        if first_mul_base.is_none() {
+                            first_mul_base = Some(b);
+                        }
                     }
                 }
             }
@@ -660,7 +697,11 @@ impl Conv {
         }
 
         // --- Phase 2b: Push ALL reduce groups (contiguous) ---
-        let reduce_dtype = if self.bias.is_some() { NumericDType::F32 } else { original_dtype };
+        let reduce_dtype = if self.bias.is_some() {
+            NumericDType::F32
+        } else {
+            original_dtype
+        };
         let mut first_reduce_base = None;
 
         for co in 0..c_out as usize {
@@ -676,7 +717,9 @@ impl Conv {
                 out_sym_dims.clone(),
                 vec![InputRef::affine(mul_bases[co], 1)],
             );
-            if first_reduce_base.is_none() { first_reduce_base = Some(b); }
+            if first_reduce_base.is_none() {
+                first_reduce_base = Some(b);
+            }
         }
 
         // --- Phase 3: Bias add (contiguous) ---
@@ -687,7 +730,9 @@ impl Conv {
 
             for co in 0..c_out {
                 let reduce_co_base = reduce_base.offset(co * s);
-                let bias_atom = bm.base_id.offset(co * bm.known_strides.get(0).copied().unwrap_or(1));
+                let bias_atom = bm
+                    .base_id
+                    .offset(co * bm.known_strides.get(0).copied().unwrap_or(1));
 
                 let b = ctx.nano.push_group(
                     s,
@@ -702,7 +747,9 @@ impl Conv {
                         InputRef::Broadcast(bias_atom),
                     ],
                 );
-                if first_bias_base.is_none() { first_bias_base = Some(b); }
+                if first_bias_base.is_none() {
+                    first_bias_base = Some(b);
+                }
             }
 
             output_base = first_bias_base.unwrap();
@@ -765,9 +812,16 @@ impl MilliOp for Conv {
             for i in 0..n_spatial {
                 match &weight_shape[i + 2] {
                     ScalarInfoTyped::Numeric(v) => ks.push(*v as usize),
-                    ScalarInfoTyped::Symbolic(_) => return make_symbolic_output(
-                        self.output, out_dtype, &batch, &out_channels, n_spatial, symbolic_resolver,
-                    ),
+                    ScalarInfoTyped::Symbolic(_) => {
+                        return make_symbolic_output(
+                            self.output,
+                            out_dtype,
+                            &batch,
+                            &out_channels,
+                            n_spatial,
+                            symbolic_resolver,
+                        );
+                    }
                 }
             }
             ks
@@ -820,23 +874,19 @@ impl MilliOp for Conv {
             // For SameUpper/SameLower with symbolic input, we can still compute output = ceil(input/stride)
             // but for NotSet/Valid we need concrete dims
             match self.auto_pad {
-                ConvAutoPad::SameUpper | ConvAutoPad::SameLower => {
-                    (0..n_spatial)
-                        .map(|i| match &input_shape[i + 2] {
-                            ScalarInfoTyped::Numeric(v) => {
-                                let out = (*v as usize).div_ceil(strides[i]);
-                                ScalarInfoTyped::Numeric(out as u64)
-                            }
-                            ScalarInfoTyped::Symbolic(_) => ScalarInfoTyped::Symbolic(
-                                SymbolicScalarTyped::new(symbolic_resolver),
-                            ),
-                        })
-                        .collect()
-                }
-                _ => (0..n_spatial)
-                    .map(|_| {
-                        ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(symbolic_resolver))
+                ConvAutoPad::SameUpper | ConvAutoPad::SameLower => (0..n_spatial)
+                    .map(|i| match &input_shape[i + 2] {
+                        ScalarInfoTyped::Numeric(v) => {
+                            let out = (*v as usize).div_ceil(strides[i]);
+                            ScalarInfoTyped::Numeric(out as u64)
+                        }
+                        ScalarInfoTyped::Symbolic(_) => {
+                            ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(symbolic_resolver))
+                        }
                     })
+                    .collect(),
+                _ => (0..n_spatial)
+                    .map(|_| ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(symbolic_resolver)))
                     .collect(),
             }
         };
@@ -1340,7 +1390,9 @@ impl MilliOp for ConvInputGrad {
         let input_info = known_inputs
             .get(&self.input)
             .ok_or(MilliOpGraphError::UnableToInfer)?;
-        let ranked = input_info.as_ranked().ok_or(MilliOpGraphError::UnableToInfer)?;
+        let ranked = input_info
+            .as_ranked()
+            .ok_or(MilliOpGraphError::UnableToInfer)?;
         let out = crate::tensor_info::TensorInfo::from_dtype_and_shape_scalars(
             input_info.dtype(),
             &ranked.shape(),
@@ -1508,7 +1560,10 @@ impl MilliOp for ConvInputGrad {
         &self,
         inputs: &[crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>],
         pool: &'p P2,
-    ) -> Result<Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>, crate::nano_graph::pool_eval::PoolEvalError> {
+    ) -> Result<
+        Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>,
+        crate::nano_graph::pool_eval::PoolEvalError,
+    > {
         use crate::numeric_scalar::NumericScalar;
         use crate::numeric_tensor::{NumericTensor as PoolTensor, TensorLayout};
         use crate::tensor_rank::DynRank;
@@ -1530,7 +1585,9 @@ impl MilliOp for ConvInputGrad {
         let in_channels = channels_per_group_in * group;
 
         let kernel_shape: Vec<usize> = if self.kernel_shape.is_empty() {
-            (0..n_spatial).map(|i| weight_shape[i + 2] as usize).collect()
+            (0..n_spatial)
+                .map(|i| weight_shape[i + 2] as usize)
+                .collect()
         } else {
             self.kernel_shape.iter().map(|&x| x as usize).collect()
         };
@@ -1549,18 +1606,29 @@ impl MilliOp for ConvInputGrad {
         let out_spatial_size: usize = out_spatial.iter().product();
         let k_per_group: usize = channels_per_group_in * kernel_shape.iter().product::<usize>();
 
-        let input_spatial: Vec<usize> = (0..n_spatial).map(|i| input_shape[i + 2] as usize).collect();
+        let input_spatial: Vec<usize> = (0..n_spatial)
+            .map(|i| input_shape[i + 2] as usize)
+            .collect();
 
         let dilated_kernel: Vec<usize> = (0..n_spatial)
             .map(|i| dilations[i] * (kernel_shape[i] - 1) + 1)
             .collect();
         let (pad_begin, _) = resolve_padding(
-            self.auto_pad, &self.pads, n_spatial, &input_spatial, &strides, &dilated_kernel,
+            self.auto_pad,
+            &self.pads,
+            n_spatial,
+            &input_spatial,
+            &strides,
+            &dilated_kernel,
         );
 
         // Extract f32 data.
-        let weight_data: Vec<f32> = (0..weight_view.numel()).map(|i| weight_view.read_element(i).to_f32()).collect();
-        let grad_data: Vec<f32> = (0..grad_view.numel()).map(|i| grad_view.read_element(i).to_f32()).collect();
+        let weight_data: Vec<f32> = (0..weight_view.numel())
+            .map(|i| weight_view.read_element(i).to_f32())
+            .collect();
+        let grad_data: Vec<f32> = (0..grad_view.numel())
+            .map(|i| grad_view.read_element(i).to_f32())
+            .collect();
 
         let in_spatial_size: usize = input_spatial.iter().product();
         let mut dx = vec![0.0f32; batch_size * in_channels * in_spatial_size];
@@ -1575,11 +1643,13 @@ impl MilliOp for ConvInputGrad {
             for g in 0..group {
                 let grad_offset = n * out_channels * out_spatial_size
                     + g * channels_per_group_out * out_spatial_size;
-                let grad_slice = &grad_data[grad_offset..grad_offset + channels_per_group_out * out_spatial_size];
+                let grad_slice = &grad_data
+                    [grad_offset..grad_offset + channels_per_group_out * out_spatial_size];
 
                 // Weight for this group: [cpg_out, K] from flat weight_data.
                 let w_offset = g * channels_per_group_out * k_per_group;
-                let w_slice = &weight_data[w_offset..w_offset + channels_per_group_out * k_per_group];
+                let w_slice =
+                    &weight_data[w_offset..w_offset + channels_per_group_out * k_per_group];
 
                 // d_col = W^T @ dY  →  [K, out_spatial_size]
                 let mut d_col = vec![0.0f32; k_per_group * out_spatial_size];
@@ -1587,26 +1657,36 @@ impl MilliOp for ConvInputGrad {
                     for s in 0..out_spatial_size {
                         let mut sum = 0.0f32;
                         for co in 0..channels_per_group_out {
-                            sum += w_slice[co * k_per_group + k] * grad_slice[co * out_spatial_size + s];
+                            sum += w_slice[co * k_per_group + k]
+                                * grad_slice[co * out_spatial_size + s];
                         }
                         d_col[k * out_spatial_size + s] = sum;
                     }
                 }
 
                 // col2im: scatter d_col back to input space
-                let dx_offset = n * in_channels * in_spatial_size + g * channels_per_group_in * in_spatial_size;
-                let dx_slice = &mut dx[dx_offset..dx_offset + channels_per_group_in * in_spatial_size];
+                let dx_offset =
+                    n * in_channels * in_spatial_size + g * channels_per_group_in * in_spatial_size;
+                let dx_slice =
+                    &mut dx[dx_offset..dx_offset + channels_per_group_in * in_spatial_size];
                 col2im_2d(
                     &d_col,
                     dx_slice,
                     &Im2Col2dParams {
                         in_base: 0,
                         channels_per_group_in,
-                        in_h, in_w, out_h, out_w,
-                        kernel_h: kernel_shape[0], kernel_w: kernel_shape[1],
-                        stride_h: strides[0], stride_w: strides[1],
-                        dilation_h: dilations[0], dilation_w: dilations[1],
-                        pad_top: pad_begin[0], pad_left: pad_begin[1],
+                        in_h,
+                        in_w,
+                        out_h,
+                        out_w,
+                        kernel_h: kernel_shape[0],
+                        kernel_w: kernel_shape[1],
+                        stride_h: strides[0],
+                        stride_w: strides[1],
+                        dilation_h: dilations[0],
+                        dilation_w: dilations[1],
+                        pad_top: pad_begin[0],
+                        pad_left: pad_begin[1],
                     },
                 );
             }
@@ -1616,7 +1696,8 @@ impl MilliOp for ConvInputGrad {
         result_shape.extend(input_spatial.iter().map(|&s| s as u64));
         let dtype = grad_view.dtype();
         let layout = TensorLayout::<DynRank>::row_major(result_shape, dtype);
-        let buf = pool.allocate(layout.buffer_size_bytes())
+        let buf = pool
+            .allocate(layout.buffer_size_bytes())
             .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
         let mut out = PoolTensor::from_parts(buf, layout);
         for (i, &v) in dx.iter().enumerate() {
@@ -1736,10 +1817,18 @@ impl MilliOp for ConvWeightGrad {
         pool: &'p P,
     ) -> Result<Vec<(GlobalId, crate::tensor_info::TensorInfo<'p, P>)>, MilliOpGraphError> {
         // Weight shape: [out_channels, in_channels/groups, *kernel_shape]
-        let grad_info = known_inputs.get(&self.grad_output).ok_or(MilliOpGraphError::UnableToInfer)?;
-        let input_info = known_inputs.get(&self.input).ok_or(MilliOpGraphError::UnableToInfer)?;
-        let grad_ranked = grad_info.as_ranked().ok_or(MilliOpGraphError::UnableToInfer)?;
-        let input_ranked = input_info.as_ranked().ok_or(MilliOpGraphError::UnableToInfer)?;
+        let grad_info = known_inputs
+            .get(&self.grad_output)
+            .ok_or(MilliOpGraphError::UnableToInfer)?;
+        let input_info = known_inputs
+            .get(&self.input)
+            .ok_or(MilliOpGraphError::UnableToInfer)?;
+        let grad_ranked = grad_info
+            .as_ranked()
+            .ok_or(MilliOpGraphError::UnableToInfer)?;
+        let input_ranked = input_info
+            .as_ranked()
+            .ok_or(MilliOpGraphError::UnableToInfer)?;
         let grad_shape = grad_ranked.shape();
         let input_shape = input_ranked.shape();
         if grad_shape.len() < 2 || input_shape.len() < 2 {
@@ -1763,7 +1852,10 @@ impl MilliOp for ConvWeightGrad {
         for &k in &self.kernel_shape {
             weight_shape.push(ScalarInfoTyped::Numeric(k as u64));
         }
-        let out = crate::tensor_info::TensorInfo::from_dtype_and_shape_scalars(grad_info.dtype(), &weight_shape);
+        let out = crate::tensor_info::TensorInfo::from_dtype_and_shape_scalars(
+            grad_info.dtype(),
+            &weight_shape,
+        );
         Ok(vec![(self.output, out)])
     }
 
@@ -1907,7 +1999,10 @@ impl MilliOp for ConvWeightGrad {
         &self,
         inputs: &[crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>],
         pool: &'p P2,
-    ) -> Result<Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>, crate::nano_graph::pool_eval::PoolEvalError> {
+    ) -> Result<
+        Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>,
+        crate::nano_graph::pool_eval::PoolEvalError,
+    > {
         use crate::numeric_scalar::NumericScalar;
         use crate::numeric_tensor::{NumericTensor as PoolTensor, TensorLayout};
         use crate::tensor_rank::DynRank;
@@ -1941,7 +2036,9 @@ impl MilliOp for ConvWeightGrad {
             self.dilations.iter().map(|&x| x as usize).collect()
         };
 
-        let input_spatial: Vec<usize> = (0..n_spatial).map(|i| input_shape[i + 2] as usize).collect();
+        let input_spatial: Vec<usize> = (0..n_spatial)
+            .map(|i| input_shape[i + 2] as usize)
+            .collect();
         let out_spatial: Vec<usize> = (0..n_spatial).map(|i| grad_shape[i + 2] as usize).collect();
         let out_spatial_size: usize = out_spatial.iter().product();
         let k_per_group: usize = channels_per_group_in * kernel_shape.iter().product::<usize>();
@@ -1950,12 +2047,21 @@ impl MilliOp for ConvWeightGrad {
             .map(|i| dilations[i] * (kernel_shape[i] - 1) + 1)
             .collect();
         let (pad_begin, _) = resolve_padding(
-            self.auto_pad, &self.pads, n_spatial, &input_spatial, &strides, &dilated_kernel,
+            self.auto_pad,
+            &self.pads,
+            n_spatial,
+            &input_spatial,
+            &strides,
+            &dilated_kernel,
         );
 
         // Extract f32 data.
-        let input_data: Vec<f32> = (0..input_view.numel()).map(|i| input_view.read_element(i).to_f32()).collect();
-        let grad_data: Vec<f32> = (0..grad_view.numel()).map(|i| grad_view.read_element(i).to_f32()).collect();
+        let input_data: Vec<f32> = (0..input_view.numel())
+            .map(|i| input_view.read_element(i).to_f32())
+            .collect();
+        let grad_data: Vec<f32> = (0..grad_view.numel())
+            .map(|i| grad_view.read_element(i).to_f32())
+            .collect();
 
         assert_eq!(n_spatial, 2, "ConvWeightGrad currently supports 2D only");
         let in_h = input_spatial[0];
@@ -1977,18 +2083,26 @@ impl MilliOp for ConvWeightGrad {
                     &Im2Col2dParams {
                         in_base,
                         channels_per_group_in,
-                        in_h, in_w, out_h, out_w,
-                        kernel_h: kernel_shape[0], kernel_w: kernel_shape[1],
-                        stride_h: strides[0], stride_w: strides[1],
-                        dilation_h: dilations[0], dilation_w: dilations[1],
-                        pad_top: pad_begin[0], pad_left: pad_begin[1],
+                        in_h,
+                        in_w,
+                        out_h,
+                        out_w,
+                        kernel_h: kernel_shape[0],
+                        kernel_w: kernel_shape[1],
+                        stride_h: strides[0],
+                        stride_w: strides[1],
+                        dilation_h: dilations[0],
+                        dilation_w: dilations[1],
+                        pad_top: pad_begin[0],
+                        pad_left: pad_begin[1],
                     },
                 );
 
                 // dY for this (n, g): [cpg_out, out_spatial_size]
                 let grad_offset = n * out_channels * out_spatial_size
                     + g * channels_per_group_out * out_spatial_size;
-                let grad_slice = &grad_data[grad_offset..grad_offset + channels_per_group_out * out_spatial_size];
+                let grad_slice = &grad_data
+                    [grad_offset..grad_offset + channels_per_group_out * out_spatial_size];
 
                 // dW_g += dY @ col^T  →  [cpg_out, K]
                 let dw_offset = g * channels_per_group_out * k_per_group;
@@ -1996,7 +2110,8 @@ impl MilliOp for ConvWeightGrad {
                     for k in 0..k_per_group {
                         let mut sum = 0.0f32;
                         for s in 0..out_spatial_size {
-                            sum += grad_slice[co * out_spatial_size + s] * col[k * out_spatial_size + s];
+                            sum += grad_slice[co * out_spatial_size + s]
+                                * col[k * out_spatial_size + s];
                         }
                         dw[dw_offset + co * k_per_group + k] += sum;
                     }
@@ -2009,7 +2124,8 @@ impl MilliOp for ConvWeightGrad {
         result_shape.extend(kernel_shape.iter().map(|&s| s as u64));
         let dtype = grad_view.dtype();
         let layout = TensorLayout::<DynRank>::row_major(result_shape, dtype);
-        let buf = pool.allocate(layout.buffer_size_bytes())
+        let buf = pool
+            .allocate(layout.buffer_size_bytes())
             .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
         let mut out = PoolTensor::from_parts(buf, layout);
         for (i, &v) in dw.iter().enumerate() {
@@ -2132,7 +2248,10 @@ impl MilliOp for ConvBiasGrad {
         &self,
         inputs: &[crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>],
         pool: &'p P2,
-    ) -> Result<Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>, crate::nano_graph::pool_eval::PoolEvalError> {
+    ) -> Result<
+        Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>,
+        crate::nano_graph::pool_eval::PoolEvalError,
+    > {
         use crate::numeric_scalar::NumericScalar;
         use crate::numeric_tensor::{NumericTensor, TensorLayout};
         use crate::tensor_rank::DynRank;
@@ -2148,18 +2267,25 @@ impl MilliOp for ConvBiasGrad {
         let out_numel = c_out as usize;
 
         let layout = TensorLayout::<DynRank>::row_major(out_shape, dtype);
-        let buf = pool.allocate(layout.buffer_size_bytes())
+        let buf = pool
+            .allocate(layout.buffer_size_bytes())
             .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
         let mut out = NumericTensor::from_parts(buf, layout);
 
-        for i in 0..out_numel { out.write_element(i, NumericScalar::zero(dtype)); }
+        for i in 0..out_numel {
+            out.write_element(i, NumericScalar::zero(dtype));
+        }
 
         // Sum all elements with the same channel index.
         let channel_stride = if rank >= 2 {
             let mut s = 1usize;
-            for d in 2..rank { s *= shape[d] as usize; }
+            for d in 2..rank {
+                s *= shape[d] as usize;
+            }
             s
-        } else { 1 };
+        } else {
+            1
+        };
         let spatial_size = channel_stride;
         let batch_stride = c_out as usize * spatial_size;
 

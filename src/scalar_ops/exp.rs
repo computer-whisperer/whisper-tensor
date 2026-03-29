@@ -37,9 +37,18 @@ mod tests {
     #[test]
     fn float_exp_special_values() {
         let ft = FloatType::F64;
-        assert!(ft.decode_f64(float_exp(ft.encode_f64(f64::NAN), &ft)).is_nan());
-        assert_eq!(ft.decode_f64(float_exp(ft.encode_f64(f64::INFINITY), &ft)), f64::INFINITY);
-        assert_eq!(ft.decode_f64(float_exp(ft.encode_f64(f64::NEG_INFINITY), &ft)), 0.0);
+        assert!(
+            ft.decode_f64(float_exp(ft.encode_f64(f64::NAN), &ft))
+                .is_nan()
+        );
+        assert_eq!(
+            ft.decode_f64(float_exp(ft.encode_f64(f64::INFINITY), &ft)),
+            f64::INFINITY
+        );
+        assert_eq!(
+            ft.decode_f64(float_exp(ft.encode_f64(f64::NEG_INFINITY), &ft)),
+            0.0
+        );
     }
 
     #[test]

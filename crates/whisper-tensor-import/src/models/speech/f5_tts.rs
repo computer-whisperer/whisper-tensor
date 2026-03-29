@@ -3,10 +3,10 @@ use std::path::Path;
 use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
 use whisper_tensor::dtype::DType;
 use whisper_tensor::interfaces::{TTSInputConfig, TextToSpeechInterface};
-use whisper_tensor::numeric_dtype::NumericDType;
 use whisper_tensor::loader::{LoadedInterface, LoaderError, LoaderOutput};
 use whisper_tensor::milli_graph::MilliOpGraph;
 use whisper_tensor::milli_graph::ops::{Cast, Constant, SimpleBinary};
+use whisper_tensor::numeric_dtype::NumericDType;
 use whisper_tensor::super_graph::SuperGraphBuilder;
 use whisper_tensor::super_graph::links::{
     SuperGraphLink, SuperGraphLinkDouble, SuperGraphLinkTriple,

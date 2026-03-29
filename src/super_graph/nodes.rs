@@ -8,10 +8,10 @@ use crate::graph::{
     GlobalId, Graph, Node, NodeMetadata, NodeSlotEditError, Property, PropertyValue, SlotDirection,
 };
 use crate::metadata::TokenizerInfo;
-use crate::milli_graph::MilliOpGraph;
-use crate::milli_graph::observer::MilliOpGraphObserver;
 use crate::migration::numeric_scalar::NumericScalar;
 use crate::migration::numeric_tensor::NumericTensor;
+use crate::milli_graph::MilliOpGraph;
+use crate::milli_graph::observer::MilliOpGraphObserver;
 use crate::phonemization::{text_to_kokoro_phonemes, text_to_piper_phonemes};
 use crate::super_graph::data::{SuperGraphAudioClip, SuperGraphImage};
 use crate::super_graph::links::{
@@ -159,7 +159,10 @@ fn set_slot_link_like(
 }
 
 fn tensor_bool_scalar(value: bool) -> Result<SharedPoolTensor, SuperGraphError> {
-    Ok(SharedPoolTensor::from(NumericTensor::from_vec_shape(vec![value], vec![])?))
+    Ok(SharedPoolTensor::from(NumericTensor::from_vec_shape(
+        vec![value],
+        vec![],
+    )?))
 }
 
 fn read_rank0_bool_tensor(
@@ -391,12 +394,8 @@ impl<'a, T: SuperGraphObserver> SymbolicGraphObserver for SymbolicGraphObserverW
             .into_iter()
             .chain(node_path.iter().cloned())
             .collect::<Vec<_>>();
-        self.inner.on_node_executed(
-            node_path.as_slice(),
-            "",
-            start_instant,
-            end_instant,
-        )
+        self.inner
+            .on_node_executed(node_path.as_slice(), "", start_instant, end_instant)
     }
 
     fn on_tensor_assigned(
@@ -446,12 +445,8 @@ impl<'a, T: SuperGraphObserver> CompiledProgramObserver for SymbolicGraphObserve
             .into_iter()
             .chain(node_path.iter().cloned())
             .collect::<Vec<_>>();
-        self.inner.on_node_executed(
-            node_path.as_slice(),
-            "",
-            start_instant,
-            end_instant,
-        )
+        self.inner
+            .on_node_executed(node_path.as_slice(), "", start_instant, end_instant)
     }
 
     fn on_tensor_assigned(
@@ -562,8 +557,10 @@ impl SuperGraphNode for SuperGraphNodeModelExecution {
             let outputs = outputs.collect::<HashMap<_, _>>();
             for (name, link) in &self.tensor_outputs {
                 let link = require_node_link(*link, "ModelExecution", "tensor_outputs")?;
-                data.tensors
-                    .insert(link, SharedPoolTensor::from_legacy(outputs.get(name).unwrap()));
+                data.tensors.insert(
+                    link,
+                    SharedPoolTensor::from_legacy(outputs.get(name).unwrap()),
+                );
             }
         } else {
             // Pool eval path: no legacy types.
@@ -581,8 +578,10 @@ impl SuperGraphNode for SuperGraphNodeModelExecution {
                 .iter()
                 .map(|(id, shared)| (*id, shared.0.view()))
                 .collect();
-            let view_map: HashMap<GlobalId, &crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>> =
-                views.iter().map(|(id, view)| (*id, view)).collect();
+            let view_map: HashMap<
+                GlobalId,
+                &crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>,
+            > = views.iter().map(|(id, view)| (*id, view)).collect();
 
             let results = symbolic_graph.pool_eval_with_store(&view_map, tensor_store, &POOL)?;
 
@@ -595,7 +594,8 @@ impl SuperGraphNode for SuperGraphNodeModelExecution {
                 if let Some(&name) = tensors_by_id.get(&id) {
                     for (out_name, link) in &self.tensor_outputs {
                         if out_name == name {
-                            let link = require_node_link(*link, "ModelExecution", "tensor_outputs")?;
+                            let link =
+                                require_node_link(*link, "ModelExecution", "tensor_outputs")?;
                             data.tensors
                                 .insert(link, SharedPoolTensor(std::sync::Arc::new(tensor)));
                             break;
@@ -866,7 +866,8 @@ impl SuperGraphNode for SuperGraphNodeTokenizerEncode {
                 NumericTensor::from_vec_shape(ids, vec![1, *seq_len])?
             }
         };
-        data.tensors.insert(tensor_output_link, SharedPoolTensor::from(input_tensor));
+        data.tensors
+            .insert(tensor_output_link, SharedPoolTensor::from(input_tensor));
         Ok(())
     }
 
@@ -1193,9 +1194,14 @@ impl SuperGraphNode for SuperGraphNodePiperPhonemesToTensor {
             NumericTensor::<DynRank>::from_vec_shape(token_ids, vec![1, num_tokens])?;
         let input_lengths_tensor =
             NumericTensor::<DynRank>::from_vec_shape(vec![num_tokens as i64], vec![1])?;
-        data.tensors.insert(token_ids_output_link, SharedPoolTensor::from(token_ids_tensor));
-        data.tensors
-            .insert(input_lengths_output_link, SharedPoolTensor::from(input_lengths_tensor));
+        data.tensors.insert(
+            token_ids_output_link,
+            SharedPoolTensor::from(token_ids_tensor),
+        );
+        data.tensors.insert(
+            input_lengths_output_link,
+            SharedPoolTensor::from(input_lengths_tensor),
+        );
         Ok(())
     }
 
@@ -1306,7 +1312,10 @@ impl SuperGraphNode for SuperGraphNodeKokoroPhonemesToTensor {
         let num_tokens = token_ids.len();
         let token_ids_tensor =
             NumericTensor::<DynRank>::from_vec_shape(token_ids, vec![1, num_tokens])?;
-        data.tensors.insert(token_ids_output_link, SharedPoolTensor::from(token_ids_tensor));
+        data.tensors.insert(
+            token_ids_output_link,
+            SharedPoolTensor::from(token_ids_tensor),
+        );
         Ok(())
     }
 
@@ -1404,7 +1413,10 @@ impl SuperGraphNode for SuperGraphNodeF5TextToTensor {
         let num_tokens = token_ids.len();
         let token_ids_tensor =
             NumericTensor::<DynRank>::from_vec_shape(token_ids, vec![1, num_tokens])?;
-        data.tensors.insert(token_ids_output_link, SharedPoolTensor::from(token_ids_tensor));
+        data.tensors.insert(
+            token_ids_output_link,
+            SharedPoolTensor::from(token_ids_tensor),
+        );
         Ok(())
     }
 
@@ -2148,7 +2160,8 @@ impl SuperGraphNode for SuperGraphNodeAudioClipToMelSpectrogram {
 
         let mel_tensor =
             NumericTensor::<DynRank>::from_vec_shape(output, vec![1, num_mel_bins, num_frames])?;
-        data.tensors.insert(tensor_output_link, SharedPoolTensor::from(mel_tensor));
+        data.tensors
+            .insert(tensor_output_link, SharedPoolTensor::from(mel_tensor));
         Ok(())
     }
 
@@ -2235,12 +2248,8 @@ impl<'a, T: SuperGraphObserver> MilliOpGraphObserver for MilliOpGraphObserverWra
             .chain(node_path.iter())
             .copied()
             .collect::<Vec<_>>();
-        self.inner.on_node_executed(
-            node_path.as_slice(),
-            "",
-            start_instant,
-            end_instant,
-        );
+        self.inner
+            .on_node_executed(node_path.as_slice(), "", start_instant, end_instant);
     }
 
     fn should_cancel(&mut self) -> bool {
@@ -2262,7 +2271,9 @@ impl SuperGraphNode for SuperGraphNodeMilliOpGraph {
         static POOL: SystemPool = SystemPool;
 
         // Build input views from SuperGraphData.
-        let input_entries: Vec<_> = self.graph.get_inputs()
+        let input_entries: Vec<_> = self
+            .graph
+            .get_inputs()
             .into_iter()
             .filter_map(|id| {
                 let shared = data.tensors.get(&SuperGraphLink::tensor(id))?;
@@ -2273,8 +2284,10 @@ impl SuperGraphNode for SuperGraphNodeMilliOpGraph {
             .iter()
             .map(|(id, shared)| (*id, shared.0.view()))
             .collect();
-        let input_map: HashMap<GlobalId, &crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>> =
-            input_views.iter().map(|(id, view)| (*id, view)).collect();
+        let input_map: HashMap<
+            GlobalId,
+            &crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>,
+        > = input_views.iter().map(|(id, view)| (*id, view)).collect();
 
         let results = self.graph.pool_eval(&input_map, &POOL)?;
 
@@ -2463,7 +2476,9 @@ impl SuperGraphNode for SuperGraphNodeScan {
                     let mut backend = EvalBackend::NDArray;
                     let sliced = tensor_legacy.slice(slice_arg.as_slice(), &mut backend)?;
                     let squeezed = sliced.squeeze(*scan_axis as usize)?;
-                    iter_inputs.tensors.insert(inner, SharedPoolTensor::from(squeezed));
+                    iter_inputs
+                        .tensors
+                        .insert(inner, SharedPoolTensor::from(squeezed));
                 }
                 iter_inputs
             };
@@ -2530,10 +2545,8 @@ impl SuperGraphNode for SuperGraphNodeScan {
                     link
                 )));
             }
-            let legacy_parts: Vec<NumericTensor<DynRank>> = parts
-                .into_iter()
-                .map(|tensor| tensor.to_legacy())
-                .collect();
+            let legacy_parts: Vec<NumericTensor<DynRank>> =
+                parts.into_iter().map(|tensor| tensor.to_legacy()).collect();
             let unsqueezed = legacy_parts
                 .into_iter()
                 .map(|tensor| tensor.unsqueeze(axis))
@@ -2794,7 +2807,8 @@ impl SuperGraphNode for SuperGraphNodeRNNCacheRead {
                                     "RNNCacheRead",
                                     "state_outputs",
                                 )?;
-                                data.tensors.insert(output_link, SharedPoolTensor::from_legacy(value));
+                                data.tensors
+                                    .insert(output_link, SharedPoolTensor::from_legacy(value));
                             }
                         }
                         // Emit remaining tokens
@@ -2802,8 +2816,10 @@ impl SuperGraphNode for SuperGraphNodeRNNCacheRead {
                         let remaining_tokens_tensor = NumericTensor::from(
                             NDArrayNumericTensor::from_vec(remaining_tokens.to_vec()).to_dyn(),
                         );
-                        data.tensors
-                            .insert(tokens_output_link, SharedPoolTensor::from(remaining_tokens_tensor));
+                        data.tensors.insert(
+                            tokens_output_link,
+                            SharedPoolTensor::from(remaining_tokens_tensor),
+                        );
                         break;
                     }
                 }
@@ -2934,10 +2950,11 @@ impl SuperGraphNode for SuperGraphNodeRNNCacheWrite {
                     Ok((k.clone(), tensor.to_legacy()))
                 })
                 .collect::<Result<_, SuperGraphError>>()?;
-            caches.rnn_cache.entry(key_input).or_default().insert(
-                tokens_vec,
-                state_inputs,
-            );
+            caches
+                .rnn_cache
+                .entry(key_input)
+                .or_default()
+                .insert(tokens_vec, state_inputs);
         }
         Ok(())
     }
@@ -3124,7 +3141,9 @@ impl SuperGraphNode for SuperGraphNodeTensorCacheWrite {
                 .tensors
                 .get(&value_input_link)
                 .ok_or(SuperGraphError::MissingLinkError(String::new()))?;
-            caches.tensor_cache.insert(key_input, value_input.to_legacy());
+            caches
+                .tensor_cache
+                .insert(key_input, value_input.to_legacy());
         }
         Ok(())
     }
@@ -3232,8 +3251,10 @@ impl SuperGraphNode for SuperGraphNodeTensorPackCacheRead {
                 for (name, output) in &self.value_outputs {
                     let output_link =
                         require_node_link(*output, "TensorPackCacheRead", "value_outputs")?;
-                    data.tensors
-                        .insert(output_link, SharedPoolTensor::from_legacy(cached_values.get(name).unwrap()));
+                    data.tensors.insert(
+                        output_link,
+                        SharedPoolTensor::from_legacy(cached_values.get(name).unwrap()),
+                    );
                 }
                 hit = true;
             }

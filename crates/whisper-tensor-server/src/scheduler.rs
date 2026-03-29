@@ -300,11 +300,7 @@ impl SuperGraphObserver for LocalSuperGraphObserver {
         }
     }
 
-    fn on_tensor_assigned(
-        &mut self,
-        path: &[GlobalId],
-        tensor: &SharedPoolTensor,
-    ) {
+    fn on_tensor_assigned(&mut self, path: &[GlobalId], tensor: &SharedPoolTensor) {
         self.refresh_dynamic_settings();
         let tensor_legacy = tensor.to_legacy();
         if let Some(reporter) = &mut self.reporter {
@@ -485,137 +481,139 @@ pub async fn scheduler(
                     // Dispatch tight loop
                     let result = tokio::task::spawn_blocking(move || {
                         let mut ndarray_backend = EvalBackend::NDArray;
-                        let use_compiler = matches!(req.backend_mode, SuperGraphRequestBackendMode::Compiler);
+                        let use_compiler =
+                            matches!(req.backend_mode, SuperGraphRequestBackendMode::Compiler);
                         let backend = &mut ndarray_backend;
                         {
-                                let mut super_graph_data = SuperGraphData::new();
-                                for (link, tensor) in req.tensor_inputs {
-                                    super_graph_data
-                                        .tensors
-                                        .insert(link, SharedPoolTensor::from(NumericTensor::from(tensor)));
-                                }
-                                for (link, clip) in req.audio_inputs {
-                                    super_graph_data.audio_clips.insert(
-                                        link,
-                                        whisper_tensor::super_graph::data::SuperGraphAudioClip::new(
-                                            SharedPoolTensor::from(NumericTensor::from(clip.samples)),
-                                            clip.sample_rate_hz,
-                                        ),
-                                    );
-                                }
-
-                                // Populate data with refs
-                                for link in req.model_inputs.keys() {
-                                    if let Some(model) = models.get(link) {
-                                        super_graph_data
-                                            .tensor_maps
-                                            .insert(*link, model.get_tensor_store());
-                                    }
-                                }
-                                for (link, data) in req.string_inputs {
-                                    super_graph_data.strings.insert(link, data);
-                                }
-                                for (link, hash) in req.hash_inputs {
-                                    super_graph_data.hashes.insert(link, hash);
-                                }
-                                let mut observer = LocalSuperGraphObserver::new(
-                                    req.attention_token,
-                                    req.do_node_execution_reports,
-                                    req.abbreviated_tensor_report_settings,
-                                    reporter,
-                                    req.subscribed_tensors.iter().cloned().collect(),
-                                    Some(cancellation_registry_for_request.clone()),
-                                    Some(observer_settings_registry_for_request.clone()),
+                            let mut super_graph_data = SuperGraphData::new();
+                            for (link, tensor) in req.tensor_inputs {
+                                super_graph_data.tensors.insert(
+                                    link,
+                                    SharedPoolTensor::from(NumericTensor::from(tensor)),
                                 );
-                                let mut caches = caches.lock().unwrap();
-                                let mut ndarray_tensor_load_caches =
-                                    ndarray_tensor_load_caches.lock().unwrap();
-                                // setup tensor caches
-                                let res = {
-                                    let mut super_graph_tensor_cache = {
-                                        let mut res = SuperGraphTensorCache::new();
-                                        for (a, b) in &model_id_map {
-                                            if let Some(x) =
-                                                ndarray_tensor_load_caches.remove(a)
-                                            {
-                                                res.caches.push((b.get_tensor_store(), x));
-                                            } else {
-                                                res.caches.push((
-                                                    b.get_tensor_store(),
-                                                    ModelLoadedTensorCache::default(),
-                                                ));
-                                            }
+                            }
+                            for (link, clip) in req.audio_inputs {
+                                super_graph_data.audio_clips.insert(
+                                    link,
+                                    whisper_tensor::super_graph::data::SuperGraphAudioClip::new(
+                                        SharedPoolTensor::from(NumericTensor::from(clip.samples)),
+                                        clip.sample_rate_hz,
+                                    ),
+                                );
+                            }
+
+                            // Populate data with refs
+                            for link in req.model_inputs.keys() {
+                                if let Some(model) = models.get(link) {
+                                    super_graph_data
+                                        .tensor_maps
+                                        .insert(*link, model.get_tensor_store());
+                                }
+                            }
+                            for (link, data) in req.string_inputs {
+                                super_graph_data.strings.insert(link, data);
+                            }
+                            for (link, hash) in req.hash_inputs {
+                                super_graph_data.hashes.insert(link, hash);
+                            }
+                            let mut observer = LocalSuperGraphObserver::new(
+                                req.attention_token,
+                                req.do_node_execution_reports,
+                                req.abbreviated_tensor_report_settings,
+                                reporter,
+                                req.subscribed_tensors.iter().cloned().collect(),
+                                Some(cancellation_registry_for_request.clone()),
+                                Some(observer_settings_registry_for_request.clone()),
+                            );
+                            let mut caches = caches.lock().unwrap();
+                            let mut ndarray_tensor_load_caches =
+                                ndarray_tensor_load_caches.lock().unwrap();
+                            // setup tensor caches
+                            let res = {
+                                let mut super_graph_tensor_cache = {
+                                    let mut res = SuperGraphTensorCache::new();
+                                    for (a, b) in &model_id_map {
+                                        if let Some(x) = ndarray_tensor_load_caches.remove(a) {
+                                            res.caches.push((b.get_tensor_store(), x));
+                                        } else {
+                                            res.caches.push((
+                                                b.get_tensor_store(),
+                                                ModelLoadedTensorCache::default(),
+                                            ));
                                         }
-                                        res
-                                    };
-                                    let cache = req.use_cache.map(|x| {
-                                        caches.entry(x).or_insert_with(SuperGraphCache::new)
-                                    });
-                                    let compiled_models = {
-                                        let mut ret = vec![];
-                                        for (a, b) in &compiled_models {
-                                            if let Some(x) = b {
-                                                ret.push((
-                                                    model_id_map.get(a).unwrap().as_ref(),
-                                                    x.as_ref(),
-                                                ));
-                                            }
-                                        }
-                                        ret
-                                    };
-                                    let symbolic_graph_refs = symbolic_graph_models
-                                        .iter()
-                                        .map(|x| x.get_symbolic_graph())
-                                        .collect();
-                                    let mut context = SuperGraphContext {
-                                        observer: &mut observer,
-                                        caches: cache,
-                                        use_compiled_models: use_compiler,
-                                        symbolic_graphs: symbolic_graph_refs,
-                                        compiled_models: Some(compiled_models),
-                                        super_graph_tensor_cache: &mut super_graph_tensor_cache,
-                                    };
-                                    let ret = req
-                                        .super_graph
-                                        .run(super_graph_data, &mut context)
-                                        .map_err(|x| x.to_string())?;
-                                    // Re-pack tensor caches
-                                    for (a, b) in super_graph_tensor_cache.caches {
-                                        for (aa, bb) in &model_id_map {
-                                            if ptr::addr_eq(a, bb.as_ref()) {
-                                                ndarray_tensor_load_caches.insert(*aa, b);
-                                                break;
-                                            }
+                                    }
+                                    res
+                                };
+                                let cache = req
+                                    .use_cache
+                                    .map(|x| caches.entry(x).or_insert_with(SuperGraphCache::new));
+                                let compiled_models = {
+                                    let mut ret = vec![];
+                                    for (a, b) in &compiled_models {
+                                        if let Some(x) = b {
+                                            ret.push((
+                                                model_id_map.get(a).unwrap().as_ref(),
+                                                x.as_ref(),
+                                            ));
                                         }
                                     }
                                     ret
                                 };
-
-                                let SuperGraphData {
-                                    tensors,
-                                    images,
-                                    audio_clips,
-                                    strings,
-                                    hashes,
-                                    ..
-                                } = res;
-
-                                let mut tensor_outputs = tensors
+                                let symbolic_graph_refs = symbolic_graph_models
                                     .iter()
-                                    .map(|(k, v)| (*k, v.to_legacy().to_ndarray().unwrap()))
-                                    .collect::<HashMap<_, _>>();
-                                for (link, image) in images {
-                                    tensor_outputs.insert(link, image.tensor.to_legacy().to_ndarray().unwrap());
+                                    .map(|x| x.get_symbolic_graph())
+                                    .collect();
+                                let mut context = SuperGraphContext {
+                                    observer: &mut observer,
+                                    caches: cache,
+                                    use_compiled_models: use_compiler,
+                                    symbolic_graphs: symbolic_graph_refs,
+                                    compiled_models: Some(compiled_models),
+                                    super_graph_tensor_cache: &mut super_graph_tensor_cache,
+                                };
+                                let ret = req
+                                    .super_graph
+                                    .run(super_graph_data, &mut context)
+                                    .map_err(|x| x.to_string())?;
+                                // Re-pack tensor caches
+                                for (a, b) in super_graph_tensor_cache.caches {
+                                    for (aa, bb) in &model_id_map {
+                                        if ptr::addr_eq(a, bb.as_ref()) {
+                                            ndarray_tensor_load_caches.insert(*aa, b);
+                                            break;
+                                        }
+                                    }
                                 }
-                                for (link, clip) in audio_clips {
-                                    tensor_outputs.insert(link, clip.samples.to_legacy().to_ndarray().unwrap());
-                                }
+                                ret
+                            };
 
-                                Ok(SuperGraphResponseData {
-                                    tensor_outputs,
-                                    string_outputs: strings,
-                                    hash_outputs: hashes,
-                                })
+                            let SuperGraphData {
+                                tensors,
+                                images,
+                                audio_clips,
+                                strings,
+                                hashes,
+                                ..
+                            } = res;
+
+                            let mut tensor_outputs = tensors
+                                .iter()
+                                .map(|(k, v)| (*k, v.to_legacy().to_ndarray().unwrap()))
+                                .collect::<HashMap<_, _>>();
+                            for (link, image) in images {
+                                tensor_outputs
+                                    .insert(link, image.tensor.to_legacy().to_ndarray().unwrap());
+                            }
+                            for (link, clip) in audio_clips {
+                                tensor_outputs
+                                    .insert(link, clip.samples.to_legacy().to_ndarray().unwrap());
+                            }
+
+                            Ok(SuperGraphResponseData {
+                                tensor_outputs,
+                                string_outputs: strings,
+                                hash_outputs: hashes,
+                            })
                         }
                     })
                     .await

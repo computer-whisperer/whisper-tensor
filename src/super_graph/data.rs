@@ -1,9 +1,9 @@
-use crate::symbolic_graph::SharedPoolTensor;
 use crate::super_graph::links::{
     SuperGraphAnyLink, SuperGraphAtomicLinkKind, SuperGraphLink, SuperGraphLinkDouble,
     SuperGraphLinkKind,
 };
 use crate::super_graph::{SuperGraphError, SuperGraphHash};
+use crate::symbolic_graph::SharedPoolTensor;
 use crate::symbolic_graph::tensor_store::TensorStore;
 use crate::tokenizer::AnyTokenizer;
 use std::collections::HashMap;

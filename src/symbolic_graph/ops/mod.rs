@@ -99,8 +99,8 @@ use crate::backends::eval_backend::EvalBackend;
 use crate::backends::ndarray_backend::NDArrayNumericTensorError;
 use crate::dtype::{DType, DTypeError};
 use crate::graph::{GlobalId, Node, Property};
-use crate::milli_graph::{MilliLoweringContext, MilliOpGraph, MilliOpGraphError};
 use crate::migration::numeric_tensor::{NumericTensor, NumericTensorError};
+use crate::milli_graph::{MilliLoweringContext, MilliOpGraph, MilliOpGraphError};
 use crate::symbolic_graph::SymbolicGraph;
 use crate::tensor_rank::DynRank;
 use rand::Rng;
@@ -156,7 +156,8 @@ pub trait Operation: Node {
         &self,
         inputs: &HashMap<GlobalId, &crate::numeric_tensor::NumericTensorView<'_, DynRank>>,
         pool: &'p P,
-    ) -> Result<HashMap<GlobalId, crate::numeric_tensor::NumericTensor<'p, DynRank, P>>, EvalError> {
+    ) -> Result<HashMap<GlobalId, crate::numeric_tensor::NumericTensor<'p, DynRank, P>>, EvalError>
+    {
         let tensor_dtypes: HashMap<GlobalId, DType> = inputs
             .iter()
             .map(|(id, view)| (*id, view.dtype().to_legacy()))
@@ -516,7 +517,8 @@ impl Operation for AnyOperation {
         &self,
         inputs: &HashMap<GlobalId, &crate::numeric_tensor::NumericTensorView<'_, DynRank>>,
         pool: &'p P,
-    ) -> Result<HashMap<GlobalId, crate::numeric_tensor::NumericTensor<'p, DynRank, P>>, EvalError> {
+    ) -> Result<HashMap<GlobalId, crate::numeric_tensor::NumericTensor<'p, DynRank, P>>, EvalError>
+    {
         match self {
             AnyOperation::Unary(x) => x.eval_pool(inputs, pool),
             AnyOperation::Binary(x) => x.eval_pool(inputs, pool),
@@ -724,7 +726,8 @@ where
         let new_tensor = bridge::legacy_to_new(legacy_tensor);
         let view = new_tensor.view();
         let layout = TensorLayout::<DynRank>::row_major(view.shape().to_vec(), view.dtype());
-        let buf = pool.allocate(layout.buffer_size_bytes())
+        let buf = pool
+            .allocate(layout.buffer_size_bytes())
             .map_err(|e| EvalError::InvalidInput(format!("pool allocation: {e}")))?;
         let mut out = crate::numeric_tensor::NumericTensor::from_parts(buf, layout);
         for i in 0..view.numel() {

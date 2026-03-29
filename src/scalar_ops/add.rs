@@ -135,7 +135,10 @@ mod tests {
         // Large values that would lose precision through f64
         let a = it.encode_signed(i64::MAX as i128 - 1);
         let b = it.encode_signed(1);
-        assert_eq!(it.decode_signed(signed_add_wrapping(a, b, &it)), i64::MAX as i128);
+        assert_eq!(
+            it.decode_signed(signed_add_wrapping(a, b, &it)),
+            i64::MAX as i128
+        );
     }
 
     // -- Signed integer addition (saturating) --

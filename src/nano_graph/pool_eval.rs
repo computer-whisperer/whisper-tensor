@@ -115,7 +115,11 @@ pub fn pool_eval<'p, P: Pool + 'p>(
         }
 
         // --- Handle OpaqueOutput: dispatch to opaque eval function ---
-        if let ScalarOp::OpaqueOutput { opaque_idx, output_idx } = &group.op {
+        if let ScalarOp::OpaqueOutput {
+            opaque_idx,
+            output_idx,
+        } = &group.op
+        {
             // Evaluate the opaque op if not cached.
             if !opaque_cache.contains_key(opaque_idx) {
                 let opaque_op = &graph.opaque_ops()[*opaque_idx];
@@ -123,17 +127,18 @@ pub fn pool_eval<'p, P: Pool + 'p>(
                 // Assemble input tensors from atom buffers.
                 let mut input_tensors = Vec::with_capacity(opaque_op.inputs.len());
                 for inp in &opaque_op.inputs {
-                    let inp_layout = TensorLayout::<DynRank>::row_major(
-                        inp.shape.clone(),
-                        inp.dtype,
-                    );
-                    let mut inp_buf = pool.allocate(inp_layout.buffer_size_bytes())
+                    let inp_layout =
+                        TensorLayout::<DynRank>::row_major(inp.shape.clone(), inp.dtype);
+                    let mut inp_buf = pool
+                        .allocate(inp_layout.buffer_size_bytes())
                         .map_err(PoolEvalError::Allocation)?;
-                    let mut inp_tensor: NumericTensor<'p, DynRank, P> = NumericTensor::from_parts(inp_buf, inp_layout);
+                    let mut inp_tensor: NumericTensor<'p, DynRank, P> =
+                        NumericTensor::from_parts(inp_buf, inp_layout);
                     for elem in 0..inp.count as usize {
                         let atom_id = AtomId(inp.base.0 + elem as u64);
                         let val = lookup_atom_raw(atom_id, graph, &group_buffers, &input_buffers);
-                        let val_dtype = lookup_atom_dtype(atom_id, graph, &group_buffers, &input_buffers);
+                        let val_dtype =
+                            lookup_atom_dtype(atom_id, graph, &group_buffers, &input_buffers);
                         let scalar = NumericScalar {
                             bits: val.to_le_bytes(),
                             dtype: val_dtype,
@@ -150,7 +155,8 @@ pub fn pool_eval<'p, P: Pool + 'p>(
                     .iter()
                     .map(|sys_t| {
                         let layout = sys_t.layout().clone();
-                        let mut buf = pool.allocate(layout.buffer_size_bytes())
+                        let mut buf = pool
+                            .allocate(layout.buffer_size_bytes())
                             .expect("pool alloc failed copying opaque result");
                         let mut t = NumericTensor::from_parts(buf, layout);
                         for i in 0..sys_t.numel() {
@@ -170,7 +176,8 @@ pub fn pool_eval<'p, P: Pool + 'p>(
             let count = group.count as usize;
             let output_dtype = group.output_dtype;
             let layout = TensorLayout::<DynRank>::row_major(vec![count as u64], output_dtype);
-            let buffer = pool.allocate(layout.buffer_size_bytes())
+            let buffer = pool
+                .allocate(layout.buffer_size_bytes())
                 .map_err(PoolEvalError::Allocation)?;
             let mut tensor = NumericTensor::from_parts(buffer, layout);
             for i in 0..count {
@@ -221,10 +228,10 @@ pub fn pool_eval<'p, P: Pool + 'p>(
 
                 let base_atom = group.inputs[0].resolve(ri);
                 for k in 0..*reduce_count {
-                    let src_id =
-                        AtomId((base_atom.0 as i64 + k as i64 * reduce_stride) as u64);
+                    let src_id = AtomId((base_atom.0 as i64 + k as i64 * reduce_stride) as u64);
                     let val = lookup_atom_raw(src_id, graph, &group_buffers, &input_buffers);
-                    let val_dtype = lookup_atom_dtype(src_id, graph, &group_buffers, &input_buffers);
+                    let val_dtype =
+                        lookup_atom_dtype(src_id, graph, &group_buffers, &input_buffers);
                     let cast_raw = val_dtype.cast_raw(val, *compute_dtype);
 
                     acc_raw = match kind {
@@ -300,7 +307,8 @@ pub fn pool_eval<'p, P: Pool + 'p>(
                         } else {
                             group.inputs[2].resolve(ri)
                         };
-                        let val = lookup_atom_raw(chosen_src, graph, &group_buffers, &input_buffers);
+                        let val =
+                            lookup_atom_raw(chosen_src, graph, &group_buffers, &input_buffers);
                         let val_dtype =
                             lookup_atom_dtype(chosen_src, graph, &group_buffers, &input_buffers);
                         val_dtype.cast_raw(val, output_dtype)
@@ -345,7 +353,9 @@ pub fn pool_eval<'p, P: Pool + 'p>(
         let count = range.count as usize;
         let output_dtype = range.dtype;
         let layout = TensorLayout::<DynRank>::row_major(vec![count as u64], output_dtype);
-        let buffer = pool.allocate(layout.buffer_size_bytes()).map_err(PoolEvalError::Allocation)?;
+        let buffer = pool
+            .allocate(layout.buffer_size_bytes())
+            .map_err(PoolEvalError::Allocation)?;
         let mut out_tensor = NumericTensor::from_parts(buffer, layout);
 
         for offset in 0..range.count {
@@ -403,9 +413,9 @@ fn lookup_atom_raw<P: Pool>(
     input_buffers: &[InputBuffer],
 ) -> u64 {
     if let Some(gi) = graph.find_group_idx(atom_id) {
-        let gb = group_buffers[gi].as_ref().unwrap_or_else(|| {
-            panic!("group {gi} buffer freed when reading atom {atom_id}")
-        });
+        let gb = group_buffers[gi]
+            .as_ref()
+            .unwrap_or_else(|| panic!("group {gi} buffer freed when reading atom {atom_id}"));
         let group = &graph.groups()[gi];
         let offset = (atom_id.0 - group.base_id.0) as usize;
         return gb.tensor.read_element(offset).view().read_raw();
@@ -414,7 +424,9 @@ fn lookup_atom_raw<P: Pool>(
         let ib = &input_buffers[ti];
         let bit_off = offset as usize * ib.dtype.total_bits() as usize;
         return crate::numeric_scalar::conversions::read_raw_bits(
-            &ib.data, bit_off, ib.dtype.total_bits(),
+            &ib.data,
+            bit_off,
+            ib.dtype.total_bits(),
         );
     }
     panic!("atom {atom_id} not found in any group or input");
@@ -464,15 +476,23 @@ fn eval_binop(op: &ScalarBinOp, a: u64, b: u64, dtype: NumericDType) -> u64 {
             ScalarBinOp::Min => crate::scalar_ops::min::float_min(a, b, &ft),
             ScalarBinOp::Mod => crate::scalar_ops::modulo::float_mod(a, b, &ft),
             ScalarBinOp::Pow => crate::scalar_ops::pow::float_pow(a, b, &ft),
-            ScalarBinOp::Equal => bool_to_dtype_raw(crate::scalar_ops::cmp::float_equal(a, b, &ft), dtype),
-            ScalarBinOp::Greater => bool_to_dtype_raw(crate::scalar_ops::cmp::float_greater(a, b, &ft), dtype),
-            ScalarBinOp::GreaterOrEqual => {
-                bool_to_dtype_raw(crate::scalar_ops::cmp::float_greater_or_equal(a, b, &ft), dtype)
+            ScalarBinOp::Equal => {
+                bool_to_dtype_raw(crate::scalar_ops::cmp::float_equal(a, b, &ft), dtype)
             }
-            ScalarBinOp::Less => bool_to_dtype_raw(crate::scalar_ops::cmp::float_less(a, b, &ft), dtype),
-            ScalarBinOp::LessOrEqual => {
-                bool_to_dtype_raw(crate::scalar_ops::cmp::float_less_or_equal(a, b, &ft), dtype)
+            ScalarBinOp::Greater => {
+                bool_to_dtype_raw(crate::scalar_ops::cmp::float_greater(a, b, &ft), dtype)
             }
+            ScalarBinOp::GreaterOrEqual => bool_to_dtype_raw(
+                crate::scalar_ops::cmp::float_greater_or_equal(a, b, &ft),
+                dtype,
+            ),
+            ScalarBinOp::Less => {
+                bool_to_dtype_raw(crate::scalar_ops::cmp::float_less(a, b, &ft), dtype)
+            }
+            ScalarBinOp::LessOrEqual => bool_to_dtype_raw(
+                crate::scalar_ops::cmp::float_less_or_equal(a, b, &ft),
+                dtype,
+            ),
             ScalarBinOp::And => {
                 bool_to_dtype_raw(crate::scalar_ops::logical::logical_and(a, b), dtype)
             }
@@ -492,20 +512,32 @@ fn eval_binop(op: &ScalarBinOp, a: u64, b: u64, dtype: NumericDType) -> u64 {
             ScalarBinOp::Min => crate::scalar_ops::min::signed_min(a, b, &it),
             ScalarBinOp::Mod => crate::scalar_ops::modulo::signed_mod(a, b, &it),
             ScalarBinOp::Pow => crate::scalar_ops::pow::signed_pow(a, b, &it),
-            ScalarBinOp::Equal => bool_to_dtype_raw(crate::scalar_ops::cmp::signed_equal(a, b, &it), dtype),
+            ScalarBinOp::Equal => {
+                bool_to_dtype_raw(crate::scalar_ops::cmp::signed_equal(a, b, &it), dtype)
+            }
             ScalarBinOp::Greater => {
                 bool_to_dtype_raw(crate::scalar_ops::cmp::signed_greater(a, b, &it), dtype)
             }
-            ScalarBinOp::GreaterOrEqual => {
-                bool_to_dtype_raw(crate::scalar_ops::cmp::signed_greater_or_equal(a, b, &it), dtype)
+            ScalarBinOp::GreaterOrEqual => bool_to_dtype_raw(
+                crate::scalar_ops::cmp::signed_greater_or_equal(a, b, &it),
+                dtype,
+            ),
+            ScalarBinOp::Less => {
+                bool_to_dtype_raw(crate::scalar_ops::cmp::signed_less(a, b, &it), dtype)
             }
-            ScalarBinOp::Less => bool_to_dtype_raw(crate::scalar_ops::cmp::signed_less(a, b, &it), dtype),
-            ScalarBinOp::LessOrEqual => {
-                bool_to_dtype_raw(crate::scalar_ops::cmp::signed_less_or_equal(a, b, &it), dtype)
+            ScalarBinOp::LessOrEqual => bool_to_dtype_raw(
+                crate::scalar_ops::cmp::signed_less_or_equal(a, b, &it),
+                dtype,
+            ),
+            ScalarBinOp::And => {
+                bool_to_dtype_raw(crate::scalar_ops::logical::logical_and(a, b), dtype)
             }
-            ScalarBinOp::And => bool_to_dtype_raw(crate::scalar_ops::logical::logical_and(a, b), dtype),
-            ScalarBinOp::Or => bool_to_dtype_raw(crate::scalar_ops::logical::logical_or(a, b), dtype),
-            ScalarBinOp::Xor => bool_to_dtype_raw(crate::scalar_ops::logical::logical_xor(a, b), dtype),
+            ScalarBinOp::Or => {
+                bool_to_dtype_raw(crate::scalar_ops::logical::logical_or(a, b), dtype)
+            }
+            ScalarBinOp::Xor => {
+                bool_to_dtype_raw(crate::scalar_ops::logical::logical_xor(a, b), dtype)
+            }
         },
         NumericDType::UnsignedInt(it) => match op {
             ScalarBinOp::Add => crate::scalar_ops::add::unsigned_add_wrapping(a, b, &it),
@@ -522,26 +554,40 @@ fn eval_binop(op: &ScalarBinOp, a: u64, b: u64, dtype: NumericDType) -> u64 {
             ScalarBinOp::Greater => {
                 bool_to_dtype_raw(crate::scalar_ops::cmp::unsigned_greater(a, b, &it), dtype)
             }
-            ScalarBinOp::GreaterOrEqual => {
-                bool_to_dtype_raw(crate::scalar_ops::cmp::unsigned_greater_or_equal(a, b, &it), dtype)
-            }
+            ScalarBinOp::GreaterOrEqual => bool_to_dtype_raw(
+                crate::scalar_ops::cmp::unsigned_greater_or_equal(a, b, &it),
+                dtype,
+            ),
             ScalarBinOp::Less => {
                 bool_to_dtype_raw(crate::scalar_ops::cmp::unsigned_less(a, b, &it), dtype)
             }
-            ScalarBinOp::LessOrEqual => {
-                bool_to_dtype_raw(crate::scalar_ops::cmp::unsigned_less_or_equal(a, b, &it), dtype)
+            ScalarBinOp::LessOrEqual => bool_to_dtype_raw(
+                crate::scalar_ops::cmp::unsigned_less_or_equal(a, b, &it),
+                dtype,
+            ),
+            ScalarBinOp::And => {
+                bool_to_dtype_raw(crate::scalar_ops::logical::logical_and(a, b), dtype)
             }
-            ScalarBinOp::And => bool_to_dtype_raw(crate::scalar_ops::logical::logical_and(a, b), dtype),
-            ScalarBinOp::Or => bool_to_dtype_raw(crate::scalar_ops::logical::logical_or(a, b), dtype),
-            ScalarBinOp::Xor => bool_to_dtype_raw(crate::scalar_ops::logical::logical_xor(a, b), dtype),
+            ScalarBinOp::Or => {
+                bool_to_dtype_raw(crate::scalar_ops::logical::logical_or(a, b), dtype)
+            }
+            ScalarBinOp::Xor => {
+                bool_to_dtype_raw(crate::scalar_ops::logical::logical_xor(a, b), dtype)
+            }
         },
         NumericDType::Bool => {
             // Comparisons and logical ops on Bool
             match op {
                 ScalarBinOp::Equal => bool_to_dtype_raw(if a == b { 1 } else { 0 }, dtype),
-                ScalarBinOp::And => bool_to_dtype_raw(crate::scalar_ops::logical::logical_and(a, b), dtype),
-                ScalarBinOp::Or => bool_to_dtype_raw(crate::scalar_ops::logical::logical_or(a, b), dtype),
-                ScalarBinOp::Xor => bool_to_dtype_raw(crate::scalar_ops::logical::logical_xor(a, b), dtype),
+                ScalarBinOp::And => {
+                    bool_to_dtype_raw(crate::scalar_ops::logical::logical_and(a, b), dtype)
+                }
+                ScalarBinOp::Or => {
+                    bool_to_dtype_raw(crate::scalar_ops::logical::logical_or(a, b), dtype)
+                }
+                ScalarBinOp::Xor => {
+                    bool_to_dtype_raw(crate::scalar_ops::logical::logical_xor(a, b), dtype)
+                }
                 _ => panic!("unsupported binop {op:?} for Bool"),
             }
         }
@@ -568,7 +614,11 @@ fn eval_unaryop(op: &ScalarUnaryOp, x: u64, dtype: NumericDType) -> u64 {
             ScalarUnaryOp::Not => {
                 // Logical NOT for float: nonzero → 0.0, zero → 1.0
                 let val = ft.decode_f64(x);
-                ft.encode_f64(if val != 0.0 && !val.is_nan() { 0.0 } else { 1.0 })
+                ft.encode_f64(if val != 0.0 && !val.is_nan() {
+                    0.0
+                } else {
+                    1.0
+                })
             }
             ScalarUnaryOp::IsNan => {
                 let val = ft.decode_f64(x);
@@ -579,7 +629,12 @@ fn eval_unaryop(op: &ScalarUnaryOp, x: u64, dtype: NumericDType) -> u64 {
                 detect_positive,
                 detect_negative,
             } => {
-                let result = crate::scalar_ops::is_inf::float_is_inf(x, &ft, *detect_positive, *detect_negative);
+                let result = crate::scalar_ops::is_inf::float_is_inf(
+                    x,
+                    &ft,
+                    *detect_positive,
+                    *detect_negative,
+                );
                 dtype.encode_from_f64(result as f64)
             }
             ScalarUnaryOp::BitwiseNot => {
@@ -618,11 +673,9 @@ fn eval_unaryop(op: &ScalarUnaryOp, x: u64, dtype: NumericDType) -> u64 {
             _ => panic!("unsupported unary op {op:?} for unsigned int"),
         },
         NumericDType::Bool => match op {
-            ScalarUnaryOp::Not => {
-                dtype.encode_from_f64(if x != 0 { 0.0 } else { 1.0 })
-            }
+            ScalarUnaryOp::Not => dtype.encode_from_f64(if x != 0 { 0.0 } else { 1.0 }),
             _ => panic!("unsupported unary op {op:?} for Bool"),
-        }
+        },
     }
 }
 

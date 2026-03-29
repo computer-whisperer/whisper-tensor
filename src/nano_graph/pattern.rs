@@ -9,9 +9,9 @@
 //! `AtomGroup`s. Groups are a convenience — every atom could exist standalone
 //! without changing semantics. The grouping never limits what can be expressed.
 
-use crate::numeric_dtype::NumericDType;
 use crate::graph::GlobalId;
 use crate::nano_graph::ops::ScalarOp;
+use crate::numeric_dtype::NumericDType;
 use crate::range_map::RangeMap;
 use std::collections::HashMap;
 
@@ -325,9 +325,7 @@ impl NanoGraph {
         let base = self.alloc_ids(count);
         let dtype = tam.dtype;
         // Build explicit mapping from each element to its source atom.
-        let source_atoms: Vec<AtomId> = (0..count)
-            .map(|i| tam.atom_id_for_element(i))
-            .collect();
+        let source_atoms: Vec<AtomId> = (0..count).map(|i| tam.atom_id_for_element(i)).collect();
         self.groups.insert(
             base.0,
             count,
@@ -377,7 +375,12 @@ impl NanoGraph {
     /// Reserve an AtomId range for an external input tensor.
     /// Returns the base AtomId. No group is created — the executor fills
     /// these atoms from the TensorStore or user data at runtime.
-    pub fn add_input_tensor(&mut self, tensor_id: GlobalId, count: u64, dtype: NumericDType) -> AtomId {
+    pub fn add_input_tensor(
+        &mut self,
+        tensor_id: GlobalId,
+        count: u64,
+        dtype: NumericDType,
+    ) -> AtomId {
         let base_id = self.alloc_ids(count);
         self.input_ranges.insert(
             base_id.0,
@@ -991,7 +994,9 @@ impl NanoGraph {
                 ScalarOp::Reduce { .. } => 1,
                 // OpaqueOutput inputs are Broadcast refs to opaque op's input bases (for liveness).
                 // The count varies — skip the check.
-                ScalarOp::OpaqueOutput { .. } => { continue; }
+                ScalarOp::OpaqueOutput { .. } => {
+                    continue;
+                }
             };
             if group.inputs.len() != expected_inputs {
                 errors.push(format!(
@@ -1041,8 +1046,8 @@ impl std::fmt::Display for NanoGraphStats {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::numeric_dtype::NumericDType;
     use crate::nano_graph::ops::{ReduceKind, ScalarBinOp, ScalarOp, ScalarUnaryOp};
+    use crate::numeric_dtype::NumericDType;
     use crate::numeric_scalar::NumericScalar;
 
     /// Build a tiny graph: c = a + b, elementwise over 1024 atoms.

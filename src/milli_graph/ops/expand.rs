@@ -1,13 +1,13 @@
-use crate::pool::Pool;
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
 use crate::graph::{GlobalId, Node};
+use crate::migration::numeric_tensor::NumericTensor;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
 use crate::nano_graph::lower::{NanoLoweringContext, TensorAtomMap};
 use crate::nano_graph::ops::ScalarOp;
 use crate::nano_graph::pattern::AtomId;
-use crate::migration::numeric_tensor::NumericTensor;
+use crate::pool::Pool;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -53,7 +53,10 @@ impl Expand {
 }
 
 impl Expand {
-    pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
+    pub fn lower_to_nano(
+        &self,
+        ctx: &mut crate::nano_graph::NanoLoweringContext,
+    ) -> crate::milli_graph::ops::LowerResult {
         let all_infos = ctx.all_infos;
         let in_id = Node::inputs(self).next().unwrap();
         let out_id = Node::outputs(self).next().unwrap();
@@ -150,10 +153,7 @@ impl MilliOp for Expand {
         known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'p, P>>,
         symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
         pool: &'p P,
-    ) -> Result<
-        Vec<(GlobalId, crate::tensor_info::TensorInfo<'p, P>)>,
-        MilliOpGraphError,
-    > {
+    ) -> Result<Vec<(GlobalId, crate::tensor_info::TensorInfo<'p, P>)>, MilliOpGraphError> {
         use crate::scalar_info::ScalarInfoTyped;
         use crate::symbolic_scalar::SymbolicScalarTyped;
         use crate::tensor_info::TensorInfo;
@@ -180,14 +180,27 @@ impl MilliOp for Expand {
                 for i in 0..output_rank {
                     let target_i = (i as i64 - output_rank as i64) + target_shape.len() as i64;
                     let input_i = (i as i64 - output_rank as i64) + input_shape.len() as i64;
-                    let target_dim = if target_i >= 0 { Some(target_shape[target_i as usize].clone()) } else { None };
-                    let input_dim = if input_i >= 0 { Some(input_shape[input_i as usize].clone()) } else { None };
+                    let target_dim = if target_i >= 0 {
+                        Some(target_shape[target_i as usize].clone())
+                    } else {
+                        None
+                    };
+                    let input_dim = if input_i >= 0 {
+                        Some(input_shape[input_i as usize].clone())
+                    } else {
+                        None
+                    };
                     let dim = match (target_dim, input_dim) {
-                        (Some(ScalarInfoTyped::Numeric(t)), Some(ScalarInfoTyped::Numeric(inp))) => ScalarInfoTyped::Numeric(t.max(inp)),
+                        (
+                            Some(ScalarInfoTyped::Numeric(t)),
+                            Some(ScalarInfoTyped::Numeric(inp)),
+                        ) => ScalarInfoTyped::Numeric(t.max(inp)),
                         (Some(t), None) => t,
                         (None, Some(inp)) => inp,
                         (Some(ScalarInfoTyped::Numeric(t)), Some(_)) => ScalarInfoTyped::Numeric(t),
-                        (Some(_), Some(ScalarInfoTyped::Numeric(inp))) => ScalarInfoTyped::Numeric(inp),
+                        (Some(_), Some(ScalarInfoTyped::Numeric(inp))) => {
+                            ScalarInfoTyped::Numeric(inp)
+                        }
                         _ => ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(symbolic_resolver)),
                     };
                     final_shape.push(dim);
@@ -201,7 +214,9 @@ impl MilliOp for Expand {
         };
 
         // If both inputs are concrete, try constant fold via nano+pool_eval path.
-        if let Some(results) = super::constant_fold(self, known_inputs, &[(self.output, output_hint)], pool) {
+        if let Some(results) =
+            super::constant_fold(self, known_inputs, &[(self.output, output_hint)], pool)
+        {
             return Ok(results);
         }
 
@@ -320,7 +335,10 @@ impl MilliOp for Expand {
         &self,
         inputs: &[crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>],
         pool: &'p P2,
-    ) -> Result<Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>, crate::nano_graph::pool_eval::PoolEvalError> {
+    ) -> Result<
+        Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>,
+        crate::nano_graph::pool_eval::PoolEvalError,
+    > {
         use crate::numeric_tensor::{NumericTensor, TensorLayout};
         use crate::tensor_rank::DynRank;
 
@@ -342,7 +360,11 @@ impl MilliOp for Expand {
             padded_input[output_rank - input_shape.len() + i] = d;
         }
         for i in 0..output_rank {
-            let t = if i < output_rank - target_shape.len() { 1 } else { target_shape[i - (output_rank - target_shape.len())] };
+            let t = if i < output_rank - target_shape.len() {
+                1
+            } else {
+                target_shape[i - (output_rank - target_shape.len())]
+            };
             output_shape[i] = t.max(padded_input[i]);
         }
 
@@ -359,7 +381,8 @@ impl MilliOp for Expand {
         }
 
         let layout = TensorLayout::<DynRank>::row_major(output_shape.clone(), dtype);
-        let buf = pool.allocate(layout.buffer_size_bytes())
+        let buf = pool
+            .allocate(layout.buffer_size_bytes())
             .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
         let mut out = NumericTensor::from_parts(buf, layout);
 
@@ -379,7 +402,10 @@ impl MilliOp for Expand {
         Ok(vec![out])
     }
 
-    fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
+    fn lower_to_nano(
+        &self,
+        ctx: &mut crate::nano_graph::NanoLoweringContext,
+    ) -> crate::milli_graph::ops::LowerResult {
         Expand::lower_to_nano(self, ctx)
     }
 }

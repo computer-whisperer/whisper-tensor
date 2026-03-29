@@ -1,11 +1,11 @@
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
 use crate::graph::{GlobalId, Node};
+use crate::migration::numeric_scalar::NumericScalarType;
+use crate::migration::numeric_tensor::NumericTensor;
 use crate::milli_graph::MilliOpGraph;
 use crate::milli_graph::MilliOpGraphError;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
-use crate::migration::numeric_scalar::NumericScalarType;
-use crate::migration::numeric_tensor::NumericTensor;
 use crate::pool::Pool;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -66,7 +66,10 @@ impl CumSum {
         super::remap(&mut self.axis, map);
     }
 
-    pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
+    pub fn lower_to_nano(
+        &self,
+        ctx: &mut crate::nano_graph::NanoLoweringContext,
+    ) -> crate::milli_graph::ops::LowerResult {
         let exclusive = self.exclusive;
         let reverse = self.reverse;
 
@@ -90,7 +93,13 @@ impl crate::nano_graph::ops::OpaqueEval for CumSumEval {
         &self,
         inputs: &[crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>],
     ) -> Result<
-        Vec<crate::numeric_tensor::NumericTensor<'static, crate::tensor_rank::DynRank, crate::pool::SystemPool>>,
+        Vec<
+            crate::numeric_tensor::NumericTensor<
+                'static,
+                crate::tensor_rank::DynRank,
+                crate::pool::SystemPool,
+            >,
+        >,
         crate::nano_graph::pool_eval::PoolEvalError,
     > {
         use crate::numeric_tensor::{NumericTensor, TensorLayout};
@@ -105,10 +114,15 @@ impl crate::nano_graph::ops::OpaqueEval for CumSumEval {
 
         // Extract axis from inputs[1] (scalar i64).
         let raw_axis = inputs[1].read_element(0).to_i64();
-        let axis = if raw_axis < 0 { (raw_axis + rank as i64) as usize } else { raw_axis as usize };
+        let axis = if raw_axis < 0 {
+            (raw_axis + rank as i64) as usize
+        } else {
+            raw_axis as usize
+        };
 
         let layout = TensorLayout::<DynRank>::row_major(shape.clone(), dtype);
-        let buf = POOL.allocate(layout.buffer_size_bytes())
+        let buf = POOL
+            .allocate(layout.buffer_size_bytes())
             .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
         let mut out = NumericTensor::from_parts(buf, layout);
 
@@ -134,7 +148,9 @@ impl crate::nano_graph::ops::OpaqueEval for CumSumEval {
                 let mut rem = line;
                 let mut idx = 0usize;
                 for d in 0..rank {
-                    if d == axis { continue; }
+                    if d == axis {
+                        continue;
+                    }
                     let dim_stride = strides[d];
                     // Effective stride in the "outer" iteration: product of non-axis dims after d.
                     let outer_stride = {
@@ -218,7 +234,10 @@ impl MilliOp for CumSum {
         &self,
         inputs: &[crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>],
         pool: &'p P2,
-    ) -> Result<Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>, crate::nano_graph::pool_eval::PoolEvalError> {
+    ) -> Result<
+        Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>,
+        crate::nano_graph::pool_eval::PoolEvalError,
+    > {
         use crate::numeric_tensor::{NumericTensor, TensorLayout};
         use crate::tensor_rank::DynRank;
 
@@ -229,10 +248,15 @@ impl MilliOp for CumSum {
 
         // Extract axis from inputs[1] (scalar i64).
         let raw_axis = inputs[1].read_element(0).to_i64();
-        let axis = if raw_axis < 0 { (raw_axis + rank as i64) as usize } else { raw_axis as usize };
+        let axis = if raw_axis < 0 {
+            (raw_axis + rank as i64) as usize
+        } else {
+            raw_axis as usize
+        };
 
         let layout = TensorLayout::<DynRank>::row_major(shape.clone(), dtype);
-        let buf = pool.allocate(layout.buffer_size_bytes())
+        let buf = pool
+            .allocate(layout.buffer_size_bytes())
             .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
         let mut out = NumericTensor::from_parts(buf, layout);
 
@@ -257,7 +281,9 @@ impl MilliOp for CumSum {
                 let mut rem = line;
                 let mut idx = 0usize;
                 for d in 0..rank {
-                    if d == axis { continue; }
+                    if d == axis {
+                        continue;
+                    }
                     let dim_stride = strides[d];
                     let outer_stride = {
                         let mut os = 1usize;
@@ -281,11 +307,17 @@ impl MilliOp for CumSum {
                     let flat = base + k * axis_stride;
                     let val = data.read_element(flat).to_f64();
                     if self.exclusive {
-                        out.write_element(flat, crate::numeric_scalar::NumericScalar::from_f64(acc).cast_to(dtype));
+                        out.write_element(
+                            flat,
+                            crate::numeric_scalar::NumericScalar::from_f64(acc).cast_to(dtype),
+                        );
                         acc += val;
                     } else {
                         acc += val;
-                        out.write_element(flat, crate::numeric_scalar::NumericScalar::from_f64(acc).cast_to(dtype));
+                        out.write_element(
+                            flat,
+                            crate::numeric_scalar::NumericScalar::from_f64(acc).cast_to(dtype),
+                        );
                     }
                 }
             } else {
@@ -293,11 +325,17 @@ impl MilliOp for CumSum {
                     let flat = base + k * axis_stride;
                     let val = data.read_element(flat).to_f64();
                     if self.exclusive {
-                        out.write_element(flat, crate::numeric_scalar::NumericScalar::from_f64(acc).cast_to(dtype));
+                        out.write_element(
+                            flat,
+                            crate::numeric_scalar::NumericScalar::from_f64(acc).cast_to(dtype),
+                        );
                         acc += val;
                     } else {
                         acc += val;
-                        out.write_element(flat, crate::numeric_scalar::NumericScalar::from_f64(acc).cast_to(dtype));
+                        out.write_element(
+                            flat,
+                            crate::numeric_scalar::NumericScalar::from_f64(acc).cast_to(dtype),
+                        );
                     }
                 }
             }
@@ -334,11 +372,7 @@ impl MilliOp for CumSum {
         let first = ScalarInfo::Symbolic(SymbolicScalar::new(out_dtype, symbolic_resolver));
         Ok(vec![(
             self.output,
-            TensorInfo::new_from_first_element_and_rank(
-                first,
-                data_info.rank(),
-                symbolic_resolver,
-            ),
+            TensorInfo::new_from_first_element_and_rank(first, data_info.rank(), symbolic_resolver),
         )])
     }
 

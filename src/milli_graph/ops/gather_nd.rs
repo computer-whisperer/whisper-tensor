@@ -126,7 +126,10 @@ impl MilliOp for GatherND {
 
     fn eval(
         &self,
-        inputs: &HashMap<GlobalId, crate::migration::numeric_tensor::NumericTensor<crate::tensor_rank::DynRank>>,
+        inputs: &HashMap<
+            GlobalId,
+            crate::migration::numeric_tensor::NumericTensor<crate::tensor_rank::DynRank>,
+        >,
         _config: &super::MilliEvalConfig,
         _backend: &mut crate::backends::eval_backend::EvalBackend,
     ) -> super::EvalResult {
@@ -135,7 +138,8 @@ impl MilliOp for GatherND {
             .map(|id| crate::symbolic_graph::SharedPoolTensor::from_legacy(&inputs[id]))
             .collect();
         let view_refs: Vec<_> = views.iter().map(|s| s.0.view()).collect();
-        let results = self.eval_new(&view_refs, &crate::pool::SystemPool)
+        let results = self
+            .eval_new(&view_refs, &crate::pool::SystemPool)
             .map_err(|e| MilliOpGraphError::InvalidInput(format!("{e}")))?;
         let output = self.output;
         Ok(Box::new(results.into_iter().map(move |t| {
@@ -201,10 +205,7 @@ impl MilliOp for GatherND {
             data_strides[i] = data_strides[i + 1] * data_shape[i + 1] as usize;
         }
 
-        let batch_size: usize = data_shape[..batch_dims]
-            .iter()
-            .product::<u64>()
-            .max(1) as usize;
+        let batch_size: usize = data_shape[..batch_dims].iter().product::<u64>().max(1) as usize;
         let lookups_per_batch = num_lookups / batch_size.max(1);
         let data_per_batch: usize = data.numel() / batch_size.max(1);
 

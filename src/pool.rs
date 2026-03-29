@@ -9,8 +9,8 @@
 
 use std::alloc::Layout;
 use std::ops::{Deref, DerefMut};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Minimum alignment for all pool allocations.
 /// Covers all primitive types up to f128 and common SIMD widths.

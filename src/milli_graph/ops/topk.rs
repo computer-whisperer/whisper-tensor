@@ -1,9 +1,9 @@
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
 use crate::graph::{GlobalId, Node};
+use crate::migration::numeric_tensor::NumericTensor;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
-use crate::migration::numeric_tensor::NumericTensor;
 use crate::pool::Pool;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -173,7 +173,10 @@ impl MilliOp for TopK {
         &self,
         inputs: &[crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>],
         pool: &'p P2,
-    ) -> Result<Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>, crate::nano_graph::pool_eval::PoolEvalError> {
+    ) -> Result<
+        Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>,
+        crate::nano_graph::pool_eval::PoolEvalError,
+    > {
         use crate::numeric_scalar::NumericScalar;
         use crate::numeric_tensor::{NumericTensor, TensorLayout};
         use crate::tensor_rank::DynRank;
@@ -185,26 +188,39 @@ impl MilliOp for TopK {
         let dtype = data.dtype();
         let k = k_tensor.read_element(0).to_i64() as usize;
 
-        let axis = if self.axis < 0 { (self.axis + rank as i64) as usize } else { self.axis as usize };
+        let axis = if self.axis < 0 {
+            (self.axis + rank as i64) as usize
+        } else {
+            self.axis as usize
+        };
 
         // Output shape: same as input but axis dim = k
         let mut output_shape = input_shape.clone();
         output_shape[axis] = k as u64;
 
         let val_layout = TensorLayout::<DynRank>::row_major(output_shape.clone(), dtype);
-        let idx_layout = TensorLayout::<DynRank>::row_major(output_shape.clone(), crate::numeric_dtype::NumericDType::I64);
-        let val_buf = pool.allocate(val_layout.buffer_size_bytes())
+        let idx_layout = TensorLayout::<DynRank>::row_major(
+            output_shape.clone(),
+            crate::numeric_dtype::NumericDType::I64,
+        );
+        let val_buf = pool
+            .allocate(val_layout.buffer_size_bytes())
             .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
-        let idx_buf = pool.allocate(idx_layout.buffer_size_bytes())
+        let idx_buf = pool
+            .allocate(idx_layout.buffer_size_bytes())
             .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
         let mut val_out = NumericTensor::from_parts(val_buf, val_layout);
         let mut idx_out = NumericTensor::from_parts(idx_buf, idx_layout);
 
         // Compute strides
         let mut in_strides = vec![1usize; rank];
-        for i in (0..rank.saturating_sub(1)).rev() { in_strides[i] = in_strides[i + 1] * input_shape[i + 1] as usize; }
+        for i in (0..rank.saturating_sub(1)).rev() {
+            in_strides[i] = in_strides[i + 1] * input_shape[i + 1] as usize;
+        }
         let mut out_strides = vec![1usize; rank];
-        for i in (0..rank.saturating_sub(1)).rev() { out_strides[i] = out_strides[i + 1] * output_shape[i + 1] as usize; }
+        for i in (0..rank.saturating_sub(1)).rev() {
+            out_strides[i] = out_strides[i + 1] * output_shape[i + 1] as usize;
+        }
 
         let axis_len = input_shape[axis] as usize;
 
@@ -226,7 +242,8 @@ impl MilliOp for TopK {
                     if axis > 0 {
                         let mut outer_rem = outer;
                         for d in (0..axis).rev() {
-                            let dim_below: usize = input_shape[d + 1..axis].iter().product::<u64>().max(1) as usize;
+                            let dim_below: usize =
+                                input_shape[d + 1..axis].iter().product::<u64>().max(1) as usize;
                             let coord = outer_rem / dim_below;
                             outer_rem %= dim_below;
                             in_flat += coord * in_strides[d];
@@ -236,7 +253,8 @@ impl MilliOp for TopK {
                     if axis + 1 < rank {
                         let mut inner_rem = inner;
                         for d in (axis + 1..rank).rev() {
-                            let dim_below: usize = input_shape[d + 1..].iter().product::<u64>().max(1) as usize;
+                            let dim_below: usize =
+                                input_shape[d + 1..].iter().product::<u64>().max(1) as usize;
                             let coord = inner_rem / dim_below;
                             inner_rem %= dim_below;
                             in_flat += coord * in_strides[d];
@@ -247,9 +265,11 @@ impl MilliOp for TopK {
 
                 // Sort
                 if self.largest {
-                    elements.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+                    elements
+                        .sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
                 } else {
-                    elements.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+                    elements
+                        .sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
                 }
 
                 // Write top k
@@ -260,7 +280,8 @@ impl MilliOp for TopK {
                     if axis > 0 {
                         let mut outer_rem = outer;
                         for d in (0..axis).rev() {
-                            let dim_below: usize = output_shape[d + 1..axis].iter().product::<u64>().max(1) as usize;
+                            let dim_below: usize =
+                                output_shape[d + 1..axis].iter().product::<u64>().max(1) as usize;
                             let coord = outer_rem / dim_below;
                             outer_rem %= dim_below;
                             out_flat += coord * out_strides[d];
@@ -270,7 +291,8 @@ impl MilliOp for TopK {
                     if axis + 1 < rank {
                         let mut inner_rem = inner;
                         for d in (axis + 1..rank).rev() {
-                            let dim_below: usize = output_shape[d + 1..].iter().product::<u64>().max(1) as usize;
+                            let dim_below: usize =
+                                output_shape[d + 1..].iter().product::<u64>().max(1) as usize;
                             let coord = inner_rem / dim_below;
                             inner_rem %= dim_below;
                             out_flat += coord * out_strides[d];

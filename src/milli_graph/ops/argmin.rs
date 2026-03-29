@@ -1,9 +1,9 @@
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
 use crate::graph::{GlobalId, Node};
+use crate::migration::numeric_tensor::NumericTensor;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
-use crate::migration::numeric_tensor::NumericTensor;
 use crate::pool::Pool;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -138,7 +138,10 @@ impl MilliOp for ArgMin {
         &self,
         inputs: &[crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>],
         pool: &'p P2,
-    ) -> Result<Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>, crate::nano_graph::pool_eval::PoolEvalError> {
+    ) -> Result<
+        Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>,
+        crate::nano_graph::pool_eval::PoolEvalError,
+    > {
         use crate::numeric_dtype::NumericDType;
         use crate::numeric_scalar::NumericScalar;
         use crate::numeric_tensor::{NumericTensor, TensorLayout};
@@ -147,33 +150,46 @@ impl MilliOp for ArgMin {
         let data = &inputs[0];
         let shape = data.shape();
         let rank = shape.len();
-        let axis = if self.axis < 0 { (self.axis + rank as i64) as usize } else { self.axis as usize };
+        let axis = if self.axis < 0 {
+            (self.axis + rank as i64) as usize
+        } else {
+            self.axis as usize
+        };
         let out_dtype = NumericDType::I64;
 
         let mut out_shape = Vec::new();
         for (i, &dim) in shape.iter().enumerate() {
             if i == axis {
-                if self.keepdims { out_shape.push(1u64); }
+                if self.keepdims {
+                    out_shape.push(1u64);
+                }
             } else {
                 out_shape.push(dim);
             }
         }
-        if out_shape.is_empty() { out_shape.push(1); }
+        if out_shape.is_empty() {
+            out_shape.push(1);
+        }
 
         let out_numel: usize = out_shape.iter().product::<u64>() as usize;
         let layout = TensorLayout::<DynRank>::row_major(out_shape.clone(), out_dtype);
-        let buf = pool.allocate(layout.buffer_size_bytes())
+        let buf = pool
+            .allocate(layout.buffer_size_bytes())
             .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
         let mut out = NumericTensor::from_parts(buf, layout);
 
         let in_strides = {
             let mut s = vec![1usize; rank];
-            for i in (0..rank.saturating_sub(1)).rev() { s[i] = s[i + 1] * shape[i + 1] as usize; }
+            for i in (0..rank.saturating_sub(1)).rev() {
+                s[i] = s[i + 1] * shape[i + 1] as usize;
+            }
             s
         };
         let out_strides = {
             let mut s = vec![1usize; out_shape.len()];
-            for i in (0..out_shape.len().saturating_sub(1)).rev() { s[i] = s[i + 1] * out_shape[i + 1] as usize; }
+            for i in (0..out_shape.len().saturating_sub(1)).rev() {
+                s[i] = s[i + 1] * out_shape[i + 1] as usize;
+            }
             s
         };
 
@@ -187,7 +203,9 @@ impl MilliOp for ArgMin {
             let mut out_dim_idx = 0;
             for d in 0..rank {
                 if d == axis {
-                    if self.keepdims { out_dim_idx += 1; }
+                    if self.keepdims {
+                        out_dim_idx += 1;
+                    }
                     continue;
                 }
                 let coord = rem / out_strides[out_dim_idx];

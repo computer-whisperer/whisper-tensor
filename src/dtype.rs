@@ -1,5 +1,5 @@
-use crate::onnx;
 use crate::migration::packed_format::PackedFormat;
+use crate::onnx;
 use arbitrary_int::{i4, u4};
 use float8::{F8E4M3, F8E5M2};
 use half::{bf16, f16};

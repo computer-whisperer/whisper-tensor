@@ -1,12 +1,12 @@
-use crate::pool::Pool;
 use crate::backends::eval_backend::EvalBackend;
 use crate::graph::{GlobalId, Node};
+use crate::migration::numeric_tensor::NumericTensor;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
 use crate::nano_graph::lower::{NanoLoweringContext, TensorAtomMap};
 use crate::nano_graph::ops::{ScalarBinOp, ScalarOp, ScalarUnaryOp};
 use crate::nano_graph::pattern::InputRef;
-use crate::migration::numeric_tensor::NumericTensor;
+use crate::pool::Pool;
 use crate::tensor_info::TensorInfo;
 use crate::{DynRank, TrigOp};
 use serde::{Deserialize, Serialize};
@@ -152,7 +152,10 @@ impl SimpleUnaryOp {
 }
 
 impl SimpleUnaryOp {
-    pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
+    pub fn lower_to_nano(
+        &self,
+        ctx: &mut crate::nano_graph::NanoLoweringContext,
+    ) -> crate::milli_graph::ops::LowerResult {
         let all_infos = ctx.all_infos;
 
         let in_id = Node::inputs(self).next().unwrap();
@@ -217,7 +220,10 @@ impl SimpleUnaryOp {
             },
             WhichSimpleUnaryOp::IsNan => ScalarOp::Unary {
                 op: ScalarUnaryOp::IsNan,
-                compute_dtype: all_infos.get(&in_id).map(|i| NanoLoweringContext::ndt(i)).unwrap_or(dt),
+                compute_dtype: all_infos
+                    .get(&in_id)
+                    .map(|i| NanoLoweringContext::ndt(i))
+                    .unwrap_or(dt),
             },
             WhichSimpleUnaryOp::Erf => ScalarOp::Unary {
                 op: ScalarUnaryOp::Erf,
@@ -239,7 +245,10 @@ impl SimpleUnaryOp {
                     detect_positive: *detect_positive,
                     detect_negative: *detect_negative,
                 },
-                compute_dtype: all_infos.get(&in_id).map(|i| NanoLoweringContext::ndt(i)).unwrap_or(dt),
+                compute_dtype: all_infos
+                    .get(&in_id)
+                    .map(|i| NanoLoweringContext::ndt(i))
+                    .unwrap_or(dt),
             },
             WhichSimpleUnaryOp::BitwiseNot => ScalarOp::Unary {
                 op: ScalarUnaryOp::BitwiseNot,
@@ -392,7 +401,12 @@ impl MilliOp for SimpleUnaryOp {
         };
 
         // If input is concrete, try constant fold with output hints.
-        if let Some(results) = super::constant_fold(self, known_inputs, &[(self.output, out_info.clone_with_pool(pool))], pool) {
+        if let Some(results) = super::constant_fold(
+            self,
+            known_inputs,
+            &[(self.output, out_info.clone_with_pool(pool))],
+            pool,
+        ) {
             return Ok(results);
         }
 
@@ -436,7 +450,10 @@ impl MilliOp for SimpleUnaryOp {
         &self,
         inputs: &[crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>],
         pool: &'p P2,
-    ) -> Result<Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>, crate::nano_graph::pool_eval::PoolEvalError> {
+    ) -> Result<
+        Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>,
+        crate::nano_graph::pool_eval::PoolEvalError,
+    > {
         use crate::numeric_scalar::NumericScalar;
         use crate::numeric_tensor::{NumericTensor, TensorLayout};
         use crate::tensor_rank::DynRank;
@@ -448,12 +465,15 @@ impl MilliOp for SimpleUnaryOp {
 
         // IsNan and IsInf produce Bool output
         let out_dtype = match self.op {
-            WhichSimpleUnaryOp::IsNan | WhichSimpleUnaryOp::IsInf { .. } => crate::numeric_dtype::NumericDType::Bool,
+            WhichSimpleUnaryOp::IsNan | WhichSimpleUnaryOp::IsInf { .. } => {
+                crate::numeric_dtype::NumericDType::Bool
+            }
             _ => dtype,
         };
 
         let layout = TensorLayout::<DynRank>::row_major(input_shape, out_dtype);
-        let buf = pool.allocate(layout.buffer_size_bytes())
+        let buf = pool
+            .allocate(layout.buffer_size_bytes())
             .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
         let mut out = NumericTensor::from_parts(buf, layout);
 
@@ -471,7 +491,13 @@ impl MilliOp for SimpleUnaryOp {
                 WhichSimpleUnaryOp::Ceil => NumericScalar::from_f64(f.ceil()).cast_to(dtype),
                 WhichSimpleUnaryOp::Round => NumericScalar::from_f64(f.round()).cast_to(dtype),
                 WhichSimpleUnaryOp::Sign => {
-                    let s = if f > 0.0 { 1.0 } else if f < 0.0 { -1.0 } else { 0.0 };
+                    let s = if f > 0.0 {
+                        1.0
+                    } else if f < 0.0 {
+                        -1.0
+                    } else {
+                        0.0
+                    };
                     NumericScalar::from_f64(s).cast_to(dtype)
                 }
                 WhichSimpleUnaryOp::Log1p => NumericScalar::from_f64(f.ln_1p()).cast_to(dtype),
@@ -504,19 +530,21 @@ impl MilliOp for SimpleUnaryOp {
                     let sign = if x < 0.0 { -1.0 } else { 1.0 };
                     let x = x.abs();
                     let t = 1.0 / (1.0 + p * x);
-                    let y = 1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * (-x * x).exp();
+                    let y =
+                        1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * (-x * x).exp();
                     NumericScalar::from_f64(sign * y).cast_to(dtype)
                 }
                 WhichSimpleUnaryOp::IsNan => NumericScalar::from_bool(f.is_nan()),
-                WhichSimpleUnaryOp::IsInf { detect_positive, detect_negative } => {
+                WhichSimpleUnaryOp::IsInf {
+                    detect_positive,
+                    detect_negative,
+                } => {
                     let is_inf = (detect_positive && f == f64::INFINITY)
                         || (detect_negative && f == f64::NEG_INFINITY);
                     NumericScalar::from_bool(is_inf)
                 }
                 WhichSimpleUnaryOp::Not => NumericScalar::from_bool(!v.is_nonzero()),
-                WhichSimpleUnaryOp::BitwiseNot => {
-                    NumericScalar::from_raw_bits(!v.raw(), dtype)
-                }
+                WhichSimpleUnaryOp::BitwiseNot => NumericScalar::from_raw_bits(!v.raw(), dtype),
             };
             out.write_element(i, result);
         }
@@ -568,7 +596,10 @@ impl MilliOp for SimpleUnaryOp {
         Some(result)
     }
 
-    fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
+    fn lower_to_nano(
+        &self,
+        ctx: &mut crate::nano_graph::NanoLoweringContext,
+    ) -> crate::milli_graph::ops::LowerResult {
         SimpleUnaryOp::lower_to_nano(self, ctx)
     }
 }
@@ -617,7 +648,10 @@ impl ClampMin {
 }
 
 impl ClampMin {
-    pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
+    pub fn lower_to_nano(
+        &self,
+        ctx: &mut crate::nano_graph::NanoLoweringContext,
+    ) -> crate::milli_graph::ops::LowerResult {
         let all_infos = ctx.all_infos;
         let in_id = Node::inputs(self).next().unwrap();
         let out_id = Node::outputs(self).next().unwrap();
@@ -707,7 +741,12 @@ impl MilliOp for ClampMin {
             symbolic_resolver,
         );
 
-        if let Some(results) = super::constant_fold(self, known_inputs, &[(self.output, out.clone_with_pool(pool))], pool) {
+        if let Some(results) = super::constant_fold(
+            self,
+            known_inputs,
+            &[(self.output, out.clone_with_pool(pool))],
+            pool,
+        ) {
             return Ok(results);
         }
 
@@ -736,7 +775,8 @@ impl MilliOp for ClampMin {
         // mask = cast(input >= value, float)
         let threshold = super::Constant::new_scalar(graph, self.value, rng);
         let mask = super::SimpleBinary::greater_or_equal(graph, self.input, threshold, rng);
-        let mask_float = super::Cast::push_new(graph, mask, crate::numeric_dtype::NumericDType::F32, rng);
+        let mask_float =
+            super::Cast::push_new(graph, mask, crate::numeric_dtype::NumericDType::F32, rng);
         let grad_input = super::SimpleBinary::mul(graph, grad_output, mask_float, rng);
         let mut result = HashMap::new();
         result.insert(self.input, grad_input);
@@ -747,7 +787,10 @@ impl MilliOp for ClampMin {
         &self,
         inputs: &[crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>],
         pool: &'p P2,
-    ) -> Result<Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>, crate::nano_graph::pool_eval::PoolEvalError> {
+    ) -> Result<
+        Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>,
+        crate::nano_graph::pool_eval::PoolEvalError,
+    > {
         use crate::numeric_scalar::NumericScalar;
         use crate::numeric_tensor::{NumericTensor, TensorLayout};
         use crate::tensor_rank::DynRank;
@@ -759,7 +802,8 @@ impl MilliOp for ClampMin {
         let min_val = self.value as f64;
 
         let layout = TensorLayout::<DynRank>::row_major(shape, dtype);
-        let buf = pool.allocate(layout.buffer_size_bytes())
+        let buf = pool
+            .allocate(layout.buffer_size_bytes())
             .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
         let mut out = NumericTensor::from_parts(buf, layout);
 
@@ -773,7 +817,10 @@ impl MilliOp for ClampMin {
         Ok(vec![out])
     }
 
-    fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
+    fn lower_to_nano(
+        &self,
+        ctx: &mut crate::nano_graph::NanoLoweringContext,
+    ) -> crate::milli_graph::ops::LowerResult {
         ClampMin::lower_to_nano(self, ctx)
     }
 }

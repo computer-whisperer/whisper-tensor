@@ -1,12 +1,12 @@
-use crate::pool::Pool;
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
 use crate::backends::ndarray_backend::NDArrayNumericTensor;
 use crate::dtype::DType;
 use crate::graph::{GlobalId, Node};
+use crate::migration::numeric_tensor::NumericTensor;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
-use crate::migration::numeric_tensor::NumericTensor;
+use crate::pool::Pool;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use typenum::P1;
@@ -51,7 +51,10 @@ impl Squeeze {
 }
 
 impl Squeeze {
-    pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
+    pub fn lower_to_nano(
+        &self,
+        ctx: &mut crate::nano_graph::NanoLoweringContext,
+    ) -> crate::milli_graph::ops::LowerResult {
         ctx.lower_view_op(self)
     }
 
@@ -85,10 +88,7 @@ impl MilliOp for Squeeze {
         known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'p, P>>,
         symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
         pool: &'p P,
-    ) -> Result<
-        Vec<(GlobalId, crate::tensor_info::TensorInfo<'p, P>)>,
-        MilliOpGraphError,
-    > {
+    ) -> Result<Vec<(GlobalId, crate::tensor_info::TensorInfo<'p, P>)>, MilliOpGraphError> {
         use crate::scalar_info::ScalarInfoTyped;
         use crate::symbolic_scalar::SymbolicScalarTyped;
         use crate::tensor_info::TensorInfo;
@@ -129,7 +129,9 @@ impl MilliOp for Squeeze {
         };
 
         // If both inputs are concrete, try constant fold via nano+pool_eval path.
-        if let Some(results) = super::constant_fold(self, known_inputs, &[(self.output, output_hint)], pool) {
+        if let Some(results) =
+            super::constant_fold(self, known_inputs, &[(self.output, output_hint)], pool)
+        {
             return Ok(results);
         }
 
@@ -255,7 +257,10 @@ impl MilliOp for Squeeze {
         &self,
         inputs: &[crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>],
         pool: &'p P2,
-    ) -> Result<Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>, crate::nano_graph::pool_eval::PoolEvalError> {
+    ) -> Result<
+        Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>,
+        crate::nano_graph::pool_eval::PoolEvalError,
+    > {
         use crate::numeric_tensor::{NumericTensor, TensorLayout};
         use crate::tensor_rank::DynRank;
 
@@ -269,17 +274,24 @@ impl MilliOp for Squeeze {
         let axes: Vec<usize> = (0..axes_tensor.numel())
             .map(|i| {
                 let a = axes_tensor.read_element(i).to_i64();
-                if a < 0 { (a + input_rank as i64) as usize } else { a as usize }
+                if a < 0 {
+                    (a + input_rank as i64) as usize
+                } else {
+                    a as usize
+                }
             })
             .collect();
 
-        let output_shape: Vec<u64> = input_shape.iter().enumerate()
+        let output_shape: Vec<u64> = input_shape
+            .iter()
+            .enumerate()
             .filter(|(i, _)| !axes.contains(i))
             .map(|(_, &d)| d)
             .collect();
 
         let layout = TensorLayout::<DynRank>::row_major(output_shape, dtype);
-        let buf = pool.allocate(layout.buffer_size_bytes())
+        let buf = pool
+            .allocate(layout.buffer_size_bytes())
             .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
         let mut out = NumericTensor::from_parts(buf, layout);
         for i in 0..numel {
@@ -288,7 +300,10 @@ impl MilliOp for Squeeze {
         Ok(vec![out])
     }
 
-    fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
+    fn lower_to_nano(
+        &self,
+        ctx: &mut crate::nano_graph::NanoLoweringContext,
+    ) -> crate::milli_graph::ops::LowerResult {
         Squeeze::lower_to_nano(self, ctx)
     }
 }

@@ -406,7 +406,11 @@ impl NumericTensor<DynRank> {
     /// - For floating types, result has the same sign as a and magnitude less than |b|.
     /// - For integer inputs, values are computed in floating domain when necessary to match ONNX behavior, then cast back as needed by the implementation.
     /// - Division by zero yields NaN for floating inputs. For integer inputs, results are undefined and may error.
-    pub fn fmod(a: &Self, b: &Self, _backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
+    pub fn fmod(
+        a: &Self,
+        b: &Self,
+        _backend: &mut EvalBackend,
+    ) -> Result<Self, NumericTensorError> {
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::fmod(
             &a.try_into()?,
             &b.try_into()?,
@@ -418,7 +422,11 @@ impl NumericTensor<DynRank> {
     /// - The sign of the result follows ONNX: r = a - trunc(a/b)*b, so r has the same sign as a and |r| < |b| when b != 0.
     /// - Division by zero is an error.
     /// - Mixed dtypes are promoted to an integer common type when possible; otherwise integers may be promoted to float and the result cast as needed by the implementation.
-    pub fn imod(a: &Self, b: &Self, _backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
+    pub fn imod(
+        a: &Self,
+        b: &Self,
+        _backend: &mut EvalBackend,
+    ) -> Result<Self, NumericTensorError> {
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::imod(
             &a.try_into()?,
             &b.try_into()?,
@@ -628,7 +636,11 @@ impl NumericTensor<DynRank> {
     /// ONNX semantics:
     /// - Returns a boolean tensor.
     /// - Any comparison involving NaN yields false.
-    pub fn less(a: &Self, b: &Self, _backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
+    pub fn less(
+        a: &Self,
+        b: &Self,
+        _backend: &mut EvalBackend,
+    ) -> Result<Self, NumericTensorError> {
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::less(
             &a.try_into()?,
             &b.try_into()?,

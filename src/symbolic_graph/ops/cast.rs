@@ -159,7 +159,8 @@ impl Operation for CastOperation {
 
         // Handle packed (quantized) inputs: dequantize to F32, then cast if needed
         if let crate::migration::numeric_tensor::NumericTensor::Packed(p) = input {
-            let f32_tensor = crate::migration::numeric_tensor::NumericTensor::NDArray(p.dequantize());
+            let f32_tensor =
+                crate::migration::numeric_tensor::NumericTensor::NDArray(p.dequantize());
             let result = if self.to == crate::dtype::DType::F32 {
                 f32_tensor
             } else {
@@ -183,8 +184,12 @@ impl Operation for CastOperation {
         rng: &mut impl rand::Rng,
     ) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
-        let out =
-            milli_graph::ops::Cast::push_new(&mut graph, input_map[&self.input], NumericDType::from_legacy(self.to).unwrap(), rng);
+        let out = milli_graph::ops::Cast::push_new(
+            &mut graph,
+            input_map[&self.input],
+            NumericDType::from_legacy(self.to).unwrap(),
+            rng,
+        );
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);
         graph.set_output_map(output_map);

@@ -149,7 +149,10 @@ impl MilliOp for Compress {
 
     fn eval(
         &self,
-        inputs: &HashMap<GlobalId, crate::migration::numeric_tensor::NumericTensor<crate::tensor_rank::DynRank>>,
+        inputs: &HashMap<
+            GlobalId,
+            crate::migration::numeric_tensor::NumericTensor<crate::tensor_rank::DynRank>,
+        >,
         _config: &super::MilliEvalConfig,
         _backend: &mut crate::backends::eval_backend::EvalBackend,
     ) -> super::EvalResult {
@@ -158,7 +161,8 @@ impl MilliOp for Compress {
             .map(|id| crate::symbolic_graph::SharedPoolTensor::from_legacy(&inputs[id]))
             .collect();
         let view_refs: Vec<_> = views.iter().map(|s| s.0.view()).collect();
-        let results = self.eval_new(&view_refs, &crate::pool::SystemPool)
+        let results = self
+            .eval_new(&view_refs, &crate::pool::SystemPool)
             .map_err(|e| MilliOpGraphError::InvalidInput(format!("{e}")))?;
         let output = self.output;
         Ok(Box::new(results.into_iter().map(move |t| {

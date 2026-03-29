@@ -28,10 +28,10 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use crate::numeric_dtype::NumericDType;
 use crate::graph::GlobalId;
 use crate::nano_graph::pattern::InputTensor;
 use crate::nano_graph::{AtomGroup, AtomId, AtomRange, InputRef, NanoGraph, ScalarOp, SymDim};
+use crate::numeric_dtype::NumericDType;
 
 use super::types::{Phase, Span};
 
@@ -388,7 +388,9 @@ fn collect_external_in_range(
 }
 
 /// Merge overlapping/adjacent external ranges.
-fn merge_external_ranges(ranges: &BTreeMap<u64, (u64, NumericDType)>) -> Vec<(AtomId, u64, NumericDType)> {
+fn merge_external_ranges(
+    ranges: &BTreeMap<u64, (u64, NumericDType)>,
+) -> Vec<(AtomId, u64, NumericDType)> {
     let mut merged: Vec<(AtomId, u64, NumericDType)> = Vec::new();
     for (&base, &(count, dtype)) in ranges {
         if let Some(last) = merged.last_mut() {
@@ -940,8 +942,8 @@ fn identify_output_groups(graph: &NanoGraph, output_atom_ids: &[AtomId]) -> Hash
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::numeric_dtype::NumericDType;
     use crate::nano_graph::ops::{ReduceKind, ScalarBinOp, ScalarUnaryOp};
+    use crate::numeric_dtype::NumericDType;
     use crate::numeric_scalar::NumericScalar;
 
     /// Helper: assert that each phase has exactly `num_lanes` spans.

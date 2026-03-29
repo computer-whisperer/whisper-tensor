@@ -117,7 +117,10 @@ pub trait OpaqueEval: Send + Sync {
     fn eval(
         &self,
         inputs: &[NumericTensorView<'_, DynRank>],
-    ) -> Result<Vec<NumericTensor<'static, DynRank, crate::pool::SystemPool>>, crate::nano_graph::pool_eval::PoolEvalError>;
+    ) -> Result<
+        Vec<NumericTensor<'static, DynRank, crate::pool::SystemPool>>,
+        crate::nano_graph::pool_eval::PoolEvalError,
+    >;
 }
 
 impl std::fmt::Debug for OpaqueOp {

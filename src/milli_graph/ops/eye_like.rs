@@ -64,8 +64,7 @@ impl EyeLike {
         use crate::numeric_tensor::{NumericTensor, TensorLayout};
         use crate::tensor_rank::DynRank;
 
-        let layout =
-            TensorLayout::<DynRank>::row_major(vec![rows as u64, cols as u64], dtype);
+        let layout = TensorLayout::<DynRank>::row_major(vec![rows as u64, cols as u64], dtype);
         let buf = pool
             .allocate(layout.buffer_size_bytes())
             .expect("EyeLike: pool allocation failed");
@@ -126,8 +125,13 @@ impl MilliOp for EyeLike {
         if let (ScalarInfoTyped::Numeric(rows), ScalarInfoTyped::Numeric(cols)) =
             (&shape[0], &shape[1])
         {
-            let tensor =
-                Self::build_tensor(*rows as usize, *cols as usize, self.k, self.output_dtype, pool);
+            let tensor = Self::build_tensor(
+                *rows as usize,
+                *cols as usize,
+                self.k,
+                self.output_dtype,
+                pool,
+            );
             return Ok(vec![(
                 self.output,
                 crate::tensor_info::TensorInfo::from_view(&tensor.view(), pool),
@@ -135,10 +139,8 @@ impl MilliOp for EyeLike {
         }
 
         // Shape not fully known — return shape-only info.
-        let out = crate::tensor_info::TensorInfo::from_dtype_and_shape_scalars(
-            self.output_dtype,
-            &shape,
-        );
+        let out =
+            crate::tensor_info::TensorInfo::from_dtype_and_shape_scalars(self.output_dtype, &shape);
         Ok(vec![(self.output, out)])
     }
 
@@ -154,7 +156,9 @@ impl MilliOp for EyeLike {
         let input = &inputs[&self.input];
         let shape = input.shape();
         if shape.len() != 2 {
-            return Err(MilliOpGraphError::InvalidInput("EyeLike requires 2D".into()));
+            return Err(MilliOpGraphError::InvalidInput(
+                "EyeLike requires 2D".into(),
+            ));
         }
         let tensor = Self::build_tensor(
             shape[0] as usize,

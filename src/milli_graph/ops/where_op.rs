@@ -1,13 +1,13 @@
-use crate::pool::Pool;
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
 use crate::graph::{GlobalId, Node};
+use crate::migration::numeric_tensor::NumericTensor;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
 use crate::nano_graph::lower::{NanoLoweringContext, TensorAtomMap};
 use crate::nano_graph::ops::ScalarOp;
 use crate::nano_graph::pattern::AtomId;
-use crate::migration::numeric_tensor::NumericTensor;
+use crate::pool::Pool;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -55,7 +55,10 @@ impl Where {
 }
 
 impl Where {
-    pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
+    pub fn lower_to_nano(
+        &self,
+        ctx: &mut crate::nano_graph::NanoLoweringContext,
+    ) -> crate::milli_graph::ops::LowerResult {
         let all_infos = ctx.all_infos;
         let mut inputs_iter = Node::inputs(self);
         let cond_id = inputs_iter.next().unwrap();
@@ -144,10 +147,7 @@ impl MilliOp for Where {
         known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'p, P>>,
         symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
         pool: &'p P,
-    ) -> Result<
-        Vec<(GlobalId, crate::tensor_info::TensorInfo<'p, P>)>,
-        MilliOpGraphError,
-    > {
+    ) -> Result<Vec<(GlobalId, crate::tensor_info::TensorInfo<'p, P>)>, MilliOpGraphError> {
         use crate::tensor_info::TensorInfo;
 
         let cond_info = known_inputs
@@ -187,7 +187,12 @@ impl MilliOp for Where {
         };
 
         // If all concrete, try constant fold with output hints.
-        if let Some(results) = super::constant_fold(self, known_inputs, &[(self.output, out_info.clone_with_pool(pool))], pool) {
+        if let Some(results) = super::constant_fold(
+            self,
+            known_inputs,
+            &[(self.output, out_info.clone_with_pool(pool))],
+            pool,
+        ) {
             return Ok(results);
         }
 
@@ -209,7 +214,10 @@ impl MilliOp for Where {
         &self,
         inputs: &[crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>],
         pool: &'p P2,
-    ) -> Result<Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>, crate::nano_graph::pool_eval::PoolEvalError> {
+    ) -> Result<
+        Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>,
+        crate::nano_graph::pool_eval::PoolEvalError,
+    > {
         use crate::numeric_tensor::{NumericTensor, TensorLayout};
         use crate::tensor_rank::DynRank;
 
@@ -226,26 +234,43 @@ impl MilliOp for Where {
         let mut pc = vec![1u64; out_rank];
         let mut px = vec![1u64; out_rank];
         let mut py = vec![1u64; out_rank];
-        for (i, &d) in cond_shape.iter().enumerate() { pc[out_rank - cond_shape.len() + i] = d; }
-        for (i, &d) in x_shape.iter().enumerate() { px[out_rank - x_shape.len() + i] = d; }
-        for (i, &d) in y_shape.iter().enumerate() { py[out_rank - y_shape.len() + i] = d; }
+        for (i, &d) in cond_shape.iter().enumerate() {
+            pc[out_rank - cond_shape.len() + i] = d;
+        }
+        for (i, &d) in x_shape.iter().enumerate() {
+            px[out_rank - x_shape.len() + i] = d;
+        }
+        for (i, &d) in y_shape.iter().enumerate() {
+            py[out_rank - y_shape.len() + i] = d;
+        }
         let mut output_shape = vec![0u64; out_rank];
-        for i in 0..out_rank { output_shape[i] = pc[i].max(px[i]).max(py[i]); }
+        for i in 0..out_rank {
+            output_shape[i] = pc[i].max(px[i]).max(py[i]);
+        }
 
         let out_numel: usize = output_shape.iter().product::<u64>() as usize;
 
         // Compute strides
         let mut out_strides = vec![1usize; out_rank];
-        for i in (0..out_rank.saturating_sub(1)).rev() { out_strides[i] = out_strides[i + 1] * output_shape[i + 1] as usize; }
+        for i in (0..out_rank.saturating_sub(1)).rev() {
+            out_strides[i] = out_strides[i + 1] * output_shape[i + 1] as usize;
+        }
         let mut c_strides = vec![1usize; out_rank];
-        for i in (0..out_rank.saturating_sub(1)).rev() { c_strides[i] = c_strides[i + 1] * pc[i + 1] as usize; }
+        for i in (0..out_rank.saturating_sub(1)).rev() {
+            c_strides[i] = c_strides[i + 1] * pc[i + 1] as usize;
+        }
         let mut x_strides = vec![1usize; out_rank];
-        for i in (0..out_rank.saturating_sub(1)).rev() { x_strides[i] = x_strides[i + 1] * px[i + 1] as usize; }
+        for i in (0..out_rank.saturating_sub(1)).rev() {
+            x_strides[i] = x_strides[i + 1] * px[i + 1] as usize;
+        }
         let mut y_strides = vec![1usize; out_rank];
-        for i in (0..out_rank.saturating_sub(1)).rev() { y_strides[i] = y_strides[i + 1] * py[i + 1] as usize; }
+        for i in (0..out_rank.saturating_sub(1)).rev() {
+            y_strides[i] = y_strides[i + 1] * py[i + 1] as usize;
+        }
 
         let layout = TensorLayout::<DynRank>::row_major(output_shape.clone(), dtype);
-        let buf = pool.allocate(layout.buffer_size_bytes())
+        let buf = pool
+            .allocate(layout.buffer_size_bytes())
             .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
         let mut out = NumericTensor::from_parts(buf, layout);
 
@@ -273,7 +298,10 @@ impl MilliOp for Where {
         Ok(vec![out])
     }
 
-    fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
+    fn lower_to_nano(
+        &self,
+        ctx: &mut crate::nano_graph::NanoLoweringContext,
+    ) -> crate::milli_graph::ops::LowerResult {
         Where::lower_to_nano(self, ctx)
     }
 }

@@ -128,8 +128,7 @@ impl FloatType {
     fn encode_infinity(&self, sign_bit: u64) -> u64 {
         if self.has_infinity {
             let max_exp = self.max_biased_exponent() as u64;
-            (sign_bit << (self.total_bits() as u32 - 1))
-                | (max_exp << self.mantissa_bits as u32)
+            (sign_bit << (self.total_bits() as u32 - 1)) | (max_exp << self.mantissa_bits as u32)
         } else {
             self.encode_max_finite(sign_bit)
         }
@@ -148,9 +147,7 @@ impl FloatType {
             (max_exp, mant_mask)
         };
 
-        (sign_bit << (self.total_bits() as u32 - 1))
-            | (exp_val << mant_bits)
-            | mant_val
+        (sign_bit << (self.total_bits() as u32 - 1)) | (exp_val << mant_bits) | mant_val
     }
 
     fn encode_overflow(&self, sign_bit: u64) -> u64 {
@@ -194,9 +191,7 @@ impl FloatType {
             mant_int
         };
 
-        (sign_bit << (self.total_bits() as u32 - 1))
-            | (biased_exp << mant_bits)
-            | final_mant
+        (sign_bit << (self.total_bits() as u32 - 1)) | (biased_exp << mant_bits) | final_mant
     }
 
     fn encode_subnormal(&self, sign_bit: u64, abs_val: f64) -> u64 {
@@ -250,7 +245,11 @@ impl IntType {
     pub fn encode_signed(&self, value: i128) -> u64 {
         let clamped = self.clamp_signed(value);
         let raw = clamped as i64 as u64;
-        if self.bits >= 64 { raw } else { raw & ((1u64 << self.bits) - 1) }
+        if self.bits >= 64 {
+            raw
+        } else {
+            raw & ((1u64 << self.bits) - 1)
+        }
     }
 
     /// Encode an unsigned integer value, clamping to this type's range.
@@ -267,14 +266,20 @@ impl IntType {
 
     /// Clamp an unsigned value to this type's range.
     pub fn clamp_unsigned(&self, value: u128) -> u128 {
-        let max = if self.bits >= 64 { u64::MAX as u128 } else { (1u128 << self.bits) - 1 };
+        let max = if self.bits >= 64 {
+            u64::MAX as u128
+        } else {
+            (1u128 << self.bits) - 1
+        };
         value.min(max)
     }
 
     /// Convert f64 to signed integer with saturation.
     /// NaN → 0, ±Inf → min/max.
     pub fn float_to_signed(&self, f: f64) -> i128 {
-        if f.is_nan() { return 0; }
+        if f.is_nan() {
+            return 0;
+        }
         let min = -(1i128 << (self.bits - 1));
         let max = (1i128 << (self.bits - 1)) - 1;
         // Rust guarantees saturating float-to-int casts (since 1.45)
@@ -284,8 +289,14 @@ impl IntType {
     /// Convert f64 to unsigned integer with saturation.
     /// NaN or negative → 0.
     pub fn float_to_unsigned(&self, f: f64) -> u128 {
-        if f.is_nan() || f < 0.0 { return 0; }
-        let max = if self.bits >= 64 { u64::MAX as u128 } else { (1u128 << self.bits) - 1 };
+        if f.is_nan() || f < 0.0 {
+            return 0;
+        }
+        let max = if self.bits >= 64 {
+            u64::MAX as u128
+        } else {
+            (1u128 << self.bits) - 1
+        };
         (f.trunc() as u128).min(max)
     }
 }
@@ -310,7 +321,13 @@ impl NumericDType {
             NumericDType::Float(ft) => ft.decode_f64(raw),
             NumericDType::SignedInt(it) => it.decode_signed(raw) as f64,
             NumericDType::UnsignedInt(it) => it.decode_unsigned(raw) as f64,
-            NumericDType::Bool => if raw != 0 { 1.0 } else { 0.0 },
+            NumericDType::Bool => {
+                if raw != 0 {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
         }
     }
 
@@ -347,7 +364,13 @@ fn encode_intermediate(value: Intermediate, dtype: NumericDType) -> u64 {
             let f = match value {
                 Intermediate::Float(f) => f,
                 Intermediate::Int(i) => i as f64,
-                Intermediate::Bool(b) => if b { 1.0 } else { 0.0 },
+                Intermediate::Bool(b) => {
+                    if b {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                }
             };
             ft.encode_f64(f)
         }
@@ -355,15 +378,33 @@ fn encode_intermediate(value: Intermediate, dtype: NumericDType) -> u64 {
             let i = match value {
                 Intermediate::Float(f) => it.float_to_signed(f),
                 Intermediate::Int(i) => it.clamp_signed(i),
-                Intermediate::Bool(b) => if b { 1 } else { 0 },
+                Intermediate::Bool(b) => {
+                    if b {
+                        1
+                    } else {
+                        0
+                    }
+                }
             };
             it.encode_signed(i)
         }
         NumericDType::UnsignedInt(it) => {
             let u = match value {
                 Intermediate::Float(f) => it.float_to_unsigned(f),
-                Intermediate::Int(i) => if i < 0 { 0 } else { it.clamp_unsigned(i as u128) },
-                Intermediate::Bool(b) => if b { 1 } else { 0 },
+                Intermediate::Int(i) => {
+                    if i < 0 {
+                        0
+                    } else {
+                        it.clamp_unsigned(i as u128)
+                    }
+                }
+                Intermediate::Bool(b) => {
+                    if b {
+                        1
+                    } else {
+                        0
+                    }
+                }
             };
             it.encode_unsigned(u)
         }
@@ -393,14 +434,20 @@ fn round_to_nearest_even(value: f64) -> u64 {
     } else if frac < 0.5 {
         floor_u64
     } else {
-        if floor_u64 % 2 == 0 { floor_u64 } else { floor_u64 + 1 }
+        if floor_u64 % 2 == 0 {
+            floor_u64
+        } else {
+            floor_u64 + 1
+        }
     }
 }
 
 /// Decompose f64 into (fraction, exponent) where value = fraction * 2^exponent,
 /// 0.5 <= fraction < 1.0 for nonzero values.
 fn frexp_f64(value: f64) -> (f64, i32) {
-    if value == 0.0 { return (0.0, 0); }
+    if value == 0.0 {
+        return (0.0, 0);
+    }
     let bits = value.to_bits();
     let biased_exp = ((bits >> 52) & 0x7FF) as i32;
     let mantissa_bits = bits & ((1u64 << 52) - 1);

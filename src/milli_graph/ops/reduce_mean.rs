@@ -1,8 +1,8 @@
-use crate::pool::Pool;
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
 use crate::dtype::DType;
 use crate::graph::{GlobalId, Node};
+use crate::migration::numeric_tensor::NumericTensor;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
 use crate::nano_graph::lower::{NanoLoweringContext, TensorAtomMap};
@@ -10,7 +10,7 @@ use crate::nano_graph::ops::{ReduceKind, ScalarBinOp, ScalarOp};
 use crate::nano_graph::pattern::InputRef;
 use crate::numeric_dtype::NumericDType;
 use crate::numeric_scalar::NumericScalar;
-use crate::migration::numeric_tensor::NumericTensor;
+use crate::pool::Pool;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use typenum::P1;
@@ -84,7 +84,10 @@ impl ReduceMean {
 }
 
 impl ReduceMean {
-    pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
+    pub fn lower_to_nano(
+        &self,
+        ctx: &mut crate::nano_graph::NanoLoweringContext,
+    ) -> crate::milli_graph::ops::LowerResult {
         let all_infos = ctx.all_infos;
         let out_id = Node::outputs(self).next().unwrap();
 
@@ -123,7 +126,9 @@ impl ReduceMean {
             return crate::milli_graph::ops::LowerResult::Unsupported;
         };
         let out_dt = NanoLoweringContext::ndt(out_info);
-        let in_dt = in_info.map(|i| NanoLoweringContext::ndt(i)).unwrap_or(out_dt);
+        let in_dt = in_info
+            .map(|i| NanoLoweringContext::ndt(i))
+            .unwrap_or(out_dt);
 
         // For BF16/F16: keep entire mean computation in F32, cast at the end.
         // This matches milli eval where ndarray accumulates in F32.
@@ -216,10 +221,7 @@ impl MilliOp for ReduceMean {
         known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'p, P>>,
         symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
         pool: &'p P,
-    ) -> Result<
-        Vec<(GlobalId, crate::tensor_info::TensorInfo<'p, P>)>,
-        MilliOpGraphError,
-    > {
+    ) -> Result<Vec<(GlobalId, crate::tensor_info::TensorInfo<'p, P>)>, MilliOpGraphError> {
         use crate::scalar_info::ScalarInfoTyped;
         use crate::tensor_info::TensorInfo;
 
@@ -285,7 +287,12 @@ impl MilliOp for ReduceMean {
         };
 
         // Check if all inputs are concrete; if so, try constant fold with output hints.
-        if let Some(results) = super::constant_fold(self, known_inputs, &[(self.output, out_info.clone_with_pool(pool))], pool) {
+        if let Some(results) = super::constant_fold(
+            self,
+            known_inputs,
+            &[(self.output, out_info.clone_with_pool(pool))],
+            pool,
+        ) {
             return Ok(results);
         }
 
@@ -366,8 +373,12 @@ impl MilliOp for ReduceMean {
             // Gather the specific axes from input_shape, then ReduceProd
             let count = super::Gather::push_new(graph, input_shape, axes, 0, rng);
             let count_scalar = super::ReduceProd::push_new(graph, count, None, false, false, rng);
-            let count_float =
-                super::Cast::push_new(graph, count_scalar, crate::numeric_dtype::NumericDType::F32, rng);
+            let count_float = super::Cast::push_new(
+                graph,
+                count_scalar,
+                crate::numeric_dtype::NumericDType::F32,
+                rng,
+            );
             let grad_input = super::SimpleBinary::div(graph, expanded, count_float, rng);
             let mut result = HashMap::new();
             result.insert(self.data, grad_input);
@@ -376,7 +387,8 @@ impl MilliOp for ReduceMean {
             // All axes reduced — count = total number of input elements
             // ReduceProd(input_shape) gives the total element count
             let total = super::ReduceProd::push_new(graph, input_shape, None, false, false, rng);
-            let total_float = super::Cast::push_new(graph, total, crate::numeric_dtype::NumericDType::F32, rng);
+            let total_float =
+                super::Cast::push_new(graph, total, crate::numeric_dtype::NumericDType::F32, rng);
             let grad_input = super::SimpleBinary::div(graph, expanded, total_float, rng);
             let mut result = HashMap::new();
             result.insert(self.data, grad_input);
@@ -388,7 +400,10 @@ impl MilliOp for ReduceMean {
         &self,
         inputs: &[crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>],
         pool: &'p P2,
-    ) -> Result<Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>, crate::nano_graph::pool_eval::PoolEvalError> {
+    ) -> Result<
+        Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>,
+        crate::nano_graph::pool_eval::PoolEvalError,
+    > {
         let dtype = inputs[0].dtype();
         super::reduce_eval_new(
             inputs,
@@ -402,7 +417,10 @@ impl MilliOp for ReduceMean {
         )
     }
 
-    fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
+    fn lower_to_nano(
+        &self,
+        ctx: &mut crate::nano_graph::NanoLoweringContext,
+    ) -> crate::milli_graph::ops::LowerResult {
         ReduceMean::lower_to_nano(self, ctx)
     }
 }

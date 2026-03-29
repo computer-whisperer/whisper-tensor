@@ -1,11 +1,11 @@
-use crate::pool::Pool;
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
 use crate::graph::{GlobalId, Node};
+use crate::migration::numeric_tensor::NumericTensor;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp, MilliOpTensorIDOrLiteral};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
 use crate::nano_graph::lower::{DimKind, NanoLoweringContext, TensorAtomMap};
-use crate::migration::numeric_tensor::NumericTensor;
+use crate::pool::Pool;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use typenum::P1;
@@ -75,7 +75,10 @@ impl Split {
 }
 
 impl Split {
-    pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
+    pub fn lower_to_nano(
+        &self,
+        ctx: &mut crate::nano_graph::NanoLoweringContext,
+    ) -> crate::milli_graph::ops::LowerResult {
         let all_infos = ctx.all_infos;
         let in_id = Node::inputs(self).next().unwrap();
         let out_id = Node::outputs(self).next().unwrap();
@@ -214,7 +217,11 @@ impl Split {
         if let Some(n) = self.num_outputs {
             let in_id = Node::inputs(self).next().unwrap();
             let axis = if self.axis < 0 {
-                let rank = ctx.tensor_map.get(&in_id).map(|m| m.layout.len()).unwrap_or(1);
+                let rank = ctx
+                    .tensor_map
+                    .get(&in_id)
+                    .map(|m| m.layout.len())
+                    .unwrap_or(1);
                 (self.axis + rank as i64) as usize
             } else {
                 self.axis as usize
@@ -276,10 +283,7 @@ impl MilliOp for Split {
         known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'p, P>>,
         _symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
         pool: &'p P,
-    ) -> Result<
-        Vec<(GlobalId, crate::tensor_info::TensorInfo<'p, P>)>,
-        MilliOpGraphError,
-    > {
+    ) -> Result<Vec<(GlobalId, crate::tensor_info::TensorInfo<'p, P>)>, MilliOpGraphError> {
         use crate::scalar_info::ScalarInfoTyped;
         use crate::tensor_info::TensorInfo;
 
@@ -338,7 +342,12 @@ impl MilliOp for Split {
         let out_info = TensorInfo::from_dtype_and_shape_scalars(out_dtype, &out_dims);
 
         // If all inputs are concrete, try constant fold via nano+pool_eval path.
-        if let Some(results) = super::constant_fold(self, known_inputs, &[(self.output, out_info.clone_with_pool(pool))], pool) {
+        if let Some(results) = super::constant_fold(
+            self,
+            known_inputs,
+            &[(self.output, out_info.clone_with_pool(pool))],
+            pool,
+        ) {
             return Ok(results);
         }
 
@@ -410,7 +419,10 @@ impl MilliOp for Split {
         &self,
         inputs: &[crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>],
         pool: &'p P2,
-    ) -> Result<Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>, crate::nano_graph::pool_eval::PoolEvalError> {
+    ) -> Result<
+        Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>,
+        crate::nano_graph::pool_eval::PoolEvalError,
+    > {
         use crate::numeric_tensor::{NumericTensor, TensorLayout};
         use crate::tensor_rank::DynRank;
 
@@ -418,7 +430,11 @@ impl MilliOp for Split {
         let data_shape = data.shape();
         let rank = data_shape.len();
         let dtype = data.dtype();
-        let axis = if self.axis < 0 { (self.axis + rank as i64) as usize } else { self.axis as usize };
+        let axis = if self.axis < 0 {
+            (self.axis + rank as i64) as usize
+        } else {
+            self.axis as usize
+        };
 
         // Determine split sizes
         let split_sizes: Vec<i64> = if let Some(ref split) = self.split {
@@ -426,29 +442,51 @@ impl MilliOp for Split {
                 MilliOpTensorIDOrLiteral::TensorID(_) => {
                     // inputs[1] is the split tensor
                     let split_tensor = &inputs[1];
-                    (0..split_tensor.numel()).map(|i| split_tensor.read_element(i).to_i64()).collect()
+                    (0..split_tensor.numel())
+                        .map(|i| split_tensor.read_element(i).to_i64())
+                        .collect()
                 }
                 MilliOpTensorIDOrLiteral::Literal(lit) => {
-                    let legacy: crate::migration::numeric_tensor::NumericTensor<DynRank> = lit.clone().into();
+                    let legacy: crate::migration::numeric_tensor::NumericTensor<DynRank> =
+                        lit.clone().into();
                     // Extract values via casting
-                    let cast = legacy.cast(crate::dtype::DType::I64, &mut crate::backends::eval_backend::EvalBackend::NDArray)
-                        .map_err(|e| crate::nano_graph::pool_eval::PoolEvalError::Unsupported(format!("{e:?}")))?;
+                    let cast = legacy
+                        .cast(
+                            crate::dtype::DType::I64,
+                            &mut crate::backends::eval_backend::EvalBackend::NDArray,
+                        )
+                        .map_err(|e| {
+                            crate::nano_graph::pool_eval::PoolEvalError::Unsupported(format!(
+                                "{e:?}"
+                            ))
+                        })?;
                     cast.try_to_rank::<P1>()
                         .and_then(|r| Vec::<i64>::try_from(r))
-                        .map_err(|e| crate::nano_graph::pool_eval::PoolEvalError::Unsupported(format!("{e:?}")))?
+                        .map_err(|e| {
+                            crate::nano_graph::pool_eval::PoolEvalError::Unsupported(format!(
+                                "{e:?}"
+                            ))
+                        })?
                 }
             }
         } else if let Some(num_outputs) = self.num_outputs {
             let dim = data_shape[axis] as usize;
             let base = dim / num_outputs;
             let remainder = dim % num_outputs;
-            (0..num_outputs).map(|i| (base + if i < remainder { 1 } else { 0 }) as i64).collect()
+            (0..num_outputs)
+                .map(|i| (base + if i < remainder { 1 } else { 0 }) as i64)
+                .collect()
         } else {
-            return Err(crate::nano_graph::pool_eval::PoolEvalError::Unsupported("Split: no split attribute".to_string()));
+            return Err(crate::nano_graph::pool_eval::PoolEvalError::Unsupported(
+                "Split: no split attribute".to_string(),
+            ));
         };
 
         // Compute start offset along axis for this output_id
-        let start: usize = split_sizes[..self.output_id].iter().map(|&s| s as usize).sum();
+        let start: usize = split_sizes[..self.output_id]
+            .iter()
+            .map(|&s| s as usize)
+            .sum();
         let size = split_sizes[self.output_id] as usize;
 
         // Output shape: same as input but axis dim = size
@@ -458,12 +496,17 @@ impl MilliOp for Split {
 
         // Compute strides
         let mut in_strides = vec![1usize; rank];
-        for i in (0..rank.saturating_sub(1)).rev() { in_strides[i] = in_strides[i + 1] * data_shape[i + 1] as usize; }
+        for i in (0..rank.saturating_sub(1)).rev() {
+            in_strides[i] = in_strides[i + 1] * data_shape[i + 1] as usize;
+        }
         let mut out_strides = vec![1usize; rank];
-        for i in (0..rank.saturating_sub(1)).rev() { out_strides[i] = out_strides[i + 1] * output_shape[i + 1] as usize; }
+        for i in (0..rank.saturating_sub(1)).rev() {
+            out_strides[i] = out_strides[i + 1] * output_shape[i + 1] as usize;
+        }
 
         let layout = TensorLayout::<DynRank>::row_major(output_shape, dtype);
-        let buf = pool.allocate(layout.buffer_size_bytes())
+        let buf = pool
+            .allocate(layout.buffer_size_bytes())
             .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
         let mut out = NumericTensor::from_parts(buf, layout);
 
@@ -482,7 +525,10 @@ impl MilliOp for Split {
         Ok(vec![out])
     }
 
-    fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> crate::milli_graph::ops::LowerResult {
+    fn lower_to_nano(
+        &self,
+        ctx: &mut crate::nano_graph::NanoLoweringContext,
+    ) -> crate::milli_graph::ops::LowerResult {
         Split::lower_to_nano(self, ctx)
     }
 }

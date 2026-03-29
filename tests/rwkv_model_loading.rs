@@ -208,8 +208,8 @@ fn rwkv01b_model_loads_with_binfile() {
 fn rwkv01b_nano_graph_integrity() {
     use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
     use whisper_tensor::graph::GlobalId;
-    use whisper_tensor::nano_graph::{lower, pattern::AtomRange};
     use whisper_tensor::migration::numeric_tensor::NumericTensor;
+    use whisper_tensor::nano_graph::{lower, pattern::AtomRange};
     use whisper_tensor::tensor_info::TensorInfo;
     use whisper_tensor::{DynRank, dtype::DType};
 
@@ -354,12 +354,19 @@ fn rwkv01b_nano_graph_integrity() {
     // Insert weights first, then user inputs on top — user inputs take precedence.
     // User inputs should be Shaped (not Numeric) so the lowering doesn't bake in
     // test values as constants; the test provides runtime overrides separately.
-    let mut lower_infos: HashMap<GlobalId, TensorInfo<'_, whisper_tensor::pool::SystemPool>> = HashMap::new();
+    let mut lower_infos: HashMap<GlobalId, TensorInfo<'_, whisper_tensor::pool::SystemPool>> =
+        HashMap::new();
     for (id, t) in &weight_tensors {
-        lower_infos.insert(*id, TensorInfo::from_legacy(t, &whisper_tensor::pool::SystemPool));
+        lower_infos.insert(
+            *id,
+            TensorInfo::from_legacy(t, &whisper_tensor::pool::SystemPool),
+        );
     }
     for (id, t) in &input_tensors {
-        lower_infos.insert(*id, TensorInfo::from_legacy(t, &whisper_tensor::pool::SystemPool));
+        lower_infos.insert(
+            *id,
+            TensorInfo::from_legacy(t, &whisper_tensor::pool::SystemPool),
+        );
     }
 
     let t0 = std::time::Instant::now();

@@ -122,11 +122,7 @@ impl Operation for BinaryOperation {
                     .unwrap_or(DType::F32);
                 let input_ndt = NumericDType::from_legacy(input_dtype).unwrap();
                 milli_graph::ops::MatMul::push_new_default_precision(
-                    &mut graph,
-                    a,
-                    b,
-                    input_ndt,
-                    rng,
+                    &mut graph, a, b, input_ndt, rng,
                 )
             }
             WhichBinaryOperation::And => milli_graph::ops::SimpleBinary::and(&mut graph, a, b, rng),

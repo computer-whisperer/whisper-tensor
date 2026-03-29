@@ -25,7 +25,6 @@ pub enum ModelError {
     UnconfiguredBackend,
 }
 
-
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ModelID {
     pub name: String,

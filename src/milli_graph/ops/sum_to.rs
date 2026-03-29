@@ -1,9 +1,9 @@
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
 use crate::graph::{GlobalId, Node};
+use crate::migration::numeric_tensor::NumericTensor;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
-use crate::migration::numeric_tensor::NumericTensor;
 use crate::pool::Pool;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -194,7 +194,10 @@ impl MilliOp for SumTo {
         &self,
         inputs: &[crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>],
         pool: &'p P2,
-    ) -> Result<Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>, crate::nano_graph::pool_eval::PoolEvalError> {
+    ) -> Result<
+        Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>,
+        crate::nano_graph::pool_eval::PoolEvalError,
+    > {
         use crate::numeric_scalar::NumericScalar;
         use crate::numeric_tensor::{NumericTensor, TensorLayout};
         use crate::tensor_rank::DynRank;
@@ -224,38 +227,54 @@ impl MilliOp for SumTo {
         // If no reduction needed, copy data and reshape.
         if reduce_axes.is_empty() {
             let layout = TensorLayout::<DynRank>::row_major(target_shape.clone(), dtype);
-            let buf = pool.allocate(layout.buffer_size_bytes())
+            let buf = pool
+                .allocate(layout.buffer_size_bytes())
                 .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
             let mut out = NumericTensor::from_parts(buf, layout);
-            for i in 0..data.numel() { out.write_element(i, data.read_element(i)); }
+            for i in 0..data.numel() {
+                out.write_element(i, data.read_element(i));
+            }
             return Ok(vec![out]);
         }
 
         // Reduce sum along reduce_axes with keepdims=true, then reshape.
         // Use padded_target as the intermediate shape (keepdims).
         let keepdims_shape: Vec<u64> = (0..data_rank)
-            .map(|i| if reduce_axes.contains(&i) { 1 } else { data_shape[i] })
+            .map(|i| {
+                if reduce_axes.contains(&i) {
+                    1
+                } else {
+                    data_shape[i]
+                }
+            })
             .collect();
         let out_numel: usize = keepdims_shape.iter().product::<u64>() as usize;
 
         // Allocate intermediate in keepdims shape.
         let kd_layout = TensorLayout::<DynRank>::row_major(keepdims_shape.clone(), dtype);
-        let kd_buf = pool.allocate(kd_layout.buffer_size_bytes())
+        let kd_buf = pool
+            .allocate(kd_layout.buffer_size_bytes())
             .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
         let mut kd_out = NumericTensor::from_parts(kd_buf, kd_layout);
 
         // Initialize to zero.
-        for i in 0..out_numel { kd_out.write_element(i, NumericScalar::zero(dtype)); }
+        for i in 0..out_numel {
+            kd_out.write_element(i, NumericScalar::zero(dtype));
+        }
 
         // Strides.
         let in_strides = {
             let mut s = vec![1usize; data_rank];
-            for i in (0..data_rank.saturating_sub(1)).rev() { s[i] = s[i + 1] * data_shape[i + 1] as usize; }
+            for i in (0..data_rank.saturating_sub(1)).rev() {
+                s[i] = s[i + 1] * data_shape[i + 1] as usize;
+            }
             s
         };
         let out_strides = {
             let mut s = vec![1usize; data_rank];
-            for i in (0..data_rank.saturating_sub(1)).rev() { s[i] = s[i + 1] * keepdims_shape[i + 1] as usize; }
+            for i in (0..data_rank.saturating_sub(1)).rev() {
+                s[i] = s[i + 1] * keepdims_shape[i + 1] as usize;
+            }
             s
         };
 
@@ -279,10 +298,13 @@ impl MilliOp for SumTo {
         // Reshape to target_shape if needed.
         if keepdims_shape.iter().map(|&x| x as u64).collect::<Vec<_>>() != target_shape {
             let layout = TensorLayout::<DynRank>::row_major(target_shape, dtype);
-            let buf = pool.allocate(layout.buffer_size_bytes())
+            let buf = pool
+                .allocate(layout.buffer_size_bytes())
                 .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
             let mut out = NumericTensor::from_parts(buf, layout);
-            for i in 0..out_numel { out.write_element(i, kd_out.read_element(i)); }
+            for i in 0..out_numel {
+                out.write_element(i, kd_out.read_element(i));
+            }
             Ok(vec![out])
         } else {
             Ok(vec![kd_out])

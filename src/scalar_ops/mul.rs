@@ -117,7 +117,10 @@ mod tests {
         let it = IntType::BITS_32;
         let a = it.encode_signed(i32::MAX as i128);
         let b = it.encode_signed(2);
-        assert_eq!(it.decode_signed(signed_mul_saturating(a, b, &it)), i32::MAX as i128);
+        assert_eq!(
+            it.decode_signed(signed_mul_saturating(a, b, &it)),
+            i32::MAX as i128
+        );
     }
 
     #[test]
@@ -125,7 +128,10 @@ mod tests {
         let it = IntType::BITS_64;
         let a = it.encode_signed(1_000_000_007);
         let b = it.encode_signed(2);
-        assert_eq!(it.decode_signed(signed_mul_wrapping(a, b, &it)), 2_000_000_014);
+        assert_eq!(
+            it.decode_signed(signed_mul_wrapping(a, b, &it)),
+            2_000_000_014
+        );
     }
 
     // -- Unsigned integer multiplication --
@@ -144,7 +150,10 @@ mod tests {
         // 20 * 20 = 400 → wraps in u8 to 144
         let a = it.encode_unsigned(20);
         let b = it.encode_unsigned(20);
-        assert_eq!(it.decode_unsigned(unsigned_mul_wrapping(a, b, &it)), (400u16 as u8) as u128);
+        assert_eq!(
+            it.decode_unsigned(unsigned_mul_wrapping(a, b, &it)),
+            (400u16 as u8) as u128
+        );
     }
 
     #[test]

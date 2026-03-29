@@ -11,11 +11,7 @@ pub trait SuperGraphObserver {
         start_instant: Instant,
         end_instant: Instant,
     );
-    fn on_tensor_assigned(
-        &mut self,
-        path: &[GlobalId],
-        tensor: &SharedPoolTensor,
-    );
+    fn on_tensor_assigned(&mut self, path: &[GlobalId], tensor: &SharedPoolTensor);
     fn on_loading_weight(&mut self, path: &[GlobalId], weight_name: Option<String>);
     fn on_progress(&mut self, path: &[GlobalId], tier: i64, numerator: f64, denominator: f64);
     fn should_cancel(&mut self) -> bool {
@@ -32,12 +28,7 @@ impl SuperGraphObserver for () {
         _end_instant: Instant,
     ) {
     }
-    fn on_tensor_assigned(
-        &mut self,
-        _path: &[GlobalId],
-        _tensor: &SharedPoolTensor,
-    ) {
-    }
+    fn on_tensor_assigned(&mut self, _path: &[GlobalId], _tensor: &SharedPoolTensor) {}
     fn on_loading_weight(&mut self, _path: &[GlobalId], _weight_name: Option<String>) {}
     fn on_progress(&mut self, _path: &[GlobalId], _tier: i64, _numerator: f64, _denominator: f64) {}
     fn should_cancel(&mut self) -> bool {
