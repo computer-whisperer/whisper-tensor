@@ -124,7 +124,7 @@ pub(crate) fn view_to_legacy(
 ///
 /// For float types, reads raw bytes directly (no precision loss).
 /// For integer types, reads raw bytes directly (no f64 roundtrip).
-pub(crate) fn legacy_to_new(
+pub fn legacy_to_new(
     legacy: &LegacyNumericTensor<LegacyDynRank>,
 ) -> NumericTensor<'static, DynRank, SystemPool> {
     let dtype = NumericDType::from_legacy(legacy.dtype()).unwrap();

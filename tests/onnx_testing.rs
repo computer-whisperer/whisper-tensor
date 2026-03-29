@@ -7,13 +7,12 @@ use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Once;
-use whisper_tensor::backends::eval_backend::EvalBackend;
-use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
 use whisper_tensor::dtype::{DType, DTypeError};
-use whisper_tensor::migration::numeric_tensor::NumericTensor;
 use whisper_tensor::model::Model;
+use whisper_tensor::numeric_tensor::NumericTensorView;
 use whisper_tensor::onnx::TensorProto;
-use whisper_tensor::symbolic_graph::ONNXDecodingError;
+use whisper_tensor::pool::Pool;
+use whisper_tensor::symbolic_graph::{ONNXDecodingError, tensor_proto_to_pool_tensor};
 use whisper_tensor::tensor_rank::DynRank;
 
 // Structure to hold a test case
@@ -93,8 +92,7 @@ impl OnnxNodeTest {
         })
     }
 
-    // Run the test using a specified backend
-    fn run(&self, backend: &mut EvalBackend) -> Result<(), TestError> {
+    fn run<'p, P: Pool + 'p>(&self, pool: &'p P) -> Result<(), TestError> {
         log::info!("Running test: {}", self.name);
 
         // Load the model
@@ -112,10 +110,10 @@ impl OnnxNodeTest {
         for (i, test_data_set) in self.test_data_sets.iter().enumerate() {
             log::info!("  Running test data set {i}");
 
-            // Convert protobuf inputs to NumericTensor, fixing up dtype
-            // mismatches from old ONNX test data (BF16/F16 stored as UINT16).
+            // Parse protobuf inputs directly into pool-backed tensors,
+            // fixing up dtype mismatches from old ONNX test data.
             let mut inputs =
-                parse_tensors_with_dtype_fixup(&test_data_set.inputs, &model_input_info)
+                parse_tensors_with_dtype_fixup(&test_data_set.inputs, &model_input_info, pool)
                     .map_err(|e| format!("Failed to parse inputs: {e}"))?;
 
             // Fix tensor name mismatches: some ONNX test .pb files use
@@ -136,18 +134,27 @@ impl OnnxNodeTest {
                     .collect();
             }
 
-            // Run the model
+            let input_views: HashMap<String, _> = inputs
+                .iter()
+                .map(|(name, t)| (name.clone(), t.view()))
+                .collect();
+            let input_refs: HashMap<String, &NumericTensorView<'_, DynRank>> = input_views
+                .iter()
+                .map(|(name, v)| (name.clone(), v))
+                .collect();
+
+            // Run the model through pool eval.
             let outputs = model
-                .eval(inputs, &mut (), None, backend)
+                .eval_pool(input_refs, pool)
                 .map_err(|e| format!("Model execution failed: {e:?}"))?;
 
             // Build output type info from actual model outputs for dtype fixup
             let output_type_info: HashMap<String, (DType, Vec<Option<u64>>)> = outputs
                 .iter()
-                .map(|(name, tensor)| (name.clone(), (tensor.dtype(), vec![])))
+                .map(|(name, tensor)| (name.clone(), (tensor.dtype().to_legacy(), vec![])))
                 .collect();
             let mut expected =
-                parse_tensors_with_dtype_fixup(&test_data_set.outputs, &output_type_info)
+                parse_tensors_with_dtype_fixup(&test_data_set.outputs, &output_type_info, pool)
                     .map_err(|e| format!("Failed to parse expected outputs: {e}"))?;
 
             // Same name fixup for outputs
@@ -170,21 +177,18 @@ impl OnnxNodeTest {
                     .get(name)
                     .ok_or_else(|| format!("Output '{name}' not found in model results"))?;
 
-                // Compare tensors with tolerance
-                self.compare_tensors(actual_tensor, expected_tensor)?;
+                self.compare_tensors(&actual_tensor.view(), &expected_tensor.view())?;
             }
         }
 
         Ok(())
     }
 
-    // Compare tensors with tolerance
     fn compare_tensors(
         &self,
-        actual: &NumericTensor<DynRank>,
-        expected: &NumericTensor<DynRank>,
+        actual: &NumericTensorView<'_, DynRank>,
+        expected: &NumericTensorView<'_, DynRank>,
     ) -> Result<(), TestError> {
-        // Check shapes match
         if actual.dtype() != expected.dtype() {
             Err(format!(
                 "Data type mismatch: actual {:?} vs expected {:?}",
@@ -193,7 +197,6 @@ impl OnnxNodeTest {
             ))?
         }
 
-        // Compare shapes
         if actual.shape() != expected.shape() {
             Err(format!(
                 "Shape mismatch: actual {:?} vs expected {:?}",
@@ -202,37 +205,22 @@ impl OnnxNodeTest {
             ))?;
         }
 
-        // Compare values when cast to 64 bit
-        let actual_values: Vec<f64> = actual
-            .cast(DType::F64, &mut EvalBackend::NDArray)
-            .unwrap()
-            .to_ndarray()
-            .unwrap()
-            .flatten()
-            .try_to_vec()
-            .unwrap();
-        let expected_values: Vec<f64> = expected
-            .cast(DType::F64, &mut EvalBackend::NDArray)
-            .unwrap()
-            .to_ndarray()
-            .unwrap()
-            .flatten()
-            .try_to_vec()
-            .unwrap();
-
         // Use wider tolerance for low-precision dtypes
+        use whisper_tensor::numeric_dtype::NumericDType;
         let (rtol, atol) = match actual.dtype() {
-            DType::BF16 => (0.01, 1e-3),
-            DType::F16 => (0.005, 1e-4),
+            NumericDType::BF16 => (0.01, 1e-3),
+            NumericDType::F16 => (0.005, 1e-4),
             _ => (self.rtol, self.atol),
         };
 
-        for (actual_value, expected_value) in actual_values.iter().zip(expected_values.iter()) {
+        for i in 0..actual.numel() {
+            let actual_value = actual.read_element(i).to_f64();
+            let expected_value = expected.read_element(i).to_f64();
             let abs_diff = (actual_value - expected_value).abs();
             let tolerance = atol + rtol * expected_value.abs();
             if abs_diff > tolerance {
                 Err(format!(
-                    "Value mismatch: actual {actual_value} vs expected {expected_value}"
+                    "Value mismatch at element {i}: actual {actual_value} vs expected {expected_value}"
                 ))?;
             }
         }
@@ -280,47 +268,18 @@ impl TestDataSet {
 
         Some(TestDataSet { inputs, outputs })
     }
-
-    // Parse input protobuf data into NumericTensors
-    fn parse_inputs(&self) -> Result<HashMap<String, NumericTensor<DynRank>>, ONNXDecodingError> {
-        let mut result = HashMap::new();
-
-        // This will need to use the model to get input names
-        // For now, we'll use placeholder indices as names
-        for proto_data in self.inputs.values() {
-            let tensor_proto = TensorProto::decode(proto_data.as_slice()).unwrap();
-            let tensor: NumericTensor<DynRank> =
-                NDArrayNumericTensor::try_from(&tensor_proto)?.into();
-
-            // Use a name based on index (you'll need a better naming strategy)
-            result.insert(tensor_proto.name, tensor);
-        }
-
-        Ok(result)
-    }
-
-    // Parse output protobuf data into NumericTensors
-    fn parse_outputs(&self) -> Result<HashMap<String, NumericTensor<DynRank>>, ONNXDecodingError> {
-        let mut result = HashMap::new();
-
-        for proto_data in self.outputs.values() {
-            let tensor_proto = TensorProto::decode(proto_data.as_slice()).unwrap();
-            let tensor: NumericTensor<DynRank> =
-                NDArrayNumericTensor::try_from(&tensor_proto)?.into();
-
-            result.insert(tensor_proto.name, tensor);
-        }
-
-        Ok(result)
-    }
 }
 
-/// Reparse tensors from raw protobuf data with corrected dtype.
-/// Old ONNX test data stores BF16/F16 as UINT16 in the protobuf tensor.
-fn parse_tensors_with_dtype_fixup(
+/// Parse tensors from raw protobuf data directly into pool-backed tensors.
+/// Applies dtype fixup for old ONNX test data (e.g. BF16/F16 stored as UINT16).
+fn parse_tensors_with_dtype_fixup<'p, P: Pool + 'p>(
     proto_map: &HashMap<String, Vec<u8>>,
     type_info: &HashMap<String, (DType, Vec<Option<u64>>)>,
-) -> Result<HashMap<String, NumericTensor<DynRank>>, ONNXDecodingError> {
+    pool: &'p P,
+) -> Result<
+    HashMap<String, whisper_tensor::numeric_tensor::NumericTensor<'p, DynRank, P>>,
+    ONNXDecodingError,
+> {
     let mut result = HashMap::new();
     for proto_data in proto_map.values() {
         let mut tensor_proto = TensorProto::decode(proto_data.as_slice()).unwrap();
@@ -344,8 +303,8 @@ fn parse_tensors_with_dtype_fixup(
             }
         }
 
-        let tensor: NumericTensor<DynRank> = NDArrayNumericTensor::try_from(&tensor_proto)?.into();
-        result.insert(tensor_proto.name, tensor);
+        let tensor = tensor_proto_to_pool_tensor(&tensor_proto, pool)?;
+        result.insert(tensor_proto.name.clone(), tensor);
     }
     Ok(result)
 }
@@ -374,9 +333,10 @@ fn onnx_dtype_code(dtype: DType) -> i32 {
     }
 }
 
-fn run_ndarray_test(path: &Path) {
+fn run_pool_test(path: &Path) {
+    let pool = whisper_tensor::pool::TrackedPool::new(None);
     let test = OnnxNodeTest::from_directory(path).unwrap();
-    test.run(&mut EvalBackend::NDArray).unwrap()
+    test.run(&pool).unwrap();
 }
 
 macro_rules! do_test {
@@ -3574,4 +3534,4 @@ macro_rules! do_tests {
     };
 }
 
-do_tests!(run_ndarray_test, ndarray);
+do_tests!(run_pool_test, pool);

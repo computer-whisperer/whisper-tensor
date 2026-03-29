@@ -205,7 +205,7 @@ fn decode_tensor_proto_to_stored(
     t: &onnx::TensorProto,
     tensor_store: &mut TensorStore,
 ) -> Result<StoredOrNotTensor, ONNXDecodingError> {
-    let pool_tensor = tensor_proto_to_pool_tensor(t)?;
+    let pool_tensor = tensor_proto_to_pool_tensor(t, &crate::pool::SystemPool)?;
     let numel = pool_tensor.numel();
     if numel > 100 {
         let id = tensor_store.add_tensor(StoredTensor::Inline(pool_tensor));
@@ -1462,18 +1462,18 @@ fn unpack_4bit_pairs(packed: &[u8], numel: usize) -> Vec<u8> {
 }
 
 /// Decode an ONNX TensorProto directly into a pool-backed NumericTensor.
-/// Handles raw_data, typed data fields (float_data, int32_data, etc.),
-/// and 4-bit packed formats. No legacy NDArrayNumericTensor intermediate.
-fn tensor_proto_to_pool_tensor(
+///
+/// For `raw_data`: copies bytes directly into the pool buffer and configures
+/// the tensor layout to describe the ONNX byte arrangement.
+///
+/// For typed fields (`float_data`, `int32_data`, etc.): packs values into
+/// the target byte layout and copies into the pool buffer.
+pub fn tensor_proto_to_pool_tensor<'p, P: crate::pool::Pool + 'p>(
     tensor: &onnx::TensorProto,
-) -> Result<
-    crate::numeric_tensor::NumericTensor<'static, DynRank, crate::pool::SystemPool>,
-    ONNXDecodingError,
-> {
+    pool: &'p P,
+) -> Result<crate::numeric_tensor::NumericTensor<'p, DynRank, P>, ONNXDecodingError> {
     use crate::numeric_dtype::NumericDType;
-    use crate::numeric_scalar::NumericScalar;
     use crate::numeric_tensor::{NumericTensor as NewTensor, TensorLayout};
-    use crate::pool::{Pool, SystemPool};
 
     let legacy_dt = DType::try_from(
         onnx::tensor_proto::DataType::try_from(tensor.data_type)
@@ -1485,70 +1485,116 @@ fn tensor_proto_to_pool_tensor(
         ))
     })?;
     let shape: Vec<u64> = tensor.dims.iter().map(|x| *x as u64).collect();
-    let numel = shape.iter().product::<u64>() as usize;
-    let layout = TensorLayout::<DynRank>::row_major(shape.clone(), ndt);
-    let buf = SystemPool
-        .allocate(layout.buffer_size_bytes())
-        .map_err(|_| ONNXDecodingError::UnsupportedONNX("allocation failed".into()))?;
-    let mut out: NewTensor<'static, DynRank, SystemPool> = NewTensor::from_parts(buf, layout);
+
+    // Helper: allocate buffer, copy raw_bytes into it, attach layout.
+    let copy_into_pool = |raw_bytes: &[u8],
+                          layout: TensorLayout<DynRank>|
+     -> Result<NewTensor<'p, DynRank, P>, ONNXDecodingError> {
+        let expected = layout.buffer_size_bytes();
+        if raw_bytes.len() != expected {
+            return Err(ONNXDecodingError::UnsupportedONNX(format!(
+                "raw_data length {} != expected buffer size {}",
+                raw_bytes.len(),
+                expected
+            )));
+        }
+        let mut buf = pool
+            .allocate(expected)
+            .map_err(|_| ONNXDecodingError::UnsupportedONNX("allocation failed".into()))?;
+        buf.copy_from_slice(raw_bytes);
+        Ok(NewTensor::from_parts(buf, layout))
+    };
 
     if !tensor.raw_data.is_empty() {
-        // Raw LE bytes — read element-by-element via read_raw_bits to handle sub-byte types.
-        let bits = ndt.total_bits() as usize;
-        // ONNX packs 4-bit types two per byte (low nibble first).
-        let is_4bit = matches!(ndt, NumericDType::SignedInt(it) | NumericDType::UnsignedInt(it) if it.bits == 4);
-        if is_4bit {
-            let unpacked = unpack_4bit_pairs(&tensor.raw_data, numel);
-            for (i, &byte) in unpacked.iter().enumerate() {
-                out.write_element(i, NumericScalar::from_raw_bits(byte as u64, ndt));
+        if ndt == NumericDType::Bool {
+            // ONNX stores 1 byte per bool; configure 8-bit strides so the
+            // buffer is copied as-is and read_element picks the LSB of each byte.
+            let dims = &shape;
+            let mut strides = vec![0u64; dims.len()];
+            if !dims.is_empty() {
+                strides[dims.len() - 1] = 8;
+                for i in (0..dims.len() - 1).rev() {
+                    strides[i] = strides[i + 1] * dims[i + 1];
+                }
             }
-        } else {
-            for i in 0..numel {
-                let bit_offset = i * bits;
-                let raw = crate::numeric_scalar::conversions::read_raw_bits(
-                    &tensor.raw_data,
-                    bit_offset,
-                    bits as u8,
-                );
-                out.write_element(i, NumericScalar::from_raw_bits(raw, ndt));
-            }
+            let layout = TensorLayout::ElementStrided {
+                shape: shape.clone(),
+                dtype: ndt,
+                strides,
+                offset_bits: 0,
+            };
+            return copy_into_pool(&tensor.raw_data, layout);
         }
-    } else if !tensor.float_data.is_empty() {
-        for (i, &v) in tensor.float_data.iter().enumerate().take(numel) {
-            out.write_element(i, NumericScalar::from_f32(v).cast_to(ndt));
-        }
-    } else if !tensor.double_data.is_empty() {
-        for (i, &v) in tensor.double_data.iter().enumerate().take(numel) {
-            out.write_element(i, NumericScalar::from_f64(v).cast_to(ndt));
-        }
-    } else if !tensor.int32_data.is_empty() {
-        // int32_data is used for I32, I16, U16, I8, U8, F16, BF16, F8, and 4-bit types.
-        let is_4bit = matches!(ndt, NumericDType::SignedInt(it) | NumericDType::UnsignedInt(it) if it.bits == 4);
-        if is_4bit {
-            let bytes: Vec<u8> = tensor.int32_data.iter().map(|x| *x as u8).collect();
-            let unpacked = unpack_4bit_pairs(&bytes, numel);
-            for (i, &byte) in unpacked.iter().enumerate() {
-                out.write_element(i, NumericScalar::from_raw_bits(byte as u64, ndt));
-            }
-        } else {
-            for (i, &v) in tensor.int32_data.iter().enumerate().take(numel) {
-                // Encode the low bits of the i32 as the target type's raw bits.
-                out.write_element(i, NumericScalar::from_raw_bits(v as u64, ndt));
-            }
-        }
-    } else if !tensor.int64_data.is_empty() {
-        for (i, &v) in tensor.int64_data.iter().enumerate().take(numel) {
-            out.write_element(i, NumericScalar::from_i64(v).cast_to(ndt));
-        }
-    } else if !tensor.uint64_data.is_empty() {
-        for (i, &v) in tensor.uint64_data.iter().enumerate().take(numel) {
-            out.write_element(i, NumericScalar::from_raw_bits(v, ndt));
-        }
-    } else {
-        // Empty tensor — already zero-initialized by from_parts.
+
+        // 4-bit types: ONNX packs two per byte (low nibble first) — same as
+        // our row-major 4-bit layout. Byte-aligned types: LE contiguous, also
+        // matches row-major. Both can be copied directly.
+        let layout = TensorLayout::row_major(shape, ndt);
+        return copy_into_pool(&tensor.raw_data, layout);
     }
 
-    Ok(out)
+    // Typed fields: pack values into a byte buffer matching row-major layout,
+    // then copy into pool.
+    let layout = TensorLayout::<DynRank>::row_major(shape.clone(), ndt);
+    let numel = shape.iter().product::<u64>() as usize;
+    let bytes_per = ndt.bytes_per_element();
+
+    if !tensor.float_data.is_empty() {
+        let mut raw = vec![0u8; numel * bytes_per];
+        for (i, &v) in tensor.float_data.iter().enumerate().take(numel) {
+            raw[i * 4..(i + 1) * 4].copy_from_slice(&v.to_le_bytes());
+        }
+        return copy_into_pool(&raw, layout);
+    }
+
+    if !tensor.double_data.is_empty() {
+        let mut raw = vec![0u8; numel * bytes_per];
+        for (i, &v) in tensor.double_data.iter().enumerate().take(numel) {
+            raw[i * 8..(i + 1) * 8].copy_from_slice(&v.to_le_bytes());
+        }
+        return copy_into_pool(&raw, layout);
+    }
+
+    if !tensor.int32_data.is_empty() {
+        // int32_data stores values for I32, I16, U16, I8, U8, F16, BF16, F8, 4-bit.
+        // For all types, the low bits of each i32 are the target-type raw bits.
+        let is_4bit = matches!(ndt, NumericDType::SignedInt(it) | NumericDType::UnsignedInt(it) if it.bits == 4);
+        if is_4bit {
+            // Each i32 holds one packed byte (two 4-bit elements). Copy the
+            // low byte of each i32 into a buffer matching our row-major 4-bit layout.
+            let raw: Vec<u8> = tensor.int32_data.iter().map(|x| *x as u8).collect();
+            return copy_into_pool(&raw, layout);
+        }
+        let mut raw = vec![0u8; numel * bytes_per];
+        for (i, &v) in tensor.int32_data.iter().enumerate().take(numel) {
+            let le = (v as u32).to_le_bytes();
+            raw[i * bytes_per..(i + 1) * bytes_per].copy_from_slice(&le[..bytes_per]);
+        }
+        return copy_into_pool(&raw, layout);
+    }
+
+    if !tensor.int64_data.is_empty() {
+        let mut raw = vec![0u8; numel * bytes_per];
+        for (i, &v) in tensor.int64_data.iter().enumerate().take(numel) {
+            raw[i * 8..(i + 1) * 8].copy_from_slice(&v.to_le_bytes());
+        }
+        return copy_into_pool(&raw, layout);
+    }
+
+    if !tensor.uint64_data.is_empty() {
+        let mut raw = vec![0u8; numel * bytes_per];
+        for (i, &v) in tensor.uint64_data.iter().enumerate().take(numel) {
+            let le = v.to_le_bytes();
+            raw[i * bytes_per..(i + 1) * bytes_per].copy_from_slice(&le[..bytes_per]);
+        }
+        return copy_into_pool(&raw, layout);
+    }
+
+    // No data fields — zero tensor.
+    let buf = pool
+        .allocate(layout.buffer_size_bytes())
+        .map_err(|_| ONNXDecodingError::UnsupportedONNX("allocation failed".into()))?;
+    Ok(NewTensor::from_parts(buf, layout))
 }
 
 /// Bridge: convert a legacy NDArrayNumericTensor to a pool tensor.
@@ -3543,7 +3589,7 @@ mod tests {
             if name.starts_with("input_") && name.ends_with(".pb") {
                 let data = std::fs::read(entry.path()).unwrap();
                 let tensor_proto = crate::onnx::TensorProto::decode(data.as_slice()).unwrap();
-                let pool_tensor = tensor_proto_to_pool_tensor(&tensor_proto)
+                let pool_tensor = tensor_proto_to_pool_tensor(&tensor_proto, &SystemPool)
                     .expect("failed to load input tensor proto");
                 let idx: usize = name
                     .strip_prefix("input_")
@@ -3558,7 +3604,7 @@ mod tests {
             if name.starts_with("output_") && name.ends_with(".pb") {
                 let data = std::fs::read(entry.path()).unwrap();
                 let tensor_proto = crate::onnx::TensorProto::decode(data.as_slice()).unwrap();
-                let pool_tensor = tensor_proto_to_pool_tensor(&tensor_proto)
+                let pool_tensor = tensor_proto_to_pool_tensor(&tensor_proto, &SystemPool)
                     .expect("failed to load output tensor proto");
                 let idx: usize = name
                     .strip_prefix("output_")

@@ -3,11 +3,15 @@ use std::collections::HashMap;
 use crate::backends::eval_backend::EvalRuntimeError;
 use crate::dtype::DType;
 use crate::migration::numeric_tensor::NumericTensorError;
+use crate::numeric_tensor::NumericTensorView;
+use crate::pool::Pool;
+use crate::symbolic_graph::ops::EvalError;
+use crate::tensor_rank::DynRank;
 use prost::DecodeError;
 use rand::Rng;
 
 use crate::symbolic_graph::tensor_store::TensorStore;
-use crate::symbolic_graph::{ONNXDecodingError, SymbolicGraph, SymbolicGraphMutator, TensorType};
+use crate::symbolic_graph::{ONNXDecodingError, SymbolicGraph, SymbolicGraphMutator};
 
 use crate::scalar_info::ScalarInfoTyped;
 
@@ -80,6 +84,45 @@ impl Model {
 
     pub fn get_tensor_store(&self) -> &TensorStore {
         &self.tensor_store
+    }
+
+    /// Run the model through the pool-based eval pipeline.
+    ///
+    /// Accepts named inputs as `NumericTensorView`s, maps them to GlobalIds,
+    /// runs `pool_eval_with_store`, and maps output GlobalIds back to names.
+    pub fn eval_pool<'p, P: Pool + 'p>(
+        &self,
+        inputs: HashMap<String, &NumericTensorView<'_, DynRank>>,
+        pool: &'p P,
+    ) -> Result<HashMap<String, crate::numeric_tensor::NumericTensor<'p, DynRank, P>>, EvalError>
+    {
+        let tensors_by_name = self.graph.get_tensors_by_name();
+
+        // Map String names → GlobalIds for inputs.
+        let mut id_inputs = HashMap::new();
+        for (name, view) in inputs {
+            if let Some(&id) = tensors_by_name.get(&name) {
+                id_inputs.insert(id, view);
+            }
+        }
+
+        let id_outputs = self
+            .graph
+            .pool_eval_with_store(&id_inputs, &self.tensor_store, pool)?;
+
+        // Map GlobalIds → String names for outputs.
+        let id_to_name: HashMap<_, _> = tensors_by_name
+            .iter()
+            .map(|(name, &id)| (id, name.as_str()))
+            .collect();
+
+        let mut named_outputs = HashMap::new();
+        for (id, tensor) in id_outputs {
+            if let Some(&name) = id_to_name.get(&id) {
+                named_outputs.insert(name.to_string(), tensor);
+            }
+        }
+        Ok(named_outputs)
     }
 
     #[allow(clippy::type_complexity)]
