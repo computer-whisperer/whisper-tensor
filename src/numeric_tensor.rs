@@ -489,6 +489,12 @@ pub enum TensorLayoutError {
     },
     #[error("slice range {start}..{end} is empty or inverted on dimension {dim}")]
     SliceEmpty { dim: usize, start: u64, end: u64 },
+    #[error("transpose not supported for quantized layouts")]
+    QuantizedTransposeUnsupported,
+    #[error("transpose permutation length {got} does not match rank {expected}")]
+    TransposeRankMismatch { got: usize, expected: usize },
+    #[error("transpose permutation is not a valid permutation of 0..{rank}")]
+    TransposeInvalidPerm { rank: usize },
 }
 
 // ---------------------------------------------------------------------------
@@ -591,6 +597,58 @@ impl<'a, R: Rank> NumericTensorView<'a, R> {
             }
             TensorLayout::SimpleBlockQuant { .. } | TensorLayout::KQuant { .. } => {
                 Err(TensorLayoutError::QuantizedSliceUnsupported)
+            }
+        }
+    }
+
+    /// Zero-copy transpose: permutes dimensions according to `perm`.
+    ///
+    /// `perm` maps output dimension → input dimension. For example,
+    /// `perm = &[1, 0]` swaps the two dimensions of a 2D tensor.
+    /// Only supported for `ElementStrided` layouts.
+    pub fn transpose(&self, perm: &[usize]) -> Result<NumericTensorView<'a, R>, TensorLayoutError> {
+        match &self.layout {
+            TensorLayout::ElementStrided {
+                shape,
+                dtype,
+                strides,
+                offset_bits,
+            } => {
+                let dims = shape.as_slice();
+                let rank = dims.len();
+                if perm.len() != rank {
+                    return Err(TensorLayoutError::TransposeRankMismatch {
+                        got: perm.len(),
+                        expected: rank,
+                    });
+                }
+                // Validate permutation
+                let mut seen = vec![false; rank];
+                for &p in perm {
+                    if p >= rank || seen[p] {
+                        return Err(TensorLayoutError::TransposeInvalidPerm { rank });
+                    }
+                    seen[p] = true;
+                }
+
+                let stride_slice = strides.as_slice();
+                let new_shape_vec: Vec<u64> = perm.iter().map(|&p| dims[p]).collect();
+                let new_stride_vec: Vec<u64> = perm.iter().map(|&p| stride_slice[p]).collect();
+
+                Ok(NumericTensorView {
+                    data: self.data,
+                    layout: TensorLayout::ElementStrided {
+                        shape: R::KnownDims::try_from_slice(&new_shape_vec)
+                            .expect("transpose preserves rank"),
+                        dtype: *dtype,
+                        strides: R::KnownDims::try_from_slice(&new_stride_vec)
+                            .expect("transpose preserves rank"),
+                        offset_bits: *offset_bits,
+                    },
+                })
+            }
+            TensorLayout::SimpleBlockQuant { .. } | TensorLayout::KQuant { .. } => {
+                Err(TensorLayoutError::QuantizedTransposeUnsupported)
             }
         }
     }
@@ -754,6 +812,13 @@ impl<'a, R: Rank, P: Pool + 'a> NumericTensor<'a, R, P> {
         ranges: &[(u64, u64)],
     ) -> Result<NumericTensorView<'_, R>, TensorLayoutError> {
         self.view().slice(ranges)
+    }
+
+    /// Zero-copy transpose: returns a view with permuted dimensions.
+    ///
+    /// See [`NumericTensorView::transpose`] for details.
+    pub fn transpose(&self, perm: &[usize]) -> Result<NumericTensorView<'_, R>, TensorLayoutError> {
+        self.view().transpose(perm)
     }
 
     /// Clone this tensor into a new pool-allocated tensor.
@@ -1523,5 +1588,75 @@ mod tests {
                 .unwrap();
         assert_eq!(t.shape(), &[3u64]);
         assert_eq!(t.read_element(1), NumericScalar::from_i32(20));
+    }
+
+    // -- transpose --
+
+    #[test]
+    fn transpose_2d() {
+        // Shape [2, 3], element [i,j] = i*3 + j
+        let t = make_f32_iota(vec![2, 3]);
+        let view = t.view();
+        let transposed = view.transpose(&[1, 0]).unwrap();
+        assert_eq!(transposed.shape(), &vec![3u64, 2]);
+        // transposed[0,0] = original[0,0] = 0
+        assert_eq!(transposed.read_element(0), NumericScalar::from_f32(0.0));
+        // transposed[0,1] = original[1,0] = 3
+        assert_eq!(transposed.read_element(1), NumericScalar::from_f32(3.0));
+        // transposed[1,0] = original[0,1] = 1
+        assert_eq!(transposed.read_element(2), NumericScalar::from_f32(1.0));
+        // transposed[2,1] = original[1,2] = 5
+        assert_eq!(transposed.read_element(5), NumericScalar::from_f32(5.0));
+    }
+
+    #[test]
+    fn transpose_3d() {
+        // Shape [2, 3, 4], element [i,j,k] = i*12 + j*4 + k
+        let t = make_f32_iota(vec![2, 3, 4]);
+        let view = t.view();
+        // perm [2, 0, 1] → shape [4, 2, 3]
+        let transposed = view.transpose(&[2, 0, 1]).unwrap();
+        assert_eq!(transposed.shape(), &vec![4u64, 2, 3]);
+        // transposed[0,0,0] = original[0,0,0] = 0
+        assert_eq!(transposed.read_element(0), NumericScalar::from_f32(0.0));
+        // transposed[1,0,0] = original[0,0,1] = 1
+        assert_eq!(transposed.read_element(6), NumericScalar::from_f32(1.0));
+        // transposed[0,1,0] = original[1,0,0] = 12
+        assert_eq!(transposed.read_element(3), NumericScalar::from_f32(12.0));
+    }
+
+    #[test]
+    fn transpose_materialize() {
+        let pool = SystemPool;
+        let t = make_f32_iota(vec![2, 3]);
+        let transposed = t.view().transpose(&[1, 0]).unwrap();
+        let materialized = transposed.to_tensor(&pool).unwrap();
+        assert_eq!(materialized.shape(), &vec![3u64, 2]);
+        assert!(materialized.layout().is_contiguous());
+        // Row-major [3,2]: element [1,0] = flat 2, should be original [0,1] = 1
+        assert_eq!(materialized.read_element(2), NumericScalar::from_f32(1.0));
+    }
+
+    #[test]
+    fn transpose_rank_mismatch_errors() {
+        let t = make_f32_iota(vec![2, 3]);
+        let err = t.view().transpose(&[0, 1, 2]).unwrap_err();
+        assert!(matches!(
+            err,
+            TensorLayoutError::TransposeRankMismatch {
+                got: 3,
+                expected: 2
+            }
+        ));
+    }
+
+    #[test]
+    fn transpose_invalid_perm_errors() {
+        let t = make_f32_iota(vec![2, 3]);
+        let err = t.view().transpose(&[0, 0]).unwrap_err();
+        assert!(matches!(
+            err,
+            TensorLayoutError::TransposeInvalidPerm { rank: 2 }
+        ));
     }
 }
