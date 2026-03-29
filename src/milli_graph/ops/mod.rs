@@ -170,11 +170,14 @@ pub fn constant_fold<'p, P: Pool + 'p>(
     output_hints: &[(GlobalId, TensorInfo<'p, P>)],
     pool: &'p P,
 ) -> Option<Vec<(GlobalId, TensorInfo<'p, P>)>> {
-    use crate::nano_graph::lower::{NanoLoweringContext, new_numeric_to_legacy};
+    use crate::nano_graph::lower::NanoLoweringContext;
     use crate::nano_graph::pattern::AtomRange;
     use crate::nano_graph::pool_eval;
     use crate::pool::SystemPool;
 
+    // NanoLoweringContext is parameterized on SystemPool, so we build a
+    // SystemPool-typed TensorInfo map for the lowering context. Input data
+    // is copied from the caller's pool via from_view (no legacy round-trip).
     type LowerTensorInfo = TensorInfo<'static, SystemPool>;
     static SYS_POOL: SystemPool = SystemPool;
 
@@ -192,11 +195,10 @@ pub fn constant_fold<'p, P: Pool + 'p>(
     }
 
     // 2. Build LowerTensorInfo map with inputs + output hints.
-    let mut sys_infos: HashMap<GlobalId, LowerTensorInfo> = HashMap::new();
+    let mut lower_infos: HashMap<GlobalId, LowerTensorInfo> = HashMap::new();
     for &id in &input_ids {
         let concrete = known_inputs.get(&id)?.as_concrete()?;
-        let legacy = new_numeric_to_legacy(concrete);
-        sys_infos.insert(id, LowerTensorInfo::from_legacy(&legacy, &SYS_POOL));
+        lower_infos.insert(id, LowerTensorInfo::from_view(&concrete.view(), &SYS_POOL));
     }
     for (id, hint) in output_hints {
         // Output hints are dtype+shape only (no concrete data).
@@ -213,12 +215,12 @@ pub fn constant_fold<'p, P: Pool + 'p>(
                     ),
                 })
                 .collect();
-            sys_infos.insert(
+            lower_infos.insert(
                 *id,
                 LowerTensorInfo::from_dtype_and_shape_scalars(dtype, &dims),
             );
         } else {
-            sys_infos.insert(
+            lower_infos.insert(
                 *id,
                 LowerTensorInfo::Minimal(crate::tensor_info::MinimalTensor::new(
                     crate::scalar_info::ScalarInfo::Numeric(
@@ -233,9 +235,9 @@ pub fn constant_fold<'p, P: Pool + 'p>(
     }
 
     // 3. Lower this single op with constants embedded as Literal nano-ops.
-    let mut ctx = NanoLoweringContext::new(&sys_infos);
+    let mut ctx = NanoLoweringContext::new(&lower_infos);
     for &id in &input_ids {
-        ctx.register_constant(id, &sys_infos[&id]);
+        ctx.register_constant(id, &lower_infos[&id]);
     }
     op.lower_to_nano(&mut ctx);
 
