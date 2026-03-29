@@ -103,9 +103,9 @@ impl MilliOp for Range {
 
         // If all inputs are concrete, compute the output length.
         if let (Some(start_v), Some(end_v), Some(delta_v)) = (
-            start_info.to_f64_vec().and_then(|v| v.first().copied()),
-            end_info.to_f64_vec().and_then(|v| v.first().copied()),
-            delta_info.to_f64_vec().and_then(|v| v.first().copied()),
+            start_info.as_concrete().map(|t| t.read_element(0).to_f64()),
+            end_info.as_concrete().map(|t| t.read_element(0).to_f64()),
+            delta_info.as_concrete().map(|t| t.read_element(0).to_f64()),
         ) {
             let n = ((end_v - start_v) / delta_v).ceil().max(0.0) as u64;
             return Ok(vec![(

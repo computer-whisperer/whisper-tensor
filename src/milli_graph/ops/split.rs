@@ -423,13 +423,11 @@ impl MilliOp for Split {
         Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>,
         crate::nano_graph::pool_eval::PoolEvalError,
     > {
-        use crate::numeric_tensor::{NumericTensor, TensorLayout};
         use crate::tensor_rank::DynRank;
 
         let data = &inputs[0];
         let data_shape = data.shape();
         let rank = data_shape.len();
-        let dtype = data.dtype();
         let axis = if self.axis < 0 {
             (self.axis + rank as i64) as usize
         } else {
@@ -483,44 +481,32 @@ impl MilliOp for Split {
         };
 
         // Compute start offset along axis for this output_id
-        let start: usize = split_sizes[..self.output_id]
+        let start: u64 = split_sizes[..self.output_id]
             .iter()
-            .map(|&s| s as usize)
+            .map(|&s| s as u64)
             .sum();
-        let size = split_sizes[self.output_id] as usize;
+        let size = split_sizes[self.output_id] as u64;
 
-        // Output shape: same as input but axis dim = size
-        let mut output_shape = data_shape.clone();
-        output_shape[axis] = size as u64;
-        let out_numel: usize = output_shape.iter().product::<u64>() as usize;
+        // Slice along the split axis, full range on all other dims
+        let ranges: Vec<(u64, u64)> = (0..rank)
+            .map(|d| {
+                if d == axis {
+                    (start, start + size)
+                } else {
+                    (0, data_shape[d])
+                }
+            })
+            .collect();
 
-        // Compute strides
-        let mut in_strides = vec![1usize; rank];
-        for i in (0..rank.saturating_sub(1)).rev() {
-            in_strides[i] = in_strides[i + 1] * data_shape[i + 1] as usize;
-        }
-        let mut out_strides = vec![1usize; rank];
-        for i in (0..rank.saturating_sub(1)).rev() {
-            out_strides[i] = out_strides[i + 1] * output_shape[i + 1] as usize;
-        }
-
-        let layout = TensorLayout::<DynRank>::row_major(output_shape, dtype);
-        let buf = pool
-            .allocate(layout.buffer_size_bytes())
+        let out = data
+            .slice(&ranges)
+            .map_err(|e| {
+                crate::nano_graph::pool_eval::PoolEvalError::Unsupported(format!(
+                    "Split slice failed: {e}"
+                ))
+            })?
+            .to_tensor(pool)
             .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
-        let mut out = NumericTensor::from_parts(buf, layout);
-
-        for out_flat in 0..out_numel {
-            let mut rem = out_flat;
-            let mut in_flat = 0usize;
-            for d in 0..rank {
-                let coord = rem / out_strides[d];
-                rem %= out_strides[d];
-                let in_coord = if d == axis { coord + start } else { coord };
-                in_flat += in_coord * in_strides[d];
-            }
-            out.write_element(out_flat, data.read_element(in_flat));
-        }
 
         Ok(vec![out])
     }

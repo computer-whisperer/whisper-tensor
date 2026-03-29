@@ -97,6 +97,10 @@ pub enum TensorLayout<R: Rank> {
         dtype: NumericDType,
         /// Per-dimension strides in bits. Always positive.
         strides: R::KnownDims,
+        /// Bit offset of the first element from the start of the buffer.
+        /// Non-zero after slicing. Element access adds this before computing
+        /// the final position.
+        offset_bits: u64,
     },
 
     /// Simple block quantization (GGUF legacy Q-types).
@@ -154,6 +158,7 @@ impl<R: Rank> TensorLayout<R> {
             dtype,
             strides: R::KnownDims::try_from_slice(&strides_vec)
                 .expect("stride length matches shape length"),
+            offset_bits: 0,
         }
     }
 
@@ -212,6 +217,43 @@ impl<R: Rank> TensorLayout<R> {
         }
     }
 
+    /// Returns true if the layout is contiguous from the start of the buffer:
+    /// row-major strides, zero offset. A memcpy of the buffer reproduces the tensor.
+    ///
+    /// Always true for quantized formats (they have no offset/stride concept).
+    pub fn is_contiguous(&self) -> bool {
+        match self {
+            TensorLayout::ElementStrided {
+                shape,
+                dtype,
+                strides,
+                offset_bits,
+            } => {
+                if *offset_bits != 0 {
+                    return false;
+                }
+                let dims = shape.as_slice();
+                let stride_slice = strides.as_slice();
+                let element_bits = dtype.total_bits() as u64;
+                // Check row-major: last stride == element_bits,
+                // each earlier stride == next_stride * next_dim.
+                if dims.is_empty() {
+                    return true;
+                }
+                if stride_slice[dims.len() - 1] != element_bits {
+                    return false;
+                }
+                for i in (0..dims.len() - 1).rev() {
+                    if stride_slice[i] != stride_slice[i + 1] * dims[i + 1] {
+                        return false;
+                    }
+                }
+                true
+            }
+            TensorLayout::SimpleBlockQuant { .. } | TensorLayout::KQuant { .. } => true,
+        }
+    }
+
     /// Total buffer size in bytes needed to hold this tensor.
     pub fn buffer_size_bytes(&self) -> usize {
         match self {
@@ -219,17 +261,19 @@ impl<R: Rank> TensorLayout<R> {
                 shape,
                 dtype,
                 strides,
+                offset_bits,
             } => {
                 let dims = shape.as_slice();
                 if dims.is_empty() {
-                    return dtype.bytes_per_element();
+                    return ((*offset_bits + dtype.total_bits() as u64 + 7) / 8) as usize;
                 }
                 let element_bits = dtype.total_bits() as u64;
-                let extent: u64 = dims
-                    .iter()
-                    .zip(strides.as_slice().iter())
-                    .map(|(&dim, &stride)| if dim > 0 { (dim - 1) * stride } else { 0 })
-                    .sum::<u64>()
+                let extent: u64 = offset_bits
+                    + dims
+                        .iter()
+                        .zip(strides.as_slice().iter())
+                        .map(|(&dim, &stride)| if dim > 0 { (dim - 1) * stride } else { 0 })
+                        .sum::<u64>()
                     + element_bits;
                 ((extent + 7) / 8) as usize
             }
@@ -247,6 +291,41 @@ impl<R: Rank> TensorLayout<R> {
                 (numel / KQuantVariant::BLOCK_SIZE) * variant.block_bytes()
             }
         }
+    }
+}
+
+// -- Index coordinate helpers --
+
+impl<R: Rank> TensorLayout<R> {
+    /// Decompose a flat (row-major) element index into multi-dimensional coordinates.
+    ///
+    /// For a tensor with shape `[d0, d1, d2]`, flat index `k` maps to
+    /// `[k / (d1*d2), (k / d2) % d1, k % d2]`.
+    pub fn flat_to_coords(&self, flat_index: usize) -> Vec<usize> {
+        let dims = self.shape().as_slice();
+        let rank = dims.len();
+        let mut coords = vec![0usize; rank];
+        let mut remaining = flat_index;
+        for i in (0..rank).rev() {
+            let d = dims[i] as usize;
+            coords[i] = remaining % d;
+            remaining /= d;
+        }
+        coords
+    }
+
+    /// Convert multi-dimensional coordinates to a flat (row-major) element index.
+    ///
+    /// Inverse of [`flat_to_coords`].
+    pub fn coords_to_flat(&self, coords: &[usize]) -> usize {
+        let dims = self.shape().as_slice();
+        let mut flat = 0usize;
+        let mut stride = 1usize;
+        for i in (0..dims.len()).rev() {
+            flat += coords[i] * stride;
+            stride *= dims[i] as usize;
+        }
+        flat
     }
 }
 
@@ -269,9 +348,10 @@ impl<R: Rank> TensorLayout<R> {
                 shape,
                 dtype,
                 strides,
+                offset_bits,
             } => {
-                let bit_offset =
-                    flat_to_bit_offset(flat_index, shape.as_slice(), strides.as_slice());
+                let bit_offset = *offset_bits as usize
+                    + flat_to_bit_offset(flat_index, shape.as_slice(), strides.as_slice());
                 NumericScalarView {
                     data,
                     bit_offset,
@@ -294,6 +374,7 @@ impl<R: Rank> TensorLayout<R> {
                 shape,
                 dtype,
                 strides,
+                offset_bits,
             } => {
                 assert_eq!(
                     value.dtype(),
@@ -302,8 +383,8 @@ impl<R: Rank> TensorLayout<R> {
                     value.dtype(),
                     dtype
                 );
-                let bit_offset =
-                    flat_to_bit_offset(flat_index, shape.as_slice(), strides.as_slice());
+                let bit_offset = *offset_bits as usize
+                    + flat_to_bit_offset(flat_index, shape.as_slice(), strides.as_slice());
                 let mut view = NumericScalarViewMut {
                     data,
                     bit_offset,
@@ -390,6 +471,27 @@ impl<R: Rank> TensorLayout<R> {
 }
 
 // ---------------------------------------------------------------------------
+// TensorLayoutError
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, thiserror::Error)]
+pub enum TensorLayoutError {
+    #[error("slice not supported for quantized layouts")]
+    QuantizedSliceUnsupported,
+    #[error("slice ranges length {got} does not match rank {expected}")]
+    SliceRankMismatch { got: usize, expected: usize },
+    #[error("slice range {start}..{end} out of bounds for dimension {dim} (size {dim_size})")]
+    SliceOutOfBounds {
+        dim: usize,
+        start: u64,
+        end: u64,
+        dim_size: u64,
+    },
+    #[error("slice range {start}..{end} is empty or inverted on dimension {dim}")]
+    SliceEmpty { dim: usize, start: u64, end: u64 },
+}
+
+// ---------------------------------------------------------------------------
 // NumericTensorView
 // ---------------------------------------------------------------------------
 
@@ -429,6 +531,104 @@ impl<'a, R: Rank> NumericTensorView<'a, R> {
 
     pub fn read_element(&self, flat_index: usize) -> NumericScalar {
         self.layout.read_element(self.data, flat_index)
+    }
+
+    /// Zero-copy slice: returns a view into a sub-region.
+    ///
+    /// `ranges` has one `(start, end)` pair per dimension (end is exclusive).
+    /// Only supported for `ElementStrided` layouts.
+    pub fn slice(
+        &self,
+        ranges: &[(u64, u64)],
+    ) -> Result<NumericTensorView<'a, R>, TensorLayoutError> {
+        match &self.layout {
+            TensorLayout::ElementStrided {
+                shape,
+                dtype,
+                strides,
+                offset_bits,
+            } => {
+                let dims = shape.as_slice();
+                if ranges.len() != dims.len() {
+                    return Err(TensorLayoutError::SliceRankMismatch {
+                        got: ranges.len(),
+                        expected: dims.len(),
+                    });
+                }
+
+                let stride_slice = strides.as_slice();
+                let mut new_offset = *offset_bits;
+                let mut new_shape_vec = Vec::with_capacity(dims.len());
+
+                for (i, &(start, end)) in ranges.iter().enumerate() {
+                    if start >= end {
+                        return Err(TensorLayoutError::SliceEmpty { dim: i, start, end });
+                    }
+                    if end > dims[i] {
+                        return Err(TensorLayoutError::SliceOutOfBounds {
+                            dim: i,
+                            start,
+                            end,
+                            dim_size: dims[i],
+                        });
+                    }
+                    new_offset += start * stride_slice[i];
+                    new_shape_vec.push(end - start);
+                }
+
+                let new_shape = R::KnownDims::try_from_slice(&new_shape_vec)
+                    .expect("slice output has same rank as input");
+
+                Ok(NumericTensorView {
+                    data: self.data,
+                    layout: TensorLayout::ElementStrided {
+                        shape: new_shape,
+                        dtype: *dtype,
+                        strides: strides.clone(),
+                        offset_bits: new_offset,
+                    },
+                })
+            }
+            TensorLayout::SimpleBlockQuant { .. } | TensorLayout::KQuant { .. } => {
+                Err(TensorLayoutError::QuantizedSliceUnsupported)
+            }
+        }
+    }
+
+    /// Materialize this view into a new pool-owned tensor.
+    ///
+    /// Fast path: if the layout is contiguous (row-major, zero offset), the
+    /// buffer is memcpy'd directly. Otherwise elements are copied one by one
+    /// into a fresh row-major tensor.
+    pub fn to_tensor<'p, P: Pool>(
+        &self,
+        pool: &'p P,
+    ) -> Result<NumericTensor<'p, R, P>, crate::pool::AllocationError> {
+        if self.layout.is_contiguous() {
+            // Memcpy path — layout already describes a dense row-major buffer.
+            let size = self.layout.buffer_size_bytes();
+            let mut buffer = pool.allocate(size)?;
+            buffer[..size].copy_from_slice(&self.data[..size]);
+            Ok(NumericTensor {
+                buffer,
+                layout: self.layout.clone(),
+            })
+        } else {
+            // Element-wise copy into a fresh row-major layout.
+            let shape = self.layout.shape().clone();
+            let dtype = self.layout.element_dtype();
+            let out_layout = TensorLayout::row_major(shape, dtype);
+            let mut buffer = pool.allocate(out_layout.buffer_size_bytes())?;
+            let numel = self.layout.numel();
+            for i in 0..numel {
+                let scalar = self.layout.read_element(self.data, i);
+                out_layout.write_element(&mut buffer, i, scalar);
+            }
+            Ok(NumericTensor {
+                buffer,
+                layout: out_layout,
+            })
+        }
     }
 }
 
@@ -473,6 +673,46 @@ impl<'a, R: Rank, P: Pool + 'a> NumericTensor<'a, R, P> {
         Self { buffer, layout }
     }
 
+    /// Create a tensor by computing each element from its flat index.
+    pub fn from_fn(
+        shape: R::KnownDims,
+        dtype: NumericDType,
+        pool: &'a P,
+        f: impl Fn(usize) -> NumericScalar,
+    ) -> Result<Self, crate::pool::AllocationError> {
+        let layout = TensorLayout::row_major(shape, dtype);
+        let numel = layout.numel();
+        let mut buffer = pool.allocate(layout.buffer_size_bytes())?;
+        for i in 0..numel {
+            layout.write_element(&mut buffer, i, f(i));
+        }
+        Ok(Self { buffer, layout })
+    }
+
+    /// Create a tensor from a slice of pre-computed scalars.
+    ///
+    /// Panics if `scalars.len() != shape.product()`.
+    pub fn from_scalars(
+        shape: R::KnownDims,
+        dtype: NumericDType,
+        pool: &'a P,
+        scalars: &[NumericScalar],
+    ) -> Result<Self, crate::pool::AllocationError> {
+        let layout = TensorLayout::row_major(shape, dtype);
+        assert_eq!(
+            scalars.len(),
+            layout.numel(),
+            "from_scalars: {} scalars provided but shape has {} elements",
+            scalars.len(),
+            layout.numel()
+        );
+        let mut buffer = pool.allocate(layout.buffer_size_bytes())?;
+        for (i, scalar) in scalars.iter().enumerate() {
+            layout.write_element(&mut buffer, i, *scalar);
+        }
+        Ok(Self { buffer, layout })
+    }
+
     /// Borrow as a view — erases the pool type.
     pub fn view(&self) -> NumericTensorView<'_, R> {
         NumericTensorView {
@@ -506,17 +746,30 @@ impl<'a, R: Rank, P: Pool + 'a> NumericTensor<'a, R, P> {
             .write_element(&mut self.buffer, flat_index, value);
     }
 
+    /// Zero-copy slice: returns a view into a sub-region of this tensor.
+    ///
+    /// See [`NumericTensorView::slice`] for details.
+    pub fn slice(
+        &self,
+        ranges: &[(u64, u64)],
+    ) -> Result<NumericTensorView<'_, R>, TensorLayoutError> {
+        self.view().slice(ranges)
+    }
+
+    /// Clone this tensor into a new pool-allocated tensor.
+    ///
+    /// See [`NumericTensorView::to_tensor`] for details.
+    pub fn to_tensor<'p, P2: Pool>(
+        &self,
+        pool: &'p P2,
+    ) -> Result<NumericTensor<'p, R, P2>, crate::pool::AllocationError> {
+        self.view().to_tensor(pool)
+    }
+
     /// Read all elements as i64 values. Useful for extracting shape/axes parameters.
     pub fn to_i64_vec(&self) -> Vec<i64> {
         (0..self.numel())
             .map(|i| self.read_element(i).to_i64())
-            .collect()
-    }
-
-    /// Read all elements as f64 values.
-    pub fn to_f64_vec(&self) -> Vec<f64> {
-        (0..self.numel())
-            .map(|i| self.read_element(i).to_f64())
             .collect()
     }
 
@@ -810,5 +1063,465 @@ mod tests {
                 "buffer size mismatch for {fmt} with {numel} elements"
             );
         }
+    }
+
+    // -- Slice --
+
+    /// Helper: create a DynRank tensor with F32 values 0.0, 1.0, 2.0, ...
+    fn make_f32_iota(shape: Vec<u64>) -> NumericTensor<'static, DynRank, SystemPool> {
+        static POOL: SystemPool = SystemPool;
+        let mut t =
+            NumericTensor::<DynRank, SystemPool>::zeros(shape, NumericDType::F32, &POOL).unwrap();
+        for i in 0..t.numel() {
+            t.write_element(i, NumericScalar::from_f32(i as f32));
+        }
+        t
+    }
+
+    #[test]
+    fn slice_1d_f32() {
+        let t = make_f32_iota(vec![8]);
+        let view = t.view();
+        // Slice [2..5] → elements 2.0, 3.0, 4.0
+        let sliced = view.slice(&[(2, 5)]).unwrap();
+        assert_eq!(sliced.shape(), &vec![3u64]);
+        assert_eq!(sliced.numel(), 3);
+        assert_eq!(sliced.read_element(0), NumericScalar::from_f32(2.0));
+        assert_eq!(sliced.read_element(1), NumericScalar::from_f32(3.0));
+        assert_eq!(sliced.read_element(2), NumericScalar::from_f32(4.0));
+    }
+
+    #[test]
+    fn slice_2d_f32() {
+        // Shape [4, 6], row-major: element [i,j] = i*6 + j
+        let t = make_f32_iota(vec![4, 6]);
+        let view = t.view();
+        // Slice [1..3, 2..5] → shape [2, 3]
+        let sliced = view.slice(&[(1, 3), (2, 5)]).unwrap();
+        assert_eq!(sliced.shape(), &vec![2u64, 3]);
+        // sliced[0,0] = original[1,2] = 1*6+2 = 8
+        assert_eq!(sliced.read_element(0), NumericScalar::from_f32(8.0));
+        // sliced[0,2] = original[1,4] = 10
+        assert_eq!(sliced.read_element(2), NumericScalar::from_f32(10.0));
+        // sliced[1,0] = original[2,2] = 14
+        assert_eq!(sliced.read_element(3), NumericScalar::from_f32(14.0));
+        // sliced[1,2] = original[2,4] = 16
+        assert_eq!(sliced.read_element(5), NumericScalar::from_f32(16.0));
+    }
+
+    #[test]
+    fn slice_of_slice_composes() {
+        let t = make_f32_iota(vec![10]);
+        let view = t.view();
+        // First slice: [2..8] → 2,3,4,5,6,7
+        let s1 = view.slice(&[(2, 8)]).unwrap();
+        // Second slice: [1..4] of s1 → 3,4,5
+        let s2 = s1.slice(&[(1, 4)]).unwrap();
+        assert_eq!(s2.shape(), &vec![3u64]);
+        assert_eq!(s2.read_element(0), NumericScalar::from_f32(3.0));
+        assert_eq!(s2.read_element(1), NumericScalar::from_f32(4.0));
+        assert_eq!(s2.read_element(2), NumericScalar::from_f32(5.0));
+    }
+
+    #[test]
+    fn slice_bool_sub_byte() {
+        // 16 bool elements = 2 bytes, 1-bit strides
+        let layout = TensorLayout::<DynRank>::row_major(vec![16], NumericDType::BOOL);
+        let mut buf = vec![0u8; layout.buffer_size_bytes()];
+        // Write alternating true/false: indices 0=F,1=T,2=F,3=T,...
+        for i in 0..16 {
+            layout.write_element(&mut buf, i, NumericScalar::from_bool(i % 2 == 1));
+        }
+        let view = NumericTensorView::<DynRank>::new(&buf, layout);
+
+        // Slice [3..7] → indices 3,4,5,6 → T,F,T,F
+        let sliced = view.slice(&[(3, 7)]).unwrap();
+        assert_eq!(sliced.shape(), &vec![4u64]);
+        assert_eq!(sliced.read_element(0), NumericScalar::from_bool(true));
+        assert_eq!(sliced.read_element(1), NumericScalar::from_bool(false));
+        assert_eq!(sliced.read_element(2), NumericScalar::from_bool(true));
+        assert_eq!(sliced.read_element(3), NumericScalar::from_bool(false));
+    }
+
+    #[test]
+    fn slice_full_range_is_identity() {
+        let t = make_f32_iota(vec![3, 4]);
+        let view = t.view();
+        let sliced = view.slice(&[(0, 3), (0, 4)]).unwrap();
+        assert_eq!(sliced.shape(), &vec![3u64, 4]);
+        for i in 0..12 {
+            assert_eq!(sliced.read_element(i), view.read_element(i));
+        }
+    }
+
+    #[test]
+    fn slice_single_element() {
+        let t = make_f32_iota(vec![5]);
+        let view = t.view();
+        let sliced = view.slice(&[(3, 4)]).unwrap();
+        assert_eq!(sliced.shape(), &vec![1u64]);
+        assert_eq!(sliced.read_element(0), NumericScalar::from_f32(3.0));
+    }
+
+    #[test]
+    fn slice_rank_mismatch_errors() {
+        let t = make_f32_iota(vec![4, 4]);
+        let view = t.view();
+        let err = view.slice(&[(0, 2)]).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                TensorLayoutError::SliceRankMismatch {
+                    got: 1,
+                    expected: 2
+                }
+            ),
+            "expected rank mismatch, got: {err}"
+        );
+    }
+
+    #[test]
+    fn slice_out_of_bounds_errors() {
+        let t = make_f32_iota(vec![4]);
+        let view = t.view();
+        let err = view.slice(&[(2, 5)]).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                TensorLayoutError::SliceOutOfBounds {
+                    dim: 0,
+                    end: 5,
+                    dim_size: 4,
+                    ..
+                }
+            ),
+            "expected out of bounds, got: {err}"
+        );
+    }
+
+    #[test]
+    fn slice_empty_range_errors() {
+        let t = make_f32_iota(vec![4]);
+        let view = t.view();
+        let err = view.slice(&[(3, 3)]).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                TensorLayoutError::SliceEmpty {
+                    dim: 0,
+                    start: 3,
+                    end: 3
+                }
+            ),
+            "expected empty range, got: {err}"
+        );
+    }
+
+    #[test]
+    fn slice_quantized_errors() {
+        let layout = TensorLayout::<DynRank>::simple_block_quant(vec![32], 4, false);
+        let buf = vec![0u8; layout.buffer_size_bytes()];
+        let view = NumericTensorView::<DynRank>::new(&buf, layout);
+        let err = view.slice(&[(0, 16)]).unwrap_err();
+        assert!(matches!(err, TensorLayoutError::QuantizedSliceUnsupported));
+    }
+
+    #[test]
+    fn slice_fixed_rank() {
+        use typenum::P1;
+        // Verify slice works on fixed-rank views too
+        let layout = TensorLayout::<P1>::row_major([8], NumericDType::F32);
+        let mut buf = vec![0u8; layout.buffer_size_bytes()];
+        for i in 0..8 {
+            layout.write_element(&mut buf, i, NumericScalar::from_f32(i as f32));
+        }
+        let view = NumericTensorView::<P1>::new(&buf, layout);
+        let sliced = view.slice(&[(2, 6)]).unwrap();
+        assert_eq!(sliced.shape(), &[4u64]);
+        assert_eq!(sliced.read_element(0), NumericScalar::from_f32(2.0));
+        assert_eq!(sliced.read_element(3), NumericScalar::from_f32(5.0));
+    }
+
+    // -- to_tensor --
+
+    #[test]
+    fn to_tensor_contiguous_memcpy() {
+        let pool = SystemPool;
+        let t = make_f32_iota(vec![3, 4]);
+        let view = t.view();
+        assert!(view.layout().is_contiguous());
+        let cloned = view.to_tensor(&pool).unwrap();
+        assert_eq!(cloned.shape(), &vec![3u64, 4]);
+        for i in 0..12 {
+            assert_eq!(cloned.read_element(i), NumericScalar::from_f32(i as f32));
+        }
+        // Verify it's a true copy — different buffer address
+        assert!(!std::ptr::eq(
+            view.data().as_ptr(),
+            cloned.buffer().as_ptr()
+        ));
+    }
+
+    #[test]
+    fn to_tensor_sliced_view() {
+        let pool = SystemPool;
+        let t = make_f32_iota(vec![4, 6]);
+        let view = t.view();
+        // Slice [1..3, 2..5] → non-contiguous view
+        let sliced = view.slice(&[(1, 3), (2, 5)]).unwrap();
+        assert!(!sliced.layout().is_contiguous());
+
+        let materialized = sliced.to_tensor(&pool).unwrap();
+        assert_eq!(materialized.shape(), &vec![2u64, 3]);
+        assert!(materialized.layout().is_contiguous());
+        // materialized[0,0] = original[1,2] = 8
+        assert_eq!(materialized.read_element(0), NumericScalar::from_f32(8.0));
+        // materialized[1,2] = original[2,4] = 16
+        assert_eq!(materialized.read_element(5), NumericScalar::from_f32(16.0));
+    }
+
+    #[test]
+    fn to_tensor_sliced_1d() {
+        let pool = SystemPool;
+        let t = make_f32_iota(vec![10]);
+        let sliced = t.view().slice(&[(3, 7)]).unwrap();
+        let materialized = sliced.to_tensor(&pool).unwrap();
+        assert_eq!(materialized.shape(), &vec![4u64]);
+        assert!(materialized.layout().is_contiguous());
+        for i in 0..4 {
+            assert_eq!(
+                materialized.read_element(i),
+                NumericScalar::from_f32((i + 3) as f32)
+            );
+        }
+    }
+
+    #[test]
+    fn to_tensor_bool_sliced() {
+        let pool = SystemPool;
+        let layout = TensorLayout::<DynRank>::row_major(vec![16], NumericDType::BOOL);
+        let mut buf = vec![0u8; layout.buffer_size_bytes()];
+        for i in 0..16 {
+            layout.write_element(&mut buf, i, NumericScalar::from_bool(i % 2 == 1));
+        }
+        let view = NumericTensorView::<DynRank>::new(&buf, layout);
+        // Slice at non-byte-aligned offset (bit 3)
+        let sliced = view.slice(&[(3, 7)]).unwrap();
+        let materialized = sliced.to_tensor(&pool).unwrap();
+        assert_eq!(materialized.shape(), &vec![4u64]);
+        assert!(materialized.layout().is_contiguous());
+        assert_eq!(materialized.read_element(0), NumericScalar::from_bool(true));
+        assert_eq!(
+            materialized.read_element(1),
+            NumericScalar::from_bool(false)
+        );
+        assert_eq!(materialized.read_element(2), NumericScalar::from_bool(true));
+        assert_eq!(
+            materialized.read_element(3),
+            NumericScalar::from_bool(false)
+        );
+    }
+
+    #[test]
+    fn to_tensor_quantized_memcpy() {
+        let pool = SystemPool;
+        let layout = TensorLayout::<DynRank>::simple_block_quant(vec![32], 4, false);
+        let size = layout.buffer_size_bytes();
+        // Fill with a recognizable pattern
+        let buf: Vec<u8> = (0..size).map(|i| (i & 0xFF) as u8).collect();
+        let view = NumericTensorView::<DynRank>::new(&buf, layout);
+        let cloned = view.to_tensor(&pool).unwrap();
+        assert_eq!(cloned.buffer().len(), size);
+        assert_eq!(cloned.buffer(), buf.as_slice());
+    }
+
+    #[test]
+    fn to_tensor_fixed_rank() {
+        use typenum::P1;
+        let pool = SystemPool;
+        let layout = TensorLayout::<P1>::row_major([6], NumericDType::F32);
+        let mut buf = vec![0u8; layout.buffer_size_bytes()];
+        for i in 0..6 {
+            layout.write_element(&mut buf, i, NumericScalar::from_f32(i as f32));
+        }
+        let view = NumericTensorView::<P1>::new(&buf, layout);
+        let sliced = view.slice(&[(2, 5)]).unwrap();
+        let materialized = sliced.to_tensor(&pool).unwrap();
+        assert_eq!(materialized.shape(), &[3u64]);
+        assert_eq!(materialized.read_element(0), NumericScalar::from_f32(2.0));
+        assert_eq!(materialized.read_element(2), NumericScalar::from_f32(4.0));
+    }
+
+    #[test]
+    fn to_tensor_slice_of_slice() {
+        let pool = SystemPool;
+        let t = make_f32_iota(vec![10]);
+        let s1 = t.view().slice(&[(2, 8)]).unwrap();
+        let s2 = s1.slice(&[(1, 4)]).unwrap();
+        // s2 = elements 3,4,5 — non-contiguous (offset_bits != 0)
+        let materialized = s2.to_tensor(&pool).unwrap();
+        assert!(materialized.layout().is_contiguous());
+        assert_eq!(materialized.read_element(0), NumericScalar::from_f32(3.0));
+        assert_eq!(materialized.read_element(1), NumericScalar::from_f32(4.0));
+        assert_eq!(materialized.read_element(2), NumericScalar::from_f32(5.0));
+    }
+
+    // -- is_contiguous --
+
+    #[test]
+    fn is_contiguous_row_major() {
+        let layout = TensorLayout::<DynRank>::row_major(vec![3, 4], NumericDType::F32);
+        assert!(layout.is_contiguous());
+    }
+
+    #[test]
+    fn is_contiguous_after_slice() {
+        let t = make_f32_iota(vec![8]);
+        let sliced = t.view().slice(&[(2, 6)]).unwrap();
+        assert!(!sliced.layout().is_contiguous());
+    }
+
+    #[test]
+    fn is_contiguous_quantized() {
+        let layout = TensorLayout::<DynRank>::simple_block_quant(vec![32], 4, false);
+        assert!(layout.is_contiguous());
+        let layout = TensorLayout::<DynRank>::k_quant(vec![256], KQuantVariant::Q4_K);
+        assert!(layout.is_contiguous());
+    }
+
+    // -- flat_to_coords / coords_to_flat --
+
+    #[test]
+    fn coords_roundtrip_3d() {
+        let layout = TensorLayout::<DynRank>::row_major(vec![2, 3, 4], NumericDType::F32);
+        for flat in 0..24 {
+            let coords = layout.flat_to_coords(flat);
+            assert_eq!(
+                layout.coords_to_flat(&coords),
+                flat,
+                "roundtrip failed for {flat}"
+            );
+        }
+    }
+
+    #[test]
+    fn coords_known_values() {
+        let layout = TensorLayout::<DynRank>::row_major(vec![2, 3], NumericDType::F32);
+        assert_eq!(layout.flat_to_coords(0), vec![0, 0]);
+        assert_eq!(layout.flat_to_coords(1), vec![0, 1]);
+        assert_eq!(layout.flat_to_coords(3), vec![1, 0]);
+        assert_eq!(layout.flat_to_coords(5), vec![1, 2]);
+        assert_eq!(layout.coords_to_flat(&[1, 2]), 5);
+    }
+
+    #[test]
+    fn coords_scalar() {
+        let layout = TensorLayout::<DynRank>::row_major(vec![], NumericDType::F32);
+        assert_eq!(layout.flat_to_coords(0), Vec::<usize>::new());
+        assert_eq!(layout.coords_to_flat(&[]), 0);
+    }
+
+    #[test]
+    fn coords_1d() {
+        let layout = TensorLayout::<DynRank>::row_major(vec![5], NumericDType::F32);
+        assert_eq!(layout.flat_to_coords(3), vec![3]);
+        assert_eq!(layout.coords_to_flat(&[3]), 3);
+    }
+
+    // -- from_fn --
+
+    #[test]
+    fn from_fn_1d() {
+        let pool = SystemPool;
+        let t =
+            NumericTensor::<DynRank, SystemPool>::from_fn(vec![5], NumericDType::F32, &pool, |i| {
+                NumericScalar::from_f32(i as f32 * 2.0)
+            })
+            .unwrap();
+        assert_eq!(t.shape(), &vec![5u64]);
+        assert_eq!(t.read_element(0), NumericScalar::from_f32(0.0));
+        assert_eq!(t.read_element(2), NumericScalar::from_f32(4.0));
+        assert_eq!(t.read_element(4), NumericScalar::from_f32(8.0));
+    }
+
+    #[test]
+    fn from_fn_2d() {
+        let pool = SystemPool;
+        let t = NumericTensor::<DynRank, SystemPool>::from_fn(
+            vec![3, 4],
+            NumericDType::I32,
+            &pool,
+            |i| NumericScalar::from_i32(i as i32),
+        )
+        .unwrap();
+        assert_eq!(t.numel(), 12);
+        for i in 0..12 {
+            assert_eq!(t.read_element(i), NumericScalar::from_i32(i as i32));
+        }
+    }
+
+    #[test]
+    fn from_fn_bool() {
+        let pool = SystemPool;
+        let t = NumericTensor::<DynRank, SystemPool>::from_fn(
+            vec![8],
+            NumericDType::BOOL,
+            &pool,
+            |i| NumericScalar::from_bool(i % 3 == 0),
+        )
+        .unwrap();
+        assert_eq!(t.read_element(0), NumericScalar::from_bool(true));
+        assert_eq!(t.read_element(1), NumericScalar::from_bool(false));
+        assert_eq!(t.read_element(2), NumericScalar::from_bool(false));
+        assert_eq!(t.read_element(3), NumericScalar::from_bool(true));
+    }
+
+    // -- from_scalars --
+
+    #[test]
+    fn from_scalars_basic() {
+        let pool = SystemPool;
+        let scalars: Vec<NumericScalar> =
+            (0..6).map(|i| NumericScalar::from_f32(i as f32)).collect();
+        let t = NumericTensor::<DynRank, SystemPool>::from_scalars(
+            vec![2, 3],
+            NumericDType::F32,
+            &pool,
+            &scalars,
+        )
+        .unwrap();
+        assert_eq!(t.shape(), &vec![2u64, 3]);
+        for i in 0..6 {
+            assert_eq!(t.read_element(i), NumericScalar::from_f32(i as f32));
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "from_scalars")]
+    fn from_scalars_length_mismatch_panics() {
+        let pool = SystemPool;
+        let scalars = vec![NumericScalar::from_f32(1.0), NumericScalar::from_f32(2.0)];
+        let _ = NumericTensor::<DynRank, SystemPool>::from_scalars(
+            vec![3],
+            NumericDType::F32,
+            &pool,
+            &scalars,
+        );
+    }
+
+    #[test]
+    fn from_scalars_fixed_rank() {
+        use typenum::P1;
+        let pool = SystemPool;
+        let scalars = vec![
+            NumericScalar::from_i32(10),
+            NumericScalar::from_i32(20),
+            NumericScalar::from_i32(30),
+        ];
+        let t =
+            NumericTensor::<P1, SystemPool>::from_scalars([3], NumericDType::I32, &pool, &scalars)
+                .unwrap();
+        assert_eq!(t.shape(), &[3u64]);
+        assert_eq!(t.read_element(1), NumericScalar::from_i32(20));
     }
 }

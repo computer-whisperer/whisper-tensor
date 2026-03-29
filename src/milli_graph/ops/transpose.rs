@@ -385,45 +385,20 @@ impl MilliOp for Transpose {
 
         // Compute output shape
         let output_shape: Vec<u64> = full_perm.iter().map(|&p| input_shape[p]).collect();
-        let out_numel: usize = output_shape.iter().product::<u64>() as usize;
 
-        // Compute input strides (row-major)
-        let mut input_strides = vec![1usize; rank];
-        for i in (0..rank.saturating_sub(1)).rev() {
-            input_strides[i] = input_strides[i + 1] * input_shape[i + 1] as usize;
-        }
+        let out_layout = TensorLayout::<DynRank>::row_major(output_shape.clone(), dtype);
+        let in_layout = data.layout().clone();
 
-        // Compute output strides (row-major)
-        let mut output_strides = vec![1usize; rank];
-        for i in (0..rank.saturating_sub(1)).rev() {
-            output_strides[i] = output_strides[i + 1] * output_shape[i + 1] as usize;
-        }
-
-        let layout = TensorLayout::<DynRank>::row_major(output_shape, dtype);
-        let buf = pool
-            .allocate(layout.buffer_size_bytes())
-            .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
-        let mut out = NumericTensor::from_parts(buf, layout);
-
-        // Build inverse permutation: inv_perm[perm[i]] = i
-        let mut inv_perm = vec![0usize; rank];
-        for (i, &p) in full_perm.iter().enumerate() {
-            inv_perm[p] = i;
-        }
-
-        for out_flat in 0..out_numel {
-            // Decompose output flat index into output coords
-            let mut rem = out_flat;
-            let mut input_flat = 0usize;
-            for out_dim in 0..rank {
-                let coord = rem / output_strides[out_dim];
-                rem %= output_strides[out_dim];
-                // This output coord corresponds to input dim = perm[out_dim]
-                let in_dim = full_perm[out_dim];
-                input_flat += coord * input_strides[in_dim];
+        let out = NumericTensor::<DynRank, P2>::from_fn(output_shape, dtype, pool, |out_flat| {
+            let out_coords = out_layout.flat_to_coords(out_flat);
+            // Output dim d has coord for input dim perm[d]
+            let mut in_coords = vec![0usize; rank];
+            for (out_dim, &coord) in out_coords.iter().enumerate() {
+                in_coords[full_perm[out_dim]] = coord;
             }
-            out.write_element(out_flat, data.read_element(input_flat));
-        }
+            data.read_element(in_layout.coords_to_flat(&in_coords))
+        })
+        .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
 
         Ok(vec![out])
     }

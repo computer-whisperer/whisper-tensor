@@ -942,11 +942,6 @@ impl<'p, P: Pool + 'p> TensorInfo<'p, P> {
         Some(self.as_concrete()?.to_i64_vec())
     }
 
-    /// Extract all elements as f64. Returns None if not concrete.
-    pub(crate) fn to_f64_vec(&self) -> Option<Vec<f64>> {
-        Some(self.as_concrete()?.to_f64_vec())
-    }
-
     /// Returns the concrete legacy NumericTensor if this TensorInfo holds concrete numeric data.
     /// Temporary bridge: reads elements from the pool-backed tensor into a legacy NumericTensor.
     pub(crate) fn as_numeric(&self) -> Option<NumericTensor<DynRank>> {

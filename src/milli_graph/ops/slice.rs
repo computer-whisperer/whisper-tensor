@@ -573,37 +573,22 @@ impl MilliOp for Slice {
             .map(|&(s, e, step)| ((e - s + (step - step.signum())) / step).max(0) as u64)
             .collect();
 
-        let out_numel: usize = output_shape.iter().product::<u64>() as usize;
+        let out_layout = TensorLayout::<DynRank>::row_major(output_shape.clone(), dtype);
+        let in_layout = data.layout().clone();
 
-        // Compute input strides (row-major)
-        let mut in_strides = vec![1usize; input_rank];
-        for i in (0..input_rank.saturating_sub(1)).rev() {
-            in_strides[i] = in_strides[i + 1] * input_shape[i + 1] as usize;
-        }
-        // Compute output strides
-        let mut out_strides = vec![1usize; input_rank];
-        for i in (0..input_rank.saturating_sub(1)).rev() {
-            out_strides[i] = out_strides[i + 1] * output_shape[i + 1] as usize;
-        }
-
-        let layout = TensorLayout::<DynRank>::row_major(output_shape.clone(), dtype);
-        let buf = pool
-            .allocate(layout.buffer_size_bytes())
-            .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
-        let mut out = NumericTensor::from_parts(buf, layout);
-
-        for out_flat in 0..out_numel {
-            let mut rem = out_flat;
-            let mut in_flat = 0usize;
-            for d in 0..input_rank {
-                let coord = rem / out_strides[d];
-                rem %= out_strides[d];
-                let (start, _, step) = slices[d];
-                let in_coord = (start + coord as i64 * step) as usize;
-                in_flat += in_coord * in_strides[d];
-            }
-            out.write_element(out_flat, data.read_element(in_flat));
-        }
+        let out = NumericTensor::<DynRank, P2>::from_fn(output_shape, dtype, pool, |out_flat| {
+            let out_coords = out_layout.flat_to_coords(out_flat);
+            let in_coords: Vec<usize> = out_coords
+                .iter()
+                .enumerate()
+                .map(|(d, &coord)| {
+                    let (start, _, step) = slices[d];
+                    (start + coord as i64 * step) as usize
+                })
+                .collect();
+            data.read_element(in_layout.coords_to_flat(&in_coords))
+        })
+        .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
 
         Ok(vec![out])
     }

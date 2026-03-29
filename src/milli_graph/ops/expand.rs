@@ -368,36 +368,20 @@ impl MilliOp for Expand {
             output_shape[i] = t.max(padded_input[i]);
         }
 
-        let out_numel: usize = output_shape.iter().product::<u64>() as usize;
+        // Input layout for flat_to_coords/coords_to_flat with padded shape
+        let in_layout = TensorLayout::<DynRank>::row_major(padded_input.clone(), dtype);
+        let out_layout = TensorLayout::<DynRank>::row_major(output_shape.clone(), dtype);
 
-        // Compute strides for output and padded input
-        let mut out_strides = vec![1usize; output_rank];
-        for i in (0..output_rank.saturating_sub(1)).rev() {
-            out_strides[i] = out_strides[i + 1] * output_shape[i + 1] as usize;
-        }
-        let mut in_strides = vec![1usize; output_rank];
-        for i in (0..output_rank.saturating_sub(1)).rev() {
-            in_strides[i] = in_strides[i + 1] * padded_input[i + 1] as usize;
-        }
-
-        let layout = TensorLayout::<DynRank>::row_major(output_shape.clone(), dtype);
-        let buf = pool
-            .allocate(layout.buffer_size_bytes())
-            .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
-        let mut out = NumericTensor::from_parts(buf, layout);
-
-        for out_flat in 0..out_numel {
-            let mut rem = out_flat;
-            let mut in_flat = 0usize;
-            for d in 0..output_rank {
-                let coord = rem / out_strides[d];
-                rem %= out_strides[d];
-                // Broadcast: if input dim is 1, always use coord 0
-                let in_coord = if padded_input[d] == 1 { 0 } else { coord };
-                in_flat += in_coord * in_strides[d];
-            }
-            out.write_element(out_flat, data.read_element(in_flat));
-        }
+        let out = NumericTensor::<DynRank, P2>::from_fn(output_shape, dtype, pool, |out_flat| {
+            let out_coords = out_layout.flat_to_coords(out_flat);
+            let in_coords: Vec<usize> = out_coords
+                .iter()
+                .enumerate()
+                .map(|(d, &c)| if padded_input[d] == 1 { 0 } else { c })
+                .collect();
+            data.read_element(in_layout.coords_to_flat(&in_coords))
+        })
+        .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
 
         Ok(vec![out])
     }

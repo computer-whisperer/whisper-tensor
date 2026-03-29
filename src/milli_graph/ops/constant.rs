@@ -259,23 +259,12 @@ impl MilliOp for Constant {
         Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>,
         crate::nano_graph::pool_eval::PoolEvalError,
     > {
-        use crate::numeric_tensor::{NumericTensor, TensorLayout};
-        use crate::tensor_rank::DynRank;
-
-        let src = &*self.data.0;
-        let ndt = src.dtype();
-        let shape = src.shape().clone();
-
-        let layout = TensorLayout::<DynRank>::row_major(shape, ndt);
-        let buf_size = layout.buffer_size_bytes();
-        let buf = pool
-            .allocate(buf_size)
+        let out = self
+            .data
+            .0
+            .view()
+            .to_tensor(pool)
             .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
-
-        let mut out = NumericTensor::from_parts(buf, layout);
-        for i in 0..src.numel() {
-            out.write_element(i, src.read_element(i));
-        }
         Ok(vec![out])
     }
 
@@ -452,27 +441,18 @@ impl MilliOp for ConstantOfShape {
         Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>,
         crate::nano_graph::pool_eval::PoolEvalError,
     > {
-        use crate::numeric_tensor::{NumericTensor, TensorLayout};
+        use crate::numeric_tensor::NumericTensor;
         use crate::tensor_rank::DynRank;
 
-        // Read shape from inputs[0]
         let shape_tensor = &inputs[0];
         let shape: Vec<u64> = (0..shape_tensor.numel())
             .map(|i| shape_tensor.read_element(i).to_i64() as u64)
             .collect();
 
-        let ndt = self.value.dtype();
         let fill_val = self.value;
-        let numel: usize = shape.iter().product::<u64>() as usize;
-
-        let layout = TensorLayout::<DynRank>::row_major(shape, ndt);
-        let buf = pool
-            .allocate(layout.buffer_size_bytes())
-            .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
-        let mut out = NumericTensor::from_parts(buf, layout);
-        for i in 0..numel {
-            out.write_element(i, fill_val);
-        }
+        let out =
+            NumericTensor::<DynRank, P2>::from_fn(shape, fill_val.dtype(), pool, |_| fill_val)
+                .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
 
         Ok(vec![out])
     }

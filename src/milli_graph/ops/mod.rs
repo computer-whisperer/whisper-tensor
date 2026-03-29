@@ -360,14 +360,9 @@ pub(crate) fn reduce_eval_new<'p, P2: Pool + 'p>(
                 .map(|i| ax_view.read_element(i).to_i64())
                 .collect();
             if raw.is_empty() && noop_with_empty_axes {
-                let layout = TensorLayout::<DynRank>::row_major(shape.clone(), dtype);
-                let buf = pool
-                    .allocate(layout.buffer_size_bytes())
+                let out = data
+                    .to_tensor(pool)
                     .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
-                let mut out = NumericTensor::from_parts(buf, layout);
-                for i in 0..data.numel() {
-                    out.write_element(i, data.read_element(i));
-                }
                 return Ok(vec![out]);
             }
             if raw.is_empty() {

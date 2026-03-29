@@ -1005,29 +1005,31 @@ impl MilliOp for Resize {
 
         // Try scales
         if let Some(scales_id) = self.scales {
-            if let Some(scales_info) = known_inputs.get(&scales_id) {
-                if let Some(scales_f64) = scales_info.to_f64_vec() {
-                    if !scales_f64.is_empty() && !scales_f64.iter().all(|&x| x == 0.0) {
-                        let mut out_dims = shape.to_vec();
-                        for (i, &axis) in resolved_axes.iter().enumerate() {
-                            let scale = scales_f64[i] as f32;
-                            match &shape[axis] {
-                                ScalarInfoTyped::Numeric(v) => {
-                                    let new_size = (*v as f32 * scale).floor() as u64;
-                                    out_dims[axis] = ScalarInfoTyped::Numeric(new_size);
-                                }
-                                ScalarInfoTyped::Symbolic(_) => {
-                                    out_dims[axis] = ScalarInfoTyped::Symbolic(
-                                        SymbolicScalarTyped::new(symbolic_resolver),
-                                    );
-                                }
+            if let Some(scales_tensor) = known_inputs
+                .get(&scales_id)
+                .and_then(|info| info.as_concrete())
+            {
+                let numel = scales_tensor.numel();
+                if numel > 0 && (0..numel).any(|i| scales_tensor.read_element(i).to_f64() != 0.0) {
+                    let mut out_dims = shape.to_vec();
+                    for (i, &axis) in resolved_axes.iter().enumerate() {
+                        let scale = scales_tensor.read_element(i).to_f64() as f32;
+                        match &shape[axis] {
+                            ScalarInfoTyped::Numeric(v) => {
+                                let new_size = (*v as f32 * scale).floor() as u64;
+                                out_dims[axis] = ScalarInfoTyped::Numeric(new_size);
+                            }
+                            ScalarInfoTyped::Symbolic(_) => {
+                                out_dims[axis] = ScalarInfoTyped::Symbolic(
+                                    SymbolicScalarTyped::new(symbolic_resolver),
+                                );
                             }
                         }
-                        return Ok(vec![(
-                            self.output,
-                            TensorInfo::from_dtype_and_shape_scalars(out_dtype, &out_dims),
-                        )]);
                     }
+                    return Ok(vec![(
+                        self.output,
+                        TensorInfo::from_dtype_and_shape_scalars(out_dtype, &out_dims),
+                    )]);
                 }
             }
         }

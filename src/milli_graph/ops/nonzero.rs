@@ -158,40 +158,32 @@ impl MilliOp for NonZero {
     > {
         use crate::numeric_dtype::NumericDType;
         use crate::numeric_scalar::NumericScalar;
-        use crate::numeric_tensor::{NumericTensor, TensorLayout};
+        use crate::numeric_tensor::NumericTensor;
         use crate::tensor_rank::DynRank;
 
         let data = &inputs[0];
-        let shape = data.shape();
-        let rank = shape.len();
+        let rank = data.shape().len();
+        let data_layout = data.layout().clone();
 
-        // Find all nonzero element indices.
-        let nz_flat: Vec<usize> = (0..data.numel())
+        // Find all nonzero element indices and decompose to coordinates.
+        let nz_coords: Vec<Vec<usize>> = (0..data.numel())
             .filter(|&i| data.read_element(i).is_nonzero())
+            .map(|i| data_layout.flat_to_coords(i))
             .collect();
-        let nnz = nz_flat.len();
+        let nnz = nz_coords.len();
 
         // Output: [rank, nnz] I64.
-        let out_shape = vec![rank as u64, nnz as u64];
-        let layout = TensorLayout::<DynRank>::row_major(out_shape, NumericDType::I64);
-        let buf = pool
-            .allocate(layout.buffer_size_bytes())
-            .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
-        let mut out = NumericTensor::from_parts(buf, layout);
-
-        let mut strides = vec![1usize; rank];
-        for i in (0..rank.saturating_sub(1)).rev() {
-            strides[i] = strides[i + 1] * shape[i + 1] as usize;
-        }
-
-        for (col, &flat) in nz_flat.iter().enumerate() {
-            let mut rem = flat;
-            for row in 0..rank {
-                let idx = rem / strides[row];
-                rem %= strides[row];
-                out.write_element(row * nnz + col, NumericScalar::from_i64(idx as i64));
-            }
-        }
+        let out = NumericTensor::<DynRank, P2>::from_fn(
+            vec![rank as u64, nnz as u64],
+            NumericDType::I64,
+            pool,
+            |flat| {
+                let row = flat / nnz;
+                let col = flat % nnz;
+                NumericScalar::from_i64(nz_coords[col][row] as i64)
+            },
+        )
+        .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
 
         Ok(vec![out])
     }

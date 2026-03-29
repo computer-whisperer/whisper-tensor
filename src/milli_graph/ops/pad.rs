@@ -113,6 +113,7 @@ impl Pad {
         use crate::nano_graph::lower::{DimKind, NanoLoweringContext, TensorAtomMap};
         use crate::nano_graph::ops::ScalarOp;
         use crate::nano_graph::pattern::InputRef;
+        use crate::numeric_dtype::NumericDType;
         use crate::numeric_scalar::NumericScalar;
 
         // Constant mode only.
@@ -201,19 +202,12 @@ impl Pad {
         }
 
         // Extract constant fill value (default 0.0).
-        let fill_val = if let Some(cv_id) = self.constant_value {
-            if let Some(cv_info) = all_infos.get(&cv_id) {
-                cv_info
-                    .to_f64_vec()
-                    .and_then(|v| v.first().copied())
-                    .unwrap_or(0.0)
-            } else {
-                0.0
-            }
-        } else {
-            0.0
-        };
-        let fill_scalar = NumericScalar::from_f32(fill_val as f32);
+        let fill_scalar = self
+            .constant_value
+            .and_then(|cv_id| all_infos.get(&cv_id))
+            .and_then(|cv_info| cv_info.as_concrete())
+            .map(|t| t.read_element(0).cast_to(NumericDType::F32))
+            .unwrap_or(NumericScalar::from_f32(0.0));
 
         let in_strides = &in_map.known_strides;
         let sym_dims = in_map.sym_dims.clone();
