@@ -84,7 +84,7 @@ impl MilliOp for Range {
         &self,
         known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'p, P>>,
         symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
-        _pool: &'p P,
+        pool: &'p P,
     ) -> Result<Vec<(GlobalId, crate::tensor_info::TensorInfo<'p, P>)>, MilliOpGraphError> {
         use crate::scalar_info::{ScalarInfo, ScalarInfoTyped};
         use crate::symbolic_scalar::SymbolicScalar;
@@ -101,16 +101,32 @@ impl MilliOp for Range {
             .ok_or(MilliOpGraphError::UnableToInfer)?;
         let out_dtype = start_info.dtype();
 
-        // If all inputs are concrete, compute the output length.
-        if let (Some(start_v), Some(end_v), Some(delta_v)) = (
-            start_info.as_concrete().map(|t| t.read_element(0).to_f64()),
-            end_info.as_concrete().map(|t| t.read_element(0).to_f64()),
-            delta_info.as_concrete().map(|t| t.read_element(0).to_f64()),
+        // If all inputs are concrete, compute the full output with concrete values.
+        if let (Some(start_t), Some(end_t), Some(delta_t)) = (
+            start_info.as_concrete(),
+            end_info.as_concrete(),
+            delta_info.as_concrete(),
         ) {
-            let n = ((end_v - start_v) / delta_v).ceil().max(0.0) as u64;
+            let start_v = start_t.read_element(0).to_f64();
+            let end_v = end_t.read_element(0).to_f64();
+            let delta_v = delta_t.read_element(0).to_f64();
+            let n = ((end_v - start_v) / delta_v).ceil().max(0.0) as usize;
+
+            let out_tensor = crate::numeric_tensor::NumericTensor::from_fn(
+                vec![n as u64],
+                out_dtype,
+                pool,
+                |i| {
+                    crate::numeric_scalar::NumericScalar::from_f64(start_v + i as f64 * delta_v)
+                        .cast_to(out_dtype)
+                },
+            )
+            .map_err(|_| MilliOpGraphError::UnableToInfer)?;
             return Ok(vec![(
                 self.output,
-                TensorInfo::from_dtype_and_shape(out_dtype, &[n]),
+                TensorInfo::Ranked(crate::tensor_info::TensorInfoRanked::Shaped(
+                    crate::tensor_info::TensorInfoShaped::Numeric(out_tensor),
+                )),
             )]);
         }
 
