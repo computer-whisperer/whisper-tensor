@@ -1695,6 +1695,8 @@ impl<'a> NanoLoweringContext<'a> {
             .map(|&ki| in_known[ki])
             .product();
         if reduce_extent == 0 {
+            // Reducing over 0 elements produces the identity value.
+            // This can't be expressed as a Reduce nano-op; fall to opaque.
             return crate::milli_graph::ops::LowerResult::Unsupported;
         }
 

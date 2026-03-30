@@ -551,6 +551,11 @@ impl MilliOp for Slice {
         for (i, &axis) in axes.iter().enumerate() {
             let dim = input_shape[axis] as i64;
             let step = steps[i];
+            if step == 0 {
+                return Err(crate::nano_graph::pool_eval::PoolEvalError::Unsupported(
+                    "Slice: step must not be 0".into(),
+                ));
+            }
             let (start, end) = if step > 0 {
                 let s = starts[i].clamp(-dim, dim);
                 let s = if s < 0 { s + dim } else { s };

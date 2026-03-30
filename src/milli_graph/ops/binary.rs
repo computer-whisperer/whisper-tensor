@@ -619,13 +619,32 @@ impl MilliOp for SimpleBinary {
                 WhichSimpleBinaryOp::Div => av.div(bv),
                 WhichSimpleBinaryOp::Max => av.max(bv),
                 WhichSimpleBinaryOp::Min => av.min(bv),
-                WhichSimpleBinaryOp::Modulo(_) => {
+                WhichSimpleBinaryOp::Modulo(fmod) => {
+                    let is_float = a_dtype.is_float();
+                    let use_fmod = if is_float {
+                        true
+                    } else {
+                        fmod.unwrap_or(false)
+                    };
                     let af = av.to_f64();
                     let bf = bv.to_f64();
                     if bf == 0.0 {
-                        NumericScalar::from_f64(f64::NAN).cast_to(a_dtype)
-                    } else {
+                        if is_float {
+                            NumericScalar::from_f64(f64::NAN).cast_to(a_dtype)
+                        } else {
+                            NumericScalar::from_f64(0.0).cast_to(a_dtype)
+                        }
+                    } else if use_fmod {
                         NumericScalar::from_f64(af % bf).cast_to(a_dtype)
+                    } else {
+                        // Mathematical modulo: result sign matches divisor.
+                        let rem = af % bf;
+                        let result = if rem != 0.0 && rem.signum() != bf.signum() {
+                            rem + bf
+                        } else {
+                            rem
+                        };
+                        NumericScalar::from_f64(result).cast_to(a_dtype)
                     }
                 }
                 WhichSimpleBinaryOp::Equal => NumericScalar::from_bool(av.to_f64() == bv.to_f64()),

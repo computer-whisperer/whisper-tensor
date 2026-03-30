@@ -327,17 +327,23 @@ impl Operation for FlattenOperation {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let input = input_map[&self.input];
 
+        // Build shape tensor: [prod(shape[:axis]), -1].
+        // Use resolve_axes to normalize negative axis values.
+        let axis_raw = milli_graph::ops_helpers::scalar_const(&mut graph, self.axis, rng);
+        let axis_resolved =
+            milli_graph::ops_helpers::resolve_axes(&mut graph, axis_raw, input, rng);
+
         let shape_tensor = if self.axis == 0 {
+            // Static fast path: axis=0, prefix product is 1 → shape = [1, -1].
             milli_graph::ops::Constant::from_vec(&mut graph, vec![1i64, -1i64], rng)
         } else {
             let input_shape = milli_graph::ops::Shape::push_new(&mut graph, input, rng);
             let zero_const = milli_graph::ops::Constant::from_vec(&mut graph, vec![0i64], rng);
-            let axis_const = milli_graph::ops::Constant::from_vec(&mut graph, vec![self.axis], rng);
             let first_dims = milli_graph::ops::Slice::push_new(
                 &mut graph,
                 input_shape,
                 zero_const,
-                axis_const,
+                axis_resolved,
                 None,
                 None,
                 rng,
