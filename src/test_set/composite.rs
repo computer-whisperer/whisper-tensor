@@ -10,8 +10,8 @@ use rand::rngs::SmallRng;
 
 use crate::backends::ndarray_backend::NDArrayNumericTensor;
 use crate::graph::GlobalId;
-use crate::milli_graph::MilliOpGraph;
 use crate::milli_graph::ops::{self, Constant};
+use crate::milli_graph::{self, MilliOpGraph, ops_helpers};
 use crate::numeric_dtype::NumericDType;
 
 use super::tensor_f32_shaped;
@@ -560,9 +560,22 @@ fn rms_norm_multirow() -> TestCase {
     // x² = x_f32 * x_f32
     let x_sq = ops::SimpleBinary::mul(&mut graph, x_f32, x_f32, &mut rng);
 
-    // mean(x², axis=-1, keepdims=true)
-    let axes = i64_const(&mut graph, vec![-1], &mut rng);
-    let sq_mean = ops::ReduceMean::push_new(&mut graph, x_sq, Some(axes), true, false, &mut rng);
+    // mean(x², axis=-1, keepdims=true) — use resolve_axes + Range to match the
+    // real RMSNormalizationOperation::get_milli_op_graph exactly.
+    let axis_raw = ops_helpers::scalar_const(&mut graph, -1i64, &mut rng);
+    let axis_resolved = ops_helpers::resolve_axes(&mut graph, axis_raw, x, &mut rng);
+    let rank_tid = ops_helpers::rank(&mut graph, x, &mut rng);
+    let step_tid = ops_helpers::scalar_const(&mut graph, 1i64, &mut rng);
+    let normalized_axes =
+        milli_graph::ops::Range::push_new(&mut graph, axis_resolved, rank_tid, step_tid, &mut rng);
+    let sq_mean = ops::ReduceMean::push_new(
+        &mut graph,
+        x_sq,
+        Some(normalized_axes),
+        true,
+        false,
+        &mut rng,
+    );
 
     // sqrt(mean + eps)
     let eps = f32_const(&mut graph, vec![1e-5], vec![1, 1], &mut rng);
