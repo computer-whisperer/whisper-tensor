@@ -106,6 +106,16 @@ impl Concat {
             let Some(inp_map) = ctx.tensor_map.get(&inp_id).cloned() else {
                 return crate::milli_graph::ops::LowerResult::Unsupported;
             };
+            if std::env::var("DEBUG_LOWER").is_ok() {
+                eprintln!(
+                    "  [concat input] {inp_id} base={:?} count={} layout={:?} strides={:?} segments={}",
+                    inp_map.base_id,
+                    inp_map.count,
+                    inp_map.layout,
+                    inp_map.known_strides,
+                    inp_map.segments.len()
+                );
+            }
             let inp_known: Vec<u64> = inp_map
                 .layout
                 .iter()

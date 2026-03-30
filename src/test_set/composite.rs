@@ -89,23 +89,81 @@ mod tests {
         let input_refs: HashMap<GlobalId, &NumericTensorView<'_, crate::tensor_rank::DynRank>> =
             input_views.iter().map(|(&id, v)| (id, v)).collect();
 
-        // Dump the milli graph structure to understand the op chain.
+        // Run through legacy eval with observer to get correct intermediate values.
         {
+            use crate::milli_graph::observer::MilliOpGraphObserver;
+            struct DumpObserver;
+            impl MilliOpGraphObserver for DumpObserver {
+                fn on_tensor_assigned(
+                    &mut self,
+                    path: &[GlobalId],
+                    tensor: &crate::numeric_tensor::NumericTensorView<
+                        '_,
+                        crate::tensor_rank::DynRank,
+                    >,
+                ) {
+                    let id = path.last().copied().unwrap_or(GlobalId(0));
+                    let vals: Vec<f64> = (0..tensor.numel().min(8))
+                        .map(|i| tensor.read_element(i).to_f64())
+                        .collect();
+                    eprintln!(
+                        "  [legacy] {id} shape={:?} dtype={:?} vals={vals:?}",
+                        tensor.shape(),
+                        tensor.dtype()
+                    );
+                }
+                fn on_node_executed(
+                    &mut self,
+                    _: &[GlobalId],
+                    _: std::time::Instant,
+                    _: std::time::Instant,
+                ) {
+                }
+            }
+
             let tensor_dtypes: HashMap<GlobalId, crate::dtype::DType> = input_refs
                 .iter()
                 .map(|(id, view)| (*id, view.dtype().to_legacy()))
                 .collect();
             let mctx = crate::milli_graph::MilliLoweringContext::new(tensor_dtypes);
-            let mut rng2 = SmallRng::seed_from_u64(0); // matches eval_pool's WyRand default
+            let mut rng2 = SmallRng::seed_from_u64(0);
             let mg = op.get_milli_op_graph(&mctx, &mut rng2);
-            eprintln!("=== Milli graph: {} ops ===", mg.op_ordering().len());
+
+            // Legacy eval — should produce correct results.
+            let legacy_inputs: HashMap<
+                GlobalId,
+                crate::migration::numeric_tensor::NumericTensor<crate::tensor_rank::DynRank>,
+            > = input_views
+                .iter()
+                .map(|(&id, v)| (id, crate::migration::bridge::view_to_legacy(v)))
+                .collect();
+            let mut backend = crate::backends::eval_backend::EvalBackend::NDArray;
+            let mut obs = DumpObserver;
+            eprintln!("=== Legacy eval ===");
+            let legacy_out: HashMap<_, _> = mg
+                .eval(&legacy_inputs, &mut obs, &mut backend)
+                .expect("legacy eval")
+                .collect();
+            for (id, t) in &legacy_out {
+                let pool_t = crate::migration::bridge::legacy_to_new(t);
+                let vals: Vec<f64> = (0..pool_t.numel().min(8))
+                    .map(|i| pool_t.read_element(i).to_f64())
+                    .collect();
+                eprintln!(
+                    "  [legacy output] {id} shape={:?} vals={vals:?}",
+                    pool_t.shape()
+                );
+            }
+
+            // Pool eval for comparison.
+            eprintln!("=== Pool eval ===");
             let pool2 = TrackedPool::new(None);
-            let milli_results = mg.pool_eval(&input_refs, &pool2).expect("milli pool_eval");
-            for (id, t) in &milli_results {
-                let vals: Vec<f64> = (0..t.numel().min(16))
+            let pool_out = mg.pool_eval(&input_refs, &pool2).expect("pool_eval");
+            for (id, t) in &pool_out {
+                let vals: Vec<f64> = (0..t.numel().min(8))
                     .map(|i| t.read_element(i).to_f64())
                     .collect();
-                eprintln!("  milli output {id}: shape={:?} vals={vals:?}", t.shape());
+                eprintln!("  [pool output] {id} shape={:?} vals={vals:?}", t.shape());
             }
         }
 
