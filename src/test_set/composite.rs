@@ -89,6 +89,26 @@ mod tests {
         let input_refs: HashMap<GlobalId, &NumericTensorView<'_, crate::tensor_rank::DynRank>> =
             input_views.iter().map(|(&id, v)| (id, v)).collect();
 
+        // Dump the milli graph structure to understand the op chain.
+        {
+            let tensor_dtypes: HashMap<GlobalId, crate::dtype::DType> = input_refs
+                .iter()
+                .map(|(id, view)| (*id, view.dtype().to_legacy()))
+                .collect();
+            let mctx = crate::milli_graph::MilliLoweringContext::new(tensor_dtypes);
+            let mut rng2 = SmallRng::seed_from_u64(0); // matches eval_pool's WyRand default
+            let mg = op.get_milli_op_graph(&mctx, &mut rng2);
+            eprintln!("=== Milli graph: {} ops ===", mg.op_ordering().len());
+            let pool2 = TrackedPool::new(None);
+            let milli_results = mg.pool_eval(&input_refs, &pool2).expect("milli pool_eval");
+            for (id, t) in &milli_results {
+                let vals: Vec<f64> = (0..t.numel().min(16))
+                    .map(|i| t.read_element(i).to_f64())
+                    .collect();
+                eprintln!("  milli output {id}: shape={:?} vals={vals:?}", t.shape());
+            }
+        }
+
         let results = op.eval_pool(&input_refs, &pool).expect("eval_pool failed");
         let out = results.get(&out_id).expect("output not found");
 
