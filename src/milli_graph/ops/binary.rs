@@ -368,19 +368,10 @@ impl SimpleBinary {
         let base_id = ctx.nano.push_group(
             count,
             out_dt,
-            scalar_op.clone(),
+            scalar_op,
             sym_dims.clone(),
-            vec![input_a.clone(), input_b.clone()],
+            vec![input_a, input_b],
         );
-
-        if std::env::var("DEBUG_LOWER").is_ok() {
-            eprintln!(
-                "  [lower binary] {:?} out={out_id} base={base_id:?} count={count} a_base={:?} b_base={:?} input_a={input_a:?} input_b={input_b:?}",
-                self.which_op(),
-                a_map.base_id,
-                b_map.base_id,
-            );
-        }
 
         ctx.tensor_map.insert(
             out_id,

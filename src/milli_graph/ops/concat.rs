@@ -106,16 +106,6 @@ impl Concat {
             let Some(inp_map) = ctx.tensor_map.get(&inp_id).cloned() else {
                 return crate::milli_graph::ops::LowerResult::Unsupported;
             };
-            if std::env::var("DEBUG_LOWER").is_ok() {
-                eprintln!(
-                    "  [concat input] {inp_id} base={:?} count={} layout={:?} strides={:?} segments={}",
-                    inp_map.base_id,
-                    inp_map.count,
-                    inp_map.layout,
-                    inp_map.known_strides,
-                    inp_map.segments.len()
-                );
-            }
             let inp_known: Vec<u64> = inp_map
                 .layout
                 .iter()
@@ -179,30 +169,40 @@ impl Concat {
             }
         }
 
-        // Non-contiguous concat: zero-cost segmented view.
-        // Each input becomes a segment with its own base_id and strides.
-        let mut segments = Vec::with_capacity(input_maps.len());
+        // Non-contiguous concat: build segments.
+        // If any input is itself segmented (from a previous concat), expand
+        // its inner segments into the outer segment list so that
+        // atom_id_for_element can resolve all atoms in a single level.
+        let out_dt = crate::nano_graph::NanoLoweringContext::ndt(out_info);
+        let mut segments = Vec::new();
         let mut cum = 0u64;
         for (i, inp_map) in input_maps.iter().enumerate() {
-            segments.push(ConcatSegment {
-                concat_dim: concat_known_idx,
-                start: cum,
-                size: concat_dim_sizes[i],
-                base_id: inp_map.base_id,
-                known_strides: inp_map.known_strides.clone(),
-            });
+            if !inp_map.segments.is_empty() {
+                // Expand inner segments, shifting their concat-dim starts.
+                for inner_seg in &inp_map.segments {
+                    segments.push(ConcatSegment {
+                        concat_dim: concat_known_idx,
+                        start: cum + inner_seg.start,
+                        size: inner_seg.size,
+                        base_id: inner_seg.base_id,
+                        known_strides: inner_seg.known_strides.clone(),
+                    });
+                }
+            } else {
+                segments.push(ConcatSegment {
+                    concat_dim: concat_known_idx,
+                    start: cum,
+                    size: concat_dim_sizes[i],
+                    base_id: inp_map.base_id,
+                    known_strides: inp_map.known_strides.clone(),
+                });
+            }
             cum += concat_dim_sizes[i];
         }
 
         ctx.tensor_map.insert(
             out_id,
-            TensorAtomMap::segmented(
-                out_count,
-                crate::nano_graph::NanoLoweringContext::ndt(out_info),
-                out_layout,
-                out_sym_dims,
-                segments,
-            ),
+            TensorAtomMap::segmented(out_count, out_dt, out_layout, out_sym_dims, segments),
         );
         crate::milli_graph::ops::LowerResult::Lowered
     }

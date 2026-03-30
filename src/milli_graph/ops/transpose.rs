@@ -163,17 +163,53 @@ impl Transpose {
             transposed_layout[out_dim] = in_map.layout[in_dim].clone();
         }
 
-        ctx.tensor_map.insert(
-            out_id,
-            TensorAtomMap::simple(
-                in_map.base_id,
-                in_map.count,
-                NanoLoweringContext::ndt(out_info),
-                transposed_layout,
-                transposed_strides,
-                in_map.sym_dims.clone(),
-            ),
-        );
+        let out_dt = NanoLoweringContext::ndt(out_info);
+
+        if !in_map.segments.is_empty() {
+            // Segmented input (from Concat): propagate segments with permuted strides.
+            let permuted_segments: Vec<crate::nano_graph::lower::ConcatSegment> = in_map
+                .segments
+                .iter()
+                .map(|seg| {
+                    let mut new_strides = vec![0u64; full_perm.len()];
+                    for (out_dim, &in_dim) in full_perm.iter().enumerate() {
+                        new_strides[out_dim] = seg.known_strides[in_dim];
+                    }
+                    crate::nano_graph::lower::ConcatSegment {
+                        concat_dim: full_perm
+                            .iter()
+                            .position(|&d| d == seg.concat_dim)
+                            .unwrap_or(seg.concat_dim),
+                        start: seg.start,
+                        size: seg.size,
+                        base_id: seg.base_id,
+                        known_strides: new_strides,
+                    }
+                })
+                .collect();
+            ctx.tensor_map.insert(
+                out_id,
+                TensorAtomMap::segmented(
+                    in_map.count,
+                    out_dt,
+                    transposed_layout,
+                    in_map.sym_dims.clone(),
+                    permuted_segments,
+                ),
+            );
+        } else {
+            ctx.tensor_map.insert(
+                out_id,
+                TensorAtomMap::simple(
+                    in_map.base_id,
+                    in_map.count,
+                    out_dt,
+                    transposed_layout,
+                    transposed_strides,
+                    in_map.sym_dims.clone(),
+                ),
+            );
+        }
         crate::milli_graph::ops::LowerResult::Lowered
     }
 
