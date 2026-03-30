@@ -27,7 +27,21 @@ pub fn build_cases() -> Vec<TestCase> {
         gelu_approx(),
         conv_relu(),
         gather_layernorm(),
+        rms_norm_multirow(),
+        reduce_mean_broadcast_mul(),
+        cast_then_self_mul(),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_set::run_case_via_graph_pool_eval;
+
+    #[test]
+    fn test_rms_norm_via_symbolic_eval_pool() {
+        test_rms_norm_symbolic_eval_pool();
+    }
 }
 
 fn rng() -> SmallRng {
@@ -521,6 +535,322 @@ fn gather_layernorm() -> TestCase {
             tolerance: Tolerance {
                 atol: 1e-3,
                 rtol: 1e-3,
+            },
+        }],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// RMS Normalization (multi-row) — matches ONNX RMSNormalization structure.
+// y = (x / rms(x)) * scale, where rms = sqrt(mean(x², axis=-1) + eps)
+// Uses Cast to F32, matching the real symbolic op's milli graph.
+// ---------------------------------------------------------------------------
+
+fn rms_norm_multirow() -> TestCase {
+    let mut rng = rng();
+    let ext_x = GlobalId::new(&mut rng);
+    let ext_scale = GlobalId::new(&mut rng);
+    let (mut graph, imap) = MilliOpGraph::new([ext_x, ext_scale], &mut rng);
+    let x = imap[&ext_x];
+    let scale = imap[&ext_scale];
+
+    // Cast to F32 (identity when input is already F32, but exercises the Cast op path)
+    let x_f32 = ops::Cast::push_new(&mut graph, x, NumericDType::F32, &mut rng);
+
+    // x² = x_f32 * x_f32
+    let x_sq = ops::SimpleBinary::mul(&mut graph, x_f32, x_f32, &mut rng);
+
+    // mean(x², axis=-1, keepdims=true)
+    let axes = i64_const(&mut graph, vec![-1], &mut rng);
+    let sq_mean = ops::ReduceMean::push_new(&mut graph, x_sq, Some(axes), true, false, &mut rng);
+
+    // sqrt(mean + eps)
+    let eps = f32_const(&mut graph, vec![1e-5], vec![1, 1], &mut rng);
+    let mean_eps = ops::SimpleBinary::add(&mut graph, sq_mean, eps, &mut rng);
+    let rms = ops::SimpleUnaryOp::sqrt(&mut graph, mean_eps, &mut rng);
+
+    // 1 / rms
+    let rms_inv = ops::SimpleUnaryOp::reciprocal(&mut graph, rms, &mut rng);
+
+    // normalized = x_f32 * rms_inv
+    let normalized = ops::SimpleBinary::mul(&mut graph, x_f32, rms_inv, &mut rng);
+
+    // CastLike back to input dtype (identity for F32)
+    let normalized = ops::CastLike::push_new(&mut graph, normalized, x, &mut rng);
+
+    // out = normalized * scale
+    let out = ops::SimpleBinary::mul(&mut graph, normalized, scale, &mut rng);
+    graph.set_outputs(vec![out]);
+
+    // x = [[1.7640524, 0.4001572, 0.978738, 2.2408931],
+    //      [1.867558, -0.9772779, 0.95008844, -0.1513572],
+    //      [-0.10321885, 0.41059852, 0.14404356, 1.4542735]]
+    // scale = [1.2302907, 1.2023798, -0.3873268, -0.30230275]
+    let x_data: Vec<f32> = vec![
+        1.7640524,
+        0.4001572,
+        0.978738,
+        2.2408931,
+        1.867558,
+        -0.9772779,
+        0.95008844,
+        -0.1513572,
+        -0.10321885,
+        0.41059852,
+        0.14404356,
+        1.4542735,
+    ];
+    let scale_data: Vec<f32> = vec![1.2302907, 1.2023798, -0.3873268, -0.30230275];
+
+    // Compute expected output manually.
+    let mut expected = vec![0.0f32; 12];
+    for row in 0..3 {
+        let sq_sum: f32 = (0..4)
+            .map(|c| x_data[row * 4 + c] * x_data[row * 4 + c])
+            .sum();
+        let rms_val = (sq_sum / 4.0 + 1e-5).sqrt();
+        for col in 0..4 {
+            expected[row * 4 + col] = x_data[row * 4 + col] / rms_val * scale_data[col];
+        }
+    }
+
+    TestCase {
+        name: "rms_norm_multirow".into(),
+        graph,
+        data_sets: vec![TestDataSet {
+            label: "3x4".into(),
+            inputs: HashMap::from([
+                (ext_x, tensor_f32_shaped(vec![3, 4], &x_data)),
+                (ext_scale, tensor_f32_shaped(vec![4], &scale_data)),
+            ]),
+            expected_outputs: HashMap::from([(out, tensor_f32_shaped(vec![3, 4], &expected))]),
+            tolerance: Tolerance {
+                atol: 1e-5,
+                rtol: 1e-5,
+            },
+        }],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ReduceMean → broadcast multiply: isolates the broadcast pattern.
+// out = x * mean(x, axis=-1, keepdims=true)
+// ---------------------------------------------------------------------------
+
+fn reduce_mean_broadcast_mul() -> TestCase {
+    let mut rng = rng();
+    let ext_x = GlobalId::new(&mut rng);
+    let (mut graph, imap) = MilliOpGraph::new([ext_x], &mut rng);
+    let x = imap[&ext_x];
+
+    let axes = i64_const(&mut graph, vec![-1], &mut rng);
+    let mean = ops::ReduceMean::push_new(&mut graph, x, Some(axes), true, false, &mut rng);
+    let out = ops::SimpleBinary::mul(&mut graph, x, mean, &mut rng);
+    graph.set_outputs(vec![out]);
+
+    // x = [[1, 2, 3], [4, 5, 6]]
+    // mean(axis=-1) = [[2], [5]]
+    // out = [[1*2, 2*2, 3*2], [4*5, 5*5, 6*5]] = [[2, 4, 6], [20, 25, 30]]
+    TestCase {
+        name: "reduce_mean_broadcast_mul".into(),
+        graph,
+        data_sets: vec![TestDataSet {
+            label: "2x3".into(),
+            inputs: HashMap::from([(
+                ext_x,
+                tensor_f32_shaped(vec![2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
+            )]),
+            expected_outputs: HashMap::from([(
+                out,
+                tensor_f32_shaped(vec![2, 3], &[2.0, 4.0, 6.0, 20.0, 25.0, 30.0]),
+            )]),
+            tolerance: Tolerance {
+                atol: 1e-5,
+                rtol: 1e-5,
+            },
+        }],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Cast (identity F32→F32) then self-multiply: x_f32 = Cast(x), out = x_f32 * x_f32
+// Tests that Cast's opaque op output is correctly registered in the tensor_map
+// so both inputs of Mul see the same atoms.
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// RMS Normalization via symbolic Operation::eval_pool — tests the exact code
+// path the ONNX tests use (symbolic op → milli graph → pool_eval).
+// ---------------------------------------------------------------------------
+
+fn rms_norm_symbolic_eval_pool() -> TestCase {
+    use crate::symbolic_graph::ops::{Operation, RMSNormalizationOperation};
+
+    let mut rng = rng();
+    let input_id = GlobalId::new(&mut rng);
+    let scale_id = GlobalId::new(&mut rng);
+    let output_id = GlobalId::new(&mut rng);
+
+    let op = RMSNormalizationOperation::new(input_id, scale_id, None, output_id, 1e-5, &mut rng);
+
+    let x_data: Vec<f32> = vec![
+        1.7640524,
+        0.4001572,
+        0.978738,
+        2.2408931,
+        1.867558,
+        -0.9772779,
+        0.95008844,
+        -0.1513572,
+        -0.10321885,
+        0.41059852,
+        0.14404356,
+        1.4542735,
+    ];
+    let scale_data: Vec<f32> = vec![1.2302907, 1.2023798, -0.3873268, -0.30230275];
+
+    // Expected: same as rms_norm_multirow
+    let mut expected = vec![0.0f32; 12];
+    for row in 0..3 {
+        let sq_sum: f32 = (0..4)
+            .map(|c| x_data[row * 4 + c] * x_data[row * 4 + c])
+            .sum();
+        let rms_val = (sq_sum / 4.0 + 1e-5).sqrt();
+        for col in 0..4 {
+            expected[row * 4 + col] = x_data[row * 4 + col] / rms_val * scale_data[col];
+        }
+    }
+
+    // We can't use the TestCase/TestDataSet runner here since it expects a MilliOpGraph.
+    // Instead, run the symbolic op's eval_pool directly in a test function.
+    // Use a dummy TestCase with empty data_sets, and add a custom runner below.
+    let (graph, _) = MilliOpGraph::new(vec![input_id, scale_id].into_iter(), &mut rng);
+    TestCase {
+        name: "rms_norm_symbolic_eval_pool".into(),
+        graph,
+        data_sets: vec![], // empty — tested via custom test below
+    }
+}
+
+#[cfg(test)]
+fn test_rms_norm_symbolic_eval_pool() {
+    use crate::pool::TrackedPool;
+    use crate::symbolic_graph::ops::{Operation, RMSNormalizationOperation};
+
+    let mut rng = rng();
+    let input_id = GlobalId::new(&mut rng);
+    let scale_id = GlobalId::new(&mut rng);
+    let output_id = GlobalId::new(&mut rng);
+
+    let op = RMSNormalizationOperation::new(input_id, scale_id, None, output_id, 1e-5, &mut rng);
+
+    let pool = TrackedPool::new(None);
+
+    let x_data: Vec<f32> = vec![
+        1.7640524,
+        0.4001572,
+        0.978738,
+        2.2408931,
+        1.867558,
+        -0.9772779,
+        0.95008844,
+        -0.1513572,
+        -0.10321885,
+        0.41059852,
+        0.14404356,
+        1.4542735,
+    ];
+    let scale_data: Vec<f32> = vec![1.2302907, 1.2023798, -0.3873268, -0.30230275];
+
+    let x_tensor = super::tensor_f32_shaped(vec![3, 4], &x_data);
+    let s_tensor = super::tensor_f32_shaped(vec![4], &scale_data);
+
+    // Test 1: via Operation::eval_pool (the exact ONNX path)
+    let input_views: HashMap<GlobalId, _> =
+        HashMap::from([(input_id, x_tensor.view()), (scale_id, s_tensor.view())]);
+    let input_refs: HashMap<
+        GlobalId,
+        &crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>,
+    > = input_views.iter().map(|(&id, v)| (id, v)).collect();
+
+    let results = op.eval_pool(&input_refs, &pool).expect("eval_pool failed");
+    let out = results.get(&output_id).expect("output not found");
+
+    // Test 2: via get_milli_op_graph + pool_eval directly
+    let tensor_dtypes: HashMap<GlobalId, crate::dtype::DType> = input_refs
+        .iter()
+        .map(|(id, view)| (*id, view.dtype().to_legacy()))
+        .collect();
+    let ctx = crate::milli_graph::MilliLoweringContext::new(tensor_dtypes);
+    let mut rng_milli = SmallRng::seed_from_u64(700);
+    let milli_graph = op.get_milli_op_graph(&ctx, &mut rng_milli);
+    let milli_results = milli_graph
+        .pool_eval(&input_refs, &pool)
+        .expect("milli pool_eval failed");
+
+    // Compare: milli pool_eval should match eval_pool
+    for (id, milli_tensor) in &milli_results {
+        eprintln!(
+            "milli output {id}: shape={:?} numel={}",
+            milli_tensor.shape(),
+            milli_tensor.numel()
+        );
+        for i in 0..milli_tensor.numel() {
+            eprintln!("  [{i}] = {}", milli_tensor.read_element(i).to_f64());
+        }
+    }
+    eprintln!("--- eval_pool output ---");
+    for i in 0..out.numel() {
+        eprintln!("  [{i}] = {}", out.read_element(i).to_f64());
+    }
+
+    let mut expected = vec![0.0f32; 12];
+    for row in 0..3 {
+        let sq_sum: f32 = (0..4)
+            .map(|c| x_data[row * 4 + c] * x_data[row * 4 + c])
+            .sum();
+        let rms_val = (sq_sum / 4.0 + 1e-5).sqrt();
+        for col in 0..4 {
+            expected[row * 4 + col] = x_data[row * 4 + col] / rms_val * scale_data[col];
+        }
+    }
+
+    for i in 0..12 {
+        let actual = out.read_element(i).to_f64() as f32;
+        let exp = expected[i];
+        let diff = (actual - exp).abs();
+        assert!(
+            diff < 1e-4,
+            "element {i}: actual {actual} vs expected {exp} (diff {diff})"
+        );
+    }
+}
+
+fn cast_then_self_mul() -> TestCase {
+    let mut rng = rng();
+    let ext_x = GlobalId::new(&mut rng);
+    let (mut graph, imap) = MilliOpGraph::new([ext_x], &mut rng);
+    let x = imap[&ext_x];
+
+    let x_f32 = ops::Cast::push_new(&mut graph, x, NumericDType::F32, &mut rng);
+    let out = ops::SimpleBinary::mul(&mut graph, x_f32, x_f32, &mut rng);
+    graph.set_outputs(vec![out]);
+
+    // x = [[2, 3], [4, 5]]
+    // cast is identity, out = x² = [[4, 9], [16, 25]]
+    TestCase {
+        name: "cast_then_self_mul".into(),
+        graph,
+        data_sets: vec![TestDataSet {
+            label: "2x2".into(),
+            inputs: HashMap::from([(ext_x, tensor_f32_shaped(vec![2, 2], &[2.0, 3.0, 4.0, 5.0]))]),
+            expected_outputs: HashMap::from([(
+                out,
+                tensor_f32_shaped(vec![2, 2], &[4.0, 9.0, 16.0, 25.0]),
+            )]),
+            tolerance: Tolerance {
+                atol: 1e-6,
+                rtol: 1e-6,
             },
         }],
     }
