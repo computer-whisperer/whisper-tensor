@@ -1270,6 +1270,17 @@ impl MilliOp for Resize {
                 ),
             ));
         }
+        if !matches!(
+            self.keep_aspect_ratio_policy,
+            ResizeKeepAspectRatioPolicy::Stretch
+        ) {
+            return Err(crate::nano_graph::pool_eval::PoolEvalError::Unsupported(
+                format!(
+                    "Resize eval_new: keep_aspect_ratio_policy {:?} not implemented",
+                    self.keep_aspect_ratio_policy
+                ),
+            ));
+        }
 
         let data = &inputs[0];
         let input_shape = data.shape();

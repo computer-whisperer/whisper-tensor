@@ -1628,7 +1628,9 @@ impl<'a> NanoLoweringContext<'a> {
             );
             return crate::milli_graph::ops::LowerResult::Lowered;
         } else {
-            return crate::milli_graph::ops::LowerResult::Unsupported;
+            // No axes tensor and not noop → reduce all axes.
+            let in_rank = in_map.layout.len();
+            (0..in_rank as i64).collect()
         };
 
         let in_rank = in_map.layout.len();
