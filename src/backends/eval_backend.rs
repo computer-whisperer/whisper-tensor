@@ -106,7 +106,10 @@ pub fn run<T: SymbolicGraphObserver>(
     for (name, tensor) in inputs {
         if let Some(tensor_id) = tensors_by_name.get(&name) {
             let onnx_tensor = model.get_tensor_info(*tensor_id).unwrap();
-            observer.on_tensor_assigned(&[onnx_tensor.global_id()], &tensor, eval_backend);
+            {
+                let pool_t = crate::migration::bridge::legacy_to_new(&tensor);
+                observer.on_tensor_assigned(&[onnx_tensor.global_id()], &pool_t.view());
+            }
             active_tensors.insert(*tensor_id, tensor);
         }
     }
@@ -207,7 +210,7 @@ pub fn run<T: SymbolicGraphObserver>(
             })
             .map_err(|x| EvalRuntimeError::EvalError(name.clone(), x))?;
             let end_instant = Instant::now();
-            observer.on_op_executed(&[op.global_id()], start_instant, end_instant, eval_backend);
+            observer.on_op_executed(&[op.global_id()], start_instant, end_instant);
             let mut new_tensors = vec![];
             for (tensor_id, value) in outputs {
                 //assert_eq!(value.has_nan().unwrap(), false);
@@ -217,7 +220,10 @@ pub fn run<T: SymbolicGraphObserver>(
                 check_tensor_matches(&value, tensor_info)
                     .map_err(|x| EvalRuntimeError::EvalError(name.clone(), x))?;
 
-                observer.on_tensor_assigned(&[tensor_info.global_id()], &value, eval_backend);
+                {
+                    let pool_t = crate::migration::bridge::legacy_to_new(&value);
+                    observer.on_tensor_assigned(&[tensor_info.global_id()], &pool_t.view());
+                }
                 if let Some(x) = tensor_uses_left.get(&tensor_id)
                     && *x > 0
                 {

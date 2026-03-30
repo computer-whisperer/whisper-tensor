@@ -1063,14 +1063,17 @@ impl MilliOpGraph {
                 )?
                 .collect();
             let end_instant = Instant::now();
-            observer.on_node_executed(&[op.global_id()], start_instant, end_instant, backend);
+            observer.on_node_executed(&[op.global_id()], start_instant, end_instant);
             for (tensor_id, value) in out_vec {
                 let observed_tensor_id = self
                     .tensors
                     .get(&tensor_id)
                     .map(|tensor| tensor.global_id())
                     .unwrap_or(tensor_id);
-                observer.on_tensor_assigned(&[observed_tensor_id], &value, backend);
+                {
+                    let pool_t = crate::migration::bridge::legacy_to_new(&value);
+                    observer.on_tensor_assigned(&[observed_tensor_id], &pool_t.view());
+                }
                 intermediate_values.insert(tensor_id, value);
             }
         }

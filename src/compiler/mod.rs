@@ -88,13 +88,11 @@ pub trait CompiledProgramObserver {
         node_path: &[GlobalId],
         start_instant: Instant,
         end_instant: Instant,
-        backend: &mut EvalBackend,
     );
     fn on_tensor_assigned(
         &mut self,
         tensor_path: &[GlobalId],
-        tensor: &NumericTensor<DynRank>,
-        backend: &mut EvalBackend,
+        tensor: &crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>,
     );
     fn on_loading_weight(&mut self, path: &[GlobalId], weight_name: Option<String>);
     fn should_cancel(&mut self) -> bool {
@@ -122,20 +120,17 @@ impl<T: CompiledProgramObserver> SymbolicGraphObserver for SymbolicGraphObserver
         node_path: &[GlobalId],
         start_instant: Instant,
         end_instant: Instant,
-        backend: &mut EvalBackend,
     ) {
         self.observer
-            .on_op_executed(node_path, start_instant, end_instant, backend);
+            .on_op_executed(node_path, start_instant, end_instant);
     }
 
     fn on_tensor_assigned(
         &mut self,
         tensor_path: &[GlobalId],
-        tensor: &NumericTensor<DynRank>,
-        backend: &mut EvalBackend,
+        tensor: &crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>,
     ) {
-        self.observer
-            .on_tensor_assigned(tensor_path, tensor, backend);
+        self.observer.on_tensor_assigned(tensor_path, tensor);
     }
 
     fn on_loading_weight(&mut self, path: &[GlobalId], weight_name: Option<String>) {

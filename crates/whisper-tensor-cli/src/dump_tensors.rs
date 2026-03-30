@@ -104,23 +104,17 @@ fn parse_npy_shape(header: &str) -> Result<Vec<u64>, String> {
 // .npy writer
 // ---------------------------------------------------------------------------
 
-fn write_npy(path: &Path, tensor: &NumericTensor<DynRank>) -> Result<(), String> {
-    let nd = tensor
-        .to_ndarray()
-        .map_err(|e| format!("to_ndarray: {e}"))?;
-    let shape = nd.shape().to_vec();
+fn write_npy(
+    path: &Path,
+    tensor: &whisper_tensor::symbolic_graph::SharedPoolTensor,
+) -> Result<(), String> {
+    let view = tensor.view();
+    let shape: Vec<u64> = view.shape().to_vec();
 
-    // Cast to F32 for .npy compatibility, then extract raw f32 values
-    let nd = if nd.dtype() != DType::F32 {
-        nd.cast(DType::F32)
-            .map_err(|e| format!("cast to f32: {e}"))?
-    } else {
-        nd
-    };
-    let flat: Vec<f32> = nd
-        .flatten()
-        .try_to_vec()
-        .map_err(|e| format!("flatten to vec: {e}"))?;
+    // Extract f32 values for .npy compatibility.
+    let flat: Vec<f32> = (0..view.numel())
+        .map(|i| view.read_element(i).to_f64() as f32)
+        .collect();
 
     // Write .npy v1 format
     let shape_str = shape
@@ -166,7 +160,7 @@ pub struct TensorDumpObserver {
     /// GlobalId → ONNX name, for the tensors we want to capture.
     watched_ids: HashMap<GlobalId, String>,
     /// Captured tensor values, keyed by ONNX name.
-    pub captured: HashMap<String, NumericTensor<DynRank>>,
+    pub captured: HashMap<String, whisper_tensor::symbolic_graph::SharedPoolTensor>,
     call_count: usize,
 }
 
@@ -199,34 +193,31 @@ impl TensorDumpObserver {
 }
 
 impl SymbolicGraphObserver for TensorDumpObserver {
-    fn on_op_executed(&mut self, _: &[GlobalId], _: Instant, _: Instant, _: &mut EvalBackend) {}
+    fn on_op_executed(&mut self, _: &[GlobalId], _: Instant, _: Instant) {}
     fn on_tensor_assigned(
         &mut self,
         tensor_path: &[GlobalId],
-        tensor: &NumericTensor<DynRank>,
-        _backend: &mut EvalBackend,
+        tensor: &whisper_tensor::numeric_tensor::NumericTensorView<
+            '_,
+            whisper_tensor::tensor_rank::DynRank,
+        >,
     ) {
+        use whisper_tensor::symbolic_graph::SharedPoolTensor;
         if let Some(id) = tensor_path.last() {
             self.call_count += 1;
             if let Some(name) = self.watched_ids.get(id) {
-                let preview: Vec<f32> = tensor
-                    .to_ndarray()
-                    .and_then(|nd| Ok(nd.cast(DType::F32)?))
-                    .map(|nd: NDArrayNumericTensor<DynRank>| {
-                        let v: Result<Vec<f32>, _> = nd.flatten().try_into();
-                        v.unwrap_or_default()
-                    })
-                    .unwrap_or_default();
-                let n = preview.len().min(3);
+                let n = tensor.numel().min(3);
+                let preview: Vec<f64> = (0..n).map(|i| tensor.read_element(i).to_f64()).collect();
                 eprintln!(
                     "  captured '{}': shape={:?} dtype={:?} first{}={:.6?}",
                     name,
                     tensor.shape(),
                     tensor.dtype(),
                     n,
-                    &preview[..n]
+                    &preview
                 );
-                self.captured.insert(name.clone(), tensor.clone());
+                self.captured
+                    .insert(name.clone(), SharedPoolTensor::from_view(tensor));
             }
         }
     }

@@ -386,7 +386,6 @@ impl<'a, T: SuperGraphObserver> SymbolicGraphObserver for SymbolicGraphObserverW
         node_path: &[GlobalId],
         start_instant: Instant,
         end_instant: Instant,
-        _backend: &mut EvalBackend,
     ) {
         let node_path = self
             .path
@@ -401,8 +400,7 @@ impl<'a, T: SuperGraphObserver> SymbolicGraphObserver for SymbolicGraphObserverW
     fn on_tensor_assigned(
         &mut self,
         tensor_path: &[GlobalId],
-        tensor: &NumericTensor<DynRank>,
-        _backend: &mut EvalBackend,
+        tensor: &crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>,
     ) {
         use crate::symbolic_graph::SharedPoolTensor;
         let tensor_path = self
@@ -411,7 +409,7 @@ impl<'a, T: SuperGraphObserver> SymbolicGraphObserver for SymbolicGraphObserverW
             .into_iter()
             .chain(tensor_path.iter().cloned())
             .collect::<Vec<_>>();
-        let pool_tensor = SharedPoolTensor::from_legacy(tensor);
+        let pool_tensor = SharedPoolTensor::from_view(tensor);
         self.inner
             .on_tensor_assigned(tensor_path.as_slice(), &pool_tensor)
     }
@@ -437,7 +435,6 @@ impl<'a, T: SuperGraphObserver> CompiledProgramObserver for SymbolicGraphObserve
         node_path: &[GlobalId],
         start_instant: Instant,
         end_instant: Instant,
-        _backend: &mut EvalBackend,
     ) {
         let node_path = self
             .path
@@ -452,8 +449,7 @@ impl<'a, T: SuperGraphObserver> CompiledProgramObserver for SymbolicGraphObserve
     fn on_tensor_assigned(
         &mut self,
         tensor_path: &[GlobalId],
-        tensor: &NumericTensor<DynRank>,
-        _backend: &mut EvalBackend,
+        tensor: &crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>,
     ) {
         use crate::symbolic_graph::SharedPoolTensor;
         let tensor_path = self
@@ -462,7 +458,7 @@ impl<'a, T: SuperGraphObserver> CompiledProgramObserver for SymbolicGraphObserve
             .into_iter()
             .chain(tensor_path.iter().cloned())
             .collect::<Vec<_>>();
-        let pool_tensor = SharedPoolTensor::from_legacy(tensor);
+        let pool_tensor = SharedPoolTensor::from_view(tensor);
         self.inner
             .on_tensor_assigned(tensor_path.as_slice(), &pool_tensor)
     }
@@ -2220,8 +2216,7 @@ impl<'a, T: SuperGraphObserver> MilliOpGraphObserver for MilliOpGraphObserverWra
     fn on_tensor_assigned(
         &mut self,
         tensor_path: &[GlobalId],
-        tensor: &NumericTensor<DynRank>,
-        _backend: &mut EvalBackend,
+        tensor: &crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>,
     ) {
         use crate::symbolic_graph::SharedPoolTensor;
         let tensor_path = self
@@ -2230,7 +2225,7 @@ impl<'a, T: SuperGraphObserver> MilliOpGraphObserver for MilliOpGraphObserverWra
             .chain(tensor_path.iter())
             .copied()
             .collect::<Vec<_>>();
-        let pool_tensor = SharedPoolTensor::from_legacy(tensor);
+        let pool_tensor = SharedPoolTensor::from_view(tensor);
         self.inner
             .on_tensor_assigned(tensor_path.as_slice(), &pool_tensor);
     }
@@ -2240,7 +2235,6 @@ impl<'a, T: SuperGraphObserver> MilliOpGraphObserver for MilliOpGraphObserverWra
         node_path: &[GlobalId],
         start_instant: Instant,
         end_instant: Instant,
-        _backend: &mut EvalBackend,
     ) {
         let node_path = self
             .node_path

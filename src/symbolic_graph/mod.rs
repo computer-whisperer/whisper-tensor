@@ -189,6 +189,26 @@ impl SharedPoolTensor {
     pub fn to_legacy(&self) -> crate::migration::numeric_tensor::NumericTensor<DynRank> {
         crate::nano_graph::lower::new_numeric_to_legacy(&*self.0)
     }
+
+    /// Get a view of the underlying tensor.
+    pub fn view(&self) -> crate::numeric_tensor::NumericTensorView<'_, DynRank> {
+        self.0.view()
+    }
+
+    /// Create from a `NumericTensorView` by copying into SystemPool.
+    pub fn from_view(view: &crate::numeric_tensor::NumericTensorView<'_, DynRank>) -> Self {
+        use crate::numeric_tensor::{NumericTensor, TensorLayout};
+        use crate::pool::Pool;
+        let layout = TensorLayout::<DynRank>::row_major(view.shape().to_vec(), view.dtype());
+        let buf = crate::pool::SystemPool
+            .allocate(layout.buffer_size_bytes())
+            .expect("SystemPool allocation failed");
+        let mut tensor = NumericTensor::from_parts(buf, layout);
+        for i in 0..view.numel() {
+            tensor.write_element(i, view.read_element(i));
+        }
+        Self(std::sync::Arc::new(tensor))
+    }
 }
 
 impl From<crate::migration::numeric_tensor::NumericTensor<DynRank>> for SharedPoolTensor {
@@ -1378,10 +1398,20 @@ impl SymbolicGraph {
         pool: &'p P,
     ) -> Result<HashMap<GlobalId, crate::numeric_tensor::NumericTensor<'p, DynRank, P>>, EvalError>
     {
+        self.eval_pool_observed(inputs, pool, &mut ())
+    }
+
+    /// Pool-based op-by-op evaluation with observer.
+    pub fn eval_pool_observed<'p, P: crate::pool::Pool + 'p, T: observer::SymbolicGraphObserver>(
+        &self,
+        inputs: &HashMap<GlobalId, &crate::numeric_tensor::NumericTensorView<'_, DynRank>>,
+        pool: &'p P,
+        observer: &mut T,
+    ) -> Result<HashMap<GlobalId, crate::numeric_tensor::NumericTensor<'p, DynRank, P>>, EvalError>
+    {
         use crate::numeric_tensor::NumericTensor as PoolTensor;
 
-        // Seed active tensors from inputs. We need owned pool tensors, so copy
-        // the input views into pool-allocated buffers.
+        // Seed active tensors from inputs.
         let mut active_tensors: HashMap<GlobalId, PoolTensor<'p, DynRank, P>> = HashMap::new();
         for (&id, &view) in inputs {
             let layout = crate::numeric_tensor::TensorLayout::<DynRank>::row_major(
@@ -1428,8 +1458,14 @@ impl SymbolicGraph {
                     &crate::numeric_tensor::NumericTensorView<'_, DynRank>,
                 > = input_views.iter().map(|(&id, v)| (id, v)).collect();
 
+                let start_instant = std::time::Instant::now();
                 let outputs = op.eval_pool(&view_refs, pool)?;
+                let end_instant = std::time::Instant::now();
+                observer.on_op_executed(&[op.global_id()], start_instant, end_instant);
                 for (tensor_id, value) in outputs {
+                    if let Some(tensor_info) = self.get_tensor_info(tensor_id) {
+                        observer.on_tensor_assigned(&[tensor_info.global_id()], &value.view());
+                    }
                     active_tensors.insert(tensor_id, value);
                 }
                 ops_completed_now.push(*op_id);
