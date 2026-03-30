@@ -179,6 +179,10 @@ impl Concat {
         for (i, inp_map) in input_maps.iter().enumerate() {
             if !inp_map.segments.is_empty() {
                 // Expand inner segments, shifting their concat-dim starts.
+                // Only valid when inner and outer concat are on the same axis.
+                if inp_map.segments[0].concat_dim != concat_known_idx {
+                    return crate::milli_graph::ops::LowerResult::Unsupported;
+                }
                 for inner_seg in &inp_map.segments {
                     segments.push(ConcatSegment {
                         concat_dim: concat_known_idx,

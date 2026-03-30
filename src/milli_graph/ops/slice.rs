@@ -91,6 +91,11 @@ impl Slice {
         let Some(in_map) = ctx.tensor_map.get(&data_id).cloned() else {
             return crate::milli_graph::ops::LowerResult::Unsupported;
         };
+        // Segmented inputs (from Concat) are not supported — base_id addressing
+        // would skip segments. Fall back to opaque eval.
+        if !in_map.segments.is_empty() {
+            return crate::milli_graph::ops::LowerResult::Unsupported;
+        };
         let Some(out_info) = all_infos.get(&out_id) else {
             return crate::milli_graph::ops::LowerResult::Unsupported;
         };

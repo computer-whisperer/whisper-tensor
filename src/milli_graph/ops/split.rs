@@ -86,6 +86,9 @@ impl Split {
         let Some(in_map) = ctx.tensor_map.get(&in_id).cloned() else {
             return crate::milli_graph::ops::LowerResult::Unsupported;
         };
+        if !in_map.segments.is_empty() {
+            return crate::milli_graph::ops::LowerResult::Unsupported;
+        }
         let Some(out_info) = all_infos.get(&out_id) else {
             return crate::milli_graph::ops::LowerResult::Unsupported;
         };

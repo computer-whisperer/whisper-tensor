@@ -179,7 +179,7 @@ impl Transpose {
                         concat_dim: full_perm
                             .iter()
                             .position(|&d| d == seg.concat_dim)
-                            .unwrap_or(seg.concat_dim),
+                            .expect("concat_dim must appear in transpose permutation"),
                         start: seg.start,
                         size: seg.size,
                         base_id: seg.base_id,
