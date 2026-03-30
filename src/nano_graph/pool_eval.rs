@@ -234,28 +234,13 @@ pub fn pool_eval<'p, P: Pool + 'p>(
                         lookup_atom_dtype(src_id, graph, &group_buffers, &input_buffers);
                     let cast_raw = val_dtype.cast_raw(val, *compute_dtype);
 
-                    acc_raw = match kind {
-                        ReduceKind::Sum => {
-                            let sum = compute_dtype.decode_to_f64(acc_raw)
-                                + compute_dtype.decode_to_f64(cast_raw);
-                            compute_dtype.encode_from_f64(sum)
-                        }
-                        ReduceKind::Max => {
-                            let a = compute_dtype.decode_to_f64(acc_raw);
-                            let b = compute_dtype.decode_to_f64(cast_raw);
-                            compute_dtype.encode_from_f64(a.max(b))
-                        }
-                        ReduceKind::Min => {
-                            let a = compute_dtype.decode_to_f64(acc_raw);
-                            let b = compute_dtype.decode_to_f64(cast_raw);
-                            compute_dtype.encode_from_f64(a.min(b))
-                        }
-                        ReduceKind::Prod => {
-                            let prod = compute_dtype.decode_to_f64(acc_raw)
-                                * compute_dtype.decode_to_f64(cast_raw);
-                            compute_dtype.encode_from_f64(prod)
-                        }
+                    let binop = match kind {
+                        ReduceKind::Sum => ScalarBinOp::Add,
+                        ReduceKind::Max => ScalarBinOp::Max,
+                        ReduceKind::Min => ScalarBinOp::Min,
+                        ReduceKind::Prod => ScalarBinOp::Mul,
                     };
+                    acc_raw = eval_binop(&binop, acc_raw, cast_raw, *compute_dtype);
                 }
                 let result = compute_dtype.cast_raw(acc_raw, output_dtype);
                 write_atom(&mut tensor, i as usize, result, output_dtype);

@@ -269,8 +269,8 @@ impl MilliOp for GatherElements {
         //
         // Step 1: stride literal
         let stride_lit = ctx.nano.push_atom(
-            NumericDType::F32,
-            ScalarOp::Literal(NumericScalar::from_f32(cols as f32)),
+            NumericDType::I64,
+            ScalarOp::Literal(NumericScalar::from_i64(cols as i64)),
             vec![],
             vec![],
         );
@@ -278,23 +278,23 @@ impl MilliOp for GatherElements {
         // Normalize negative indices: normalized = index + (index < 0) * axis_len
         let axis_len = data_known[0]; // rows for axis=0
         let axis_len_lit = ctx.nano.push_atom(
-            NumericDType::F32,
-            ScalarOp::Literal(NumericScalar::from_f32(axis_len as f32)),
+            NumericDType::I64,
+            ScalarOp::Literal(NumericScalar::from_i64(axis_len as i64)),
             vec![],
             vec![],
         );
         let zero_lit = ctx.nano.push_atom(
-            NumericDType::F32,
-            ScalarOp::Literal(NumericScalar::from_f32(0.0)),
+            NumericDType::I64,
+            ScalarOp::Literal(NumericScalar::from_i64(0)),
             vec![],
             vec![],
         );
         let cmp_base = ctx.nano.push_group(
             out_count,
-            NumericDType::F32,
+            NumericDType::I64,
             ScalarOp::Binary {
                 op: ScalarBinOp::Less,
-                compute_dtype: NumericDType::F32,
+                compute_dtype: NumericDType::I64,
             },
             out_sym_dims.clone(),
             vec![
@@ -304,10 +304,10 @@ impl MilliOp for GatherElements {
         );
         let offset_base = ctx.nano.push_group(
             out_count,
-            NumericDType::F32,
+            NumericDType::I64,
             ScalarOp::Binary {
                 op: ScalarBinOp::Mul,
-                compute_dtype: NumericDType::F32,
+                compute_dtype: NumericDType::I64,
             },
             out_sym_dims.clone(),
             vec![
@@ -317,10 +317,10 @@ impl MilliOp for GatherElements {
         );
         let norm_base = ctx.nano.push_group(
             out_count,
-            NumericDType::F32,
+            NumericDType::I64,
             ScalarOp::Binary {
                 op: ScalarBinOp::Add,
-                compute_dtype: NumericDType::F32,
+                compute_dtype: NumericDType::I64,
             },
             out_sym_dims.clone(),
             vec![
@@ -331,15 +331,15 @@ impl MilliOp for GatherElements {
 
         // Column offset literals: 0..cols
         let col_lit_base = ctx.nano.push_atom(
-            NumericDType::F32,
-            ScalarOp::Literal(NumericScalar::from_f32(0.0)),
+            NumericDType::I64,
+            ScalarOp::Literal(NumericScalar::from_i64(0)),
             vec![],
             vec![],
         );
         for j in 1..cols {
             ctx.nano.push_atom(
-                NumericDType::F32,
-                ScalarOp::Literal(NumericScalar::from_f32(j as f32)),
+                NumericDType::I64,
+                ScalarOp::Literal(NumericScalar::from_i64(j as i64)),
                 vec![],
                 vec![],
             );
@@ -348,10 +348,10 @@ impl MilliOp for GatherElements {
         // Mul group: normalized_index[i] * cols
         let mul_base = ctx.nano.push_group(
             out_count,
-            NumericDType::F32,
+            NumericDType::I64,
             ScalarOp::Binary {
                 op: ScalarBinOp::Mul,
-                compute_dtype: NumericDType::F32,
+                compute_dtype: NumericDType::I64,
             },
             out_sym_dims.clone(),
             vec![
@@ -363,10 +363,10 @@ impl MilliOp for GatherElements {
         // Add group: (indices[i] * cols) + (i % cols)
         let add_base = ctx.nano.push_group(
             out_count,
-            NumericDType::F32,
+            NumericDType::I64,
             ScalarOp::Binary {
                 op: ScalarBinOp::Add,
-                compute_dtype: NumericDType::F32,
+                compute_dtype: NumericDType::I64,
             },
             out_sym_dims.clone(),
             vec![

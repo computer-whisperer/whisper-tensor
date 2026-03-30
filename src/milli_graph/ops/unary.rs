@@ -667,7 +667,9 @@ impl ClampMin {
         let dt = NanoLoweringContext::ndt(out_info);
         let min_id = ctx.nano.push_atom(
             dt,
-            ScalarOp::Literal(crate::numeric_scalar::NumericScalar::from_f32(min_val)),
+            ScalarOp::Literal(
+                crate::numeric_scalar::NumericScalar::from_f64(min_val as f64).cast_to(dt),
+            ),
             vec![],
             vec![],
         );

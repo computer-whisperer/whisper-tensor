@@ -392,7 +392,6 @@ impl Conv {
         use crate::nano_graph::lower::TensorAtomMap;
         use crate::nano_graph::ops::{ReduceKind, ScalarBinOp, ScalarOp};
         use crate::nano_graph::pattern::InputRef;
-        use crate::numeric_dtype::NumericDType;
         use crate::numeric_scalar::NumericScalar;
 
         let all_infos = ctx.all_infos;
@@ -574,8 +573,8 @@ impl Conv {
                 if top_count > 0 {
                     let b = ctx.nano.push_group(
                         top_count,
-                        NumericDType::F32,
-                        ScalarOp::Literal(NumericScalar::from_f32(0.0)),
+                        original_dtype,
+                        ScalarOp::Literal(NumericScalar::zero(original_dtype)),
                         sym_dims.clone(),
                         vec![],
                     );
@@ -592,7 +591,7 @@ impl Conv {
                         .offset(in_c_offset + ih_idx as u64 * in_h_stride);
                     let b = ctx.nano.push_group(
                         iw as u64,
-                        NumericDType::F32,
+                        original_dtype,
                         ScalarOp::Identity,
                         sym_dims.clone(),
                         vec![InputRef::affine(in_row_base, in_w_stride)],
@@ -611,8 +610,8 @@ impl Conv {
                     if inter_count > 0 {
                         ctx.nano.push_group(
                             inter_count,
-                            NumericDType::F32,
-                            ScalarOp::Literal(NumericScalar::from_f32(0.0)),
+                            original_dtype,
+                            ScalarOp::Literal(NumericScalar::zero(original_dtype)),
                             sym_dims.clone(),
                             vec![],
                         );
@@ -623,7 +622,6 @@ impl Conv {
             padded_base = first_base.unwrap();
         } else {
             // No padding: reference input atoms directly.
-            // The Mul compute_dtype=F32 handles any dtype cast.
             padded_base = in_map.base_id;
         }
 
@@ -678,10 +676,10 @@ impl Conv {
 
                         let b = ctx.nano.push_group(
                             s,
-                            NumericDType::F32,
+                            original_dtype,
                             ScalarOp::Binary {
                                 op: ScalarBinOp::Mul,
-                                compute_dtype: NumericDType::F32,
+                                compute_dtype: original_dtype,
                             },
                             out_sym_dims.clone(),
                             vec![InputRef::Broadcast(w_atom), input_ref],
@@ -697,22 +695,17 @@ impl Conv {
         }
 
         // --- Phase 2b: Push ALL reduce groups (contiguous) ---
-        let reduce_dtype = if self.bias.is_some() {
-            NumericDType::F32
-        } else {
-            original_dtype
-        };
         let mut first_reduce_base = None;
 
         for co in 0..c_out as usize {
             let b = ctx.nano.push_group(
                 s,
-                reduce_dtype,
+                original_dtype,
                 ScalarOp::Reduce {
                     kind: ReduceKind::Sum,
                     reduce_count: k,
                     reduce_stride: s as i64,
-                    compute_dtype: NumericDType::F32,
+                    compute_dtype: original_dtype,
                 },
                 out_sym_dims.clone(),
                 vec![InputRef::affine(mul_bases[co], 1)],
@@ -739,7 +732,7 @@ impl Conv {
                     original_dtype,
                     ScalarOp::Binary {
                         op: ScalarBinOp::Add,
-                        compute_dtype: NumericDType::F32,
+                        compute_dtype: original_dtype,
                     },
                     out_sym_dims.clone(),
                     vec![

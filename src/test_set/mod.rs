@@ -10,6 +10,7 @@
 pub mod cast;
 pub mod composite;
 pub mod conv;
+pub mod dtype_discipline;
 pub mod elementwise;
 pub mod matmul;
 pub mod opaque_ops;
@@ -268,6 +269,7 @@ pub fn build_test_set() -> Vec<TestCase> {
     cases.extend(pad::build_cases());
     cases.extend(structural::build_cases());
     cases.extend(opaque_ops::build_cases());
+    cases.extend(dtype_discipline::build_cases());
     cases
 }
 

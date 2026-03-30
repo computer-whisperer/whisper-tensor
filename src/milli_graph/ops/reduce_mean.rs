@@ -150,10 +150,10 @@ impl ReduceMean {
             return reduce_result; // ReduceSum unsupported, fall to opaque.
         };
 
-        // Divide by extent (not multiply by reciprocal — they differ in f32 rounding).
+        // Divide by extent (not multiply by reciprocal — they differ in rounding).
         let extent_lit = ctx.nano.push_atom(
             compute_dt,
-            ScalarOp::Literal(NumericScalar::from_f32(extent as f32)),
+            ScalarOp::Literal(NumericScalar::from_f64(extent as f64).cast_to(compute_dt)),
             vec![],
             vec![],
         );
