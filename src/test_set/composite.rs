@@ -42,6 +42,80 @@ mod tests {
     fn test_rms_norm_via_symbolic_eval_pool() {
         test_rms_norm_symbolic_eval_pool();
     }
+
+    #[test]
+    fn test_rotary_embedding_via_symbolic_eval_pool() {
+        use crate::numeric_tensor::NumericTensorView;
+        use crate::pool::TrackedPool;
+        use crate::symbolic_graph::ops::{Operation, RotaryEmbeddingOperation};
+
+        let mut rng = rng();
+        let data_id = GlobalId::new(&mut rng);
+        let cos_id = GlobalId::new(&mut rng);
+        let sin_id = GlobalId::new(&mut rng);
+        let pos_id = GlobalId::new(&mut rng);
+        let out_id = GlobalId::new(&mut rng);
+
+        let op = RotaryEmbeddingOperation::new(
+            data_id,
+            cos_id,
+            sin_id,
+            Some(pos_id),
+            out_id,
+            false, // not interleaved
+            None,  // no num_heads (4D input)
+            0,     // full rotation
+            &mut rng,
+        );
+
+        let pool = TrackedPool::new(None);
+
+        // Minimal test: [B=1, H=1, S=1, D=4], cos/sin cache [2, 2], pos_ids [1, 1]
+        // x1 = data[:2] = [1, 2], x2 = data[2:] = [3, 4]
+        // cos = cos_cache[pos[0,0]] = cos_cache[1], sin = sin_cache[1]
+        // real = cos*x1 - sin*x2, imag = sin*x1 + cos*x2
+        // output = [real[0], real[1], imag[0], imag[1]]
+        let data = super::tensor_f32_shaped(vec![1, 1, 1, 4], &[1.0, 2.0, 3.0, 4.0]);
+        let cos_cache = super::tensor_f32_shaped(vec![2, 2], &[0.5, 0.6, 0.7, 0.8]);
+        let sin_cache = super::tensor_f32_shaped(vec![2, 2], &[0.1, 0.2, 0.3, 0.4]);
+        let pos_ids = crate::test_set::tensor_i64_shaped(vec![1, 1], &[1]);
+
+        let input_views: HashMap<GlobalId, _> = HashMap::from([
+            (data_id, data.view()),
+            (cos_id, cos_cache.view()),
+            (sin_id, sin_cache.view()),
+            (pos_id, pos_ids.view()),
+        ]);
+        let input_refs: HashMap<GlobalId, &NumericTensorView<'_, crate::tensor_rank::DynRank>> =
+            input_views.iter().map(|(&id, v)| (id, v)).collect();
+
+        let results = op.eval_pool(&input_refs, &pool).expect("eval_pool failed");
+        let out = results.get(&out_id).expect("output not found");
+
+        // After transpose [B,H,S,D] -> [B,S,H,D]: still [1,1,1,4]
+        // x1 = [1, 2], x2 = [3, 4]
+        // cos_cache[1] = [0.7, 0.8], sin_cache[1] = [0.3, 0.4]
+        // real = [0.7*1 - 0.3*3, 0.8*2 - 0.4*4] = [0.7-0.9, 1.6-1.6] = [-0.2, 0.0]
+        // imag = [0.3*1 + 0.7*3, 0.4*2 + 0.8*4] = [0.3+2.1, 0.8+3.2] = [2.4, 4.0]
+        // output (pre-transpose) = [-0.2, 0.0, 2.4, 4.0]
+        // After transpose back [B,S,H,D] -> [B,H,S,D]: still [1,1,1,4]
+        let expected: Vec<f32> = vec![-0.2, 0.0, 2.4, 4.0];
+
+        eprintln!("rotary_embedding output ({} elements):", out.numel());
+        for i in 0..out.numel() {
+            let actual = out.read_element(i).to_f64();
+            eprintln!("  [{i}] actual={actual:.6} expected={:.6}", expected[i]);
+        }
+
+        for (i, &exp) in expected.iter().enumerate() {
+            let actual = out.read_element(i).to_f64() as f32;
+            let diff = (actual - exp).abs();
+            assert!(
+                diff < 1e-4,
+                "element {i}: actual {actual} vs expected {exp} (diff {diff})"
+            );
+        }
+    }
 }
 
 fn rng() -> SmallRng {
