@@ -183,57 +183,6 @@ impl StoredTensor {
         Some(NewTensor::from_parts(buf, layout))
     }
 
-    pub fn to_numeric(&self) -> NumericTensor<DynRank> {
-        match self {
-            StoredTensor::Inline(src) => {
-                // Bridge to legacy: read elements from new-type tensor.
-                let legacy_dt = src.dtype().to_legacy();
-                let shape = src.shape().clone();
-                let numel = src.numel();
-                // Build legacy via element extraction.
-                let mut vals = Vec::with_capacity(numel);
-                for i in 0..numel {
-                    vals.push(src.read_element(i).to_f64());
-                }
-                // Create f64 ndarray then cast to target dtype.
-                let nd = crate::backends::ndarray_backend::NDArrayNumericTensor::from_vec_shape(
-                    vals, &shape,
-                )
-                .expect("build legacy from inline");
-                let mut backend = crate::backends::eval_backend::EvalBackend::NDArray;
-                let cast = NumericTensor::NDArray(nd)
-                    .cast(legacy_dt, &mut backend)
-                    .expect("cast inline to legacy dtype");
-                cast
-            }
-            StoredTensor::Numeric(tensor) => tensor.clone(),
-            StoredTensor::ExternalBinary { .. }
-            | StoredTensor::ExternalPth { .. }
-            | StoredTensor::ExternalSafetensors { .. }
-            | StoredTensor::ExternalGGUF { .. } => {
-                // Legacy path: load raw bytes, build legacy tensor via dtype bridge.
-                let raw = self
-                    .load_raw_bytes()
-                    .expect("load raw bytes for to_numeric");
-                let legacy_dtype = self.dtype();
-                let shape = self.shape();
-
-                if let Some(packed_format) = legacy_dtype.packed_format() {
-                    let packed = PackedTensor::new(Arc::from(raw), shape, packed_format);
-                    NumericTensor::Packed(packed)
-                } else {
-                    let nd = crate::backends::ndarray_backend::NDArrayNumericTensor::from_raw_data(
-                        &raw,
-                        legacy_dtype,
-                        shape,
-                    )
-                    .expect("decode external tensor");
-                    NumericTensor::NDArray(nd)
-                }
-            }
-        }
-    }
-
     pub fn shape(&self) -> Vec<u64> {
         match self {
             StoredTensor::Inline(t) => t.shape().clone(),

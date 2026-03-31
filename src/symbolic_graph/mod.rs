@@ -243,19 +243,6 @@ pub enum StoredOrNotTensor {
 }
 
 impl StoredOrNotTensor {
-    pub fn get_tensor(&self, tensor_store: &TensorStore) -> NumericTensor<DynRank> {
-        match self {
-            StoredOrNotTensor::Stored(id) => tensor_store.get_tensor(*id).unwrap().to_numeric(),
-            StoredOrNotTensor::Inline(shared) => {
-                let info = crate::tensor_info::TensorInfo::from_view(
-                    &shared.0.view(),
-                    &crate::pool::SystemPool,
-                );
-                info.as_numeric()
-                    .expect("inline tensor must bridge to legacy")
-            }
-        }
-    }
     pub fn shape(&self, tensor_store: &TensorStore) -> Vec<u64> {
         match self {
             StoredOrNotTensor::Stored(id) => tensor_store.get_tensor(*id).unwrap().shape(),
@@ -409,42 +396,6 @@ impl SymbolicGraph {
 
     pub fn get_tensor_info(&self, tensor_id: GlobalId) -> Option<&ONNXTensorInfo> {
         self.tensors.get(&tensor_id)
-    }
-
-    pub fn get_initialized_tensors(
-        &self,
-        tensor_store: &TensorStore,
-    ) -> HashMap<GlobalId, NumericTensor<DynRank>> {
-        self.get_initialized_tensors_with_observer(tensor_store, &mut ())
-    }
-
-    pub fn get_initialized_tensors_with_observer<T: SymbolicGraphObserver>(
-        &self,
-        tensor_store: &TensorStore,
-        observer: &mut T,
-    ) -> HashMap<GlobalId, NumericTensor<DynRank>> {
-        let mut out = HashMap::new();
-
-        for (key, tensor) in &self.tensors {
-            if observer.should_cancel() {
-                break;
-            }
-            match &tensor.tensor_type {
-                TensorType::Constant(x) => {
-                    let label = x.loading_label(tensor_store).or(tensor.onnx_name.clone());
-                    observer.on_loading_weight(&[*key], label);
-                    out.insert(*key, x.get_tensor(tensor_store));
-                }
-                TensorType::Input(Some(x)) => {
-                    let label = x.loading_label(tensor_store).or(tensor.onnx_name.clone());
-                    observer.on_loading_weight(&[*key], label);
-                    out.insert(*key, x.get_tensor(tensor_store));
-                }
-                _ => {}
-            }
-        }
-
-        out
     }
 
     fn populate(
@@ -3369,8 +3320,7 @@ mod tests {
     /// Helper: load an ONNX node test, evaluate via generate_milli_graph + pool_eval,
     /// compare against ONNX expected outputs.
     fn test_equivalence_for_onnx_dir(dir: &str) {
-        use crate::pool::SystemPool;
-        use crate::symbolic_graph::SharedPoolTensor;
+        use crate::pool::{Pool, SystemPool};
 
         static POOL: SystemPool = SystemPool;
 
@@ -3432,32 +3382,39 @@ mod tests {
             }
         }
 
-        // Add initialized tensors (weights/constants) via legacy bridge.
-        let initialized = graph.get_initialized_tensors(&tensor_store);
-        for (id, legacy_tensor) in &initialized {
-            let shared = SharedPoolTensor::from_legacy(legacy_tensor);
-            // SAFETY: SystemPool is 'static.
-            let pool_tensor: crate::numeric_tensor::NumericTensor<
-                'static,
-                crate::tensor_rank::DynRank,
-                SystemPool,
-            > = unsafe {
-                std::mem::transmute(std::sync::Arc::try_unwrap(shared.0).unwrap_or_else(|arc| {
-                    // Clone the data if Arc has multiple refs
-                    let view = arc.view();
-                    let mut t = crate::numeric_tensor::NumericTensor::zeros(
-                        view.shape().to_vec(),
-                        view.dtype(),
-                        &POOL,
-                    )
-                    .unwrap();
-                    for i in 0..view.numel() {
-                        t.write_element(i, view.read_element(i));
-                    }
-                    t
-                }))
+        // Load initialized tensors (weights/constants) directly as pool tensors.
+        for (&tensor_id, tensor_meta) in &graph.tensors {
+            let stored_ref = match &tensor_meta.tensor_type {
+                TensorType::Constant(s) | TensorType::Input(Some(s)) => Some(s),
+                _ => None,
             };
-            pool_inputs.insert(*id, pool_tensor);
+            if let Some(stored_ref) = stored_ref {
+                match stored_ref {
+                    StoredOrNotTensor::Stored(store_id) => {
+                        if let Some(stored) = tensor_store.get_tensor(*store_id) {
+                            if let Some(t) = stored.to_pool_tensor(&POOL) {
+                                pool_inputs.insert(tensor_id, t);
+                            }
+                        }
+                    }
+                    StoredOrNotTensor::Inline(shared) => {
+                        let src = &*shared.0;
+                        let layout = crate::numeric_tensor::TensorLayout::<
+                            crate::tensor_rank::DynRank,
+                        >::row_major(
+                            src.shape().clone(), src.dtype()
+                        );
+                        if let Ok(buf) = POOL.allocate(layout.buffer_size_bytes()) {
+                            let mut t =
+                                crate::numeric_tensor::NumericTensor::from_parts(buf, layout);
+                            for i in 0..src.numel() {
+                                t.write_element(i, src.read_element(i));
+                            }
+                            pool_inputs.insert(tensor_id, t);
+                        }
+                    }
+                }
+            }
         }
 
         // Evaluate via generate_milli_graph + pool_eval.
