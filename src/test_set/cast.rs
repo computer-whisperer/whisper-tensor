@@ -219,15 +219,21 @@ fn cast_f32_to_f8e5m2_non_saturating() -> TestCase {
     TestCase {
         name: "cast_f32_to_f8e5m2_non_saturating".to_string(),
         graph,
-        data_sets: vec![
-            cast_data_set(
-                "overflow_to_inf",
-                &ids,
-                tensor_f32(&[1e6, f32::INFINITY, -1e6, f32::NEG_INFINITY]),
-                tensor_from_f64(dt, &[f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY]),
-                Tolerance::EXACT,
+        data_sets: vec![cast_data_set(
+            "overflow_to_inf",
+            &ids,
+            tensor_f32(&[1e6, f32::INFINITY, -1e6, f32::NEG_INFINITY]),
+            tensor_from_f64(
+                dt,
+                &[
+                    f64::INFINITY,
+                    f64::INFINITY,
+                    f64::NEG_INFINITY,
+                    f64::NEG_INFINITY,
+                ],
             ),
-        ],
+            Tolerance::EXACT,
+        )],
     }
 }
 

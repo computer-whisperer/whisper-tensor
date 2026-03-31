@@ -251,8 +251,7 @@ fn validate_onnx_model(
         load_golden_tensors(golden_path, &manifest.outputs, &pool).expect("load golden outputs");
 
     let mut rng = rand::rng();
-    let model =
-        Model::new_from_onnx(onnx_data, &mut rng, base_dir).expect("model loads from ONNX");
+    let model = Model::new_from_onnx(onnx_data, &mut rng, base_dir).expect("model loads from ONNX");
 
     // Prepare inputs: golden snapshot values override model defaults.
     // Inputs NOT in the golden snapshot (e.g., state tensors) get zero-filled.

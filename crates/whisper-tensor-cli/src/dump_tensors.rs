@@ -16,8 +16,8 @@ use whisper_tensor::model::Model;
 use whisper_tensor::numeric_dtype::NumericDType;
 use whisper_tensor::numeric_tensor::{NumericTensorView, TensorLayout};
 use whisper_tensor::pool::{Pool, SystemPool};
-use whisper_tensor::symbolic_graph::observer::SymbolicGraphObserver;
 use whisper_tensor::symbolic_graph::SharedPoolTensor;
+use whisper_tensor::symbolic_graph::observer::SymbolicGraphObserver;
 use whisper_tensor::tensor_rank::DynRank;
 use whisper_tensor::{npy, npy::write_npy_file};
 

@@ -158,9 +158,7 @@ fn parse_dtype(header: &str) -> Result<NumericDType, String> {
         .find(quote_char)
         .ok_or("No opening quote for descr")?;
     let inner = &after_colon[first_quote + 1..];
-    let end_quote = inner
-        .find(quote_char)
-        .ok_or("No closing quote for descr")?;
+    let end_quote = inner.find(quote_char).ok_or("No closing quote for descr")?;
     let descr = &inner[..end_quote];
 
     // Strip endianness prefix

@@ -391,12 +391,8 @@ impl MilliOp for SimpleUnaryOp {
                 )
             }
             _ => {
-                // Same dtype, same shape — reconstruct from first_element + rank.
-                TensorInfo::new_from_first_element_and_rank(
-                    input_info.first_element(),
-                    input_info.rank(),
-                    symbolic_resolver,
-                )
+                // Same dtype, same shape — clone input info for shape propagation.
+                input_info.clone_with_pool(pool)
             }
         };
 

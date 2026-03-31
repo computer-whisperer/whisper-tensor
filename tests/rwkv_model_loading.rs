@@ -125,12 +125,16 @@ fn rwkv01b_single_step_runs_shape_sanity() {
     };
 
     let owned_inputs = build_zero_inputs(&model);
-    let views: HashMap<String, NumericTensorView<'_, DynRank>> =
-        owned_inputs.iter().map(|(n, t)| (n.clone(), t.view())).collect();
+    let views: HashMap<String, NumericTensorView<'_, DynRank>> = owned_inputs
+        .iter()
+        .map(|(n, t)| (n.clone(), t.view()))
+        .collect();
     let view_refs: HashMap<String, &NumericTensorView<'_, DynRank>> =
         views.iter().map(|(n, v)| (n.clone(), v)).collect();
 
-    let outputs = model.eval_pool(view_refs, &SystemPool).expect("eval_pool ok");
+    let outputs = model
+        .eval_pool(view_refs, &SystemPool)
+        .expect("eval_pool ok");
     assert!(!outputs.is_empty(), "has outputs");
 }
 
@@ -170,12 +174,16 @@ fn rwkv01b_model_loads_with_binfile() {
 
     // Verify we can run eval (which loads tensors from the store internally).
     let owned_inputs = build_zero_inputs(&model);
-    let views: HashMap<String, NumericTensorView<'_, DynRank>> =
-        owned_inputs.iter().map(|(n, t)| (n.clone(), t.view())).collect();
+    let views: HashMap<String, NumericTensorView<'_, DynRank>> = owned_inputs
+        .iter()
+        .map(|(n, t)| (n.clone(), t.view()))
+        .collect();
     let view_refs: HashMap<String, &NumericTensorView<'_, DynRank>> =
         views.iter().map(|(n, v)| (n.clone(), v)).collect();
 
-    let outputs = model.eval_pool(view_refs, &SystemPool).expect("eval_pool ok");
+    let outputs = model
+        .eval_pool(view_refs, &SystemPool)
+        .expect("eval_pool ok");
     assert!(!outputs.is_empty(), "has outputs");
 
     std::env::set_current_dir(old_cwd).expect("restore cwd");

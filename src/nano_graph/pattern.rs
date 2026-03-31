@@ -995,7 +995,10 @@ impl NanoGraph {
             // Input count check.
             let expected_inputs = match &group.op {
                 ScalarOp::Literal(_) => 0,
-                ScalarOp::Unary { .. } | ScalarOp::Identity | ScalarOp::Cast { .. } | ScalarOp::IndirectLoad { .. } => 1,
+                ScalarOp::Unary { .. }
+                | ScalarOp::Identity
+                | ScalarOp::Cast { .. }
+                | ScalarOp::IndirectLoad { .. } => 1,
                 ScalarOp::Binary { .. } => 2,
                 ScalarOp::Select => 3,
                 ScalarOp::Reduce { .. } => 1,

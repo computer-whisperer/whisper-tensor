@@ -8,6 +8,7 @@ mod concat;
 pub(crate) mod constant;
 mod conv;
 mod cumsum;
+mod dilate;
 mod expand;
 mod eye_like;
 mod gather;
@@ -50,6 +51,7 @@ pub use concat::*;
 pub use constant::*;
 pub use conv::*;
 pub use cumsum::*;
+pub use dilate::*;
 pub use expand::*;
 pub use eye_like::*;
 pub use gather::*;
@@ -763,6 +765,7 @@ pub enum AnyMilliOp {
     ConvWeightGrad(ConvWeightGrad),
     ConvBiasGrad(ConvBiasGrad),
     Pad(Pad),
+    Dilate(Dilate),
     Compress(Compress),
     ReverseSequence(ReverseSequence),
     ScatterElements(ScatterElements),
@@ -804,6 +807,7 @@ impl AnyMilliOp {
             AnyMilliOp::ReduceProd(x) => x.lower_to_nano(ctx),
             AnyMilliOp::Conv(x) => x.lower_to_nano(ctx),
             AnyMilliOp::Pad(x) => x.lower_to_nano(ctx),
+            AnyMilliOp::Dilate(x) => x.lower_to_nano(ctx),
             // Everything else: no nano decomposition, fall through to opaque.
             _ => LowerResult::Unsupported,
         }
@@ -852,6 +856,7 @@ impl AnyMilliOp {
             AnyMilliOp::ConvWeightGrad(x) => x.label.clone(),
             AnyMilliOp::ConvBiasGrad(x) => x.label.clone(),
             AnyMilliOp::Pad(x) => x.label.clone(),
+            AnyMilliOp::Dilate(x) => x.label.clone(),
             AnyMilliOp::Compress(x) => x.label.clone(),
             AnyMilliOp::ReverseSequence(x) => x.label.clone(),
             AnyMilliOp::ScatterElements(x) => x.label.clone(),
@@ -905,6 +910,7 @@ impl AnyMilliOp {
             AnyMilliOp::ConvWeightGrad(x) => x.remap_tensors(map, rng),
             AnyMilliOp::ConvBiasGrad(x) => x.remap_tensors(map, rng),
             AnyMilliOp::Pad(x) => x.remap_tensors(map, rng),
+            AnyMilliOp::Dilate(x) => x.remap_tensors(map, rng),
             AnyMilliOp::Compress(x) => x.remap_tensors(map, rng),
             AnyMilliOp::ReverseSequence(x) => x.remap_tensors(map, rng),
             AnyMilliOp::ScatterElements(x) => x.remap_tensors(map, rng),
@@ -961,6 +967,7 @@ macro_rules! delegate {
                 AnyMilliOp::ConvWeightGrad(x) => x.$name($($arg),*),
                 AnyMilliOp::ConvBiasGrad(x) => x.$name($($arg),*),
                 AnyMilliOp::Pad(x) => x.$name($($arg),*),
+                AnyMilliOp::Dilate(x) => x.$name($($arg),*),
                 AnyMilliOp::Compress(x) => x.$name($($arg),*),
                 AnyMilliOp::ReverseSequence(x) => x.$name($($arg),*),
                 AnyMilliOp::ScatterElements(x) => x.$name($($arg),*),
@@ -1031,6 +1038,7 @@ impl MilliOp for AnyMilliOp {
             AnyMilliOp::ConvWeightGrad(x) => x.infer(known_inputs, symbolic_resolver, pool),
             AnyMilliOp::ConvBiasGrad(x) => x.infer(known_inputs, symbolic_resolver, pool),
             AnyMilliOp::Pad(x) => x.infer(known_inputs, symbolic_resolver, pool),
+            AnyMilliOp::Dilate(x) => x.infer(known_inputs, symbolic_resolver, pool),
             AnyMilliOp::Compress(x) => x.infer(known_inputs, symbolic_resolver, pool),
             AnyMilliOp::ReverseSequence(x) => x.infer(known_inputs, symbolic_resolver, pool),
             AnyMilliOp::ScatterElements(x) => x.infer(known_inputs, symbolic_resolver, pool),
@@ -1088,6 +1096,7 @@ impl MilliOp for AnyMilliOp {
             AnyMilliOp::ConvWeightGrad(x) => x.backward(output_grads, graph, rng),
             AnyMilliOp::ConvBiasGrad(x) => x.backward(output_grads, graph, rng),
             AnyMilliOp::Pad(x) => x.backward(output_grads, graph, rng),
+            AnyMilliOp::Dilate(x) => x.backward(output_grads, graph, rng),
             AnyMilliOp::Compress(x) => x.backward(output_grads, graph, rng),
             AnyMilliOp::ReverseSequence(x) => x.backward(output_grads, graph, rng),
             AnyMilliOp::ScatterElements(x) => x.backward(output_grads, graph, rng),
@@ -1149,6 +1158,7 @@ impl MilliOp for AnyMilliOp {
             AnyMilliOp::ConvWeightGrad(x) => x.eval_new(inputs, pool),
             AnyMilliOp::ConvBiasGrad(x) => x.eval_new(inputs, pool),
             AnyMilliOp::Pad(x) => x.eval_new(inputs, pool),
+            AnyMilliOp::Dilate(x) => x.eval_new(inputs, pool),
             AnyMilliOp::Compress(x) => x.eval_new(inputs, pool),
             AnyMilliOp::ReverseSequence(x) => x.eval_new(inputs, pool),
             AnyMilliOp::ScatterElements(x) => x.eval_new(inputs, pool),

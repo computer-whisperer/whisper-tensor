@@ -1277,6 +1277,10 @@ impl MilliOpGraph {
                 tam.known_dims.clone()
             };
 
+            // Check for zero-element output (any dim is 0).
+            let is_zero_element = shape.contains(&0);
+            let numel = if is_zero_element { 0 } else { numel };
+
             let layout = crate::numeric_tensor::TensorLayout::<DynRank>::row_major(shape, dtype);
             let buf = pool
                 .allocate(layout.buffer_size_bytes())
