@@ -82,16 +82,8 @@ pub fn run<T: SymbolicGraphObserver>(
     if observer.should_cancel() {
         return Err(EvalRuntimeError::Cancelled);
     }
-    let initialized_tensors = if let Some(tensor_cache) = loaded_tensor_cache {
-        model.get_initialized_tensors_cached_with_observer(
-            tensor_store,
-            tensor_cache,
-            eval_backend,
-            observer,
-        )
-    } else {
-        model.get_initialized_tensors_with_observer(tensor_store, observer)
-    };
+    let _ = loaded_tensor_cache; // caching removed — now dead code path
+    let initialized_tensors = model.get_initialized_tensors_with_observer(tensor_store, observer);
     if observer.should_cancel() {
         return Err(EvalRuntimeError::Cancelled);
     }

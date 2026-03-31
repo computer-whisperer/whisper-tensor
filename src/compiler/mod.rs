@@ -65,16 +65,16 @@ pub fn op_census(graph: &MilliOpGraph) -> Vec<(String, usize)> {
 }
 
 // ---------------------------------------------------------------------------
-// Legacy API — kept for backward compatibility with existing callers
-// (interfaces.rs, super_graph/, server, examples)
+// Public API — wraps SymbolicGraph execution for callers that need a
+// "compiled program" abstraction. Currently runs through pool_eval.
 // ---------------------------------------------------------------------------
 
-use crate::backends::eval_backend;
-use crate::backends::eval_backend::EvalBackend;
 use crate::migration::numeric_tensor::NumericTensor;
 use crate::symbolic_graph::SymbolicGraph;
 use crate::symbolic_graph::observer::SymbolicGraphObserver;
+use crate::symbolic_graph::ops::EvalError;
 use crate::symbolic_graph::tensor_store::TensorStore;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -103,7 +103,7 @@ pub trait CompiledProgramObserver {
 #[derive(thiserror::Error, Debug)]
 pub enum CompilerError {
     #[error(transparent)]
-    EvalRuntimeError(#[from] eval_backend::EvalRuntimeError),
+    EvalError(#[from] EvalError),
 }
 
 pub struct CompiledProgram {
@@ -145,23 +145,50 @@ impl<T: CompiledProgramObserver> SymbolicGraphObserver for SymbolicGraphObserver
 impl CompiledProgram {
     pub fn run<T: CompiledProgramObserver>(
         &self,
-        eval_backend: &mut EvalBackend,
+        _eval_backend: &mut crate::backends::eval_backend::EvalBackend,
         tensor_store: &TensorStore,
-        tensor_cache: Option<&mut crate::backends::ModelLoadedTensorCache>,
+        _tensor_cache: Option<&mut crate::backends::ModelLoadedTensorCache>,
         inputs: impl IntoIterator<Item = (String, NumericTensor<DynRank>)>,
         observer: &mut T,
     ) -> Result<impl Iterator<Item = (String, NumericTensor<DynRank>)>, CompilerError> {
-        let mut observer = SymbolicGraphObserverWrapper { observer };
-        let res = eval_backend::run(
-            &self.interim_graph,
-            tensor_store,
-            tensor_cache,
-            eval_backend,
-            &mut observer,
-            inputs,
-        )?;
+        use crate::migration::bridge;
+        use crate::pool::SystemPool;
 
-        Ok(res.into_iter())
+        let pool = SystemPool;
+        let _ = observer; // TODO: thread observer through pool_eval_with_store
+
+        // Convert legacy inputs → pool tensor views.
+        let tensors_by_name = self.interim_graph.get_tensors_by_name();
+        let new_inputs: Vec<_> = inputs
+            .into_iter()
+            .filter_map(|(name, legacy)| {
+                let id = *tensors_by_name.get(&name)?;
+                Some((id, bridge::legacy_to_new(&legacy)))
+            })
+            .collect();
+        let input_views: Vec<_> = new_inputs.iter().map(|(id, t)| (*id, t.view())).collect();
+        let input_map: HashMap<GlobalId, &crate::numeric_tensor::NumericTensorView<'_, DynRank>> =
+            input_views.iter().map(|(id, v)| (*id, v)).collect();
+
+        // Run through pool_eval_with_store.
+        let results = self
+            .interim_graph
+            .pool_eval_with_store(&input_map, tensor_store, &pool)?;
+
+        // Convert results back to legacy, keyed by name.
+        let tensors_by_name_rev: HashMap<GlobalId, String> = tensors_by_name
+            .iter()
+            .map(|(name, id)| (*id, name.clone()))
+            .collect();
+        let legacy_results: Vec<_> = results
+            .into_iter()
+            .filter_map(|(id, tensor)| {
+                let name = tensors_by_name_rev.get(&id)?.clone();
+                Some((name, bridge::view_to_legacy(&tensor.view())))
+            })
+            .collect();
+
+        Ok(legacy_results.into_iter())
     }
 }
 

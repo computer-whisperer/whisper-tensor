@@ -3,8 +3,6 @@ pub mod observer;
 pub mod ops;
 pub mod tensor_store;
 
-use crate::backends::ModelLoadedTensorCache;
-use crate::backends::eval_backend::EvalBackend;
 use crate::backends::ndarray_backend::{NDArrayNumericTensor, NDArrayNumericTensorError};
 use crate::dtype::DType;
 use crate::graph::{
@@ -445,59 +443,6 @@ impl SymbolicGraph {
 
     pub fn get_tensor_info(&self, tensor_id: GlobalId) -> Option<&ONNXTensorInfo> {
         self.tensors.get(&tensor_id)
-    }
-
-    pub fn get_initialized_tensors_cached(
-        &self,
-        tensor_store: &TensorStore,
-        loaded_tensor_cache: &mut ModelLoadedTensorCache,
-        eval_backend: &mut EvalBackend,
-    ) -> HashMap<GlobalId, NumericTensor<DynRank>> {
-        self.get_initialized_tensors_cached_with_observer(
-            tensor_store,
-            loaded_tensor_cache,
-            eval_backend,
-            &mut (),
-        )
-    }
-
-    pub fn get_initialized_tensors_cached_with_observer<T: SymbolicGraphObserver>(
-        &self,
-        tensor_store: &TensorStore,
-        loaded_tensor_cache: &mut ModelLoadedTensorCache,
-        eval_backend: &mut EvalBackend,
-        observer: &mut T,
-    ) -> HashMap<GlobalId, NumericTensor<DynRank>> {
-        let mut out = HashMap::new();
-
-        for (key, tensor) in &self.tensors {
-            if observer.should_cancel() {
-                break;
-            }
-            if let Some(x) = loaded_tensor_cache.tensors.get(key) {
-                out.insert(*key, x.clone());
-            } else {
-                let source = match &tensor.tensor_type {
-                    TensorType::Constant(x) => Some(x),
-                    TensorType::Input(Some(x)) => Some(x),
-                    _ => None,
-                };
-                if let Some(source) = source {
-                    let label = source
-                        .loading_label(tensor_store)
-                        .or(tensor.onnx_name.clone());
-                    observer.on_loading_weight(&[*key], label);
-                    let tensor = source.get_tensor(tensor_store);
-                    let loaded_tensor = eval_backend.to_native_type(&tensor);
-                    loaded_tensor_cache
-                        .tensors
-                        .insert(*key, loaded_tensor.clone());
-                    out.insert(*key, loaded_tensor);
-                }
-            }
-        }
-
-        out
     }
 
     pub fn get_initialized_tensors(
