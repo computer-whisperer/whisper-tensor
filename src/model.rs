@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::backends::eval_backend::EvalRuntimeError;
 use crate::dtype::DType;
@@ -10,6 +10,7 @@ use crate::tensor_rank::DynRank;
 use prost::DecodeError;
 use rand::Rng;
 
+use crate::graph::GlobalId;
 use crate::symbolic_graph::tensor_store::TensorStore;
 use crate::symbolic_graph::{ONNXDecodingError, SymbolicGraph, SymbolicGraphMutator};
 
@@ -106,9 +107,13 @@ impl Model {
             }
         }
 
-        let id_outputs = self
+        let all_tensors = self
             .graph
             .pool_eval_with_store(&id_inputs, &self.tensor_store, pool)?;
+
+        // Only return declared output tensors, not all intermediates.
+        let output_ids: std::collections::HashSet<GlobalId> =
+            self.graph.get_outputs().into_iter().collect();
 
         // Map GlobalIds → String names for outputs.
         let id_to_name: HashMap<_, _> = tensors_by_name
@@ -117,9 +122,11 @@ impl Model {
             .collect();
 
         let mut named_outputs = HashMap::new();
-        for (id, tensor) in id_outputs {
-            if let Some(&name) = id_to_name.get(&id) {
-                named_outputs.insert(name.to_string(), tensor);
+        for (id, tensor) in all_tensors {
+            if output_ids.contains(&id) {
+                if let Some(&name) = id_to_name.get(&id) {
+                    named_outputs.insert(name.to_string(), tensor);
+                }
             }
         }
         Ok(named_outputs)
