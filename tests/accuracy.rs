@@ -16,143 +16,13 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use whisper_tensor::backends::eval_backend::EvalBackend;
-use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
-use whisper_tensor::dtype::DType;
-use whisper_tensor::migration::numeric_tensor::NumericTensor;
-use whisper_tensor::model::{Model, ModelExecutionRuntime};
+use whisper_tensor::model::Model;
+use whisper_tensor::npy;
+use whisper_tensor::numeric_dtype::NumericDType;
+use whisper_tensor::numeric_tensor::{NumericTensor, NumericTensorView, TensorLayout};
+use whisper_tensor::pool::{Pool, SystemPool};
 use whisper_tensor::tensor_rank::DynRank;
 use whisper_tensor_import::onnx_graph::WeightStorageStrategy;
-
-// ---------------------------------------------------------------------------
-// .npy reader
-// ---------------------------------------------------------------------------
-
-/// Minimal NumPy .npy file reader.
-///
-/// Supports the subset of dtypes we care about: float32, float64, int32, int64,
-/// float16. The .npy format is: 6-byte magic, 2-byte version, 2-byte header
-/// length, ASCII header with dtype/shape/order, then raw data.
-fn read_npy(path: &Path) -> Result<(DType, Vec<u64>, Vec<u8>), String> {
-    let data = fs::read(path).map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
-
-    // Validate magic: \x93NUMPY
-    if data.len() < 10 || &data[..6] != b"\x93NUMPY" {
-        return Err(format!("Not a valid .npy file: {}", path.display()));
-    }
-
-    let major = data[6];
-    let header_len = if major >= 2 {
-        // v2+: 4-byte little-endian header length
-        if data.len() < 12 {
-            return Err("Truncated v2 npy header".into());
-        }
-        u32::from_le_bytes([data[8], data[9], data[10], data[11]]) as usize
-    } else {
-        // v1: 2-byte little-endian header length
-        u16::from_le_bytes([data[8], data[9]]) as usize
-    };
-
-    let header_start = if major >= 2 { 12 } else { 10 };
-    let header_end = header_start + header_len;
-    if data.len() < header_end {
-        return Err("Truncated npy header".into());
-    }
-
-    let header =
-        std::str::from_utf8(&data[header_start..header_end]).map_err(|e| format!("{e}"))?;
-
-    // Parse dtype from header: 'descr': '<f4', etc.
-    let dtype = parse_npy_dtype(header)?;
-
-    // Parse shape from header: 'shape': (4, 4, 50257), etc.
-    let shape = parse_npy_shape(header)?;
-
-    let raw = data[header_end..].to_vec();
-    Ok((dtype, shape, raw))
-}
-
-fn parse_npy_dtype(header: &str) -> Result<DType, String> {
-    // Find 'descr' value — look for the pattern 'descr': '...'
-    let descr_start = header
-        .find("'descr'")
-        .or_else(|| header.find("\"descr\""))
-        .ok_or("No 'descr' in npy header")?;
-    let rest = &header[descr_start..];
-
-    // Extract the dtype string between quotes after the colon
-    let colon = rest.find(':').ok_or("No colon after descr")?;
-    let after_colon = &rest[colon + 1..];
-    let quote_char = if after_colon.contains('\'') {
-        '\''
-    } else {
-        '"'
-    };
-    let first_quote = after_colon
-        .find(quote_char)
-        .ok_or("No opening quote for descr value")?;
-    let inner = &after_colon[first_quote + 1..];
-    let end_quote = inner
-        .find(quote_char)
-        .ok_or("No closing quote for descr value")?;
-    let descr = &inner[..end_quote];
-
-    // Strip endianness prefix (< or > or =) if present
-    let type_str = descr.trim_start_matches(['<', '>', '=', '|']);
-
-    match type_str {
-        "f8" => Ok(DType::F64),
-        "f4" => Ok(DType::F32),
-        "f2" => Ok(DType::F16),
-        "i8" => Ok(DType::I64),
-        "i4" => Ok(DType::I32),
-        "i2" => Ok(DType::I16),
-        "i1" => Ok(DType::I8),
-        "u8" => Ok(DType::U64),
-        "u4" => Ok(DType::U32),
-        "u2" => Ok(DType::U16),
-        "u1" => Ok(DType::U8),
-        "b1" => Ok(DType::BOOL),
-        "float64" => Ok(DType::F64),
-        "float32" => Ok(DType::F32),
-        "float16" => Ok(DType::F16),
-        "int64" => Ok(DType::I64),
-        "int32" => Ok(DType::I32),
-        "int16" => Ok(DType::I16),
-        "int8" => Ok(DType::I8),
-        "uint64" => Ok(DType::U64),
-        "uint32" => Ok(DType::U32),
-        "uint16" => Ok(DType::U16),
-        "uint8" => Ok(DType::U8),
-        other => Err(format!("Unsupported npy dtype: {other}")),
-    }
-}
-
-fn parse_npy_shape(header: &str) -> Result<Vec<u64>, String> {
-    let shape_start = header
-        .find("'shape'")
-        .or_else(|| header.find("\"shape\""))
-        .ok_or("No 'shape' in npy header")?;
-    let rest = &header[shape_start..];
-    let open = rest.find('(').ok_or("No '(' in shape")?;
-    let close = rest.find(')').ok_or("No ')' in shape")?;
-    let inner = rest[open + 1..close].trim();
-
-    if inner.is_empty() {
-        // Scalar: shape ()
-        return Ok(vec![]);
-    }
-
-    inner
-        .split(',')
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .map(|s| {
-            s.parse::<u64>()
-                .map_err(|e| format!("Bad shape dim '{s}': {e}"))
-        })
-        .collect()
-}
 
 // ---------------------------------------------------------------------------
 // Manifest
@@ -183,26 +53,27 @@ fn load_manifest(dir: &Path) -> Result<Manifest, String> {
 // Tensor loading from golden snapshots
 // ---------------------------------------------------------------------------
 
-fn load_golden_tensors(
+fn load_golden_tensors<'p, P: Pool + 'p>(
     dir: &Path,
     entries: &[TensorEntry],
-) -> Result<HashMap<String, NumericTensor<DynRank>>, String> {
+    pool: &'p P,
+) -> Result<HashMap<String, NumericTensor<'p, DynRank, P>>, String> {
     let mut tensors = HashMap::new();
     for entry in entries {
         let npy_path = dir.join(&entry.file);
-        let (dtype, shape, raw_data) = read_npy(&npy_path)?;
+        let tensor = npy::read_npy_file(&npy_path, pool)?;
 
-        // Sanity check against manifest
-        if shape != entry.shape {
+        // Sanity check shape against manifest
+        if tensor.shape().as_slice() != entry.shape.as_slice() {
             return Err(format!(
                 "Shape mismatch for '{}': npy {:?} vs manifest {:?}",
-                entry.name, shape, entry.shape
+                entry.name,
+                tensor.shape(),
+                entry.shape
             ));
         }
 
-        let nd = NDArrayNumericTensor::from_raw_data(&raw_data, dtype, shape)
-            .map_err(|e| format!("Failed to build tensor '{}': {e}", entry.name))?;
-        tensors.insert(entry.name.clone(), NumericTensor::NDArray(nd));
+        tensors.insert(entry.name.clone(), tensor);
     }
     Ok(tensors)
 }
@@ -233,15 +104,13 @@ struct AccuracyReport {
 
 fn compare_tensor(
     name: &str,
-    actual: &NumericTensor<DynRank>,
-    expected: &NumericTensor<DynRank>,
+    actual: &NumericTensorView<'_, DynRank>,
+    expected: &NumericTensorView<'_, DynRank>,
     rtol: f64,
     atol: f64,
 ) -> Result<TensorAccuracy, String> {
-    // Compare element counts rather than exact shapes — the ONNX graph may
-    // retain batch/unsqueeze dims that the reference squeezes away.
-    let actual_numel: u64 = actual.shape().iter().product();
-    let expected_numel: u64 = expected.shape().iter().product();
+    let actual_numel = actual.numel();
+    let expected_numel = expected.numel();
     if actual_numel != expected_numel {
         return Err(format!(
             "Output '{name}': element count mismatch: actual {:?} ({actual_numel}) vs expected {:?} ({expected_numel})",
@@ -250,39 +119,16 @@ fn compare_tensor(
         ));
     }
 
-    let actual_f64: Vec<f64> = actual
-        .cast(DType::F64, &mut EvalBackend::NDArray)
-        .map_err(|e| format!("cast actual: {e}"))?
-        .to_ndarray()
-        .map_err(|e| format!("to_ndarray actual: {e}"))?
-        .flatten()
-        .try_to_vec()
-        .map_err(|e| format!("to_vec actual: {e}"))?;
-
-    let expected_f64: Vec<f64> = expected
-        .cast(DType::F64, &mut EvalBackend::NDArray)
-        .map_err(|e| format!("cast expected: {e}"))?
-        .to_ndarray()
-        .map_err(|e| format!("to_ndarray expected: {e}"))?
-        .flatten()
-        .try_to_vec()
-        .map_err(|e| format!("to_vec expected: {e}"))?;
-
-    let n = actual_f64.len();
-    if n != expected_f64.len() {
-        return Err(format!(
-            "Output '{name}': element count mismatch: {} vs {}",
-            n,
-            expected_f64.len()
-        ));
-    }
-
+    let n = actual_numel;
     let mut max_abs = 0.0f64;
     let mut sum_abs = 0.0f64;
     let mut max_rel = 0.0f64;
     let mut within = 0usize;
 
-    for (a, e) in actual_f64.iter().zip(expected_f64.iter()) {
+    for i in 0..n {
+        let a = actual.read_element(i).to_f64();
+        let e = expected.read_element(i).to_f64();
+
         let abs_diff = (a - e).abs();
         max_abs = max_abs.max(abs_diff);
         sum_abs += abs_diff;
@@ -335,7 +181,6 @@ fn golden_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("GOLDEN_DIR") {
         PathBuf::from(dir)
     } else {
-        // Default: ci/accuracy/golden/ relative to repo root
         let mut dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         dir.push("ci");
         dir.push("accuracy");
@@ -349,7 +194,6 @@ fn report_dir() -> Option<PathBuf> {
 }
 
 fn write_report(report: &AccuracyReport) {
-    // Always print to stdout
     let json = serde_json::to_string_pretty(report).unwrap();
     println!("\n=== Accuracy Report: {} ===", report.model);
     for output in &report.outputs {
@@ -364,7 +208,6 @@ fn write_report(report: &AccuracyReport) {
     }
     println!("  RESULT: {}", if report.pass { "PASS" } else { "FAIL" });
 
-    // Optionally write JSON artifact
     if let Some(dir) = report_dir() {
         let _ = fs::create_dir_all(&dir);
         let path = dir.join(format!("accuracy-{}.json", report.model));
@@ -376,6 +219,20 @@ fn write_report(report: &AccuracyReport) {
     }
 }
 
+/// Build a zero-filled pool tensor with the given dtype and shape.
+fn zero_tensor<'p, P: Pool + 'p>(
+    dtype: NumericDType,
+    shape: Vec<u64>,
+    pool: &'p P,
+) -> NumericTensor<'p, DynRank, P> {
+    let layout = TensorLayout::<DynRank>::row_major(shape, dtype);
+    let buf = pool
+        .allocate(layout.buffer_size_bytes())
+        .expect("pool allocation for zero tensor");
+    // Buffer is already zeroed by SystemPool/TrackedPool.
+    NumericTensor::from_parts(buf, layout)
+}
+
 /// Run a full accuracy validation for an ONNX model loaded from bytes.
 fn validate_onnx_model(
     model_name: &str,
@@ -385,53 +242,59 @@ fn validate_onnx_model(
     atol: f64,
     base_dir: Option<&Path>,
 ) {
+    let pool = SystemPool;
     let manifest = load_manifest(golden_path).expect("load manifest");
 
-    // Load golden inputs and expected outputs
     let golden_inputs =
-        load_golden_tensors(golden_path, &manifest.inputs).expect("load golden inputs");
+        load_golden_tensors(golden_path, &manifest.inputs, &pool).expect("load golden inputs");
     let golden_outputs =
-        load_golden_tensors(golden_path, &manifest.outputs).expect("load golden outputs");
+        load_golden_tensors(golden_path, &manifest.outputs, &pool).expect("load golden outputs");
 
-    // Load model
     let mut rng = rand::rng();
-    let model = Model::new_from_onnx(onnx_data, &mut rng, base_dir).expect("model loads from ONNX");
+    let model =
+        Model::new_from_onnx(onnx_data, &mut rng, base_dir).expect("model loads from ONNX");
 
-    // Prepare inputs: match golden input names to model input names.
-    // Inputs present in the golden snapshot override model defaults.
-    // Inputs NOT in the golden snapshot (e.g., state tensors with zero initializers)
-    // are left for the model to fill from its ONNX initializers.
+    // Prepare inputs: golden snapshot values override model defaults.
+    // Inputs NOT in the golden snapshot (e.g., state tensors) get zero-filled.
     let model_input_info = model.get_input_tensor_info().expect("get input info");
-    let mut inputs: HashMap<String, NumericTensor<DynRank>> = HashMap::new();
-    for (name, (dtype, shape)) in &model_input_info {
-        if let Some(tensor) = golden_inputs.get(name) {
-            inputs.insert(name.clone(), tensor.clone());
-        } else {
-            // Build zero tensor for inputs not in golden snapshot.
-            // Replace dynamic (None) dims with 0 for cache-like inputs,
-            // or 1 for other dims.
-            let concrete_shape: Vec<u64> = shape.iter().map(|d| d.unwrap_or(0)).collect();
-            let numel: usize = concrete_shape.iter().product::<u64>() as usize;
-            if let Some(elem_size) = dtype.bytes_per_element() {
-                let zeros = vec![0u8; numel * elem_size];
-                if let Ok(nd) =
-                    NDArrayNumericTensor::from_raw_data(&zeros, *dtype, concrete_shape.clone())
-                {
-                    inputs.insert(name.clone(), NumericTensor::NDArray(nd));
-                    eprintln!(
-                        "  Auto-filled input '{name}': dtype={dtype:?} shape={concrete_shape:?}"
-                    );
-                }
-            }
+    let mut owned_inputs: HashMap<String, NumericTensor<'_, DynRank, SystemPool>> = HashMap::new();
+
+    for (name, (legacy_dtype, shape_desc)) in &model_input_info {
+        if golden_inputs.contains_key(name) {
+            continue; // Will use golden tensor directly
         }
+        let Some(dtype) = NumericDType::from_legacy(*legacy_dtype) else {
+            continue; // STRING or Packed — skip
+        };
+        let concrete_shape: Vec<u64> = shape_desc.iter().map(|d| d.unwrap_or(0)).collect();
+        let tensor = zero_tensor(dtype, concrete_shape.clone(), &pool);
+        eprintln!("  Auto-filled input '{name}': dtype={dtype:?} shape={concrete_shape:?}");
+        owned_inputs.insert(name.clone(), tensor);
     }
 
-    // Dump named output tensors for debugging
+    // Build view map for eval_pool: golden inputs + zero-filled inputs.
+    let golden_views: HashMap<String, NumericTensorView<'_, DynRank>> = golden_inputs
+        .iter()
+        .map(|(name, t)| (name.clone(), t.view()))
+        .collect();
+    let owned_views: HashMap<String, NumericTensorView<'_, DynRank>> = owned_inputs
+        .iter()
+        .map(|(name, t)| (name.clone(), t.view()))
+        .collect();
+
+    let mut input_view_refs: HashMap<String, &NumericTensorView<'_, DynRank>> = HashMap::new();
+    for (name, view) in &golden_views {
+        input_view_refs.insert(name.clone(), view);
+    }
+    for (name, view) in &owned_views {
+        input_view_refs.insert(name.clone(), view);
+    }
+
     if std::env::var("DUMP_GRAPH").is_ok() {
         let graph = model.get_symbolic_graph();
         let names = graph.get_tensors_by_name();
         let mut names_vec: Vec<_> = names.iter().collect();
-        names_vec.sort_by_key(|(n, _)| n.clone());
+        names_vec.sort_by_key(|(n, _)| (*n).clone());
         eprintln!("Named tensors ({}):", names_vec.len());
         for (name, _id) in &names_vec {
             if !name.contains("kv_cache") {
@@ -441,9 +304,8 @@ fn validate_onnx_model(
     }
 
     // Run eval
-    let mut runtime = ModelExecutionRuntime::Eval(EvalBackend::NDArray);
     let actual_outputs = model
-        .run(inputs, &mut (), &mut runtime)
+        .eval_pool(input_view_refs, &pool)
         .expect("model eval succeeds");
 
     // Compare each golden output
@@ -459,7 +321,7 @@ fn validate_onnx_model(
             )
         });
 
-        let acc = compare_tensor(name, actual, expected, rtol, atol)
+        let acc = compare_tensor(name, &actual.view(), &expected.view(), rtol, atol)
             .unwrap_or_else(|e| panic!("Comparison failed for '{name}': {e}"));
 
         if acc.within_tolerance < 1.0 {
@@ -514,7 +376,6 @@ fn accuracy_gpt2() {
 
     let onnx_data = fs::read(&model_path).expect("read model file");
 
-    // GPT-2 ONNX via onnxruntime reference: expect very tight match (same graph, same ops)
     validate_onnx_model(
         "gpt2",
         &onnx_data,
@@ -551,15 +412,10 @@ fn accuracy_rwkv7() {
         return;
     }
 
-    // Convert .pth → ONNX via the importer (this is part of what we're validating)
     let onnx_data =
         whisper_tensor_import::identify_and_load(&pth_path, WeightStorageStrategy::EmbeddedData)
             .expect("import rwkv7 .pth to ONNX");
 
-    // RWKV-7 reference is the official PyTorch implementation.
-    // Wider tolerance than GPT-2 because we're comparing across two different
-    // implementations (PyTorch reference vs our ONNX graph builder + NDArray eval),
-    // not just the same ONNX graph through two runtimes.
     validate_onnx_model(
         "rwkv7",
         &onnx_data,
@@ -573,10 +429,7 @@ fn accuracy_rwkv7() {
 // ---------------------------------------------------------------------------
 // HuggingFace transformers model accuracy tests
 // ---------------------------------------------------------------------------
-// All HF models follow the same pattern: find model dir on Ceph,
-// import via identify_and_load(), compare logits to golden snapshot.
 
-/// Generate an accuracy test for a HuggingFace transformers model on Ceph.
 macro_rules! hf_accuracy_test {
     ($test_name:ident, $model_name:expr, $ceph_subpath:expr, $rtol:expr, $atol:expr) => {
         #[test]
@@ -631,22 +484,10 @@ macro_rules! hf_accuracy_test {
 }
 
 // BF16 models: atol=1e-2 covers the minimum BF16 quantum (~0.0078).
-// With atol=1e-3, irreducible BF16 rounding differences at small logit
-// values cause a handful of outlier failures.
-
-// Qwen2 0.5B — smallest Qwen2, BF16
 hf_accuracy_test!(accuracy_qwen2_05b, "qwen2_05b", "Qwen2-0.5B", 1e-2, 1e-2);
-
-// Qwen3 0.6B — smallest Qwen3
 hf_accuracy_test!(accuracy_qwen3_06b, "qwen3_06b", "Qwen3-0.6B", 1e-2, 1e-2);
-
-// Gemma 2 2B
 hf_accuracy_test!(accuracy_gemma2_2b, "gemma2_2b", "gemma-2-2b-it", 1e-2, 1e-2);
-
-// Llama 3 8B
 hf_accuracy_test!(accuracy_llama3_8b, "llama3_8b", "Llama-3-8B", 1e-2, 1e-2);
-
-// Mistral 7B v0.1
 hf_accuracy_test!(
     accuracy_mistral_7b,
     "mistral_7b",
@@ -654,8 +495,6 @@ hf_accuracy_test!(
     1e-2,
     1e-2
 );
-
-// Phi-3 mini 4k
 hf_accuracy_test!(
     accuracy_phi3_mini,
     "phi3_mini",
