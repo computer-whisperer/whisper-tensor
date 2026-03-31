@@ -69,9 +69,8 @@ macro_rules! do_tests {
         do_test!($runner_fn, $runner_name, test_exp_large_negative_fp32);
         do_test!($runner_fn, $runner_name, test_tanh_small_fp32);
         do_test!($runner_fn, $runner_name, test_mish_chain_fp32);
-        do_test!($runner_fn, $runner_name, test_softplus_via_operation_fp32);
-        // test_mish_via_model_eval_fp32 is not included here — it compares
-        // against the ONNX .pb reference, which is the ONNX test's job.
+        // test_softplus_via_operation_fp32 and test_mish_via_model_eval_fp32
+        // removed — used deleted legacy Operation::eval() / Model::eval().
         do_test!($runner_fn, $runner_name, test_abs_fp32);
         do_test!($runner_fn, $runner_name, test_abs_bf16);
         do_test!($runner_fn, $runner_name, test_abs_f16);

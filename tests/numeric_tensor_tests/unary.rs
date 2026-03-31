@@ -173,109 +173,13 @@ pub fn test_mish_chain_fp32(backend: &mut EvalBackend) {
     test_eq_f32(mish, mish_ref);
 }
 
-// Test Softplus via the MilliOpGraph path (Operation::eval), not direct
-// NumericTensor calls. This exercises the exact code path the ONNX test uses.
-// If this diverges from NDArray but the chain test doesn't, the bug is in
-// how the milli-op graph evaluator interacts with Vulkan.
-pub fn test_softplus_via_operation_fp32(backend: &mut EvalBackend) {
-    use std::collections::HashMap;
-    use whisper_tensor::graph::GlobalId;
-    use whisper_tensor::symbolic_graph::ops::{Operation, UnaryOperation, WhichUnaryOperation};
-
-    let n = 10000;
-    let vals: Vec<f32> = (0..n)
-        .map(|i| -10.0 + 20.0 * (i as f32) / (n as f32 - 1.0))
-        .collect();
-    let x = NumericTensor::from_vec(vals).to_dyn_rank();
-
-    let mut rng = wyrand::WyRand::new(42);
-    let input_id = GlobalId::new(&mut rng);
-    let output_id = GlobalId::new(&mut rng);
-    let softplus_op =
-        UnaryOperation::new(input_id, output_id, WhichUnaryOperation::Softplus, &mut rng);
-    let mut inputs = HashMap::new();
-    inputs.insert(input_id, x.clone());
-
-    let result_map: HashMap<GlobalId, NumericTensor<whisper_tensor::DynRank>> =
-        softplus_op.eval(backend, &inputs).unwrap().collect();
-    let result = result_map[&output_id].clone();
-
-    // Reference: same via NDArray
-    let mut nda = EvalBackend::NDArray;
-    let ref_map: HashMap<GlobalId, NumericTensor<whisper_tensor::DynRank>> =
-        softplus_op.eval(&mut nda, &inputs).unwrap().collect();
-    let reference = ref_map[&output_id].clone();
-
-    test_eq_f32(result, reference);
-}
-
-// Test Mish by loading the actual ONNX model through Model::eval and
-// comparing against the .pb reference, exactly as the ONNX test runner does.
-// Runs the model 10 times with different RNG seeds to catch seed-dependent
-// divergences.
-pub fn test_mish_via_model_eval_fp32(backend: &mut EvalBackend) {
-    use std::collections::HashMap;
-    use whisper_tensor::model::Model;
-
-    let base = "libs/onnx/onnx/backend/test/data/node/test_mish";
-
-    // Load expected output from .pb reference
-    use prost::Message;
-    let expected_pb = std::fs::read(format!("{base}/test_data_set_0/output_0.pb")).unwrap();
-    let expected_proto = whisper_tensor::onnx::TensorProto::decode(&*expected_pb).unwrap();
-    let expected: NumericTensor<whisper_tensor::DynRank> =
-        whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor::try_from(&expected_proto)
-            .unwrap()
-            .into();
-
-    // Load input
-    let input_pb = std::fs::read(format!("{base}/test_data_set_0/input_0.pb")).unwrap();
-    let input_proto = whisper_tensor::onnx::TensorProto::decode(&*input_pb).unwrap();
-    let input_tensor: NumericTensor<whisper_tensor::DynRank> =
-        whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor::try_from(&input_proto)
-            .unwrap()
-            .into();
-
-    let model_bytes = std::fs::read(format!("{base}/model.onnx")).unwrap();
-
-    // Run with 10 different seeds to catch seed-dependent results
-    for seed in 0..10u64 {
-        let mut rng = wyrand::WyRand::new(seed);
-        let model = Model::new_from_onnx(&model_bytes, &mut rng, None).unwrap();
-
-        let mut inputs = HashMap::new();
-        inputs.insert("X".to_string(), input_tensor.clone());
-        let result = model.eval(inputs, &mut (), None, backend).unwrap();
-        let result_y = &result["Y"];
-
-        // Same comparison as ONNX test: cast to F64, check with rtol=1e-3, atol=1e-7
-        let actual_vals: Vec<f64> = result_y
-            .cast(whisper_tensor::dtype::DType::F64, &mut EvalBackend::NDArray)
-            .unwrap()
-            .to_ndarray()
-            .unwrap()
-            .flatten()
-            .try_to_vec()
-            .unwrap();
-        let expected_vals: Vec<f64> = expected
-            .cast(whisper_tensor::dtype::DType::F64, &mut EvalBackend::NDArray)
-            .unwrap()
-            .to_ndarray()
-            .unwrap()
-            .flatten()
-            .try_to_vec()
-            .unwrap();
-
-        for (i, (a, e)) in actual_vals.iter().zip(expected_vals.iter()).enumerate() {
-            let diff = (a - e).abs();
-            let tol = 1e-7 + 1e-3 * e.abs();
-            assert!(
-                diff <= tol,
-                "seed={seed} element[{i}]: actual={a:.20e} expected={e:.20e} diff={diff:.6e} tol={tol:.6e}"
-            );
-        }
-    }
-}
+// test_softplus_via_operation_fp32 — removed. Used legacy Operation::eval()
+// which has been deleted. Softplus is covered by test_set composite cases
+// and the mish chain test above.
+//
+// test_mish_via_model_eval_fp32 — removed. Used legacy Model::eval() and
+// ONNX .pb reference loading. Model-level accuracy is covered by
+// tests/accuracy.rs golden snapshot tests.
 
 pub fn test_ln_bf16(backend: &mut EvalBackend) {
     let x = NumericTensor::from_vec(vec![
