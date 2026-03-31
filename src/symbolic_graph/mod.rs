@@ -114,16 +114,13 @@ fn query_attribute_bool(attributes: &[onnx::AttributeProto], name: &str) -> Opti
     None
 }
 
-fn query_attribute_tensor(
-    attributes: &[onnx::AttributeProto],
-    name: &str,
-) -> Option<NDArrayNumericTensor<DynRank>> {
+fn query_attribute_tensor(attributes: &[onnx::AttributeProto], name: &str) -> Option<PoolTensor> {
     for attr in attributes {
         if attr.name == name
             && attr.r#type == onnx::attribute_proto::AttributeType::Tensor as i32
             && let Some(tensor_proto) = &attr.t
         {
-            return NDArrayNumericTensor::try_from(tensor_proto).ok();
+            return tensor_proto_to_pool_tensor(tensor_proto, &crate::pool::SystemPool).ok();
         }
     }
     None
@@ -243,9 +240,6 @@ pub enum StoredOrNotTensor {
     Stored(TensorStoreTensorId),
     /// Small tensor held inline (not in the tensor store).
     Inline(SharedPoolTensor),
-    /// Legacy: NDArray tensor. Kept during migration.
-    #[allow(dead_code)]
-    NotStored(NDArrayNumericTensor<DynRank>),
 }
 
 impl StoredOrNotTensor {
@@ -253,7 +247,6 @@ impl StoredOrNotTensor {
         match self {
             StoredOrNotTensor::Stored(id) => tensor_store.get_tensor(*id).unwrap().to_numeric(),
             StoredOrNotTensor::Inline(shared) => {
-                // Bridge to legacy for old eval path.
                 let info = crate::tensor_info::TensorInfo::from_view(
                     &shared.0.view(),
                     &crate::pool::SystemPool,
@@ -261,14 +254,12 @@ impl StoredOrNotTensor {
                 info.as_numeric()
                     .expect("inline tensor must bridge to legacy")
             }
-            StoredOrNotTensor::NotStored(tensor) => NumericTensor::NDArray(tensor.clone()),
         }
     }
     pub fn shape(&self, tensor_store: &TensorStore) -> Vec<u64> {
         match self {
             StoredOrNotTensor::Stored(id) => tensor_store.get_tensor(*id).unwrap().shape(),
             StoredOrNotTensor::Inline(shared) => shared.0.shape().clone(),
-            StoredOrNotTensor::NotStored(tensor) => tensor.shape(),
         }
     }
 
@@ -276,7 +267,6 @@ impl StoredOrNotTensor {
         match self {
             StoredOrNotTensor::Stored(id) => tensor_store.get_tensor(*id).unwrap().dtype(),
             StoredOrNotTensor::Inline(shared) => shared.0.dtype().to_legacy(),
-            StoredOrNotTensor::NotStored(tensor) => tensor.dtype(),
         }
     }
 
@@ -285,7 +275,7 @@ impl StoredOrNotTensor {
             StoredOrNotTensor::Stored(id) => tensor_store
                 .get_tensor(*id)
                 .and_then(|tensor| tensor.loading_label()),
-            StoredOrNotTensor::Inline(_) | StoredOrNotTensor::NotStored(_) => None,
+            StoredOrNotTensor::Inline(_) => None,
         }
     }
 }
@@ -621,9 +611,6 @@ impl SymbolicGraph {
                             Some(t.name.clone()),
                             rng,
                         );
-                    }
-                    StoredOrNotTensor::NotStored(x) => {
-                        graph_mutator.new_constant_tensor(self, x, Some(t.name.clone()), rng);
                     }
                 }
             }
@@ -1173,23 +1160,6 @@ impl SymbolicGraph {
                             }
                         }
                         StoredOrNotTensor::Inline(shared) => {
-                            let src = &*shared.0;
-                            let layout = TensorLayout::<DynRank>::row_major(
-                                src.shape().clone(),
-                                src.dtype(),
-                            );
-                            if let Ok(buf) = POOL_S.allocate(layout.buffer_size_bytes()) {
-                                let mut tensor =
-                                    crate::numeric_tensor::NumericTensor::from_parts(buf, layout);
-                                for i in 0..src.numel() {
-                                    tensor.write_element(i, src.read_element(i));
-                                }
-                                out.push((tensor_id, tensor));
-                            }
-                        }
-                        StoredOrNotTensor::NotStored(nd_tensor) => {
-                            let legacy = NumericTensor::NDArray(nd_tensor.clone());
-                            let shared = SharedPoolTensor::from_legacy(&legacy);
                             let src = &*shared.0;
                             let layout = TensorLayout::<DynRank>::row_major(
                                 src.shape().clone(),
@@ -1962,36 +1932,6 @@ impl SymbolicGraphMutator {
         Ok(global_id)
     }
 
-    pub fn new_constant_tensor(
-        &mut self,
-        inner_graph: &mut SymbolicGraph,
-        value: NDArrayNumericTensor<DynRank>,
-        name: Option<String>,
-        rng: &mut impl Rng,
-    ) -> GlobalId {
-        let mut shape = Vec::new();
-        for s in value.shape() {
-            shape.push(ScalarInfoTyped::Numeric(s))
-        }
-
-        let global_id = GlobalId::new(rng);
-        inner_graph.tensors.insert(
-            global_id,
-            ONNXTensorInfo {
-                onnx_name: name.clone(),
-                dtype: Some(ONNXDType::from_legacy(value.dtype())),
-                shape: Some(shape),
-                tensor_type: TensorType::Constant(StoredOrNotTensor::NotStored(value)),
-                global_id,
-            },
-        );
-        if let Some(name) = name {
-            self.tensors_by_name.insert(name, global_id);
-        }
-
-        global_id
-    }
-
     pub fn new_constant_pool_tensor(
         &mut self,
         inner_graph: &mut SymbolicGraph,
@@ -2144,9 +2084,12 @@ impl SymbolicGraphMutator {
         name: Option<String>,
         rng: &mut impl Rng,
     ) -> GlobalId {
+        // Bridge: convert legacy NDArray tensor → pool tensor for inline storage.
+        let legacy = NumericTensor::NDArray(value);
+        let shared = SharedPoolTensor::from_legacy(&legacy);
         let mut shape = Vec::new();
-        for s in value.shape() {
-            shape.push(ScalarInfoTyped::Numeric(s))
+        for s in shared.0.shape() {
+            shape.push(ScalarInfoTyped::Numeric(*s))
         }
         let global_id = GlobalId::new(rng);
         let g = self.graph.as_mut().unwrap();
@@ -2154,9 +2097,9 @@ impl SymbolicGraphMutator {
             global_id,
             ONNXTensorInfo {
                 onnx_name: name.clone(),
-                dtype: Some(ONNXDType::from_legacy(value.dtype())),
+                dtype: Some(ONNXDType::Numeric(shared.0.dtype())),
                 shape: Some(shape),
-                tensor_type: TensorType::Constant(StoredOrNotTensor::NotStored(value)),
+                tensor_type: TensorType::Constant(StoredOrNotTensor::Inline(shared)),
                 global_id,
             },
         );

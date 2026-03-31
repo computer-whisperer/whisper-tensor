@@ -35,10 +35,7 @@ impl ConstantOfShapeOperation {
         }
 
         let value = query_attribute_tensor(attributes, "value")
-            .map(|x| {
-                // Extract first element as new-type scalar.
-                crate::nano_graph::lower::legacy_scalar_to_new(&x.first_element())
-            })
+            .map(|x| x.read_element(0))
             .unwrap_or(NewNumericScalar::from_f32(0.0));
 
         Ok(Self {
@@ -144,9 +141,7 @@ impl ConstantOperation {
         }
 
         let value = if let Some(tensor) = query_attribute_tensor(attributes, "value") {
-            // Bridge legacy NDArray → pool tensor.
-            let pool_t = crate::symbolic_graph::tensor_proto_to_pool_tensor_from_ndarray(&tensor)?;
-            SharedPoolTensor(std::sync::Arc::new(pool_t))
+            SharedPoolTensor(std::sync::Arc::new(tensor))
         } else if let Some(value_float) = query_attribute_float(attributes, "value_float") {
             Self::pool_tensor_from_f32(vec![value_float])
         } else if let Some(value_floats) = query_attribute_floats(attributes, "value_floats") {
