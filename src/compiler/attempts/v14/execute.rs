@@ -422,27 +422,31 @@ fn format_input_ref(ir: &crate::nano_graph::InputRef) -> String {
         InputRef::Broadcast(id) => format!("Broadcast({})", id),
         InputRef::Strided {
             base,
-            stride_inner: stride,
-            ..
-        } => format!("Affine(base={}, stride={})", base, stride),
-        InputRef::Strided {
-            base,
-            stride_outer: stride,
-            modulus: repeat,
-            ..
-        } => format!(
-            "StridedBroadcast(base={}, stride={}, repeat={})",
-            base, stride, repeat
-        ),
-        InputRef::Strided {
-            base,
-            stride_inner: stride,
-            modulus,
-            ..
-        } => format!(
-            "Modular(base={}, stride={}, modulus={})",
-            base, stride, modulus
-        ),
+            dim_strides,
+            dim_shape,
+        } => {
+            if dim_strides.len() == 1 {
+                // Affine
+                format!("Affine(base={}, stride={})", base, dim_strides[0])
+            } else if dim_strides.len() == 2 && dim_strides[1] == 0 {
+                // StridedBroadcast
+                format!(
+                    "StridedBroadcast(base={}, stride={}, repeat={})",
+                    base, dim_strides[0], dim_shape[1]
+                )
+            } else if dim_strides.len() == 2 && dim_strides[0] == 0 {
+                // Modular
+                format!(
+                    "Modular(base={}, stride={}, modulus={})",
+                    base, dim_strides[1], dim_shape[1]
+                )
+            } else {
+                format!(
+                    "Strided(base={}, strides={:?}, shape={:?})",
+                    base, dim_strides, dim_shape
+                )
+            }
+        }
         InputRef::Explicit(ids) => format!(
             "Explicit([{}; len={}])",
             if ids.is_empty() {

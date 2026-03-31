@@ -314,11 +314,8 @@ impl MilliOp for Dilate {
                 if axis < rank
                     && let ScalarInfoTyped::Numeric(d) = &in_dims[axis]
                 {
-                    out_dims[axis] = ScalarInfoTyped::Numeric(if *d == 0 {
-                        0
-                    } else {
-                        (*d - 1) * s as u64 + 1
-                    });
+                    out_dims[axis] =
+                        ScalarInfoTyped::Numeric(if *d == 0 { 0 } else { (*d - 1) * s as u64 + 1 });
                 }
             }
             TensorInfo::from_dtype_and_shape_scalars(out_dtype, &out_dims)

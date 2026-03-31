@@ -337,26 +337,33 @@ pub fn compute_layout(graph: &NanoGraph, output_ranges: &[AtomRange]) -> BufferL
             InputRef::Broadcast(_) | InputRef::Explicit(_) => None,
             InputRef::Strided {
                 base,
-                stride_inner,
-                stride_outer,
-                modulus,
+                dim_strides,
+                dim_shape,
             } => {
                 // Sample all corner positions to find the bounding range.
+                // For the 2D case: inner = i % dim_shape[1], outer = i / dim_shape[1]
+                // offset = dim_strides[0] * outer + dim_strides[1] * inner
+                // For 1D (affine): offset = dim_strides[0] * i
                 let mut lo = i64::MAX;
                 let mut hi = i64::MIN;
                 let first_i = atom_offset;
                 let last_i = atom_offset + count - 1;
+                let nd = dim_strides.len();
                 for &i in &[first_i, last_i] {
-                    let inner = i % modulus;
-                    let outer = i / modulus;
-                    let off = *stride_inner * inner as i64 + *stride_outer * outer as i64;
+                    let off = if nd == 1 {
+                        dim_strides[0] * i as i64
+                    } else {
+                        let inner = i % dim_shape[1];
+                        let outer = i / dim_shape[1];
+                        dim_strides[1] * inner as i64 + dim_strides[0] * outer as i64
+                    };
                     lo = lo.min(off);
                     hi = hi.max(off);
                     // Also check boundary: when inner wraps, the offset can jump.
-                    if *modulus != u64::MAX && i > 0 {
-                        let inner2 = (modulus - 1) % modulus;
-                        let outer2 = (modulus - 1) / modulus;
-                        let off2 = *stride_inner * inner2 as i64 + *stride_outer * outer2 as i64;
+                    if nd >= 2 && dim_shape[1] != u64::MAX && i > 0 {
+                        let inner2 = (dim_shape[1] - 1) % dim_shape[1];
+                        let outer2 = (dim_shape[1] - 1) / dim_shape[1];
+                        let off2 = dim_strides[1] * inner2 as i64 + dim_strides[0] * outer2 as i64;
                         lo = lo.min(off2);
                         hi = hi.max(off2);
                     }
@@ -389,14 +396,14 @@ pub fn compute_layout(graph: &NanoGraph, output_ranges: &[AtomRange]) -> BufferL
         {
             if *reduce_count > 1 && *reduce_stride != 0 {
                 if let Some(InputRef::Strided {
-                    base,
-                    stride_inner: stride,
-                    ..
+                    base, dim_strides, ..
                 }) = group.inputs.first()
                 {
-                    let first_i = base.0 as i64 + *stride * group.atom_offset as i64;
+                    // Use the innermost stride (last element) for affine-like access
+                    let stride = dim_strides.last().copied().unwrap_or(0);
+                    let first_i = base.0 as i64 + stride * group.atom_offset as i64;
                     let last_i =
-                        base.0 as i64 + *stride * (group.atom_offset + group.count - 1) as i64;
+                        base.0 as i64 + stride * (group.atom_offset + group.count - 1) as i64;
                     let end_off = (*reduce_count as i64 - 1) * reduce_stride;
                     let endpoints = [first_i, first_i + end_off, last_i, last_i + end_off];
                     let lo = *endpoints.iter().min().unwrap() as u64;
@@ -932,36 +939,36 @@ pub fn validate_layout(graph: &NanoGraph, layout: &BufferLayout) -> Vec<String> 
         for (ii, ir) in group.inputs.iter().enumerate() {
             match ir {
                 InputRef::Strided {
-                    base,
-                    stride_inner: stride,
-                    ..
-                } if *stride != 0 => {
-                    let first_atom = (base.0 as i64 + *stride * group.atom_offset as i64) as u64;
-                    let last_atom = (base.0 as i64
-                        + *stride * (group.atom_offset + group.count - 1) as i64)
-                        as u64;
-                    let lo = first_atom.min(last_atom);
-                    let hi = first_atom.max(last_atom);
-                    if let (Some((slot_lo, _)), Some((slot_hi, _))) =
-                        (layout.find(AtomId(lo)), layout.find(AtomId(hi)))
-                    {
-                        if slot_lo.atom_base != slot_hi.atom_base
-                            && slot_lo.elem_bytes == slot_hi.elem_bytes
+                    base, dim_strides, ..
+                } => {
+                    // Use the innermost (last) stride for validation
+                    let stride = dim_strides.last().copied().unwrap_or(0);
+                    if stride != 0 {
+                        let first_atom = (base.0 as i64 + stride * group.atom_offset as i64) as u64;
+                        let last_atom = (base.0 as i64
+                            + stride * (group.atom_offset + group.count - 1) as i64)
+                            as u64;
+                        let lo = first_atom.min(last_atom);
+                        let hi = first_atom.max(last_atom);
+                        if let (Some((slot_lo, _)), Some((slot_hi, _))) =
+                            (layout.find(AtomId(lo)), layout.find(AtomId(hi)))
                         {
-                            // Check proportionality: byte_offset difference should match
-                            // atom_base difference * elem_bytes (slab-compatible layout).
-                            let atom_delta =
-                                slot_hi.atom_base.0 as i64 - slot_lo.atom_base.0 as i64;
-                            let byte_delta =
-                                slot_hi.byte_offset as i64 - slot_lo.byte_offset as i64;
-                            let expected_byte_delta = atom_delta * slot_lo.elem_bytes as i64;
-                            if byte_delta != expected_byte_delta {
-                                errors.push(format!(
-                                    "group {} input {} Affine(base={},stride={},count={},off={}): atoms {}..{} slots {} and {} byte_delta={} expected={}",
-                                    gi, ii, base, stride, group.count, group.atom_offset,
-                                    lo, hi, slot_lo.atom_base, slot_hi.atom_base,
-                                    byte_delta, expected_byte_delta,
-                                ));
+                            if slot_lo.atom_base != slot_hi.atom_base
+                                && slot_lo.elem_bytes == slot_hi.elem_bytes
+                            {
+                                let atom_delta =
+                                    slot_hi.atom_base.0 as i64 - slot_lo.atom_base.0 as i64;
+                                let byte_delta =
+                                    slot_hi.byte_offset as i64 - slot_lo.byte_offset as i64;
+                                let expected_byte_delta = atom_delta * slot_lo.elem_bytes as i64;
+                                if byte_delta != expected_byte_delta {
+                                    errors.push(format!(
+                                        "group {} input {} Affine(base={},stride={},count={},off={}): atoms {}..{} slots {} and {} byte_delta={} expected={}",
+                                        gi, ii, base, stride, group.count, group.atom_offset,
+                                        lo, hi, slot_lo.atom_base, slot_hi.atom_base,
+                                        byte_delta, expected_byte_delta,
+                                    ));
+                                }
                             }
                         }
                     }
@@ -978,14 +985,13 @@ pub fn validate_layout(graph: &NanoGraph, layout: &BufferLayout) -> Vec<String> 
             {
                 if *reduce_count > 1 && *reduce_stride != 0 {
                     if let InputRef::Strided {
-                        base,
-                        stride_inner: stride,
-                        ..
+                        base, dim_strides, ..
                     } = ir
                     {
-                        let first = (base.0 as i64 + *stride * group.atom_offset as i64) as u64;
+                        let stride = dim_strides.last().copied().unwrap_or(0);
+                        let first = (base.0 as i64 + stride * group.atom_offset as i64) as u64;
                         let last = (base.0 as i64
-                            + *stride * (group.atom_offset + group.count - 1) as i64)
+                            + stride * (group.atom_offset + group.count - 1) as i64)
                             as u64;
                         let end_off = (*reduce_count as i64 - 1) * reduce_stride;
                         let endpoints = [
@@ -1037,8 +1043,8 @@ struct FusionChain {
 ///
 /// Two consecutive groups A and B fuse if they have the same count/atom_offset,
 /// B is not a Reduce/IndirectLoad/Literal, B is not dead, and all of B's inputs
-/// that reference A use Affine stride=1 (Strided with stride_inner=1,
-/// stride_outer=0, modulus=MAX).
+/// that reference A use Affine stride=1 (Strided with dim_strides=[1],
+/// dim_shape=[MAX]).
 fn build_fusion_chains(groups: &[AtomGroup], layout: &BufferLayout) -> Vec<FusionChain> {
     // Fusion is opt-out. Disable with FUSION=0.
     if std::env::var("FUSION").as_deref() == Ok("0") {
@@ -1117,21 +1123,18 @@ fn inputs_fusable_with_chain(group: &AtomGroup, chain_ranges: &[(u64, u64)]) -> 
         match input {
             InputRef::Strided {
                 base,
-                stride_inner,
-                stride_outer,
-                modulus,
+                dim_strides,
+                dim_shape,
             } => {
                 // Check if this input's base falls within ANY chain member's range.
+                let is_affine_1 =
+                    dim_strides.len() == 1 && dim_strides[0] == 1 && dim_shape[0] == u64::MAX;
                 for &(range_lo, range_hi) in chain_ranges {
                     if base.0 >= range_lo && base.0 < range_hi {
                         // This input overlaps a chain producer's range.
                         // Fusion is only safe if it reads the SAME iteration's atom:
                         // - Affine stride=1 with base == producer's base_id (exact alignment)
-                        if *stride_inner != 1
-                            || *stride_outer != 0
-                            || *modulus != u64::MAX
-                            || base.0 != range_lo
-                        {
+                        if !is_affine_1 || base.0 != range_lo {
                             return false;
                         }
                     }
@@ -1557,12 +1560,11 @@ fn forwarded_or_slot_repr(
 ) -> ReprKind {
     if let InputRef::Strided {
         base,
-        stride_inner,
-        stride_outer,
-        modulus,
+        dim_strides,
+        dim_shape,
     } = input
     {
-        if *stride_inner == 1 && *stride_outer == 0 && *modulus == u64::MAX {
+        if dim_strides.len() == 1 && dim_strides[0] == 1 && dim_shape[0] == u64::MAX {
             if let Some((_val, dtype)) = forwarded.get(&base.0) {
                 return repr_of(*dtype);
             }
@@ -1593,12 +1595,11 @@ fn load_input_forwarded(
     // Check for forwarding: Affine stride=1 with a forwarded producer.
     if let InputRef::Strided {
         base,
-        stride_inner,
-        stride_outer,
-        modulus,
+        dim_strides,
+        dim_shape,
     } = input
     {
-        if *stride_inner == 1 && *stride_outer == 0 && *modulus == u64::MAX {
+        if dim_strides.len() == 1 && dim_strides[0] == 1 && dim_shape[0] == u64::MAX {
             if let Some((fwd_val, _fwd_dtype)) = forwarded.get(&base.0) {
                 // The forwarded value has already been through
                 // emit_store_load_roundtrip, so it's in the same format
@@ -2193,15 +2194,18 @@ fn input_slot_dtype(
         InputRef::Broadcast(atom_id) => try_find(*atom_id),
         InputRef::Strided {
             base,
-            stride_inner,
-            stride_outer,
-            modulus,
+            dim_strides,
+            dim_shape,
         } => try_find(*base).or_else(|| {
-            let inner = atom_offset % modulus;
-            let outer = atom_offset / modulus;
-            let first = AtomId(base.0.wrapping_add(
-                (*stride_inner * inner as i64 + *stride_outer * outer as i64) as u64,
-            ));
+            let nd = dim_strides.len();
+            let first_offset = if nd == 1 {
+                dim_strides[0] * atom_offset as i64
+            } else {
+                let inner = atom_offset % dim_shape[1];
+                let outer = atom_offset / dim_shape[1];
+                dim_strides[1] * inner as i64 + dim_strides[0] * outer as i64
+            };
+            let first = AtomId(base.0.wrapping_add(first_offset as u64));
             try_find(first)
         }),
         InputRef::Explicit(ids) if !ids.is_empty() => {
@@ -2276,24 +2280,31 @@ fn load_input(
 
         InputRef::Strided {
             base,
-            stride_inner,
-            stride_outer,
-            modulus,
+            dim_strides,
+            dim_shape,
         } => {
-            // General strided: atom i reads base + stride_inner*(i%modulus) + stride_outer*(i/modulus).
+            // N-dimensional strided access.
             //
-            // Special cases for fast paths:
-            //   Affine:          stride_outer==0, modulus==MAX → base + stride_inner * i
-            //   StridedBroadcast: stride_inner==0             → base + stride_outer * (i / modulus)
-            //   Modular:         stride_outer==0              → base + stride_inner * (i % modulus)
-            //   General:         both non-zero                → full formula
-            let is_affine = *stride_outer == 0 && *modulus == u64::MAX;
+            // 1D (affine):          dim_strides=[s], dim_shape=[MAX] → base + s * i
+            // 2D general:           inner = i % dim_shape[1], outer = i / dim_shape[1]
+            //                       offset = dim_strides[0]*outer + dim_strides[1]*inner
+            //   StridedBroadcast:   dim_strides[1]==0 → base + dim_strides[0] * (i / dim_shape[1])
+            //   Modular:            dim_strides[0]==0 → base + dim_strides[1] * (i % dim_shape[1])
+            let nd = dim_strides.len();
+            let is_affine = nd == 1;
+            let modulus = if nd >= 2 { dim_shape[1] } else { u64::MAX };
+            let stride_inner = if nd >= 2 {
+                dim_strides[1]
+            } else {
+                dim_strides[0]
+            };
+            let stride_outer = if nd >= 2 { dim_strides[0] } else { 0 };
 
             // Find the buffer slot by resolving the first accessed atom.
             let first_inner = atom_offset % modulus;
             let first_outer = atom_offset / modulus;
             let first_offset =
-                *stride_inner * first_inner as i64 + *stride_outer * first_outer as i64;
+                stride_inner * first_inner as i64 + stride_outer * first_outer as i64;
             let first_atom = AtomId((base.0 as i64 + first_offset) as u64);
 
             let (slot, elem) = layout
@@ -2301,8 +2312,8 @@ fn load_input(
                 .or_else(|| layout.find(first_atom))
                 .ok_or_else(|| {
                     format!(
-                        "no slot for Strided base={} first_atom={} (atom_offset={}, si={}, so={}, mod={})",
-                        base, first_atom, atom_offset, stride_inner, stride_outer, modulus
+                        "no slot for Strided base={} first_atom={} (atom_offset={}, strides={:?}, shape={:?})",
+                        base, first_atom, atom_offset, dim_strides, dim_shape
                     )
                 })?;
 
@@ -2320,7 +2331,7 @@ fn load_input(
 
             // ── Affine fast path ──
             if is_affine {
-                let byte_stride = *stride_inner * elem_bytes;
+                let byte_stride = stride_inner * elem_bytes;
                 let addr = match i_val {
                     Some(iv) => {
                         let i_bytes = builder.ins().imul_imm(iv, byte_stride);
@@ -2337,20 +2348,20 @@ fn load_input(
             }
 
             // ── General path (handles StridedBroadcast, Modular, and mixed) ──
-            let byte_stride_inner = *stride_inner * elem_bytes;
-            let byte_stride_outer = *stride_outer * elem_bytes;
+            let byte_stride_inner = stride_inner * elem_bytes;
+            let byte_stride_outer = stride_outer * elem_bytes;
 
             let addr = match i_val {
                 Some(iv) => {
                     // inner = i_eff % modulus, outer = i_eff / modulus
                     let (inner_val, outer_val) = if modulus.is_power_of_two() {
                         let shift = modulus.trailing_zeros() as i64;
-                        let mask = *modulus as i64 - 1;
+                        let mask = modulus as i64 - 1;
                         let inner = builder.ins().band_imm(iv, mask);
                         let outer = builder.ins().ushr_imm(iv, shift);
                         (inner, outer)
                     } else {
-                        let modval = builder.ins().iconst(types::I64, *modulus as i64);
+                        let modval = builder.ins().iconst(types::I64, modulus as i64);
                         let inner = builder.ins().urem(iv, modval);
                         let outer = builder.ins().udiv(iv, modval);
                         (inner, outer)
@@ -2669,13 +2680,13 @@ fn emit_reduce(
     // Resolve the source slot. Reduce input must be Affine.
     let (base_byte, input_byte_stride, reduce_byte_stride, src_dtype) = match &group.inputs[0] {
         InputRef::Strided {
-            base,
-            stride_inner: stride,
-            ..
+            base, dim_strides, ..
         } => {
+            // Use the innermost (last) stride for reduce input
+            let stride = dim_strides.last().copied().unwrap_or(0);
             let (base_byte, elem_bytes, src_dtype) =
-                resolve_affine_base(layout, *base, *stride, group.atom_offset, "reduce input")?;
-            let byte_stride = *stride * elem_bytes as i64;
+                resolve_affine_base(layout, *base, stride, group.atom_offset, "reduce input")?;
+            let byte_stride = stride * elem_bytes as i64;
             let red_stride = reduce_stride * elem_bytes as i64;
             (base_byte, byte_stride, red_stride, src_dtype)
         }
@@ -3385,13 +3396,15 @@ impl CompiledPlan {
                                         {
                                             if let Some(InputRef::Strided {
                                                 base,
-                                                stride_inner: stride,
+                                                dim_strides,
                                                 ..
                                             }) = group.inputs.first()
                                             {
                                                 let elem = (atom.0 - group.base_id.0) as u64;
+                                                let stride =
+                                                    dim_strides.last().copied().unwrap_or(0);
                                                 let src_base = (base.0 as i64
-                                                    + *stride * (elem + group.atom_offset) as i64)
+                                                    + stride * (elem + group.atom_offset) as i64)
                                                     as u64;
                                                 // Read first few k values from buffer.
                                                 let mut k_vals = Vec::new();

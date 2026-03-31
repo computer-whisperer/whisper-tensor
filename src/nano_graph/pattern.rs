@@ -58,18 +58,25 @@ pub struct AtomRange {
 pub enum InputRef {
     /// Every atom in this group reads the same source atom (broadcast).
     Broadcast(AtomId),
-    /// Unified strided access pattern. Atom at offset `i` reads:
-    ///   base + stride_inner * (i % modulus) + stride_outer * (i / modulus)
+    /// N-dimensional strided access. Atom at offset `i` is decomposed into
+    /// coordinates via row-major indexing into `dim_shape` (outer-to-inner),
+    /// then dotted with `dim_strides`:
     ///
-    /// Subsumes the former Affine, Modular, and StridedBroadcast variants:
-    /// - Affine{stride}:              stride_inner=stride, stride_outer=0, modulus=u64::MAX
-    /// - Modular{stride, modulus}:    stride_inner=stride, stride_outer=0, modulus=modulus
-    /// - StridedBroadcast{stride, repeat}: stride_inner=0, stride_outer=stride, modulus=repeat
+    ///   remaining = i
+    ///   for d in (nd-1)..=1:
+    ///       coord[d] = remaining % dim_shape[d]
+    ///       remaining /= dim_shape[d]
+    ///   coord[0] = remaining   // outermost: no modulus
+    ///   result = base + sum(coord[d] * dim_strides[d])
+    ///
+    /// Common patterns via helpers:
+    /// - `affine(stride)`:             1D, dim_strides=[stride], dim_shape=[MAX]
+    /// - `modular(stride, mod)`:       2D, dim_strides=[0, stride], dim_shape=[MAX, mod]
+    /// - `strided_broadcast(stride, repeat)`: 2D, dim_strides=[stride, 0], dim_shape=[MAX, repeat]
     Strided {
         base: AtomId,
-        stride_inner: i64,
-        stride_outer: i64,
-        modulus: u64,
+        dim_strides: Vec<i64>,
+        dim_shape: Vec<u64>,
     },
     /// Arbitrary per-atom source mapping. Used when no regular pattern exists
     /// (e.g., Gather with compile-time-known indices, irregular Concat).
@@ -82,9 +89,8 @@ impl InputRef {
     pub fn affine(base: AtomId, stride: i64) -> Self {
         InputRef::Strided {
             base,
-            stride_inner: stride,
-            stride_outer: 0,
-            modulus: u64::MAX,
+            dim_strides: vec![stride],
+            dim_shape: vec![u64::MAX],
         }
     }
 
@@ -92,9 +98,8 @@ impl InputRef {
     pub fn modular(base: AtomId, stride: i64, modulus: u64) -> Self {
         InputRef::Strided {
             base,
-            stride_inner: stride,
-            stride_outer: 0,
-            modulus,
+            dim_strides: vec![0, stride],
+            dim_shape: vec![u64::MAX, modulus],
         }
     }
 
@@ -102,9 +107,8 @@ impl InputRef {
     pub fn strided_broadcast(base: AtomId, stride: i64, repeat: u64) -> Self {
         InputRef::Strided {
             base,
-            stride_inner: 0,
-            stride_outer: stride,
-            modulus: repeat,
+            dim_strides: vec![stride, 0],
+            dim_shape: vec![u64::MAX, repeat],
         }
     }
 
@@ -114,15 +118,24 @@ impl InputRef {
             InputRef::Broadcast(id) => *id,
             InputRef::Strided {
                 base,
-                stride_inner,
-                stride_outer,
-                modulus,
+                dim_strides,
+                dim_shape,
             } => {
-                let inner = i % modulus;
-                let outer = i / modulus;
-                AtomId(base.0.wrapping_add(
-                    (*stride_inner * inner as i64 + *stride_outer * outer as i64) as u64,
-                ))
+                let nd = dim_strides.len();
+                let mut offset = 0i64;
+                let mut remaining = i;
+                // Inner to outer: decompose flat index into ND coordinates.
+                for d in (0..nd).rev() {
+                    let coord = if d == 0 {
+                        remaining // outermost dim: no modulus
+                    } else {
+                        let c = remaining % dim_shape[d];
+                        remaining /= dim_shape[d];
+                        c
+                    };
+                    offset += coord as i64 * dim_strides[d];
+                }
+                AtomId(base.0.wrapping_add(offset as u64))
             }
             InputRef::Explicit(ids) => ids[i as usize],
         }
@@ -133,19 +146,23 @@ impl InputRef {
         match self {
             InputRef::Broadcast(_) => 1,
             InputRef::Strided {
-                stride_outer,
-                modulus,
+                dim_strides,
+                dim_shape,
                 ..
             } => {
-                if *stride_outer == 0 && *modulus == u64::MAX {
-                    // Affine case
+                let nd = dim_strides.len();
+                if nd == 1 {
+                    // Affine
                     count as usize
-                } else if *stride_outer == 0 {
-                    // Modular case
-                    *modulus as usize
+                } else if nd == 2 && dim_strides[0] == 0 {
+                    // Modular
+                    dim_shape[1] as usize
+                } else if nd == 2 && dim_strides[1] == 0 {
+                    // StridedBroadcast
+                    count.div_ceil(dim_shape[1]) as usize
                 } else {
-                    // StridedBroadcast case
-                    count.div_ceil(*modulus) as usize
+                    // General ND — estimate from count.
+                    count as usize
                 }
             }
             InputRef::Explicit(ids) => {
@@ -824,17 +841,22 @@ impl NanoGraph {
             }
             InputRef::Strided {
                 base,
-                stride_inner,
-                stride_outer,
-                modulus,
+                dim_strides,
+                dim_shape,
             } => {
-                if *stride_outer == 0 && *modulus != u64::MAX {
-                    // Modular case: range is base..base+stride*(modulus-1)
+                // For modular patterns (2D with outer stride=0): the range
+                // spans base to base + inner_stride * (modulus - 1).
+                let is_modular = dim_strides.len() >= 2
+                    && dim_strides[0] == 0
+                    && dim_shape.last().copied().unwrap_or(u64::MAX) != u64::MAX;
+                if is_modular {
+                    let inner_stride = *dim_strides.last().unwrap();
+                    let modulus = *dim_shape.last().unwrap();
                     let a = base.0;
-                    let b = (base.0 as i64 + *stride_inner * (*modulus as i64 - 1)) as u64;
+                    let b = (base.0 as i64 + inner_stride * (modulus as i64 - 1)) as u64;
                     self.insert_groups_in_id_range(a.min(b), a.max(b), out);
                 } else {
-                    // Affine or StridedBroadcast case
+                    // General case: resolve first and last to find the range.
                     let first = input.resolve(atom_offset);
                     let last = input.resolve(atom_offset + count - 1);
                     let lo = first.0.min(last.0);

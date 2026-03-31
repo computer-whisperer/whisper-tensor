@@ -771,16 +771,6 @@ fn input_ref_range(input: &InputRef, count: u64, atom_offset: u64) -> (u64, u64)
             let last = input.resolve(atom_offset + count - 1);
             (first.0.min(last.0), first.0.max(last.0))
         }
-        InputRef::Strided {
-            base,
-            stride_inner: stride,
-            modulus,
-            ..
-        } => {
-            let a = base.0;
-            let b = (base.0 as i64 + *stride * (*modulus as i64 - 1)) as u64;
-            (a.min(b), a.max(b))
-        }
         InputRef::Explicit(ids) => {
             let slice = &ids[atom_offset as usize..(atom_offset + count) as usize];
             let lo = slice.iter().map(|id| id.0).min().unwrap_or(0);

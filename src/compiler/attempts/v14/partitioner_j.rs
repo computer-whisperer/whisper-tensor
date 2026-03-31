@@ -337,10 +337,44 @@ fn input_crosses_lane_boundary(
         }
         InputRef::Strided {
             base,
-            stride_inner: stride,
-            ..
+            dim_strides,
+            dim_shape,
         } => {
-            if *stride == 0 {
+            let nd = dim_strides.len();
+            // Determine the effective "affine stride" (innermost stride for 1D,
+            // or the first stride for 2D patterns like StridedBroadcast/Modular).
+            //
+            // 1D affine: dim_strides=[s] → stride=s
+            // 2D StridedBroadcast: dim_strides=[s, 0] → handle separately below
+            // 2D Modular: dim_strides=[0, s] → handle separately below
+            // 2D General: dim_strides=[so, si] → use like affine with si
+
+            // StridedBroadcast: dim_strides[1]==0
+            if nd == 2 && dim_strides[1] == 0 {
+                // StridedBroadcast: atom i reads base + stride * (i / repeat).
+                // When we split the consumer, lane k gets atoms [k*C..(k+1)*C).
+                // Those atoms read source atoms at base + stride * (k*C/repeat)
+                // through base + stride * ((k+1)*C-1)/repeat.
+                // As long as the source range is contiguous per lane, this is fine.
+                return false;
+            }
+
+            // Modular: dim_strides[0]==0
+            if nd == 2 && dim_strides[0] == 0 {
+                // Modular: every lane reads from the full modular range.
+                // The source is typically a small bias/weight that gets duplicated
+                // (classified as Literal) or provided as input. No barrier needed
+                // because the source is either duplicated or available as external input.
+                return false;
+            }
+
+            // Affine or general 2D with both strides non-zero: use innermost stride
+            let stride = if nd == 1 {
+                dim_strides[0]
+            } else {
+                dim_strides[1]
+            };
+            if stride == 0 {
                 // Degenerate broadcast-like: all atoms read the same source.
                 return false;
             }
@@ -420,31 +454,6 @@ fn input_crosses_lane_boundary(
                 }
             }
             // Source not found as a group (might be an input tensor) → no crossing.
-            false
-        }
-        InputRef::Strided {
-            base,
-            stride_outer: stride,
-            modulus: repeat,
-            ..
-        } => {
-            // StridedBroadcast: atom i reads base + stride * (i / repeat).
-            // When we split the consumer, lane k gets atoms [k*C..(k+1)*C).
-            // Those atoms read source atoms at base + stride * (k*C/repeat)
-            // through base + stride * ((k+1)*C-1)/repeat.
-            // As long as the source range is contiguous per lane, this is fine.
-            false
-        }
-        InputRef::Strided {
-            modulus,
-            stride_inner: _,
-            stride_outer: 0,
-            ..
-        } => {
-            // Modular: every lane reads from the full modular range.
-            // The source is typically a small bias/weight that gets duplicated
-            // (classified as Literal) or provided as input. No barrier needed
-            // because the source is either duplicated or available as external input.
             false
         }
         InputRef::Explicit(_ids) => {
@@ -1143,34 +1152,10 @@ fn input_ref_source_range(input: &InputRef, count: u64, atom_offset: u64) -> (u6
     }
     match input {
         InputRef::Broadcast(base) => (base.0, base.0),
-        InputRef::Strided {
-            base,
-            stride_inner: stride,
-            ..
-        } => {
+        InputRef::Strided { .. } => {
             let first = input.resolve(atom_offset);
             let last = input.resolve(atom_offset + count - 1);
             (first.0.min(last.0), first.0.max(last.0))
-        }
-        InputRef::Strided {
-            base,
-            stride_outer: stride,
-            modulus: repeat,
-            ..
-        } => {
-            let first = input.resolve(atom_offset);
-            let last = input.resolve(atom_offset + count - 1);
-            (first.0.min(last.0), first.0.max(last.0))
-        }
-        InputRef::Strided {
-            base,
-            stride_inner: stride,
-            modulus,
-            ..
-        } => {
-            let a = base.0;
-            let b = (base.0 as i64 + *stride * (*modulus as i64 - 1)) as u64;
-            (a.min(b), a.max(b))
         }
         InputRef::Explicit(ids) => {
             let slice = &ids[atom_offset as usize..(atom_offset + count) as usize];

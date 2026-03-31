@@ -53,7 +53,7 @@ use super::types::{Phase, Span};
 /// Transformed to:
 ///   Mul group:   count = K*N (unchanged), op = Binary{Mul} (unchanged)
 ///     input_a:   Modular(A_base, a_stride, modulus=K)
-///     input_b:   Strided(B_base, stride_inner=N, stride_outer=1, modulus=K)
+///     input_b:   Strided(B_base, dim_strides=[1, N], dim_shape=[MAX, K])
 ///   Reduce group: count = N (unchanged), op = Reduce{count=K, stride=1}
 ///     input:     Affine(Mul_base, stride=K)
 ///
@@ -88,11 +88,10 @@ fn relayout_matmul_groups(graph: &mut NanoGraph) -> usize {
         let (mul_base, mul_stride) = match &rgroup.inputs[0] {
             InputRef::Strided {
                 base,
-                stride_inner,
-                stride_outer,
-                modulus,
-            } if *stride_inner == 1 && *stride_outer == 0 && *modulus == u64::MAX => {
-                (*base, *stride_inner)
+                dim_strides,
+                dim_shape,
+            } if dim_strides.len() == 1 && dim_strides[0] == 1 && dim_shape[0] == u64::MAX => {
+                (*base, dim_strides[0])
             }
             _ => continue,
         };
@@ -124,18 +123,21 @@ fn relayout_matmul_groups(graph: &mut NanoGraph) -> usize {
         if mgroup.inputs.len() != 2 {
             continue;
         }
-        let has_sb_n = mgroup.inputs.iter().any(|inp| {
-            matches!(
-                inp,
-                InputRef::Strided { stride_inner: 0, modulus, .. } if *modulus == n
-            )
+        let has_sb_n = mgroup.inputs.iter().any(|inp| match inp {
+            InputRef::Strided {
+                dim_strides,
+                dim_shape,
+                ..
+            } if dim_strides.len() == 2 && dim_strides[1] == 0 && dim_shape[1] == n => true,
+            _ => false,
         });
-        let has_affine_1 = mgroup.inputs.iter().any(|inp| {
-            matches!(
-                inp,
-                InputRef::Strided { stride_inner: 1, stride_outer: 0, modulus, .. }
-                    if *modulus == u64::MAX
-            )
+        let has_affine_1 = mgroup.inputs.iter().any(|inp| match inp {
+            InputRef::Strided {
+                dim_strides,
+                dim_shape,
+                ..
+            } if dim_strides.len() == 1 && dim_strides[0] == 1 && dim_shape[0] == u64::MAX => true,
+            _ => false,
         });
         if !has_sb_n || !has_affine_1 {
             continue;
@@ -155,29 +157,29 @@ fn relayout_matmul_groups(graph: &mut NanoGraph) -> usize {
                 // StridedBroadcast(A_base, a_stride, repeat=N)
                 //   → Modular(A_base, a_stride, modulus=K)
                 InputRef::Strided {
-                    stride_inner: si,
-                    stride_outer: so,
-                    modulus,
+                    dim_strides,
+                    dim_shape,
                     ..
-                } if *si == 0 && *modulus == n => {
-                    // Was: stride_inner=0, stride_outer=a_stride, modulus=N
-                    // New: stride_inner=a_stride, stride_outer=0, modulus=K
-                    let a_stride = *so;
-                    *si = a_stride;
-                    *so = 0;
-                    *modulus = k;
+                } if dim_strides.len() == 2 && dim_strides[1] == 0 && dim_shape[1] == n => {
+                    // Was: dim_strides=[a_stride, 0], dim_shape=[MAX, N] (StridedBroadcast)
+                    // New: dim_strides=[0, a_stride], dim_shape=[MAX, K] (Modular)
+                    let a_stride = dim_strides[0];
+                    dim_strides[0] = 0;
+                    dim_strides[1] = a_stride;
+                    dim_shape[1] = k;
                 }
                 // Affine(B_base, stride=1)
-                //   → Strided(B_base, stride_inner=N, stride_outer=1, modulus=K)
+                //   → Strided(B_base, dim_strides=[1, N], dim_shape=[MAX, K])
                 InputRef::Strided {
-                    stride_inner: si,
-                    stride_outer: so,
-                    modulus,
+                    dim_strides,
+                    dim_shape,
                     ..
-                } if *si == 1 && *so == 0 && *modulus == u64::MAX => {
-                    *si = n as i64;
-                    *so = 1;
-                    *modulus = k;
+                } if dim_strides.len() == 1 && dim_strides[0] == 1 && dim_shape[0] == u64::MAX => {
+                    // Was: 1D affine stride=1
+                    // New: 2D with dim_strides=[1, N], dim_shape=[MAX, K]
+                    // (old: stride_inner=N, stride_outer=1, modulus=K)
+                    *dim_strides = vec![1, n as i64];
+                    *dim_shape = vec![u64::MAX, k];
                 }
                 _ => {}
             }
@@ -188,12 +190,11 @@ fn relayout_matmul_groups(graph: &mut NanoGraph) -> usize {
         if let Some(inp) = rgroup.inputs.first_mut() {
             match inp {
                 InputRef::Strided {
-                    stride_inner: si,
-                    stride_outer: so,
-                    modulus,
+                    dim_strides,
+                    dim_shape,
                     ..
-                } if *si == 1 && *so == 0 && *modulus == u64::MAX => {
-                    *si = k as i64;
+                } if dim_strides.len() == 1 && dim_strides[0] == 1 && dim_shape[0] == u64::MAX => {
+                    dim_strides[0] = k as i64;
                 }
                 _ => {}
             }
@@ -478,9 +479,74 @@ fn is_lane_local_access(consumer: &AtomGroup, producer: &AtomGroup, num_lanes: u
             }
             InputRef::Strided {
                 base,
-                stride_inner: stride,
-                ..
+                dim_strides,
+                dim_shape,
             } => {
+                let nd = dim_strides.len();
+
+                // StridedBroadcast: dim_strides=[stride, 0], dim_shape=[MAX, repeat]
+                if nd == 2 && dim_strides[1] == 0 {
+                    let stride = dim_strides[0];
+                    let repeat = dim_shape[1];
+                    // StridedBroadcast: atom i reads base + stride * (i / repeat).
+                    // This is used in matmul Mul groups where chunks of K atoms
+                    // share the same A element.
+                    //
+                    // For lane-local access when chunked:
+                    // Lane k's atoms [k*C/L .. (k+1)*C/L) read source atoms at
+                    // base + stride * (i/repeat) for i in that range.
+                    //
+                    // For this to be lane-local:
+                    // 1. Consumer chunk size C/L must be a multiple of repeat.
+                    //    Otherwise, lane boundaries don't align with repeat boundaries,
+                    //    and some lanes read atoms from adjacent lanes' producer chunks.
+                    // 2. The number of distinct reads per chunk (C/(L*repeat)) must equal
+                    //    the producer chunk size (P/L), ensuring each lane reads exactly
+                    //    its own producer fragment.
+                    // 3. Base alignment: first read of lane 0 must hit producer base.
+                    let chunk = consumer.count / num_lanes as u64;
+                    let prod_chunk = producer.count / num_lanes as u64;
+                    let abs_stride = stride.unsigned_abs();
+
+                    // chunk must be a multiple of repeat for alignment.
+                    if chunk % repeat != 0 {
+                        return false;
+                    }
+
+                    let distinct_per_chunk = chunk / repeat;
+
+                    if abs_stride > 0
+                        && distinct_per_chunk == prod_chunk
+                        && consumer.count % num_lanes as u64 == 0
+                        && producer.count % num_lanes as u64 == 0
+                    {
+                        // Check base alignment: first consumer atom reads from producer base.
+                        let first_read = base
+                            .0
+                            .wrapping_add((abs_stride * (consumer.atom_offset / repeat)) as u64);
+                        if first_read == prod_base {
+                            continue; // lane-local
+                        }
+                    }
+
+                    return false;
+                }
+
+                // Modular: dim_strides=[0, stride], dim_shape=[MAX, modulus]
+                if nd == 2 && dim_strides[0] == 0 {
+                    // Modular: atom i reads base + stride * (i % modulus).
+                    // This tiles/repeats — every lane needs the same modulus-sized
+                    // range. NOT lane-local unless the producer is duplicated.
+                    return false;
+                }
+
+                // Affine or general: use innermost stride
+                let stride = if nd == 1 {
+                    dim_strides[0]
+                } else {
+                    dim_strides[1]
+                };
+
                 // For lane-local access with chunked splitting:
                 // Consumer atom i (at offset i + atom_offset) reads producer atom at
                 // base + stride * (i + atom_offset).
@@ -496,22 +562,11 @@ fn is_lane_local_access(consumer: &AtomGroup, producer: &AtomGroup, num_lanes: u
                 // The full footprint per element is stride (= K for matmul) atoms wide,
                 // so |stride| * C = K * M = P (the full Mul group size). This satisfies
                 // the lane-local condition.
-                let abs_stride = (*stride).unsigned_abs();
+                let abs_stride = stride.unsigned_abs();
 
                 // General check: does stride * consumer_count == producer_count?
-                // Each consumer element reads abs_stride producer elements (the
-                // matmul Mul→Reduce pattern). With aligned splitting — splitting
-                // the producer as K × consumer_chunks instead of even splits —
-                // each lane's consumer fragment reads exactly from its own
-                // producer fragment by construction.
-                //
-                // We do NOT require consumer.count % num_lanes == 0. Uneven
-                // consumer splits (some lanes get one extra) are fine as long as
-                // emit_split_group uses aligned splits for the producer.
                 if abs_stride > 0 && abs_stride * consumer.count == producer.count {
-                    // Verify base alignment: first consumer atom should read from
-                    // producer start (or start of producer + some lane-aligned offset).
-                    let first_read = if *stride >= 0 {
+                    let first_read = if stride >= 0 {
                         base.0
                             .wrapping_add((abs_stride * consumer.atom_offset) as u64)
                     } else {
@@ -526,7 +581,7 @@ fn is_lane_local_access(consumer: &AtomGroup, producer: &AtomGroup, num_lanes: u
                 }
 
                 // Special case: stride=1, same count (elementwise 1:1).
-                if *stride == 1 && consumer.count == producer.count {
+                if stride == 1 && consumer.count == producer.count {
                     let first_read = base.0.wrapping_add(consumer.atom_offset);
                     let last_read = base
                         .0
@@ -540,66 +595,6 @@ fn is_lane_local_access(consumer: &AtomGroup, producer: &AtomGroup, num_lanes: u
                 }
 
                 // Not lane-local.
-                return false;
-            }
-            InputRef::Strided {
-                base,
-                stride_outer: stride,
-                modulus: repeat,
-                ..
-            } => {
-                // StridedBroadcast: atom i reads base + stride * (i / repeat).
-                // This is used in matmul Mul groups where chunks of K atoms
-                // share the same A element.
-                //
-                // For lane-local access when chunked:
-                // Lane k's atoms [k*C/L .. (k+1)*C/L) read source atoms at
-                // base + stride * (i/repeat) for i in that range.
-                //
-                // For this to be lane-local:
-                // 1. Consumer chunk size C/L must be a multiple of repeat.
-                //    Otherwise, lane boundaries don't align with repeat boundaries,
-                //    and some lanes read atoms from adjacent lanes' producer chunks.
-                // 2. The number of distinct reads per chunk (C/(L*repeat)) must equal
-                //    the producer chunk size (P/L), ensuring each lane reads exactly
-                //    its own producer fragment.
-                // 3. Base alignment: first read of lane 0 must hit producer base.
-                let chunk = consumer.count / num_lanes as u64;
-                let prod_chunk = producer.count / num_lanes as u64;
-                let abs_stride = (*stride).unsigned_abs();
-
-                // chunk must be a multiple of repeat for alignment.
-                if chunk % *repeat != 0 {
-                    return false;
-                }
-
-                let distinct_per_chunk = chunk / *repeat;
-
-                if abs_stride > 0
-                    && distinct_per_chunk == prod_chunk
-                    && consumer.count % num_lanes as u64 == 0
-                    && producer.count % num_lanes as u64 == 0
-                {
-                    // Check base alignment: first consumer atom reads from producer base.
-                    let first_read = base
-                        .0
-                        .wrapping_add((abs_stride * (consumer.atom_offset / repeat)) as u64);
-                    if first_read == prod_base {
-                        continue; // lane-local
-                    }
-                }
-
-                return false;
-            }
-            InputRef::Strided {
-                base,
-                stride_inner: stride,
-                modulus,
-                ..
-            } => {
-                // Modular: atom i reads base + stride * (i % modulus).
-                // This tiles/repeats — every lane needs the same modulus-sized
-                // range. NOT lane-local unless the producer is duplicated.
                 return false;
             }
             InputRef::Explicit(_) => {
@@ -641,46 +636,50 @@ fn input_refs_group(
         InputRef::Broadcast(id) => id.0 >= pb && id.0 < pe,
         InputRef::Strided {
             base,
-            stride_inner: stride,
-            ..
+            dim_strides,
+            dim_shape,
         } => {
-            let first = base
-                .0
-                .wrapping_add((*stride * consumer_offset as i64) as u64);
-            let last = base
-                .0
-                .wrapping_add((*stride * (consumer_offset + consumer_count - 1) as i64) as u64);
-            let lo = first.min(last);
-            let hi = first.max(last);
-            lo < pe && hi >= pb
-        }
-        InputRef::Strided {
-            base,
-            stride_outer: stride,
-            modulus: repeat,
-            ..
-        } => {
-            let first_block = consumer_offset / repeat;
-            let last_block = (consumer_offset + consumer_count - 1) / repeat;
-            let first = base.0.wrapping_add((*stride * first_block as i64) as u64);
-            let last = base.0.wrapping_add((*stride * last_block as i64) as u64);
-            let lo = first.min(last);
-            let hi = first.max(last);
-            lo < pe && hi >= pb
-        }
-        InputRef::Strided {
-            base,
-            stride_inner: stride,
-            modulus,
-            ..
-        } => {
-            let a = base.0;
-            let b = base
-                .0
-                .wrapping_add((*stride * (*modulus as i64 - 1)) as u64);
-            let lo = a.min(b);
-            let hi = a.max(b);
-            lo < pe && hi >= pb
+            let nd = dim_strides.len();
+            if nd == 1 {
+                // Affine: base + stride * i
+                let stride = dim_strides[0];
+                let first = base
+                    .0
+                    .wrapping_add((stride * consumer_offset as i64) as u64);
+                let last = base
+                    .0
+                    .wrapping_add((stride * (consumer_offset + consumer_count - 1) as i64) as u64);
+                let lo = first.min(last);
+                let hi = first.max(last);
+                lo < pe && hi >= pb
+            } else if nd >= 2 && dim_strides[1] == 0 {
+                // StridedBroadcast: base + stride * (i / repeat)
+                let stride = dim_strides[0];
+                let repeat = dim_shape[1];
+                let first_block = consumer_offset / repeat;
+                let last_block = (consumer_offset + consumer_count - 1) / repeat;
+                let first = base.0.wrapping_add((stride * first_block as i64) as u64);
+                let last = base.0.wrapping_add((stride * last_block as i64) as u64);
+                let lo = first.min(last);
+                let hi = first.max(last);
+                lo < pe && hi >= pb
+            } else if nd >= 2 && dim_strides[0] == 0 {
+                // Modular: base + stride * (i % modulus), range is [0..modulus-1]
+                let stride = dim_strides[1];
+                let modulus = dim_shape[1];
+                let a = base.0;
+                let b = base.0.wrapping_add((stride * (modulus as i64 - 1)) as u64);
+                let lo = a.min(b);
+                let hi = a.max(b);
+                lo < pe && hi >= pb
+            } else {
+                // General 2D: use resolve for bounding
+                let first = input.resolve(consumer_offset);
+                let last = input.resolve(consumer_offset + consumer_count - 1);
+                let lo = first.0.min(last.0);
+                let hi = first.0.max(last.0);
+                lo < pe && hi >= pb
+            }
         }
         InputRef::Explicit(ids) => ids
             .iter()
@@ -763,10 +762,7 @@ fn collect_input_atom_ranges(
     // Also check input tensors
     for input in &group.inputs {
         match input {
-            InputRef::Broadcast(id)
-            | InputRef::Strided { base: id, .. }
-            | InputRef::Strided { base: id, .. }
-            | InputRef::Strided { base: id, .. } => {
+            InputRef::Broadcast(id) | InputRef::Strided { base: id, .. } => {
                 if let Some((idx, _)) = graph.find_input_idx(*id) {
                     let it = &graph.input_tensors()[idx];
                     if seen_bases.insert(it.base_id.0) {
@@ -976,12 +972,12 @@ fn build_phase(
             if let ScalarOp::Reduce { .. } = &cons.op {
                 for inp in &cons.inputs {
                     if let InputRef::Strided {
-                        base,
-                        stride_inner: stride,
-                        ..
+                        base, dim_strides, ..
                     } = inp
                     {
-                        let abs_stride = (*stride).unsigned_abs();
+                        // Use innermost stride for the affine-like pattern
+                        let stride = dim_strides.last().copied().unwrap_or(0);
+                        let abs_stride = stride.unsigned_abs();
                         if abs_stride > 0
                             && abs_stride * cons.count == group.count
                             && input_refs_group(inp, cons.count, cons.atom_offset, group)
@@ -1373,34 +1369,10 @@ fn ensure_inputs_declared(
             InputRef::Broadcast(id) => {
                 ranges_to_cover.push((id.0, id.0));
             }
-            InputRef::Strided {
-                base,
-                stride_inner: stride,
-                ..
-            } => {
+            InputRef::Strided { .. } => {
                 let first = input.resolve(atom_offset).0;
                 let last = input.resolve(atom_offset + count - 1).0;
                 ranges_to_cover.push((first.min(last), first.max(last)));
-            }
-            InputRef::Strided {
-                base,
-                stride_outer: stride,
-                modulus: repeat,
-                ..
-            } => {
-                let first = input.resolve(atom_offset).0;
-                let last = input.resolve(atom_offset + count - 1).0;
-                ranges_to_cover.push((first.min(last), first.max(last)));
-            }
-            InputRef::Strided {
-                base,
-                stride_inner: stride,
-                modulus,
-                ..
-            } => {
-                let a = base.0;
-                let b = (base.0 as i64 + *stride * (*modulus as i64 - 1)) as u64;
-                ranges_to_cover.push((a.min(b), a.max(b)));
             }
             InputRef::Explicit(ids) => {
                 let start = atom_offset as usize;

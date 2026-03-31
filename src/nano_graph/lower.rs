@@ -2265,24 +2265,22 @@ mod tests {
             // Input 0 should be StridedBroadcast with repeat=N=16.
             match &g.inputs[0] {
                 InputRef::Strided {
-                    stride_inner,
-                    stride_outer,
-                    modulus,
+                    dim_strides,
+                    dim_shape,
                     ..
-                } if *stride_inner == 0 && *stride_outer != 0 => {
-                    assert_eq!(*modulus, 16, "StridedBroadcast repeat should be N=16");
+                } if dim_strides.len() == 2 && dim_strides[1] == 0 => {
+                    assert_eq!(dim_shape[1], 16, "StridedBroadcast repeat should be N=16");
                 }
                 other => panic!("Expected StridedBroadcast for input 0, got {:?}", other),
             }
             // Input 1 should be Affine with stride=1.
             match &g.inputs[1] {
                 InputRef::Strided {
-                    stride_inner,
-                    stride_outer,
-                    modulus,
+                    dim_strides,
+                    dim_shape,
                     ..
-                } if *stride_outer == 0 && *modulus == u64::MAX => {
-                    assert_eq!(*stride_inner, 1, "Affine stride should be 1");
+                } if dim_strides.len() == 1 && dim_shape[0] == u64::MAX => {
+                    assert_eq!(dim_strides[0], 1, "Affine stride should be 1");
                 }
                 other => panic!("Expected Affine for input 1, got {:?}", other),
             }

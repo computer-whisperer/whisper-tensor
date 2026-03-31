@@ -669,9 +669,11 @@ impl Conv {
 
                         let input_ref = InputRef::Strided {
                             base: in_base,
-                            stride_inner: (stride_w as u64 * ref_w_stride) as i64,
-                            stride_outer: (stride_h as u64 * ref_h_stride) as i64,
-                            modulus: ow as u64,
+                            dim_strides: vec![
+                                (stride_h as u64 * ref_h_stride) as i64,
+                                (stride_w as u64 * ref_w_stride) as i64,
+                            ],
+                            dim_shape: vec![u64::MAX, ow as u64],
                         };
 
                         let b = ctx.nano.push_group(
