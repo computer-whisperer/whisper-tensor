@@ -912,20 +912,12 @@ impl Operation for GlobalAveragePoolOperation {
         let shape_len = Shape::push_new(&mut graph, input_shape, rng);
         let two_1d = Constant::from_vec(&mut graph, vec![2i64], rng);
         let n_spatial = SimpleBinary::sub(&mut graph, shape_len, two_1d, rng);
-        let spatial_ones = {
-            let op_id = crate::milli_graph::ops::ConstantOfShape::push_new(
-                &mut graph,
-                crate::numeric_scalar::NumericScalar::from_i64(1),
-                n_spatial,
-                rng,
-            );
-            graph
-                .get_node_by_id(&op_id)
-                .unwrap()
-                .outputs()
-                .next()
-                .unwrap()
-        };
+        let spatial_ones = crate::milli_graph::ops::ConstantOfShape::push_new(
+            &mut graph,
+            crate::numeric_scalar::NumericScalar::from_i64(1),
+            n_spatial,
+            rng,
+        );
         let out_shape = Concat::push_new(&mut graph, vec![bc, spatial_ones], 0, rng);
         let out = Reshape::push_new(&mut graph, pooled, out_shape, false, rng);
 
@@ -1006,20 +998,12 @@ impl Operation for GlobalMaxPoolOperation {
         let shape_len = Shape::push_new(&mut graph, input_shape, rng);
         let two_1d = Constant::from_vec(&mut graph, vec![2i64], rng);
         let n_spatial = SimpleBinary::sub(&mut graph, shape_len, two_1d, rng);
-        let spatial_ones = {
-            let op_id = crate::milli_graph::ops::ConstantOfShape::push_new(
-                &mut graph,
-                crate::numeric_scalar::NumericScalar::from_i64(1),
-                n_spatial,
-                rng,
-            );
-            graph
-                .get_node_by_id(&op_id)
-                .unwrap()
-                .outputs()
-                .next()
-                .unwrap()
-        };
+        let spatial_ones = crate::milli_graph::ops::ConstantOfShape::push_new(
+            &mut graph,
+            crate::numeric_scalar::NumericScalar::from_i64(1),
+            n_spatial,
+            rng,
+        );
         let out_shape = Concat::push_new(&mut graph, vec![bc, spatial_ones], 0, rng);
         let out = Reshape::push_new(&mut graph, pooled, out_shape, false, rng);
 
