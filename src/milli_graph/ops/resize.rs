@@ -1249,58 +1249,29 @@ impl MilliOp for Resize {
         Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>,
         crate::nano_graph::pool_eval::PoolEvalError,
     > {
+        use crate::numeric_scalar::NumericScalar;
         use crate::numeric_tensor::{NumericTensor, TensorLayout};
         use crate::tensor_rank::DynRank;
-
-        // Only nearest-neighbor mode is partially implemented. Non-nearest modes
-        // and non-default coordinate transforms need the full resize_generic path.
-        if !matches!(self.mode, ResizeMode::Nearest) {
-            return Err(crate::nano_graph::pool_eval::PoolEvalError::Unsupported(
-                format!("Resize eval_new: mode {:?} not implemented", self.mode),
-            ));
-        }
-        if !matches!(
-            self.coord_transform,
-            ResizeCoordTransform::HalfPixel | ResizeCoordTransform::Asymmetric
-        ) {
-            return Err(crate::nano_graph::pool_eval::PoolEvalError::Unsupported(
-                format!(
-                    "Resize eval_new: coord_transform {:?} not implemented",
-                    self.coord_transform
-                ),
-            ));
-        }
-        if !matches!(
-            self.keep_aspect_ratio_policy,
-            ResizeKeepAspectRatioPolicy::Stretch
-        ) {
-            return Err(crate::nano_graph::pool_eval::PoolEvalError::Unsupported(
-                format!(
-                    "Resize eval_new: keep_aspect_ratio_policy {:?} not implemented",
-                    self.keep_aspect_ratio_policy
-                ),
-            ));
-        }
 
         let data = &inputs[0];
         let input_shape = data.shape();
         let rank = input_shape.len();
         let dtype = data.dtype();
 
-        // Parse optional inputs based on field presence
+        // Parse optional inputs.
         let mut input_idx = 1;
-        let _roi: Vec<f64> = if self.roi.is_some() && inputs.len() > input_idx {
-            let r: Vec<f64> = (0..inputs[input_idx].numel())
-                .map(|i| inputs[input_idx].read_element(i).to_f64())
+        let roi_raw: Vec<f32> = if self.roi.is_some() && inputs.len() > input_idx {
+            let r: Vec<f32> = (0..inputs[input_idx].numel())
+                .map(|i| inputs[input_idx].read_element(i).to_f32())
                 .collect();
             input_idx += 1;
             r
         } else {
             vec![]
         };
-        let scales_vec: Option<Vec<f64>> = if self.scales.is_some() && inputs.len() > input_idx {
-            let s: Vec<f64> = (0..inputs[input_idx].numel())
-                .map(|i| inputs[input_idx].read_element(i).to_f64())
+        let scales_vec: Option<Vec<f32>> = if self.scales.is_some() && inputs.len() > input_idx {
+            let s: Vec<f32> = (0..inputs[input_idx].numel())
+                .map(|i| inputs[input_idx].read_element(i).to_f32())
                 .collect();
             input_idx += 1;
             if s.iter().all(|&x| x == 0.0) {
@@ -1320,98 +1291,81 @@ impl MilliOp for Resize {
             None
         };
 
-        // Compute output shape
-        let output_shape: Vec<usize> = if let Some(ref sizes) = sizes_vec {
-            if !self.axes.is_empty() {
-                let mut out = input_shape.iter().map(|&d| d as usize).collect::<Vec<_>>();
-                for (i, &a) in self.axes.iter().enumerate() {
-                    let axis = if a < 0 {
-                        (a + rank as i64) as usize
+        // Expand axes-relative ROI to full-rank ROI.
+        let full_roi = if !self.axes.is_empty() && !roi_raw.is_empty() {
+            let resolved_axes: Vec<usize> = self
+                .axes
+                .iter()
+                .map(|&a| {
+                    if a < 0 {
+                        (rank as i64 + a) as usize
                     } else {
                         a as usize
-                    };
-                    out[axis] = sizes[i] as usize;
-                }
-                out
-            } else {
-                sizes.iter().map(|&s| s as usize).collect()
+                    }
+                })
+                .collect();
+            let num_axes = resolved_axes.len();
+            let mut full = vec![0.0f32; 2 * rank];
+            for d in 0..rank {
+                full[d + rank] = 1.0;
             }
-        } else if let Some(ref scales) = scales_vec {
-            if !self.axes.is_empty() {
-                let mut out = input_shape.iter().map(|&d| d as usize).collect::<Vec<_>>();
-                for (i, &a) in self.axes.iter().enumerate() {
-                    let axis = if a < 0 {
-                        (a + rank as i64) as usize
-                    } else {
-                        a as usize
-                    };
-                    out[axis] = (input_shape[axis] as f64 * scales[i]).floor() as usize;
-                }
-                out
-            } else {
-                input_shape
-                    .iter()
-                    .zip(scales.iter())
-                    .map(|(&d, &s)| (d as f64 * s).floor() as usize)
-                    .collect()
+            for (i, &axis) in resolved_axes.iter().enumerate() {
+                full[axis] = roi_raw[i];
+                full[axis + rank] = roi_raw[i + num_axes];
             }
+            full
         } else {
-            input_shape.iter().map(|&d| d as usize).collect()
+            roi_raw
         };
 
+        // Compute output shape and scales using the same helpers as legacy eval.
+        let output_shape = compute_output_shape(
+            input_shape,
+            scales_vec.as_deref(),
+            sizes_vec.as_deref(),
+            &self.axes,
+            self.keep_aspect_ratio_policy,
+        );
+        let scales = compute_scales(
+            input_shape,
+            &output_shape,
+            scales_vec.as_deref(),
+            &self.axes,
+            self.keep_aspect_ratio_policy,
+        );
+
+        // Flatten input to f32 for resize_generic.
+        let in_numel = data.numel();
+        let input_flat: Vec<f32> = (0..in_numel)
+            .map(|i| data.read_element(i).to_f32())
+            .collect();
+
+        let output_data = resize_generic(
+            &input_flat,
+            &ResizeGenericParams {
+                input_shape,
+                output_shape: &output_shape,
+                scales: &scales,
+                full_roi: &full_roi,
+                mode: self.mode,
+                coord_transform: self.coord_transform,
+                nearest_mode: self.nearest_mode,
+                cubic_coeff_a: self.cubic_coeff_a,
+                antialias: self.antialias,
+                exclude_outside: self.exclude_outside,
+                extrapolation_value: self.extrapolation_value,
+            },
+        );
+
+        // Build output tensor, casting back to original dtype.
         let out_shape_u64: Vec<u64> = output_shape.iter().map(|&s| s as u64).collect();
-        let out_numel: usize = out_shape_u64.iter().product::<u64>() as usize;
-
-        // Compute input/output strides
-        let mut in_strides = vec![1usize; rank];
-        for i in (0..rank.saturating_sub(1)).rev() {
-            in_strides[i] = in_strides[i + 1] * input_shape[i + 1] as usize;
-        }
-        let mut out_strides = vec![1usize; rank];
-        for i in (0..rank.saturating_sub(1)).rev() {
-            out_strides[i] = out_strides[i + 1] * output_shape[i + 1];
-        }
-
         let layout = TensorLayout::<DynRank>::row_major(out_shape_u64, dtype);
         let buf = pool
             .allocate(layout.buffer_size_bytes())
             .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
         let mut out = NumericTensor::from_parts(buf, layout);
-
-        // Nearest-neighbor interpolation with coordinate transform.
-        for out_flat in 0..out_numel {
-            let mut rem = out_flat;
-            let mut in_flat = 0usize;
-            for d in 0..rank {
-                let coord = rem / out_strides[d];
-                rem %= out_strides[d];
-                let scale = if output_shape[d] > 0 {
-                    input_shape[d] as f64 / output_shape[d] as f64
-                } else {
-                    1.0
-                };
-                let in_coord_f = match self.coord_transform {
-                    ResizeCoordTransform::HalfPixel => (coord as f64 + 0.5) * scale - 0.5,
-                    ResizeCoordTransform::Asymmetric => coord as f64 * scale,
-                    _ => unreachable!(), // guarded above
-                };
-                // Apply nearest_mode rounding.
-                let in_coord_rounded = match self.nearest_mode {
-                    ResizeNearestMode::RoundPreferFloor => {
-                        if in_coord_f == (in_coord_f.ceil() - 0.5) {
-                            in_coord_f.ceil() as i64 - 1
-                        } else {
-                            in_coord_f.round() as i64
-                        }
-                    }
-                    ResizeNearestMode::RoundPreferCeil => in_coord_f.round() as i64,
-                    ResizeNearestMode::Floor => in_coord_f.floor() as i64,
-                    ResizeNearestMode::Ceil => in_coord_f.ceil() as i64,
-                };
-                let in_coord = in_coord_rounded.max(0).min(input_shape[d] as i64 - 1) as usize;
-                in_flat += in_coord * in_strides[d];
-            }
-            out.write_element(out_flat, data.read_element(in_flat));
+        for (i, &v) in output_data.iter().enumerate() {
+            out.write_element(i, NumericScalar::from_f32(v).cast_to(dtype));
         }
 
         Ok(vec![out])
