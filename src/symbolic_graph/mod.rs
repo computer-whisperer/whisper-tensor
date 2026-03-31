@@ -326,30 +326,6 @@ impl ONNXTensorInfo {
     }
 }
 
-/// Validate that a legacy tensor matches the expected dtype and rank from ONNX metadata.
-/// Used by eval_backend::run (legacy model execution path).
-pub fn check_tensor_matches(
-    tensor: &NumericTensor<DynRank>,
-    tensor_info: &ONNXTensorInfo,
-) -> Result<(), EvalError> {
-    if let Some(shape) = tensor_info.shape()
-        && shape.len() != tensor.shape().len()
-    {
-        Err(EvalError::UnexpectedRank(shape.len(), tensor.shape().len()))?;
-    }
-    if let Some(expected) = tensor_info.dtype() {
-        let tensor_dtype = tensor.dtype();
-        let tensor_onnx_dtype = ONNXDType::from_legacy(tensor_dtype);
-        if expected != tensor_onnx_dtype {
-            Err(EvalError::UnexpectedDType(
-                expected.to_legacy(),
-                tensor_dtype,
-            ))?
-        }
-    }
-    Ok(())
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GraphOperation {
     pub name: Option<String>,

@@ -492,54 +492,6 @@ impl Node for AnyOperation {
     delegate!(global_id() -> GlobalId);
 }
 
-impl AnyOperation {
-    /// Legacy eval bridge: converts legacy tensors → pool views, runs eval_pool,
-    /// converts back. Used only by eval_backend::run (compiler path).
-    pub fn eval(
-        &self,
-        _backend: &mut crate::backends::eval_backend::EvalBackend,
-        inputs: &HashMap<
-            GlobalId,
-            crate::migration::numeric_tensor::NumericTensor<crate::tensor_rank::DynRank>,
-        >,
-    ) -> Result<
-        Box<
-            dyn Iterator<
-                Item = (
-                    GlobalId,
-                    crate::migration::numeric_tensor::NumericTensor<crate::tensor_rank::DynRank>,
-                ),
-            >,
-        >,
-        EvalError,
-    > {
-        use crate::migration::bridge;
-        use crate::pool::SystemPool;
-
-        // Convert legacy → pool views.
-        let new_tensors: Vec<_> = inputs
-            .iter()
-            .map(|(&id, t)| (id, bridge::legacy_to_new(t)))
-            .collect();
-        let views: Vec<_> = new_tensors.iter().map(|(id, t)| (*id, t.view())).collect();
-        let view_refs: HashMap<
-            GlobalId,
-            &crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>,
-        > = views.iter().map(|(id, v)| (*id, v)).collect();
-
-        // Run pool eval.
-        let pool = SystemPool;
-        let results = self.eval_pool(&view_refs, &pool)?;
-
-        // Convert back to legacy.
-        let legacy_results: Vec<_> = results
-            .into_iter()
-            .map(|(id, t)| (id, bridge::view_to_legacy(&t.view())))
-            .collect();
-        Ok(Box::new(legacy_results.into_iter()))
-    }
-}
-
 impl Operation for AnyOperation {
     fn eval_pool<'p, P: crate::pool::Pool + 'p>(
         &self,
