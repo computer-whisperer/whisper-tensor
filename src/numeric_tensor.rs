@@ -77,6 +77,129 @@ impl fmt::Display for KQuantVariant {
 }
 
 // ---------------------------------------------------------------------------
+// TensorFormat
+// ---------------------------------------------------------------------------
+
+/// What kind of data a tensor contains — enough to construct a [`TensorLayout`]
+/// given a shape.
+///
+/// This is the shape-independent part of a tensor's storage description.
+/// Combined with a shape, it fully determines the memory layout.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum TensorFormat {
+    /// Standard element-strided numeric tensor.
+    Element(NumericDType),
+    /// Simple block quantization (GGUF Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q8_1).
+    SimpleBlockQuant {
+        /// Bits per quantized weight (4, 5, or 8).
+        weight_bits: u8,
+        /// Whether each block has a per-block minimum (f16).
+        has_min: bool,
+    },
+    /// K-quant hierarchical block format (GGUF Q2_K through Q8_K).
+    KQuant(KQuantVariant),
+}
+
+impl TensorFormat {
+    /// The dtype you get when reading individual elements.
+    /// Quantized formats dequantize to F32.
+    pub fn element_dtype(&self) -> NumericDType {
+        match self {
+            TensorFormat::Element(dt) => *dt,
+            TensorFormat::SimpleBlockQuant { .. } | TensorFormat::KQuant(_) => NumericDType::F32,
+        }
+    }
+
+    /// Whether this is a quantized (block-packed) format.
+    pub fn is_quantized(&self) -> bool {
+        !matches!(self, TensorFormat::Element(_))
+    }
+
+    /// Construct a row-major [`TensorLayout`] for this format and shape.
+    pub fn to_layout<R: Rank>(&self, shape: R::KnownDims) -> TensorLayout<R> {
+        match self {
+            TensorFormat::Element(dt) => TensorLayout::row_major(shape, *dt),
+            TensorFormat::SimpleBlockQuant {
+                weight_bits,
+                has_min,
+            } => TensorLayout::simple_block_quant(shape, *weight_bits, *has_min),
+            TensorFormat::KQuant(variant) => TensorLayout::k_quant(shape, *variant),
+        }
+    }
+}
+
+impl From<NumericDType> for TensorFormat {
+    fn from(dt: NumericDType) -> Self {
+        TensorFormat::Element(dt)
+    }
+}
+
+impl TensorFormat {
+    /// Convert from legacy DType. Returns None for STRING.
+    pub fn from_legacy_dtype(dt: crate::dtype::DType) -> Option<Self> {
+        if let Some(pf) = dt.packed_format() {
+            Some(TensorFormat::from(pf))
+        } else {
+            NumericDType::from_legacy(dt).map(TensorFormat::Element)
+        }
+    }
+}
+
+impl From<crate::migration::packed_format::PackedFormat> for TensorFormat {
+    fn from(pf: crate::migration::packed_format::PackedFormat) -> Self {
+        use crate::migration::packed_format::PackedFormat;
+        match pf {
+            PackedFormat::Q4_0 => TensorFormat::SimpleBlockQuant {
+                weight_bits: 4,
+                has_min: false,
+            },
+            PackedFormat::Q4_1 => TensorFormat::SimpleBlockQuant {
+                weight_bits: 4,
+                has_min: true,
+            },
+            PackedFormat::Q5_0 => TensorFormat::SimpleBlockQuant {
+                weight_bits: 5,
+                has_min: false,
+            },
+            PackedFormat::Q5_1 => TensorFormat::SimpleBlockQuant {
+                weight_bits: 5,
+                has_min: true,
+            },
+            PackedFormat::Q8_0 => TensorFormat::SimpleBlockQuant {
+                weight_bits: 8,
+                has_min: false,
+            },
+            PackedFormat::Q8_1 => TensorFormat::SimpleBlockQuant {
+                weight_bits: 8,
+                has_min: true,
+            },
+            PackedFormat::Q2_K => TensorFormat::KQuant(KQuantVariant::Q2_K),
+            PackedFormat::Q3_K => TensorFormat::KQuant(KQuantVariant::Q3_K),
+            PackedFormat::Q4_K => TensorFormat::KQuant(KQuantVariant::Q4_K),
+            PackedFormat::Q5_K => TensorFormat::KQuant(KQuantVariant::Q5_K),
+            PackedFormat::Q6_K => TensorFormat::KQuant(KQuantVariant::Q6_K),
+            PackedFormat::Q8_K => TensorFormat::KQuant(KQuantVariant::Q8_K),
+        }
+    }
+}
+
+impl fmt::Display for TensorFormat {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TensorFormat::Element(dt) => write!(f, "{dt}"),
+            TensorFormat::SimpleBlockQuant {
+                weight_bits,
+                has_min,
+            } => {
+                let suffix = if *has_min { "1" } else { "0" };
+                write!(f, "Q{weight_bits}_{suffix}")
+            }
+            TensorFormat::KQuant(v) => write!(f, "{v}"),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // TensorLayout
 // ---------------------------------------------------------------------------
 

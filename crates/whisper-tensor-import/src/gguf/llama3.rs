@@ -155,7 +155,8 @@ impl<'a> GraphBuilder<'a> {
             tensor_name: name.to_string(),
             offset,
             length: info.byte_length,
-            dtype: info.dtype,
+            format: whisper_tensor::numeric_tensor::TensorFormat::from_legacy_dtype(info.dtype)
+                .expect("unsupported GGUF dtype"),
             shape: info.dimensions.clone(),
         };
         let store_id = self.m.tensor_store_mut().add_tensor(stored);

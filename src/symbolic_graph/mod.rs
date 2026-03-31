@@ -593,99 +593,70 @@ impl SymbolicGraph {
                     map.insert(kv.key.clone(), kv.value.clone());
                 }
                 if let Some(fmt) = map.get("format") {
+                    // Parse dtype once for all external format paths.
+                    let tensor_format = {
+                        let ndt = ONNXDType::from_onnx_i32(t.data_type)?
+                            .expect_numeric("external tensor");
+                        crate::numeric_tensor::TensorFormat::Element(ndt)
+                    };
+                    let shape = t.dims.iter().map(|x| *x as u64).collect::<Vec<_>>();
+
                     if fmt == "pth" {
                         if let (Some(location), Some(tensor_name)) =
                             (map.get("location"), map.get("tensor_name"))
                         {
-                            let dtype = DType::try_from(
-                                onnx::tensor_proto::DataType::try_from(t.data_type).map_err(
-                                    |x| {
-                                        ONNXDecodingError::ProtobufDecodeError(anyhow::Error::from(
-                                            x,
-                                        ))
-                                    },
-                                )?,
-                            )?;
-                            let shape = t.dims.iter().map(|x| *x as u64).collect::<Vec<_>>();
                             let id =
                                 graph_mutator
                                     .tensor_store
                                     .add_tensor(StoredTensor::ExternalPth {
                                         path: resolve_path(location),
                                         tensor_name: tensor_name.clone(),
-                                        dtype,
+                                        format: tensor_format,
                                         shape: shape.clone(),
                                     });
                             StoredOrNotTensor::Stored(id)
                         } else {
-                            // Missing required keys for pth; fallback to eager load
                             decode_tensor_proto_to_stored(t, &mut graph_mutator.tensor_store)?
                         }
                     } else if fmt == "safetensors" {
                         if let (Some(location), Some(tensor_name)) =
                             (map.get("location"), map.get("tensor_name"))
                         {
-                            let dtype = DType::try_from(
-                                onnx::tensor_proto::DataType::try_from(t.data_type).map_err(
-                                    |x| {
-                                        ONNXDecodingError::ProtobufDecodeError(anyhow::Error::from(
-                                            x,
-                                        ))
-                                    },
-                                )?,
-                            )?;
-                            let shape = t.dims.iter().map(|x| *x as u64).collect::<Vec<_>>();
                             let id = graph_mutator.tensor_store.add_tensor(
                                 StoredTensor::ExternalSafetensors {
                                     path: resolve_path(location),
                                     tensor_name: tensor_name.clone(),
-                                    dtype,
+                                    format: tensor_format,
                                     shape: shape.clone(),
                                 },
                             );
                             StoredOrNotTensor::Stored(id)
                         } else {
-                            // Missing required keys; fallback to eager load
                             decode_tensor_proto_to_stored(t, &mut graph_mutator.tensor_store)?
                         }
                     } else {
-                        // Unknown format; try generic external binary with offset/length
                         if let (Some(location), Some(offset), Some(length)) =
                             (map.get("location"), map.get("offset"), map.get("length"))
                         {
-                            let dtype = DType::try_from(
-                                onnx::tensor_proto::DataType::try_from(t.data_type).map_err(
-                                    |x| {
-                                        ONNXDecodingError::ProtobufDecodeError(anyhow::Error::from(
-                                            x,
-                                        ))
-                                    },
-                                )?,
-                            )?;
-                            let shape = t.dims.iter().map(|x| *x as u64).collect::<Vec<_>>();
                             let id = graph_mutator.tensor_store.add_tensor(
                                 StoredTensor::ExternalBinary {
                                     path: resolve_path(location),
                                     offset: offset.parse().unwrap_or(0usize),
                                     length: length.parse().unwrap_or(0usize),
-                                    dtype,
+                                    format: tensor_format,
                                     shape: shape.clone(),
                                 },
                             );
                             StoredOrNotTensor::Stored(id)
                         } else {
-                            // Fallback to eager load when essential keys missing
                             decode_tensor_proto_to_stored(t, &mut graph_mutator.tensor_store)?
                         }
                     }
                 } else if let (Some(location), Some(offset), Some(length)) =
                     (map.get("location"), map.get("offset"), map.get("length"))
                 {
-                    let dtype = DType::try_from(
-                        onnx::tensor_proto::DataType::try_from(t.data_type).map_err(|x| {
-                            ONNXDecodingError::ProtobufDecodeError(anyhow::Error::from(x))
-                        })?,
-                    )?;
+                    let ndt =
+                        ONNXDType::from_onnx_i32(t.data_type)?.expect_numeric("external tensor");
                     let shape = t.dims.iter().map(|x| *x as u64).collect::<Vec<_>>();
                     let id = graph_mutator
                         .tensor_store
@@ -693,7 +664,7 @@ impl SymbolicGraph {
                             path: resolve_path(location),
                             offset: offset.parse().unwrap_or(0usize),
                             length: length.parse().unwrap_or(0usize),
-                            dtype,
+                            format: crate::numeric_tensor::TensorFormat::Element(ndt),
                             shape: shape.clone(),
                         });
                     StoredOrNotTensor::Stored(id)
