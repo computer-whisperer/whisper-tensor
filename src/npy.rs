@@ -1,10 +1,10 @@
-//! NumPy `.npy` file reader producing pool-backed [`NumericTensor`]s.
+//! NumPy `.npy` file reader/writer for pool-backed [`NumericTensor`]s.
 //!
 //! Supports the subset of dtypes used in practice: float16/32/64, bfloat16,
 //! int8/16/32/64, uint8/16/32/64, bool.
 
 use crate::numeric_dtype::NumericDType;
-use crate::numeric_tensor::{NumericTensor, TensorLayout};
+use crate::numeric_tensor::{NumericTensor, NumericTensorView, TensorLayout};
 use crate::pool::Pool;
 use crate::tensor_rank::DynRank;
 use std::path::Path;
@@ -67,6 +67,77 @@ pub fn read_npy_file<'p, P: Pool + 'p>(
     let data =
         std::fs::read(path).map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
     read_npy(&data, pool)
+}
+
+/// Serialize a tensor view to `.npy` v1 format bytes.
+pub fn write_npy(view: &NumericTensorView<'_, DynRank>) -> Vec<u8> {
+    let shape = view.shape();
+    let dtype = view.dtype();
+    let descr = dtype_to_npy_descr(dtype);
+
+    let shape_str = if shape.is_empty() {
+        "()".to_string()
+    } else if shape.len() == 1 {
+        format!("({},)", shape[0])
+    } else {
+        let dims: Vec<String> = shape.iter().map(|d| d.to_string()).collect();
+        format!("({})", dims.join(", "))
+    };
+    let header_content = format!(
+        "{{'descr': '{}', 'fortran_order': False, 'shape': {}, }}",
+        descr, shape_str
+    );
+
+    // Pad to 64-byte alignment
+    let prefix_len = 10usize; // magic(6) + version(2) + header_len(2)
+    let unpadded = prefix_len + header_content.len() + 1; // +1 for trailing \n
+    let padded = (unpadded + 63) & !63;
+    let padding = padded - unpadded;
+    let header_len = (header_content.len() + padding + 1) as u16;
+
+    let data_bytes = view.numel() * dtype.bytes_per_element();
+    let mut buf = Vec::with_capacity(prefix_len + header_len as usize + data_bytes);
+    buf.extend_from_slice(b"\x93NUMPY");
+    buf.push(1); // major
+    buf.push(0); // minor
+    buf.extend_from_slice(&header_len.to_le_bytes());
+    buf.extend_from_slice(header_content.as_bytes());
+    buf.extend(std::iter::repeat(b' ').take(padding));
+    buf.push(b'\n');
+
+    // Write raw tensor data — element by element via scalar LE bytes.
+    let bpe = dtype.bytes_per_element();
+    for i in 0..view.numel() {
+        let scalar = view.read_element(i);
+        buf.extend_from_slice(&scalar.raw_bits()[..bpe]);
+    }
+
+    buf
+}
+
+/// Write a tensor view to a `.npy` file.
+pub fn write_npy_file(path: &Path, view: &NumericTensorView<'_, DynRank>) -> Result<(), String> {
+    let data = write_npy(view);
+    std::fs::write(path, &data).map_err(|e| format!("Failed to write {}: {e}", path.display()))
+}
+
+fn dtype_to_npy_descr(dtype: NumericDType) -> &'static str {
+    match dtype {
+        NumericDType::F64 => "<f8",
+        NumericDType::F32 => "<f4",
+        NumericDType::F16 => "<f2",
+        NumericDType::BF16 => "<f2", // BF16 has no standard npy descr; write as f16 bytes
+        NumericDType::I64 => "<i8",
+        NumericDType::I32 => "<i4",
+        NumericDType::I16 => "<i2",
+        NumericDType::I8 => "|i1",
+        NumericDType::U64 => "<u8",
+        NumericDType::U32 => "<u4",
+        NumericDType::U16 => "<u2",
+        NumericDType::U8 => "|u1",
+        NumericDType::BOOL => "|b1",
+        _ => "<f4", // Exotic sub-byte types: fall back to f4 descr
+    }
 }
 
 fn parse_dtype(header: &str) -> Result<NumericDType, String> {

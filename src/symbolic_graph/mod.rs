@@ -1086,6 +1086,21 @@ impl SymbolicGraph {
         pool: &'p P,
     ) -> Result<HashMap<GlobalId, crate::numeric_tensor::NumericTensor<'p, DynRank, P>>, EvalError>
     {
+        self.pool_eval_with_store_observed(user_inputs, tensor_store, pool, &mut ())
+    }
+
+    pub fn pool_eval_with_store_observed<
+        'p,
+        P: crate::pool::Pool + 'p,
+        T: observer::SymbolicGraphObserver,
+    >(
+        &self,
+        user_inputs: &HashMap<GlobalId, &crate::numeric_tensor::NumericTensorView<'_, DynRank>>,
+        tensor_store: &TensorStore,
+        pool: &'p P,
+        observer: &mut T,
+    ) -> Result<HashMap<GlobalId, crate::numeric_tensor::NumericTensor<'p, DynRank, P>>, EvalError>
+    {
         use crate::numeric_tensor::TensorLayout;
         use crate::pool::{Pool, SystemPool};
 
@@ -1148,7 +1163,7 @@ impl SymbolicGraph {
             input_map.insert(id, view);
         }
 
-        self.eval_pool(&input_map, pool)
+        self.eval_pool_observed(&input_map, pool, observer)
     }
 
     /// Pool-based op-by-op evaluation.
