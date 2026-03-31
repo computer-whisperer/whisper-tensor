@@ -105,7 +105,10 @@ impl Loader for TransformersLoader {
             // Simple transformer (no KV cache state)
             let input_id = *names_by_id.get(token_input).unwrap();
             let input_info = graph.get_tensor_info(input_id).unwrap();
-            let input_dtype = input_info.dtype.unwrap_or(DType::I32);
+            let input_dtype = input_info
+                .dtype
+                .map(|d| d.to_legacy())
+                .unwrap_or(DType::I32);
             let input_rank = input_info.shape.as_ref().map_or(2, |s| s.len());
 
             let output_id = *names_by_id.get(logit_output).unwrap();

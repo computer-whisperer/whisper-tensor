@@ -1140,7 +1140,10 @@ mod tests {
             stash_type: DType::F32,
         };
 
-        let tensor_dtypes = HashMap::from([(x_id, DType::BF16), (w_id, DType::BF16)]);
+        let tensor_dtypes = HashMap::from([
+            (x_id, crate::numeric_dtype::NumericDType::BF16),
+            (w_id, crate::numeric_dtype::NumericDType::BF16),
+        ]);
         let ctx = crate::milli_graph::MilliLoweringContext::new(tensor_dtypes);
         let milli_graph = op.get_milli_op_graph(&ctx, &mut rng);
 
@@ -1190,7 +1193,10 @@ mod tests {
             stash_type: DType::F32,
         };
 
-        let tensor_dtypes = HashMap::from([(x_id, DType::BF16), (w_id, DType::BF16)]);
+        let tensor_dtypes = HashMap::from([
+            (x_id, crate::numeric_dtype::NumericDType::BF16),
+            (w_id, crate::numeric_dtype::NumericDType::BF16),
+        ]);
         let ctx = crate::milli_graph::MilliLoweringContext::new(tensor_dtypes);
         let milli_graph = op.get_milli_op_graph(&ctx, &mut rng);
 

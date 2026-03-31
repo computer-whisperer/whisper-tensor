@@ -115,12 +115,11 @@ impl Operation for BinaryOperation {
             WhichBinaryOperation::Mul => milli_graph::ops::SimpleBinary::mul(&mut graph, a, b, rng),
             WhichBinaryOperation::Div => milli_graph::ops::SimpleBinary::div(&mut graph, a, b, rng),
             WhichBinaryOperation::MatMul => {
-                let input_dtype = ctx
+                let input_ndt = ctx
                     .tensor_dtypes
                     .get(&self.a)
                     .copied()
-                    .unwrap_or(DType::F32);
-                let input_ndt = NumericDType::from_legacy(input_dtype).unwrap();
+                    .unwrap_or(NumericDType::F32);
                 milli_graph::ops::MatMul::push_new_default_precision(
                     &mut graph, a, b, input_ndt, rng,
                 )
@@ -330,13 +329,11 @@ impl Operation for GemmOperation {
             b
         };
 
-        let input_dtype = NumericDType::from_legacy(
-            ctx.tensor_dtypes
-                .get(&self.input_a)
-                .copied()
-                .unwrap_or(DType::F32),
-        )
-        .unwrap();
+        let input_dtype = ctx
+            .tensor_dtypes
+            .get(&self.input_a)
+            .copied()
+            .unwrap_or(NumericDType::F32);
         let (prod_dt, acc_dt, out_dt) =
             milli_graph::ops::MatMul::default_precision_for(input_dtype);
 

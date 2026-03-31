@@ -174,7 +174,7 @@ pub(super) fn infer_vae_io(
 
 pub(super) fn infer_model_dtype(graph: &SymbolicGraph, io: &TransformerIo) -> Option<DType> {
     let tid = graph.get_tensors_by_name().get(&io.latent_input).copied()?;
-    graph.get_tensor_info(tid)?.dtype
+    graph.get_tensor_info(tid)?.dtype.map(|d| d.to_legacy())
 }
 
 pub(super) fn infer_t5_seq_len(graph: &SymbolicGraph, io: &T5EncoderIo) -> Option<usize> {

@@ -12,6 +12,7 @@ use crate::graph::{
 };
 use crate::migration::numeric_scalar::NumericScalar;
 use crate::migration::numeric_tensor::NumericTensor;
+use crate::numeric_dtype::{NumericDType, ONNXDType};
 use crate::scalar_info::ScalarInfoTyped;
 use crate::symbolic_graph::observer::SymbolicGraphObserver;
 use crate::symbolic_graph::ops::{AnyOperation, EvalError, Operation};
@@ -50,6 +51,8 @@ pub enum ONNXDecodingError {
     MissingAttribute(String, String),
     #[error(transparent)]
     DTypeError(#[from] crate::dtype::DTypeError),
+    #[error(transparent)]
+    ONNXDTypeError(#[from] crate::numeric_dtype::ONNXDTypeError),
     #[error(transparent)]
     NDArrayNumericTensorError(#[from] NDArrayNumericTensorError),
     #[error("Unsupported ONNX: {0}")]
@@ -301,7 +304,7 @@ pub enum TensorType {
 pub struct ONNXTensorInfo {
     global_id: GlobalId,
     pub onnx_name: Option<String>,
-    pub dtype: Option<DType>,
+    pub dtype: Option<ONNXDType>,
     pub shape: Option<Vec<ScalarInfoTyped<u64>>>,
     pub tensor_type: TensorType,
 }
@@ -311,8 +314,13 @@ impl ONNXTensorInfo {
         self.shape.clone()
     }
 
-    pub fn dtype(&self) -> Option<DType> {
+    pub fn dtype(&self) -> Option<ONNXDType> {
         self.dtype
+    }
+
+    /// Get the numeric dtype if known. Returns None for String or unknown dtype.
+    pub fn numeric_dtype(&self) -> Option<NumericDType> {
+        self.dtype.and_then(|d| d.as_numeric())
     }
 
     pub fn name(&self) -> Option<String> {
@@ -331,10 +339,14 @@ pub fn check_tensor_matches(
     {
         Err(EvalError::UnexpectedRank(shape.len(), tensor.shape().len()))?;
     }
-    if let Some(dtype) = tensor_info.dtype() {
+    if let Some(expected) = tensor_info.dtype() {
         let tensor_dtype = tensor.dtype();
-        if dtype != tensor_dtype {
-            Err(EvalError::UnexpectedDType(dtype, tensor_dtype))?
+        let tensor_onnx_dtype = ONNXDType::from_legacy(tensor_dtype);
+        if expected != tensor_onnx_dtype {
+            Err(EvalError::UnexpectedDType(
+                expected.to_legacy(),
+                tensor_dtype,
+            ))?
         }
     }
     Ok(())
@@ -800,11 +812,11 @@ impl SymbolicGraph {
         use crate::graph::{Graph, Node};
         use crate::milli_graph::{MilliLoweringContext, MilliOpGraph, MilliOpGroup, MilliOpPhase};
 
-        // Build dtype context for milli lowering.
-        let tensor_dtypes: HashMap<GlobalId, DType> = self
+        // Build dtype context for milli lowering (numeric types only).
+        let tensor_dtypes: HashMap<GlobalId, NumericDType> = self
             .tensors
             .iter()
-            .filter_map(|(id, info)| info.dtype().map(|dt| (*id, dt)))
+            .filter_map(|(id, info)| info.numeric_dtype().map(|dt| (*id, dt)))
             .collect();
         let lowering_ctx = MilliLoweringContext::new(tensor_dtypes);
 
@@ -896,11 +908,11 @@ impl SymbolicGraph {
             return Err(MilliGraphGenError::OptimizerWithoutBackward);
         }
 
-        // Build dtype context for milli lowering.
-        let tensor_dtypes: HashMap<GlobalId, DType> = self
+        // Build dtype context for milli lowering (numeric types only).
+        let tensor_dtypes: HashMap<GlobalId, NumericDType> = self
             .tensors
             .iter()
-            .filter_map(|(id, info)| info.dtype().map(|dt| (*id, dt)))
+            .filter_map(|(id, info)| info.numeric_dtype().map(|dt| (*id, dt)))
             .collect();
         let lowering_ctx = MilliLoweringContext::new(tensor_dtypes);
 
@@ -1450,14 +1462,9 @@ pub fn tensor_proto_to_pool_tensor<'p, P: crate::pool::Pool + 'p>(
     use crate::numeric_dtype::NumericDType;
     use crate::numeric_tensor::{NumericTensor as NewTensor, TensorLayout};
 
-    let legacy_dt = DType::try_from(
-        onnx::tensor_proto::DataType::try_from(tensor.data_type)
-            .map_err(|x| ONNXDecodingError::ProtobufDecodeError(anyhow::Error::from(x)))?,
-    )?;
-    let ndt = NumericDType::from_legacy(legacy_dt).ok_or_else(|| {
-        ONNXDecodingError::UnsupportedONNX(format!(
-            "unsupported dtype {legacy_dt:?} for pool tensor"
-        ))
+    let onnx_dt = ONNXDType::from_onnx_i32(tensor.data_type)?;
+    let ndt = onnx_dt.as_numeric().ok_or_else(|| {
+        ONNXDecodingError::UnsupportedONNX(format!("unsupported dtype {onnx_dt} for pool tensor"))
     })?;
     let shape: Vec<u64> = tensor.dims.iter().map(|x| *x as u64).collect();
 
@@ -2015,10 +2022,7 @@ impl SymbolicGraphMutator {
             .as_ref()
             .ok_or(ONNXDecodingError::MissingField("tensor_type.shape"))?;
 
-        let dtype = DType::try_from(
-            onnx::tensor_proto::DataType::try_from(onnx_tensor_type_value_inner.elem_type)
-                .map_err(|x| ONNXDecodingError::ProtobufDecodeError(anyhow::Error::from(x)))?,
-        )?;
+        let dtype = ONNXDType::from_onnx_i32(onnx_tensor_type_value_inner.elem_type)?;
 
         let mut dimensions = vec![];
         for dim in &onnx_shape.dim {
@@ -2083,7 +2087,7 @@ impl SymbolicGraphMutator {
             global_id,
             ONNXTensorInfo {
                 onnx_name: name.clone(),
-                dtype: Some(value.dtype()),
+                dtype: Some(ONNXDType::from_legacy(value.dtype())),
                 shape: Some(shape),
                 tensor_type: TensorType::Constant(StoredOrNotTensor::NotStored(value)),
                 global_id,
@@ -2113,7 +2117,7 @@ impl SymbolicGraphMutator {
             global_id,
             ONNXTensorInfo {
                 onnx_name: name.clone(),
-                dtype: Some(value.0.dtype().to_legacy()),
+                dtype: Some(ONNXDType::Numeric(value.0.dtype())),
                 shape: Some(shape),
                 tensor_type: TensorType::Constant(StoredOrNotTensor::Inline(value)),
                 global_id,
@@ -2145,7 +2149,7 @@ impl SymbolicGraphMutator {
             global_id,
             ONNXTensorInfo {
                 onnx_name: name.clone(),
-                dtype: Some(tensor_ref.dtype()),
+                dtype: Some(ONNXDType::from_legacy(tensor_ref.dtype())),
                 shape: Some(shape),
                 tensor_type: TensorType::Constant(StoredOrNotTensor::Stored(id)),
                 global_id,
@@ -2228,7 +2232,7 @@ impl SymbolicGraphMutator {
             global_id,
             ONNXTensorInfo {
                 onnx_name: name.clone(),
-                dtype: Some(value.dtype().to_legacy()),
+                dtype: Some(ONNXDType::Numeric(value.dtype())),
                 shape: Some(shape),
                 tensor_type: TensorType::Constant(StoredOrNotTensor::Inline(SharedPoolTensor(
                     std::sync::Arc::new(value),
@@ -2258,7 +2262,7 @@ impl SymbolicGraphMutator {
             global_id,
             ONNXTensorInfo {
                 onnx_name: name.clone(),
-                dtype: Some(value.dtype()),
+                dtype: Some(ONNXDType::from_legacy(value.dtype())),
                 shape: Some(shape),
                 tensor_type: TensorType::Constant(StoredOrNotTensor::NotStored(value)),
                 global_id,
@@ -2281,7 +2285,7 @@ impl SymbolicGraphMutator {
         for s in tensor_ref.shape() {
             shape.push(ScalarInfoTyped::Numeric(s))
         }
-        let dtype = tensor_ref.dtype();
+        let dtype = ONNXDType::from_legacy(tensor_ref.dtype());
         let global_id = GlobalId::new(rng);
         let g = self.graph.as_mut().unwrap();
         g.tensors.insert(
@@ -2339,7 +2343,7 @@ impl SymbolicGraphMutator {
         let tensor = ONNXTensorInfo {
             onnx_name: Some(name.to_string()),
             tensor_type,
-            dtype,
+            dtype: dtype.map(ONNXDType::from_legacy),
             shape,
             global_id,
         };
@@ -3471,7 +3475,7 @@ impl Link for ONNXTensorInfo {
 
 impl LinkMetadata for ONNXTensorInfo {
     fn dtype(&self) -> Option<DType> {
-        self.dtype
+        self.dtype.map(|d| d.to_legacy())
     }
 
     fn shape(&self) -> Option<Vec<ScalarInfoTyped<u64>>> {

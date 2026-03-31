@@ -121,9 +121,9 @@ mod tests {
                 }
             }
 
-            let tensor_dtypes: HashMap<GlobalId, crate::dtype::DType> = input_refs
+            let tensor_dtypes: HashMap<GlobalId, crate::numeric_dtype::NumericDType> = input_refs
                 .iter()
-                .map(|(id, view)| (*id, view.dtype().to_legacy()))
+                .map(|(id, view)| (*id, view.dtype()))
                 .collect();
             let mctx = crate::milli_graph::MilliLoweringContext::new(tensor_dtypes);
             let mut rng2 = SmallRng::seed_from_u64(0);
@@ -942,9 +942,9 @@ fn test_rms_norm_symbolic_eval_pool() {
     let out = results.get(&output_id).expect("output not found");
 
     // Test 2: via get_milli_op_graph + pool_eval directly
-    let tensor_dtypes: HashMap<GlobalId, crate::dtype::DType> = input_refs
+    let tensor_dtypes: HashMap<GlobalId, crate::numeric_dtype::NumericDType> = input_refs
         .iter()
-        .map(|(id, view)| (*id, view.dtype().to_legacy()))
+        .map(|(id, view)| (*id, view.dtype()))
         .collect();
     let ctx = crate::milli_graph::MilliLoweringContext::new(tensor_dtypes);
     let mut rng_milli = SmallRng::seed_from_u64(700);

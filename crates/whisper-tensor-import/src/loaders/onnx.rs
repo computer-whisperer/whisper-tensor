@@ -84,7 +84,10 @@ impl Loader for OnnxLoader {
             if let (Some((_, input_info)), Some((_, output_info))) = (first_input, first_output) {
                 let token_input_name = input_info.name().unwrap();
                 let logit_output_name = output_info.name().unwrap();
-                let input_dtype = input_info.dtype.unwrap_or(DType::I32);
+                let input_dtype = input_info
+                    .dtype
+                    .map(|d| d.to_legacy())
+                    .unwrap_or(DType::I32);
                 let input_rank = input_info.shape.as_ref().map_or(2, |s| s.len());
                 let output_rank = output_info.shape.as_ref().map_or(3, |s| s.len());
 

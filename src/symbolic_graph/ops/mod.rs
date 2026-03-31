@@ -100,6 +100,7 @@ use crate::dtype::{DType, DTypeError};
 use crate::graph::{GlobalId, Node, Property};
 use crate::migration::numeric_tensor::NumericTensorError;
 use crate::milli_graph::{MilliLoweringContext, MilliOpGraph, MilliOpGraphError};
+use crate::numeric_dtype::NumericDType;
 use crate::symbolic_graph::SymbolicGraph;
 use crate::tensor_rank::DynRank;
 use rand::Rng;
@@ -142,9 +143,9 @@ pub trait Operation: Node {
         pool: &'p P,
     ) -> Result<HashMap<GlobalId, crate::numeric_tensor::NumericTensor<'p, DynRank, P>>, EvalError>
     {
-        let tensor_dtypes: HashMap<GlobalId, DType> = inputs
+        let tensor_dtypes: HashMap<GlobalId, NumericDType> = inputs
             .iter()
-            .map(|(id, view)| (*id, view.dtype().to_legacy()))
+            .map(|(id, view)| (*id, view.dtype()))
             .collect();
         let ctx = MilliLoweringContext::new(tensor_dtypes);
         let mut rng = WyRand::new(Default::default());

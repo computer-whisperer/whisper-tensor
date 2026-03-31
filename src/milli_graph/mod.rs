@@ -23,12 +23,15 @@ pub mod validate_infer;
 /// Context passed during symbolic → milli op graph lowering.
 /// Carries tensor metadata that individual ops can use to set
 /// precision-sensitive fields (e.g. MatMul accumulation dtype).
+///
+/// By the time we reach the milli layer, all tensors are numeric.
+/// String tensors are handled at the SymbolicGraph level.
 pub struct MilliLoweringContext {
-    pub tensor_dtypes: HashMap<GlobalId, DType>,
+    pub tensor_dtypes: HashMap<GlobalId, NumericDType>,
 }
 
 impl MilliLoweringContext {
-    pub fn new(tensor_dtypes: HashMap<GlobalId, DType>) -> Self {
+    pub fn new(tensor_dtypes: HashMap<GlobalId, NumericDType>) -> Self {
         Self { tensor_dtypes }
     }
 

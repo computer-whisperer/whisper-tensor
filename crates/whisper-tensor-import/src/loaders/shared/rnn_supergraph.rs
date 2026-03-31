@@ -134,7 +134,8 @@ pub(super) fn build_rnn_supergraph(
                 .collect();
             let input_tensor_dtype = input_tensor_info
                 .dtype
-                .expect("state pair input tensor has no dtype");
+                .expect("state pair input tensor has no dtype")
+                .to_legacy();
             let num_elements = input_tensor_shape.iter().product::<u64>();
             let input_tensor = NDArrayNumericTensor::from_vec_shape(
                 vec![0.0; num_elements as usize],
@@ -216,7 +217,8 @@ pub(super) fn build_rnn_supergraph(
             .len();
         let input_tensor_dtype = input_tensor_info
             .dtype
-            .expect("token input tensor has no dtype");
+            .expect("token input tensor has no dtype")
+            .to_legacy();
 
         let (mut milli_graph, input_map) =
             MilliOpGraph::new(std::iter::once(sub_token_input.global_id()), rng);

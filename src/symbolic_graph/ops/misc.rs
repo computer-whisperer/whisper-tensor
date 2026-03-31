@@ -1527,11 +1527,11 @@ impl Operation for EyeLikeOperation {
 
         // Determine output dtype.
         let out_dtype = if let Some(dtype_int) = self.dtype {
-            let onnx_dt = crate::onnx::tensor_proto::DataType::try_from(dtype_int as i32).unwrap();
-            crate::numeric_dtype::NumericDType::from_legacy(DType::try_from(onnx_dt).unwrap())
-                .unwrap()
+            crate::numeric_dtype::ONNXDType::from_onnx_i32(dtype_int as i32)
+                .expect("EyeLike: unsupported dtype")
+                .expect_numeric("EyeLike")
         } else if let Some(dt) = ctx.tensor_dtypes.get(&self.input) {
-            crate::numeric_dtype::NumericDType::from_legacy(*dt).unwrap()
+            *dt
         } else {
             crate::numeric_dtype::NumericDType::F32
         };
@@ -1870,7 +1870,7 @@ impl Operation for HardmaxOperation {
         let out_dtype = _ctx
             .tensor_dtypes
             .get(&self.input)
-            .and_then(|dt| NumericDType::from_legacy(*dt))
+            .copied()
             .unwrap_or(NumericDType::F32);
         let result = Cast::push_new(&mut graph, mask, out_dtype, rng);
 

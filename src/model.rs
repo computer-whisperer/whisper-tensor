@@ -133,7 +133,7 @@ impl Model {
         let mut results = HashMap::new();
         for tensor_id in input_ids {
             if let Some(tensor_info) = self.graph.get_tensor_info(tensor_id)
-                && let (Some(dtype), Some(name), Some(shape)) =
+                && let (Some(onnx_dtype), Some(name), Some(shape)) =
                     (tensor_info.dtype(), tensor_info.name(), tensor_info.shape())
             {
                 let shape: Vec<_> = shape
@@ -143,7 +143,7 @@ impl Model {
                         _ => None,
                     })
                     .collect();
-                results.insert(name.clone(), (dtype, shape));
+                results.insert(name.clone(), (onnx_dtype.to_legacy(), shape));
             }
         }
         Ok(results)

@@ -347,6 +347,55 @@ impl ONNXDType {
             ONNXDType::String => None,
         }
     }
+
+    /// Get the numeric dtype, or panic with a message if this is not numeric.
+    pub fn expect_numeric(&self, msg: &str) -> NumericDType {
+        self.as_numeric()
+            .unwrap_or_else(|| panic!("{msg}: expected numeric dtype, got {self}"))
+    }
+
+    /// Parse from an ONNX protobuf DataType enum value (i32).
+    pub fn from_onnx_i32(value: i32) -> Result<Self, ONNXDTypeError> {
+        use crate::onnx::tensor_proto::DataType;
+        let dt = DataType::try_from(value)
+            .map_err(|_| ONNXDTypeError::UnsupportedONNXDataType(value))?;
+        Self::from_onnx_proto(dt)
+    }
+
+    /// Parse from an ONNX protobuf DataType enum.
+    pub fn from_onnx_proto(
+        dt: crate::onnx::tensor_proto::DataType,
+    ) -> Result<Self, ONNXDTypeError> {
+        use crate::onnx::tensor_proto::DataType;
+        Ok(match dt {
+            DataType::Double => ONNXDType::Numeric(NumericDType::F64),
+            DataType::Float => ONNXDType::Numeric(NumericDType::F32),
+            DataType::Bfloat16 => ONNXDType::Numeric(NumericDType::BF16),
+            DataType::Float16 => ONNXDType::Numeric(NumericDType::F16),
+            DataType::Float8e4m3fn => ONNXDType::Numeric(NumericDType::F8E4M3FN),
+            DataType::Float8e5m2 => ONNXDType::Numeric(NumericDType::F8E5M2),
+            DataType::Float4e2m1 => ONNXDType::Numeric(NumericDType::F4E2M1),
+            DataType::Int64 => ONNXDType::Numeric(NumericDType::I64),
+            DataType::Int32 => ONNXDType::Numeric(NumericDType::I32),
+            DataType::Int16 => ONNXDType::Numeric(NumericDType::I16),
+            DataType::Int8 => ONNXDType::Numeric(NumericDType::I8),
+            DataType::Int4 => ONNXDType::Numeric(NumericDType::I4),
+            DataType::Uint64 => ONNXDType::Numeric(NumericDType::U64),
+            DataType::Uint32 => ONNXDType::Numeric(NumericDType::U32),
+            DataType::Uint16 => ONNXDType::Numeric(NumericDType::U16),
+            DataType::Uint8 => ONNXDType::Numeric(NumericDType::U8),
+            DataType::Uint4 => ONNXDType::Numeric(NumericDType::U4),
+            DataType::Bool => ONNXDType::Numeric(NumericDType::BOOL),
+            DataType::String => ONNXDType::String,
+            other => return Err(ONNXDTypeError::UnsupportedONNXDataType(other as i32)),
+        })
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ONNXDTypeError {
+    #[error("Unsupported ONNX DataType value: {0}")]
+    UnsupportedONNXDataType(i32),
 }
 
 impl fmt::Display for ONNXDType {
@@ -437,6 +486,16 @@ impl ONNXDType {
                 Some(ndt) => ONNXDType::Numeric(ndt),
                 None => panic!("DType::Packed has no ONNXDType representation"),
             },
+        }
+    }
+
+    /// Convert back to the legacy `DType` enum.
+    ///
+    /// Panics if the inner `NumericDType` has no legacy equivalent.
+    pub fn to_legacy(self) -> DType {
+        match self {
+            ONNXDType::String => DType::STRING,
+            ONNXDType::Numeric(ndt) => ndt.to_legacy(),
         }
     }
 }
