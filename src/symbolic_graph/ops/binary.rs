@@ -1,4 +1,3 @@
-use crate::dtype::DType;
 use crate::graph::{GlobalId, Node, Property, PropertyValue};
 use crate::milli_graph::{MilliLoweringContext, MilliOpGraph};
 use crate::numeric_dtype::NumericDType;

@@ -1,8 +1,7 @@
-use crate::dtype::DType;
 use crate::graph::{GlobalId, Node};
 use crate::milli_graph::ops::*;
 use crate::milli_graph::{MilliLoweringContext, MilliOpGraph};
-use crate::numeric_dtype::NumericDType;
+use crate::numeric_dtype::{NumericDType, ONNXDType};
 use crate::symbolic_graph::ops::Operation;
 use crate::symbolic_graph::{ONNXDecodingError, query_attribute_int};
 use crate::{TrigOp, onnx};
@@ -115,7 +114,10 @@ impl Operation for WindowOperation {
         let out_dtype = {
             let onnx_dt = onnx::tensor_proto::DataType::try_from(self.output_datatype as i32)
                 .unwrap_or(onnx::tensor_proto::DataType::Float);
-            DType::try_from(onnx_dt).unwrap_or(DType::F32)
+            ONNXDType::from_onnx_proto(onnx_dt)
+                .ok()
+                .and_then(|d| d.as_numeric())
+                .unwrap_or(NumericDType::F32)
         };
 
         // Ensure size is INT64 for Range
@@ -163,13 +165,8 @@ impl Operation for WindowOperation {
         }
 
         // Cast to requested output dtype
-        if out_dtype != DType::F32 {
-            w = Cast::push_new(
-                &mut g,
-                w,
-                NumericDType::from_legacy(out_dtype).unwrap(),
-                rng,
-            );
+        if out_dtype != NumericDType::F32 {
+            w = Cast::push_new(&mut g, w, out_dtype, rng);
         }
 
         let mut output_map = HashMap::new();

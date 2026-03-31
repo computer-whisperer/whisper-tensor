@@ -10,8 +10,6 @@
 
 use super::ops::*;
 use super::{SymbolicGraphMutator, TensorType};
-use crate::backends::ndarray_backend::NDArrayNumericTensor;
-use crate::dtype::DType;
 use crate::graph::GlobalId;
 use crate::numeric_dtype::NumericDType;
 use crate::numeric_scalar::NumericScalar;
@@ -252,7 +250,7 @@ impl SymbolicGraphMutator {
         &mut self,
         name: &str,
         input: GlobalId,
-        to: DType,
+        to: NumericDType,
         rng: &mut impl Rng,
     ) -> GlobalId {
         let out = self.push_intermediate(name, rng);

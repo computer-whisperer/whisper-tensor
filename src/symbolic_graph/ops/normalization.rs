@@ -1,4 +1,3 @@
-use crate::dtype::DType;
 use crate::graph::{GlobalId, Node, Property, PropertyValue};
 use crate::milli_graph::{MilliLoweringContext, MilliOpGraph, ops_helpers};
 use crate::numeric_dtype::NumericDType;
@@ -125,7 +124,7 @@ pub struct GroupNormalizationOperation {
     output: GlobalId,
     epsilon: f32,
     num_groups: usize,
-    stash_type: DType,
+    stash_type: NumericDType,
 }
 
 impl GroupNormalizationOperation {
@@ -155,9 +154,9 @@ impl GroupNormalizationOperation {
             }
         }
         let stash_type = if query_attribute_int(attributes, "stash_type").unwrap_or(1) == 1 {
-            DType::F32
+            NumericDType::F32
         } else {
-            DType::BF16
+            NumericDType::BF16
         };
         let num_groups = num_groups.ok_or(ONNXDecodingError::MissingAttribute(
             "GroupNormalization".to_string(),
@@ -204,12 +203,8 @@ impl Operation for GroupNormalizationOperation {
     fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let original_input = input_map[&self.input];
-        let input_cast = milli_graph::ops::Cast::push_new(
-            &mut graph,
-            original_input,
-            NumericDType::from_legacy(self.stash_type).unwrap(),
-            rng,
-        );
+        let input_cast =
+            milli_graph::ops::Cast::push_new(&mut graph, original_input, self.stash_type, rng);
 
         let input_shape = milli_graph::ops::Shape::push_new(&mut graph, input_cast, rng);
         let num_channels = {
@@ -278,7 +273,7 @@ impl Operation for GroupNormalizationOperation {
             let scale_cast = milli_graph::ops::Cast::push_new(
                 &mut graph,
                 input_map[&self.scale],
-                NumericDType::from_legacy(self.stash_type).unwrap(),
+                self.stash_type,
                 rng,
             );
             let scale = milli_graph::ops::Unsqueeze::push_new(&mut graph, scale_cast, one, rng);
@@ -289,7 +284,7 @@ impl Operation for GroupNormalizationOperation {
             let bias_cast = milli_graph::ops::Cast::push_new(
                 &mut graph,
                 input_map[&self.bias],
-                NumericDType::from_legacy(self.stash_type).unwrap(),
+                self.stash_type,
                 rng,
             );
             let bias = milli_graph::ops::Unsqueeze::push_new(&mut graph, bias_cast, one, rng);
@@ -310,7 +305,10 @@ impl Operation for GroupNormalizationOperation {
         vec![
             Property::new("epsilon", PropertyValue::Float(self.epsilon as f64)),
             Property::new("num_groups", PropertyValue::Int(self.num_groups as i64)),
-            Property::new("stash_type", PropertyValue::DType(self.stash_type)),
+            Property::new(
+                "stash_type",
+                PropertyValue::DType(self.stash_type.to_legacy()),
+            ),
         ]
     }
 }
@@ -326,7 +324,7 @@ pub struct RMSNormalizationOperation {
     inv_std_dev_output: Option<GlobalId>,
     axis: i64,
     epsilon: f32,
-    stash_type: DType,
+    stash_type: NumericDType,
 }
 
 impl RMSNormalizationOperation {
@@ -348,7 +346,7 @@ impl RMSNormalizationOperation {
             inv_std_dev_output: None,
             axis: -1,
             epsilon,
-            stash_type: DType::F32,
+            stash_type: NumericDType::F32,
         }
     }
 
@@ -382,9 +380,9 @@ impl RMSNormalizationOperation {
             }
         }
         let stash_type = if query_attribute_int(attributes, "stash_type").unwrap_or(1) == 1 {
-            DType::F32
+            NumericDType::F32
         } else {
-            DType::BF16
+            NumericDType::BF16
         };
         Ok(Self {
             global_id: GlobalId::new(rng),
@@ -458,12 +456,8 @@ impl Operation for RMSNormalizationOperation {
         let input_data = input_map[&self.input];
         let input_scale = input_map[&self.scale];
 
-        let input_f32 = milli_graph::ops::Cast::push_new(
-            &mut graph,
-            input_data,
-            NumericDType::from_legacy(self.stash_type).unwrap(),
-            rng,
-        );
+        let input_f32 =
+            milli_graph::ops::Cast::push_new(&mut graph, input_data, self.stash_type, rng);
 
         let axis = ops_helpers::scalar_const(&mut graph, self.axis, rng);
         let axis = ops_helpers::resolve_axes(&mut graph, axis, input_data, rng);
@@ -520,7 +514,10 @@ impl Operation for RMSNormalizationOperation {
         vec![
             Property::new("axis", PropertyValue::Int(self.axis)),
             Property::new("epsilon", PropertyValue::Float(self.epsilon as f64)),
-            Property::new("stash_type", PropertyValue::DType(self.stash_type)),
+            Property::new(
+                "stash_type",
+                PropertyValue::DType(self.stash_type.to_legacy()),
+            ),
         ]
     }
 }
@@ -536,7 +533,7 @@ pub struct LayerNormalizationOperation {
     inv_std_dev_output: Option<GlobalId>,
     axis: i64,
     epsilon: f32,
-    stash_type: DType,
+    stash_type: NumericDType,
 }
 
 impl LayerNormalizationOperation {
@@ -558,7 +555,7 @@ impl LayerNormalizationOperation {
             inv_std_dev_output: None,
             axis: -1,
             epsilon,
-            stash_type: DType::F32,
+            stash_type: NumericDType::F32,
         }
     }
 
@@ -592,9 +589,9 @@ impl LayerNormalizationOperation {
             }
         }
         let stash_type = if query_attribute_int(attributes, "stash_type").unwrap_or(1) == 1 {
-            DType::F32
+            NumericDType::F32
         } else {
-            DType::BF16
+            NumericDType::BF16
         };
         Ok(Self {
             global_id: GlobalId::new(rng),
@@ -667,12 +664,8 @@ impl Operation for LayerNormalizationOperation {
         let input_data = input_map[&self.input];
         let input_scale = input_map[&self.scale];
 
-        let input_f32 = milli_graph::ops::Cast::push_new(
-            &mut graph,
-            input_data,
-            NumericDType::from_legacy(self.stash_type).unwrap(),
-            rng,
-        );
+        let input_f32 =
+            milli_graph::ops::Cast::push_new(&mut graph, input_data, self.stash_type, rng);
 
         let axis = ops_helpers::scalar_const(&mut graph, self.axis, rng);
         let axis = ops_helpers::resolve_axes(&mut graph, axis, input_data, rng);
@@ -739,7 +732,10 @@ impl Operation for LayerNormalizationOperation {
         vec![
             Property::new("axis", PropertyValue::Int(self.axis)),
             Property::new("epsilon", PropertyValue::Float(self.epsilon as f64)),
-            Property::new("stash_type", PropertyValue::DType(self.stash_type)),
+            Property::new(
+                "stash_type",
+                PropertyValue::DType(self.stash_type.to_legacy()),
+            ),
         ]
     }
 }
@@ -1137,7 +1133,7 @@ mod tests {
             inv_std_dev_output: None,
             axis: -1,
             epsilon: 1e-6,
-            stash_type: DType::F32,
+            stash_type: NumericDType::F32,
         };
 
         let tensor_dtypes = HashMap::from([
@@ -1190,7 +1186,7 @@ mod tests {
             inv_std_dev_output: None,
             axis: -1,
             epsilon: 1e-6,
-            stash_type: DType::F32,
+            stash_type: NumericDType::F32,
         };
 
         let tensor_dtypes = HashMap::from([

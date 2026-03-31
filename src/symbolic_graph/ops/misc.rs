@@ -1,7 +1,7 @@
-use crate::dtype::DType;
 use crate::graph::{GlobalId, Graph, Node, Property, PropertyValue};
 use crate::milli_graph::ops::*;
 use crate::milli_graph::{MilliLoweringContext, MilliOpGraph};
+use crate::numeric_dtype::{NumericDType, ONNXDType};
 use crate::symbolic_graph::ops::{EvalError, Operation};
 use crate::symbolic_graph::{
     ONNXDecodingError, SymbolicGraph, SymbolicGraphMutator, query_attribute_float,
@@ -354,7 +354,7 @@ pub struct RandomNormalLikeOperation {
     global_id: GlobalId,
     input: GlobalId,
     output: GlobalId,
-    dtype: Option<DType>,
+    dtype: Option<NumericDType>,
     mean: f32,
     scale: f32,
     seed: Option<f32>,
@@ -380,7 +380,7 @@ impl RandomNormalLikeOperation {
         let dtype = if let Some(dtype) = dtype {
             let to_datatype = onnx::tensor_proto::DataType::try_from(dtype.i as i32)
                 .map_err(|x| ONNXDecodingError::ProtobufDecodeError(x.into()))?;
-            Some(DType::try_from(to_datatype)?)
+            Some(ONNXDType::from_onnx_proto(to_datatype)?.expect_numeric("RandomNormalLike"))
         } else {
             None
         };
@@ -423,7 +423,10 @@ impl Operation for RandomNormalLikeOperation {
     fn parameters(&self) -> Vec<Property> {
         let mut params = Vec::new();
         if let Some(dtype) = self.dtype {
-            params.push(Property::new("dtype", PropertyValue::DType(dtype)));
+            params.push(Property::new(
+                "dtype",
+                PropertyValue::DType(dtype.to_legacy()),
+            ));
         }
         params.push(Property::new(
             "mean",
@@ -444,7 +447,7 @@ impl Operation for RandomNormalLikeOperation {
         let out = crate::milli_graph::ops::RandomNormalLike::push_new(
             &mut graph,
             input_map[&self.input],
-            self.dtype,
+            self.dtype.map(|dt| dt.to_legacy()),
             self.mean,
             self.scale,
             self.seed,

@@ -1,7 +1,6 @@
-use crate::dtype::DType;
 use crate::graph::{GlobalId, Node, Property, PropertyValue};
 use crate::milli_graph::{self, MilliLoweringContext, MilliOpGraph};
-use crate::numeric_dtype::NumericDType;
+use crate::numeric_dtype::{NumericDType, ONNXDType};
 use crate::onnx;
 use crate::symbolic_graph::ONNXDecodingError;
 use crate::symbolic_graph::ops::Operation;
@@ -79,11 +78,16 @@ pub struct CastOperation {
     global_id: GlobalId,
     input: GlobalId,
     output: GlobalId,
-    to: DType,
+    to: NumericDType,
 }
 
 impl CastOperation {
-    pub fn new(input: GlobalId, output: GlobalId, to: DType, rng: &mut impl rand::Rng) -> Self {
+    pub fn new(
+        input: GlobalId,
+        output: GlobalId,
+        to: NumericDType,
+        rng: &mut impl rand::Rng,
+    ) -> Self {
         Self {
             global_id: GlobalId::new(rng),
             input,
@@ -114,7 +118,7 @@ impl CastOperation {
             .i as i32;
         let to_datatype = onnx::tensor_proto::DataType::try_from(to_i)
             .map_err(|x| ONNXDecodingError::ProtobufDecodeError(x.into()))?;
-        let to = DType::try_from(to_datatype)?;
+        let to = ONNXDType::from_onnx_proto(to_datatype)?.expect_numeric("Cast target");
         Ok(Self {
             global_id: GlobalId::new(rng),
             input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("Cast"))?,
@@ -142,7 +146,10 @@ impl Node for CastOperation {
 
 impl Operation for CastOperation {
     fn parameters(&self) -> Vec<Property> {
-        vec![Property::new("to", PropertyValue::DType(self.to))]
+        vec![Property::new(
+            "to",
+            PropertyValue::DType(self.to.to_legacy()),
+        )]
     }
 
     fn get_milli_op_graph(
@@ -151,12 +158,8 @@ impl Operation for CastOperation {
         rng: &mut impl rand::Rng,
     ) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
-        let out = milli_graph::ops::Cast::push_new(
-            &mut graph,
-            input_map[&self.input],
-            NumericDType::from_legacy(self.to).unwrap(),
-            rng,
-        );
+        let out =
+            milli_graph::ops::Cast::push_new(&mut graph, input_map[&self.input], self.to, rng);
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);
         graph.set_output_map(output_map);

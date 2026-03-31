@@ -4,6 +4,7 @@ use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
 use whisper_tensor::dtype::DType;
 use whisper_tensor::graph::GlobalId;
 use whisper_tensor::model::Model;
+use whisper_tensor::numeric_dtype::NumericDType;
 use whisper_tensor::scalar_info::ScalarInfoTyped;
 use whisper_tensor::symbolic_graph::tensor_store::StoredTensor;
 use whisper_tensor::symbolic_graph::{SymbolicGraphMutator, TensorType};
@@ -193,9 +194,9 @@ impl<'a> GraphBuilder<'a> {
 
         // -- Embedding (dequantize packed weight, then gather) --
         let embed_weight = self.load_weight("token_embd.weight", rng)?;
-        let embed_weight = self
-            .m
-            .push_cast("embed_tokens/cast", embed_weight, DType::F32, rng);
+        let embed_weight =
+            self.m
+                .push_cast("embed_tokens/cast", embed_weight, NumericDType::F32, rng);
         let x = self
             .m
             .push_gather("embed_tokens", embed_weight, input_ids, 0, rng);
