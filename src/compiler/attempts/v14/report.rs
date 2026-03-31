@@ -445,7 +445,7 @@ pub fn svg_report(
 fn scalar_op_name(op: &ScalarOp) -> &'static str {
     match op {
         ScalarOp::Literal(_) => "Literal",
-        ScalarOp::Identity => "Identity",
+        ScalarOp::Identity | ScalarOp::Cast { .. } => "Identity",
         ScalarOp::Binary { .. } => "Binary",
         ScalarOp::Unary { .. } => "Unary",
         ScalarOp::Select => "Select",

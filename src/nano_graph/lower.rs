@@ -1445,6 +1445,24 @@ impl<'a> NanoLoweringContext<'a> {
         &mut self,
         op: &T,
     ) -> crate::milli_graph::ops::LowerResult {
+        self.lower_passthrough_with_op(op, ScalarOp::Identity)
+    }
+
+    /// Like `lower_identity_passthrough`, but uses a `ScalarOp::Cast` with
+    /// the given saturation mode.
+    pub fn lower_cast_passthrough<T: Node>(
+        &mut self,
+        op: &T,
+        saturating: bool,
+    ) -> crate::milli_graph::ops::LowerResult {
+        self.lower_passthrough_with_op(op, ScalarOp::Cast { saturating })
+    }
+
+    fn lower_passthrough_with_op<T: Node>(
+        &mut self,
+        op: &T,
+        cast_op: ScalarOp,
+    ) -> crate::milli_graph::ops::LowerResult {
         let all_infos = self.all_infos;
         let in_id = Node::inputs(op).next().unwrap();
         let out_id = Node::outputs(op).next().unwrap();
@@ -1465,14 +1483,14 @@ impl<'a> NanoLoweringContext<'a> {
             return crate::milli_graph::ops::LowerResult::Lowered;
         }
 
-        // Dtype differs — emit an Identity group for the cast.
+        // Dtype differs — emit a cast group.
         let known_dims = in_map.known_dims();
         let input_ref = Self::pointwise_input_ref(&in_map);
 
         let base_id = self.nano.push_group(
             in_map.count,
             out_dt,
-            ScalarOp::Identity,
+            cast_op,
             in_map.sym_dims.clone(),
             vec![input_ref],
         );

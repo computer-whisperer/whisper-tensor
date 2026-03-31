@@ -406,7 +406,7 @@ fn op_name(op: &crate::nano_graph::ScalarOp) -> &'static str {
     use crate::nano_graph::ScalarOp;
     match op {
         ScalarOp::Literal(_) => "Literal",
-        ScalarOp::Identity => "Identity",
+        ScalarOp::Identity | ScalarOp::Cast { .. } => "Identity",
         ScalarOp::Binary { .. } => "Binary",
         ScalarOp::Unary { .. } => "Unary",
         ScalarOp::Select => "Select",

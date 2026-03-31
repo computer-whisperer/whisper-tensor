@@ -17,6 +17,14 @@ pub struct Cast {
     output: GlobalId,
     data: GlobalId,
     dtype: NumericDType,
+    /// When true, overflow clamps to ±max_finite instead of ±inf.
+    /// ONNX Cast defaults to true for float8 targets.
+    #[serde(default = "default_saturate")]
+    pub(crate) saturate: bool,
+}
+
+fn default_saturate() -> bool {
+    true
 }
 
 impl Cast {
@@ -31,13 +39,24 @@ impl Cast {
         dtype: NumericDType,
         rng: &mut impl Rng,
     ) -> GlobalId {
-        Self::push_new_with_label(graph, data, dtype, None, rng)
+        Self::push_new_with_options(graph, data, dtype, true, None, rng)
     }
 
     pub fn push_new_with_label(
         graph: &mut MilliOpGraph,
         data: GlobalId,
         dtype: NumericDType,
+        label: Option<String>,
+        rng: &mut impl Rng,
+    ) -> GlobalId {
+        Self::push_new_with_options(graph, data, dtype, true, label, rng)
+    }
+
+    pub fn push_new_with_options(
+        graph: &mut MilliOpGraph,
+        data: GlobalId,
+        dtype: NumericDType,
+        saturate: bool,
         label: Option<String>,
         rng: &mut impl Rng,
     ) -> GlobalId {
@@ -48,6 +67,7 @@ impl Cast {
             output,
             data,
             dtype,
+            saturate,
         };
         graph.push_op(AnyMilliOp::Cast(node));
         output
@@ -59,7 +79,7 @@ impl Cast {
         &self,
         ctx: &mut crate::nano_graph::NanoLoweringContext,
     ) -> crate::milli_graph::ops::LowerResult {
-        ctx.lower_identity_passthrough(self)
+        ctx.lower_cast_passthrough(self, self.saturate)
     }
 
     pub fn remap_tensors(&mut self, map: &HashMap<GlobalId, GlobalId>, rng: &mut impl rand::Rng) {

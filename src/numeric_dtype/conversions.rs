@@ -134,7 +134,7 @@ impl FloatType {
         }
     }
 
-    fn encode_max_finite(&self, sign_bit: u64) -> u64 {
+    pub(crate) fn encode_max_finite(&self, sign_bit: u64) -> u64 {
         let mant_bits = self.mantissa_bits as u32;
         let max_exp = self.max_biased_exponent() as u64;
         let mant_mask = (1u64 << mant_bits) - 1;
@@ -354,6 +354,23 @@ impl NumericDType {
             NumericDType::Bool => Intermediate::Bool(raw != 0),
         };
         encode_intermediate(intermediate, target)
+    }
+
+    /// If the raw value decodes to ±inf for this dtype, replace it with
+    /// ±max_finite. Non-float or non-infinite values pass through unchanged.
+    pub fn saturate_inf(&self, raw: u64) -> u64 {
+        match self {
+            NumericDType::Float(ft) => {
+                let val = ft.decode_f64(raw);
+                if val.is_infinite() {
+                    let sign_bit: u64 = if val.is_sign_negative() { 1 } else { 0 };
+                    ft.encode_max_finite(sign_bit)
+                } else {
+                    raw
+                }
+            }
+            _ => raw,
+        }
     }
 }
 

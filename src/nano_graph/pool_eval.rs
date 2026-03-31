@@ -257,6 +257,18 @@ pub fn pool_eval<'p, P: Pool + 'p>(
                             lookup_atom_dtype(src, graph, &group_buffers, &input_buffers);
                         val_dtype.cast_raw(val, output_dtype)
                     }
+                    ScalarOp::Cast { saturating } => {
+                        let src = group.inputs[0].resolve(ri);
+                        let val = lookup_atom_raw(src, graph, &group_buffers, &input_buffers);
+                        let val_dtype =
+                            lookup_atom_dtype(src, graph, &group_buffers, &input_buffers);
+                        let raw = val_dtype.cast_raw(val, output_dtype);
+                        if *saturating {
+                            output_dtype.saturate_inf(raw)
+                        } else {
+                            raw
+                        }
+                    }
                     ScalarOp::Binary { op, compute_dtype } => {
                         let a_src = group.inputs[0].resolve(ri);
                         let b_src = group.inputs[1].resolve(ri);

@@ -246,7 +246,8 @@ fn classify_group(group: &AtomGroup, num_lanes: usize) -> GroupKind {
         ScalarOp::Binary { .. }
         | ScalarOp::Unary { .. }
         | ScalarOp::Select
-        | ScalarOp::Identity => {
+        | ScalarOp::Identity
+        | ScalarOp::Cast { .. } => {
             // Groups with Explicit inputs can't be trivially split because
             // InputRef::Explicit stores a Vec<AtomId> that must have exactly
             // group.count entries, and the atom_offset mechanism doesn't compose

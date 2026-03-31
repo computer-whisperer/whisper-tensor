@@ -79,6 +79,14 @@ pub struct CastOperation {
     input: GlobalId,
     output: GlobalId,
     to: NumericDType,
+    /// When true, overflow clamps to ±max_finite instead of ±inf.
+    /// ONNX Cast defaults to true (saturate=1) for float8 targets.
+    #[serde(default = "default_true")]
+    saturate: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl CastOperation {
@@ -93,6 +101,7 @@ impl CastOperation {
             input,
             output,
             to,
+            saturate: true,
         }
     }
 
@@ -119,11 +128,17 @@ impl CastOperation {
         let to_datatype = onnx::tensor_proto::DataType::try_from(to_i)
             .map_err(|x| ONNXDecodingError::ProtobufDecodeError(x.into()))?;
         let to = ONNXDType::from_onnx_proto(to_datatype)?.expect_numeric("Cast target");
+        let saturate = attributes
+            .iter()
+            .find(|a| a.name == "saturate")
+            .map(|a| a.i != 0)
+            .unwrap_or(true); // ONNX default: saturate=1
         Ok(Self {
             global_id: GlobalId::new(rng),
             input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("Cast"))?,
             output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("Cast"))?,
             to,
+            saturate,
         })
     }
 }
@@ -158,8 +173,14 @@ impl Operation for CastOperation {
         rng: &mut impl rand::Rng,
     ) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
-        let out =
-            milli_graph::ops::Cast::push_new(&mut graph, input_map[&self.input], self.to, rng);
+        let out = milli_graph::ops::Cast::push_new_with_options(
+            &mut graph,
+            input_map[&self.input],
+            self.to,
+            self.saturate,
+            None,
+            rng,
+        );
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);
         graph.set_output_map(output_map);

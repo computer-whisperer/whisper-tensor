@@ -159,9 +159,13 @@ pub enum ScalarOp {
     /// the exact typed value (BF16, F32, etc.).
     Literal(NumericScalar),
     /// Identity pass-through. One input, output = cast(input, output_dtype).
-    /// Used for index-remapping ops (Slice, strided views) and dtype casts.
-    /// The cast target is the group's `output_dtype`.
+    /// Used for index-remapping ops (Slice, strided views) and non-cast
+    /// dtype reinterpretations.
     Identity,
+    /// Explicit dtype cast. One input, output = cast(input, output_dtype).
+    /// If `saturating` is true, overflow clamps to ±max_finite instead of ±inf.
+    /// ONNX Cast defaults to saturating for float8 targets.
+    Cast { saturating: bool },
     /// Binary operation on two inputs.
     Binary {
         op: ScalarBinOp,
@@ -206,6 +210,7 @@ impl ScalarOp {
         match self {
             ScalarOp::Literal(_)
             | ScalarOp::Identity
+            | ScalarOp::Cast { .. }
             | ScalarOp::Select
             | ScalarOp::IndirectLoad { .. }
             | ScalarOp::OpaqueOutput { .. } => None,
