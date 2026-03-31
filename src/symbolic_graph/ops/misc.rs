@@ -1,8 +1,5 @@
-use crate::backends::eval_backend::EvalBackend;
-use crate::backends::ndarray_backend::NDArrayNumericTensor;
 use crate::dtype::DType;
 use crate::graph::{GlobalId, Graph, Node, Property, PropertyValue};
-use crate::migration::numeric_tensor::NumericTensor;
 use crate::milli_graph::ops::*;
 use crate::milli_graph::{MilliLoweringContext, MilliOpGraph};
 use crate::symbolic_graph::ops::{EvalError, Operation};
@@ -178,29 +175,6 @@ impl Operation for IfOperation {
 
     fn get_sub_graphs(&self) -> Vec<&SymbolicGraph> {
         vec![&self.then_branch, &self.else_branch]
-    }
-
-    fn eval(
-        &self,
-        backend: &mut EvalBackend,
-        inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
-    ) -> Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, EvalError> {
-        let condition = inputs.get(&self.condition).unwrap();
-        let condition: bool = condition.first_element().into();
-        let (active_tensors, output_ids) = if condition {
-            let tensors = self.then_branch.eval(inputs, backend)?;
-            (tensors, &self.then_branch.ordered_outputs)
-        } else {
-            let tensors = self.else_branch.eval(inputs, backend)?;
-            (tensors, &self.else_branch.ordered_outputs)
-        };
-
-        // Get all outputs
-        let mut outputs = HashMap::new();
-        for (to_id, from_id) in self.outputs.iter().zip(output_ids.iter()) {
-            outputs.insert(*to_id, active_tensors.get(from_id).unwrap().clone());
-        }
-        Ok(Box::new(outputs.into_iter()))
     }
 
     fn eval_pool<'p, P: crate::pool::Pool + 'p>(
@@ -1548,50 +1522,6 @@ impl Operation for EyeLikeOperation {
         false
     }
 
-    fn eval(
-        &self,
-        backend: &mut EvalBackend,
-        inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
-    ) -> Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, EvalError> {
-        let input = &inputs[&self.input];
-        let shape: Vec<usize> = input.shape().iter().map(|&v| v as usize).collect();
-        if shape.len() != 2 {
-            return Err(EvalError::InvalidInput(
-                "EyeLike requires 2D input".to_string(),
-            ));
-        }
-        let rows = shape[0];
-        let cols = shape[1];
-
-        // Determine output dtype
-        let out_dtype = if let Some(dtype_int) = self.dtype {
-            let onnx_dt = onnx::tensor_proto::DataType::try_from(dtype_int as i32)
-                .map_err(|_| EvalError::InvalidInput("Invalid dtype".to_string()))?;
-            DType::try_from(onnx_dt)?
-        } else {
-            input.dtype()
-        };
-
-        // Create zeros and fill diagonal
-        let mut data = vec![0.0f32; rows * cols];
-        let k = self.k;
-        for i in 0..rows {
-            let j = i as i64 + k;
-            if j >= 0 && (j as usize) < cols {
-                data[i * cols + j as usize] = 1.0;
-            }
-        }
-
-        let out_shape: Vec<u64> = shape.iter().map(|&v| v as u64).collect();
-        let mut out =
-            NumericTensor::NDArray(NDArrayNumericTensor::from_vec_shape(data, &out_shape)?);
-        if out_dtype != DType::F32 {
-            out = out.cast(out_dtype, backend)?;
-        }
-
-        Ok(Box::new(std::iter::once((self.output, out))))
-    }
-
     fn get_milli_op_graph(&self, ctx: &MilliLoweringContext, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
 
@@ -1770,63 +1700,6 @@ impl Operation for HardmaxOperation {
 
     fn is_differentiable(&self) -> bool {
         false
-    }
-
-    fn eval(
-        &self,
-        backend: &mut EvalBackend,
-        inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
-    ) -> Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, EvalError> {
-        let input = &inputs[&self.input];
-        let shape: Vec<usize> = input.shape().iter().map(|&v| v as usize).collect();
-        let rank = shape.len();
-
-        // Normalize axis
-        let axis = if self.axis < 0 {
-            (self.axis + rank as i64) as usize
-        } else {
-            self.axis as usize
-        };
-
-        let input_f32 = input.cast(DType::F32, backend)?;
-        let flat_data: Vec<f32> = input_f32.to_ndarray()?.flatten().try_into()?;
-
-        let total: usize = shape.iter().product();
-        let mut out_data = vec![0.0f32; total];
-
-        // Compute sizes: outer dimensions before axis, axis dim, inner dimensions after axis
-        let outer_size: usize = shape[..axis].iter().product();
-        let axis_size = shape[axis];
-        let inner_size: usize = shape[axis + 1..].iter().product();
-
-        for outer in 0..outer_size {
-            for inner in 0..inner_size {
-                // Find argmax along the axis
-                let mut max_val = f32::NEG_INFINITY;
-                let mut max_idx = 0usize;
-                for a in 0..axis_size {
-                    let idx = outer * axis_size * inner_size + a * inner_size + inner;
-                    let val = flat_data[idx];
-                    if val > max_val {
-                        max_val = val;
-                        max_idx = a;
-                    }
-                }
-                let out_idx = outer * axis_size * inner_size + max_idx * inner_size + inner;
-                out_data[out_idx] = 1.0;
-            }
-        }
-
-        let out_shape: Vec<u64> = shape.iter().map(|&v| v as u64).collect();
-        let mut out =
-            NumericTensor::NDArray(NDArrayNumericTensor::from_vec_shape(out_data, &out_shape)?);
-
-        let original_dtype = input.dtype();
-        if original_dtype != DType::F32 {
-            out = out.cast(original_dtype, backend)?;
-        }
-
-        Ok(Box::new(std::iter::once((self.output, out))))
     }
 
     fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, rng: &mut impl Rng) -> MilliOpGraph {
@@ -2071,93 +1944,6 @@ impl Operation for CompressOperation {
 
     fn is_differentiable(&self) -> bool {
         false
-    }
-
-    fn eval(
-        &self,
-        backend: &mut EvalBackend,
-        inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
-    ) -> Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, EvalError> {
-        let input = &inputs[&self.input];
-        let condition = &inputs[&self.condition];
-
-        // Get condition as boolean values (nonzero = true).
-        // Force NDArray — Compress does CPU-side filtering, no point in
-        // uploading to Vulkan just to download again.
-        let cond_cast = condition.cast(DType::I64, &mut EvalBackend::NDArray)?;
-        let cond_i64: Vec<i64> = cond_cast.to_ndarray()?.flatten().try_into()?;
-        let cond_bool: Vec<bool> = cond_i64.iter().map(|&v| v != 0).collect();
-
-        let input_shape: Vec<usize> = input.shape().iter().map(|&v| v as usize).collect();
-
-        // Force NDArray — Compress does CPU-side filtering.
-        let input_f32 = input.cast(DType::F32, &mut EvalBackend::NDArray)?;
-
-        let out = if let Some(axis_val) = self.axis {
-            let rank = input_shape.len();
-            let axis = if axis_val < 0 {
-                (axis_val + rank as i64) as usize
-            } else {
-                axis_val as usize
-            };
-
-            // Select slices along axis where condition is true
-            let axis_size = input_shape[axis];
-            let selected_indices: Vec<usize> = cond_bool
-                .iter()
-                .take(axis_size)
-                .enumerate()
-                .filter(|&(_, &v)| v)
-                .map(|(i, _)| i)
-                .collect();
-
-            let flat_data: Vec<f32> = input_f32.to_ndarray()?.flatten().try_into()?;
-
-            // Compute sizes
-            let outer_size: usize = input_shape[..axis].iter().product();
-            let inner_size: usize = input_shape[axis + 1..].iter().product();
-            let axis_stride = inner_size;
-            let outer_stride = axis_size * inner_size;
-
-            let mut out_data = Vec::new();
-            for outer in 0..outer_size {
-                for &sel_idx in &selected_indices {
-                    let base = outer * outer_stride + sel_idx * axis_stride;
-                    for inner in 0..inner_size {
-                        out_data.push(flat_data[base + inner]);
-                    }
-                }
-            }
-
-            let mut out_shape: Vec<u64> = input_shape.iter().map(|&v| v as u64).collect();
-            out_shape[axis] = selected_indices.len() as u64;
-            NumericTensor::NDArray(NDArrayNumericTensor::from_vec_shape(out_data, &out_shape)?)
-        } else {
-            // No axis: flatten input, select elements where condition is true
-            let flat_data: Vec<f32> = input_f32.to_ndarray()?.flatten().try_into()?;
-            let mut out_data: Vec<f32> = Vec::new();
-            for (i, &val) in flat_data.iter().enumerate() {
-                let c = if i < cond_bool.len() {
-                    cond_bool[i]
-                } else {
-                    false
-                };
-                if c {
-                    out_data.push(val);
-                }
-            }
-            let out_shape = vec![out_data.len() as u64];
-            NumericTensor::NDArray(NDArrayNumericTensor::from_vec_shape(out_data, &out_shape)?)
-        };
-
-        let original_dtype = input.dtype();
-        let out = if original_dtype != DType::F32 {
-            out.cast(original_dtype, backend)?
-        } else {
-            out
-        };
-
-        Ok(Box::new(std::iter::once((self.output, out))))
     }
 
     fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, rng: &mut impl Rng) -> MilliOpGraph {

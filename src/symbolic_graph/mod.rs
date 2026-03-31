@@ -320,13 +320,12 @@ impl ONNXTensorInfo {
     }
 }
 
+/// Validate that a legacy tensor matches the expected dtype and rank from ONNX metadata.
+/// Used by eval_backend::run (legacy model execution path).
 pub fn check_tensor_matches(
     tensor: &NumericTensor<DynRank>,
     tensor_info: &ONNXTensorInfo,
 ) -> Result<(), EvalError> {
-    // Note: shape validation is intentionally lenient. Many ONNX models have
-    // incorrect shape annotations (e.g. static 1 for what should be dynamic).
-    // We only validate rank (number of dims) and dtype, not individual dim values.
     if let Some(shape) = tensor_info.shape()
         && shape.len() != tensor.shape().len()
     {
@@ -1327,68 +1326,8 @@ impl SymbolicGraph {
         self.eval_pool(&input_map, pool)
     }
 
-    fn eval(
-        &self,
-        inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
-        eval_backend: &mut EvalBackend,
-    ) -> Result<HashMap<GlobalId, NumericTensor<DynRank>>, EvalError> {
-        let mut active_tensors: HashMap<GlobalId, NumericTensor<DynRank>> = inputs.clone();
-
-        let ops = self.get_operations();
-        let mut remaining_ops_to_complete: Vec<GlobalId> = ops.keys().copied().collect();
-        let mut total_ops_completed: Vec<GlobalId> = vec![];
-        loop {
-            let mut ops_completed_now = vec![];
-
-            for op_id in &remaining_ops_to_complete {
-                let GraphOperation { name: _, op } = ops.get(op_id).unwrap();
-                let input_ids = op.inputs();
-                let mut input_values = HashMap::new();
-                // Collect all inputs, abort if we can't do this one yet
-                let mut failed_to_fetch = false;
-                for tensor_id in input_ids {
-                    if let Some(value) = active_tensors.get(&tensor_id) {
-                        // Validate shape and dtype
-                        if let Some(tensor_info) = self.get_tensor_info(tensor_id) {
-                            check_tensor_matches(value, tensor_info)?;
-                        }
-                        input_values.insert(tensor_id, value.clone());
-                    } else {
-                        // Can't do this one yet
-                        failed_to_fetch = true;
-                        continue;
-                    }
-                }
-                if failed_to_fetch {
-                    continue;
-                }
-                let outputs = op.eval(eval_backend, &input_values)?;
-                for (tensor_id, value) in outputs {
-                    //assert_eq!(value.has_nan().unwrap(), false);
-
-                    // Validate shape and dtype
-                    if let Some(tensor_info) = self.get_tensor_info(tensor_id) {
-                        check_tensor_matches(&value, tensor_info)?;
-                    }
-                    active_tensors.insert(tensor_id, value);
-                }
-                ops_completed_now.push(*op_id)
-            }
-            remaining_ops_to_complete.retain(|&x| !ops_completed_now.contains(&x));
-            if ops_completed_now.is_empty() {
-                // Hopefully we are done now
-                break;
-            }
-
-            total_ops_completed.extend(ops_completed_now);
-        }
-
-        Ok(active_tensors)
-    }
-
     /// Pool-based op-by-op evaluation.
     ///
-    /// Same interpreter loop as `eval`, but uses pool-allocated tensors throughout.
     /// Each op is evaluated via `Operation::eval_pool`, which by default lowers to
     /// a milli graph and runs pool_eval. Ops with sub-graphs (Scan, If) override
     /// eval_pool to recursively call this method.

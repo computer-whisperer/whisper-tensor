@@ -95,11 +95,10 @@ pub use unary::{
 };
 pub use window::{WindowKind, WindowOperation};
 
-use crate::backends::eval_backend::EvalBackend;
 use crate::backends::ndarray_backend::NDArrayNumericTensorError;
 use crate::dtype::{DType, DTypeError};
 use crate::graph::{GlobalId, Node, Property};
-use crate::migration::numeric_tensor::{NumericTensor, NumericTensorError};
+use crate::migration::numeric_tensor::NumericTensorError;
 use crate::milli_graph::{MilliLoweringContext, MilliOpGraph, MilliOpGraphError};
 use crate::symbolic_graph::SymbolicGraph;
 use crate::tensor_rank::DynRank;
@@ -132,22 +131,7 @@ pub enum EvalError {
     MissingInputTensor(String, Option<DType>, Option<Vec<usize>>),
 }
 
-type OperationEvalRet =
-    Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, EvalError>;
 pub trait Operation: Node {
-    fn eval(
-        &self,
-        backend: &mut EvalBackend,
-        inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
-    ) -> OperationEvalRet {
-        let tensor_dtypes: HashMap<GlobalId, DType> =
-            inputs.iter().map(|(id, t)| (*id, t.dtype())).collect();
-        let ctx = MilliLoweringContext::new(tensor_dtypes);
-        let mut rng = WyRand::new(Default::default());
-        let milli_graph = self.get_milli_op_graph(&ctx, &mut rng);
-        Ok(milli_graph.eval(inputs, &mut (), backend)?)
-    }
-
     /// Pool-based evaluation. Default: lower to milli graph → pool_eval.
     ///
     /// Ops with sub-graphs (Scan, If) override this to recursively call
@@ -507,12 +491,55 @@ impl Node for AnyOperation {
     delegate!(global_id() -> GlobalId);
 }
 
-impl Operation for AnyOperation {
-    delegate!(eval(
-        backend: &mut EvalBackend,
-        inputs: &HashMap<GlobalId, NumericTensor<DynRank>>
-    ) -> Result<Box<dyn Iterator<Item=(GlobalId, NumericTensor<DynRank>)>>, EvalError>);
+impl AnyOperation {
+    /// Legacy eval bridge: converts legacy tensors → pool views, runs eval_pool,
+    /// converts back. Used only by eval_backend::run (compiler path).
+    pub fn eval(
+        &self,
+        _backend: &mut crate::backends::eval_backend::EvalBackend,
+        inputs: &HashMap<
+            GlobalId,
+            crate::migration::numeric_tensor::NumericTensor<crate::tensor_rank::DynRank>,
+        >,
+    ) -> Result<
+        Box<
+            dyn Iterator<
+                Item = (
+                    GlobalId,
+                    crate::migration::numeric_tensor::NumericTensor<crate::tensor_rank::DynRank>,
+                ),
+            >,
+        >,
+        EvalError,
+    > {
+        use crate::migration::bridge;
+        use crate::pool::SystemPool;
 
+        // Convert legacy → pool views.
+        let new_tensors: Vec<_> = inputs
+            .iter()
+            .map(|(&id, t)| (id, bridge::legacy_to_new(t)))
+            .collect();
+        let views: Vec<_> = new_tensors.iter().map(|(id, t)| (*id, t.view())).collect();
+        let view_refs: HashMap<
+            GlobalId,
+            &crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>,
+        > = views.iter().map(|(id, v)| (*id, v)).collect();
+
+        // Run pool eval.
+        let pool = SystemPool;
+        let results = self.eval_pool(&view_refs, &pool)?;
+
+        // Convert back to legacy.
+        let legacy_results: Vec<_> = results
+            .into_iter()
+            .map(|(id, t)| (id, bridge::view_to_legacy(&t.view())))
+            .collect();
+        Ok(Box::new(legacy_results.into_iter()))
+    }
+}
+
+impl Operation for AnyOperation {
     fn eval_pool<'p, P: crate::pool::Pool + 'p>(
         &self,
         inputs: &HashMap<GlobalId, &crate::numeric_tensor::NumericTensorView<'_, DynRank>>,
@@ -685,55 +712,4 @@ fn remap_u64s_in_json(value: &mut serde_json::Value, map: &HashMap<u64, u64>) {
         }
         _ => {}
     }
-}
-
-/// Bridge: run a legacy Operation::eval through pool types.
-///
-/// Converts pool tensor views → legacy NumericTensor, calls op.eval(),
-/// converts results back → pool tensors. Temporary compatibility shim
-/// for ops that haven't been ported to pool-native eval_pool yet.
-/// Bridge: run a legacy Operation::eval through pool types.
-///
-/// Converts pool tensor views → legacy NumericTensor, calls op.eval(),
-/// converts results back → pool tensors. Temporary compatibility shim
-/// for ops that haven't been ported to pool-native eval_pool yet.
-pub(crate) fn eval_pool_via_legacy<'p, O, P>(
-    op: &O,
-    inputs: &HashMap<GlobalId, &crate::numeric_tensor::NumericTensorView<'_, DynRank>>,
-    pool: &'p P,
-) -> Result<HashMap<GlobalId, crate::numeric_tensor::NumericTensor<'p, DynRank, P>>, EvalError>
-where
-    O: Operation,
-    P: crate::pool::Pool + 'p,
-{
-    use crate::migration::bridge;
-    use crate::numeric_tensor::TensorLayout;
-
-    // Convert pool views → legacy tensors.
-    let legacy_inputs: HashMap<GlobalId, NumericTensor<DynRank>> = inputs
-        .iter()
-        .map(|(&id, view)| (id, bridge::view_to_legacy(view)))
-        .collect();
-
-    // Run legacy eval.
-    let mut backend = EvalBackend::NDArray;
-    let legacy_outputs: HashMap<GlobalId, NumericTensor<DynRank>> =
-        op.eval(&mut backend, &legacy_inputs)?.collect();
-
-    // Convert legacy results → pool tensors.
-    let mut pool_outputs = HashMap::new();
-    for (id, legacy_tensor) in &legacy_outputs {
-        let new_tensor = bridge::legacy_to_new(legacy_tensor);
-        let view = new_tensor.view();
-        let layout = TensorLayout::<DynRank>::row_major(view.shape().to_vec(), view.dtype());
-        let buf = pool
-            .allocate(layout.buffer_size_bytes())
-            .map_err(|e| EvalError::InvalidInput(format!("pool allocation: {e}")))?;
-        let mut out = crate::numeric_tensor::NumericTensor::from_parts(buf, layout);
-        for i in 0..view.numel() {
-            out.write_element(i, view.read_element(i));
-        }
-        pool_outputs.insert(*id, out);
-    }
-    Ok(pool_outputs)
 }

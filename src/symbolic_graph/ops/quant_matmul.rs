@@ -1,10 +1,7 @@
-use crate::dtype::DType;
 use crate::graph::{GlobalId, Node, Property, PropertyValue};
-use crate::migration::numeric_tensor::NumericTensor;
 use crate::milli_graph::{self, MilliLoweringContext, MilliOpGraph};
 use crate::numeric_dtype::NumericDType;
-use crate::symbolic_graph::ops::{EvalError, Operation, OperationEvalRet};
-use crate::tensor_rank::DynRank;
+use crate::symbolic_graph::ops::Operation;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -57,34 +54,6 @@ impl Node for QuantMatMulOperation {
 }
 
 impl Operation for QuantMatMulOperation {
-    fn eval(
-        &self,
-        backend: &mut crate::backends::eval_backend::EvalBackend,
-        inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
-    ) -> OperationEvalRet {
-        let weight = inputs
-            .get(&self.weight)
-            .ok_or_else(|| EvalError::InvalidInput("QuantMatMul: missing weight".into()))?;
-
-        // Dequantize packed weight to F32 if needed
-        let weight_f32: NumericTensor<DynRank> = match weight {
-            NumericTensor::Packed(p) => NumericTensor::NDArray(p.dequantize()),
-            other => other.clone(),
-        };
-
-        // Replace the packed weight with the dequantized version and delegate
-        // to the milli graph (Transpose + MatMul)
-        let mut patched = inputs.clone();
-        patched.insert(self.weight, weight_f32);
-
-        let tensor_dtypes: HashMap<GlobalId, DType> =
-            patched.iter().map(|(id, t)| (*id, t.dtype())).collect();
-        let ctx = MilliLoweringContext::new(tensor_dtypes);
-        let mut rng = wyrand::WyRand::new(Default::default());
-        let milli_graph = self.get_milli_op_graph(&ctx, &mut rng);
-        Ok(milli_graph.eval(&patched, &mut (), backend)?)
-    }
-
     fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, rng: &mut impl Rng) -> MilliOpGraph {
         let input_ids = vec![self.input, self.weight];
         let (mut graph, input_map) = MilliOpGraph::new(input_ids, rng);
