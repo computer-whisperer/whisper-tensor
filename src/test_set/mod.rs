@@ -58,6 +58,12 @@ pub struct Tolerance {
 }
 
 impl Tolerance {
+    /// Exact match (integer/bool semantics).
+    pub const EXACT: Self = Tolerance {
+        atol: 0.0,
+        rtol: 0.0,
+    };
+
     pub fn for_dtype(dtype: NumericDType) -> Self {
         match dtype {
             NumericDType::F64 => Tolerance {
@@ -99,6 +105,17 @@ impl Tolerance {
 // ---------------------------------------------------------------------------
 // Tensor construction helpers
 // ---------------------------------------------------------------------------
+
+/// Create a 1D test tensor from f64 values encoded into the given dtype.
+/// Works for any dtype — values are cast through the dtype's encode path.
+pub fn tensor_from_f64(dtype: NumericDType, values: &[f64]) -> TestTensor {
+    let shape = vec![values.len() as u64];
+    let mut t = NumericTensor::zeros(shape, dtype, &POOL).unwrap();
+    for (i, &v) in values.iter().enumerate() {
+        t.write_element(i, NumericScalar::from_f64(v).cast_to(dtype));
+    }
+    t
+}
 
 /// Create a test tensor from f32 values with an explicit shape.
 pub fn tensor_f32_shaped(shape: Vec<u64>, values: &[f32]) -> TestTensor {

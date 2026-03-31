@@ -14,13 +14,16 @@ use crate::milli_graph::ops::Cast;
 use crate::numeric_dtype::NumericDType;
 
 use super::{TestCase, TestDataSet, TestTensor, Tolerance};
-use super::{tensor_bf16, tensor_f32, tensor_i32};
+use super::{tensor_bf16, tensor_f32, tensor_from_f64, tensor_i32};
 
 pub fn build_cases() -> Vec<TestCase> {
     vec![
         cast_f32_to_bf16_case(),
         cast_f32_to_i32_case(),
         cast_i32_to_f32_case(),
+        cast_f32_to_f8e5m2_saturating(),
+        cast_f32_to_f8e5m2_non_saturating(),
+        cast_f32_to_f8e4m3fn_saturating(),
     ]
 }
 
@@ -38,11 +41,19 @@ struct CastGraphIds {
 }
 
 fn build_cast_graph(target_dtype: NumericDType) -> (MilliOpGraph, CastGraphIds) {
+    build_cast_graph_with_saturate(target_dtype, true)
+}
+
+fn build_cast_graph_with_saturate(
+    target_dtype: NumericDType,
+    saturate: bool,
+) -> (MilliOpGraph, CastGraphIds) {
     let mut rng = rng();
     let ext_in = GlobalId::new(&mut rng);
     let (mut graph, input_map) = MilliOpGraph::new([ext_in], &mut rng);
     let int_in = input_map[&ext_in];
-    let out = Cast::push_new(&mut graph, int_in, target_dtype, &mut rng);
+    let out =
+        Cast::push_new_with_options(&mut graph, int_in, target_dtype, saturate, None, &mut rng);
     graph.set_outputs(vec![out]);
     (graph, CastGraphIds { ext_in, out })
 }
@@ -152,5 +163,113 @@ fn cast_i32_to_f32_case() -> TestCase {
             tensor_f32(&[1.0, -2.0, 0.0, 100.0, -999.0]),
             Tolerance::for_dtype(NumericDType::F32),
         )],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// F32 → F8E5M2 (saturating — default ONNX behavior)
+// ---------------------------------------------------------------------------
+//
+// F8E5M2: 5 exponent bits, 2 mantissa bits, bias=15, has_infinity=true.
+// Max finite = 1.75 × 2^15 = 57344.
+// With saturate=true: overflow and ±inf both clamp to ±57344.
+
+fn cast_f32_to_f8e5m2_saturating() -> TestCase {
+    let dt = NumericDType::F8E5M2;
+    let (graph, ids) = build_cast_graph_with_saturate(dt, true);
+
+    TestCase {
+        name: "cast_f32_to_f8e5m2_saturating".to_string(),
+        graph,
+        data_sets: vec![
+            cast_data_set(
+                "normal_values",
+                &ids,
+                tensor_f32(&[0.5, 1.0, -1.0, 0.0]),
+                tensor_from_f64(dt, &[0.5, 1.0, -1.0, 0.0]),
+                Tolerance::EXACT,
+            ),
+            cast_data_set(
+                "overflow_saturates",
+                &ids,
+                // 1e6 and inf should both saturate to max finite (57344)
+                tensor_f32(&[1e6, f32::INFINITY, -1e6, f32::NEG_INFINITY]),
+                tensor_from_f64(dt, &[57344.0, 57344.0, -57344.0, -57344.0]),
+                Tolerance::EXACT,
+            ),
+            cast_data_set(
+                "nan_passthrough",
+                &ids,
+                tensor_f32(&[f32::NAN]),
+                tensor_from_f64(dt, &[f64::NAN]),
+                Tolerance::EXACT, // NaN == NaN in assert_tensors_close
+            ),
+        ],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// F32 → F8E5M2 (non-saturating)
+// ---------------------------------------------------------------------------
+
+fn cast_f32_to_f8e5m2_non_saturating() -> TestCase {
+    let dt = NumericDType::F8E5M2;
+    let (graph, ids) = build_cast_graph_with_saturate(dt, false);
+
+    TestCase {
+        name: "cast_f32_to_f8e5m2_non_saturating".to_string(),
+        graph,
+        data_sets: vec![
+            cast_data_set(
+                "overflow_to_inf",
+                &ids,
+                tensor_f32(&[1e6, f32::INFINITY, -1e6, f32::NEG_INFINITY]),
+                tensor_from_f64(dt, &[f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY]),
+                Tolerance::EXACT,
+            ),
+        ],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// F32 → F8E4M3FN (saturating)
+// ---------------------------------------------------------------------------
+//
+// F8E4M3FN: 4 exponent bits, 3 mantissa bits, bias=7, has_infinity=false.
+// Max finite = 1.875 × 2^8 = 480.
+// has_infinity=false means overflow always saturates to 480 regardless of
+// the saturate flag, but we test the saturating path for consistency.
+
+fn cast_f32_to_f8e4m3fn_saturating() -> TestCase {
+    let dt = NumericDType::F8E4M3FN;
+    let (graph, ids) = build_cast_graph_with_saturate(dt, true);
+
+    TestCase {
+        name: "cast_f32_to_f8e4m3fn_saturating".to_string(),
+        graph,
+        data_sets: vec![
+            cast_data_set(
+                "normal_values",
+                &ids,
+                tensor_f32(&[0.5, 1.0, -1.0, 0.0, 2.0]),
+                tensor_from_f64(dt, &[0.5, 1.0, -1.0, 0.0, 2.0]),
+                Tolerance::EXACT,
+            ),
+            cast_data_set(
+                "overflow_saturates",
+                &ids,
+                // 1000 > 480 → saturates to 480. inf → 480 (no inf in F8E4M3FN).
+                tensor_f32(&[1000.0, f32::INFINITY, -1000.0, f32::NEG_INFINITY]),
+                tensor_from_f64(dt, &[480.0, 480.0, -480.0, -480.0]),
+                Tolerance::EXACT,
+            ),
+            cast_data_set(
+                "nan_passthrough",
+                &ids,
+                tensor_f32(&[f32::NAN]),
+                tensor_from_f64(dt, &[f64::NAN]),
+                Tolerance::EXACT,
+            ),
+        ],
     }
 }
