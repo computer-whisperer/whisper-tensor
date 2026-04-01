@@ -540,7 +540,9 @@ impl Conv {
         let out_spatial: Vec<usize> = (0..n_spatial)
             .map(|i| (padded_spatial[i] - dilated_kernel[i]) / strides[i] + 1)
             .collect();
-        let s: u64 = out_spatial.iter().map(|&d| d as u64).product(); // total output spatial elements
+        let spatial_size: u64 = out_spatial.iter().map(|&d| d as u64).product();
+        // s = total output elements per output channel (batch × spatial).
+        // When batch is symbolic, batch_known=1 and sym_dims handle replication.
 
         // Kernel element count and contraction dim.
         let kernel_total: u64 = kernel.iter().map(|&k| k as u64).product();
@@ -556,7 +558,8 @@ impl Conv {
             })
             .product::<u64>()
             .max(1);
-        let total_mul_atoms = batch_known * c_out * k * s;
+        let s = batch_known * spatial_size;
+        let total_mul_atoms = c_out * k * s;
         if total_mul_atoms > 16_000_000 {
             return crate::milli_graph::ops::LowerResult::Unsupported;
         }
@@ -587,80 +590,89 @@ impl Conv {
             let mut first_base = None;
             let mut pending_zeros = 0u64;
 
-            // Input strides for [C_in, spatial_dims...] at the tail of known_strides.
+            // Input strides: [...batch, C_in, spatial_dims...].
             let in_c_stride = in_strides[in_strides.len() - 1 - n_spatial];
             let in_spatial_strides: Vec<u64> = (0..n_spatial)
                 .map(|i| in_strides[in_strides.len() - n_spatial + i])
                 .collect();
+            // Batch stride: product of all dims after batch.
+            let in_batch_stride: u64 = if in_strides.len() > 1 + n_spatial {
+                in_strides[in_strides.len() - 2 - n_spatial]
+            } else {
+                0 // no batch dim (or batch=1 symbolic)
+            };
 
-            // Number of rows = c_in * product of PADDED outer spatial dims.
             let n_outer: usize = padded_spatial[..last].iter().product::<usize>().max(1);
             let outer_strides = compute_row_major_strides(&padded_spatial[..last]);
 
-            for ci in 0..c_in {
-                let c_offset = ci * in_c_stride;
+            for bi in 0..batch_known {
+                let batch_offset = bi * in_batch_stride;
+                for ci in 0..c_in {
+                    let c_offset = batch_offset + ci * in_c_stride;
 
-                for row_idx in 0..n_outer {
-                    // Decompose row_idx into padded spatial coords for dims 0..last.
-                    let mut coords = vec![0usize; last];
-                    let mut rem = row_idx;
-                    for d in 0..last {
-                        if outer_strides[d] > 0 {
-                            coords[d] = rem / outer_strides[d];
-                            rem %= outer_strides[d];
+                    for row_idx in 0..n_outer {
+                        // Decompose row_idx into padded spatial coords for dims 0..last.
+                        let mut coords = vec![0usize; last];
+                        let mut rem = row_idx;
+                        for d in 0..last {
+                            if outer_strides[d] > 0 {
+                                coords[d] = rem / outer_strides[d];
+                                rem %= outer_strides[d];
+                            }
                         }
-                    }
 
-                    // Check if any outer coord is in the pad region.
-                    let in_pad = (0..last).any(|d| {
-                        coords[d] < pad_begin[d] || coords[d] >= pad_begin[d] + in_spatial[d]
-                    });
+                        // Check if any outer coord is in the pad region.
+                        let in_pad = (0..last).any(|d| {
+                            coords[d] < pad_begin[d] || coords[d] >= pad_begin[d] + in_spatial[d]
+                        });
 
-                    if in_pad {
-                        pending_zeros += padded_last as u64;
-                    } else {
-                        // Left pad.
-                        pending_zeros += pad_begin[last] as u64;
+                        if in_pad {
+                            pending_zeros += padded_last as u64;
+                        } else {
+                            // Left pad.
+                            pending_zeros += pad_begin[last] as u64;
 
-                        // Flush zeros.
-                        if pending_zeros > 0 {
+                            // Flush zeros.
+                            if pending_zeros > 0 {
+                                let b = ctx.nano.push_group(
+                                    pending_zeros,
+                                    original_dtype,
+                                    ScalarOp::Literal(NumericScalar::zero(original_dtype)),
+                                    sym_dims.clone(),
+                                    vec![],
+                                );
+                                if first_base.is_none() {
+                                    first_base = Some(b);
+                                }
+                                pending_zeros = 0;
+                            }
+
+                            // Identity: copy input row along the innermost spatial dim.
+                            let mut in_offset = c_offset;
+                            for d in 0..last {
+                                in_offset +=
+                                    (coords[d] - pad_begin[d]) as u64 * in_spatial_strides[d];
+                            }
                             let b = ctx.nano.push_group(
-                                pending_zeros,
+                                in_last as u64,
                                 original_dtype,
-                                ScalarOp::Literal(NumericScalar::zero(original_dtype)),
+                                ScalarOp::Identity,
                                 sym_dims.clone(),
-                                vec![],
+                                vec![InputRef::affine(
+                                    in_map.base_id.offset(in_offset),
+                                    in_spatial_strides[last] as i64,
+                                )],
                             );
                             if first_base.is_none() {
                                 first_base = Some(b);
                             }
-                            pending_zeros = 0;
-                        }
 
-                        // Identity: copy input row along the innermost spatial dim.
-                        let mut in_offset = c_offset;
-                        for d in 0..last {
-                            in_offset += (coords[d] - pad_begin[d]) as u64 * in_spatial_strides[d];
+                            // Right pad.
+                            pending_zeros += pad_end[last] as u64;
                         }
-                        let b = ctx.nano.push_group(
-                            in_last as u64,
-                            original_dtype,
-                            ScalarOp::Identity,
-                            sym_dims.clone(),
-                            vec![InputRef::affine(
-                                in_map.base_id.offset(in_offset),
-                                in_spatial_strides[last] as i64,
-                            )],
-                        );
-                        if first_base.is_none() {
-                            first_base = Some(b);
-                        }
-
-                        // Right pad.
-                        pending_zeros += pad_end[last] as u64;
                     }
-                }
-            }
+                } // for ci
+            } // for bi
 
             if pending_zeros > 0 {
                 let b = ctx.nano.push_group(
@@ -682,14 +694,22 @@ impl Conv {
 
         // Reference strides for addressing into the padded/input atom space.
         // Padded atoms are row-major; raw input may have non-row-major strides.
+        let ref_batch_stride: u64;
         let ref_c_stride: u64;
         let ref_spatial_strides: Vec<u64>;
         if has_padding {
             let padded_rm = compute_row_major_strides_u64(&padded_spatial);
-            ref_c_stride = padded_spatial.iter().map(|&d| d as u64).product();
+            let padded_per_channel: u64 = padded_spatial.iter().map(|&d| d as u64).product();
+            ref_c_stride = padded_per_channel;
+            ref_batch_stride = c_in * padded_per_channel;
             ref_spatial_strides = padded_rm;
         } else {
             ref_c_stride = in_strides[in_strides.len() - 1 - n_spatial];
+            ref_batch_stride = if in_strides.len() > 1 + n_spatial {
+                in_strides[in_strides.len() - 2 - n_spatial]
+            } else {
+                0
+            };
             ref_spatial_strides = (0..n_spatial)
                 .map(|i| in_strides[in_strides.len() - n_spatial + i])
                 .collect();
@@ -697,139 +717,176 @@ impl Conv {
 
         // --- Phase 2a: Emit mul groups ---
         // For each (output_channel, input_channel_in_group, kernel_position):
-        //   mul[s] = weight[co, ci_local, k...] * input[ci, output_coords*stride + k*dilation]
+        //   mul[flat] = weight[co, ci_local, k...] * input[batch, ci, output_coords*stride + k*dilation]
         //
-        // The input addressing uses ND Strided InputRef.
+        // flat indexes over [batch, spatial_dims...] = s = batch_known * spatial_size.
 
-        // Precompute kernel position strides for flat→multi-index decomposition.
         let kernel_strides = compute_row_major_strides(&kernel);
 
-        // Build the ND Strided dim_shape for output spatial addressing:
-        // [u64::MAX, O1, O2, ..., O_{nd-1}]
-        let mut nd_dim_shape = vec![u64::MAX];
-        for d in 1..n_spatial {
-            nd_dim_shape.push(out_spatial[d] as u64);
+        // Build ND Strided dim_shape for [batch, spatial_dims...] addressing.
+        // When batch_known > 1: [u64::MAX, O0, O1, ..., O_{nd-1}]
+        // When batch_known == 1: [u64::MAX, O1, ..., O_{nd-1}] (no batch dim needed)
+        // Build dim_shape/dim_strides including batch when batch_known > 1.
+        let nd_dim_shape: Vec<u64>;
+        let nd_dim_strides: Vec<i64>;
+        if batch_known > 1 {
+            // [u64::MAX (batch outer), spatial_0, spatial_1, ..., spatial_{nd-1}]
+            let mut shape = vec![u64::MAX];
+            for d in 0..n_spatial {
+                shape.push(out_spatial[d] as u64);
+            }
+            // Remove outermost (already u64::MAX) and shift: the outermost actual dim
+            // is batch, next are spatial dims.
+            // Actually: dim_shape for [B, O0, O1, ..., O_{nd-1}]:
+            // [u64::MAX, O0, O1, ..., O_{nd-1}] — B is outermost (no modulus).
+            let mut strs = vec![ref_batch_stride as i64]; // batch stride
+            for d in 0..n_spatial {
+                strs.push((strides[d] as u64 * ref_spatial_strides[d]) as i64);
+            }
+            nd_dim_shape = shape;
+            nd_dim_strides = strs;
+        } else {
+            let mut shape = vec![u64::MAX];
+            for d in 1..n_spatial {
+                shape.push(out_spatial[d] as u64);
+            }
+            let strs: Vec<i64> = (0..n_spatial)
+                .map(|d| (strides[d] as u64 * ref_spatial_strides[d]) as i64)
+                .collect();
+            nd_dim_shape = shape;
+            nd_dim_strides = strs;
         }
-        // dim_strides for output→input mapping: stride[d] * ref_stride[d]
-        let nd_dim_strides: Vec<i64> = (0..n_spatial)
+
+        // Emit atoms in [B, C_out, spatial] order (row-major output layout).
+        // The spatial-only Strided InputRef addresses within one batch element.
+        let spatial_dim_shape: Vec<u64> = {
+            let mut shape = vec![u64::MAX];
+            for d in 1..n_spatial {
+                shape.push(out_spatial[d] as u64);
+            }
+            shape
+        };
+        let spatial_dim_strides: Vec<i64> = (0..n_spatial)
             .map(|d| (strides[d] as u64 * ref_spatial_strides[d]) as i64)
             .collect();
 
-        let mut mul_bases: Vec<_> = Vec::with_capacity(c_out as usize);
+        let mut first_output_base = None;
 
-        for co in 0..c_out {
-            let mut first_mul_base = None;
-            let g = co / (c_out / groups);
+        for bi in 0..batch_known {
+            let batch_padded_offset = bi * ref_batch_stride;
 
-            for ci_local in 0..c_in_per_group {
-                let ci = g * c_in_per_group + ci_local;
-
-                for k_flat in 0..kernel_total {
-                    // Decompose flat kernel index into per-axis coords.
-                    let mut k_coords = vec![0usize; n_spatial];
-                    let mut k_rem = k_flat as usize;
-                    for d in 0..n_spatial {
-                        if kernel_strides[d] > 0 {
-                            k_coords[d] = k_rem / kernel_strides[d];
-                            k_rem %= kernel_strides[d];
-                        }
-                    }
-
-                    // Weight atom offset.
-                    let mut w_offset = co * w_strides[0] + ci_local * w_strides[1];
-                    for d in 0..n_spatial {
-                        w_offset += k_coords[d] as u64 * w_strides[2 + d];
-                    }
-                    let w_atom = w_map.base_id.offset(w_offset);
-
-                    // Input base offset for this (ci, kernel_pos):
-                    //   ci * ref_c_stride + sum(k[d] * dilation[d] * ref_spatial_stride[d])
-                    let mut in_base_offset = ci * ref_c_stride;
-                    for d in 0..n_spatial {
-                        in_base_offset +=
-                            k_coords[d] as u64 * dilations[d] as u64 * ref_spatial_strides[d];
-                    }
-                    let in_base = padded_base.offset(in_base_offset);
-
-                    let input_ref = InputRef::Strided {
-                        base: in_base,
-                        dim_strides: nd_dim_strides.clone(),
-                        dim_shape: nd_dim_shape.clone(),
-                    };
-
-                    let b = ctx.nano.push_group(
-                        s,
-                        original_dtype,
-                        ScalarOp::Binary {
-                            op: ScalarBinOp::Mul,
-                            compute_dtype: original_dtype,
-                        },
-                        out_sym_dims.clone(),
-                        vec![InputRef::Broadcast(w_atom), input_ref],
-                    );
-                    if first_mul_base.is_none() {
-                        first_mul_base = Some(b);
-                    }
-                }
-            }
-
-            mul_bases.push(first_mul_base.unwrap());
-        }
-
-        // --- Phase 2b: Reduce groups ---
-        let mut first_reduce_base = None;
-
-        for co in 0..c_out as usize {
-            let b = ctx.nano.push_group(
-                s,
-                original_dtype,
-                ScalarOp::Reduce {
-                    kind: ReduceKind::Sum,
-                    reduce_count: k,
-                    reduce_stride: s as i64,
-                    compute_dtype: original_dtype,
-                },
-                out_sym_dims.clone(),
-                vec![InputRef::affine(mul_bases[co], 1)],
-            );
-            if first_reduce_base.is_none() {
-                first_reduce_base = Some(b);
-            }
-        }
-
-        // --- Phase 3: Bias add ---
-        let output_base;
-        if let Some(ref bm) = bias_map {
-            let mut first_bias_base = None;
-            let reduce_base = first_reduce_base.unwrap();
+            // Phase 2a: Mul groups for this batch element.
+            let mut mul_bases: Vec<_> = Vec::with_capacity(c_out as usize);
 
             for co in 0..c_out {
-                let reduce_co_base = reduce_base.offset(co * s);
-                let bias_atom = bm
-                    .base_id
-                    .offset(co * bm.known_strides.get(0).copied().unwrap_or(1));
+                let mut first_mul_base = None;
+                let g = co / (c_out / groups);
 
+                for ci_local in 0..c_in_per_group {
+                    let ci = g * c_in_per_group + ci_local;
+
+                    for k_flat in 0..kernel_total {
+                        let mut k_coords = vec![0usize; n_spatial];
+                        let mut k_rem = k_flat as usize;
+                        for d in 0..n_spatial {
+                            if kernel_strides[d] > 0 {
+                                k_coords[d] = k_rem / kernel_strides[d];
+                                k_rem %= kernel_strides[d];
+                            }
+                        }
+
+                        let mut w_offset = co * w_strides[0] + ci_local * w_strides[1];
+                        for d in 0..n_spatial {
+                            w_offset += k_coords[d] as u64 * w_strides[2 + d];
+                        }
+                        let w_atom = w_map.base_id.offset(w_offset);
+
+                        let mut in_base_offset = batch_padded_offset + ci * ref_c_stride;
+                        for d in 0..n_spatial {
+                            in_base_offset +=
+                                k_coords[d] as u64 * dilations[d] as u64 * ref_spatial_strides[d];
+                        }
+                        let in_base = padded_base.offset(in_base_offset);
+
+                        let input_ref = InputRef::Strided {
+                            base: in_base,
+                            dim_strides: spatial_dim_strides.clone(),
+                            dim_shape: spatial_dim_shape.clone(),
+                        };
+
+                        let b = ctx.nano.push_group(
+                            spatial_size,
+                            original_dtype,
+                            ScalarOp::Binary {
+                                op: ScalarBinOp::Mul,
+                                compute_dtype: original_dtype,
+                            },
+                            out_sym_dims.clone(),
+                            vec![InputRef::Broadcast(w_atom), input_ref],
+                        );
+                        if first_mul_base.is_none() {
+                            first_mul_base = Some(b);
+                        }
+                    }
+                }
+                mul_bases.push(first_mul_base.unwrap());
+            }
+
+            // Phase 2b: Reduce groups for this batch element.
+            for co in 0..c_out as usize {
                 let b = ctx.nano.push_group(
-                    s,
+                    spatial_size,
                     original_dtype,
-                    ScalarOp::Binary {
-                        op: ScalarBinOp::Add,
+                    ScalarOp::Reduce {
+                        kind: ReduceKind::Sum,
+                        reduce_count: k,
+                        reduce_stride: spatial_size as i64,
                         compute_dtype: original_dtype,
                     },
                     out_sym_dims.clone(),
-                    vec![
-                        InputRef::affine(reduce_co_base, 1),
-                        InputRef::Broadcast(bias_atom),
-                    ],
+                    vec![InputRef::affine(mul_bases[co], 1)],
                 );
-                if first_bias_base.is_none() {
-                    first_bias_base = Some(b);
+                if first_output_base.is_none() {
+                    first_output_base = Some(b);
                 }
             }
+        }
 
+        // Phase 3: Bias add (applied to all batch × channel × spatial atoms).
+        let output_base;
+        if let Some(ref bm) = bias_map {
+            let reduce_base = first_output_base.unwrap();
+            let mut first_bias_base = None;
+
+            for bi in 0..batch_known {
+                for co in 0..c_out {
+                    let reduce_offset = (bi * c_out + co) * spatial_size;
+                    let reduce_co_base = reduce_base.offset(reduce_offset);
+                    let bias_atom = bm
+                        .base_id
+                        .offset(co * bm.known_strides.get(0).copied().unwrap_or(1));
+
+                    let b = ctx.nano.push_group(
+                        spatial_size,
+                        original_dtype,
+                        ScalarOp::Binary {
+                            op: ScalarBinOp::Add,
+                            compute_dtype: original_dtype,
+                        },
+                        out_sym_dims.clone(),
+                        vec![
+                            InputRef::affine(reduce_co_base, 1),
+                            InputRef::Broadcast(bias_atom),
+                        ],
+                    );
+                    if first_bias_base.is_none() {
+                        first_bias_base = Some(b);
+                    }
+                }
+            }
             output_base = first_bias_base.unwrap();
         } else {
-            output_base = first_reduce_base.unwrap();
+            output_base = first_output_base.unwrap();
         }
 
         // --- Phase 4: Register output ---
