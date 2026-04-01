@@ -1,5 +1,5 @@
 use crate::graph::{GlobalId, Node, Property, PropertyValue};
-use crate::milli_graph::{self, MilliLoweringContext, MilliOpGraph};
+use crate::milli_graph::{self, MilliLoweringContext, MilliOpGraph, ops_helpers};
 use crate::numeric_dtype::NumericDType;
 use crate::onnx::AttributeProto;
 use crate::symbolic_graph::ops::{EvalError, Operation};
@@ -128,6 +128,57 @@ fn has_diagonal(input_subs: &[Vec<char>]) -> bool {
         }
     }
     false
+}
+
+// ── Batch diagonal: ...ii -> ...i ─────────────────────────────────────────────
+//
+// Extract diagonal of the last 2 dims, preserving all batch dims.
+// Fully dynamic — works for any number of batch dims.
+
+fn lower_batch_diagonal(graph: &mut MilliOpGraph, input: GlobalId, rng: &mut impl Rng) -> GlobalId {
+    use milli_graph::ops as mops;
+
+    let shape = mops::Shape::push_new(graph, input, rng);
+    let rank = ops_helpers::rank(graph, input, rng);
+    let one = ops_helpers::scalar_const(graph, 1i64, rng);
+    let two = ops_helpers::scalar_const(graph, 2i64, rng);
+    let zero = ops_helpers::scalar_const(graph, 0i64, rng);
+    let neg_one = ops_helpers::scalar_const(graph, -1i64, rng);
+
+    // dim = shape[-1] (size of the diagonal dimension)
+    let dim = mops::Gather::push_new(graph, shape, neg_one, 0, rng);
+
+    // batch_shape = shape[:-2]
+    let rank_minus_2 = mops::SimpleBinary::sub(graph, rank, two, rng);
+    let batch_shape = mops::Slice::push_new(graph, shape, zero, rank_minus_2, None, None, rng);
+
+    // Flatten to 3D: [-1, dim, dim]
+    let shape_3d = mops::Concat::push_new(graph, vec![neg_one, dim, dim], 0, rng);
+    let flat = mops::Reshape::push_new(graph, input, shape_3d, false, rng);
+
+    // indices = Range(0, dim) → [dim], reshape to [1, dim, 1]
+    let shape_1 = mops::Constant::from_vec(graph, vec![1i64], rng);
+    let dim_1d = mops::Reshape::push_new(graph, dim, shape_1, false, rng);
+    let arange = mops::Range::push_new(graph, zero, dim_1d, one, rng);
+    let idx_shape = mops::Concat::push_new(graph, vec![one, dim, one], 0, rng);
+    let idx_3d = mops::Reshape::push_new(graph, arange, idx_shape, false, rng);
+
+    // Expand indices to [N, dim, 1] to match flat's batch dim.
+    let flat_shape = mops::Shape::push_new(graph, flat, rng);
+    let n_val = mops::Gather::push_new(graph, flat_shape, zero, 0, rng);
+    let expand_shape = mops::Concat::push_new(graph, vec![n_val, dim, one], 0, rng);
+    let idx_expanded = mops::Expand::push_new(graph, idx_3d, expand_shape, rng);
+
+    // GatherElements(flat, idx_expanded, axis=2) → [N, dim, 1]
+    let gathered = mops::GatherElements::push_new(graph, flat, idx_expanded, 2, rng);
+
+    // Squeeze axis 2 → [N, dim]
+    let axes_2 = mops::Constant::from_vec(graph, vec![2i64], rng);
+    let squeezed = mops::Squeeze::push_new(graph, gathered, axes_2, rng);
+
+    // Reshape back to [..., dim]
+    let out_shape = mops::Concat::push_new(graph, vec![batch_shape, dim], 0, rng);
+    mops::Reshape::push_new(graph, squeezed, out_shape, false, rng)
 }
 
 // ── Single-input lowering (transpose + reduce) ──────────────────────────────
@@ -512,6 +563,34 @@ impl Operation for EinsumOperation {
             input_subs.len(),
             self.inputs.len()
         );
+
+        // Special case: batch diagonal "...ii -> ...i" (single input).
+        // Extract diagonal of the last 2 dims, preserving batch dims.
+        if self.inputs.len() == 1
+            && has_ellipsis(&input_subs, &output_sub)
+            && has_diagonal(&input_subs)
+        {
+            // Check pattern: input ends in [X, X] (same label twice),
+            // output ends in [X] (that label once), both have ellipsis prefix.
+            let isub = &input_subs[0];
+            let e = '\u{2026}'; // ellipsis char
+            let is_batch_diag = isub.len() >= 3
+                && isub[0] == e
+                && isub[isub.len() - 1] == isub[isub.len() - 2]
+                && isub[isub.len() - 1] != e
+                && output_sub.len() >= 2
+                && output_sub[0] == e
+                && output_sub[output_sub.len() - 1] == isub[isub.len() - 1];
+
+            if is_batch_diag {
+                let inp = input_map[&self.inputs[0]];
+                let result = lower_batch_diagonal(&mut graph, inp, rng);
+                let mut output_map = HashMap::new();
+                output_map.insert(result, self.output);
+                graph.set_output_map(output_map);
+                return graph;
+            }
+        }
 
         if has_ellipsis(&input_subs, &output_sub) {
             panic!(
