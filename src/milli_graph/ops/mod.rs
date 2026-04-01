@@ -196,6 +196,44 @@ pub fn constant_fold<'p, P: Pool + 'p>(
         return None;
     }
 
+    // Short-circuit for zero-element outputs: no computation needed.
+    // Build the output tensor with the correct shape and zero elements.
+    let all_zero_element = output_hints.iter().all(|(_, hint)| {
+        if let Some(ranked) = hint.as_ranked() {
+            ranked
+                .shape()
+                .iter()
+                .any(|d| matches!(d, crate::scalar_info::ScalarInfoTyped::Numeric(0)))
+        } else {
+            false
+        }
+    });
+    if all_zero_element {
+        let output_ids: Vec<GlobalId> = op.outputs().collect();
+        let mut results = Vec::new();
+        for &out_id in &output_ids {
+            let hint = output_hints
+                .iter()
+                .find(|(id, _)| *id == out_id)
+                .map(|(_, h)| h)?;
+            let dtype = hint.dtype();
+            let shape: Vec<u64> = hint
+                .as_ranked()?
+                .shape()
+                .iter()
+                .map(|d| match d {
+                    crate::scalar_info::ScalarInfoTyped::Numeric(v) => *v,
+                    _ => 0,
+                })
+                .collect();
+            let layout = crate::numeric_tensor::TensorLayout::row_major(shape, dtype);
+            let buf = pool.allocate(layout.buffer_size_bytes()).ok()?;
+            let out_tensor = crate::numeric_tensor::NumericTensor::from_parts(buf, layout);
+            results.push((out_id, TensorInfo::from(out_tensor)));
+        }
+        return Some(results);
+    }
+
     // 2. Build LowerTensorInfo map with inputs + output hints.
     let mut lower_infos: HashMap<GlobalId, LowerTensorInfo> = HashMap::new();
     for &id in &input_ids {
@@ -261,15 +299,15 @@ pub fn constant_fold<'p, P: Pool + 'p>(
         let mut seen = std::collections::HashSet::new();
         for i in 0..tam.count {
             let atom = tam.atom_id_for_element(i);
-            if let Some(gi) = ctx.nano.find_group_idx(atom) {
-                if seen.insert(gi) {
-                    let g = &ctx.nano.groups()[gi];
-                    output_ranges.push(AtomRange {
-                        base: g.base_id,
-                        count: g.count,
-                        dtype: g.output_dtype,
-                    });
-                }
+            if let Some(gi) = ctx.nano.find_group_idx(atom)
+                && seen.insert(gi)
+            {
+                let g = &ctx.nano.groups()[gi];
+                output_ranges.push(AtomRange {
+                    base: g.base_id,
+                    count: g.count,
+                    dtype: g.output_dtype,
+                });
             }
             if let Some((ti, _)) = ctx.nano.find_input_idx(atom) {
                 let it = &ctx.nano.input_tensors()[ti];

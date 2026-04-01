@@ -723,46 +723,12 @@ impl Conv {
 
         let kernel_strides = compute_row_major_strides(&kernel);
 
-        // Build ND Strided dim_shape for [batch, spatial_dims...] addressing.
-        // When batch_known > 1: [u64::MAX, O0, O1, ..., O_{nd-1}]
-        // When batch_known == 1: [u64::MAX, O1, ..., O_{nd-1}] (no batch dim needed)
-        // Build dim_shape/dim_strides including batch when batch_known > 1.
-        let nd_dim_shape: Vec<u64>;
-        let nd_dim_strides: Vec<i64>;
-        if batch_known > 1 {
-            // [u64::MAX (batch outer), spatial_0, spatial_1, ..., spatial_{nd-1}]
-            let mut shape = vec![u64::MAX];
-            for d in 0..n_spatial {
-                shape.push(out_spatial[d] as u64);
-            }
-            // Remove outermost (already u64::MAX) and shift: the outermost actual dim
-            // is batch, next are spatial dims.
-            // Actually: dim_shape for [B, O0, O1, ..., O_{nd-1}]:
-            // [u64::MAX, O0, O1, ..., O_{nd-1}] — B is outermost (no modulus).
-            let mut strs = vec![ref_batch_stride as i64]; // batch stride
-            for d in 0..n_spatial {
-                strs.push((strides[d] as u64 * ref_spatial_strides[d]) as i64);
-            }
-            nd_dim_shape = shape;
-            nd_dim_strides = strs;
-        } else {
-            let mut shape = vec![u64::MAX];
-            for d in 1..n_spatial {
-                shape.push(out_spatial[d] as u64);
-            }
-            let strs: Vec<i64> = (0..n_spatial)
-                .map(|d| (strides[d] as u64 * ref_spatial_strides[d]) as i64)
-                .collect();
-            nd_dim_shape = shape;
-            nd_dim_strides = strs;
-        }
-
         // Emit atoms in [B, C_out, spatial] order (row-major output layout).
         // The spatial-only Strided InputRef addresses within one batch element.
         let spatial_dim_shape: Vec<u64> = {
             let mut shape = vec![u64::MAX];
-            for d in 1..n_spatial {
-                shape.push(out_spatial[d] as u64);
+            for &os in &out_spatial[1..] {
+                shape.push(os as u64);
             }
             shape
         };
@@ -772,10 +738,16 @@ impl Conv {
 
         let mut first_output_base = None;
 
+        // Phase 2a: Emit ALL mul groups for all batches × channels × kernel positions.
+        // Must come before reduce groups so the reduce atoms are contiguous in
+        // [B, C_out, spatial] order (matching the output row-major layout).
+        //
+        // all_mul_bases[bi][co] = first mul group atom ID for that (batch, output_channel).
+        let mut all_mul_bases: Vec<Vec<crate::nano_graph::pattern::AtomId>> =
+            Vec::with_capacity(batch_known as usize);
+
         for bi in 0..batch_known {
             let batch_padded_offset = bi * ref_batch_stride;
-
-            // Phase 2a: Mul groups for this batch element.
             let mut mul_bases: Vec<_> = Vec::with_capacity(c_out as usize);
 
             for co in 0..c_out {
@@ -831,9 +803,14 @@ impl Conv {
                 }
                 mul_bases.push(first_mul_base.unwrap());
             }
+            all_mul_bases.push(mul_bases);
+        }
 
-            // Phase 2b: Reduce groups for this batch element.
-            for co in 0..c_out as usize {
+        // Phase 2b: Emit ALL reduce groups in [B, C_out, spatial] order.
+        // These must be contiguous so the output TensorAtomMap can address them
+        // with simple row-major strides.
+        for batch_mul_bases in &all_mul_bases {
+            for &mul_base in batch_mul_bases {
                 let b = ctx.nano.push_group(
                     spatial_size,
                     original_dtype,
@@ -844,7 +821,7 @@ impl Conv {
                         compute_dtype: original_dtype,
                     },
                     out_sym_dims.clone(),
-                    vec![InputRef::affine(mul_bases[co], 1)],
+                    vec![InputRef::affine(mul_base, 1)],
                 );
                 if first_output_base.is_none() {
                     first_output_base = Some(b);
@@ -864,7 +841,7 @@ impl Conv {
                     let reduce_co_base = reduce_base.offset(reduce_offset);
                     let bias_atom = bm
                         .base_id
-                        .offset(co * bm.known_strides.get(0).copied().unwrap_or(1));
+                        .offset(co * bm.known_strides.first().copied().unwrap_or(1));
 
                     let b = ctx.nano.push_group(
                         spatial_size,

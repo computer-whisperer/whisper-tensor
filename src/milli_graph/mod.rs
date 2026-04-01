@@ -1131,6 +1131,58 @@ impl MilliOpGraph {
         // Infer for output shape reconstruction. lower() re-infers internally —
         // TODO: pass pre-computed infos to avoid the double infer.
         let all_infos = self.infer_all(&info_inputs, &POOL_S)?;
+
+        // Short-circuit: if all outputs are zero-element tensors, skip lowering
+        // and return empty tensors directly.
+        let output_map_ref = self.output_map.as_ref().ok_or_else(|| {
+            MilliOpGraphError::InvalidGraph("output_map is not configured".into())
+        })?;
+        {
+            let all_output_zero_element = output_map_ref.iter().all(|(internal_id, _)| {
+                if let Some(info) = all_infos.get(internal_id) {
+                    if let Some(ranked) = info.as_ranked() {
+                        ranked
+                            .shape()
+                            .iter()
+                            .any(|d| matches!(d, crate::scalar_info::ScalarInfoTyped::Numeric(0)))
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            });
+            if all_output_zero_element {
+                let mut outputs = HashMap::new();
+                for (&internal_id, &ext_id) in output_map_ref {
+                    if let Some(info) = all_infos.get(&internal_id) {
+                        let dtype = info.dtype();
+                        let shape: Vec<u64> = if let Some(ranked) = info.as_ranked() {
+                            ranked
+                                .shape()
+                                .iter()
+                                .map(|d| match d {
+                                    crate::scalar_info::ScalarInfoTyped::Numeric(v) => *v,
+                                    _ => 0,
+                                })
+                                .collect()
+                        } else {
+                            vec![0]
+                        };
+                        let layout =
+                            crate::numeric_tensor::TensorLayout::<DynRank>::row_major(shape, dtype);
+                        let buf = pool.allocate(layout.buffer_size_bytes()).map_err(|e| {
+                            MilliOpGraphError::InvalidInput(format!("allocation: {e}"))
+                        })?;
+                        let out_tensor =
+                            crate::numeric_tensor::NumericTensor::from_parts(buf, layout);
+                        outputs.insert(ext_id, out_tensor);
+                    }
+                }
+                return Ok(outputs);
+            }
+        }
+
         let lower_result = lower::lower(self, &info_inputs)
             .map_err(|e| MilliOpGraphError::LowerError(e.to_string()))?;
 
@@ -1144,9 +1196,7 @@ impl MilliOpGraph {
             })
             .collect();
 
-        let output_map = self.output_map.as_ref().ok_or_else(|| {
-            MilliOpGraphError::InvalidGraph("output_map is not configured".into())
-        })?;
+        let output_map = output_map_ref;
 
         // Build output AtomRanges.
         let output_ids: Vec<GlobalId> = if let Some(ordering) = &self.output_ordering {
@@ -1169,15 +1219,15 @@ impl MilliOpGraph {
                 let mut seen = std::collections::HashSet::new();
                 for i in 0..tam.count {
                     let atom = tam.atom_id_for_element(i);
-                    if let Some(gi) = lower_result.graph.find_group_idx(atom) {
-                        if seen.insert(gi) {
-                            let g = &lower_result.graph.groups()[gi];
-                            output_ranges.push(AtomRange {
-                                base: g.base_id,
-                                count: g.count,
-                                dtype: g.output_dtype,
-                            });
-                        }
+                    if let Some(gi) = lower_result.graph.find_group_idx(atom)
+                        && seen.insert(gi)
+                    {
+                        let g = &lower_result.graph.groups()[gi];
+                        output_ranges.push(AtomRange {
+                            base: g.base_id,
+                            count: g.count,
+                            dtype: g.output_dtype,
+                        });
                     }
                 }
             }

@@ -167,8 +167,32 @@ mod tests {
             }
         }
 
-        let results = op.eval_pool(&input_refs, &pool).expect("eval_pool failed");
-        let out = results.get(&out_id).expect("output not found");
+        let onnx_inputs: HashMap<GlobalId, crate::numeric_dtype::ONNXTensorView<'_>> = [
+            (
+                data_id,
+                crate::numeric_dtype::ONNXTensorView::Numeric(data.view()),
+            ),
+            (
+                cos_id,
+                crate::numeric_dtype::ONNXTensorView::Numeric(cos_cache.view()),
+            ),
+            (
+                sin_id,
+                crate::numeric_dtype::ONNXTensorView::Numeric(sin_cache.view()),
+            ),
+            (
+                pos_id,
+                crate::numeric_dtype::ONNXTensorView::Numeric(pos_ids.view()),
+            ),
+        ]
+        .into_iter()
+        .collect();
+        let results = op.eval_pool(&onnx_inputs, &pool).expect("eval_pool failed");
+        let out = results
+            .get(&out_id)
+            .expect("output not found")
+            .as_numeric()
+            .unwrap();
 
         // After transpose [B,H,S,D] -> [B,S,H,D]: still [1,1,1,4]
         // x1 = [1, 2], x2 = [3, 4]
@@ -938,8 +962,24 @@ fn test_rms_norm_symbolic_eval_pool() {
         &crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>,
     > = input_views.iter().map(|(&id, v)| (id, v)).collect();
 
-    let results = op.eval_pool(&input_refs, &pool).expect("eval_pool failed");
-    let out = results.get(&output_id).expect("output not found");
+    let onnx_inputs: HashMap<GlobalId, crate::numeric_dtype::ONNXTensorView<'_>> = [
+        (
+            input_id,
+            crate::numeric_dtype::ONNXTensorView::Numeric(x_tensor.view()),
+        ),
+        (
+            scale_id,
+            crate::numeric_dtype::ONNXTensorView::Numeric(s_tensor.view()),
+        ),
+    ]
+    .into_iter()
+    .collect();
+    let results = op.eval_pool(&onnx_inputs, &pool).expect("eval_pool failed");
+    let out = results
+        .get(&output_id)
+        .expect("output not found")
+        .as_numeric()
+        .unwrap();
 
     // Test 2: via get_milli_op_graph + pool_eval directly
     let tensor_dtypes: HashMap<GlobalId, crate::numeric_dtype::NumericDType> = input_refs
