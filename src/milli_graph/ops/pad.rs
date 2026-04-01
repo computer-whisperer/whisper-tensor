@@ -366,12 +366,6 @@ impl MilliOp for Pad {
         use crate::numeric_tensor::{NumericTensor, TensorLayout};
         use crate::tensor_rank::DynRank;
 
-        if !matches!(self.mode, PadMode::Constant) {
-            return Err(crate::nano_graph::pool_eval::PoolEvalError::Unsupported(
-                format!("Pad eval_new: mode {:?} not implemented", self.mode),
-            ));
-        }
-
         let data = &inputs[0];
         let shape = data.shape();
         let rank = shape.len();
@@ -443,11 +437,7 @@ impl MilliOp for Pad {
             .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;
         let mut out = NumericTensor::from_parts(buf, layout);
 
-        // Initialize output with constant value.
         let const_scalar = crate::numeric_scalar::NumericScalar::from_f64(const_val).cast_to(dtype);
-        for i in 0..out_numel {
-            out.write_element(i, const_scalar);
-        }
 
         // Compute strides for input and output.
         let in_strides = {
@@ -465,17 +455,49 @@ impl MilliOp for Pad {
             s
         };
 
-        // Copy input data into output at offset position (constant mode).
-        let in_total = data.numel();
-        for flat_idx in 0..in_total {
-            let mut remaining = flat_idx;
-            let mut out_offset = 0usize;
+        // For each output element, compute the source input coordinate per mode.
+        for out_flat in 0..out_numel {
+            let mut rem = out_flat;
+            let mut in_flat = 0usize;
+            let mut is_pad = false;
+
             for d in 0..rank {
-                let coord = remaining / in_strides[d];
-                remaining %= in_strides[d];
-                out_offset += (coord as i64 + begin_pads[d]) as usize * out_strides[d];
+                let out_coord = rem / out_strides[d];
+                rem %= out_strides[d];
+
+                // Map output coordinate to input coordinate.
+                let in_coord_raw = out_coord as i64 - begin_pads[d];
+                let dim = shape[d] as i64;
+
+                let dim_usize = shape[d] as usize;
+                let in_coord: usize = match self.mode {
+                    PadMode::Constant => {
+                        if in_coord_raw < 0 || in_coord_raw >= dim {
+                            is_pad = true;
+                            0
+                        } else {
+                            in_coord_raw as usize
+                        }
+                    }
+                    PadMode::Edge => in_coord_raw.clamp(0, dim - 1) as usize,
+                    PadMode::Reflect => reflect_index(in_coord_raw, dim_usize),
+                    PadMode::Wrap => {
+                        let m = in_coord_raw % dim;
+                        (if m < 0 { m + dim } else { m }) as usize
+                    }
+                };
+
+                if is_pad {
+                    break;
+                }
+                in_flat += in_coord * in_strides[d];
             }
-            out.write_element(out_offset, data.read_element(flat_idx));
+
+            if is_pad {
+                out.write_element(out_flat, const_scalar);
+            } else {
+                out.write_element(out_flat, data.read_element(in_flat));
+            }
         }
 
         Ok(vec![out])
