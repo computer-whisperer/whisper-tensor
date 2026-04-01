@@ -198,24 +198,32 @@ impl Operation for StftOperation {
         // kn = k_col * n_row -> [fft_length, frame_length]
         let kn = milli_graph::ops::SimpleBinary::mul(&mut graph, k_col, n_row, rng);
 
+        // Compute twiddle factors in F64 for precision (F32 sin(π) ≠ 0),
+        // then cast to F32 for the MatMul.
+        let kn_f64 = milli_graph::ops::Cast::push_new(&mut graph, kn, NumericDType::F64, rng);
+
         // angle = -2 * pi * kn / frame_length
         let neg_two_pi =
-            milli_graph::ops::Constant::new_scalar(&mut graph, -2.0f32 * std::f32::consts::PI, rng);
-        let angle_num = milli_graph::ops::SimpleBinary::mul(&mut graph, neg_two_pi, kn, rng);
-        let frame_length_f32 =
-            milli_graph::ops::Cast::push_new(&mut graph, frame_length, NumericDType::F32, rng);
+            milli_graph::ops::Constant::new_scalar(&mut graph, -2.0f64 * std::f64::consts::PI, rng);
+        let angle_num = milli_graph::ops::SimpleBinary::mul(&mut graph, neg_two_pi, kn_f64, rng);
+        let frame_length_f64 =
+            milli_graph::ops::Cast::push_new(&mut graph, frame_length, NumericDType::F64, rng);
         let angle =
-            milli_graph::ops::SimpleBinary::div(&mut graph, angle_num, frame_length_f32, rng);
+            milli_graph::ops::SimpleBinary::div(&mut graph, angle_num, frame_length_f64, rng);
 
-        // cos_matrix = Cos(angle), sin_matrix = Sin(angle)  [fft_length, frame_length]
+        // cos_matrix = Cos(angle), sin_matrix = Sin(angle)  [fft_length, frame_length] in F64
         let cos_matrix = milli_graph::ops::SimpleUnaryOp::trig(&mut graph, angle, TrigOp::Cos, rng);
         let sin_matrix = milli_graph::ops::SimpleUnaryOp::trig(&mut graph, angle, TrigOp::Sin, rng);
 
-        // Transpose both to [frame_length, fft_length]
+        // Cast to F32, then transpose to [frame_length, fft_length]
+        let cos_f32 =
+            milli_graph::ops::Cast::push_new(&mut graph, cos_matrix, NumericDType::F32, rng);
+        let sin_f32 =
+            milli_graph::ops::Cast::push_new(&mut graph, sin_matrix, NumericDType::F32, rng);
         let cos_t =
-            milli_graph::ops::Transpose::push_new(&mut graph, cos_matrix, Some(vec![1, 0]), rng);
+            milli_graph::ops::Transpose::push_new(&mut graph, cos_f32, Some(vec![1, 0]), rng);
         let sin_t =
-            milli_graph::ops::Transpose::push_new(&mut graph, sin_matrix, Some(vec![1, 0]), rng);
+            milli_graph::ops::Transpose::push_new(&mut graph, sin_f32, Some(vec![1, 0]), rng);
 
         // Step 8: MatMul
         // frames @ cos_t -> real [batch, num_frames, fft_length]
