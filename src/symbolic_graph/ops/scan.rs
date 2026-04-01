@@ -144,13 +144,21 @@ impl Operation for ScanOperation {
 
     fn eval_pool<'p, P: crate::pool::Pool + 'p>(
         &self,
-        inputs: &HashMap<GlobalId, &crate::numeric_tensor::NumericTensorView<'_, DynRank>>,
+        onnx_inputs: &HashMap<GlobalId, crate::numeric_dtype::ONNXTensorView<'_>>,
         pool: &'p P,
-    ) -> Result<HashMap<GlobalId, crate::numeric_tensor::NumericTensor<'p, DynRank, P>>, EvalError>
-    {
+    ) -> Result<HashMap<GlobalId, crate::numeric_dtype::ONNXTensor<'p, P>>, EvalError> {
         use crate::numeric_dtype::NumericDType;
         use crate::numeric_scalar::NumericScalar;
         use crate::numeric_tensor::{NumericTensor as PoolTensor, NumericTensorView, TensorLayout};
+
+        // Extract numeric views — Scan only handles numeric tensors.
+        let mut inputs_storage: HashMap<GlobalId, &NumericTensorView<'_, DynRank>> = HashMap::new();
+        for (&id, v) in onnx_inputs {
+            if let Ok(nv) = v.as_numeric() {
+                inputs_storage.insert(id, nv);
+            }
+        }
+        let inputs = &inputs_storage;
 
         // Helper: slice a pool tensor along an axis at a single index, squeeze that axis.
         fn slice_and_squeeze<'p2, P2: crate::pool::Pool + 'p2>(
@@ -523,7 +531,10 @@ impl Operation for ScanOperation {
             }
         }
 
-        Ok(outputs)
+        Ok(outputs
+            .into_iter()
+            .map(|(id, t)| (id, crate::numeric_dtype::ONNXTensor::Numeric(t)))
+            .collect())
     }
 
     fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, _rng: &mut impl Rng) -> MilliOpGraph {

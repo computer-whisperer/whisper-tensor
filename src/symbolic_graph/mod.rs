@@ -1079,6 +1079,52 @@ impl SymbolicGraph {
     ///
     /// Loads initialized tensors (weights/constants) from `tensor_store`,
     /// combines with `user_inputs`, then runs `eval_pool` (op-by-op interpreter).
+    /// Load numeric constants/weights from the tensor store into SystemPool tensors.
+    pub fn load_numeric_constants(
+        &self,
+        tensor_store: &TensorStore,
+    ) -> Vec<(
+        GlobalId,
+        crate::numeric_tensor::NumericTensor<'static, DynRank, crate::pool::SystemPool>,
+    )> {
+        use crate::numeric_tensor::TensorLayout;
+        use crate::pool::{Pool, SystemPool};
+
+        static POOL_S: SystemPool = SystemPool;
+        let mut out = Vec::new();
+        for (&tensor_id, tensor_meta) in &self.tensors {
+            let stored_ref = match &tensor_meta.tensor_type {
+                TensorType::Constant(s) | TensorType::Input(Some(s)) => Some(s),
+                _ => None,
+            };
+            if let Some(stored_ref) = stored_ref {
+                match stored_ref {
+                    StoredOrNotTensor::Stored(store_id) => {
+                        if let Some(stored) = tensor_store.get_tensor(*store_id) {
+                            if let Some(new_tensor) = stored.to_pool_tensor(&POOL_S) {
+                                out.push((tensor_id, new_tensor));
+                            }
+                        }
+                    }
+                    StoredOrNotTensor::Inline(shared) => {
+                        let src = &*shared.0;
+                        let layout =
+                            TensorLayout::<DynRank>::row_major(src.shape().clone(), src.dtype());
+                        if let Ok(buf) = POOL_S.allocate(layout.buffer_size_bytes()) {
+                            let mut tensor =
+                                crate::numeric_tensor::NumericTensor::from_parts(buf, layout);
+                            for i in 0..src.numel() {
+                                tensor.write_element(i, src.read_element(i));
+                            }
+                            out.push((tensor_id, tensor));
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
     pub fn pool_eval_with_store<'p, P: crate::pool::Pool + 'p>(
         &self,
         user_inputs: &HashMap<GlobalId, &crate::numeric_tensor::NumericTensorView<'_, DynRank>>,
@@ -1181,6 +1227,11 @@ impl SymbolicGraph {
     }
 
     /// Pool-based op-by-op evaluation with observer.
+    ///
+    /// Accepts numeric tensor views as inputs. Internally uses ONNXTensor
+    /// to support string tensors flowing between ops. Returns only the
+    /// numeric outputs (string intermediates are consumed by ops like Equal
+    /// and produce numeric Bool results).
     pub fn eval_pool_observed<'p, P: crate::pool::Pool + 'p, T: observer::SymbolicGraphObserver>(
         &self,
         inputs: &HashMap<GlobalId, &crate::numeric_tensor::NumericTensorView<'_, DynRank>>,
@@ -1188,23 +1239,67 @@ impl SymbolicGraph {
         observer: &mut T,
     ) -> Result<HashMap<GlobalId, crate::numeric_tensor::NumericTensor<'p, DynRank, P>>, EvalError>
     {
+        let onnx_views: HashMap<GlobalId, crate::numeric_dtype::ONNXTensorView<'_>> = inputs
+            .iter()
+            .map(|(&id, v)| {
+                (
+                    id,
+                    crate::numeric_dtype::ONNXTensorView::Numeric(
+                        crate::numeric_tensor::NumericTensorView::new(v.data(), v.layout().clone()),
+                    ),
+                )
+            })
+            .collect();
+        let onnx_inputs = self.eval_pool_onnx(&onnx_views, pool, observer)?;
+
+        // Extract numeric tensors from ONNXTensor results.
+        let mut results = HashMap::new();
+        for (id, onnx_t) in onnx_inputs {
+            if let Ok(t) = onnx_t.into_numeric() {
+                results.insert(id, t);
+            }
+        }
+        Ok(results)
+    }
+
+    /// Core op-by-op evaluation using ONNXTensor (supports string + numeric).
+    pub fn eval_pool_onnx<'p, P: crate::pool::Pool + 'p, T: observer::SymbolicGraphObserver>(
+        &self,
+        inputs: &HashMap<GlobalId, crate::numeric_dtype::ONNXTensorView<'_>>,
+        pool: &'p P,
+        observer: &mut T,
+    ) -> Result<HashMap<GlobalId, crate::numeric_dtype::ONNXTensor<'p, P>>, EvalError> {
+        use crate::numeric_dtype::{ONNXTensor, ONNXTensorView};
         use crate::numeric_tensor::NumericTensor as PoolTensor;
 
-        // Seed active tensors from inputs.
-        let mut active_tensors: HashMap<GlobalId, PoolTensor<'p, DynRank, P>> = HashMap::new();
-        for (&id, &view) in inputs {
-            let layout = crate::numeric_tensor::TensorLayout::<DynRank>::row_major(
-                view.shape().to_vec(),
-                view.dtype(),
-            );
-            let buf = pool
-                .allocate(layout.buffer_size_bytes())
-                .map_err(|e| EvalError::InvalidInput(format!("pool allocation: {e}")))?;
-            let mut tensor = PoolTensor::from_parts(buf, layout);
-            for i in 0..view.numel() {
-                tensor.write_element(i, view.read_element(i));
+        // Seed active tensors from inputs (both numeric and string).
+        let mut active_tensors: HashMap<GlobalId, ONNXTensor<'p, P>> = HashMap::new();
+        for (&id, view) in inputs {
+            match view {
+                ONNXTensorView::Numeric(nv) => {
+                    let layout = crate::numeric_tensor::TensorLayout::<DynRank>::row_major(
+                        nv.shape().to_vec(),
+                        nv.dtype(),
+                    );
+                    let buf = pool
+                        .allocate(layout.buffer_size_bytes())
+                        .map_err(|e| EvalError::InvalidInput(format!("pool allocation: {e}")))?;
+                    let mut tensor = PoolTensor::from_parts(buf, layout);
+                    for i in 0..nv.numel() {
+                        tensor.write_element(i, nv.read_element(i));
+                    }
+                    active_tensors.insert(id, ONNXTensor::Numeric(tensor));
+                }
+                ONNXTensorView::String { shape, data } => {
+                    active_tensors.insert(
+                        id,
+                        ONNXTensor::String {
+                            shape: shape.to_vec(),
+                            data: data.to_vec(),
+                        },
+                    );
+                }
             }
-            active_tensors.insert(id, tensor);
         }
 
         let ops = self.get_operations();
@@ -1216,13 +1311,10 @@ impl SymbolicGraph {
                 let GraphOperation { name: _, op } = ops.get(op_id).unwrap();
                 let input_ids: Vec<GlobalId> = op.inputs().collect();
 
-                // Collect input views, skip if not all ready yet.
-                let mut input_views = HashMap::new();
+                // Check all inputs ready.
                 let mut ready = true;
                 for &tensor_id in &input_ids {
-                    if let Some(tensor) = active_tensors.get(&tensor_id) {
-                        input_views.insert(tensor_id, tensor.view());
-                    } else {
+                    if !active_tensors.contains_key(&tensor_id) {
                         ready = false;
                         break;
                     }
@@ -1231,19 +1323,22 @@ impl SymbolicGraph {
                     continue;
                 }
 
-                // Build view-ref map for eval_pool.
-                let view_refs: HashMap<
-                    GlobalId,
-                    &crate::numeric_tensor::NumericTensorView<'_, DynRank>,
-                > = input_views.iter().map(|(&id, v)| (id, v)).collect();
+                // Build view map for eval_pool.
+                let input_views: HashMap<GlobalId, crate::numeric_dtype::ONNXTensorView<'_>> =
+                    input_ids
+                        .iter()
+                        .filter_map(|&id| Some((id, active_tensors.get(&id)?.view())))
+                        .collect();
 
                 let start_instant = std::time::Instant::now();
-                let outputs = op.eval_pool(&view_refs, pool)?;
+                let outputs = op.eval_pool(&input_views, pool)?;
                 let end_instant = std::time::Instant::now();
                 observer.on_op_executed(&[op.global_id()], start_instant, end_instant);
                 for (tensor_id, value) in outputs {
                     if let Some(tensor_info) = self.get_tensor_info(tensor_id) {
-                        observer.on_tensor_assigned(&[tensor_info.global_id()], &value.view());
+                        if let Ok(nt) = value.as_numeric() {
+                            observer.on_tensor_assigned(&[tensor_info.global_id()], &nt.view());
+                        }
                     }
                     active_tensors.insert(tensor_id, value);
                 }
@@ -1274,6 +1369,25 @@ fn unpack_4bit_pairs(packed: &[u8], numel: usize) -> Vec<u8> {
         }
     }
     out
+}
+
+/// Decode an ONNX TensorProto into an ONNXTensor (handles both numeric and string).
+pub fn tensor_proto_to_onnx_tensor<'p, P: crate::pool::Pool + 'p>(
+    tensor: &onnx::TensorProto,
+    pool: &'p P,
+) -> Result<crate::numeric_dtype::ONNXTensor<'p, P>, ONNXDecodingError> {
+    let onnx_dt = ONNXDType::from_onnx_i32(tensor.data_type)?;
+    if matches!(onnx_dt, ONNXDType::String) {
+        let shape: Vec<u64> = tensor.dims.iter().map(|x| *x as u64).collect();
+        let data: Vec<String> = tensor
+            .string_data
+            .iter()
+            .map(|s| String::from_utf8_lossy(s).into_owned())
+            .collect();
+        return Ok(crate::numeric_dtype::ONNXTensor::String { shape, data });
+    }
+    let t = tensor_proto_to_pool_tensor(tensor, pool)?;
+    Ok(crate::numeric_dtype::ONNXTensor::Numeric(t))
 }
 
 /// Decode an ONNX TensorProto directly into a pool-backed NumericTensor.

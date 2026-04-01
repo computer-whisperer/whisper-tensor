@@ -137,20 +137,38 @@ pub trait Operation: Node {
     ///
     /// Ops with sub-graphs (Scan, If) override this to recursively call
     /// SymbolicGraph::eval_pool on their sub-graphs.
+    ///
+    /// The default implementation extracts NumericTensorViews from ONNXTensorView
+    /// inputs and lowers to a milli-op graph. Ops that handle non-numeric types
+    /// (e.g. Equal on strings) must override this.
     fn eval_pool<'p, P: crate::pool::Pool + 'p>(
         &self,
-        inputs: &HashMap<GlobalId, &crate::numeric_tensor::NumericTensorView<'_, DynRank>>,
+        inputs: &HashMap<GlobalId, crate::numeric_dtype::ONNXTensorView<'_>>,
         pool: &'p P,
-    ) -> Result<HashMap<GlobalId, crate::numeric_tensor::NumericTensor<'p, DynRank, P>>, EvalError>
-    {
-        let tensor_dtypes: HashMap<GlobalId, NumericDType> = inputs
+    ) -> Result<HashMap<GlobalId, crate::numeric_dtype::ONNXTensor<'p, P>>, EvalError> {
+        // Extract numeric views for the milli-op path.
+        let mut view_refs: HashMap<
+            GlobalId,
+            &crate::numeric_tensor::NumericTensorView<'_, DynRank>,
+        > = HashMap::new();
+        for (&id, onnx_view) in inputs {
+            if let Ok(nv) = onnx_view.as_numeric() {
+                view_refs.insert(id, nv);
+            }
+        }
+
+        let tensor_dtypes: HashMap<GlobalId, NumericDType> = view_refs
             .iter()
             .map(|(id, view)| (*id, view.dtype()))
             .collect();
         let ctx = MilliLoweringContext::new(tensor_dtypes);
         let mut rng = WyRand::new(Default::default());
         let milli_graph = self.get_milli_op_graph(&ctx, &mut rng);
-        Ok(milli_graph.pool_eval(inputs, pool)?)
+        let results = milli_graph.pool_eval(&view_refs, pool)?;
+        Ok(results
+            .into_iter()
+            .map(|(id, t)| (id, crate::numeric_dtype::ONNXTensor::Numeric(t)))
+            .collect())
     }
 
     fn get_milli_op_graph(&self, ctx: &MilliLoweringContext, rng: &mut impl Rng) -> MilliOpGraph;
@@ -495,10 +513,9 @@ impl Node for AnyOperation {
 impl Operation for AnyOperation {
     fn eval_pool<'p, P: crate::pool::Pool + 'p>(
         &self,
-        inputs: &HashMap<GlobalId, &crate::numeric_tensor::NumericTensorView<'_, DynRank>>,
+        inputs: &HashMap<GlobalId, crate::numeric_dtype::ONNXTensorView<'_>>,
         pool: &'p P,
-    ) -> Result<HashMap<GlobalId, crate::numeric_tensor::NumericTensor<'p, DynRank, P>>, EvalError>
-    {
+    ) -> Result<HashMap<GlobalId, crate::numeric_dtype::ONNXTensor<'p, P>>, EvalError> {
         match self {
             AnyOperation::Unary(x) => x.eval_pool(inputs, pool),
             AnyOperation::Binary(x) => x.eval_pool(inputs, pool),
@@ -665,4 +682,34 @@ fn remap_u64s_in_json(value: &mut serde_json::Value, map: &HashMap<u64, u64>) {
         }
         _ => {}
     }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers for ONNXTensor ↔ NumericTensor conversion in eval_pool overrides
+// ---------------------------------------------------------------------------
+
+/// Extract numeric views from ONNXTensorView inputs. String entries are skipped.
+pub(super) fn extract_numeric_views<'a>(
+    onnx_inputs: &'a HashMap<crate::graph::GlobalId, crate::numeric_dtype::ONNXTensorView<'a>>,
+) -> HashMap<
+    crate::graph::GlobalId,
+    &'a crate::numeric_tensor::NumericTensorView<'a, crate::tensor_rank::DynRank>,
+> {
+    onnx_inputs
+        .iter()
+        .filter_map(|(&id, v)| Some((id, v.as_numeric().ok()?)))
+        .collect()
+}
+
+/// Wrap numeric tensor outputs as ONNXTensor::Numeric.
+pub(super) fn wrap_numeric_outputs<'p, P: crate::pool::Pool + 'p>(
+    results: HashMap<
+        crate::graph::GlobalId,
+        crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P>,
+    >,
+) -> HashMap<crate::graph::GlobalId, crate::numeric_dtype::ONNXTensor<'p, P>> {
+    results
+        .into_iter()
+        .map(|(id, t)| (id, crate::numeric_dtype::ONNXTensor::Numeric(t)))
+        .collect()
 }

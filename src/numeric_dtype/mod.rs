@@ -414,6 +414,119 @@ impl From<NumericDType> for ONNXDType {
 }
 
 // ---------------------------------------------------------------------------
+// ONNXTensor — symbolic-graph-level tensor that can hold string or numeric data
+// ---------------------------------------------------------------------------
+
+/// Tensor at the ONNX / symbolic-graph level.
+///
+/// Wraps either a pool-backed `NumericTensor` (the common case) or a string
+/// tensor (rare — used by Equal, StringNormalizer, etc.). Milli-op lowering
+/// only accepts the Numeric arm; string ops must be handled eagerly at the
+/// symbolic eval level.
+pub enum ONNXTensor<'p, P: crate::pool::Pool + 'p> {
+    Numeric(crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P>),
+    String {
+        shape: Vec<u64>,
+        data: Vec<std::string::String>,
+    },
+}
+
+impl<'p, P: crate::pool::Pool + 'p> ONNXTensor<'p, P> {
+    /// Get the ONNX-level dtype.
+    pub fn onnx_dtype(&self) -> ONNXDType {
+        match self {
+            ONNXTensor::Numeric(t) => ONNXDType::Numeric(t.dtype()),
+            ONNXTensor::String { .. } => ONNXDType::String,
+        }
+    }
+
+    /// Unwrap as a numeric tensor, or return an error.
+    pub fn as_numeric(
+        &self,
+    ) -> Result<&crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P>, String>
+    {
+        match self {
+            ONNXTensor::Numeric(t) => Ok(t),
+            ONNXTensor::String { .. } => Err("expected numeric tensor, got string".into()),
+        }
+    }
+
+    /// Unwrap into a numeric tensor, or return an error.
+    pub fn into_numeric(
+        self,
+    ) -> Result<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P>, String>
+    {
+        match self {
+            ONNXTensor::Numeric(t) => Ok(t),
+            ONNXTensor::String { .. } => Err("expected numeric tensor, got string".into()),
+        }
+    }
+
+    pub fn shape(&self) -> &[u64] {
+        match self {
+            ONNXTensor::Numeric(t) => t.shape(),
+            ONNXTensor::String { shape, .. } => shape,
+        }
+    }
+}
+
+impl<'p, P: crate::pool::Pool + 'p> ONNXTensor<'p, P> {
+    /// Borrow as a pool-erased view.
+    pub fn view(&self) -> ONNXTensorView<'_> {
+        match self {
+            ONNXTensor::Numeric(t) => ONNXTensorView::Numeric(t.view()),
+            ONNXTensor::String { shape, data } => ONNXTensorView::String { shape, data },
+        }
+    }
+}
+
+impl<'p, P: crate::pool::Pool + 'p>
+    From<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P>>
+    for ONNXTensor<'p, P>
+{
+    fn from(t: crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P>) -> Self {
+        ONNXTensor::Numeric(t)
+    }
+}
+
+/// Borrowed view of an ONNXTensor. Pool-erased — can reference data from any pool.
+///
+/// Parallels `NumericTensorView` but also handles string data.
+pub enum ONNXTensorView<'a> {
+    Numeric(crate::numeric_tensor::NumericTensorView<'a, crate::tensor_rank::DynRank>),
+    String {
+        shape: &'a [u64],
+        data: &'a [std::string::String],
+    },
+}
+
+impl<'a> ONNXTensorView<'a> {
+    pub fn onnx_dtype(&self) -> ONNXDType {
+        match self {
+            ONNXTensorView::Numeric(v) => ONNXDType::Numeric(v.dtype()),
+            ONNXTensorView::String { .. } => ONNXDType::String,
+        }
+    }
+
+    pub fn as_numeric(
+        &self,
+    ) -> Result<&crate::numeric_tensor::NumericTensorView<'a, crate::tensor_rank::DynRank>, String>
+    {
+        match self {
+            ONNXTensorView::Numeric(v) => Ok(v),
+            ONNXTensorView::String { .. } => Err("expected numeric tensor, got string".into()),
+        }
+    }
+
+    pub fn shape(&self) -> &[u64] {
+        match self {
+            ONNXTensorView::Numeric(v) => v.shape(),
+            ONNXTensorView::String { shape, .. } => shape,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Conversion from legacy DType
 // ---------------------------------------------------------------------------
 

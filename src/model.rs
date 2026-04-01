@@ -132,6 +132,55 @@ impl Model {
         Ok(named_outputs)
     }
 
+    /// Evaluate with ONNXTensor inputs/outputs (supports string tensors).
+    pub fn eval_pool_onnx<'p, P: Pool + 'p>(
+        &self,
+        inputs: HashMap<String, crate::numeric_dtype::ONNXTensorView<'_>>,
+        pool: &'p P,
+    ) -> Result<HashMap<String, crate::numeric_dtype::ONNXTensor<'p, P>>, EvalError> {
+        use crate::numeric_dtype::ONNXTensorView;
+        let tensors_by_name = self.graph.get_tensors_by_name();
+
+        // Map String names → GlobalIds.
+        let mut id_inputs: HashMap<GlobalId, ONNXTensorView<'_>> = HashMap::new();
+        for (name, view) in inputs {
+            if let Some(&id) = tensors_by_name.get(&name) {
+                id_inputs.insert(id, view);
+            }
+        }
+
+        // Load numeric constants from tensor_store.
+        let bridged = self.graph.load_numeric_constants(&self.tensor_store);
+        let bridged_views: Vec<_> = bridged.iter().map(|(id, t)| (*id, t.view())).collect();
+        for (id, view) in &bridged_views {
+            id_inputs.entry(*id).or_insert_with(|| {
+                ONNXTensorView::Numeric(crate::numeric_tensor::NumericTensorView::new(
+                    view.data(),
+                    view.layout().clone(),
+                ))
+            });
+        }
+
+        let all_tensors = self.graph.eval_pool_onnx(&id_inputs, pool, &mut ())?;
+
+        let output_ids: std::collections::HashSet<GlobalId> =
+            self.graph.get_outputs().into_iter().collect();
+        let id_to_name: HashMap<_, _> = tensors_by_name
+            .iter()
+            .map(|(name, &id)| (id, name.as_str()))
+            .collect();
+
+        let mut named_outputs = HashMap::new();
+        for (id, tensor) in all_tensors {
+            if output_ids.contains(&id) {
+                if let Some(&name) = id_to_name.get(&id) {
+                    named_outputs.insert(name.to_string(), tensor);
+                }
+            }
+        }
+        Ok(named_outputs)
+    }
+
     #[allow(clippy::type_complexity)]
     pub fn get_input_tensor_info(
         &self,

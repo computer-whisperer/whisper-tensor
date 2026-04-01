@@ -179,25 +179,30 @@ impl Operation for IfOperation {
 
     fn eval_pool<'p, P: crate::pool::Pool + 'p>(
         &self,
-        inputs: &HashMap<
+        inputs: &HashMap<GlobalId, crate::numeric_dtype::ONNXTensorView<'_>>,
+        pool: &'p P,
+    ) -> Result<HashMap<GlobalId, crate::numeric_dtype::ONNXTensor<'p, P>>, EvalError> {
+        // Extract numeric views for branch evaluation.
+        let mut numeric_views: HashMap<
             GlobalId,
             &crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>,
-        >,
-        pool: &'p P,
-    ) -> Result<
-        HashMap<GlobalId, crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P>>,
-        EvalError,
-    > {
-        let cond_view = inputs.get(&self.condition).unwrap();
+        > = HashMap::new();
+        for (&id, v) in inputs {
+            if let Ok(nv) = v.as_numeric() {
+                numeric_views.insert(id, nv);
+            }
+        }
+
+        let cond_view = numeric_views.get(&self.condition).unwrap();
         let condition: bool = cond_view.read_element(0).to_f64() != 0.0;
         let (branch_results, output_ids) = if condition {
             (
-                self.then_branch.eval_pool(inputs, pool)?,
+                self.then_branch.eval_pool(&numeric_views, pool)?,
                 &self.then_branch.ordered_outputs,
             )
         } else {
             (
-                self.else_branch.eval_pool(inputs, pool)?,
+                self.else_branch.eval_pool(&numeric_views, pool)?,
                 &self.else_branch.ordered_outputs,
             )
         };
@@ -205,7 +210,6 @@ impl Operation for IfOperation {
         let mut outputs = HashMap::new();
         for (to_id, from_id) in self.outputs.iter().zip(output_ids.iter()) {
             if let Some(tensor) = branch_results.get(from_id) {
-                // Copy into a new allocation so branch_results can be dropped.
                 let view = tensor.view();
                 let layout =
                     crate::numeric_tensor::TensorLayout::<crate::tensor_rank::DynRank>::row_major(
@@ -219,7 +223,7 @@ impl Operation for IfOperation {
                 for i in 0..view.numel() {
                     out.write_element(i, view.read_element(i));
                 }
-                outputs.insert(*to_id, out);
+                outputs.insert(*to_id, crate::numeric_dtype::ONNXTensor::Numeric(out));
             }
         }
         Ok(outputs)

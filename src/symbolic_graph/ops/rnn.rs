@@ -125,16 +125,12 @@ impl Operation for SimpleRnnOperation {
 
     fn eval_pool<'p, P: crate::pool::Pool + 'p>(
         &self,
-        inputs: &HashMap<
-            GlobalId,
-            &crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>,
-        >,
+        onnx_inputs: &HashMap<GlobalId, crate::numeric_dtype::ONNXTensorView<'_>>,
         pool: &'p P,
-    ) -> Result<
-        HashMap<GlobalId, crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P>>,
-        super::EvalError,
-    > {
-        simple_rnn_eval_pool(self, inputs, pool)
+    ) -> Result<HashMap<GlobalId, crate::numeric_dtype::ONNXTensor<'p, P>>, super::EvalError> {
+        let inputs = super::extract_numeric_views(onnx_inputs);
+        let results = simple_rnn_eval_pool(self, &inputs, pool)?;
+        Ok(super::wrap_numeric_outputs(results))
     }
 
     fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, _rng: &mut impl Rng) -> MilliOpGraph {
@@ -972,16 +968,12 @@ impl Operation for GruOperation {
 
     fn eval_pool<'p, P: crate::pool::Pool + 'p>(
         &self,
-        inputs: &HashMap<
-            GlobalId,
-            &crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>,
-        >,
+        onnx_inputs: &HashMap<GlobalId, crate::numeric_dtype::ONNXTensorView<'_>>,
         pool: &'p P,
-    ) -> Result<
-        HashMap<GlobalId, crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P>>,
-        super::EvalError,
-    > {
-        gru_eval_pool(self, inputs, pool)
+    ) -> Result<HashMap<GlobalId, crate::numeric_dtype::ONNXTensor<'p, P>>, super::EvalError> {
+        let inputs = super::extract_numeric_views(onnx_inputs);
+        let results = gru_eval_pool(self, &inputs, pool)?;
+        Ok(super::wrap_numeric_outputs(results))
     }
 
     fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, _rng: &mut impl Rng) -> MilliOpGraph {
