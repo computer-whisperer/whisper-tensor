@@ -4,11 +4,11 @@ use crate::compiler::CompiledProgram;
 use crate::metadata::TokenizerInfo;
 use crate::migration::numeric_tensor::NumericTensor;
 use crate::model::Model;
+use crate::pool::Pool;
 use crate::super_graph::cache::{SuperGraphCache, SuperGraphTensorCache};
 use crate::super_graph::data::{SuperGraphData, SuperGraphImage};
 use crate::super_graph::links::SuperGraphLink;
 use crate::super_graph::{SuperGraph, SuperGraphContext, SuperGraphError};
-use crate::symbolic_graph::SharedPoolTensor;
 use crate::tensor_rank::DynRank;
 use crate::tokenizer::{AnyTokenizer, Tokenizer};
 use serde::{Deserialize, Serialize};
@@ -63,7 +63,7 @@ pub struct TextInferenceTokensInLogitOutInterface {
 
 impl TextInferenceTokensInLogitOutInterface {
     #[allow(clippy::too_many_arguments)]
-    pub fn run_string_in_string_out(
+    pub fn run_string_in_string_out<'p, P: Pool + 'p>(
         &self,
         model: &Model,
         compiled_model: Option<&CompiledProgram>,
@@ -71,7 +71,7 @@ impl TextInferenceTokensInLogitOutInterface {
         tokenizer_cache: &mut HashMap<TokenizerInfo, Arc<AnyTokenizer>>,
         tensor_cache: Option<&mut ModelLoadedTensorCache>,
         super_graph_caches: Option<&mut SuperGraphCache>,
-        backend: &mut EvalBackend,
+        pool: &'p P,
     ) -> Result<String, SuperGraphError> {
         let tokenizer = {
             if let Some(x) = tokenizer_cache.get(&self.tokenizer) {
@@ -92,7 +92,7 @@ impl TextInferenceTokensInLogitOutInterface {
                 .insert(self.model_input_link, model.get_tensor_store());
             super_graph_data.tensors.insert(
                 self.token_context_input_link,
-                SharedPoolTensor::from(tokens_tensor),
+                crate::nano_graph::lower::legacy_numeric_to_new(&tokens_tensor, pool),
             );
             super_graph_data.hashes.insert(self.cache_key_input_link, 0);
             super_graph_data
@@ -113,6 +113,7 @@ impl TextInferenceTokensInLogitOutInterface {
                 compiled_models
             };
             let mut context = SuperGraphContext {
+                pool,
                 observer: &mut observer,
                 super_graph_tensor_cache: &mut super_graph_tensor_cache,
                 caches: super_graph_caches,
@@ -130,15 +131,16 @@ impl TextInferenceTokensInLogitOutInterface {
             .tensors
             .get(&self.logit_output_link)
             .unwrap();
-        let logits = logits.to_legacy();
+        let logits = crate::nano_graph::lower::new_numeric_to_legacy(logits);
         let logits_shape = logits.shape();
         // Select last position
+        let mut backend = EvalBackend::NDArray;
         let logits = logits.slice(
             &[logits_shape[0] - 1..logits_shape[0], 0..logits_shape[1]],
-            backend,
+            &mut backend,
         )?;
         let logits = logits.squeeze(0)?;
-        let token_id = logits.argmax(0, true, false, backend)?;
+        let token_id = logits.argmax(0, true, false, &mut backend)?;
 
         let token_id: u32 = token_id.first_element().into();
         let token_str = tokenizer.decode(&[token_id])?;
@@ -186,7 +188,7 @@ pub struct MultimodalLanguageInterface {
 
 impl MultimodalLanguageInterface {
     #[allow(clippy::too_many_arguments)]
-    pub fn run_string_with_modal_inputs_in_string_out(
+    pub fn run_string_with_modal_inputs_in_string_out<'p, P: Pool + 'p>(
         &self,
         model: &Model,
         compiled_model: Option<&CompiledProgram>,
@@ -195,7 +197,7 @@ impl MultimodalLanguageInterface {
         tokenizer_cache: &mut HashMap<TokenizerInfo, Arc<AnyTokenizer>>,
         tensor_cache: Option<&mut ModelLoadedTensorCache>,
         super_graph_caches: Option<&mut SuperGraphCache>,
-        backend: &mut EvalBackend,
+        pool: &'p P,
     ) -> Result<String, SuperGraphError> {
         let tokenizer = {
             if let Some(x) = tokenizer_cache.get(&self.tokenizer) {
@@ -217,11 +219,16 @@ impl MultimodalLanguageInterface {
             super_graph_data.tensors.extend(
                 modal_inputs
                     .into_iter()
-                    .map(|(k, v)| (k, SharedPoolTensor::from(v))),
+                    .map(|(k, v)| {
+                        (
+                            k,
+                            crate::nano_graph::lower::legacy_numeric_to_new(&v, pool),
+                        )
+                    }),
             );
             super_graph_data.tensors.insert(
                 self.token_context_input_link,
-                SharedPoolTensor::from(tokens_tensor),
+                crate::nano_graph::lower::legacy_numeric_to_new(&tokens_tensor, pool),
             );
             super_graph_data.hashes.insert(self.cache_key_input_link, 0);
             super_graph_data
@@ -242,6 +249,7 @@ impl MultimodalLanguageInterface {
                 compiled_models
             };
             let mut context = SuperGraphContext {
+                pool,
                 observer: &mut observer,
                 super_graph_tensor_cache: &mut super_graph_tensor_cache,
                 caches: super_graph_caches,
@@ -259,14 +267,15 @@ impl MultimodalLanguageInterface {
             .tensors
             .get(&self.logit_output_link)
             .unwrap();
-        let logits = logits.to_legacy();
+        let logits = crate::nano_graph::lower::new_numeric_to_legacy(logits);
         let logits_shape = logits.shape();
+        let mut backend = EvalBackend::NDArray;
         let logits = logits.slice(
             &[logits_shape[0] - 1..logits_shape[0], 0..logits_shape[1]],
-            backend,
+            &mut backend,
         )?;
         let logits = logits.squeeze(0)?;
-        let token_id = logits.argmax(0, true, false, backend)?;
+        let token_id = logits.argmax(0, true, false, &mut backend)?;
 
         let token_id: u32 = token_id.first_element().into();
         let token_str = tokenizer.decode(&[token_id])?;
@@ -274,7 +283,7 @@ impl MultimodalLanguageInterface {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn run_string_in_string_out(
+    pub fn run_string_in_string_out<'p, P: Pool + 'p>(
         &self,
         model: &Model,
         compiled_model: Option<&CompiledProgram>,
@@ -282,7 +291,7 @@ impl MultimodalLanguageInterface {
         tokenizer_cache: &mut HashMap<TokenizerInfo, Arc<AnyTokenizer>>,
         tensor_cache: Option<&mut ModelLoadedTensorCache>,
         super_graph_caches: Option<&mut SuperGraphCache>,
-        backend: &mut EvalBackend,
+        pool: &'p P,
     ) -> Result<String, SuperGraphError> {
         self.run_string_with_modal_inputs_in_string_out(
             model,
@@ -292,7 +301,7 @@ impl MultimodalLanguageInterface {
             tokenizer_cache,
             tensor_cache,
             super_graph_caches,
-            backend,
+            pool,
         )
     }
 
@@ -478,7 +487,7 @@ impl ImageGenerationInterface {
 
     /// Run the full image generation pipeline.
     #[allow(clippy::too_many_arguments)]
-    pub fn run(
+    pub fn run<'p, P: Pool + 'p>(
         &self,
         models: &[&Model],
         positive_prompt: String,
@@ -487,8 +496,8 @@ impl ImageGenerationInterface {
         latent_shape: Vec<usize>,
         num_inference_steps: usize,
         guidance_scale: f32,
-        backend: &mut EvalBackend,
-    ) -> Result<SuperGraphImage, SuperGraphError> {
+        pool: &'p P,
+    ) -> Result<SuperGraphImage<'p, P>, SuperGraphError> {
         assert_eq!(
             models.len(),
             self.model_weights.len(),
@@ -535,27 +544,21 @@ impl ImageGenerationInterface {
             data.strings
                 .insert(negative_link, negative_prompt.unwrap_or_default());
         }
-        data.tensors.insert(
-            self.initial_latent_input,
-            SharedPoolTensor::from(latent_tensor),
-        );
-        data.tensors.insert(
-            self.timesteps_input,
-            SharedPoolTensor::from(timesteps_tensor),
-        );
+        let to_pool =
+            |t: &NumericTensor<DynRank>| crate::nano_graph::lower::legacy_numeric_to_new(t, pool);
         data.tensors
-            .insert(self.dt_input, SharedPoolTensor::from(dt_tensor));
+            .insert(self.initial_latent_input, to_pool(&latent_tensor));
         data.tensors
-            .insert(self.sigmas_input, SharedPoolTensor::from(sigmas_tensor));
-        data.tensors.insert(
-            self.iteration_count_input,
-            SharedPoolTensor::from(iter_count),
-        );
+            .insert(self.timesteps_input, to_pool(&timesteps_tensor));
+        data.tensors.insert(self.dt_input, to_pool(&dt_tensor));
+        data.tensors
+            .insert(self.sigmas_input, to_pool(&sigmas_tensor));
+        data.tensors
+            .insert(self.iteration_count_input, to_pool(&iter_count));
         if let Some(gs_link) = self.guidance_scale_input {
             let guidance =
                 NumericTensor::<DynRank>::from_vec_shape(vec![guidance_scale], vec![]).unwrap();
-            data.tensors
-                .insert(gs_link, SharedPoolTensor::from(guidance));
+            data.tensors.insert(gs_link, to_pool(&guidance));
         }
         for (weight_link, model) in self.model_weights.iter().zip(models.iter()) {
             data.tensor_maps
@@ -567,6 +570,7 @@ impl ImageGenerationInterface {
         let mut tensor_cache = SuperGraphTensorCache::new();
         let symbolic_graphs: Vec<_> = models.iter().map(|m| m.get_symbolic_graph()).collect();
         let mut context = SuperGraphContext {
+            pool,
             observer: &mut observer,
             super_graph_tensor_cache: &mut tensor_cache,
             caches: None,
@@ -575,8 +579,11 @@ impl ImageGenerationInterface {
             compiled_models: None,
         };
 
-        let result = self.super_graph.run(data, &mut context)?;
-        let image = result.images.get(&self.image_output).unwrap().clone();
+        let mut result = self.super_graph.run(data, &mut context)?;
+        let image = result
+            .images
+            .remove(&self.image_output)
+            .expect("image output missing");
         Ok(image)
     }
 
