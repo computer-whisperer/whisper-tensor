@@ -99,7 +99,7 @@ impl Constant {
     pub(crate) fn pool_data(
         &self,
     ) -> &crate::numeric_tensor::NumericTensor<'static, DynRank, crate::pool::SystemPool> {
-        &self.data
+        self.data.inner()
     }
 
     /// Push a 1D constant tensor from a vec of typed values.
@@ -235,7 +235,7 @@ impl MilliOp for Constant {
         use crate::tensor_info::TensorInfo;
         Ok(vec![(
             self.output,
-            TensorInfo::from_view(&self.data.view(), pool),
+            TensorInfo::from_view(&self.data.inner().view(), pool),
         )])
     }
 
@@ -247,7 +247,7 @@ impl MilliOp for Constant {
     ) -> Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, MilliOpGraphError>
     {
         // Bridge to legacy for old eval path.
-        let legacy = crate::nano_graph::lower::new_numeric_to_legacy(&*self.data);
+        let legacy = crate::nano_graph::lower::new_numeric_to_legacy(self.data.inner());
         Ok(Box::new([(self.output, legacy)].into_iter()))
     }
 
@@ -261,6 +261,7 @@ impl MilliOp for Constant {
     > {
         let out = self
             .data
+            .inner()
             .view()
             .to_tensor(pool)
             .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;

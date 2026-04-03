@@ -183,7 +183,7 @@ impl Node for ConstantOperation {
 
 impl Operation for ConstantOperation {
     fn parameters(&self) -> Vec<Property> {
-        let t = &*self.value.0;
+        let t = self.value.inner();
         let shape: Vec<i64> = t.shape().iter().map(|&x| x as i64).collect();
         let total_elements = t.numel();
 

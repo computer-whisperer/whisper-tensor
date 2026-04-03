@@ -152,28 +152,57 @@ pub struct InlineConstantTensor(
     >,
 );
 
-impl std::ops::Deref for InlineConstantTensor {
-    type Target = crate::numeric_tensor::NumericTensor<'static, DynRank, crate::pool::SystemPool>;
-    fn deref(&self) -> &Self::Target {
+impl InlineConstantTensor {
+    pub fn inner(
+        &self,
+    ) -> &crate::numeric_tensor::NumericTensor<'static, DynRank, crate::pool::SystemPool> {
         &self.0
     }
 }
 
+/// Serialized as { shape: [u64], dtype: NumericDType, data: [u8] }.
 impl serde::Serialize for InlineConstantTensor {
-    fn serialize<S: serde::Serializer>(&self, _serializer: S) -> Result<S::Ok, S::Error> {
-        // TODO: implement proper tensor serialization
-        Err(serde::ser::Error::custom(
-            "InlineConstantTensor serialization not yet implemented",
-        ))
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let tensor = &*self.0;
+        let mut s = serializer.serialize_struct("InlineConstantTensor", 3)?;
+        s.serialize_field("shape", tensor.shape())?;
+        s.serialize_field("dtype", &tensor.dtype())?;
+        s.serialize_field("data", tensor.buffer())?;
+        s.end()
     }
 }
 
 impl<'de> serde::Deserialize<'de> for InlineConstantTensor {
-    fn deserialize<D: serde::Deserializer<'de>>(_deserializer: D) -> Result<Self, D::Error> {
-        // TODO: implement proper tensor deserialization
-        Err(serde::de::Error::custom(
-            "InlineConstantTensor deserialization not yet implemented",
-        ))
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use crate::numeric_dtype::NumericDType;
+        use crate::numeric_tensor::{NumericTensor, TensorLayout};
+        use crate::pool::{Pool, SystemPool};
+
+        #[derive(serde::Deserialize)]
+        struct Raw {
+            shape: Vec<u64>,
+            dtype: NumericDType,
+            data: Vec<u8>,
+        }
+
+        let raw = Raw::deserialize(deserializer)?;
+        let layout = TensorLayout::<DynRank>::row_major(raw.shape, raw.dtype);
+        let expected = layout.buffer_size_bytes();
+        if raw.data.len() != expected {
+            return Err(serde::de::Error::custom(format!(
+                "InlineConstantTensor: expected {} bytes, got {}",
+                expected,
+                raw.data.len()
+            )));
+        }
+        let mut buf = SystemPool
+            .allocate(expected)
+            .map_err(|e| serde::de::Error::custom(format!("allocation: {e}")))?;
+        buf.copy_from_slice(&raw.data);
+        Ok(InlineConstantTensor(std::sync::Arc::new(
+            NumericTensor::from_parts(buf, layout),
+        )))
     }
 }
 
@@ -207,14 +236,14 @@ impl StoredOrNotTensor {
     pub fn shape(&self, tensor_store: &TensorStore) -> Vec<u64> {
         match self {
             StoredOrNotTensor::Stored(id) => tensor_store.get_tensor(*id).unwrap().shape(),
-            StoredOrNotTensor::Inline(t) => t.shape().clone(),
+            StoredOrNotTensor::Inline(t) => t.inner().shape().clone(),
         }
     }
 
     pub fn dtype(&self, tensor_store: &TensorStore) -> DType {
         match self {
             StoredOrNotTensor::Stored(id) => tensor_store.get_tensor(*id).unwrap().dtype(),
-            StoredOrNotTensor::Inline(t) => t.dtype().to_legacy(),
+            StoredOrNotTensor::Inline(t) => t.inner().dtype().to_legacy(),
         }
     }
 
@@ -1984,7 +2013,7 @@ impl SymbolicGraphMutator {
         rng: &mut impl Rng,
     ) -> GlobalId {
         let mut shape = Vec::new();
-        for &s in value.shape().iter() {
+        for &s in value.inner().shape().iter() {
             shape.push(ScalarInfoTyped::Numeric(s));
         }
 
@@ -1993,7 +2022,7 @@ impl SymbolicGraphMutator {
             global_id,
             ONNXTensorInfo {
                 onnx_name: name.clone(),
-                dtype: Some(ONNXDType::Numeric(value.dtype())),
+                dtype: Some(ONNXDType::Numeric(value.inner().dtype())),
                 shape: Some(shape),
                 tensor_type: TensorType::Constant(StoredOrNotTensor::Inline(value)),
                 global_id,

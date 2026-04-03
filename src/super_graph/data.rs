@@ -380,10 +380,56 @@ impl<'p, 'models, P: Pool + 'p> SuperGraphData<'p, 'models, P> {
                 self.video_clips
                     .insert(output, SuperGraphVideoClip::new(copy, value.fps));
             }
-            SuperGraphLinkKind::MultimodalItem | SuperGraphLinkKind::List(_) => {
+            SuperGraphLinkKind::MultimodalItem => {
+                let value = source.multimodal_items.get(&input).ok_or(
+                    SuperGraphError::MissingLinkError(format!(
+                        ": missing multimodal item link {:?}",
+                        input
+                    )),
+                )?;
+                let copied = match value {
+                    SuperGraphMultimodalItem::Text(s) => SuperGraphMultimodalItem::Text(s.clone()),
+                    SuperGraphMultimodalItem::Image(img) => {
+                        let t = img
+                            .tensor
+                            .view()
+                            .to_tensor(pool)
+                            .map_err(|e| {
+                                SuperGraphError::InvalidInputError(format!("allocation: {e}"))
+                            })?;
+                        SuperGraphMultimodalItem::Image(SuperGraphImage::new(t))
+                    }
+                    SuperGraphMultimodalItem::AudioClip(clip) => {
+                        let t = clip
+                            .samples
+                            .view()
+                            .to_tensor(pool)
+                            .map_err(|e| {
+                                SuperGraphError::InvalidInputError(format!("allocation: {e}"))
+                            })?;
+                        SuperGraphMultimodalItem::AudioClip(SuperGraphAudioClip::new(
+                            t,
+                            clip.sample_rate_hz,
+                        ))
+                    }
+                    SuperGraphMultimodalItem::VideoClip(clip) => {
+                        let t = clip
+                            .frames
+                            .view()
+                            .to_tensor(pool)
+                            .map_err(|e| {
+                                SuperGraphError::InvalidInputError(format!("allocation: {e}"))
+                            })?;
+                        SuperGraphMultimodalItem::VideoClip(SuperGraphVideoClip::new(t, clip.fps))
+                    }
+                };
+                self.multimodal_items.insert(output, copied);
+            }
+            SuperGraphLinkKind::List(_) => {
+                // Lists contain owned tensors/media that would each need deep-copying.
+                // This is not yet needed by any caller — Scan simple_inputs are never lists.
                 return Err(SuperGraphError::InvalidInputError(format!(
-                    "copy_link_from not supported for {:?} (use take_link_from instead)",
-                    input.kind()
+                    "copy_link_from not supported for List (use take_link_from instead)"
                 )));
             }
         }
