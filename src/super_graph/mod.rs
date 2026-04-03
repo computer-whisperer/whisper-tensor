@@ -58,7 +58,9 @@ pub enum SuperGraphError {
 
 pub type SuperGraphHash = u64;
 
-pub struct SuperGraphContext<'short, 'model, T: SuperGraphObserver> {
+pub struct SuperGraphContext<'short, 'model, 'p, P: crate::pool::Pool + 'p, T: SuperGraphObserver>
+{
+    pub pool: &'p P,
     pub observer: &'short mut T,
     pub caches: Option<&'short mut SuperGraphCache>,
     pub super_graph_tensor_cache: &'short mut SuperGraphTensorCache<'model>,
@@ -67,14 +69,18 @@ pub struct SuperGraphContext<'short, 'model, T: SuperGraphObserver> {
     pub compiled_models: Option<Vec<(&'model Model, &'short CompiledProgram)>>,
 }
 
-impl<'short, 'model, T: SuperGraphObserver> SuperGraphContext<'short, 'model, T> {
+impl<'short, 'model, 'p, P: crate::pool::Pool + 'p, T: SuperGraphObserver>
+    SuperGraphContext<'short, 'model, 'p, P, T>
+{
     /// Construct a context with only the required fields; caches, compiled
     /// models, and symbolic graphs default to empty/None.
     pub fn new(
+        pool: &'p P,
         observer: &'short mut T,
         tensor_cache: &'short mut SuperGraphTensorCache<'model>,
     ) -> Self {
         Self {
+            pool,
             observer,
             caches: None,
             super_graph_tensor_cache: tensor_cache,
@@ -95,20 +101,20 @@ pub struct SuperGraph {
 }
 
 impl SuperGraph {
-    pub fn run<'short, 'model, T: SuperGraphObserver>(
+    pub fn run<'short, 'model, 'p, P: crate::pool::Pool + 'p, T: SuperGraphObserver>(
         &'short self,
-        data: SuperGraphData<'model>,
-        context: &mut SuperGraphContext<'short, 'model, T>,
-    ) -> Result<SuperGraphData<'model>, SuperGraphError> {
+        data: SuperGraphData<'p, 'model, P>,
+        context: &mut SuperGraphContext<'short, 'model, 'p, P, T>,
+    ) -> Result<SuperGraphData<'p, 'model, P>, SuperGraphError> {
         self.eval(&[], data, context)
     }
 
-    pub fn eval<'a, 'b, T: SuperGraphObserver>(
+    pub fn eval<'a, 'b, 'p, P: crate::pool::Pool + 'p, T: SuperGraphObserver>(
         &'a self,
         node_path: &[GlobalId],
-        data: SuperGraphData<'b>,
-        context: &mut SuperGraphContext<'a, 'b, T>,
-    ) -> Result<SuperGraphData<'b>, SuperGraphError> {
+        data: SuperGraphData<'p, 'b, P>,
+        context: &mut SuperGraphContext<'a, 'b, 'p, P, T>,
+    ) -> Result<SuperGraphData<'p, 'b, P>, SuperGraphError> {
         if let Some(first_issue) = self.validate_structure().into_iter().next() {
             return Err(SuperGraphError::InvalidGraph(first_issue));
         }
@@ -165,12 +171,12 @@ impl SuperGraph {
             }
         }
 
-        let output_data = data.select(
-            self.output_links
+        let output_data = data.into_selected(
+            &self
+                .output_links
                 .iter()
                 .cloned()
-                .collect::<Vec<_>>()
-                .as_slice(),
+                .collect::<Vec<_>>(),
         )?;
 
         Ok(output_data)
@@ -434,9 +440,11 @@ mod tests {
         let dangling_output = SuperGraphLink::new(SuperGraphLinkKind::Tensor, &mut rng).to_any();
         graph.output_links.insert(dangling_output);
 
+        use crate::pool::SystemPool;
+        static POOL: SystemPool = SystemPool;
         let mut observer = ();
         let mut tensor_cache = SuperGraphTensorCache::new();
-        let mut context = SuperGraphContext::new(&mut observer, &mut tensor_cache);
+        let mut context = SuperGraphContext::new(&POOL, &mut observer, &mut tensor_cache);
 
         let result = graph.eval(&[], SuperGraphData::new(), &mut context);
         assert!(matches!(result, Err(SuperGraphError::InvalidGraph(_))));

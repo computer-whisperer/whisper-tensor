@@ -1696,8 +1696,6 @@ impl Operation for HardmaxOperation {
     fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, rng: &mut impl Rng) -> MilliOpGraph {
         use crate::milli_graph::ops::*;
         use crate::numeric_dtype::NumericDType;
-        use crate::symbolic_graph::SharedPoolTensor;
-
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let x = input_map[&self.input];
 

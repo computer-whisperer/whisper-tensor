@@ -101,11 +101,16 @@ impl MilliOp for ScatterND {
         _config: &super::MilliEvalConfig,
         _backend: &mut crate::backends::eval_backend::EvalBackend,
     ) -> super::EvalResult {
-        let views: Vec<_> = [self.data, self.indices, self.updates]
+        let pool_tensors: Vec<_> = [self.data, self.indices, self.updates]
             .iter()
-            .map(|id| crate::symbolic_graph::SharedPoolTensor::from_legacy(&inputs[id]))
+            .map(|id| {
+                crate::nano_graph::lower::legacy_numeric_to_new(
+                    &inputs[id],
+                    &crate::pool::SystemPool,
+                )
+            })
             .collect();
-        let view_refs: Vec<_> = views.iter().map(|s| s.0.view()).collect();
+        let view_refs: Vec<_> = pool_tensors.iter().map(|t| t.view()).collect();
         let results = self
             .eval_new(&view_refs, &crate::pool::SystemPool)
             .map_err(|e| MilliOpGraphError::InvalidInput(format!("{e}")))?;

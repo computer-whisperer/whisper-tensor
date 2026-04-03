@@ -15,7 +15,10 @@ use crate::numeric_dtype::NumericDType;
 use crate::numeric_scalar::NumericScalar;
 
 /// Create a small pool-backed I64 constant tensor from a slice.
-fn pool_tensor_i64(vals: &[i64]) -> super::PoolTensor {
+fn pool_tensor_i64(
+    vals: &[i64],
+) -> crate::numeric_tensor::NumericTensor<'static, crate::tensor_rank::DynRank, crate::pool::SystemPool>
+{
     use crate::numeric_tensor::{NumericTensor, TensorLayout};
     use crate::pool::{Pool, SystemPool};
     use crate::tensor_rank::DynRank;

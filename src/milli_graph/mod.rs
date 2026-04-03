@@ -2003,7 +2003,7 @@ mod tests {
     use crate::numeric_scalar::NumericScalar;
     use crate::numeric_tensor::NumericTensor as PoolTensor;
     use crate::pool::SystemPool;
-    use crate::symbolic_graph::SharedPoolTensor;
+    use crate::symbolic_graph::InlineConstantTensor;
 
     static POOL: SystemPool = SystemPool;
 
@@ -2025,14 +2025,14 @@ mod tests {
         t
     }
 
-    /// Create a SharedPoolTensor from f32 values (for Constant::push_new_pool).
-    fn make_shared_f32(shape: Vec<u64>, values: &[f32]) -> SharedPoolTensor {
-        SharedPoolTensor(std::sync::Arc::new(make_f32(shape, values)))
+    /// Create an InlineConstantTensor from f32 values (for Constant::push_new_pool).
+    fn make_shared_f32(shape: Vec<u64>, values: &[f32]) -> InlineConstantTensor {
+        InlineConstantTensor(std::sync::Arc::new(make_f32(shape, values)))
     }
 
-    /// Create a SharedPoolTensor from i64 values (for Constant::push_new_pool).
-    fn make_shared_i64(shape: Vec<u64>, values: &[i64]) -> SharedPoolTensor {
-        SharedPoolTensor(std::sync::Arc::new(make_i64(shape, values)))
+    /// Create an InlineConstantTensor from i64 values (for Constant::push_new_pool).
+    fn make_shared_i64(shape: Vec<u64>, values: &[i64]) -> InlineConstantTensor {
+        InlineConstantTensor(std::sync::Arc::new(make_i64(shape, values)))
     }
 
     /// Read all elements as f32 from a pool tensor.

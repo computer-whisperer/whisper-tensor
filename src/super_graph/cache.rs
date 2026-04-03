@@ -1,16 +1,18 @@
-use crate::DynRank;
 use crate::backends::ModelLoadedTensorCache;
-use crate::migration::numeric_tensor::NumericTensor;
+use crate::numeric_tensor::NumericTensor;
+use crate::pool::SystemPool;
 use crate::symbolic_graph::tensor_store::TensorStore;
+use crate::tensor_rank::DynRank;
 use std::collections::HashMap;
 
-type RNNCache = HashMap<Vec<u32>, HashMap<String, NumericTensor<DynRank>>>;
-type TensorPackCache = HashMap<String, NumericTensor<DynRank>>;
+type CachedTensor = NumericTensor<'static, DynRank, SystemPool>;
+type RNNCache = HashMap<Vec<u32>, HashMap<String, CachedTensor>>;
+type TensorPackCache = HashMap<String, CachedTensor>;
 
-#[derive(Clone, Debug, Default)]
+#[derive(Default)]
 pub struct SuperGraphCache {
     pub rnn_cache: HashMap<u64, RNNCache>,
-    pub tensor_cache: HashMap<u64, NumericTensor<DynRank>>,
+    pub tensor_cache: HashMap<u64, CachedTensor>,
     pub tensor_pack_cache: HashMap<u64, TensorPackCache>,
 }
 

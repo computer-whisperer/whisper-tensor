@@ -1,38 +1,34 @@
+use crate::numeric_tensor::NumericTensor;
+use crate::pool::Pool;
 use crate::super_graph::links::{
     SuperGraphAnyLink, SuperGraphAtomicLinkKind, SuperGraphLink, SuperGraphLinkDouble,
     SuperGraphLinkKind,
 };
 use crate::super_graph::{SuperGraphError, SuperGraphHash};
-use crate::symbolic_graph::SharedPoolTensor;
 use crate::symbolic_graph::tensor_store::TensorStore;
+use crate::tensor_rank::DynRank;
 use crate::tokenizer::AnyTokenizer;
 use std::collections::HashMap;
 
-#[derive(Clone, Debug)]
-pub struct SuperGraphImage {
-    pub tensor: SharedPoolTensor,
+#[derive(Debug)]
+pub struct SuperGraphImage<'p, P: Pool + 'p> {
+    pub tensor: NumericTensor<'p, DynRank, P>,
 }
 
-impl SuperGraphImage {
-    pub fn new(tensor: SharedPoolTensor) -> Self {
+impl<'p, P: Pool + 'p> SuperGraphImage<'p, P> {
+    pub fn new(tensor: NumericTensor<'p, DynRank, P>) -> Self {
         Self { tensor }
     }
 }
 
-impl From<SharedPoolTensor> for SuperGraphImage {
-    fn from(value: SharedPoolTensor) -> Self {
-        Self::new(value)
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct SuperGraphAudioClip {
-    pub samples: SharedPoolTensor,
+#[derive(Debug)]
+pub struct SuperGraphAudioClip<'p, P: Pool + 'p> {
+    pub samples: NumericTensor<'p, DynRank, P>,
     pub sample_rate_hz: u32,
 }
 
-impl SuperGraphAudioClip {
-    pub fn new(samples: SharedPoolTensor, sample_rate_hz: u32) -> Self {
+impl<'p, P: Pool + 'p> SuperGraphAudioClip<'p, P> {
+    pub fn new(samples: NumericTensor<'p, DynRank, P>, sample_rate_hz: u32) -> Self {
         Self {
             samples,
             sample_rate_hz,
@@ -40,40 +36,39 @@ impl SuperGraphAudioClip {
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct SuperGraphVideoClip {
-    pub frames: SharedPoolTensor,
+#[derive(Debug)]
+pub struct SuperGraphVideoClip<'p, P: Pool + 'p> {
+    pub frames: NumericTensor<'p, DynRank, P>,
     pub fps: f32,
 }
 
-impl SuperGraphVideoClip {
-    pub fn new(frames: SharedPoolTensor, fps: f32) -> Self {
+impl<'p, P: Pool + 'p> SuperGraphVideoClip<'p, P> {
+    pub fn new(frames: NumericTensor<'p, DynRank, P>, fps: f32) -> Self {
         Self { frames, fps }
     }
 }
 
-#[derive(Clone, Debug)]
-pub enum SuperGraphMultimodalItem {
+#[derive(Debug)]
+pub enum SuperGraphMultimodalItem<'p, P: Pool + 'p> {
     Text(String),
-    Image(SuperGraphImage),
-    AudioClip(SuperGraphAudioClip),
-    VideoClip(SuperGraphVideoClip),
+    Image(SuperGraphImage<'p, P>),
+    AudioClip(SuperGraphAudioClip<'p, P>),
+    VideoClip(SuperGraphVideoClip<'p, P>),
 }
 
-#[derive(Clone)]
-pub enum SuperGraphListValue<'models> {
-    Tensor(Vec<SharedPoolTensor>),
+pub enum SuperGraphListValue<'p, 'models, P: Pool + 'p> {
+    Tensor(Vec<NumericTensor<'p, DynRank, P>>),
     String(Vec<String>),
     Tokenizer(Vec<AnyTokenizer>),
     TensorMap(Vec<&'models TensorStore>),
     Hash(Vec<SuperGraphHash>),
-    Image(Vec<SuperGraphImage>),
-    AudioClip(Vec<SuperGraphAudioClip>),
-    VideoClip(Vec<SuperGraphVideoClip>),
-    MultimodalItem(Vec<SuperGraphMultimodalItem>),
+    Image(Vec<SuperGraphImage<'p, P>>),
+    AudioClip(Vec<SuperGraphAudioClip<'p, P>>),
+    VideoClip(Vec<SuperGraphVideoClip<'p, P>>),
+    MultimodalItem(Vec<SuperGraphMultimodalItem<'p, P>>),
 }
 
-impl<'models> SuperGraphListValue<'models> {
+impl<'p, 'models, P: Pool + 'p> SuperGraphListValue<'p, 'models, P> {
     pub fn item_kind(&self) -> SuperGraphAtomicLinkKind {
         match self {
             SuperGraphListValue::Tensor(_) => SuperGraphAtomicLinkKind::Tensor,
@@ -89,21 +84,20 @@ impl<'models> SuperGraphListValue<'models> {
     }
 }
 
-#[derive(Clone, Default)]
-pub struct SuperGraphData<'models> {
-    pub tensors: HashMap<SuperGraphLink, SharedPoolTensor>,
+pub struct SuperGraphData<'p, 'models, P: Pool + 'p> {
+    pub tensors: HashMap<SuperGraphLink, NumericTensor<'p, DynRank, P>>,
     pub strings: HashMap<SuperGraphLink, String>,
     pub tokenizers: HashMap<SuperGraphLink, AnyTokenizer>,
     pub tensor_maps: HashMap<SuperGraphLink, &'models TensorStore>,
     pub hashes: HashMap<SuperGraphLink, SuperGraphHash>,
-    pub images: HashMap<SuperGraphLink, SuperGraphImage>,
-    pub audio_clips: HashMap<SuperGraphLink, SuperGraphAudioClip>,
-    pub video_clips: HashMap<SuperGraphLink, SuperGraphVideoClip>,
-    pub multimodal_items: HashMap<SuperGraphLink, SuperGraphMultimodalItem>,
-    pub lists: HashMap<SuperGraphLink, SuperGraphListValue<'models>>,
+    pub images: HashMap<SuperGraphLink, SuperGraphImage<'p, P>>,
+    pub audio_clips: HashMap<SuperGraphLink, SuperGraphAudioClip<'p, P>>,
+    pub video_clips: HashMap<SuperGraphLink, SuperGraphVideoClip<'p, P>>,
+    pub multimodal_items: HashMap<SuperGraphLink, SuperGraphMultimodalItem<'p, P>>,
+    pub lists: HashMap<SuperGraphLink, SuperGraphListValue<'p, 'models, P>>,
 }
 
-impl<'models> SuperGraphData<'models> {
+impl<'p, 'models, P: Pool + 'p> SuperGraphData<'p, 'models, P> {
     pub fn new() -> Self {
         Self {
             tensors: HashMap::new(),
@@ -134,11 +128,142 @@ impl<'models> SuperGraphData<'models> {
         }
     }
 
+    /// Move a link's value from `source` into `self`. Removes from source.
+    pub fn take_link_from(
+        &mut self,
+        source: &mut Self,
+        input: SuperGraphLink,
+        output: SuperGraphLink,
+    ) -> Result<(), SuperGraphError> {
+        if input.kind() != output.kind() {
+            return Err(SuperGraphError::InvalidInputError(format!(
+                "link kind mismatch while taking {:?} -> {:?}",
+                input, output
+            )));
+        }
+
+        match input.kind() {
+            SuperGraphLinkKind::Tensor => {
+                let value = source
+                    .tensors
+                    .remove(&input)
+                    .ok_or(SuperGraphError::MissingLinkError(format!(
+                        ": missing tensor link {:?}",
+                        input
+                    )))?;
+                self.tensors.insert(output, value);
+            }
+            SuperGraphLinkKind::String => {
+                let value = source
+                    .strings
+                    .remove(&input)
+                    .ok_or(SuperGraphError::MissingLinkError(format!(
+                        ": missing string link {:?}",
+                        input
+                    )))?;
+                self.strings.insert(output, value);
+            }
+            SuperGraphLinkKind::Tokenizer => {
+                let value = source
+                    .tokenizers
+                    .remove(&input)
+                    .ok_or(SuperGraphError::MissingLinkError(format!(
+                        ": missing tokenizer link {:?}",
+                        input
+                    )))?;
+                self.tokenizers.insert(output, value);
+            }
+            SuperGraphLinkKind::TensorMap => {
+                let value = source
+                    .tensor_maps
+                    .remove(&input)
+                    .ok_or(SuperGraphError::MissingLinkError(format!(
+                        ": missing tensor_map link {:?}",
+                        input
+                    )))?;
+                self.tensor_maps.insert(output, value);
+            }
+            SuperGraphLinkKind::Hash => {
+                let value = source
+                    .hashes
+                    .remove(&input)
+                    .ok_or(SuperGraphError::MissingLinkError(format!(
+                        ": missing hash link {:?}",
+                        input
+                    )))?;
+                self.hashes.insert(output, value);
+            }
+            SuperGraphLinkKind::Image => {
+                let value = source
+                    .images
+                    .remove(&input)
+                    .ok_or(SuperGraphError::MissingLinkError(format!(
+                        ": missing image link {:?}",
+                        input
+                    )))?;
+                self.images.insert(output, value);
+            }
+            SuperGraphLinkKind::AudioClip => {
+                let value = source
+                    .audio_clips
+                    .remove(&input)
+                    .ok_or(SuperGraphError::MissingLinkError(format!(
+                        ": missing audio clip link {:?}",
+                        input
+                    )))?;
+                self.audio_clips.insert(output, value);
+            }
+            SuperGraphLinkKind::VideoClip => {
+                let value = source
+                    .video_clips
+                    .remove(&input)
+                    .ok_or(SuperGraphError::MissingLinkError(format!(
+                        ": missing video clip link {:?}",
+                        input
+                    )))?;
+                self.video_clips.insert(output, value);
+            }
+            SuperGraphLinkKind::MultimodalItem => {
+                let value = source.multimodal_items.remove(&input).ok_or(
+                    SuperGraphError::MissingLinkError(format!(
+                        ": missing multimodal item link {:?}",
+                        input
+                    )),
+                )?;
+                self.multimodal_items.insert(output, value);
+            }
+            SuperGraphLinkKind::List(item_kind) => {
+                let value = source
+                    .lists
+                    .remove(&input)
+                    .ok_or(SuperGraphError::MissingLinkError(format!(
+                        ": missing list link {:?}",
+                        input
+                    )))?;
+                if value.item_kind() != item_kind {
+                    return Err(SuperGraphError::InvalidInputError(format!(
+                        "list item kind mismatch for {:?}: link declares {:?}, value contains {:?}",
+                        input,
+                        item_kind,
+                        value.item_kind()
+                    )));
+                }
+                self.lists.insert(output, value);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Copy a tensor from `source` into `self` by allocating a new copy on `pool`.
+    /// Does not remove from source — use for data that must survive (e.g., Scan simple_inputs).
+    /// Only supports tensor and non-tensor (Copy/Clone) link kinds.
     pub fn copy_link_from(
         &mut self,
         source: &Self,
         input: SuperGraphLink,
         output: SuperGraphLink,
+        pool: &'p P,
     ) -> Result<(), SuperGraphError> {
         if input.kind() != output.kind() {
             return Err(SuperGraphError::InvalidInputError(format!(
@@ -156,7 +281,11 @@ impl<'models> SuperGraphData<'models> {
                         ": missing tensor link {:?}",
                         input
                     )))?;
-                self.tensors.insert(output, value.clone());
+                let copy = value
+                    .view()
+                    .to_tensor(pool)
+                    .map_err(|e| SuperGraphError::InvalidInputError(format!("allocation: {e}")))?;
+                self.tensors.insert(output, copy);
             }
             SuperGraphLinkKind::String => {
                 let value = source
@@ -208,7 +337,12 @@ impl<'models> SuperGraphData<'models> {
                         ": missing image link {:?}",
                         input
                     )))?;
-                self.images.insert(output, value.clone());
+                let copy = value
+                    .tensor
+                    .view()
+                    .to_tensor(pool)
+                    .map_err(|e| SuperGraphError::InvalidInputError(format!("allocation: {e}")))?;
+                self.images.insert(output, SuperGraphImage::new(copy));
             }
             SuperGraphLinkKind::AudioClip => {
                 let value =
@@ -219,7 +353,15 @@ impl<'models> SuperGraphData<'models> {
                             ": missing audio clip link {:?}",
                             input
                         )))?;
-                self.audio_clips.insert(output, value.clone());
+                let copy = value
+                    .samples
+                    .view()
+                    .to_tensor(pool)
+                    .map_err(|e| SuperGraphError::InvalidInputError(format!("allocation: {e}")))?;
+                self.audio_clips.insert(
+                    output,
+                    SuperGraphAudioClip::new(copy, value.sample_rate_hz),
+                );
             }
             SuperGraphLinkKind::VideoClip => {
                 let value =
@@ -230,78 +372,60 @@ impl<'models> SuperGraphData<'models> {
                             ": missing video clip link {:?}",
                             input
                         )))?;
-                self.video_clips.insert(output, value.clone());
+                let copy = value
+                    .frames
+                    .view()
+                    .to_tensor(pool)
+                    .map_err(|e| SuperGraphError::InvalidInputError(format!("allocation: {e}")))?;
+                self.video_clips
+                    .insert(output, SuperGraphVideoClip::new(copy, value.fps));
             }
-            SuperGraphLinkKind::MultimodalItem => {
-                let value = source.multimodal_items.get(&input).ok_or(
-                    SuperGraphError::MissingLinkError(format!(
-                        ": missing multimodal item link {:?}",
-                        input
-                    )),
-                )?;
-                self.multimodal_items.insert(output, value.clone());
-            }
-            SuperGraphLinkKind::List(item_kind) => {
-                let value = source
-                    .lists
-                    .get(&input)
-                    .ok_or(SuperGraphError::MissingLinkError(format!(
-                        ": missing list link {:?}",
-                        input
-                    )))?;
-                if value.item_kind() != item_kind {
-                    return Err(SuperGraphError::InvalidInputError(format!(
-                        "list item kind mismatch for {:?}: link declares {:?}, value contains {:?}",
-                        input,
-                        item_kind,
-                        value.item_kind()
-                    )));
-                }
-                self.lists.insert(output, value.clone());
+            SuperGraphLinkKind::MultimodalItem | SuperGraphLinkKind::List(_) => {
+                return Err(SuperGraphError::InvalidInputError(format!(
+                    "copy_link_from not supported for {:?} (use take_link_from instead)",
+                    input.kind()
+                )));
             }
         }
 
         Ok(())
     }
 
-    pub fn select(&self, links: &[SuperGraphAnyLink]) -> Result<Self, SuperGraphError> {
+    /// Consume self, extracting only the requested links. All other data is dropped.
+    pub fn into_selected(
+        mut self,
+        links: &[SuperGraphAnyLink],
+    ) -> Result<Self, SuperGraphError> {
         let mut selected = Self::new();
-        for link in links {
-            selected.copy_link_from(self, *link, *link)?;
+        for &link in links {
+            selected.take_link_from(&mut self, link, link)?;
         }
         Ok(selected)
     }
 
-    pub fn remap(&self, map: Vec<SuperGraphLinkDouble>) -> Result<Self, SuperGraphError> {
+    /// Remap links from source keys to destination keys, moving data.
+    pub fn into_remapped(
+        mut self,
+        map: Vec<SuperGraphLinkDouble>,
+    ) -> Result<Self, SuperGraphError> {
         let mut new_data = Self::new();
-
         for link in map {
-            new_data.copy_link_from(self, link.first(), link.second())?;
+            new_data.take_link_from(&mut self, link.first(), link.second())?;
         }
-
         Ok(new_data)
     }
 
-    pub fn extend(&mut self, other: &Self) {
-        self.tensors
-            .extend(other.tensors.iter().map(|(a, b)| (*a, b.clone())));
-        self.strings
-            .extend(other.strings.iter().map(|(a, b)| (*a, b.clone())));
-        self.tokenizers
-            .extend(other.tokenizers.iter().map(|(a, b)| (*a, b.clone())));
-        self.tensor_maps
-            .extend(other.tensor_maps.iter().map(|(a, b)| (*a, *b)));
-        self.hashes
-            .extend(other.hashes.iter().map(|(a, b)| (*a, *b)));
-        self.images
-            .extend(other.images.iter().map(|(a, b)| (*a, b.clone())));
-        self.audio_clips
-            .extend(other.audio_clips.iter().map(|(a, b)| (*a, b.clone())));
-        self.video_clips
-            .extend(other.video_clips.iter().map(|(a, b)| (*a, b.clone())));
-        self.multimodal_items
-            .extend(other.multimodal_items.iter().map(|(a, b)| (*a, b.clone())));
-        self.lists
-            .extend(other.lists.iter().map(|(a, b)| (*a, b.clone())));
+    /// Merge all entries from `other` into `self`, consuming `other`.
+    pub fn extend_from(&mut self, other: Self) {
+        self.tensors.extend(other.tensors);
+        self.strings.extend(other.strings);
+        self.tokenizers.extend(other.tokenizers);
+        self.tensor_maps.extend(other.tensor_maps);
+        self.hashes.extend(other.hashes);
+        self.images.extend(other.images);
+        self.audio_clips.extend(other.audio_clips);
+        self.video_clips.extend(other.video_clips);
+        self.multimodal_items.extend(other.multimodal_items);
+        self.lists.extend(other.lists);
     }
 }

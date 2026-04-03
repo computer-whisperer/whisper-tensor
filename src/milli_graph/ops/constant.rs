@@ -8,14 +8,12 @@ use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
 use crate::numeric_dtype::NumericDType;
 use crate::numeric_scalar::NumericScalar as NewScalar;
 use crate::pool::Pool;
-use crate::symbolic_graph::SharedPoolTensor;
+use crate::symbolic_graph::InlineConstantTensor;
 
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use typenum::P1;
-
-type PoolTensor = crate::numeric_tensor::NumericTensor<'static, DynRank, crate::pool::SystemPool>;
 
 /// Trait for Rust types that can be stored as constant tensor elements.
 pub trait ConstantValue: Copy {
@@ -72,8 +70,8 @@ impl ConstantValue for bool {
     }
 }
 
-/// Build a `SharedPoolTensor` from values + shape on the system pool.
-fn build_pool_tensor<T: ConstantValue>(values: &[T], shape: Vec<u64>) -> SharedPoolTensor {
+/// Build an inline constant tensor from values + shape on the system pool.
+fn build_inline_constant<T: ConstantValue>(values: &[T], shape: Vec<u64>) -> InlineConstantTensor {
     use crate::numeric_tensor::{NumericTensor, TensorLayout};
     use crate::pool::{Pool, SystemPool};
 
@@ -85,7 +83,7 @@ fn build_pool_tensor<T: ConstantValue>(values: &[T], shape: Vec<u64>) -> SharedP
     for (i, v) in values.iter().enumerate() {
         tensor.write_element(i, v.to_scalar());
     }
-    SharedPoolTensor(std::sync::Arc::new(tensor))
+    InlineConstantTensor(std::sync::Arc::new(tensor))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -93,13 +91,15 @@ pub struct Constant {
     global_id: GlobalId,
     pub(crate) label: Option<String>,
     output: GlobalId,
-    data: SharedPoolTensor,
+    data: InlineConstantTensor,
 }
 
 impl Constant {
     #[allow(dead_code)]
-    pub(crate) fn pool_data(&self) -> &PoolTensor {
-        &self.data.0
+    pub(crate) fn pool_data(
+        &self,
+    ) -> &crate::numeric_tensor::NumericTensor<'static, DynRank, crate::pool::SystemPool> {
+        &self.data
     }
 
     /// Push a 1D constant tensor from a vec of typed values.
@@ -119,7 +119,7 @@ impl Constant {
         rng: &mut impl Rng,
     ) -> GlobalId {
         let len = values.len() as u64;
-        let data = build_pool_tensor(&values, vec![len]);
+        let data = build_inline_constant(&values, vec![len]);
         Self::push_new_pool(graph, data, label, rng)
     }
 
@@ -139,7 +139,7 @@ impl Constant {
         label: Option<String>,
         rng: &mut impl Rng,
     ) -> GlobalId {
-        let data = build_pool_tensor(&[v], vec![1]);
+        let data = build_inline_constant(&[v], vec![1]);
         Self::push_new_pool(graph, data, label, rng)
     }
 
@@ -164,16 +164,16 @@ impl Constant {
             .expect("bridge constant to pool tensor");
         Self::push_new_pool(
             graph,
-            SharedPoolTensor(std::sync::Arc::new(pool_tensor)),
+            InlineConstantTensor(std::sync::Arc::new(pool_tensor)),
             label,
             rng,
         )
     }
 
-    /// Push a constant from a pool tensor directly.
+    /// Push a constant from an inline constant tensor directly.
     pub fn push_new_pool(
         graph: &mut MilliOpGraph,
-        data: SharedPoolTensor,
+        data: InlineConstantTensor,
         label: Option<String>,
         rng: &mut impl Rng,
     ) -> GlobalId {
@@ -235,7 +235,7 @@ impl MilliOp for Constant {
         use crate::tensor_info::TensorInfo;
         Ok(vec![(
             self.output,
-            TensorInfo::from_view(&self.data.0.view(), pool),
+            TensorInfo::from_view(&self.data.view(), pool),
         )])
     }
 
@@ -247,7 +247,7 @@ impl MilliOp for Constant {
     ) -> Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, MilliOpGraphError>
     {
         // Bridge to legacy for old eval path.
-        let legacy = crate::nano_graph::lower::new_numeric_to_legacy(&*self.data.0);
+        let legacy = crate::nano_graph::lower::new_numeric_to_legacy(&*self.data);
         Ok(Box::new([(self.output, legacy)].into_iter()))
     }
 
@@ -261,7 +261,6 @@ impl MilliOp for Constant {
     > {
         let out = self
             .data
-            .0
             .view()
             .to_tensor(pool)
             .map_err(crate::nano_graph::pool_eval::PoolEvalError::Allocation)?;

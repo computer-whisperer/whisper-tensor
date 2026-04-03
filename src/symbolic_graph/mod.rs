@@ -114,7 +114,10 @@ fn query_attribute_bool(attributes: &[onnx::AttributeProto], name: &str) -> Opti
     None
 }
 
-fn query_attribute_tensor(attributes: &[onnx::AttributeProto], name: &str) -> Option<PoolTensor> {
+fn query_attribute_tensor(
+    attributes: &[onnx::AttributeProto],
+    name: &str,
+) -> Option<crate::numeric_tensor::NumericTensor<'static, DynRank, crate::pool::SystemPool>> {
     for attr in attributes {
         if attr.name == name
             && attr.r#type == onnx::attribute_proto::AttributeType::Tensor as i32
@@ -138,84 +141,41 @@ fn query_attribute_graph<'a>(
     None
 }
 
-/// A pool tensor wrapped in Arc for cheap cloning in graph structures.
-/// Skips serde — serialization goes through the legacy path.
-#[derive(Debug)]
-pub struct SharedPoolTensor(
-    pub  std::sync::Arc<
+/// Small inline constant tensor (≤100 elements). Arc-wrapped because
+/// StoredOrNotTensor must be Clone (it lives inside ONNXTensorInfo which
+/// is cloned when graphs are cloned), and NumericTensor doesn't implement
+/// Clone (pool buffers aren't trivially cloneable).
+#[derive(Clone, Debug)]
+pub struct InlineConstantTensor(
+    pub std::sync::Arc<
         crate::numeric_tensor::NumericTensor<'static, DynRank, crate::pool::SystemPool>,
     >,
 );
 
-impl Clone for SharedPoolTensor {
-    fn clone(&self) -> Self {
-        Self(self.0.clone())
+impl std::ops::Deref for InlineConstantTensor {
+    type Target = crate::numeric_tensor::NumericTensor<'static, DynRank, crate::pool::SystemPool>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
     }
 }
 
-impl serde::Serialize for SharedPoolTensor {
+impl serde::Serialize for InlineConstantTensor {
     fn serialize<S: serde::Serializer>(&self, _serializer: S) -> Result<S::Ok, S::Error> {
+        // TODO: implement proper tensor serialization
         Err(serde::ser::Error::custom(
-            "SharedPoolTensor serialization not yet implemented",
+            "InlineConstantTensor serialization not yet implemented",
         ))
     }
 }
 
-impl<'de> serde::Deserialize<'de> for SharedPoolTensor {
+impl<'de> serde::Deserialize<'de> for InlineConstantTensor {
     fn deserialize<D: serde::Deserializer<'de>>(_deserializer: D) -> Result<Self, D::Error> {
+        // TODO: implement proper tensor deserialization
         Err(serde::de::Error::custom(
-            "SharedPoolTensor deserialization not yet implemented",
+            "InlineConstantTensor deserialization not yet implemented",
         ))
     }
 }
-
-impl SharedPoolTensor {
-    /// Convert a legacy `NumericTensor<DynRank>` into a `SharedPoolTensor`.
-    pub fn from_legacy(legacy: &crate::migration::numeric_tensor::NumericTensor<DynRank>) -> Self {
-        let pool_tensor =
-            crate::nano_graph::lower::legacy_numeric_to_new(legacy, &crate::pool::SystemPool);
-        // SAFETY: SystemPool allocations are 'static.
-        let static_tensor: crate::numeric_tensor::NumericTensor<
-            'static,
-            DynRank,
-            crate::pool::SystemPool,
-        > = unsafe { std::mem::transmute(pool_tensor) };
-        Self(std::sync::Arc::new(static_tensor))
-    }
-
-    /// Convert back to a legacy `NumericTensor<DynRank>`.
-    pub fn to_legacy(&self) -> crate::migration::numeric_tensor::NumericTensor<DynRank> {
-        crate::nano_graph::lower::new_numeric_to_legacy(&*self.0)
-    }
-
-    /// Get a view of the underlying tensor.
-    pub fn view(&self) -> crate::numeric_tensor::NumericTensorView<'_, DynRank> {
-        self.0.view()
-    }
-
-    /// Create from a `NumericTensorView` by copying into SystemPool.
-    pub fn from_view(view: &crate::numeric_tensor::NumericTensorView<'_, DynRank>) -> Self {
-        use crate::numeric_tensor::{NumericTensor, TensorLayout};
-        use crate::pool::Pool;
-        let layout = TensorLayout::<DynRank>::row_major(view.shape().to_vec(), view.dtype());
-        let buf = crate::pool::SystemPool
-            .allocate(layout.buffer_size_bytes())
-            .expect("SystemPool allocation failed");
-        let mut tensor = NumericTensor::from_parts(buf, layout);
-        for i in 0..view.numel() {
-            tensor.write_element(i, view.read_element(i));
-        }
-        Self(std::sync::Arc::new(tensor))
-    }
-}
-
-impl From<crate::migration::numeric_tensor::NumericTensor<DynRank>> for SharedPoolTensor {
-    fn from(legacy: crate::migration::numeric_tensor::NumericTensor<DynRank>) -> Self {
-        Self::from_legacy(&legacy)
-    }
-}
-
-type PoolTensor = crate::numeric_tensor::NumericTensor<'static, DynRank, crate::pool::SystemPool>;
 
 /// Decode TensorProto into StoredOrNotTensor using new types.
 /// Large tensors (>100 elements) go to the tensor store; small ones are held inline.
@@ -229,7 +189,7 @@ fn decode_tensor_proto_to_stored(
         let id = tensor_store.add_tensor(StoredTensor::Inline(pool_tensor));
         Ok(StoredOrNotTensor::Stored(id))
     } else {
-        Ok(StoredOrNotTensor::Inline(SharedPoolTensor(
+        Ok(StoredOrNotTensor::Inline(InlineConstantTensor(
             std::sync::Arc::new(pool_tensor),
         )))
     }
@@ -238,22 +198,23 @@ fn decode_tensor_proto_to_stored(
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum StoredOrNotTensor {
     Stored(TensorStoreTensorId),
-    /// Small tensor held inline (not in the tensor store).
-    Inline(SharedPoolTensor),
+    /// Small constant tensor held inline (not in the tensor store).
+    /// ≤100 elements; allocated on SystemPool with 'static lifetime.
+    Inline(InlineConstantTensor),
 }
 
 impl StoredOrNotTensor {
     pub fn shape(&self, tensor_store: &TensorStore) -> Vec<u64> {
         match self {
             StoredOrNotTensor::Stored(id) => tensor_store.get_tensor(*id).unwrap().shape(),
-            StoredOrNotTensor::Inline(shared) => shared.0.shape().clone(),
+            StoredOrNotTensor::Inline(t) => t.shape().clone(),
         }
     }
 
     pub fn dtype(&self, tensor_store: &TensorStore) -> DType {
         match self {
             StoredOrNotTensor::Stored(id) => tensor_store.get_tensor(*id).unwrap().dtype(),
-            StoredOrNotTensor::Inline(shared) => shared.0.dtype().to_legacy(),
+            StoredOrNotTensor::Inline(t) => t.dtype().to_legacy(),
         }
     }
 
@@ -1524,7 +1485,10 @@ pub fn tensor_proto_to_pool_tensor<'p, P: crate::pool::Pool + 'p>(
 /// Bridge: convert a legacy NDArrayNumericTensor to a pool tensor.
 pub(crate) fn tensor_proto_to_pool_tensor_from_ndarray(
     nd: &NDArrayNumericTensor<DynRank>,
-) -> Result<PoolTensor, ONNXDecodingError> {
+) -> Result<
+    crate::numeric_tensor::NumericTensor<'static, DynRank, crate::pool::SystemPool>,
+    ONNXDecodingError,
+> {
     use crate::numeric_dtype::NumericDType;
     use crate::numeric_tensor::TensorLayout;
     use crate::pool::{Pool, SystemPool};
@@ -1543,7 +1507,7 @@ pub(crate) fn tensor_proto_to_pool_tensor_from_ndarray(
     let buf = SystemPool
         .allocate(layout.buffer_size_bytes())
         .map_err(|_| ONNXDecodingError::UnsupportedONNX("allocation failed".into()))?;
-    let mut tensor: PoolTensor = crate::numeric_tensor::NumericTensor::from_parts(buf, layout);
+    let mut tensor = crate::numeric_tensor::NumericTensor::from_parts(buf, layout);
     for i in 0..concrete.numel() {
         tensor.write_element(i, concrete.read_element(i));
     }
@@ -2015,12 +1979,12 @@ impl SymbolicGraphMutator {
     pub fn new_constant_pool_tensor(
         &mut self,
         inner_graph: &mut SymbolicGraph,
-        value: SharedPoolTensor,
+        value: InlineConstantTensor,
         name: Option<String>,
         rng: &mut impl Rng,
     ) -> GlobalId {
         let mut shape = Vec::new();
-        for &s in value.0.shape().iter() {
+        for &s in value.shape().iter() {
             shape.push(ScalarInfoTyped::Numeric(s));
         }
 
@@ -2029,7 +1993,7 @@ impl SymbolicGraphMutator {
             global_id,
             ONNXTensorInfo {
                 onnx_name: name.clone(),
-                dtype: Some(ONNXDType::Numeric(value.0.dtype())),
+                dtype: Some(ONNXDType::Numeric(value.dtype())),
                 shape: Some(shape),
                 tensor_type: TensorType::Constant(StoredOrNotTensor::Inline(value)),
                 global_id,
@@ -2130,7 +2094,7 @@ impl SymbolicGraphMutator {
 
     pub fn push_constant_pool_tensor(
         &mut self,
-        value: PoolTensor,
+        value: crate::numeric_tensor::NumericTensor<'static, DynRank, crate::pool::SystemPool>,
         name: Option<String>,
         rng: &mut impl Rng,
     ) -> GlobalId {
@@ -2146,9 +2110,9 @@ impl SymbolicGraphMutator {
                 onnx_name: name.clone(),
                 dtype: Some(ONNXDType::Numeric(value.dtype())),
                 shape: Some(shape),
-                tensor_type: TensorType::Constant(StoredOrNotTensor::Inline(SharedPoolTensor(
-                    std::sync::Arc::new(value),
-                ))),
+                tensor_type: TensorType::Constant(StoredOrNotTensor::Inline(
+                    InlineConstantTensor(std::sync::Arc::new(value)),
+                )),
                 global_id,
             },
         );
@@ -2165,10 +2129,12 @@ impl SymbolicGraphMutator {
         rng: &mut impl Rng,
     ) -> GlobalId {
         // Bridge: convert legacy NDArray tensor → pool tensor for inline storage.
-        let legacy = NumericTensor::NDArray(value);
-        let shared = SharedPoolTensor::from_legacy(&legacy);
+        let legacy =
+            crate::migration::numeric_tensor::NumericTensor::NDArray(value);
+        let pool_tensor =
+            crate::nano_graph::lower::legacy_numeric_to_new(&legacy, &crate::pool::SystemPool);
         let mut shape = Vec::new();
-        for s in shared.0.shape() {
+        for s in pool_tensor.shape() {
             shape.push(ScalarInfoTyped::Numeric(*s))
         }
         let global_id = GlobalId::new(rng);
@@ -2177,9 +2143,11 @@ impl SymbolicGraphMutator {
             global_id,
             ONNXTensorInfo {
                 onnx_name: name.clone(),
-                dtype: Some(ONNXDType::Numeric(shared.0.dtype())),
+                dtype: Some(ONNXDType::Numeric(pool_tensor.dtype())),
                 shape: Some(shape),
-                tensor_type: TensorType::Constant(StoredOrNotTensor::Inline(shared)),
+                tensor_type: TensorType::Constant(StoredOrNotTensor::Inline(
+                    InlineConstantTensor(std::sync::Arc::new(pool_tensor)),
+                )),
                 global_id,
             },
         );

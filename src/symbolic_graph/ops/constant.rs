@@ -4,7 +4,7 @@ use crate::milli_graph::{MilliLoweringContext, MilliOpGraph};
 use crate::numeric_scalar::NumericScalar as NewNumericScalar;
 use crate::symbolic_graph::ops::Operation;
 use crate::symbolic_graph::{
-    ONNXDecodingError, SharedPoolTensor, query_attribute_float, query_attribute_floats,
+    InlineConstantTensor, ONNXDecodingError, query_attribute_float, query_attribute_floats,
     query_attribute_int, query_attribute_ints, query_attribute_tensor,
 };
 use crate::{DynRank, onnx};
@@ -85,12 +85,12 @@ impl Operation for ConstantOfShapeOperation {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ConstantOperation {
     global_id: GlobalId,
-    pub value: SharedPoolTensor,
+    pub value: InlineConstantTensor,
     output: GlobalId,
 }
 
 impl ConstantOperation {
-    pub fn new(value: SharedPoolTensor, output: GlobalId, rng: &mut impl Rng) -> Self {
+    pub fn new(value: InlineConstantTensor, output: GlobalId, rng: &mut impl Rng) -> Self {
         Self {
             global_id: GlobalId::new(rng),
             value,
@@ -98,8 +98,8 @@ impl ConstantOperation {
         }
     }
 
-    /// Helper: create a pool tensor from typed scalar values.
-    fn pool_tensor_from_f32(vals: Vec<f32>) -> SharedPoolTensor {
+    /// Helper: create an inline constant tensor from f32 values.
+    fn inline_tensor_from_f32(vals: Vec<f32>) -> InlineConstantTensor {
         use crate::numeric_dtype::NumericDType;
         use crate::numeric_tensor::{NumericTensor, TensorLayout};
         use crate::pool::{Pool, SystemPool};
@@ -110,10 +110,10 @@ impl ConstantOperation {
         for (i, &v) in vals.iter().enumerate() {
             t.write_element(i, NewNumericScalar::from_f32(v));
         }
-        SharedPoolTensor(std::sync::Arc::new(t))
+        InlineConstantTensor(std::sync::Arc::new(t))
     }
 
-    fn pool_tensor_from_i64(vals: Vec<i64>) -> SharedPoolTensor {
+    fn inline_tensor_from_i64(vals: Vec<i64>) -> InlineConstantTensor {
         use crate::numeric_dtype::NumericDType;
         use crate::numeric_tensor::{NumericTensor, TensorLayout};
         use crate::pool::{Pool, SystemPool};
@@ -124,7 +124,7 @@ impl ConstantOperation {
         for (i, &v) in vals.iter().enumerate() {
             t.write_element(i, NewNumericScalar::from_i64(v));
         }
-        SharedPoolTensor(std::sync::Arc::new(t))
+        InlineConstantTensor(std::sync::Arc::new(t))
     }
 
     pub(crate) fn from_onnx(
@@ -141,15 +141,15 @@ impl ConstantOperation {
         }
 
         let value = if let Some(tensor) = query_attribute_tensor(attributes, "value") {
-            SharedPoolTensor(std::sync::Arc::new(tensor))
+            InlineConstantTensor(std::sync::Arc::new(tensor))
         } else if let Some(value_float) = query_attribute_float(attributes, "value_float") {
-            Self::pool_tensor_from_f32(vec![value_float])
+            Self::inline_tensor_from_f32(vec![value_float])
         } else if let Some(value_floats) = query_attribute_floats(attributes, "value_floats") {
-            Self::pool_tensor_from_f32(value_floats)
+            Self::inline_tensor_from_f32(value_floats)
         } else if let Some(value_int) = query_attribute_int(attributes, "value_int") {
-            Self::pool_tensor_from_i64(vec![value_int])
+            Self::inline_tensor_from_i64(vec![value_int])
         } else if let Some(value_ints) = query_attribute_ints(attributes, "value_ints") {
-            Self::pool_tensor_from_i64(value_ints)
+            Self::inline_tensor_from_i64(value_ints)
         } else {
             Err(ONNXDecodingError::MissingAttribute(
                 "Constant".to_string(),
