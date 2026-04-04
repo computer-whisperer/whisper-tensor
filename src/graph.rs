@@ -5,7 +5,7 @@
 //! - Future graph layers (import, symbolic, milli-op, super) implement these to align.
 //! - Enable shared tooling and passes across all graphs.
 
-use crate::dtype::DType;
+use crate::numeric_dtype::ONNXDType;
 use crate::scalar_info::ScalarInfoTyped;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -42,7 +42,7 @@ pub enum PropertyValue {
     String(String),
     IntList(Vec<i64>),
     FloatList(Vec<f64>),
-    DType(DType),
+    DType(ONNXDType),
     GlobalId(GlobalId),
     GlobalIdList(Vec<GlobalId>),
     None,
@@ -104,7 +104,7 @@ impl Display for LinkCategory {
 /// Metadata about a link (tensor/value) in a graph.
 pub trait LinkMetadata: Link {
     /// The data type of this link, if known.
-    fn dtype(&self) -> Option<DType> {
+    fn dtype(&self) -> Option<ONNXDType> {
         None
     }
 
@@ -139,14 +139,14 @@ pub trait NodeMetadata: Node {
 
 /// Object-safe version of LinkMetadata for dynamic dispatch.
 pub trait LinkMetadataDyn: Link {
-    fn dtype(&self) -> Option<DType>;
+    fn dtype(&self) -> Option<ONNXDType>;
     fn shape(&self) -> Option<Vec<ScalarInfoTyped<u64>>>;
     fn category(&self) -> Option<LinkCategory>;
     fn properties(&self) -> Vec<Property>;
 }
 
 impl<L: LinkMetadata> LinkMetadataDyn for L {
-    fn dtype(&self) -> Option<DType> {
+    fn dtype(&self) -> Option<ONNXDType> {
         LinkMetadata::dtype(self)
     }
 

@@ -429,7 +429,7 @@ impl Operation for RandomNormalLikeOperation {
         if let Some(dtype) = self.dtype {
             params.push(Property::new(
                 "dtype",
-                PropertyValue::DType(dtype.to_legacy()),
+                PropertyValue::DType(crate::numeric_dtype::ONNXDType::Numeric(dtype)),
             ));
         }
         params.push(Property::new(

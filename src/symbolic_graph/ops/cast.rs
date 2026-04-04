@@ -163,7 +163,7 @@ impl Operation for CastOperation {
     fn parameters(&self) -> Vec<Property> {
         vec![Property::new(
             "to",
-            PropertyValue::DType(self.to.to_legacy()),
+            PropertyValue::DType(crate::numeric_dtype::ONNXDType::Numeric(self.to)),
         )]
     }
 

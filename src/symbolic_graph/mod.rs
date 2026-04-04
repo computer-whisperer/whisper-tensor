@@ -3383,8 +3383,8 @@ impl Link for ONNXTensorInfo {
 }
 
 impl LinkMetadata for ONNXTensorInfo {
-    fn dtype(&self) -> Option<DType> {
-        self.dtype.map(|d| d.to_legacy())
+    fn dtype(&self) -> Option<ONNXDType> {
+        self.dtype
     }
 
     fn shape(&self) -> Option<Vec<ScalarInfoTyped<u64>>> {

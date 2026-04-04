@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::backends::eval_backend::EvalRuntimeError;
-use crate::dtype::DType;
+use crate::numeric_dtype::ONNXDType;
 use crate::migration::numeric_tensor::NumericTensorError;
 use crate::numeric_tensor::NumericTensorView;
 use crate::pool::Pool;
@@ -184,7 +184,7 @@ impl Model {
     #[allow(clippy::type_complexity)]
     pub fn get_input_tensor_info(
         &self,
-    ) -> Result<HashMap<String, (DType, Vec<Option<u64>>)>, EvalRuntimeError> {
+    ) -> Result<HashMap<String, (ONNXDType, Vec<Option<u64>>)>, EvalRuntimeError> {
         let input_ids = self.graph.get_inputs();
         let mut results = HashMap::new();
         for tensor_id in input_ids {
@@ -199,7 +199,7 @@ impl Model {
                         _ => None,
                     })
                     .collect();
-                results.insert(name.clone(), (onnx_dtype.to_legacy(), shape));
+                results.insert(name.clone(), (onnx_dtype, shape));
             }
         }
         Ok(results)

@@ -307,7 +307,7 @@ impl Operation for GroupNormalizationOperation {
             Property::new("num_groups", PropertyValue::Int(self.num_groups as i64)),
             Property::new(
                 "stash_type",
-                PropertyValue::DType(self.stash_type.to_legacy()),
+                PropertyValue::DType(crate::numeric_dtype::ONNXDType::Numeric(self.stash_type)),
             ),
         ]
     }
@@ -516,7 +516,7 @@ impl Operation for RMSNormalizationOperation {
             Property::new("epsilon", PropertyValue::Float(self.epsilon as f64)),
             Property::new(
                 "stash_type",
-                PropertyValue::DType(self.stash_type.to_legacy()),
+                PropertyValue::DType(crate::numeric_dtype::ONNXDType::Numeric(self.stash_type)),
             ),
         ]
     }
@@ -734,7 +734,7 @@ impl Operation for LayerNormalizationOperation {
             Property::new("epsilon", PropertyValue::Float(self.epsilon as f64)),
             Property::new(
                 "stash_type",
-                PropertyValue::DType(self.stash_type.to_legacy()),
+                PropertyValue::DType(crate::numeric_dtype::ONNXDType::Numeric(self.stash_type)),
             ),
         ]
     }
