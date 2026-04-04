@@ -86,7 +86,6 @@ pub use where_op::*;
 
 use crate::backends::ndarray_backend::NDArrayNumericTensor;
 use crate::graph::{GlobalId, Node, NodeMetadata, NodeSlotEditError, SlotDirection};
-use crate::migration::numeric_tensor::NumericTensor;
 use crate::milli_graph::MilliOpGraphError;
 use crate::pool::Pool;
 use crate::scalar_info::ScalarInfoTyped;
@@ -155,8 +154,6 @@ pub struct MilliEvalConfig {
     pub relaxed_accumulation: bool,
 }
 
-pub type EvalResult =
-    Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, MilliOpGraphError>;
 /// Try to constant-fold an op by lowering to nano-ops and evaluating via pool_eval.
 ///
 /// Returns `Some(results)` if all inputs are concrete and lowering succeeds.

@@ -1,17 +1,18 @@
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
-use crate::backends::ndarray_backend::NDArrayNumericTensor;
 use crate::compiler::CompiledProgramObserver;
-use crate::dtype::DType;
 use crate::graph::{
     GlobalId, Graph, Node, NodeMetadata, NodeSlotEditError, Property, PropertyValue, SlotDirection,
 };
 use crate::metadata::TokenizerInfo;
-use crate::migration::numeric_scalar::NumericScalar;
 use crate::migration::numeric_tensor::NumericTensor;
 use crate::milli_graph::MilliOpGraph;
 use crate::milli_graph::observer::MilliOpGraphObserver;
+use crate::numeric_dtype::NumericDType;
+use crate::numeric_scalar::NumericScalar;
+use crate::numeric_tensor::NumericTensor as PoolNumericTensor;
 use crate::phonemization::{text_to_kokoro_phonemes, text_to_piper_phonemes};
+use crate::pool::Pool;
 use crate::super_graph::data::{SuperGraphAudioClip, SuperGraphImage};
 use crate::super_graph::links::{
     SuperGraphAnyLink, SuperGraphLink, SuperGraphLinkDouble, SuperGraphLinkKind,
@@ -21,8 +22,6 @@ use crate::super_graph::observer::SuperGraphObserver;
 use crate::super_graph::{
     SuperGraph, SuperGraphBuilder, SuperGraphContext, SuperGraphData, SuperGraphError,
 };
-use crate::numeric_tensor::NumericTensor as PoolNumericTensor;
-use crate::pool::Pool;
 use crate::symbolic_graph::observer::SymbolicGraphObserver;
 use crate::tokenizer::{AnyTokenizer, Tokenizer};
 use rand::Rng;
@@ -186,59 +185,36 @@ fn read_rank0_bool_tensor<P: Pool>(
     Ok(tensor.read_element(0).is_nonzero())
 }
 
+fn alloc_err(e: crate::pool::AllocationError) -> SuperGraphError {
+    SuperGraphError::InvalidInputError(format!("allocation: {e}"))
+}
+
+fn check_rank0(shape: &[u64], input_name: &str) -> Result<(), SuperGraphError> {
+    if shape.len() > 1 || (shape.len() == 1 && shape[0] != 1) {
+        return Err(SuperGraphError::InvalidInputError(format!(
+            "{} must be a scalar (rank-0 or rank-1 with 1 element), got rank={} shape={:?}",
+            input_name,
+            shape.len(),
+            shape
+        )));
+    }
+    Ok(())
+}
+
 fn read_rank0_i64_tensor<P: Pool>(
     tensor: &PoolNumericTensor<'_, DynRank, P>,
     input_name: &str,
 ) -> Result<i64, SuperGraphError> {
-    let legacy = crate::nano_graph::lower::new_numeric_to_legacy(tensor);
-    if legacy.rank() > 1
-        || (legacy.rank() == 1 && legacy.shape().first().copied().unwrap_or(0) != 1)
-    {
-        return Err(SuperGraphError::InvalidInputError(format!(
-            "{} must be a scalar (rank-0 or rank-1 with 1 element), got rank={} shape={:?}",
-            input_name,
-            legacy.rank(),
-            legacy.shape()
-        )));
-    }
-    if legacy.dtype() == DType::BOOL {
-        let value: bool = legacy.first_element().into();
-        return Ok(if value { 1 } else { 0 });
-    }
-    let mut backend = EvalBackend::NDArray;
-    let cast_tensor = legacy.cast(DType::I64, &mut backend)?;
-    Ok(cast_tensor.first_element().into())
+    check_rank0(tensor.shape().as_slice(), input_name)?;
+    Ok(tensor.read_element(0).to_i64())
 }
 
 fn read_rank0_f64_tensor<P: Pool>(
     tensor: &PoolNumericTensor<'_, DynRank, P>,
     input_name: &str,
 ) -> Result<f64, SuperGraphError> {
-    let legacy = crate::nano_graph::lower::new_numeric_to_legacy(tensor);
-    if legacy.rank() > 1
-        || (legacy.rank() == 1 && legacy.shape().first().copied().unwrap_or(0) != 1)
-    {
-        return Err(SuperGraphError::InvalidInputError(format!(
-            "{} must be a scalar (rank-0 or rank-1 with 1 element), got rank={} shape={:?}",
-            input_name,
-            legacy.rank(),
-            legacy.shape()
-        )));
-    }
-    if legacy.dtype() == DType::BOOL {
-        let value: bool = legacy.first_element().into();
-        return Ok(if value { 1.0 } else { 0.0 });
-    }
-    let mut backend = EvalBackend::NDArray;
-    let cast_tensor = legacy.cast(DType::F64, &mut backend)?;
-    if let NumericScalar::F64(value) = cast_tensor.first_element() {
-        Ok(value)
-    } else {
-        Err(SuperGraphError::InvalidInputError(format!(
-            "{} could not be converted into F64",
-            input_name
-        )))
-    }
+    check_rank0(tensor.shape().as_slice(), input_name)?;
+    Ok(tensor.read_element(0).to_f64())
 }
 
 fn parse_piper_phoneme_id_map(json: &str) -> Result<HashMap<char, Vec<i64>>, SuperGraphError> {
@@ -808,19 +784,19 @@ impl SuperGraphNode for SuperGraphNodeTokenizerEncode {
                 tokenizer_link
             ))
         })?;
-        let input_tensor = match &self.mode {
+        let pool = context.pool;
+        let output_tensor = match &self.mode {
             SuperGraphNodeTokenizerEncodeMode::Plain => {
                 let tokens = tokenizer
                     .encode(text)
                     .iter()
                     .map(|x| *x as i64)
                     .collect::<Vec<_>>();
-                NumericTensor::from_vec(tokens)
-                    .to_dyn_rank()
-                    .unsqueeze(0)
-                    .unwrap()
-                    .unsqueeze(0)
-                    .unwrap()
+                let n = tokens.len() as u64;
+                PoolNumericTensor::from_fn(vec![1, 1, n], NumericDType::I64, pool, |i| {
+                    NumericScalar::from_i64(tokens[i])
+                })
+                .map_err(alloc_err)?
             }
             SuperGraphNodeTokenizerEncodeMode::ClipStyle {
                 seq_len,
@@ -843,20 +819,29 @@ impl SuperGraphNode for SuperGraphNodeTokenizerEncode {
                 }
                 ids.push(*eos as i32);
                 ids.resize(*seq_len, *pad as i32);
-                NumericTensor::from_vec_shape(ids, vec![1, *seq_len])?
+                PoolNumericTensor::from_fn(
+                    vec![1, *seq_len as u64],
+                    NumericDType::I32,
+                    pool,
+                    |i| NumericScalar::from_i32(ids[i]),
+                )
+                .map_err(alloc_err)?
             }
             SuperGraphNodeTokenizerEncodeMode::RawPad { seq_len, pad } => {
                 let encoded = tokenizer.encode(text);
                 let mut ids: Vec<i32> =
                     encoded.iter().take(*seq_len).map(|&id| id as i32).collect();
                 ids.resize(*seq_len, *pad as i32);
-                NumericTensor::from_vec_shape(ids, vec![1, *seq_len])?
+                PoolNumericTensor::from_fn(
+                    vec![1, *seq_len as u64],
+                    NumericDType::I32,
+                    pool,
+                    |i| NumericScalar::from_i32(ids[i]),
+                )
+                .map_err(alloc_err)?
             }
         };
-        data.tensors.insert(
-            tensor_output_link,
-            crate::nano_graph::lower::legacy_numeric_to_new(&input_tensor, context.pool),
-        );
+        data.tensors.insert(tensor_output_link, output_tensor);
         Ok(())
     }
 
@@ -1179,17 +1164,23 @@ impl SuperGraphNode for SuperGraphNodePiperPhonemesToTensor {
         token_ids.push(2);
 
         let num_tokens = token_ids.len();
-        let token_ids_tensor =
-            NumericTensor::<DynRank>::from_vec_shape(token_ids, vec![1, num_tokens])?;
-        let input_lengths_tensor =
-            NumericTensor::<DynRank>::from_vec_shape(vec![num_tokens as i64], vec![1])?;
+        let pool = context.pool;
         data.tensors.insert(
             token_ids_output_link,
-            crate::nano_graph::lower::legacy_numeric_to_new(&token_ids_tensor, context.pool),
+            PoolNumericTensor::from_fn(
+                vec![1, num_tokens as u64],
+                NumericDType::I64,
+                pool,
+                |i| NumericScalar::from_i64(token_ids[i]),
+            )
+            .map_err(alloc_err)?,
         );
         data.tensors.insert(
             input_lengths_output_link,
-            crate::nano_graph::lower::legacy_numeric_to_new(&input_lengths_tensor, context.pool),
+            PoolNumericTensor::from_fn(vec![1], NumericDType::I64, pool, |_| {
+                NumericScalar::from_i64(num_tokens as i64)
+            })
+            .map_err(alloc_err)?,
         );
         Ok(())
     }
@@ -1299,11 +1290,15 @@ impl SuperGraphNode for SuperGraphNodeKokoroPhonemesToTensor {
         }
         token_ids.push(0); // EOS ($)
         let num_tokens = token_ids.len();
-        let token_ids_tensor =
-            NumericTensor::<DynRank>::from_vec_shape(token_ids, vec![1, num_tokens])?;
         data.tensors.insert(
             token_ids_output_link,
-            crate::nano_graph::lower::legacy_numeric_to_new(&token_ids_tensor, context.pool),
+            PoolNumericTensor::from_fn(
+                vec![1, num_tokens as u64],
+                NumericDType::I64,
+                context.pool,
+                |i| NumericScalar::from_i64(token_ids[i]),
+            )
+            .map_err(alloc_err)?,
         );
         Ok(())
     }
@@ -1400,11 +1395,15 @@ impl SuperGraphNode for SuperGraphNodeF5TextToTensor {
             }
         }
         let num_tokens = token_ids.len();
-        let token_ids_tensor =
-            NumericTensor::<DynRank>::from_vec_shape(token_ids, vec![1, num_tokens])?;
         data.tensors.insert(
             token_ids_output_link,
-            crate::nano_graph::lower::legacy_numeric_to_new(&token_ids_tensor, context.pool),
+            PoolNumericTensor::from_fn(
+                vec![1, num_tokens as u64],
+                NumericDType::I32,
+                context.pool,
+                |i| NumericScalar::from_i32(token_ids[i]),
+            )
+            .map_err(alloc_err)?,
         );
         Ok(())
     }
@@ -2033,15 +2032,9 @@ impl SuperGraphNode for SuperGraphNodeAudioClipToMelSpectrogram {
             )));
         }
 
-        let audio_legacy = crate::nano_graph::lower::new_numeric_to_legacy(&clip.samples);
-        let mut backend = EvalBackend::NDArray;
-        let audio_f32 = audio_legacy.cast(DType::F32, &mut backend)?;
-        let audio_nd = audio_f32.to_ndarray()?;
-        let mut samples: Vec<f32> = audio_nd.flatten().try_into().map_err(|_| {
-            SuperGraphError::InvalidInputError(
-                "audio->mel failed to flatten audio tensor into f32 samples".to_string(),
-            )
-        })?;
+        let mut samples: Vec<f32> = (0..clip.samples.numel())
+            .map(|i| clip.samples.read_element(i).to_f64() as f32)
+            .collect();
 
         if let Some(max_samples) = self.config.max_samples {
             let max_samples = max_samples as usize;
@@ -2148,11 +2141,15 @@ impl SuperGraphNode for SuperGraphNodeAudioClipToMelSpectrogram {
             }
         }
 
-        let mel_tensor =
-            NumericTensor::<DynRank>::from_vec_shape(output, vec![1, num_mel_bins, num_frames])?;
         data.tensors.insert(
             tensor_output_link,
-            crate::nano_graph::lower::legacy_numeric_to_new(&mel_tensor, context.pool),
+            PoolNumericTensor::from_fn(
+                vec![1, num_mel_bins as u64, num_frames as u64],
+                NumericDType::F32,
+                context.pool,
+                |i| NumericScalar::from_f32(output[i]),
+            )
+            .map_err(alloc_err)?,
         );
         Ok(())
     }
@@ -2445,25 +2442,35 @@ fn eval_scan<'short, 'model, 'p, P: Pool + 'p, T: SuperGraphObserver>(
                             ": scan_input outer={:?} inner={:?}",
                             outer, inner
                         )))?;
-                let tensor_legacy = crate::nano_graph::lower::new_numeric_to_legacy(tensor);
-                let slice_arg = {
-                    let mut slice_ranges = Vec::new();
-                    for j in 0..tensor_legacy.rank() {
-                        if j == *scan_axis as usize {
-                            slice_ranges.push(i..i + 1);
-                        } else {
-                            slice_ranges.push(0..tensor_legacy.shape()[j]);
-                        }
+                let shape = tensor.shape();
+                let axis = *scan_axis as usize;
+                let mut slice_ranges: Vec<(u64, u64)> = Vec::new();
+                for (j, &d) in shape.iter().enumerate() {
+                    if j == axis {
+                        slice_ranges.push((i, i + 1));
+                    } else {
+                        slice_ranges.push((0, d));
                     }
-                    slice_ranges
-                };
-                let backend = EvalBackend::NDArray;
-                let sliced = tensor_legacy.slice(slice_arg.as_slice(), &backend)?;
-                let squeezed = sliced.squeeze(*scan_axis as usize)?;
-                iter_inputs.tensors.insert(
-                    inner,
-                    crate::nano_graph::lower::legacy_numeric_to_new(&squeezed, context.pool),
-                );
+                }
+                let sliced = tensor.slice(&slice_ranges).map_err(|e| {
+                    SuperGraphError::InvalidInputError(format!("scan slice: {e}"))
+                })?;
+                // Squeeze the scan axis (size 1 after slicing) — elements unchanged
+                let squeezed_shape: Vec<u64> = shape
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(j, &d)| {
+                        if j == axis { None } else { Some(d) }
+                    })
+                    .collect();
+                let squeezed = PoolNumericTensor::from_fn(
+                    squeezed_shape,
+                    sliced.dtype(),
+                    context.pool,
+                    |idx| sliced.read_element(idx),
+                )
+                .map_err(alloc_err)?;
+                iter_inputs.tensors.insert(inner, squeezed);
             }
             iter_inputs
         };
@@ -2534,25 +2541,35 @@ fn eval_scan<'short, 'model, 'p, P: Pool + 'p, T: SuperGraphObserver>(
                 link
             )));
         }
-        let legacy_parts: Vec<NumericTensor<DynRank>> = parts
-            .iter()
-            .map(|tensor| crate::nano_graph::lower::new_numeric_to_legacy(tensor))
-            .collect();
-        let unsqueezed = legacy_parts
-            .into_iter()
-            .map(|tensor| tensor.unsqueeze(axis))
-            .collect::<Result<Vec<_>, _>>()?;
-        let unsqueezed_ref = unsqueezed.iter().collect::<Vec<_>>();
-        let backend = EvalBackend::NDArray;
-        let concat_legacy = NumericTensor::<DynRank>::concat(
-            unsqueezed_ref.as_slice(),
-            axis,
-            &backend,
-        )?;
-        output_data.tensors.insert(
-            link,
-            crate::nano_graph::lower::legacy_numeric_to_new(&concat_legacy, context.pool),
-        );
+        // Each part has shape [d0, ..., dk]. We unsqueeze at `axis` to get
+        // [d0, ..., 1, ..., dk], then concat along `axis` to get
+        // [d0, ..., N, ..., dk] where N = parts.len().
+        let part_shape = parts[0].shape();
+        let n_parts = parts.len() as u64;
+        let mut concat_shape: Vec<u64> = Vec::with_capacity(part_shape.len() + 1);
+        for (j, &d) in part_shape.iter().enumerate() {
+            if j == axis {
+                concat_shape.push(n_parts);
+            }
+            concat_shape.push(d);
+        }
+        if axis >= part_shape.len() {
+            // axis == rank: append at the end
+            concat_shape.push(n_parts);
+        }
+        let part_numel = parts[0].numel();
+        let concat = PoolNumericTensor::from_fn(
+            concat_shape,
+            parts[0].dtype(),
+            context.pool,
+            |flat_idx| {
+                let part_idx = flat_idx / part_numel;
+                let elem_idx = flat_idx % part_numel;
+                parts[part_idx].read_element(elem_idx)
+            },
+        )
+        .map_err(alloc_err)?;
+        output_data.tensors.insert(link, concat);
     }
 
     data.extend_from(output_data);
@@ -2820,15 +2837,15 @@ impl SuperGraphNode for SuperGraphNodeRNNCacheRead {
                         }
                         // Emit remaining tokens
                         let remaining_tokens = &tokens_vec[i..];
-                        let remaining_tokens_tensor = NumericTensor::from(
-                            NDArrayNumericTensor::from_vec(remaining_tokens.to_vec()).to_dyn(),
-                        );
                         data.tensors.insert(
                             tokens_output_link,
-                            crate::nano_graph::lower::legacy_numeric_to_new(
-                                &remaining_tokens_tensor,
+                            PoolNumericTensor::from_fn(
+                                vec![remaining_tokens.len() as u64],
+                                NumericDType::U32,
                                 context.pool,
-                            ),
+                                |i| NumericScalar::from_u32(remaining_tokens[i]),
+                            )
+                            .map_err(alloc_err)?,
                         );
                         break;
                     }
