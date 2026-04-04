@@ -1,4 +1,4 @@
-use crate::dtype::DType;
+use crate::numeric_dtype::NumericDType;
 use std::collections::HashMap;
 use std::io::{BufRead, Read};
 use std::path::{Path, PathBuf};
@@ -14,7 +14,7 @@ pub enum PthError {
     #[error("unsupported storage type {0}")]
     UnsupportedStorageType(String),
     #[error("unsupported dtype in pth parser: {0:?}")]
-    UnsupportedDType(DType),
+    UnsupportedDType(NumericDType),
     #[error("missing key {0} in checkpoint object")]
     MissingKey(String),
 }
@@ -662,7 +662,7 @@ impl PthLayout {
     }
 }
 
-fn rebuild_args(args: Object) -> Result<(PthLayout, DType, String, usize)> {
+fn rebuild_args(args: Object) -> Result<(PthLayout, NumericDType, String, usize)> {
     let mut args = args
         .tuple()
         .map_err(|obj| invalid_pickle(format!("expected tuple args, got {obj:?}")))?;
@@ -701,18 +701,16 @@ fn rebuild_args(args: Object) -> Result<(PthLayout, DType, String, usize)> {
         .map_err(|obj| invalid_pickle(format!("expected storage class, got {obj:?}")))?;
 
     let dtype = match class_name.as_str() {
-        "FloatStorage" => DType::F32,
-        "DoubleStorage" => DType::F64,
-        "HalfStorage" => DType::F16,
-        "BFloat16Storage" => DType::BF16,
-        "ByteStorage" => DType::U8,
-        "LongStorage" => DType::I64,
+        "FloatStorage" => NumericDType::F32,
+        "DoubleStorage" => NumericDType::F64,
+        "HalfStorage" => NumericDType::F16,
+        "BFloat16Storage" => NumericDType::BF16,
+        "ByteStorage" => NumericDType::U8,
+        "LongStorage" => NumericDType::I64,
         other => return Err(PthError::UnsupportedStorageType(other.to_string())),
     };
 
-    let item_size = dtype
-        .bytes_per_element()
-        .ok_or(PthError::UnsupportedDType(dtype))?;
+    let item_size = dtype.bytes_per_element();
     let layout = PthLayout::new(size, stride, offset * item_size);
 
     Ok((layout, dtype, path, storage_size))
@@ -721,7 +719,7 @@ fn rebuild_args(args: Object) -> Result<(PthLayout, DType, String, usize)> {
 #[derive(Debug, Clone)]
 pub struct TensorInfo {
     pub name: String,
-    pub dtype: DType,
+    pub dtype: NumericDType,
     pub layout: PthLayout,
     pub path: String,
     pub storage_size: usize,
@@ -845,8 +843,7 @@ impl PthTensors {
 
         let elem_size = tensor_info
             .dtype
-            .bytes_per_element()
-            .ok_or(PthError::UnsupportedDType(tensor_info.dtype))?;
+            .bytes_per_element();
         let numel = tensor_info.layout.num_elements();
         let byte_len = numel.saturating_mul(elem_size);
 

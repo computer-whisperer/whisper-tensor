@@ -1,13 +1,9 @@
-use crate::DynRank;
-use crate::backends::ndarray_backend::NDArrayNumericTensor;
 use crate::graph::{GlobalId, Node};
-use crate::migration::numeric_tensor::NumericTensor;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::MilliOpGraph;
 use crate::pool::Pool;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use typenum::P1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Shape {
@@ -96,16 +92,24 @@ impl MilliOp for Shape {
             }
             if all_known {
                 // All dims concrete — produce a Numeric tensor.
-                let out: NumericTensor<DynRank> =
-                    NDArrayNumericTensor::<P1>::from(dim_vals).to_dyn().into();
-                return Ok(vec![(self.output, TensorInfo::from_legacy(&out, pool))]);
+                let tensor = crate::numeric_tensor::NumericTensor::from_fn(
+                    vec![dim_vals.len() as u64],
+                    crate::numeric_dtype::NumericDType::I64,
+                    pool,
+                    |i| crate::numeric_scalar::NumericScalar::from_i64(dim_vals[i]),
+                )
+                .map_err(|_| crate::milli_graph::MilliOpGraphError::UnableToInfer)?;
+                return Ok(vec![(
+                    self.output,
+                    TensorInfo::from_view(&tensor.view(), pool),
+                )]);
             }
         }
 
         // Fallback: symbolic output with known rank=1.
         let first_elem =
             crate::scalar_info::ScalarInfo::Symbolic(crate::symbolic_scalar::SymbolicScalar::new(
-                crate::numeric_dtype::NumericDType::from_legacy(crate::dtype::DType::I64).unwrap(),
+                crate::numeric_dtype::NumericDType::I64,
                 symbolic_resolver,
             ));
         let out_info = TensorInfo::new_from_first_element_and_rank(

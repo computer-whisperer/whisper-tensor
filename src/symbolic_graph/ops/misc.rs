@@ -451,7 +451,7 @@ impl Operation for RandomNormalLikeOperation {
         let out = crate::milli_graph::ops::RandomNormalLike::push_new(
             &mut graph,
             input_map[&self.input],
-            self.dtype.map(|dt| dt.to_legacy()),
+            self.dtype,
             self.mean,
             self.scale,
             self.seed,

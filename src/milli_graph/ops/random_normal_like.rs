@@ -1,7 +1,7 @@
-use crate::dtype::DType;
 use crate::graph::GlobalId;
 use crate::milli_graph::MilliOpGraphError;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
+use crate::numeric_dtype::NumericDType;
 use rand::{Rng, RngExt};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -13,7 +13,7 @@ pub struct RandomNormalLike {
     pub(crate) label: Option<String>,
     output: GlobalId,
     input: GlobalId,
-    dtype: Option<DType>,
+    dtype: Option<NumericDType>,
     mean: f32,
     scale: f32,
     seed: Option<f32>,
@@ -23,7 +23,7 @@ impl RandomNormalLike {
     pub fn push_new(
         graph: &mut crate::milli_graph::MilliOpGraph,
         input: GlobalId,
-        dtype: Option<DType>,
+        dtype: Option<NumericDType>,
         mean: f32,
         scale: f32,
         seed: Option<f32>,
@@ -36,7 +36,7 @@ impl RandomNormalLike {
     pub fn push_new_with_label(
         graph: &mut crate::milli_graph::MilliOpGraph,
         input: GlobalId,
-        dtype: Option<DType>,
+        dtype: Option<NumericDType>,
         mean: f32,
         scale: f32,
         seed: Option<f32>,
@@ -110,7 +110,6 @@ impl MilliOp for RandomNormalLike {
         symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
         _pool: &'p P,
     ) -> Result<Vec<(GlobalId, crate::tensor_info::TensorInfo<'p, P>)>, MilliOpGraphError> {
-        use crate::numeric_dtype::NumericDType;
         use crate::scalar_info::ScalarInfo;
         use crate::symbolic_scalar::SymbolicScalar;
         use crate::tensor_info::TensorInfo;
@@ -118,10 +117,7 @@ impl MilliOp for RandomNormalLike {
         let input_info = known_inputs
             .get(&self.input)
             .ok_or(MilliOpGraphError::UnableToInfer)?;
-        let out_dtype = self
-            .dtype
-            .map(|dt| NumericDType::from_legacy(dt).unwrap())
-            .unwrap_or_else(|| input_info.dtype());
+        let out_dtype = self.dtype.unwrap_or_else(|| input_info.dtype());
 
         if let Some(ranked) = input_info.as_ranked() {
             let dims = ranked.shape();
@@ -159,10 +155,7 @@ impl MilliOp for RandomNormalLike {
         let shape = input.shape().clone();
         let numel: usize = shape.iter().product::<u64>() as usize;
 
-        let out_dtype = self
-            .dtype
-            .and_then(crate::numeric_dtype::NumericDType::from_legacy)
-            .unwrap_or_else(|| input.dtype());
+        let out_dtype = self.dtype.unwrap_or_else(|| input.dtype());
 
         let layout = TensorLayout::<DynRank>::row_major(shape, out_dtype);
         let buf = pool

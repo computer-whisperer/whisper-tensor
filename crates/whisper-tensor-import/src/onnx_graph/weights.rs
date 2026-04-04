@@ -9,7 +9,7 @@ use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use whisper_tensor::dtype::DType as CoreDType;
+use whisper_tensor::numeric_dtype::NumericDType as CoreDType;
 use whisper_tensor::pth::{PthTensors, TensorInfo as PthTensorInfo};
 
 pub trait WeightExternalOutputManager<'a> {
