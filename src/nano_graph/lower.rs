@@ -21,131 +21,6 @@ use crate::tensor_info::TensorInfo;
 /// doesn't allocate pool-backed tensor data.
 type LowerTensorInfo = TensorInfo<'static, SystemPool>;
 
-/// Convert an old `migration::numeric_scalar::NumericScalar` to the new `NumericScalar`.
-///
-/// Uses the raw bits where possible, falling back to f64 roundtrip for floats.
-/// Precision is preserved for all types that fit in the new format.
-pub fn legacy_scalar_to_new(
-    old: &crate::migration::numeric_scalar::NumericScalar,
-) -> NumericScalar {
-    use crate::migration::numeric_scalar::NumericScalar as OldScalar;
-    match old {
-        OldScalar::F64(v) => NumericScalar::from_f64(*v),
-        OldScalar::F32(v) => NumericScalar::from_f32(*v),
-        OldScalar::BF16(v) => NumericScalar::from_bf16(*v),
-        OldScalar::F16(v) => NumericScalar::from_f16(*v),
-        OldScalar::F8E4M3FN(v) => NumericScalar::from_f8e4m3fn(*v),
-        OldScalar::F8E5M2(v) => NumericScalar::from_f8e5m2(*v),
-        OldScalar::I64(v) => NumericScalar::from_i64(*v),
-        OldScalar::I32(v) => NumericScalar::from_i32(*v),
-        OldScalar::I16(v) => NumericScalar::from_i16(*v),
-        OldScalar::I8(v) => NumericScalar::from_i8(*v),
-        OldScalar::U64(v) => NumericScalar::from_u64(*v),
-        OldScalar::U32(v) => NumericScalar::from_u32(*v),
-        OldScalar::U16(v) => NumericScalar::from_u16(*v),
-        OldScalar::U8(v) => NumericScalar::from_u8(*v),
-        OldScalar::I4(v) => NumericScalar::from_i4(*v),
-        OldScalar::U4(v) => NumericScalar::from_u4(*v),
-        OldScalar::BOOL(v) => NumericScalar::from_bool(*v),
-        OldScalar::STRING(_) => panic!("STRING scalars cannot be converted to NumericScalar"),
-    }
-}
-
-/// Convert a new `NumericScalar` back to the legacy `migration::numeric_scalar::NumericScalar`.
-///
-/// Extracts raw LE bytes from the new scalar and reconstructs the legacy variant.
-pub fn new_scalar_to_legacy(
-    new: &NumericScalar,
-) -> crate::migration::numeric_scalar::NumericScalar {
-    use crate::migration::numeric_scalar::NumericScalar as OldScalar;
-    let bytes = new.raw_bits();
-    let legacy_dtype = new.dtype().to_legacy();
-    match legacy_dtype {
-        crate::dtype::DType::F64 => {
-            OldScalar::F64(f64::from_le_bytes(bytes[..8].try_into().unwrap()))
-        }
-        crate::dtype::DType::F32 => {
-            OldScalar::F32(f32::from_le_bytes(bytes[..4].try_into().unwrap()))
-        }
-        crate::dtype::DType::BF16 => OldScalar::BF16(half::bf16::from_bits(u16::from_le_bytes(
-            bytes[..2].try_into().unwrap(),
-        ))),
-        crate::dtype::DType::F16 => OldScalar::F16(half::f16::from_bits(u16::from_le_bytes(
-            bytes[..2].try_into().unwrap(),
-        ))),
-        crate::dtype::DType::F8E4M3FN => OldScalar::F8E4M3FN(float8::F8E4M3::from_bits(bytes[0])),
-        crate::dtype::DType::F8E5M2 => OldScalar::F8E5M2(float8::F8E5M2::from_bits(bytes[0])),
-        crate::dtype::DType::I64 => {
-            OldScalar::I64(i64::from_le_bytes(bytes[..8].try_into().unwrap()))
-        }
-        crate::dtype::DType::I32 => {
-            OldScalar::I32(i32::from_le_bytes(bytes[..4].try_into().unwrap()))
-        }
-        crate::dtype::DType::I16 => {
-            OldScalar::I16(i16::from_le_bytes(bytes[..2].try_into().unwrap()))
-        }
-        crate::dtype::DType::I8 => OldScalar::I8(bytes[0] as i8),
-        crate::dtype::DType::U64 => {
-            OldScalar::U64(u64::from_le_bytes(bytes[..8].try_into().unwrap()))
-        }
-        crate::dtype::DType::U32 => {
-            OldScalar::U32(u32::from_le_bytes(bytes[..4].try_into().unwrap()))
-        }
-        crate::dtype::DType::U16 => {
-            OldScalar::U16(u16::from_le_bytes(bytes[..2].try_into().unwrap()))
-        }
-        crate::dtype::DType::U8 => OldScalar::U8(bytes[0]),
-        crate::dtype::DType::I4 => OldScalar::I4(arbitrary_int::i4::new((bytes[0] & 0x0F) as i8)),
-        crate::dtype::DType::U4 => OldScalar::U4(arbitrary_int::u4::new(bytes[0] & 0x0F)),
-        crate::dtype::DType::BOOL => OldScalar::BOOL(bytes[0] != 0),
-        _ => panic!("new_scalar_to_legacy: unsupported dtype {:?}", new.dtype()),
-    }
-}
-
-/// Convert a pool-backed `NumericTensor` to a legacy `migration::numeric_tensor::NumericTensor`.
-///
-/// For element-strided row-major tensors, passes the raw byte buffer directly.
-/// Panics on quantized formats (those should not appear in TensorInfo).
-pub fn new_numeric_to_legacy<P: crate::pool::Pool>(
-    tensor: &crate::numeric_tensor::NumericTensor<'_, crate::tensor_rank::DynRank, P>,
-) -> crate::migration::numeric_tensor::NumericTensor<crate::tensor_rank::DynRank> {
-    // Use the existing bridge which handles packing differences (e.g. Bool bit-packing).
-    crate::migration::bridge::view_to_legacy(&tensor.view())
-}
-
-/// Convert a legacy `NumericTensor` to a pool-backed `NumericTensor`.
-///
-/// Allocates a new buffer from the pool and copies raw bytes from the contiguous
-/// representation. For packed (quantized) tensors, dequantizes first.
-pub fn legacy_numeric_to_new<'p, P: crate::pool::Pool>(
-    tensor: &crate::migration::numeric_tensor::NumericTensor<crate::tensor_rank::DynRank>,
-    pool: &'p P,
-) -> crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P> {
-    let shape = tensor.shape();
-    let legacy_dtype = tensor.dtype();
-    let dtype = NumericDType::from_legacy(legacy_dtype)
-        .expect("legacy NumericTensor dtype has no NumericDType equivalent");
-    let layout = crate::numeric_tensor::TensorLayout::row_major(shape, dtype);
-
-    let nd = tensor
-        .to_ndarray()
-        .expect("legacy tensor to_ndarray failed");
-    let flat = nd.flatten();
-    let numel = flat.num_elements();
-
-    let buffer = pool
-        .allocate(layout.buffer_size_bytes())
-        .expect("pool allocation failed in legacy_numeric_to_new");
-    // Write element by element to handle packing differences (e.g. Bool: 1-bit vs 1-byte).
-    let mut new_tensor = crate::numeric_tensor::NumericTensor::from_parts(buffer, layout);
-    for i in 0..numel {
-        let old_scalar = flat.get(&[i as u64]).unwrap();
-        let new_scalar = legacy_scalar_to_new(&old_scalar);
-        new_tensor.write_element(i, new_scalar);
-    }
-    new_tensor
-}
-
 /// Wrapper that calls `AnyMilliOp::eval_new` through the `OpaqueEval` trait.
 ///
 /// Used by `lower_default` to make any MilliOp executable through pool_eval
@@ -1894,13 +1769,26 @@ mod tests {
     use crate::graph::Graph;
     use crate::milli_graph::MilliOpGraph;
     use crate::milli_graph::ops::MilliOp;
-    use crate::nano_graph::pool_eval;
-    // Old NumericScalar still needed for MilliOp constructors (ConstantOfShape, etc.)
-    use crate::migration::bridge;
-    use crate::migration::numeric_scalar::NumericScalar as OldNumericScalar;
-    use crate::migration::numeric_tensor::NumericTensor;
+    use crate::milli_graph::ops::constant::ConstantValue;
     use crate::nano_graph::pattern::AtomRange;
-    use crate::pool::TrackedPool;
+    use crate::nano_graph::pool_eval;
+    use crate::numeric_tensor::TensorLayout;
+    use crate::pool::{Pool, TrackedPool};
+
+    type PoolTensor = crate::numeric_tensor::NumericTensor<'static, DynRank, SystemPool>;
+
+    /// Build a pool-backed tensor from a Vec of typed values and a shape.
+    fn pool_tensor<T: ConstantValue>(values: Vec<T>, shape: Vec<u64>) -> PoolTensor {
+        let layout = TensorLayout::<DynRank>::row_major(shape, T::dtype());
+        let buf = SystemPool
+            .allocate(layout.buffer_size_bytes())
+            .expect("pool alloc");
+        let mut t = crate::numeric_tensor::NumericTensor::from_parts(buf, layout);
+        for (i, v) in values.iter().enumerate() {
+            t.write_element(i, v.to_scalar());
+        }
+        t
+    }
 
     /// Build a milli graph, eval through both per-op eval_new and nano pool_eval,
     /// compare results.
@@ -1909,7 +1797,7 @@ mod tests {
             &mut MilliOpGraph,
             &mut rand::rngs::ThreadRng,
         ) -> (Vec<GlobalId>, Vec<GlobalId>),
-        inputs: Vec<NumericTensor<DynRank>>,
+        inputs: Vec<PoolTensor>,
     ) {
         let mut rng = rand::rng();
         let (mut milli, _ext_map) = MilliOpGraph::new(std::iter::empty(), &mut rng);
@@ -1917,16 +1805,10 @@ mod tests {
         let (input_ids, output_ids) = build_graph(&mut milli, &mut rng);
         assert_eq!(input_ids.len(), inputs.len());
 
-        // Convert legacy inputs to pool tensors.
-        let pool_inputs: Vec<_> = inputs.iter().map(|t| bridge::legacy_to_new(t)).collect();
-
         // Prepare inputs for lowering info.
         let mut info_inputs: HashMap<GlobalId, LowerTensorInfo> = HashMap::new();
-        let mut intermediates: HashMap<
-            GlobalId,
-            crate::numeric_tensor::NumericTensor<'static, DynRank, SystemPool>,
-        > = HashMap::new();
-        for (id, tensor) in input_ids.iter().zip(pool_inputs.iter()) {
+        let mut intermediates: HashMap<GlobalId, PoolTensor> = HashMap::new();
+        for (id, tensor) in input_ids.iter().zip(inputs.iter()) {
             info_inputs.insert(*id, LowerTensorInfo::from_view(&tensor.view(), &SystemPool));
             intermediates.insert(*id, tensor.to_tensor(&SystemPool).unwrap());
         }
@@ -1955,7 +1837,7 @@ mod tests {
         );
 
         // Map to (AtomId, view) pairs for pool_eval.
-        let input_views: Vec<_> = pool_inputs.iter().map(|t| t.view()).collect();
+        let input_views: Vec<_> = inputs.iter().map(|t| t.view()).collect();
         let eval_inputs: Vec<_> = result
             .graph
             .input_tensors()
@@ -2081,8 +1963,8 @@ mod tests {
                 (vec![a, b], vec![c])
             },
             vec![
-                NumericTensor::from_vec_shape(vec![1.0f32, 2.0, 3.0, 4.0], vec![4]).unwrap(),
-                NumericTensor::from_vec_shape(vec![10.0f32, 20.0, 30.0, 40.0], vec![4]).unwrap(),
+                pool_tensor(vec![1.0f32, 2.0, 3.0, 4.0], vec![4]),
+                pool_tensor(vec![10.0f32, 20.0, 30.0, 40.0], vec![4]),
             ],
         );
     }
@@ -2099,9 +1981,9 @@ mod tests {
                 (vec![a, b, c], vec![abc])
             },
             vec![
-                NumericTensor::from_vec_shape(vec![1.0f32, 2.0, 3.0], vec![3]).unwrap(),
-                NumericTensor::from_vec_shape(vec![4.0f32, 5.0, 6.0], vec![3]).unwrap(),
-                NumericTensor::from_vec_shape(vec![0.1f32, 0.2, 0.3], vec![3]).unwrap(),
+                pool_tensor(vec![1.0f32, 2.0, 3.0], vec![3]),
+                pool_tensor(vec![4.0f32, 5.0, 6.0], vec![3]),
+                pool_tensor(vec![0.1f32, 0.2, 0.3], vec![3]),
             ],
         );
     }
@@ -2117,9 +1999,8 @@ mod tests {
                 (vec![a, b], vec![c])
             },
             vec![
-                NumericTensor::from_vec_shape(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3])
-                    .unwrap(),
-                NumericTensor::from_vec_shape(vec![10.0f32, 20.0, 30.0], vec![3]).unwrap(),
+                pool_tensor(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3]),
+                pool_tensor(vec![10.0f32, 20.0, 30.0], vec![3]),
             ],
         );
     }
@@ -2132,7 +2013,7 @@ mod tests {
                 let b = crate::milli_graph::ops::SimpleUnaryOp::exp(graph, a, rng);
                 (vec![a], vec![b])
             },
-            vec![NumericTensor::from_vec_shape(vec![0.0f32, 1.0, -1.0, 0.5], vec![4]).unwrap()],
+            vec![pool_tensor(vec![0.0f32, 1.0, -1.0, 0.5], vec![4])],
         );
     }
 
@@ -2153,10 +2034,8 @@ mod tests {
                 (vec![a, b], vec![c])
             },
             vec![
-                NumericTensor::from_vec_shape(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3])
-                    .unwrap(),
-                NumericTensor::from_vec_shape(vec![1.0f32, 0.0, 0.0, 1.0, 1.0, 1.0], vec![3, 2])
-                    .unwrap(),
+                pool_tensor(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3]),
+                pool_tensor(vec![1.0f32, 0.0, 0.0, 1.0, 1.0, 1.0], vec![3, 2]),
             ],
         );
     }
@@ -2182,8 +2061,8 @@ mod tests {
                 (vec![a, b], vec![c])
             },
             vec![
-                NumericTensor::from_vec_shape(vec![1.0f32; 4 * 8], vec![4, 8]).unwrap(),
-                NumericTensor::from_vec_shape(vec![1.0f32; 8 * 16], vec![8, 16]).unwrap(),
+                pool_tensor(vec![1.0f32; 4 * 8], vec![4, 8]),
+                pool_tensor(vec![1.0f32; 8 * 16], vec![8, 16]),
             ],
         );
 
@@ -2200,14 +2079,18 @@ mod tests {
             NumericDType::F32,
             &mut rng,
         );
-        let a_tensor: crate::migration::numeric_tensor::NumericTensor<crate::DynRank> =
-            NumericTensor::from_vec_shape(vec![1.0f32; 4 * 8], vec![4, 8]).unwrap();
-        let b_tensor: crate::migration::numeric_tensor::NumericTensor<crate::DynRank> =
-            NumericTensor::from_vec_shape(vec![1.0f32; 8 * 16], vec![8, 16]).unwrap();
+        let a_tensor = pool_tensor(vec![1.0f32; 4 * 8], vec![4, 8]);
+        let b_tensor = pool_tensor(vec![1.0f32; 8 * 16], vec![8, 16]);
 
         let mut info = std::collections::HashMap::new();
-        info.insert(a_id, LowerTensorInfo::from_legacy(&a_tensor, &SystemPool));
-        info.insert(b_id, LowerTensorInfo::from_legacy(&b_tensor, &SystemPool));
+        info.insert(
+            a_id,
+            LowerTensorInfo::from_view(&a_tensor.view(), &SystemPool),
+        );
+        info.insert(
+            b_id,
+            LowerTensorInfo::from_view(&b_tensor.view(), &SystemPool),
+        );
 
         let result = super::lower_with_info(&milli, &info).unwrap();
         let graph = &result.graph;
@@ -2280,15 +2163,14 @@ mod tests {
                 (vec![data, indices], vec![out])
             },
             vec![
-                NumericTensor::from_vec_shape(
+                pool_tensor(
                     vec![
                         10.0f32, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0, 110.0,
                         120.0,
                     ],
                     vec![4, 3],
-                )
-                .unwrap(),
-                NumericTensor::from_vec_shape(vec![1.0f32, 3.0], vec![2]).unwrap(),
+                ),
+                pool_tensor(vec![1.0f32, 3.0], vec![2]),
             ],
         );
     }
@@ -2306,13 +2188,10 @@ mod tests {
                     crate::milli_graph::ops::Split::push_new(graph, data, None, 0, Some(2), 1, rng);
                 (vec![data], vec![out0, out1])
             },
-            vec![
-                NumericTensor::from_vec_shape(
-                    vec![1.0f32, 2., 3., 4., 5., 6., 7., 8., 9., 10., 11., 12.],
-                    vec![4, 3],
-                )
-                .unwrap(),
-            ],
+            vec![pool_tensor(
+                vec![1.0f32, 2., 3., 4., 5., 6., 7., 8., 9., 10., 11., 12.],
+                vec![4, 3],
+            )],
         );
 
         // Verify no Identity groups were created.
@@ -2337,10 +2216,12 @@ mod tests {
             1,
             &mut rng,
         );
-        let tensor: NumericTensor<DynRank> =
-            NumericTensor::from_vec_shape(vec![1.0f32; 12], vec![4, 3]).unwrap();
+        let tensor = pool_tensor(vec![1.0f32; 12], vec![4, 3]);
         let mut info = std::collections::HashMap::new();
-        info.insert(data, LowerTensorInfo::from_legacy(&tensor, &SystemPool));
+        info.insert(
+            data,
+            LowerTensorInfo::from_view(&tensor.view(), &SystemPool),
+        );
         let result = super::lower_with_info(&milli, &info).unwrap();
         let identity_count = result
             .graph
@@ -2367,10 +2248,10 @@ mod tests {
                     crate::milli_graph::ops::Split::push_new(graph, data, None, 1, Some(2), 1, rng);
                 (vec![data], vec![out0, out1])
             },
-            vec![
-                NumericTensor::from_vec_shape((1..=12).map(|v| v as f32).collect(), vec![2, 6])
-                    .unwrap(),
-            ],
+            vec![pool_tensor(
+                (1..=12).map(|v| v as f32).collect(),
+                vec![2, 6],
+            )],
         );
     }
 
@@ -2388,7 +2269,7 @@ mod tests {
                 let sum = crate::milli_graph::ops::SimpleBinary::add(graph, out0, out1, rng);
                 (vec![data], vec![sum])
             },
-            vec![NumericTensor::from_vec_shape(vec![1.0f32, 2., 3., 4.], vec![4]).unwrap()],
+            vec![pool_tensor(vec![1.0f32, 2., 3., 4.], vec![4])],
         );
     }
 
@@ -2405,10 +2286,7 @@ mod tests {
                 );
                 (vec![data], vec![out])
             },
-            vec![
-                NumericTensor::from_vec_shape(vec![10.0f32, 20., 30., 40., 50., 60.], vec![6])
-                    .unwrap(),
-            ],
+            vec![pool_tensor(vec![10.0f32, 20., 30., 40., 50., 60.], vec![6])],
         );
     }
 
@@ -2432,10 +2310,10 @@ mod tests {
                 );
                 (vec![data], vec![out])
             },
-            vec![
-                NumericTensor::from_vec_shape((1..=12).map(|v| v as f32).collect(), vec![3, 4])
-                    .unwrap(),
-            ],
+            vec![pool_tensor(
+                (1..=12).map(|v| v as f32).collect(),
+                vec![3, 4],
+            )],
         );
     }
 
@@ -2456,7 +2334,7 @@ mod tests {
                 let sum = crate::milli_graph::ops::SimpleBinary::add(graph, out0, out1, rng);
                 (vec![data], vec![sum])
             },
-            vec![NumericTensor::from_vec_shape(vec![1.0f32, 2., 3., 4.], vec![4]).unwrap()],
+            vec![pool_tensor(vec![1.0f32, 2., 3., 4.], vec![4])],
         );
     }
 
@@ -2482,10 +2360,10 @@ mod tests {
                 );
                 (vec![data], vec![out])
             },
-            vec![
-                NumericTensor::from_vec_shape((1..=12).map(|v| v as f32).collect(), vec![3, 4])
-                    .unwrap(),
-            ],
+            vec![pool_tensor(
+                (1..=12).map(|v| v as f32).collect(),
+                vec![3, 4],
+            )],
         );
     }
 
@@ -2500,10 +2378,12 @@ mod tests {
         let _out = crate::milli_graph::ops::Slice::push_new(
             &mut milli, data, starts, ends, None, None, &mut rng,
         );
-        let tensor: NumericTensor<DynRank> =
-            NumericTensor::from_vec_shape(vec![1.0f32; 6], vec![6]).unwrap();
+        let tensor = pool_tensor(vec![1.0f32; 6], vec![6]);
         let mut info = std::collections::HashMap::new();
-        info.insert(data, LowerTensorInfo::from_legacy(&tensor, &SystemPool));
+        info.insert(
+            data,
+            LowerTensorInfo::from_view(&tensor.view(), &SystemPool),
+        );
         let result = super::lower_with_info(&milli, &info).unwrap();
         let identity_count = result
             .graph
@@ -2533,10 +2413,7 @@ mod tests {
                     crate::milli_graph::ops::Concat::push_new(graph, vec![out0, out1], 0, rng);
                 (vec![data], vec![cat])
             },
-            vec![
-                NumericTensor::from_vec_shape(vec![10.0f32, 20., 30., 40., 50., 60.], vec![6])
-                    .unwrap(),
-            ],
+            vec![pool_tensor(vec![10.0f32, 20., 30., 40., 50., 60.], vec![6])],
         );
     }
 
@@ -2551,8 +2428,8 @@ mod tests {
                 (vec![a, b], vec![cat])
             },
             vec![
-                NumericTensor::from_vec_shape(vec![1.0f32, 2., 3.], vec![3]).unwrap(),
-                NumericTensor::from_vec_shape(vec![4.0f32, 5., 6.], vec![3]).unwrap(),
+                pool_tensor(vec![1.0f32, 2., 3.], vec![3]),
+                pool_tensor(vec![4.0f32, 5., 6.], vec![3]),
             ],
         );
     }
@@ -2572,9 +2449,8 @@ mod tests {
                 (vec![data, indices], vec![out])
             },
             vec![
-                NumericTensor::from_vec_shape(vec![100.0f32, 200.0, 300.0, 400.0], vec![4])
-                    .unwrap(),
-                NumericTensor::from_vec_shape(vec![0.0f32, 2.0, 3.0], vec![3]).unwrap(),
+                pool_tensor(vec![100.0f32, 200.0, 300.0, 400.0], vec![4]),
+                pool_tensor(vec![0.0f32, 2.0, 3.0], vec![3]),
             ],
         );
     }
@@ -2605,8 +2481,8 @@ mod tests {
                 (vec![a, b], vec![c])
             },
             vec![
-                NumericTensor::from_vec_shape(a_data, vec![m, k]).unwrap(),
-                NumericTensor::from_vec_shape(b_data, vec![k, n]).unwrap(),
+                pool_tensor(a_data, vec![m as u64, k as u64]),
+                pool_tensor(b_data, vec![k as u64, n as u64]),
             ],
         );
     }
@@ -2649,31 +2525,20 @@ mod tests {
                 (vec![x, w1, b1, w2, b2], vec![out])
             },
             vec![
-                NumericTensor::from_vec_shape(
+                pool_tensor(
                     (0..256).map(|i| (i as f32) * 0.01 - 1.28).collect(),
                     vec![4, 64],
-                )
-                .unwrap(),
-                NumericTensor::from_vec_shape(
+                ),
+                pool_tensor(
                     (0..4096).map(|i| (i as f32) * 0.002 - 4.0).collect(),
                     vec![64, 64],
-                )
-                .unwrap(),
-                NumericTensor::from_vec_shape(
-                    (0..64).map(|i| (i as f32) * 0.1 - 3.2).collect(),
-                    vec![64],
-                )
-                .unwrap(),
-                NumericTensor::from_vec_shape(
+                ),
+                pool_tensor((0..64).map(|i| (i as f32) * 0.1 - 3.2).collect(), vec![64]),
+                pool_tensor(
                     (0..2048).map(|i| (i as f32) * 0.003 - 3.0).collect(),
                     vec![64, 32],
-                )
-                .unwrap(),
-                NumericTensor::from_vec_shape(
-                    (0..32).map(|i| (i as f32) * 0.05 - 0.8).collect(),
-                    vec![32],
-                )
-                .unwrap(),
+                ),
+                pool_tensor((0..32).map(|i| (i as f32) * 0.05 - 0.8).collect(), vec![32]),
             ],
         );
     }
@@ -2724,18 +2589,16 @@ mod tests {
                 (vec![x, w, gamma, beta], vec![out])
             },
             vec![
-                NumericTensor::from_vec_shape(
+                pool_tensor(
                     (0..64).map(|i| (i as f32) * 0.1 - 3.2).collect(),
                     vec![2, 4, 8],
-                )
-                .unwrap(),
-                NumericTensor::from_vec_shape(
+                ),
+                pool_tensor(
                     (0..64).map(|i| (i as f32) * 0.02 - 0.64).collect(),
                     vec![8, 8],
-                )
-                .unwrap(),
-                NumericTensor::from_vec_shape(vec![1.0f32, 1.1, 0.9, 1.05], vec![4]).unwrap(),
-                NumericTensor::from_vec_shape(vec![0.0f32, 0.1, -0.1, 0.05], vec![4]).unwrap(),
+                ),
+                pool_tensor(vec![1.0f32, 1.1, 0.9, 1.05], vec![4]),
+                pool_tensor(vec![0.0f32, 0.1, -0.1, 0.05], vec![4]),
             ],
         );
     }
@@ -2754,8 +2617,8 @@ mod tests {
                 (vec![a, b], vec![c])
             },
             vec![
-                NumericTensor::from_vec_shape(vec![10.0f32, 20.0, 30.0], vec![3]).unwrap(),
-                NumericTensor::from_vec_shape(vec![1.0f32, 2.0, 3.0], vec![3]).unwrap(),
+                pool_tensor(vec![10.0f32, 20.0, 30.0], vec![3]),
+                pool_tensor(vec![1.0f32, 2.0, 3.0], vec![3]),
             ],
         );
     }
@@ -2770,8 +2633,8 @@ mod tests {
                 (vec![a, b], vec![c])
             },
             vec![
-                NumericTensor::from_vec_shape(vec![12.0f32, 20.0, 30.0, 7.0], vec![4]).unwrap(),
-                NumericTensor::from_vec_shape(vec![3.0f32, 4.0, 5.0, 2.0], vec![4]).unwrap(),
+                pool_tensor(vec![12.0f32, 20.0, 30.0, 7.0], vec![4]),
+                pool_tensor(vec![3.0f32, 4.0, 5.0, 2.0], vec![4]),
             ],
         );
     }
@@ -2786,8 +2649,8 @@ mod tests {
                 (vec![a, b], vec![c])
             },
             vec![
-                NumericTensor::from_vec_shape(vec![1.0f32, 5.0, 3.0, 8.0], vec![4]).unwrap(),
-                NumericTensor::from_vec_shape(vec![4.0f32, 2.0, 6.0, 1.0], vec![4]).unwrap(),
+                pool_tensor(vec![1.0f32, 5.0, 3.0, 8.0], vec![4]),
+                pool_tensor(vec![4.0f32, 2.0, 6.0, 1.0], vec![4]),
             ],
         );
     }
@@ -2802,8 +2665,8 @@ mod tests {
                 (vec![a, b], vec![c])
             },
             vec![
-                NumericTensor::from_vec_shape(vec![1.0f32, 5.0, 3.0, 8.0], vec![4]).unwrap(),
-                NumericTensor::from_vec_shape(vec![4.0f32, 2.0, 6.0, 1.0], vec![4]).unwrap(),
+                pool_tensor(vec![1.0f32, 5.0, 3.0, 8.0], vec![4]),
+                pool_tensor(vec![4.0f32, 2.0, 6.0, 1.0], vec![4]),
             ],
         );
     }
@@ -2818,8 +2681,8 @@ mod tests {
                 (vec![a, b], vec![c])
             },
             vec![
-                NumericTensor::from_vec_shape(vec![1.0f32, 2.0, 3.0, 4.0], vec![4]).unwrap(),
-                NumericTensor::from_vec_shape(vec![1.0f32, 9.0, 3.0, 0.0], vec![4]).unwrap(),
+                pool_tensor(vec![1.0f32, 2.0, 3.0, 4.0], vec![4]),
+                pool_tensor(vec![1.0f32, 9.0, 3.0, 0.0], vec![4]),
             ],
         );
     }
@@ -2834,8 +2697,8 @@ mod tests {
                 (vec![a, b], vec![c])
             },
             vec![
-                NumericTensor::from_vec_shape(vec![1.0f32, 5.0, 3.0, 4.0], vec![4]).unwrap(),
-                NumericTensor::from_vec_shape(vec![4.0f32, 2.0, 3.0, 8.0], vec![4]).unwrap(),
+                pool_tensor(vec![1.0f32, 5.0, 3.0, 4.0], vec![4]),
+                pool_tensor(vec![4.0f32, 2.0, 3.0, 8.0], vec![4]),
             ],
         );
     }
@@ -2850,8 +2713,8 @@ mod tests {
                 (vec![a, b], vec![c])
             },
             vec![
-                NumericTensor::from_vec_shape(vec![1.0f32, 5.0, 3.0, 4.0], vec![4]).unwrap(),
-                NumericTensor::from_vec_shape(vec![4.0f32, 2.0, 3.0, 8.0], vec![4]).unwrap(),
+                pool_tensor(vec![1.0f32, 5.0, 3.0, 4.0], vec![4]),
+                pool_tensor(vec![4.0f32, 2.0, 3.0, 8.0], vec![4]),
             ],
         );
     }
@@ -2867,8 +2730,8 @@ mod tests {
                 (vec![a, b], vec![c])
             },
             vec![
-                NumericTensor::from_vec_shape(vec![1.0f32, 2.0, 3.0, 4.0], vec![4]).unwrap(),
-                NumericTensor::from_vec_shape(vec![10.0f32], vec![1]).unwrap(),
+                pool_tensor(vec![1.0f32, 2.0, 3.0, 4.0], vec![4]),
+                pool_tensor(vec![10.0f32], vec![1]),
             ],
         );
     }
@@ -2884,10 +2747,8 @@ mod tests {
                 (vec![a, b], vec![c])
             },
             vec![
-                NumericTensor::from_vec_shape((0..12).map(|i| i as f32).collect(), vec![3, 4])
-                    .unwrap(),
-                NumericTensor::from_vec_shape(vec![100.0f32, 200.0, 300.0, 400.0], vec![4])
-                    .unwrap(),
+                pool_tensor((0..12).map(|i| i as f32).collect(), vec![3, 4]),
+                pool_tensor(vec![100.0f32, 200.0, 300.0, 400.0], vec![4]),
             ],
         );
     }
@@ -2904,7 +2765,7 @@ mod tests {
                 let b = crate::milli_graph::ops::SimpleUnaryOp::neg(g, a, rng);
                 (vec![a], vec![b])
             },
-            vec![NumericTensor::from_vec_shape(vec![1.0f32, -2.0, 0.0, 3.5], vec![4]).unwrap()],
+            vec![pool_tensor(vec![1.0f32, -2.0, 0.0, 3.5], vec![4])],
         );
     }
 
@@ -2916,7 +2777,7 @@ mod tests {
                 let b = crate::milli_graph::ops::SimpleUnaryOp::abs(g, a, rng);
                 (vec![a], vec![b])
             },
-            vec![NumericTensor::from_vec_shape(vec![-3.0f32, 2.0, -1.0, 0.0], vec![4]).unwrap()],
+            vec![pool_tensor(vec![-3.0f32, 2.0, -1.0, 0.0], vec![4])],
         );
     }
 
@@ -2928,7 +2789,7 @@ mod tests {
                 let b = crate::milli_graph::ops::SimpleUnaryOp::sqrt(g, a, rng);
                 (vec![a], vec![b])
             },
-            vec![NumericTensor::from_vec_shape(vec![4.0f32, 9.0, 16.0, 1.0], vec![4]).unwrap()],
+            vec![pool_tensor(vec![4.0f32, 9.0, 16.0, 1.0], vec![4])],
         );
     }
 
@@ -2940,7 +2801,7 @@ mod tests {
                 let b = crate::milli_graph::ops::SimpleUnaryOp::reciprocal(g, a, rng);
                 (vec![a], vec![b])
             },
-            vec![NumericTensor::from_vec_shape(vec![2.0f32, 4.0, 0.5, 1.0], vec![4]).unwrap()],
+            vec![pool_tensor(vec![2.0f32, 4.0, 0.5, 1.0], vec![4])],
         );
     }
 
@@ -2953,7 +2814,7 @@ mod tests {
                     crate::milli_graph::ops::SimpleUnaryOp::trig(g, a, crate::TrigOp::Tanh, rng);
                 (vec![a], vec![b])
             },
-            vec![NumericTensor::from_vec_shape(vec![0.0f32, 1.0, -1.0, 2.0], vec![4]).unwrap()],
+            vec![pool_tensor(vec![0.0f32, 1.0, -1.0, 2.0], vec![4])],
         );
     }
 
@@ -2965,7 +2826,7 @@ mod tests {
                 let b = crate::milli_graph::ops::SimpleUnaryOp::ln(g, a, rng);
                 (vec![a], vec![b])
             },
-            vec![NumericTensor::from_vec_shape(vec![1.0f32, 2.0, 0.5, 10.0], vec![4]).unwrap()],
+            vec![pool_tensor(vec![1.0f32, 2.0, 0.5, 10.0], vec![4])],
         );
     }
 
@@ -2978,7 +2839,7 @@ mod tests {
                 let c = crate::milli_graph::ops::SimpleUnaryOp::ceil(g, a, rng);
                 (vec![a], vec![b, c])
             },
-            vec![NumericTensor::from_vec_shape(vec![1.5f32, -1.5, 2.0, 0.1], vec![4]).unwrap()],
+            vec![pool_tensor(vec![1.5f32, -1.5, 2.0, 0.1], vec![4])],
         );
     }
 
@@ -2996,8 +2857,8 @@ mod tests {
                 (vec![a, b], vec![c])
             },
             vec![
-                NumericTensor::from_vec_shape(vec![2.0f32, 3.0, 4.0, 5.0], vec![4]).unwrap(),
-                NumericTensor::from_vec_shape(vec![3.0f32, 2.0, 0.5, 1.0], vec![4]).unwrap(),
+                pool_tensor(vec![2.0f32, 3.0, 4.0, 5.0], vec![4]),
+                pool_tensor(vec![3.0f32, 2.0, 0.5, 1.0], vec![4]),
             ],
         );
     }
@@ -3010,9 +2871,7 @@ mod tests {
                 let b = crate::milli_graph::ops::ClampMin::push_new(g, a, 0.0, rng);
                 (vec![a], vec![b])
             },
-            vec![
-                NumericTensor::from_vec_shape(vec![-2.0f32, -0.5, 0.0, 1.0, 3.0], vec![5]).unwrap(),
-            ],
+            vec![pool_tensor(vec![-2.0f32, -0.5, 0.0, 1.0, 3.0], vec![5])],
         );
     }
 
@@ -3030,11 +2889,10 @@ mod tests {
                 (vec![a, x, y, zero], vec![out])
             },
             vec![
-                NumericTensor::from_vec_shape(vec![1.0f32, -1.0, 2.0, -2.0], vec![4]).unwrap(),
-                NumericTensor::from_vec_shape(vec![10.0f32, 20.0, 30.0, 40.0], vec![4]).unwrap(),
-                NumericTensor::from_vec_shape(vec![100.0f32, 200.0, 300.0, 400.0], vec![4])
-                    .unwrap(),
-                NumericTensor::from_vec_shape(vec![0.0f32, 0.0, 0.0, 0.0], vec![4]).unwrap(),
+                pool_tensor(vec![1.0f32, -1.0, 2.0, -2.0], vec![4]),
+                pool_tensor(vec![10.0f32, 20.0, 30.0, 40.0], vec![4]),
+                pool_tensor(vec![100.0f32, 200.0, 300.0, 400.0], vec![4]),
+                pool_tensor(vec![0.0f32, 0.0, 0.0, 0.0], vec![4]),
             ],
         );
     }
@@ -3053,9 +2911,8 @@ mod tests {
                 (vec![a, shape], vec![b])
             },
             vec![
-                NumericTensor::from_vec_shape((0..12).map(|i| i as f32).collect(), vec![3, 4])
-                    .unwrap(),
-                NumericTensor::from_vec_shape(vec![2i64, 6], vec![2]).unwrap(),
+                pool_tensor((0..12).map(|i| i as f32).collect(), vec![3, 4]),
+                pool_tensor(vec![2i64, 6], vec![2]),
             ],
         );
     }
@@ -3070,8 +2927,8 @@ mod tests {
                 (vec![a, axes], vec![b])
             },
             vec![
-                NumericTensor::from_vec_shape(vec![1.0f32, 2.0, 3.0], vec![1, 3]).unwrap(),
-                NumericTensor::from_vec_shape(vec![0i64], vec![1]).unwrap(),
+                pool_tensor(vec![1.0f32, 2.0, 3.0], vec![1, 3]),
+                pool_tensor(vec![0i64], vec![1]),
             ],
         );
     }
@@ -3086,8 +2943,8 @@ mod tests {
                 (vec![a, axes], vec![b])
             },
             vec![
-                NumericTensor::from_vec_shape(vec![1.0f32, 2.0, 3.0], vec![3]).unwrap(),
-                NumericTensor::from_vec_shape(vec![0i64], vec![1]).unwrap(),
+                pool_tensor(vec![1.0f32, 2.0, 3.0], vec![3]),
+                pool_tensor(vec![0i64], vec![1]),
             ],
         );
     }
@@ -3103,8 +2960,8 @@ mod tests {
                 (vec![a, shape], vec![b])
             },
             vec![
-                NumericTensor::from_vec_shape(vec![1.0f32, 2.0, 3.0], vec![1, 3]).unwrap(),
-                NumericTensor::from_vec_shape(vec![4i64, 3], vec![2]).unwrap(),
+                pool_tensor(vec![1.0f32, 2.0, 3.0], vec![1, 3]),
+                pool_tensor(vec![4i64, 3], vec![2]),
             ],
         );
     }
@@ -3118,10 +2975,7 @@ mod tests {
                 let b = crate::milli_graph::ops::Transpose::push_new(g, a, Some(vec![1, 0]), rng);
                 (vec![a], vec![b])
             },
-            vec![
-                NumericTensor::from_vec_shape((0..12).map(|i| i as f32).collect(), vec![3, 4])
-                    .unwrap(),
-            ],
+            vec![pool_tensor((0..12).map(|i| i as f32).collect(), vec![3, 4])],
         );
     }
 
@@ -3135,10 +2989,10 @@ mod tests {
                     crate::milli_graph::ops::Transpose::push_new(g, a, Some(vec![0, 2, 1]), rng);
                 (vec![a], vec![b])
             },
-            vec![
-                NumericTensor::from_vec_shape((0..24).map(|i| i as f32).collect(), vec![2, 3, 4])
-                    .unwrap(),
-            ],
+            vec![pool_tensor(
+                (0..24).map(|i| i as f32).collect(),
+                vec![2, 3, 4],
+            )],
         );
     }
 
@@ -3154,7 +3008,7 @@ mod tests {
                 let b = crate::milli_graph::ops::Cast::push_new(g, a, NumericDType::F64, rng);
                 (vec![a], vec![b])
             },
-            vec![NumericTensor::from_vec_shape(vec![1.5f32, -2.5, 0.0, 3.14], vec![4]).unwrap()],
+            vec![pool_tensor(vec![1.5f32, -2.5, 0.0, 3.14], vec![4])],
         );
     }
 
@@ -3179,10 +3033,10 @@ mod tests {
                 );
                 (vec![a], vec![b])
             },
-            vec![
-                NumericTensor::from_vec_shape((1..=12).map(|i| i as f32).collect(), vec![3, 4])
-                    .unwrap(),
-            ],
+            vec![pool_tensor(
+                (1..=12).map(|i| i as f32).collect(),
+                vec![3, 4],
+            )],
         );
     }
 
@@ -3203,10 +3057,10 @@ mod tests {
                 );
                 (vec![a], vec![b])
             },
-            vec![
-                NumericTensor::from_vec_shape((1..=12).map(|i| i as f32).collect(), vec![3, 4])
-                    .unwrap(),
-            ],
+            vec![pool_tensor(
+                (1..=12).map(|i| i as f32).collect(),
+                vec![3, 4],
+            )],
         );
     }
 
@@ -3227,15 +3081,12 @@ mod tests {
                 );
                 (vec![a], vec![b])
             },
-            vec![
-                NumericTensor::from_vec_shape(
-                    vec![
-                        3.0f32, 1.0, 4.0, 1.5, 9.0, 2.6, 5.3, 5.8, 9.7, 9.3, 2.3, 8.4,
-                    ],
-                    vec![3, 4],
-                )
-                .unwrap(),
-            ],
+            vec![pool_tensor(
+                vec![
+                    3.0f32, 1.0, 4.0, 1.5, 9.0, 2.6, 5.3, 5.8, 9.7, 9.3, 2.3, 8.4,
+                ],
+                vec![3, 4],
+            )],
         );
     }
 
@@ -3256,10 +3107,10 @@ mod tests {
                 );
                 (vec![a], vec![b])
             },
-            vec![
-                NumericTensor::from_vec_shape((1..=12).map(|i| i as f32).collect(), vec![3, 4])
-                    .unwrap(),
-            ],
+            vec![pool_tensor(
+                (1..=12).map(|i| i as f32).collect(),
+                vec![3, 4],
+            )],
         );
     }
 
@@ -3284,16 +3135,8 @@ mod tests {
                 (vec![a, b], vec![c])
             },
             vec![
-                NumericTensor::from_vec_shape(
-                    (0..24).map(|i| (i as f32) * 0.1).collect(),
-                    vec![2, 3, 4],
-                )
-                .unwrap(),
-                NumericTensor::from_vec_shape(
-                    (0..20).map(|i| (i as f32) * 0.1).collect(),
-                    vec![4, 5],
-                )
-                .unwrap(),
+                pool_tensor((0..24).map(|i| (i as f32) * 0.1).collect(), vec![2, 3, 4]),
+                pool_tensor((0..20).map(|i| (i as f32) * 0.1).collect(), vec![4, 5]),
             ],
         );
     }
@@ -3314,9 +3157,8 @@ mod tests {
                 (vec![a, bias], vec![out])
             },
             vec![
-                NumericTensor::from_vec_shape((0..12).map(|i| i as f32).collect(), vec![3, 4])
-                    .unwrap(),
-                NumericTensor::from_vec_shape(vec![100.0f32, 200.0, 300.0], vec![3]).unwrap(),
+                pool_tensor((0..12).map(|i| i as f32).collect(), vec![3, 4]),
+                pool_tensor(vec![100.0f32, 200.0, 300.0], vec![3]),
             ],
         );
     }
@@ -3339,16 +3181,8 @@ mod tests {
                 (vec![a, b], vec![c])
             },
             vec![
-                NumericTensor::from_vec_shape(
-                    (0..12).map(|i| (i as f32) * 0.1).collect(),
-                    vec![3, 4],
-                )
-                .unwrap(),
-                NumericTensor::from_vec_shape(
-                    (0..6).map(|i| (i as f32) * 0.1).collect(),
-                    vec![3, 2],
-                )
-                .unwrap(),
+                pool_tensor((0..12).map(|i| (i as f32) * 0.1).collect(), vec![3, 4]),
+                pool_tensor((0..6).map(|i| (i as f32) * 0.1).collect(), vec![3, 2]),
             ],
         );
     }
@@ -3376,9 +3210,8 @@ mod tests {
                 (vec![shape, x], vec![out])
             },
             vec![
-                NumericTensor::from_vec_shape(vec![2i64, 3], vec![2]).unwrap(),
-                NumericTensor::from_vec_shape(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3])
-                    .unwrap(),
+                pool_tensor(vec![2i64, 3], vec![2]),
+                pool_tensor(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3]),
             ],
         );
     }
@@ -3409,12 +3242,11 @@ mod tests {
                 (vec![a, starts, ends, axes, steps], vec![b])
             },
             vec![
-                NumericTensor::from_vec_shape((0..8).map(|i| (i as f32) * 10.0).collect(), vec![8])
-                    .unwrap(),
-                NumericTensor::from_vec_shape(vec![0i64], vec![1]).unwrap(),
-                NumericTensor::from_vec_shape(vec![8i64], vec![1]).unwrap(),
-                NumericTensor::from_vec_shape(vec![0i64], vec![1]).unwrap(),
-                NumericTensor::from_vec_shape(vec![2i64], vec![1]).unwrap(),
+                pool_tensor((0..8).map(|i| (i as f32) * 10.0).collect(), vec![8]),
+                pool_tensor(vec![0i64], vec![1]),
+                pool_tensor(vec![8i64], vec![1]),
+                pool_tensor(vec![0i64], vec![1]),
+                pool_tensor(vec![2i64], vec![1]),
             ],
         );
     }
@@ -3442,21 +3274,9 @@ mod tests {
                 (vec![a, b, w], vec![out])
             },
             vec![
-                NumericTensor::from_vec_shape(
-                    (0..6).map(|i| (i as f32) * 0.1).collect(),
-                    vec![2, 3],
-                )
-                .unwrap(),
-                NumericTensor::from_vec_shape(
-                    (6..12).map(|i| (i as f32) * 0.1).collect(),
-                    vec![2, 3],
-                )
-                .unwrap(),
-                NumericTensor::from_vec_shape(
-                    (0..6).map(|i| (i as f32) * 0.1).collect(),
-                    vec![3, 2],
-                )
-                .unwrap(),
+                pool_tensor((0..6).map(|i| (i as f32) * 0.1).collect(), vec![2, 3]),
+                pool_tensor((6..12).map(|i| (i as f32) * 0.1).collect(), vec![2, 3]),
+                pool_tensor((0..6).map(|i| (i as f32) * 0.1).collect(), vec![3, 2]),
             ],
         );
     }
@@ -3476,12 +3296,8 @@ mod tests {
                 (vec![data, indices], vec![out])
             },
             vec![
-                NumericTensor::from_vec_shape(
-                    (0..40).map(|i| (i as f32) * 0.1).collect(),
-                    vec![10, 4],
-                )
-                .unwrap(),
-                NumericTensor::from_vec_shape(vec![0i64, 3, 7, 1, 5, 9], vec![2, 3]).unwrap(),
+                pool_tensor((0..40).map(|i| (i as f32) * 0.1).collect(), vec![10, 4]),
+                pool_tensor(vec![0i64, 3, 7, 1, 5, 9], vec![2, 3]),
             ],
         );
     }
@@ -3502,17 +3318,9 @@ mod tests {
                 (vec![tok_data, pos_data, indices], vec![out])
             },
             vec![
-                NumericTensor::from_vec_shape(
-                    (0..80).map(|i| (i as f32) * 0.01).collect(),
-                    vec![10, 8],
-                )
-                .unwrap(),
-                NumericTensor::from_vec_shape(
-                    (0..24).map(|i| (i as f32) * 0.1).collect(),
-                    vec![3, 8],
-                )
-                .unwrap(),
-                NumericTensor::from_vec_shape(vec![0i64, 3, 7, 1, 5, 9], vec![2, 3]).unwrap(),
+                pool_tensor((0..80).map(|i| (i as f32) * 0.01).collect(), vec![10, 8]),
+                pool_tensor((0..24).map(|i| (i as f32) * 0.1).collect(), vec![3, 8]),
+                pool_tensor(vec![0i64, 3, 7, 1, 5, 9], vec![2, 3]),
             ],
         );
     }
@@ -3528,12 +3336,8 @@ mod tests {
                 (vec![a, shape], vec![b])
             },
             vec![
-                NumericTensor::from_vec_shape(
-                    (0..96).map(|i| (i as f32) * 0.01).collect(),
-                    vec![2, 4, 12],
-                )
-                .unwrap(),
-                NumericTensor::from_vec_shape(vec![2i64, 4, 3, 4], vec![4]).unwrap(),
+                pool_tensor((0..96).map(|i| (i as f32) * 0.01).collect(), vec![2, 4, 12]),
+                pool_tensor(vec![2i64, 4, 3, 4], vec![4]),
             ],
         );
     }
@@ -3549,13 +3353,10 @@ mod tests {
                     crate::milli_graph::ops::Transpose::push_new(g, a, Some(vec![0, 2, 1, 3]), rng);
                 (vec![a], vec![b])
             },
-            vec![
-                NumericTensor::from_vec_shape(
-                    (0..48).map(|i| (i as f32) * 0.1).collect(),
-                    vec![2, 3, 2, 4], // [B=2, S=3, H=2, D=4]
-                )
-                .unwrap(),
-            ],
+            vec![pool_tensor(
+                (0..48).map(|i| (i as f32) * 0.1).collect(),
+                vec![2, 3, 2, 4], // [B=2, S=3, H=2, D=4]
+            )],
         );
     }
 
@@ -3577,16 +3378,14 @@ mod tests {
                 (vec![q, k], vec![c])
             },
             vec![
-                NumericTensor::from_vec_shape(
+                pool_tensor(
                     (0..24).map(|i| (i as f32) * 0.1).collect(),
                     vec![1, 2, 3, 4], // Q: [B, H, S, D]
-                )
-                .unwrap(),
-                NumericTensor::from_vec_shape(
+                ),
+                pool_tensor(
                     (0..24).map(|i| (i as f32) * 0.1).collect(),
                     vec![1, 2, 4, 3], // K^T: [B, H, D, S]
-                )
-                .unwrap(),
+                ),
             ],
         );
     }
@@ -3618,17 +3417,15 @@ mod tests {
                 (vec![q_flat, q_shape, k_t], vec![scores])
             },
             vec![
-                NumericTensor::from_vec_shape(
+                pool_tensor(
                     (0..48).map(|i| (i as f32) * 0.01).collect(),
                     vec![2, 3, 8], // Q: [B=2, S=3, D=8]
-                )
-                .unwrap(),
-                NumericTensor::from_vec_shape(vec![2i64, 3, 2, 4], vec![4]).unwrap(),
-                NumericTensor::from_vec_shape(
+                ),
+                pool_tensor(vec![2i64, 3, 2, 4], vec![4]),
+                pool_tensor(
                     (0..48).map(|i| (i as f32) * 0.01).collect(),
                     vec![2, 2, 4, 3], // K^T: [B=2, H=2, D=4, S=3]
-                )
-                .unwrap(),
+                ),
             ],
         );
     }
@@ -3670,13 +3467,10 @@ mod tests {
 
                 (vec![x], vec![result])
             },
-            vec![
-                NumericTensor::from_vec_shape(
-                    vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 1.0, 0.5, 2.0],
-                    vec![2, 4],
-                )
-                .unwrap(),
-            ],
+            vec![pool_tensor(
+                vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 1.0, 0.5, 2.0],
+                vec![2, 4],
+            )],
         );
     }
 
@@ -3722,13 +3516,9 @@ mod tests {
                 (vec![x, gamma, beta], vec![out])
             },
             vec![
-                NumericTensor::from_vec_shape(
-                    vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 1.0, 0.5, 2.0],
-                    vec![2, 4],
-                )
-                .unwrap(),
-                NumericTensor::from_vec_shape(vec![1.0f32, 1.0, 1.0, 1.0], vec![4]).unwrap(),
-                NumericTensor::from_vec_shape(vec![0.0f32, 0.0, 0.0, 0.0], vec![4]).unwrap(),
+                pool_tensor(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 1.0, 0.5, 2.0], vec![2, 4]),
+                pool_tensor(vec![1.0f32, 1.0, 1.0, 1.0], vec![4]),
+                pool_tensor(vec![0.0f32, 0.0, 0.0, 0.0], vec![4]),
             ],
         );
     }
@@ -3772,19 +3562,14 @@ mod tests {
             },
             vec![
                 // K [1, 3, 4]
-                NumericTensor::from_vec_shape(
-                    (0..12).map(|i| (i as f32) * 0.1).collect(),
-                    vec![1, 3, 4],
-                )
-                .unwrap(),
+                pool_tensor((0..12).map(|i| (i as f32) * 0.1).collect(), vec![1, 3, 4]),
                 // shape for [1, 3, 2, 2]
-                NumericTensor::from_vec_shape(vec![1i64, 3, 2, 2], vec![4]).unwrap(),
+                pool_tensor(vec![1i64, 3, 2, 2], vec![4]),
                 // Q [1, 2, 3, 2]
-                NumericTensor::from_vec_shape(
+                pool_tensor(
                     (0..12).map(|i| (i as f32) * 0.1).collect(),
                     vec![1, 2, 3, 2],
-                )
-                .unwrap(),
+                ),
             ],
         );
     }
@@ -3887,33 +3672,26 @@ mod tests {
             },
             vec![
                 // x [1, 3, 4]
-                NumericTensor::from_vec_shape(
-                    (0..12).map(|i| (i as f32) * 0.1).collect(),
-                    vec![1, 3, 4],
-                )
-                .unwrap(),
+                pool_tensor((0..12).map(|i| (i as f32) * 0.1).collect(), vec![1, 3, 4]),
                 // Wq [4, 4]
-                NumericTensor::from_vec_shape(
+                pool_tensor(
                     (0..16).map(|i| (i as f32) * 0.05 - 0.4).collect(),
                     vec![4, 4],
-                )
-                .unwrap(),
+                ),
                 // Wk [4, 4]
-                NumericTensor::from_vec_shape(
+                pool_tensor(
                     (0..16).map(|i| (i as f32) * 0.03 + 0.1).collect(),
                     vec![4, 4],
-                )
-                .unwrap(),
+                ),
                 // Wv [4, 4]
-                NumericTensor::from_vec_shape(
+                pool_tensor(
                     (0..16).map(|i| (i as f32) * 0.04 - 0.2).collect(),
                     vec![4, 4],
-                )
-                .unwrap(),
+                ),
                 // shape [1, 3, 2, 2] — three copies for Q, K, V
-                NumericTensor::from_vec_shape(vec![1i64, 3, 2, 2], vec![4]).unwrap(),
-                NumericTensor::from_vec_shape(vec![1i64, 3, 2, 2], vec![4]).unwrap(),
-                NumericTensor::from_vec_shape(vec![1i64, 3, 2, 2], vec![4]).unwrap(),
+                pool_tensor(vec![1i64, 3, 2, 2], vec![4]),
+                pool_tensor(vec![1i64, 3, 2, 2], vec![4]),
+                pool_tensor(vec![1i64, 3, 2, 2], vec![4]),
             ],
         );
     }
@@ -3940,15 +3718,12 @@ mod tests {
                 );
                 (vec![a], vec![b])
             },
-            vec![
-                NumericTensor::from_vec_shape(
-                    (0..3072)
-                        .map(|i| ((i as f32) * 7.3 - 1500.0).sin() * 5000.0)
-                        .collect(),
-                    vec![4, 768],
-                )
-                .unwrap(),
-            ],
+            vec![pool_tensor(
+                (0..3072)
+                    .map(|i| ((i as f32) * 7.3 - 1500.0).sin() * 5000.0)
+                    .collect(),
+                vec![4, 768],
+            )],
         );
     }
 
@@ -3969,13 +3744,10 @@ mod tests {
                 );
                 (vec![a], vec![b])
             },
-            vec![
-                NumericTensor::from_vec_shape(
-                    (0..512).map(|i| (i as f32) * 0.01 - 2.56).collect(),
-                    vec![2, 4, 64],
-                )
-                .unwrap(),
-            ],
+            vec![pool_tensor(
+                (0..512).map(|i| (i as f32) * 0.01 - 2.56).collect(),
+                vec![2, 4, 64],
+            )],
         );
     }
 
@@ -3996,16 +3768,14 @@ mod tests {
                 (vec![a, b], vec![c])
             },
             vec![
-                NumericTensor::from_vec_shape(
+                pool_tensor(
                     (0..512).map(|i| (i as f32) * 0.01 - 2.56).collect(),
                     vec![2, 4, 64],
-                )
-                .unwrap(),
-                NumericTensor::from_vec_shape(
+                ),
+                pool_tensor(
                     (0..4096).map(|i| (i as f32) * 0.001 - 2.048).collect(),
                     vec![64, 64],
-                )
-                .unwrap(),
+                ),
             ],
         );
     }
@@ -4063,18 +3833,16 @@ mod tests {
                 (vec![q_flat, q_shape, k_flat, k_shape], vec![scores])
             },
             vec![
-                NumericTensor::from_vec_shape(
+                pool_tensor(
                     (0..512).map(|i| (i as f32) * 0.01 - 2.56).collect(),
                     vec![2, 4, 64],
-                )
-                .unwrap(),
-                NumericTensor::from_vec_shape(vec![2i64, 4, 4, 16], vec![4]).unwrap(),
-                NumericTensor::from_vec_shape(
+                ),
+                pool_tensor(vec![2i64, 4, 4, 16], vec![4]),
+                pool_tensor(
                     (0..512).map(|i| (i as f32) * 0.005 - 1.28).collect(),
                     vec![2, 4, 64],
-                )
-                .unwrap(),
-                NumericTensor::from_vec_shape(vec![2i64, 4, 4, 16], vec![4]).unwrap(),
+                ),
+                pool_tensor(vec![2i64, 4, 4, 16], vec![4]),
             ],
         );
     }
@@ -4131,14 +3899,10 @@ mod tests {
                 )
             },
             vec![
-                NumericTensor::from_vec_shape(
-                    (0..96).map(|i| (i as f32) * 0.1).collect(),
-                    vec![2, 4, 12],
-                )
-                .unwrap(),
-                NumericTensor::from_vec_shape(vec![1.0f32; 4], vec![4]).unwrap(),
-                NumericTensor::from_vec_shape(vec![2.0f32; 4], vec![4]).unwrap(),
-                NumericTensor::from_vec_shape(vec![3.0f32; 4], vec![4]).unwrap(),
+                pool_tensor((0..96).map(|i| (i as f32) * 0.1).collect(), vec![2, 4, 12]),
+                pool_tensor(vec![1.0f32; 4], vec![4]),
+                pool_tensor(vec![2.0f32; 4], vec![4]),
+                pool_tensor(vec![3.0f32; 4], vec![4]),
             ],
         );
     }
@@ -4193,16 +3957,11 @@ mod tests {
                 (vec![x, w], vec![q, k, v])
             },
             vec![
-                NumericTensor::from_vec_shape(
-                    (0..24).map(|i| (i as f32) * 0.1).collect(),
-                    vec![2, 3, 4],
-                )
-                .unwrap(),
-                NumericTensor::from_vec_shape(
+                pool_tensor((0..24).map(|i| (i as f32) * 0.1).collect(), vec![2, 3, 4]),
+                pool_tensor(
                     (0..24).map(|i| (i as f32) * 0.05 - 0.6).collect(),
                     vec![4, 6],
-                )
-                .unwrap(),
+                ),
             ],
         );
     }
@@ -4325,21 +4084,19 @@ mod tests {
             },
             vec![
                 // x [1, 4, 8]
-                NumericTensor::from_vec_shape(
+                pool_tensor(
                     (0..32).map(|i| (i as f32) * 0.1 - 1.6).collect(),
                     vec![1, 4, 8],
-                )
-                .unwrap(),
+                ),
                 // Wqkv [8, 24]
-                NumericTensor::from_vec_shape(
+                pool_tensor(
                     (0..192).map(|i| (i as f32) * 0.01 - 0.96).collect(),
                     vec![8, 24],
-                )
-                .unwrap(),
+                ),
                 // shape tensors for Q, K, V reshape
-                NumericTensor::from_vec_shape(vec![1i64, 4, 2, 4], vec![4]).unwrap(),
-                NumericTensor::from_vec_shape(vec![1i64, 4, 2, 4], vec![4]).unwrap(),
-                NumericTensor::from_vec_shape(vec![1i64, 4, 2, 4], vec![4]).unwrap(),
+                pool_tensor(vec![1i64, 4, 2, 4], vec![4]),
+                pool_tensor(vec![1i64, 4, 2, 4], vec![4]),
+                pool_tensor(vec![1i64, 4, 2, 4], vec![4]),
             ],
         );
     }

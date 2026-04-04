@@ -3,11 +3,11 @@ pub mod observer;
 pub mod ops;
 pub mod tensor_store;
 
-use crate::backends::ndarray_backend::NDArrayNumericTensor;
 use crate::dtype::DType;
 use crate::graph::{
     GlobalId, Graph, Link, LinkCategory, LinkMetadata, Node, NodeMetadata, Property,
 };
+use crate::milli_graph::ops::constant::{ConstantValue, build_inline_constant};
 use crate::numeric_dtype::{NumericDType, ONNXDType};
 use crate::scalar_info::ScalarInfoTyped;
 use crate::symbolic_graph::ops::{AnyOperation, EvalError, Operation};
@@ -1923,31 +1923,30 @@ impl SymbolicGraphMutator {
         global_id
     }
 
-    pub fn push_constant_tensor(
+    pub fn push_constant_tensor<T: ConstantValue>(
         &mut self,
-        value: NDArrayNumericTensor<DynRank>,
+        values: Vec<T>,
+        shape: Vec<u64>,
         name: Option<String>,
         rng: &mut impl Rng,
     ) -> GlobalId {
-        // Bridge: convert legacy NDArray tensor → pool tensor for inline storage.
-        let legacy = crate::migration::numeric_tensor::NumericTensor::NDArray(value);
-        let pool_tensor =
-            crate::nano_graph::lower::legacy_numeric_to_new(&legacy, &crate::pool::SystemPool);
-        let mut shape = Vec::new();
-        for s in pool_tensor.shape() {
-            shape.push(ScalarInfoTyped::Numeric(*s))
-        }
+        let inline = build_inline_constant(&values, shape);
+        let dtype = inline.inner().dtype();
+        let tensor_shape: Vec<ScalarInfoTyped<u64>> = inline
+            .inner()
+            .shape()
+            .iter()
+            .map(|&s| ScalarInfoTyped::Numeric(s))
+            .collect();
         let global_id = GlobalId::new(rng);
         let g = self.graph.as_mut().unwrap();
         g.tensors.insert(
             global_id,
             ONNXTensorInfo {
                 onnx_name: name.clone(),
-                dtype: Some(ONNXDType::Numeric(pool_tensor.dtype())),
-                shape: Some(shape),
-                tensor_type: TensorType::Constant(StoredOrNotTensor::Inline(InlineConstantTensor(
-                    std::sync::Arc::new(pool_tensor),
-                ))),
+                dtype: Some(ONNXDType::Numeric(dtype)),
+                shape: Some(tensor_shape),
+                tensor_type: TensorType::Constant(StoredOrNotTensor::Inline(inline)),
                 global_id,
             },
         );

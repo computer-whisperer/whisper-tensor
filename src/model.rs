@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 
 use crate::backends::eval_backend::EvalRuntimeError;
-use crate::migration::numeric_tensor::NumericTensorError;
 use crate::numeric_dtype::ONNXDType;
 use crate::numeric_tensor::NumericTensorView;
 use crate::pool::Pool;
@@ -18,8 +17,6 @@ use crate::scalar_info::ScalarInfoTyped;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ModelError {
-    #[error(transparent)]
-    NumericTensorError(#[from] NumericTensorError),
     #[error(transparent)]
     ONNXDecodingError(#[from] ONNXDecodingError),
     #[error(transparent)]

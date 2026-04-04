@@ -1,29 +1,21 @@
-use crate::backends::ndarray_backend::conversions::NDArrayNumericTensorType;
-use crate::migration::numeric_scalar::NumericScalarType;
-use crate::migration::numeric_tensor::{NumericTensor, NumericTensorError};
-use crate::migration::numeric_tensor_typed::NumericTensorTyped;
 use crate::numeric_dtype::NumericDType;
+use crate::numeric_dtype::NumericPrimitive;
 use crate::numeric_scalar::NumericScalar as NewNumericScalar;
 use crate::numeric_tensor::NumericTensor as NewNumericTensor;
 use crate::pool::Pool;
 use crate::scalar_info::{ScalarInfo, ScalarInfoTyped};
 use crate::symbolic_scalar::{SymbolicResolver, SymbolicScalar, SymbolicScalarTyped};
 use crate::tensor_rank::{DimContainer, DynRank, KnownRank, Rank, RankError};
-use ndarray::{ArcArray, ShapeError};
 use typenum::P1;
 
 #[derive(Debug, thiserror::Error)]
 pub enum TensorInfoError {
-    #[error(transparent)]
-    ShapeError(#[from] ShapeError),
     #[error("Cannot cast to rank")]
     CannotConvertToRank,
     #[error("Cannot cast to type")]
     CannotConvertToType,
     #[error(transparent)]
     RankError(#[from] RankError),
-    #[error(transparent)]
-    NumericTensorError(#[from] NumericTensorError),
 }
 
 /// A tensor with fully known shape and per-element scalar info.
@@ -69,14 +61,6 @@ impl<R: Rank> ShapedTensor<R> {
         }
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn try_upgrade_as_numeric_tensor(&self) -> Option<NumericTensor<R>> {
-        // TODO: needs rework — old path went through typed NumericScalar variants
-        // to construct NDArray-backed NumericTensor. New path should construct
-        // pool-backed NumericTensor directly from ScalarInfo values.
-        None
-    }
-
     pub(crate) fn try_to_rank<R1: Rank>(&self) -> Result<ShapedTensor<R1>, TensorInfoError> {
         let new_shape = R1::KnownDims::try_from_slice(self.shape.as_slice())?;
         Ok(ShapedTensor {
@@ -115,7 +99,7 @@ impl<R: Rank> ShapedTensor<R> {
 #[derive(Clone, Debug)]
 pub struct ShapedTensorTyped<T, R: Rank>
 where
-    T: Clone + PartialEq + Copy + NumericScalarType,
+    T: Clone + PartialEq + Copy + NumericPrimitive,
 {
     shape: R::KnownDims,
     values: Vec<ScalarInfoTyped<T>>,
@@ -123,7 +107,7 @@ where
 
 impl<T, R: Rank> ShapedTensorTyped<T, R>
 where
-    T: Clone + Copy + PartialEq + NumericScalarType,
+    T: Clone + Copy + PartialEq + NumericPrimitive,
 {
     pub(crate) fn new(shape: R::KnownDims, values: Vec<ScalarInfoTyped<T>>) -> Self {
         Self { shape, values }
@@ -167,35 +151,6 @@ where
         }
     }
 
-    pub(crate) fn try_to_rank<R1: Rank>(
-        &self,
-    ) -> Result<ShapedTensorTyped<T, R1>, TensorInfoError> {
-        let slice = self.shape.as_slice();
-        let new_shape = R1::KnownDims::try_from_slice(slice)?;
-        Ok(ShapedTensorTyped {
-            shape: new_shape,
-            values: self.values.clone(),
-        })
-    }
-
-    pub(crate) fn to_dyn_rank(&self) -> ShapedTensorTyped<T, DynRank> {
-        self.try_to_rank().unwrap()
-    }
-
-    /// Convert typed tensor to dtype-erased ShapedTensor.
-    pub(crate) fn to_dyn_type(&self) -> ShapedTensor<R> {
-        let values: Vec<ScalarInfo> = self.values.iter().map(|v| v.promote()).collect();
-        let dtype = values
-            .first()
-            .map(|v| v.dtype())
-            .unwrap_or(NumericDType::F32);
-        ShapedTensor {
-            dtype,
-            shape: self.shape.clone(),
-            values,
-        }
-    }
-
     #[allow(dead_code)]
     pub(crate) fn to_vec(&self) -> Vec<T> {
         self.values
@@ -208,39 +163,17 @@ where
 #[derive(Clone, Debug)]
 pub struct RankedTensorTyped<T, R: Rank>
 where
-    T: Clone + Copy + PartialEq + NumericScalarType,
+    T: Clone + Copy + PartialEq + NumericPrimitive,
 {
     first_element: ScalarInfoTyped<T>,
     shape: R::UnknownDims,
 }
 
-impl<T: Clone + Copy + PartialEq + NumericScalarType, R: Rank> RankedTensorTyped<T, R> {
+impl<T: Clone + Copy + PartialEq + NumericPrimitive, R: Rank> RankedTensorTyped<T, R> {
     pub(crate) fn new(first_element: ScalarInfoTyped<T>, shape: R::UnknownDims) -> Self {
         RankedTensorTyped {
             first_element,
             shape,
-        }
-    }
-
-    pub(crate) fn try_to_rank<R1: Rank>(
-        &self,
-    ) -> Result<RankedTensorTyped<T, R1>, TensorInfoError> {
-        let slice = self.shape.as_slice();
-        let new_shape = R1::UnknownDims::try_from_slice(slice)?;
-        Ok(RankedTensorTyped {
-            first_element: self.first_element.clone(),
-            shape: new_shape,
-        })
-    }
-
-    pub(crate) fn to_dyn_rank(&self) -> RankedTensorTyped<T, DynRank> {
-        self.try_to_rank().unwrap()
-    }
-
-    pub(crate) fn to_dyn_type(&self) -> RankedTensor<R> {
-        RankedTensor {
-            first_element: self.first_element.to_dyn_type(),
-            shape: self.shape.clone(),
         }
     }
 
@@ -347,36 +280,74 @@ impl MinimalTensor {
     }
 }
 
+/// A concrete typed tensor: all elements are known numeric values.
+#[derive(Clone, Debug)]
+pub struct ConcreteTypedTensor<T, R: Rank> {
+    shape: R::KnownDims,
+    values: Vec<T>,
+}
+
+impl<T: Clone + Copy + PartialEq, R: Rank> ConcreteTypedTensor<T, R> {
+    fn shape(&self) -> R::KnownDims {
+        self.shape.clone()
+    }
+
+    fn rank(&self) -> usize {
+        self.shape.as_slice().len()
+    }
+
+    fn get(&self, index: &R::KnownDims) -> Option<&T> {
+        // Compute flat index from shape + multidim index (row-major).
+        let shape = self.shape.as_slice();
+        let idx = index.as_slice();
+        if shape.len() != idx.len() {
+            return None;
+        }
+        let mut flat = 0usize;
+        for (i, (&dim_idx, &dim_size)) in idx.iter().zip(shape.iter()).enumerate() {
+            if dim_idx >= dim_size {
+                return None;
+            }
+            flat = flat * dim_size as usize + dim_idx as usize;
+            let _ = i;
+        }
+        self.values.get(flat)
+    }
+
+    fn to_vec(&self) -> Vec<T> {
+        self.values.clone()
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum TensorInfoTypedShaped<T, R: Rank>
 where
-    T: Clone + PartialEq + Copy + NumericScalarType + NDArrayNumericTensorType,
+    T: Clone + PartialEq + Copy + NumericPrimitive,
 {
-    Numeric(NumericTensorTyped<T, R>),
+    Numeric(ConcreteTypedTensor<T, R>),
     Shaped(ShapedTensorTyped<T, R>),
 }
 
 impl<T, R: Rank> TensorInfoTypedShaped<T, R>
 where
-    T: Clone + PartialEq + Copy + NumericScalarType + NDArrayNumericTensorType,
+    T: Clone + PartialEq + Copy + NumericPrimitive,
 {
     pub(crate) fn new_from_scalar_infos(
         shape: R::KnownDims,
         values: Vec<ScalarInfoTyped<T>>,
     ) -> Result<Self, TensorInfoError> {
         if values.iter().all(|value| value.is_numeric()) {
-            let mut new_values = vec![];
-            for value in values {
-                if let ScalarInfoTyped::Numeric(value) = value {
-                    new_values.push(value);
-                } else {
-                    unreachable!();
-                }
-            }
-            let ndarray_shape = R::cast_to_ndarray_dim(&shape);
-            Ok(Self::Numeric(NumericTensorTyped::NDArray(
-                ArcArray::from_shape_vec(ndarray_shape, new_values)?,
-            )))
+            let concrete_values: Vec<T> = values
+                .into_iter()
+                .map(|v| match v {
+                    ScalarInfoTyped::Numeric(x) => x,
+                    _ => unreachable!(),
+                })
+                .collect();
+            Ok(Self::Numeric(ConcreteTypedTensor {
+                shape,
+                values: concrete_values,
+            }))
         } else {
             Ok(Self::Shaped(ShapedTensorTyped::new(shape, values)))
         }
@@ -406,63 +377,12 @@ where
             TensorInfoTypedShaped::Shaped(shaped) => Some(shaped.get(index)?.clone()),
         }
     }
-
-    /// Convert to dtype-erased form. Since typed forms don't carry a pool,
-    /// Numeric values are read into the Symbolic (ShapedTensor) representation.
-    pub(crate) fn to_dyn_type<'p, P: Pool + 'p>(&self) -> TensorInfoShaped<'p, R, P> {
-        match self {
-            TensorInfoTypedShaped::Numeric(numeric) => {
-                // Convert through ShapedTensor since we have no pool for allocation.
-                // Iterate ndarray elements, convert T -> legacy scalar -> new scalar -> ScalarInfo.
-                let shape = numeric.shape();
-                let dtype = NumericDType::from_legacy(T::DTYPE)
-                    .expect("typed NumericTensor dtype has no NumericDType equivalent");
-                let ndarray = numeric.to_ndarray();
-                let values: Vec<ScalarInfo> = ndarray
-                    .iter()
-                    .map(|v| {
-                        let old_scalar = v.to_numeric_scalar();
-                        ScalarInfo::Numeric(crate::nano_graph::lower::legacy_scalar_to_new(
-                            &old_scalar,
-                        ))
-                    })
-                    .collect();
-                TensorInfoShaped::Symbolic(ShapedTensor {
-                    dtype,
-                    shape,
-                    values,
-                })
-            }
-            TensorInfoTypedShaped::Shaped(shaped) => {
-                TensorInfoShaped::Symbolic(shaped.to_dyn_type())
-            }
-        }
-    }
-
-    pub(crate) fn to_dyn_rank(&self) -> TensorInfoTypedShaped<T, DynRank> {
-        match self {
-            TensorInfoTypedShaped::Numeric(numeric) => {
-                TensorInfoTypedShaped::Numeric(numeric.to_dyn_rank())
-            }
-            TensorInfoTypedShaped::Shaped(shaped) => {
-                TensorInfoTypedShaped::Shaped(shaped.to_dyn_rank())
-            }
-        }
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn as_numeric(&self) -> Option<&NumericTensorTyped<T, R>> {
-        match self {
-            TensorInfoTypedShaped::Numeric(numeric) => Some(numeric),
-            TensorInfoTypedShaped::Shaped(_) => None,
-        }
-    }
 }
 
 #[derive(Clone, Debug)]
 pub enum TensorInfoTypedRanked<T, R: Rank>
 where
-    T: Clone + PartialEq + Copy + NumericScalarType + NDArrayNumericTensorType,
+    T: Clone + PartialEq + Copy + NumericPrimitive,
 {
     Shaped(TensorInfoTypedShaped<T, R>),
     Ranked(RankedTensorTyped<T, R>),
@@ -470,7 +390,7 @@ where
 
 impl<T, R: Rank> TensorInfoTypedRanked<T, R>
 where
-    T: Clone + PartialEq + Copy + NumericScalarType + NDArrayNumericTensorType,
+    T: Clone + PartialEq + Copy + NumericPrimitive,
 {
     #[allow(dead_code)]
     pub(crate) fn shape(&self) -> R::UnknownDims {
@@ -499,40 +419,6 @@ where
             TensorInfoTypedRanked::Ranked(_) => Some(ScalarInfoTyped::Symbolic(
                 SymbolicScalarTyped::new(symbolic_resolver),
             )),
-        }
-    }
-
-    pub(crate) fn to_dyn_type<'p, P: Pool + 'p>(&self) -> TensorInfoRanked<'p, R, P> {
-        match self {
-            TensorInfoTypedRanked::Shaped(shaped) => TensorInfoRanked::Shaped(shaped.to_dyn_type()),
-            TensorInfoTypedRanked::Ranked(ranked) => TensorInfoRanked::Ranked(ranked.to_dyn_type()),
-        }
-    }
-
-    pub(crate) fn to_dyn_rank(&self) -> TensorInfoTypedRanked<T, DynRank> {
-        match self {
-            TensorInfoTypedRanked::Shaped(shaped) => {
-                TensorInfoTypedRanked::Shaped(shaped.to_dyn_rank())
-            }
-            TensorInfoTypedRanked::Ranked(ranked) => {
-                TensorInfoTypedRanked::Ranked(ranked.to_dyn_rank())
-            }
-        }
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn as_shaped(&self) -> Option<&TensorInfoTypedShaped<T, R>> {
-        match self {
-            TensorInfoTypedRanked::Shaped(shaped) => Some(shaped),
-            TensorInfoTypedRanked::Ranked(_) => None,
-        }
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn as_numeric(&self) -> Option<&NumericTensorTyped<T, R>> {
-        match self {
-            TensorInfoTypedRanked::Shaped(shaped) => shaped.as_numeric(),
-            TensorInfoTypedRanked::Ranked(_) => None,
         }
     }
 }
@@ -950,16 +836,6 @@ impl<'p, P: Pool + 'p> TensorInfo<'p, P> {
         Some(self.as_concrete()?.to_i64_vec())
     }
 
-    /// Returns the concrete legacy NumericTensor if this TensorInfo holds concrete numeric data.
-    /// Temporary bridge: reads elements from the pool-backed tensor into a legacy NumericTensor.
-    #[allow(dead_code)]
-    pub(crate) fn as_numeric(&self) -> Option<NumericTensor<DynRank>> {
-        let new_tensor = self.as_concrete()?;
-        Some(crate::nano_graph::lower::new_numeric_to_legacy(new_tensor))
-    }
-
-    /// Backward-compat constructor: wrap a legacy NumericTensor into a TensorInfo.
-    /// Reads elements from the legacy tensor into a pool-allocated buffer.
     /// Create a TensorInfo from a new-type tensor view. Copies data into a pool buffer.
     pub fn from_view(
         view: &crate::numeric_tensor::NumericTensorView<'_, DynRank>,
@@ -977,13 +853,6 @@ impl<'p, P: Pool + 'p> TensorInfo<'p, P> {
             // Allocation failed — fall back to shape-only info.
             Self::from_dtype_and_shape(view.dtype(), view.shape())
         }
-    }
-
-    pub fn from_legacy(tensor: &NumericTensor<DynRank>, pool: &'p P) -> Self {
-        let new_tensor = crate::nano_graph::lower::legacy_numeric_to_new(tensor, pool);
-        TensorInfo::Ranked(TensorInfoRanked::Shaped(TensorInfoShaped::Numeric(
-            new_tensor,
-        )))
     }
 
     /// Returns the rank if statically known.
@@ -1084,31 +953,6 @@ impl<'p, P: Pool + 'p> TensorInfo<'p, P> {
 // ---------------------------------------------------------------------------
 // From impls
 // ---------------------------------------------------------------------------
-
-impl<
-    'p,
-    P: Pool + 'p,
-    R: Rank,
-    T: Clone + PartialEq + Copy + NumericScalarType + NDArrayNumericTensorType,
-> From<TensorInfoTypedShaped<T, R>> for TensorInfo<'p, P>
-{
-    fn from(tensor: TensorInfoTypedShaped<T, R>) -> Self {
-        TensorInfo::Ranked(TensorInfoRanked::Shaped(tensor.to_dyn_rank().to_dyn_type()))
-    }
-}
-
-impl<
-    'p,
-    P: Pool + 'p,
-    R: Rank,
-    T: Clone + PartialEq + Copy + NumericScalarType + NDArrayNumericTensorType,
-> From<TensorInfoTypedRanked<T, R>> for TensorInfo<'p, P>
-{
-    fn from(tensor: TensorInfoTypedRanked<T, R>) -> Self {
-        let ranked: TensorInfoRanked<'p, DynRank, P> = tensor.to_dyn_rank().to_dyn_type();
-        TensorInfo::Ranked(ranked)
-    }
-}
 
 impl<'p, P: Pool + 'p> From<NewNumericTensor<'p, DynRank, P>> for TensorInfo<'p, P> {
     fn from(tensor: NewNumericTensor<'p, DynRank, P>) -> Self {

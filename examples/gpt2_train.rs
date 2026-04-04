@@ -10,7 +10,6 @@ use std::collections::HashMap;
 
 use rand::RngExt;
 use whisper_tensor::backends::eval_backend::EvalBackend;
-use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
 use whisper_tensor::dtype::DType;
 use whisper_tensor::graph::GlobalId;
 use whisper_tensor::migration::numeric_tensor::NumericTensor;
@@ -124,12 +123,8 @@ fn build_gpt2_graph(
     m.push_input(input_ids);
 
     // Position indices [seq_len] — constant
-    let position_ids = m.push_constant_tensor(
-        NDArrayNumericTensor::from_vec_shape((0..config.seq_len as i64).collect(), &vec![seq])
-            .unwrap(),
-        None,
-        rng,
-    );
+    let position_ids =
+        m.push_constant_tensor((0..config.seq_len as i64).collect(), vec![seq], None, rng);
 
     // --- Embeddings ---
     let wte = make_param(&mut m, &mut trainable, "wte", vec![s(vocab), s(embd)], rng);
@@ -152,19 +147,11 @@ fn build_gpt2_graph(
             mask_data[i * seq as usize + j] = -1e9;
         }
     }
-    let causal_mask = m.push_constant_tensor(
-        NDArrayNumericTensor::from_vec_shape(mask_data, &vec![1, 1, seq, seq]).unwrap(),
-        None,
-        rng,
-    );
+    let causal_mask = m.push_constant_tensor(mask_data, vec![1, 1, seq, seq], None, rng);
 
     // Attention scale constant
     let scale_val = 1.0 / (head_dim as f32).sqrt();
-    let scale_tensor = m.push_constant_tensor(
-        NDArrayNumericTensor::from_vec_shape(vec![scale_val], &vec![1u64]).unwrap(),
-        None,
-        rng,
-    );
+    let scale_tensor = m.push_constant_tensor(vec![scale_val], vec![1u64], None, rng);
 
     // --- Transformer blocks ---
     for layer in 0..config.n_layer {

@@ -1,6 +1,5 @@
 use crate::gguf::parser::GgufFile;
 use std::path::Path;
-use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
 use whisper_tensor::dtype::DType;
 use whisper_tensor::graph::GlobalId;
 use whisper_tensor::model::Model;
@@ -228,24 +227,23 @@ impl<'a> GraphBuilder<'a> {
                 }
             }
             let shape = vec![max_len as u64, half_head_dim as u64];
-            let cos_nd = NDArrayNumericTensor::from_vec_shape(cos_vals, &shape).unwrap();
-            let sin_nd = NDArrayNumericTensor::from_vec_shape(sin_vals, &shape).unwrap();
-            let cos_id = self
-                .m
-                .push_constant_tensor(cos_nd, Some("cos_cache".to_string()), rng);
-            let sin_id = self
-                .m
-                .push_constant_tensor(sin_nd, Some("sin_cache".to_string()), rng);
+            let cos_id = self.m.push_constant_tensor(
+                cos_vals,
+                shape.clone(),
+                Some("cos_cache".to_string()),
+                rng,
+            );
+            let sin_id =
+                self.m
+                    .push_constant_tensor(sin_vals, shape, Some("sin_cache".to_string()), rng);
             (cos_id, sin_id)
         };
 
         // -- Scale constant for attention --
         let scale_val = (head_dim as f32).sqrt();
-        let scale_const = self.m.push_constant_tensor(
-            NDArrayNumericTensor::from_vec(vec![scale_val]).to_dyn(),
-            None,
-            rng,
-        );
+        let scale_const = self
+            .m
+            .push_constant_tensor(vec![scale_val], vec![1], None, rng);
 
         // -- Transformer layers --
         let mut layer_output = x;

@@ -202,26 +202,6 @@ fn validate_against_ground_truth(
 }
 
 impl MilliOpGraph {
-    /// Legacy entry point — converts legacy tensors and delegates to the pool-based version.
-    pub fn validate_infer_against_eval(
-        &self,
-        inputs: &HashMap<GlobalId, crate::migration::numeric_tensor::NumericTensor<DynRank>>,
-    ) -> ValidationReport {
-        // Convert legacy tensors to TensorInfo, extract concrete new-type tensors.
-        let infos: Vec<_> = inputs
-            .iter()
-            .map(|(&id, legacy)| (id, TensorInfo::from_legacy(legacy, &SystemPool)))
-            .collect();
-        let new_tensors: Vec<_> = infos
-            .iter()
-            .map(|(id, info)| (*id, info.as_concrete().expect("must be concrete")))
-            .collect();
-        let views: Vec<_> = new_tensors.iter().map(|(id, t)| (*id, t.view())).collect();
-        let view_map: HashMap<GlobalId, &NumericTensorView<'_, DynRank>> =
-            views.iter().map(|(id, view)| (*id, view)).collect();
-        self.validate_infer_against_pool_eval(&view_map)
-    }
-
     /// Validate that `infer()` never returns incorrect information for any op
     /// in this graph, at any ablation level.
     ///

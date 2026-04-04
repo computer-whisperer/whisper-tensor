@@ -1,6 +1,5 @@
-use crate::dtype::DTypeOfPrimitive;
-use crate::migration::numeric_scalar::NumericScalarType;
 use crate::numeric_dtype::NumericDType;
+use crate::numeric_dtype::NumericPrimitive;
 use crate::numeric_scalar::NumericScalar;
 use crate::symbolic_scalar::{SymbolicScalar, SymbolicScalarTyped};
 use num_traits::AsPrimitive;
@@ -9,7 +8,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ScalarInfoTyped<T>
 where
-    T: Clone + Copy + PartialEq + NumericScalarType,
+    T: Clone + Copy + PartialEq + NumericPrimitive,
 {
     Numeric(T),
     Symbolic(SymbolicScalarTyped<T>),
@@ -17,22 +16,11 @@ where
 
 impl<T> ScalarInfoTyped<T>
 where
-    T: Clone + Copy + PartialEq + NumericScalarType,
+    T: Clone + Copy + PartialEq + NumericPrimitive,
 {
-    pub(crate) fn promote(&self) -> ScalarInfo {
-        match self {
-            ScalarInfoTyped::Numeric(x) => {
-                // Go through old NumericScalar to convert typed value → new NumericScalar.
-                let old = crate::migration::numeric_scalar::NumericScalar::from(*x);
-                ScalarInfo::Numeric(crate::nano_graph::lower::legacy_scalar_to_new(&old))
-            }
-            ScalarInfoTyped::Symbolic(scalar) => ScalarInfo::Symbolic(scalar.to_dyn_type()),
-        }
-    }
-
     pub(crate) fn cast<T2>(&self) -> ScalarInfoTyped<T2>
     where
-        T2: Clone + Copy + PartialEq + NumericScalarType + 'static,
+        T2: Clone + Copy + PartialEq + NumericPrimitive + 'static,
         T: AsPrimitive<T2>,
     {
         match self {
@@ -62,10 +50,6 @@ where
             Self::Numeric(a) => Self::Numeric(*a + offset.as_()),
             Self::Symbolic(scalar) => Self::Symbolic(scalar.add_offset(offset)),
         }
-    }
-
-    pub(crate) fn to_dyn_type(&self) -> ScalarInfo {
-        self.promote()
     }
 
     pub(crate) fn is_numeric(&self) -> bool {
@@ -113,25 +97,17 @@ impl ScalarInfo {
         }
     }
 
-    /// Cast to a typed scalar info. For Numeric, extracts the value via
-    /// the legacy NumericScalar conversion path. For Symbolic, preserves the
-    /// symbolic identity with a type cast.
+    /// Cast to a typed scalar info. For Numeric, casts the value to `T`'s dtype
+    /// then extracts the typed value. For Symbolic, preserves the symbolic
+    /// identity with a type cast.
     ///
     /// Primarily used for shape-dim extraction (T = u64, i64, u32).
     #[allow(dead_code)]
-    pub(crate) fn cast<T>(&self) -> ScalarInfoTyped<T>
-    where
-        T: DTypeOfPrimitive + NumericScalarType + PartialEq + Copy + Clone,
-    {
+    pub(crate) fn cast<T: NumericPrimitive>(&self) -> ScalarInfoTyped<T> {
         match self {
             ScalarInfo::Numeric(x) => {
-                use crate::migration::numeric_scalar::NumericScalar as OldScalar;
-                let old_val = match x.dtype() {
-                    NumericDType::SignedInt(_) | NumericDType::Bool => OldScalar::I64(x.to_i64()),
-                    NumericDType::UnsignedInt(_) => OldScalar::U64(x.view().read_raw()),
-                    NumericDType::Float(_) => OldScalar::F64(x.to_f64()),
-                };
-                ScalarInfoTyped::Numeric(T::cast_from_numeric_scalar(&old_val))
+                let casted = x.cast_to(T::NUMERIC_DTYPE);
+                ScalarInfoTyped::Numeric(T::from_scalar(&casted))
             }
             ScalarInfo::Symbolic(scalar) => ScalarInfoTyped::<T>::Symbolic(scalar.cast()),
         }

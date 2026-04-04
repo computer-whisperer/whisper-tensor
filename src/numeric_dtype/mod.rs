@@ -527,6 +527,176 @@ impl<'a> ONNXTensorView<'a> {
 }
 
 // ---------------------------------------------------------------------------
+// NumericPrimitive — map Rust types to NumericDType / NumericScalar
+// ---------------------------------------------------------------------------
+
+use crate::numeric_scalar::NumericScalar;
+
+/// Trait implemented by Rust primitive types that have a corresponding `NumericDType`.
+///
+/// Provides the bridge between typed Rust values and the dtype-erased `NumericScalar`
+/// used throughout the tensor system.
+pub trait NumericPrimitive: Copy + Clone + PartialEq + 'static {
+    const NUMERIC_DTYPE: NumericDType;
+    fn to_scalar(self) -> NumericScalar;
+    fn from_scalar(s: &NumericScalar) -> Self;
+}
+
+impl NumericPrimitive for f64 {
+    const NUMERIC_DTYPE: NumericDType = NumericDType::F64;
+    fn to_scalar(self) -> NumericScalar {
+        NumericScalar::from_f64(self)
+    }
+    fn from_scalar(s: &NumericScalar) -> Self {
+        s.to_f64()
+    }
+}
+impl NumericPrimitive for f32 {
+    const NUMERIC_DTYPE: NumericDType = NumericDType::F32;
+    fn to_scalar(self) -> NumericScalar {
+        NumericScalar::from_f32(self)
+    }
+    fn from_scalar(s: &NumericScalar) -> Self {
+        s.to_f32()
+    }
+}
+impl NumericPrimitive for half::bf16 {
+    const NUMERIC_DTYPE: NumericDType = NumericDType::BF16;
+    fn to_scalar(self) -> NumericScalar {
+        NumericScalar::from_bf16(self)
+    }
+    fn from_scalar(s: &NumericScalar) -> Self {
+        half::bf16::from_bits(u16::from_le_bytes(s.raw_bits()[..2].try_into().unwrap()))
+    }
+}
+impl NumericPrimitive for half::f16 {
+    const NUMERIC_DTYPE: NumericDType = NumericDType::F16;
+    fn to_scalar(self) -> NumericScalar {
+        NumericScalar::from_f16(self)
+    }
+    fn from_scalar(s: &NumericScalar) -> Self {
+        half::f16::from_bits(u16::from_le_bytes(s.raw_bits()[..2].try_into().unwrap()))
+    }
+}
+impl NumericPrimitive for float8::F8E4M3 {
+    const NUMERIC_DTYPE: NumericDType = NumericDType::F8E4M3FN;
+    fn to_scalar(self) -> NumericScalar {
+        NumericScalar::from_f8e4m3fn(self)
+    }
+    fn from_scalar(s: &NumericScalar) -> Self {
+        float8::F8E4M3::from_bits(s.raw_bits()[0])
+    }
+}
+impl NumericPrimitive for float8::F8E5M2 {
+    const NUMERIC_DTYPE: NumericDType = NumericDType::F8E5M2;
+    fn to_scalar(self) -> NumericScalar {
+        NumericScalar::from_f8e5m2(self)
+    }
+    fn from_scalar(s: &NumericScalar) -> Self {
+        float8::F8E5M2::from_bits(s.raw_bits()[0])
+    }
+}
+impl NumericPrimitive for i64 {
+    const NUMERIC_DTYPE: NumericDType = NumericDType::I64;
+    fn to_scalar(self) -> NumericScalar {
+        NumericScalar::from_i64(self)
+    }
+    fn from_scalar(s: &NumericScalar) -> Self {
+        s.to_i64()
+    }
+}
+impl NumericPrimitive for u64 {
+    const NUMERIC_DTYPE: NumericDType = NumericDType::U64;
+    fn to_scalar(self) -> NumericScalar {
+        NumericScalar::from_u64(self)
+    }
+    fn from_scalar(s: &NumericScalar) -> Self {
+        u64::from_le_bytes(s.raw_bits()[..8].try_into().unwrap())
+    }
+}
+impl NumericPrimitive for i32 {
+    const NUMERIC_DTYPE: NumericDType = NumericDType::I32;
+    fn to_scalar(self) -> NumericScalar {
+        NumericScalar::from_i32(self)
+    }
+    fn from_scalar(s: &NumericScalar) -> Self {
+        i32::from_le_bytes(s.raw_bits()[..4].try_into().unwrap())
+    }
+}
+impl NumericPrimitive for u32 {
+    const NUMERIC_DTYPE: NumericDType = NumericDType::U32;
+    fn to_scalar(self) -> NumericScalar {
+        NumericScalar::from_u32(self)
+    }
+    fn from_scalar(s: &NumericScalar) -> Self {
+        u32::from_le_bytes(s.raw_bits()[..4].try_into().unwrap())
+    }
+}
+impl NumericPrimitive for i16 {
+    const NUMERIC_DTYPE: NumericDType = NumericDType::I16;
+    fn to_scalar(self) -> NumericScalar {
+        NumericScalar::from_i16(self)
+    }
+    fn from_scalar(s: &NumericScalar) -> Self {
+        i16::from_le_bytes(s.raw_bits()[..2].try_into().unwrap())
+    }
+}
+impl NumericPrimitive for u16 {
+    const NUMERIC_DTYPE: NumericDType = NumericDType::U16;
+    fn to_scalar(self) -> NumericScalar {
+        NumericScalar::from_u16(self)
+    }
+    fn from_scalar(s: &NumericScalar) -> Self {
+        u16::from_le_bytes(s.raw_bits()[..2].try_into().unwrap())
+    }
+}
+impl NumericPrimitive for i8 {
+    const NUMERIC_DTYPE: NumericDType = NumericDType::I8;
+    fn to_scalar(self) -> NumericScalar {
+        NumericScalar::from_i8(self)
+    }
+    fn from_scalar(s: &NumericScalar) -> Self {
+        s.raw_bits()[0] as i8
+    }
+}
+impl NumericPrimitive for u8 {
+    const NUMERIC_DTYPE: NumericDType = NumericDType::U8;
+    fn to_scalar(self) -> NumericScalar {
+        NumericScalar::from_u8(self)
+    }
+    fn from_scalar(s: &NumericScalar) -> Self {
+        s.raw_bits()[0]
+    }
+}
+impl NumericPrimitive for arbitrary_int::i4 {
+    const NUMERIC_DTYPE: NumericDType = NumericDType::I4;
+    fn to_scalar(self) -> NumericScalar {
+        NumericScalar::from_i4(self)
+    }
+    fn from_scalar(s: &NumericScalar) -> Self {
+        arbitrary_int::i4::new((s.raw_bits()[0] & 0x0F) as i8)
+    }
+}
+impl NumericPrimitive for arbitrary_int::u4 {
+    const NUMERIC_DTYPE: NumericDType = NumericDType::U4;
+    fn to_scalar(self) -> NumericScalar {
+        NumericScalar::from_u4(self)
+    }
+    fn from_scalar(s: &NumericScalar) -> Self {
+        arbitrary_int::u4::new(s.raw_bits()[0] & 0x0F)
+    }
+}
+impl NumericPrimitive for bool {
+    const NUMERIC_DTYPE: NumericDType = NumericDType::BOOL;
+    fn to_scalar(self) -> NumericScalar {
+        NumericScalar::from_bool(self)
+    }
+    fn from_scalar(s: &NumericScalar) -> Self {
+        s.raw_bits()[0] != 0
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Conversion from legacy DType
 // ---------------------------------------------------------------------------
 

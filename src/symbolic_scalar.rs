@@ -1,12 +1,12 @@
-use crate::migration::numeric_scalar::NumericScalarType;
 use crate::numeric_dtype::NumericDType;
+use crate::numeric_dtype::NumericPrimitive;
 use serde::{Deserialize, Serialize};
 use std::marker::PhantomData;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SymbolicScalarTyped<T>
 where
-    T: Clone + Copy + NumericScalarType,
+    T: Clone + Copy + NumericPrimitive,
 {
     _phantom_type: PhantomData<T>,
     offset: i64,
@@ -15,7 +15,7 @@ where
 
 impl<T> SymbolicScalarTyped<T>
 where
-    T: Clone + Copy + NumericScalarType,
+    T: Clone + Copy + NumericPrimitive,
 {
     pub(crate) fn new(resolver: &mut SymbolicResolver) -> Self {
         Self {
@@ -25,18 +25,9 @@ where
         }
     }
 
-    pub(crate) fn to_dyn_type(&self) -> SymbolicScalar {
-        SymbolicScalar {
-            offset: self.offset,
-            dtype: NumericDType::from_legacy(T::DTYPE)
-                .expect("SymbolicScalarTyped type has no NumericDType equivalent"),
-            symbol_idx: self.symbol_idx,
-        }
-    }
-
     pub(crate) fn cast<T2>(&self) -> SymbolicScalarTyped<T2>
     where
-        T2: Clone + Copy + NumericScalarType,
+        T2: Clone + Copy + NumericPrimitive,
     {
         SymbolicScalarTyped {
             _phantom_type: PhantomData::<T2>,
@@ -100,7 +91,7 @@ impl SymbolicScalar {
     #[allow(dead_code)]
     pub(crate) fn cast<T>(&self) -> SymbolicScalarTyped<T>
     where
-        T: Copy + Clone + NumericScalarType,
+        T: Copy + Clone + NumericPrimitive,
     {
         SymbolicScalarTyped {
             _phantom_type: PhantomData,

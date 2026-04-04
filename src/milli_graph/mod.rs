@@ -4395,8 +4395,8 @@ mod tests {
         let neg_info = &result[&neg];
         assert_eq!(neg_info.dtype(), NumericDType::F32);
 
-        // It won't be concrete (no numeric values), so as_numeric should be None.
-        assert!(neg_info.as_numeric().is_none());
+        // It won't be concrete (no numeric values), so as_concrete should be None.
+        assert!(neg_info.as_concrete().is_none());
     }
 
     #[test]

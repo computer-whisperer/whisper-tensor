@@ -1,5 +1,4 @@
 use crate::dtype::DType;
-use crate::migration::numeric_tensor::NumericTensor;
 use crate::numeric_dtype::NumericDType;
 use crate::numeric_tensor::TensorFormat;
 use crate::tensor_rank::DynRank;
@@ -12,8 +11,6 @@ pub struct TensorStoreTensorId(u64);
 pub enum StoredTensor {
     /// Pool-backed tensor (new type system).
     Inline(crate::numeric_tensor::NumericTensor<'static, DynRank, crate::pool::SystemPool>),
-    /// Legacy in-memory tensor — kept for backward compatibility during migration.
-    Numeric(NumericTensor<DynRank>),
     ExternalBinary {
         path: String,
         offset: usize,
@@ -70,21 +67,6 @@ impl StoredTensor {
                 let mut tensor = NewTensor::from_parts(buf, layout);
                 for i in 0..src.numel() {
                     tensor.write_element(i, src.read_element(i));
-                }
-                Some(tensor)
-            }
-            StoredTensor::Numeric(legacy) => {
-                // Bridge: legacy → TensorInfo → concrete → copy
-                let sys_pool = crate::pool::SystemPool;
-                let info = crate::tensor_info::TensorInfo::from_legacy(legacy, &sys_pool);
-                let concrete = info.as_concrete()?;
-                let ndt = concrete.dtype();
-                let shape = concrete.shape().clone();
-                let layout = TensorLayout::<DynRank>::row_major(shape, ndt);
-                let buf = pool.allocate(layout.buffer_size_bytes()).ok()?;
-                let mut tensor = NewTensor::from_parts(buf, layout);
-                for i in 0..concrete.numel() {
-                    tensor.write_element(i, concrete.read_element(i));
                 }
                 Some(tensor)
             }
@@ -183,7 +165,6 @@ impl StoredTensor {
     pub fn shape(&self) -> Vec<u64> {
         match self {
             StoredTensor::Inline(t) => t.shape().clone(),
-            StoredTensor::Numeric(tensor) => tensor.shape(),
             StoredTensor::ExternalBinary { shape, .. } => shape.clone(),
             StoredTensor::ExternalPth { shape, .. } => shape.clone(),
             StoredTensor::ExternalSafetensors { shape, .. } => shape.clone(),
@@ -195,8 +176,6 @@ impl StoredTensor {
     pub fn format(&self) -> TensorFormat {
         match self {
             StoredTensor::Inline(t) => TensorFormat::Element(t.dtype()),
-            StoredTensor::Numeric(tensor) => TensorFormat::from_legacy_dtype(tensor.dtype())
-                .unwrap_or(TensorFormat::Element(NumericDType::F32)),
             StoredTensor::ExternalBinary { format, .. }
             | StoredTensor::ExternalPth { format, .. }
             | StoredTensor::ExternalSafetensors { format, .. }

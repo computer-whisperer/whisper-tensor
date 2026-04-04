@@ -11,63 +11,29 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use crate::numeric_dtype::NumericPrimitive;
+
 /// Trait for Rust types that can be stored as constant tensor elements.
+/// Blanket-implemented for all `NumericPrimitive` types.
 pub trait ConstantValue: Copy {
     fn to_scalar(self) -> NewScalar;
     fn dtype() -> NumericDType;
 }
 
-impl ConstantValue for i64 {
+impl<T: NumericPrimitive> ConstantValue for T {
     fn to_scalar(self) -> NewScalar {
-        NewScalar::from_i64(self)
+        NumericPrimitive::to_scalar(self)
     }
     fn dtype() -> NumericDType {
-        NumericDType::I64
-    }
-}
-impl ConstantValue for i32 {
-    fn to_scalar(self) -> NewScalar {
-        NewScalar::from_i32(self)
-    }
-    fn dtype() -> NumericDType {
-        NumericDType::I32
-    }
-}
-impl ConstantValue for f32 {
-    fn to_scalar(self) -> NewScalar {
-        NewScalar::from_f32(self)
-    }
-    fn dtype() -> NumericDType {
-        NumericDType::F32
-    }
-}
-impl ConstantValue for f64 {
-    fn to_scalar(self) -> NewScalar {
-        NewScalar::from_f64(self)
-    }
-    fn dtype() -> NumericDType {
-        NumericDType::F64
-    }
-}
-impl ConstantValue for u8 {
-    fn to_scalar(self) -> NewScalar {
-        NewScalar::from_u8(self)
-    }
-    fn dtype() -> NumericDType {
-        NumericDType::U8
-    }
-}
-impl ConstantValue for bool {
-    fn to_scalar(self) -> NewScalar {
-        NewScalar::from_bool(self)
-    }
-    fn dtype() -> NumericDType {
-        NumericDType::BOOL
+        T::NUMERIC_DTYPE
     }
 }
 
 /// Build an inline constant tensor from values + shape on the system pool.
-fn build_inline_constant<T: ConstantValue>(values: &[T], shape: Vec<u64>) -> InlineConstantTensor {
+pub fn build_inline_constant<T: ConstantValue>(
+    values: &[T],
+    shape: Vec<u64>,
+) -> InlineConstantTensor {
     use crate::numeric_tensor::{NumericTensor, TensorLayout};
     use crate::pool::{Pool, SystemPool};
 
