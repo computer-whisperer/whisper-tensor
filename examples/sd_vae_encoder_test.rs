@@ -1,12 +1,8 @@
-use ndarray::ArrayD;
-use ndarray_npy::ReadNpyExt;
 use std::collections::HashMap;
-use std::fs::File;
 use std::path::Path;
 use std::time::Instant;
 use whisper_tensor::DynRank;
 use whisper_tensor::numeric_dtype::NumericDType;
-use whisper_tensor::numeric_scalar::NumericScalar;
 use whisper_tensor::numeric_tensor::NumericTensor;
 use whisper_tensor::pool::SystemPool;
 use whisper_tensor_import::identify_and_load;
@@ -15,23 +11,15 @@ use whisper_tensor_import::onnx_graph::WeightStorageStrategy;
 const SD_BASE: &str = "/mnt/secondary/neural_networks/stable-diffusion-1.5-onnx-fp16";
 const REF_DIR: &str = "/tmp/sd_reference";
 
-fn load_npy_f32(name: &str) -> (Vec<f32>, Vec<usize>) {
-    let path = format!("{REF_DIR}/{name}");
-    let reader = File::open(&path).unwrap_or_else(|e| panic!("Cannot open {path}: {e}"));
-    let arr = ArrayD::<f32>::read_npy(reader).unwrap();
-    let shape = arr.shape().to_vec();
-    let values = arr.into_raw_vec_and_offset().0;
-    (values, shape)
-}
-
 fn load_npy_as_f16_tensor<'a>(
     name: &str,
     pool: &'a SystemPool,
 ) -> NumericTensor<'a, DynRank, SystemPool> {
-    let (values, shape) = load_npy_f32(name);
-    let shape_u64: Vec<u64> = shape.iter().map(|&s| s as u64).collect();
-    NumericTensor::from_fn(shape_u64, NumericDType::F16, pool, |i| {
-        NumericScalar::from_f32(values[i]).cast_to(NumericDType::F16)
+    let path = format!("{REF_DIR}/{name}");
+    let f32_tensor =
+        whisper_tensor::npy::read_npy_file(Path::new(&path), pool).expect("read npy");
+    NumericTensor::from_fn(f32_tensor.shape().clone(), NumericDType::F16, pool, |i| {
+        f32_tensor.read_element(i).cast_to(NumericDType::F16)
     })
     .unwrap()
 }
@@ -66,37 +54,33 @@ fn main() {
     // VAE encoder uses RandomNormalLike, so outputs won't match reference exactly.
     // We verify: correct shape/dtype, and output statistics are in reasonable range.
     if let Some(out) = outputs.get("latent_sample") {
-        let ref_path = "vae_encoder_latent_sample_float16.npy";
-        let (ref_values, ref_shape) = load_npy_f32(ref_path);
+        let ref_path = format!("{REF_DIR}/vae_encoder_latent_sample_float16.npy");
+        let ref_tensor =
+            whisper_tensor::npy::read_npy_file(std::path::Path::new(&ref_path), &pool)
+                .expect("read ref npy");
 
-        let actual_shape: Vec<usize> = out.shape().iter().map(|&s| s as usize).collect();
         println!("  Output: dtype={:?}, shape={:?}", out.dtype(), out.shape());
         assert_eq!(
-            actual_shape, ref_shape,
-            "Shape mismatch: actual={actual_shape:?} vs ref={ref_shape:?}"
+            out.shape(), ref_tensor.shape(),
+            "Shape mismatch: actual={:?} vs ref={:?}", out.shape(), ref_tensor.shape()
         );
         println!("  Shape: PASS");
 
-        let actual_f32 = cast_tensor(out, NumericDType::F32, &pool);
-        let actual_flat: Vec<f32> = (0..actual_f32.numel())
-            .map(|i| actual_f32.read_element(i).to_f32())
-            .collect();
+        let numel = out.numel();
 
         // Compare statistics rather than exact values
-        let actual_mean = actual_flat.iter().sum::<f32>() / actual_flat.len() as f32;
-        let actual_std = (actual_flat
-            .iter()
-            .map(|x| (x - actual_mean) * (x - actual_mean))
+        let actual_mean = (0..numel).map(|i| out.read_element(i).to_f32()).sum::<f32>() / numel as f32;
+        let actual_std = ((0..numel)
+            .map(|i| { let v = out.read_element(i).to_f32(); (v - actual_mean) * (v - actual_mean) })
             .sum::<f32>()
-            / actual_flat.len() as f32)
+            / numel as f32)
             .sqrt();
 
-        let ref_mean = ref_values.iter().sum::<f32>() / ref_values.len() as f32;
-        let ref_std = (ref_values
-            .iter()
-            .map(|x| (x - ref_mean) * (x - ref_mean))
+        let ref_mean = (0..numel).map(|i| ref_tensor.read_element(i).to_f32()).sum::<f32>() / numel as f32;
+        let ref_std = ((0..numel)
+            .map(|i| { let v = ref_tensor.read_element(i).to_f32(); (v - ref_mean) * (v - ref_mean) })
             .sum::<f32>()
-            / ref_values.len() as f32)
+            / numel as f32)
             .sqrt();
 
         println!("  Actual  stats: mean={actual_mean:.4}, std={actual_std:.4}");
@@ -119,16 +103,4 @@ fn main() {
             println!("  Statistics: WARNING (std ratio outside expected range)");
         }
     }
-}
-
-fn cast_tensor<'a>(
-    tensor: &NumericTensor<'_, DynRank, SystemPool>,
-    target_dtype: NumericDType,
-    pool: &'a SystemPool,
-) -> NumericTensor<'a, DynRank, SystemPool> {
-    let shape: Vec<u64> = tensor.shape().clone();
-    NumericTensor::from_fn(shape, target_dtype, pool, |i| {
-        tensor.read_element(i).cast_to(target_dtype)
-    })
-    .unwrap()
 }

@@ -1,5 +1,3 @@
-use ndarray::ArrayD;
-use ndarray_npy::WriteNpyExt;
 use std::path::Path;
 use std::time::Instant;
 use whisper_tensor::DynRank;
@@ -404,12 +402,8 @@ fn debug_tensor(name: &str, tensor: &NumericTensor<'_, DynRank, SystemPool>, _po
 }
 
 fn save_npy(name: &str, tensor: &NumericTensor<'_, DynRank, SystemPool>) {
-    let vals = tensor_to_f32(tensor);
-    let shape: Vec<usize> = tensor.shape().iter().map(|&x| x as usize).collect();
-    let arr = ArrayD::from_shape_vec(shape, vals).expect("shape mismatch");
     std::fs::create_dir_all("sd_dumps").ok();
     let path = format!("sd_dumps/{name}.npy");
-    let mut f = std::fs::File::create(&path).expect("create file");
-    arr.write_npy(&mut f).expect("write npy");
+    whisper_tensor::npy::write_npy_file(Path::new(&path), &tensor.view()).expect("write npy");
     println!("  Saved {path}");
 }

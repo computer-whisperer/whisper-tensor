@@ -27,9 +27,6 @@ rand = "0.10.0"
 espeak-rs = { version = "0.1.9", optional = true }
 zip = "8.2.0"
 
-ndarray = { version = "0.17.2", features = ["serde", "rayon", "matrixmultiply-threading"] }
-blas-src = { version = "0.14", features = ["openblas"], optional = true }
-openblas-src = { version = "0.10", features = ["cblas", "system"], optional = true }
 rayon = "1.10"
 rwkv-tokenizer = {workspace=true, optional=true, features = ["serde"] }
 env_logger = "0.11.9"
@@ -41,7 +38,6 @@ strum = "0.28"
 strum_macros = "0.28"
 paste = "1.0.15"
 image = "0.25"
-ndarray-npy = "0.10"
 float8 = { version = "0.7.0", features = ["serde", "num-traits", "zerocopy"] }
 arbitrary-int = { version = "2.1", features = ["serde"] }
 
@@ -57,9 +53,8 @@ cranelift-native = { version = "0.116", optional = true }
 whisper-tensor-import = {workspace=true}
 
 [features]
-default = ["tokenizers", "rwkv-tokenizer", "http", "blas", "safetensors"]
+default = ["tokenizers", "rwkv-tokenizer", "http", "safetensors"]
 safetensors = ["dep:safetensors", "dep:memmap2"]
-blas = ["ndarray/blas", "dep:blas-src", "dep:openblas-src"]
 tokenizers = ["dep:tokenizers"]
 http = ["tokenizers?/http"]
 rwkv-tokenizer = ["dep:rwkv-tokenizer"]
