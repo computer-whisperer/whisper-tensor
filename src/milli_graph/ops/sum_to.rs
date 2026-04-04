@@ -1,13 +1,9 @@
-use crate::DynRank;
-use crate::backends::eval_backend::EvalBackend;
 use crate::graph::{GlobalId, Node};
-use crate::migration::numeric_tensor::NumericTensor;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
 use crate::pool::Pool;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use typenum::P1;
 
 /// Reduces `data` via summation so its shape matches `target_shape`.
 ///
@@ -126,68 +122,6 @@ impl MilliOp for SumTo {
         }
 
         Err(MilliOpGraphError::UnableToInfer)
-    }
-
-    fn eval(
-        &self,
-        inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
-        _config: &super::MilliEvalConfig,
-        backend: &mut EvalBackend,
-    ) -> Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, MilliOpGraphError>
-    {
-        let data = &inputs[&self.data];
-        let target_shape_tensor = &inputs[&self.target_shape];
-        let target_shape: Vec<i64> = target_shape_tensor
-            .clone()
-            .try_to_rank::<P1>()?
-            .try_into()?;
-        let target_shape_usize: Vec<usize> = target_shape.iter().map(|&x| x as usize).collect();
-
-        let data_shape = data.shape();
-        let data_rank = data_shape.len();
-        let target_rank = target_shape_usize.len();
-
-        // Fast path: shapes already match
-        if data_rank == target_rank
-            && data_shape
-                .iter()
-                .zip(target_shape_usize.iter())
-                .all(|(&d, &t)| d as usize == t)
-        {
-            return Ok(Box::new([(self.output, data.clone())].into_iter()));
-        }
-
-        // Pad target_shape with leading 1s to match data rank
-        let rank_padding = data_rank.saturating_sub(target_rank);
-        let mut padded_target = vec![1usize; rank_padding];
-        padded_target.extend(&target_shape_usize);
-
-        // Find axes where padded_target[i] == 1 and data_shape[i] > 1
-        let mut reduce_axes: Vec<usize> = Vec::new();
-        for i in 0..data_rank {
-            if padded_target[i] == 1 && data_shape[i] as usize > 1 {
-                reduce_axes.push(i);
-            }
-        }
-
-        // ReduceSum along broadcast axes with keepdims=true (preserves rank)
-        let mut result = data.clone();
-        if !reduce_axes.is_empty() {
-            result = result.reduce_sum(
-                reduce_axes,
-                true,
-                super::AccumulationMode::default(),
-                backend,
-            )?;
-        }
-
-        // Reshape to target shape (removes any rank-padded leading dims)
-        let final_shape: Vec<u64> = target_shape_usize.iter().map(|&x| x as u64).collect();
-        if result.shape() != final_shape {
-            result = result.reshape(final_shape, backend)?;
-        }
-
-        Ok(Box::new([(self.output, result)].into_iter()))
     }
 
     fn eval_new<'p, P2: crate::pool::Pool + 'p>(

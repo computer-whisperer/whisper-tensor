@@ -1895,7 +1895,6 @@ impl<'a> NanoLoweringContext<'a> {
 mod tests {
     use super::*;
     use crate::DynRank;
-    use crate::backends::eval_backend::EvalBackend;
     use crate::graph::Graph;
     use crate::milli_graph::MilliOpGraph;
     use crate::milli_graph::ops::MilliOp;
@@ -1907,26 +1906,8 @@ mod tests {
     use crate::nano_graph::pattern::AtomRange;
     use crate::pool::TrackedPool;
 
-    /// Extract flat values from a NumericTensor, returned as f64.
-    fn tensor_to_f64(t: &NumericTensor<DynRank>) -> Vec<f64> {
-        let mut backend = EvalBackend::NDArray;
-        // BOOL can't cast to F32 — handle separately.
-        if t.dtype() == crate::dtype::DType::BOOL {
-            let nd = t.to_ndarray().unwrap();
-            match nd {
-                crate::backends::ndarray_backend::NDArrayNumericTensor::BOOL(a) => {
-                    return a.iter().map(|&v| if v { 1.0 } else { 0.0 }).collect();
-                }
-                _ => unreachable!(),
-            }
-        }
-        let f32_tensor = t.cast(crate::dtype::DType::F32, &mut backend).unwrap();
-        let flat = f32_tensor.flatten().unwrap();
-        let v: Vec<f32> = flat.to_ndarray().unwrap().try_into().unwrap();
-        v.into_iter().map(|x| x as f64).collect()
-    }
-
-    /// Build a milli graph, eval through both milli and nano, compare results.
+    /// Build a milli graph, eval through both per-op eval_new and nano pool_eval,
+    /// compare results.
     fn check_integrity(
         build_graph: impl FnOnce(
             &mut MilliOpGraph,
@@ -1940,26 +1921,31 @@ mod tests {
         let (input_ids, output_ids) = build_graph(&mut milli, &mut rng);
         assert_eq!(input_ids.len(), inputs.len());
 
-        // Prepare inputs.
+        // Convert legacy inputs to pool tensors.
+        let pool_inputs: Vec<_> = inputs.iter().map(|t| bridge::legacy_to_new(t)).collect();
+
+        // Prepare inputs for lowering info.
         let mut info_inputs: HashMap<GlobalId, LowerTensorInfo> = HashMap::new();
-        let mut intermediates: HashMap<GlobalId, NumericTensor<DynRank>> = HashMap::new();
-        for (id, tensor) in input_ids.iter().zip(inputs.iter()) {
-            info_inputs.insert(*id, LowerTensorInfo::from_legacy(tensor, &SystemPool));
-            intermediates.insert(*id, tensor.clone());
+        let mut intermediates: HashMap<
+            GlobalId,
+            crate::numeric_tensor::NumericTensor<'static, DynRank, SystemPool>,
+        > = HashMap::new();
+        for (id, tensor) in input_ids.iter().zip(pool_inputs.iter()) {
+            info_inputs.insert(*id, LowerTensorInfo::from_view(&tensor.view(), &SystemPool));
+            intermediates.insert(*id, tensor.to_tensor(&SystemPool).unwrap());
         }
 
-        // Eval through MilliOpGraph.
-        let mut backend = EvalBackend::NDArray;
+        // Eval through per-op eval_new (reference implementation).
         for &op_id in milli.op_ordering() {
             let op = milli.get_node_by_id(&op_id).unwrap();
-            for (tid, val) in op
-                .eval(
-                    &intermediates,
-                    &crate::milli_graph::ops::MilliEvalConfig::default(),
-                    &mut backend,
-                )
-                .unwrap()
-            {
+            let op_input_ids: Vec<_> = op.inputs().collect();
+            let input_views: Vec<_> = op_input_ids
+                .iter()
+                .map(|id| intermediates[id].view())
+                .collect();
+            let results = op.eval_new(&input_views, &SystemPool).unwrap();
+            let op_output_ids: Vec<_> = op.outputs().collect();
+            for (tid, val) in op_output_ids.into_iter().zip(results) {
                 intermediates.insert(tid, val);
             }
         }
@@ -1972,15 +1958,8 @@ mod tests {
             result.unsupported_details
         );
 
-        // Convert old inputs to new NumericTensor via bridge for pool_eval.
-        let new_inputs: Vec<_> = input_ids
-            .iter()
-            .zip(inputs.iter())
-            .map(|(_, t)| bridge::legacy_to_new(t))
-            .collect();
-
         // Map to (AtomId, view) pairs for pool_eval.
-        let input_views: Vec<_> = new_inputs.iter().map(|t| t.view()).collect();
+        let input_views: Vec<_> = pool_inputs.iter().map(|t| t.view()).collect();
         let eval_inputs: Vec<_> = result
             .graph
             .input_tensors()
@@ -2044,7 +2023,10 @@ mod tests {
         // Compare outputs.
         for out_id in &output_ids {
             let milli_tensor = &intermediates[out_id];
-            let milli_flat = tensor_to_f64(milli_tensor);
+            let milli_numel = milli_tensor.numel();
+            let milli_flat: Vec<f64> = (0..milli_numel)
+                .map(|i| milli_tensor.read_element(i).to_f64())
+                .collect();
             let tam = result.tensor_map.get(out_id).unwrap();
 
             let nano_flat: Vec<f64> = (0..tam.count)

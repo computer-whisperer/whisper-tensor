@@ -1,13 +1,9 @@
-use crate::DynRank;
-use crate::backends::eval_backend::EvalBackend;
 use crate::graph::{GlobalId, Node};
-use crate::migration::numeric_tensor::NumericTensor;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
 use crate::pool::Pool;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use typenum::P1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReduceMax {
@@ -189,44 +185,7 @@ impl MilliOp for ReduceMax {
             return Ok(results);
         }
 
-        Ok(vec![((self.output, out_info))])
-    }
-
-    fn eval(
-        &self,
-        inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
-        _config: &super::MilliEvalConfig,
-        backend: &mut EvalBackend,
-    ) -> Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, MilliOpGraphError>
-    {
-        let data = &inputs[&self.data];
-        let axes = if let Some(axes) = self.axes {
-            Vec::<i64>::try_from(inputs[&axes].try_to_rank::<P1>()?)?
-        } else {
-            (0i64..(data.shape().len() as i64)).collect()
-        };
-        let axes = if axes.is_empty() {
-            if self.noop_with_empty_axes {
-                let out_tensor = data.clone();
-                return Ok(Box::new([(self.output, out_tensor)].into_iter()));
-            } else {
-                (0i64..(data.shape().len() as i64)).collect::<Vec<_>>()
-            }
-        } else {
-            axes
-        };
-        let axes = axes
-            .into_iter()
-            .map(|x| {
-                (if x < 0 {
-                    x + data.shape().len() as i64
-                } else {
-                    x
-                }) as usize
-            })
-            .collect::<Vec<_>>();
-        let out = data.reduce_max(axes, self.keepdims, backend)?;
-        Ok(Box::new([(self.output, out)].into_iter()))
+        Ok(vec![(self.output, out_info)])
     }
 
     fn eval_new<'p, P2: crate::pool::Pool + 'p>(

@@ -1,15 +1,9 @@
-use crate::DynRank;
-use crate::backends::eval_backend::EvalBackend;
-use crate::backends::ndarray_backend::NDArrayNumericTensor;
-use crate::dtype::DType;
 use crate::graph::{GlobalId, Node};
-use crate::migration::numeric_tensor::NumericTensor;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
 use crate::pool::Pool;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use typenum::P1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Unsqueeze {
@@ -176,7 +170,7 @@ impl MilliOp for Unsqueeze {
                 output_shape,
                 symbolic_resolver,
             ));
-            return Ok(vec![((self.output, out))]);
+            return Ok(vec![(self.output, out)]);
         }
 
         // If axes are concrete, we can at least compute output rank
@@ -190,7 +184,7 @@ impl MilliOp for Unsqueeze {
                     ScalarInfoTyped::Numeric(output_rank),
                     symbolic_resolver,
                 );
-                return Ok(vec![((self.output, out))]);
+                return Ok(vec![(self.output, out)]);
             }
         }
 
@@ -200,7 +194,7 @@ impl MilliOp for Unsqueeze {
             ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(symbolic_resolver)),
             symbolic_resolver,
         );
-        Ok(vec![((self.output, out))])
+        Ok(vec![(self.output, out)])
     }
 
     fn backward(
@@ -215,60 +209,6 @@ impl MilliOp for Unsqueeze {
         let mut result = HashMap::new();
         result.insert(self.data, grad_input);
         Some(result)
-    }
-
-    fn eval(
-        &self,
-        inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
-        _config: &super::MilliEvalConfig,
-        backend: &mut EvalBackend,
-    ) -> Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, MilliOpGraphError>
-    {
-        let axes_ndarray = NDArrayNumericTensor::<DynRank>::try_from(
-            inputs[&self.axes].cast(DType::I64, backend)?,
-        )?;
-        let axes = Vec::<i64>::try_from(axes_ndarray.try_to_rank::<P1>()?)?;
-        let input_shape = inputs[&self.data].shape();
-        let output_rank = input_shape.len() + axes.len();
-        if axes.len() == 1 {
-            let axis = axes[0];
-            // ONNX: negative axes refer to the output rank, not the input rank
-            let axis = if axis >= 0 {
-                axis as usize
-            } else {
-                (output_rank as i64 + axis) as usize
-            };
-            let output = inputs[&self.data].unsqueeze(axis)?;
-            Ok(Box::new([(self.output, output)].into_iter()))
-        } else {
-            // Multiple axes (use reshape)
-            // ONNX: negative axes refer to the output rank
-            let mut output_shape = Vec::new();
-            let mut input_index = 0;
-            for i in 0..output_rank {
-                let mut is_selected = false;
-                for axis in &axes {
-                    // Negative axes relative to output rank
-                    let axis = if *axis < 0 {
-                        output_rank as i64 + *axis
-                    } else {
-                        *axis
-                    };
-                    if axis == i as i64 {
-                        is_selected = true;
-                        break;
-                    }
-                }
-                if is_selected {
-                    output_shape.push(1);
-                } else {
-                    output_shape.push(input_shape[input_index]);
-                    input_index += 1;
-                }
-            }
-            let output = inputs[&self.data].reshape(output_shape, backend)?;
-            Ok(Box::new([(self.output, output)].into_iter()))
-        }
     }
 
     fn eval_new<'p, P2: crate::pool::Pool + 'p>(

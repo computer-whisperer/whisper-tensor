@@ -1,7 +1,4 @@
-use crate::DynRank;
-use crate::backends::eval_backend::EvalBackend;
 use crate::graph::{GlobalId, Node};
-use crate::migration::numeric_tensor::NumericTensor;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
 use crate::nano_graph::lower::{NanoLoweringContext, TensorAtomMap};
@@ -11,7 +8,6 @@ use crate::pool::Pool;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use typenum::P1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Expand {
@@ -276,7 +272,7 @@ impl MilliOp for Expand {
                     final_shape,
                     symbolic_resolver,
                 ));
-                return Ok(vec![((self.output, out))]);
+                return Ok(vec![(self.output, out)]);
             }
 
             // Input shape not known, but target shape is
@@ -285,7 +281,7 @@ impl MilliOp for Expand {
                 output_shape,
                 symbolic_resolver,
             ));
-            return Ok(vec![((self.output, out))]);
+            return Ok(vec![(self.output, out)]);
         }
 
         // Shape tensor not concrete. Try to get output rank from shape tensor length.
@@ -299,7 +295,7 @@ impl MilliOp for Expand {
                     ScalarInfoTyped::Numeric(output_rank as u32),
                     symbolic_resolver,
                 );
-                return Ok(vec![((self.output, out))]);
+                return Ok(vec![(self.output, out)]);
             }
         }
 
@@ -309,29 +305,7 @@ impl MilliOp for Expand {
             ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(symbolic_resolver)),
             symbolic_resolver,
         );
-        Ok(vec![((self.output, out))])
-    }
-
-    fn eval(
-        &self,
-        inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
-        _config: &super::MilliEvalConfig,
-        _backend: &mut EvalBackend,
-    ) -> Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, MilliOpGraphError>
-    {
-        let shape: Vec<i64> = inputs[&self.shape].try_to_rank::<P1>()?.try_into()?;
-        let shape_u = shape.iter().map(|x| *x as u64).collect::<Vec<u64>>();
-        let mut x = inputs[&self.input].clone();
-        while x.rank() < shape_u.len() {
-            x = x.unsqueeze(0)?;
-        }
-        let shape_u = shape_u
-            .iter()
-            .zip(x.shape().iter())
-            .map(|(a, b)| std::cmp::max(*a, *b))
-            .collect::<Vec<u64>>();
-        let out = x.expand(&shape_u)?;
-        Ok(Box::new([(self.output, out)].into_iter()))
+        Ok(vec![(self.output, out)])
     }
 
     fn eval_new<'p, P2: crate::pool::Pool + 'p>(

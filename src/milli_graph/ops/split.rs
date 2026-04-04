@@ -1,7 +1,4 @@
-use crate::DynRank;
-use crate::backends::eval_backend::EvalBackend;
 use crate::graph::{GlobalId, Node};
-use crate::migration::numeric_tensor::NumericTensor;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp, MilliOpTensorIDOrLiteral};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
 use crate::nano_graph::lower::{DimKind, NanoLoweringContext, TensorAtomMap};
@@ -354,68 +351,7 @@ impl MilliOp for Split {
             return Ok(results);
         }
 
-        Ok(vec![((self.output, out_info))])
-    }
-
-    fn eval(
-        &self,
-        inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
-        _config: &super::MilliEvalConfig,
-        backend: &mut EvalBackend,
-    ) -> Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, MilliOpGraphError>
-    {
-        // Determine the split sizes
-        let split: Vec<i64> = if let Some(split) = &self.split {
-            match split {
-                MilliOpTensorIDOrLiteral::TensorID(split) => {
-                    inputs[split].clone().try_to_rank::<P1>()?.try_into()?
-                }
-                MilliOpTensorIDOrLiteral::Literal(split) => {
-                    split.try_to_rank::<P1>()?.try_into()?
-                }
-            }
-        } else if let Some(num_outputs) = self.num_outputs {
-            if num_outputs == 0 {
-                return Err(MilliOpGraphError::InvalidInput(
-                    "Split: num_outputs must be > 0".to_string(),
-                ));
-            }
-            // Compute equal chunk sizes from the input shape along axis
-            let input = &inputs[&self.data];
-            let shape = input.shape();
-            let rank = shape.len();
-            let axis = if self.axis < 0 {
-                (self.axis + rank as i64) as usize
-            } else {
-                self.axis as usize
-            };
-            if axis >= rank {
-                return Err(MilliOpGraphError::InvalidInput(format!(
-                    "Split: axis {} out of range for rank {}",
-                    self.axis, rank
-                )));
-            }
-            let dim = shape[axis] as usize;
-            // ONNX semantics: when split attribute is absent and num_outputs is provided,
-            // the input tensor is split into num_outputs nearly-equal parts along axis.
-            // If not divisible, the first (dim % num_outputs) outputs get one extra element.
-            let base = dim / num_outputs;
-            let remainder = dim % num_outputs;
-            let mut parts = Vec::with_capacity(num_outputs);
-            for i in 0..num_outputs {
-                let sz = base + if i < remainder { 1 } else { 0 };
-                parts.push(sz as i64);
-            }
-            parts
-        } else {
-            return Err(MilliOpGraphError::InvalidInput(
-                "Split attribute is not set and num_outputs is not provided".to_string(),
-            ));
-        };
-
-        let outs = inputs[&self.data].split(&split, self.axis, backend)?;
-        let out = outs[self.output_id].clone();
-        Ok(Box::new([(self.output, out)].into_iter()))
+        Ok(vec![(self.output, out_info)])
     }
 
     fn eval_new<'p, P2: crate::pool::Pool + 'p>(
@@ -525,6 +461,7 @@ impl MilliOp for Split {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::DynRank;
     use crate::numeric_dtype::NumericDType;
     use crate::numeric_scalar::NumericScalar;
     use crate::numeric_tensor::NumericTensor as PoolTensor;

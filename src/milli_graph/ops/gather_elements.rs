@@ -100,34 +100,6 @@ impl MilliOp for GatherElements {
         Ok(vec![(self.output, out_info)])
     }
 
-    fn eval(
-        &self,
-        inputs: &HashMap<
-            GlobalId,
-            crate::migration::numeric_tensor::NumericTensor<crate::tensor_rank::DynRank>,
-        >,
-        _config: &super::MilliEvalConfig,
-        _backend: &mut crate::backends::eval_backend::EvalBackend,
-    ) -> super::EvalResult {
-        let pool_tensors: Vec<_> = [self.data, self.indices]
-            .iter()
-            .map(|id| {
-                crate::nano_graph::lower::legacy_numeric_to_new(
-                    &inputs[id],
-                    &crate::pool::SystemPool,
-                )
-            })
-            .collect();
-        let view_refs: Vec<_> = pool_tensors.iter().map(|t| t.view()).collect();
-        let results = self
-            .eval_new(&view_refs, &crate::pool::SystemPool)
-            .map_err(|e| MilliOpGraphError::InvalidInput(format!("{e}")))?;
-        let output = self.output;
-        Ok(Box::new(results.into_iter().map(move |t| {
-            (output, crate::nano_graph::lower::new_numeric_to_legacy(&t))
-        })))
-    }
-
     fn eval_new<'p, P2: Pool + 'p>(
         &self,
         inputs: &[crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>],

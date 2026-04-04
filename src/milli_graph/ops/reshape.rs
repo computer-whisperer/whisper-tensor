@@ -1,14 +1,9 @@
-use crate::DynRank;
-use crate::backends::eval_backend::EvalBackend;
-use crate::dtype::DType;
 use crate::graph::{GlobalId, Node};
-use crate::migration::numeric_tensor::NumericTensor;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
 use crate::pool::Pool;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use typenum::P1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Reshape {
@@ -300,7 +295,7 @@ impl MilliOp for Reshape {
                 output_dims,
                 symbolic_resolver,
             ));
-            return Ok(vec![((self.output, out))]);
+            return Ok(vec![(self.output, out)]);
         }
 
         // Shape tensor is not concrete. Try to get output rank from shape tensor's
@@ -315,7 +310,7 @@ impl MilliOp for Reshape {
                     ScalarInfoTyped::Numeric(*output_rank as u32),
                     symbolic_resolver,
                 );
-                return Ok(vec![((self.output, out))]);
+                return Ok(vec![(self.output, out)]);
             }
         }
 
@@ -325,7 +320,7 @@ impl MilliOp for Reshape {
             ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(symbolic_resolver)),
             symbolic_resolver,
         );
-        Ok(vec![((self.output, out))])
+        Ok(vec![(self.output, out)])
     }
 
     fn backward(
@@ -341,27 +336,6 @@ impl MilliOp for Reshape {
         let mut result = HashMap::new();
         result.insert(self.data, grad_input);
         Some(result)
-    }
-
-    fn eval(
-        &self,
-        inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
-        _config: &super::MilliEvalConfig,
-        backend: &mut EvalBackend,
-    ) -> Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, MilliOpGraphError>
-    {
-        let data_input = &inputs[&self.data];
-        let shape_input = &inputs[&self.shape];
-        let shape_input_value: Vec<i64> = shape_input
-            .cast(DType::I64, backend)?
-            .try_to_rank::<P1>()?
-            .try_into()?;
-
-        let output_shape = self.calculate_new_shape(&data_input.shape(), &shape_input_value)?;
-
-        let output_value = data_input.reshape(output_shape, backend)?;
-
-        Ok(Box::new([(self.output, output_value)].into_iter()))
     }
 
     fn eval_new<'p, P2: crate::pool::Pool + 'p>(

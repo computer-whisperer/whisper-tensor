@@ -1,7 +1,4 @@
-use crate::DynRank;
-use crate::backends::eval_backend::EvalBackend;
 use crate::graph::{GlobalId, Node};
-use crate::migration::numeric_tensor::NumericTensor;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp, MilliOpTensorIDOrLiteral};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
 use crate::nano_graph::lower::{ConcatSegment, DimKind, TensorAtomMap};
@@ -364,7 +361,7 @@ impl MilliOp for Concat {
             }
 
             let out_info = TensorInfo::from_dtype_and_shape_scalars(out_dtype, &out_dims);
-            Ok(vec![((self.output, out_info))])
+            Ok(vec![(self.output, out_info)])
         } else {
             // No input has known rank — fall back to Minimal.
             let first_elem = crate::scalar_info::ScalarInfo::Symbolic(
@@ -376,7 +373,7 @@ impl MilliOp for Concat {
                 out_rank,
                 symbolic_resolver,
             );
-            Ok(vec![((self.output, out_info))])
+            Ok(vec![(self.output, out_info)])
         }
     }
 
@@ -419,26 +416,6 @@ impl MilliOp for Concat {
                 .or_insert(grad_i);
         }
         Some(result)
-    }
-
-    fn eval(
-        &self,
-        inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
-        _config: &super::MilliEvalConfig,
-        backend: &mut EvalBackend,
-    ) -> Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, MilliOpGraphError>
-    {
-        let mut resolved_inputs = vec![];
-        for input in &self.inputs {
-            resolved_inputs.push(&inputs[input]);
-        }
-        let axis = if self.axis < 0 {
-            resolved_inputs[0].shape().len() as i64 + self.axis
-        } else {
-            self.axis
-        } as usize;
-        let out = NumericTensor::<DynRank>::concat(resolved_inputs.as_slice(), axis, backend)?;
-        Ok(Box::new([(self.output, out)].into_iter()))
     }
 
     fn eval_new<'p, P2: crate::pool::Pool + 'p>(

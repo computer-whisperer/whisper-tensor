@@ -1,8 +1,6 @@
 use crate::DynRank;
-use crate::backends::eval_backend::EvalBackend;
 use crate::backends::ndarray_backend::NDArrayNumericTensor;
 use crate::graph::{GlobalId, Node};
-use crate::migration::numeric_tensor::NumericTensor;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
 use crate::numeric_dtype::NumericDType;
@@ -13,7 +11,6 @@ use crate::symbolic_graph::InlineConstantTensor;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use typenum::P1;
 
 /// Trait for Rust types that can be stored as constant tensor elements.
 pub trait ConstantValue: Copy {
@@ -239,18 +236,6 @@ impl MilliOp for Constant {
         )])
     }
 
-    fn eval(
-        &self,
-        _inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
-        _config: &super::MilliEvalConfig,
-        _backend: &mut EvalBackend,
-    ) -> Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, MilliOpGraphError>
-    {
-        // Bridge to legacy for old eval path.
-        let legacy = crate::nano_graph::lower::new_numeric_to_legacy(self.data.inner());
-        Ok(Box::new([(self.output, legacy)].into_iter()))
-    }
-
     fn eval_new<'p, P2: crate::pool::Pool + 'p>(
         &self,
         _inputs: &[crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>],
@@ -411,26 +396,11 @@ impl MilliOp for ConstantOfShape {
                     }
                 }
                 let out_info = TensorInfo::from_dtype_and_shape_scalars(out_dtype, &out_dims);
-                return Ok(vec![((self.output, out_info))]);
+                return Ok(vec![(self.output, out_info)]);
             }
         }
 
         Err(MilliOpGraphError::UnableToInfer)
-    }
-
-    fn eval(
-        &self,
-        inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
-        _config: &super::MilliEvalConfig,
-        _backend: &mut EvalBackend,
-    ) -> Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, MilliOpGraphError>
-    {
-        let shape: Vec<i64> = inputs[&self.shape].try_to_rank::<P1>()?.try_into()?;
-        let shape_u64 = shape.iter().map(|x| *x as u64).collect::<Vec<_>>();
-        let legacy_scalar = crate::nano_graph::lower::new_scalar_to_legacy(&self.value);
-        let out: NumericTensor<DynRank> =
-            NDArrayNumericTensor::<DynRank>::fill(legacy_scalar, &shape_u64)?.into();
-        Ok(Box::new([(self.output, out)].into_iter()))
     }
 
     fn eval_new<'p, P2: crate::pool::Pool + 'p>(

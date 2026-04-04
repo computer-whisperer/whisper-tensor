@@ -1,8 +1,4 @@
-use crate::DynRank;
-use crate::backends::eval_backend::EvalBackend;
-use crate::dtype::DType;
 use crate::graph::{GlobalId, Node};
-use crate::migration::numeric_tensor::NumericTensor;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
 use crate::pool::Pool;
@@ -135,17 +131,6 @@ impl MilliOp for NonZero {
             SymbolicScalarTyped::new(symbolic_resolver),
         ));
         Ok(vec![(self.output, minimal)])
-    }
-
-    fn eval(
-        &self,
-        inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
-        _config: &super::MilliEvalConfig,
-        backend: &mut EvalBackend,
-    ) -> Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, MilliOpGraphError>
-    {
-        let out = inputs[&self.input].nonzero(backend)?;
-        Ok(Box::new([(self.output, out)].into_iter()))
     }
 
     fn eval_new<'p, P2: crate::pool::Pool + 'p>(

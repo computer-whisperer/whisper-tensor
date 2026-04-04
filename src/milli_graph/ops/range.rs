@@ -1,14 +1,10 @@
-use crate::DynRank;
-use crate::backends::eval_backend::EvalBackend;
 use crate::graph::GlobalId;
-use crate::migration::numeric_tensor::NumericTensor;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
 use crate::pool::Pool;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use typenum::P1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Range {
@@ -137,23 +133,6 @@ impl MilliOp for Range {
             self.output,
             TensorInfo::new_from_first_element_and_rank(first, rank, symbolic_resolver),
         )])
-    }
-
-    fn eval(
-        &self,
-        inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
-        _config: &super::MilliEvalConfig,
-        backend: &mut EvalBackend,
-    ) -> Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, MilliOpGraphError>
-    {
-        let out: NumericTensor<DynRank> = NumericTensor::<P1>::range(
-            inputs[&self.start].first_element(),
-            inputs[&self.end].first_element(),
-            inputs[&self.delta].first_element(),
-            backend,
-        )?
-        .to_dyn_rank();
-        Ok(Box::new([(self.output, out)].into_iter()))
     }
 
     fn eval_new<'p, P2: crate::pool::Pool + 'p>(

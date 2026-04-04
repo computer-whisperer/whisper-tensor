@@ -1,9 +1,6 @@
 use crate::DynRank;
-use crate::backends::eval_backend::EvalBackend;
 use crate::dtype::{DType, DTypeError};
 use crate::graph::{GlobalId, Graph, Link, Node, collect_disconnected_node_slots};
-use crate::migration::numeric_tensor::NumericTensor;
-use crate::milli_graph::observer::MilliOpGraphObserver;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::numeric_dtype::NumericDType;
 use crate::scalar_info::ScalarInfo;
@@ -13,7 +10,6 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
-use std::time::Instant;
 
 pub mod observer;
 pub mod ops;
@@ -1033,70 +1029,6 @@ impl MilliOpGraph {
         Ok(())
     }
 
-    #[allow(clippy::type_complexity)]
-    pub fn eval<T: MilliOpGraphObserver>(
-        &self,
-        inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
-        observer: &mut T,
-        backend: &mut EvalBackend,
-    ) -> Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, MilliOpGraphError>
-    {
-        self.validate_ready_for_interpreter()?;
-
-        let mut intermediate_values = HashMap::new();
-        for (tensor_id, tensor_value) in inputs {
-            if let Some(&internal_id) = self.input_map.get(tensor_id) {
-                intermediate_values.insert(internal_id, tensor_value.clone());
-            }
-        }
-
-        for op_id in &self.op_ordering {
-            if observer.should_cancel() {
-                return Err(MilliOpGraphError::Cancelled);
-            }
-            let op = self.ops.get(op_id).ok_or_else(|| {
-                MilliOpGraphError::InvalidGraph(format!("missing op {op_id} in op_ordering"))
-            })?;
-            let start_instant = Instant::now();
-            let out_vec: Vec<_> = op
-                .eval(
-                    &intermediate_values,
-                    &crate::milli_graph::ops::MilliEvalConfig::default(),
-                    backend,
-                )?
-                .collect();
-            let end_instant = Instant::now();
-            observer.on_node_executed(&[op.global_id()], start_instant, end_instant);
-            for (tensor_id, value) in out_vec {
-                let observed_tensor_id = self
-                    .tensors
-                    .get(&tensor_id)
-                    .map(|tensor| tensor.global_id())
-                    .unwrap_or(tensor_id);
-                {
-                    let pool_t = crate::migration::bridge::legacy_to_new(&value);
-                    observer.on_tensor_assigned(&[observed_tensor_id], &pool_t.view());
-                }
-                intermediate_values.insert(tensor_id, value);
-            }
-        }
-
-        let output_map = self.output_map.as_ref().ok_or_else(|| {
-            MilliOpGraphError::InvalidGraph("output_map is not configured".to_string())
-        })?;
-        let mut outputs = HashMap::new();
-        for (internal_id, external_id) in output_map {
-            let value = intermediate_values.get(internal_id).ok_or_else(|| {
-                MilliOpGraphError::InvalidGraph(format!(
-                    "missing computed output tensor {internal_id} for external output {external_id}"
-                ))
-            })?;
-            outputs.insert(*external_id, value.clone());
-        }
-
-        Ok(Box::new(outputs.into_iter()))
-    }
-
     /// Execute the graph through the pool-based nano eval pipeline.
     ///
     /// Flow: infer_all → lower_to_nano → pool_eval.
@@ -1374,112 +1306,6 @@ impl MilliOpGraph {
         }
 
         Ok(outputs)
-    }
-
-    /// Run the graph through the interpreter and return the shape of every
-    /// internal tensor (inputs, constants, intermediates, outputs).
-    ///
-    /// The returned HashMap uses internal tensor IDs — the same IDs used
-    /// by `op_ordering()`, `get_node_by_id()`, and `compile_graph()`.
-    pub fn collect_all_shapes(
-        &self,
-        inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
-    ) -> Result<HashMap<GlobalId, Vec<usize>>, MilliOpGraphError> {
-        self.validate_ready_for_interpreter()?;
-        let mut backend = EvalBackend::NDArray;
-        let mut shapes = HashMap::new();
-
-        let mut intermediate_values = HashMap::new();
-        for (ext_id, tensor_value) in inputs {
-            let int_id = self.input_map.get(ext_id).copied().ok_or_else(|| {
-                MilliOpGraphError::InvalidGraph(format!(
-                    "missing external input mapping for {ext_id}"
-                ))
-            })?;
-            shapes.insert(
-                int_id,
-                tensor_value.shape().iter().map(|&d| d as usize).collect(),
-            );
-            intermediate_values.insert(int_id, tensor_value.clone());
-        }
-
-        for op_id in &self.op_ordering {
-            let op = self.ops.get(op_id).ok_or_else(|| {
-                MilliOpGraphError::InvalidGraph(format!("missing op {op_id} in op_ordering"))
-            })?;
-            let out_vec: Vec<_> = op
-                .eval(
-                    &intermediate_values,
-                    &crate::milli_graph::ops::MilliEvalConfig::default(),
-                    &mut backend,
-                )?
-                .collect();
-            for (tensor_id, value) in out_vec {
-                shapes.insert(
-                    tensor_id,
-                    value.shape().iter().map(|&d| d as usize).collect(),
-                );
-                intermediate_values.insert(tensor_id, value);
-            }
-        }
-
-        Ok(shapes)
-    }
-
-    /// Like `collect_all_shapes` but also returns the DType of every tensor.
-    #[allow(clippy::type_complexity)]
-    pub fn collect_all_shapes_and_dtypes(
-        &self,
-        inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
-    ) -> Result<
-        (
-            HashMap<GlobalId, Vec<usize>>,
-            HashMap<GlobalId, crate::dtype::DType>,
-        ),
-        MilliOpGraphError,
-    > {
-        self.validate_ready_for_interpreter()?;
-        let mut backend = EvalBackend::NDArray;
-        let mut shapes = HashMap::new();
-        let mut dtypes = HashMap::new();
-
-        let mut intermediate_values = HashMap::new();
-        for (ext_id, tensor_value) in inputs {
-            let int_id = self.input_map.get(ext_id).copied().ok_or_else(|| {
-                MilliOpGraphError::InvalidGraph(format!(
-                    "missing external input mapping for {ext_id}"
-                ))
-            })?;
-            shapes.insert(
-                int_id,
-                tensor_value.shape().iter().map(|&d| d as usize).collect(),
-            );
-            dtypes.insert(int_id, tensor_value.dtype());
-            intermediate_values.insert(int_id, tensor_value.clone());
-        }
-
-        for op_id in &self.op_ordering {
-            let op = self.ops.get(op_id).ok_or_else(|| {
-                MilliOpGraphError::InvalidGraph(format!("missing op {op_id} in op_ordering"))
-            })?;
-            let out_vec: Vec<_> = op
-                .eval(
-                    &intermediate_values,
-                    &crate::milli_graph::ops::MilliEvalConfig::default(),
-                    &mut backend,
-                )?
-                .collect();
-            for (tensor_id, value) in out_vec {
-                shapes.insert(
-                    tensor_id,
-                    value.shape().iter().map(|&d| d as usize).collect(),
-                );
-                dtypes.insert(tensor_id, value.dtype());
-                intermediate_values.insert(tensor_id, value);
-            }
-        }
-
-        Ok((shapes, dtypes))
     }
 
     /// Propagate shape/dtype/value information through the graph using `infer()`.

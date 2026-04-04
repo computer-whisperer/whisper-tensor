@@ -1,7 +1,4 @@
-use crate::DynRank;
-use crate::backends::eval_backend::EvalBackend;
 use crate::graph::{GlobalId, Node};
-use crate::migration::numeric_tensor::NumericTensor;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
 use crate::pool::Pool;
@@ -147,26 +144,6 @@ impl MilliOp for TopK {
         }
 
         Err(MilliOpGraphError::UnableToInfer)
-    }
-
-    fn eval(
-        &self,
-        inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
-        _config: &super::MilliEvalConfig,
-        backend: &mut EvalBackend,
-    ) -> Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, MilliOpGraphError>
-    {
-        let (values, indices) = NumericTensor::<DynRank>::topk(
-            &inputs[&self.input],
-            &inputs[&self.k],
-            self.axis,
-            self.largest,
-            self.sorted,
-            backend,
-        )?;
-        Ok(Box::new(
-            [(self.output_values, values), (self.output_indices, indices)].into_iter(),
-        ))
     }
 
     fn eval_new<'p, P2: crate::pool::Pool + 'p>(

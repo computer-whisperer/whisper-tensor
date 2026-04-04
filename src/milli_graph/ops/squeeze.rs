@@ -1,15 +1,9 @@
-use crate::DynRank;
-use crate::backends::eval_backend::EvalBackend;
-use crate::backends::ndarray_backend::NDArrayNumericTensor;
-use crate::dtype::DType;
 use crate::graph::{GlobalId, Node};
-use crate::migration::numeric_tensor::NumericTensor;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
 use crate::pool::Pool;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use typenum::P1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Squeeze {
@@ -167,7 +161,7 @@ impl MilliOp for Squeeze {
                 output_shape,
                 symbolic_resolver,
             ));
-            return Ok(vec![((self.output, out))]);
+            return Ok(vec![(self.output, out)]);
         }
 
         // If axes are concrete, we can at least compute output rank
@@ -181,7 +175,7 @@ impl MilliOp for Squeeze {
                     ScalarInfoTyped::Numeric(output_rank),
                     symbolic_resolver,
                 );
-                return Ok(vec![((self.output, out))]);
+                return Ok(vec![(self.output, out)]);
             }
         }
 
@@ -191,7 +185,7 @@ impl MilliOp for Squeeze {
             ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(symbolic_resolver)),
             symbolic_resolver,
         );
-        Ok(vec![((self.output, out))])
+        Ok(vec![(self.output, out)])
     }
 
     fn backward(
@@ -206,51 +200,6 @@ impl MilliOp for Squeeze {
         let mut result = HashMap::new();
         result.insert(self.data, grad_input);
         Some(result)
-    }
-
-    fn eval(
-        &self,
-        inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
-        _config: &super::MilliEvalConfig,
-        backend: &mut EvalBackend,
-    ) -> Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, MilliOpGraphError>
-    {
-        let axes_ndarray = NDArrayNumericTensor::<DynRank>::try_from(
-            inputs[&self.axes].cast(DType::I64, backend)?,
-        )?;
-        let axes = Vec::<i64>::try_from(axes_ndarray.try_to_rank::<P1>()?)?;
-        if axes.len() == 1 {
-            let axis = axes[0];
-            let input_shape = inputs[&self.data].shape();
-            let axis = if axis >= 0 {
-                axis as usize
-            } else {
-                (input_shape.len() as i64 + axis) as usize
-            };
-            let output = inputs[&self.data].squeeze(axis)?;
-            Ok(Box::new([(self.output, output)].into_iter()))
-        } else {
-            // Multiple axes (use reshape)
-            let input_shape = inputs[&self.data].shape();
-            let normalized_axes: Vec<usize> = axes
-                .iter()
-                .map(|&a| {
-                    if a < 0 {
-                        (input_shape.len() as i64 + a) as usize
-                    } else {
-                        a as usize
-                    }
-                })
-                .collect();
-            let mut output_shape = Vec::new();
-            for (i, &dim) in input_shape.iter().enumerate() {
-                if !normalized_axes.contains(&i) {
-                    output_shape.push(dim);
-                }
-            }
-            let output = inputs[&self.data].reshape(output_shape, backend)?;
-            Ok(Box::new([(self.output, output)].into_iter()))
-        }
     }
 
     fn eval_new<'p, P2: crate::pool::Pool + 'p>(

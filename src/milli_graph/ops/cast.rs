@@ -1,7 +1,4 @@
-use crate::DynRank;
-use crate::backends::eval_backend::EvalBackend;
 use crate::graph::GlobalId;
-use crate::migration::numeric_tensor::NumericTensor;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
 use crate::numeric_dtype::NumericDType;
@@ -144,7 +141,7 @@ impl MilliOp for Cast {
             return Ok(results);
         }
 
-        Ok(vec![((self.output, out_info))])
+        Ok(vec![(self.output, out_info)])
     }
 
     fn backward(
@@ -159,17 +156,6 @@ impl MilliOp for Cast {
         let mut result = HashMap::new();
         result.insert(self.data, grad_input);
         Some(result)
-    }
-
-    fn eval(
-        &self,
-        inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
-        _config: &super::MilliEvalConfig,
-        backend: &mut EvalBackend,
-    ) -> Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, MilliOpGraphError>
-    {
-        let out = inputs[&self.data].cast(self.dtype.to_legacy(), backend)?;
-        Ok(Box::new([(self.output, out)].into_iter()))
     }
 
     fn eval_new<'p, P2: crate::pool::Pool + 'p>(

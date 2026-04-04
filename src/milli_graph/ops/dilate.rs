@@ -1,7 +1,4 @@
-use crate::DynRank;
-use crate::backends::eval_backend::EvalBackend;
 use crate::graph::GlobalId;
-use crate::migration::numeric_tensor::NumericTensor;
 use crate::milli_graph::MilliOpGraphError;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::pool::Pool;
@@ -336,17 +333,6 @@ impl MilliOp for Dilate {
         Ok(vec![(self.output, out_info)])
     }
 
-    fn eval(
-        &self,
-        _inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
-        _config: &super::MilliEvalConfig,
-        _backend: &mut EvalBackend,
-    ) -> Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, MilliOpGraphError>
-    {
-        Err(MilliOpGraphError::InvalidInput(
-            "Dilate: legacy eval not implemented — use pool_eval path".into(),
-        ))
-    }
 }
 
 #[cfg(test)]

@@ -1,15 +1,10 @@
-use crate::DynRank;
-use crate::backends::eval_backend::EvalBackend;
-use crate::dtype::DType;
 use crate::graph::{GlobalId, Node};
-use crate::migration::numeric_tensor::NumericTensor;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
 use crate::nano_graph::lower::{DimKind, NanoLoweringContext, TensorAtomMap};
 use crate::pool::Pool;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use typenum::P1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Slice {
@@ -418,86 +413,7 @@ impl MilliOp for Slice {
             return Ok(results);
         }
 
-        Ok(vec![((self.output, out_info))])
-    }
-
-    fn eval(
-        &self,
-        inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
-        _config: &super::MilliEvalConfig,
-        backend: &mut EvalBackend,
-    ) -> Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, MilliOpGraphError>
-    {
-        let data_input = &inputs[&self.data];
-        let input_shape = data_input.shape();
-        let input_rank = data_input.rank();
-        let axes: Vec<i64> = if let Some(axes) = &self.axes {
-            inputs[axes]
-                .cast(DType::I64, backend)?
-                .try_to_rank::<P1>()?
-                .try_into()?
-        } else {
-            (0i64..(input_rank as i64)).collect()
-        };
-        let steps: Vec<i64> = if let Some(steps) = &self.steps {
-            inputs[steps]
-                .cast(DType::I64, backend)?
-                .try_to_rank::<P1>()?
-                .try_into()?
-        } else {
-            axes.iter().map(|_| 1).collect()
-        };
-        let starts: Vec<i64> = inputs[&self.starts]
-            .cast(DType::I64, backend)?
-            .try_to_rank::<P1>()?
-            .try_into()?;
-        let ends: Vec<i64> = inputs[&self.ends]
-            .cast(DType::I64, backend)?
-            .try_to_rank::<P1>()?
-            .try_into()?;
-
-        // Build per-axis (start, end, step) in ndarray isize convention.
-        // Unmentioned axes get full extent with step 1.
-        let mut slices: Vec<(isize, isize, isize)> = input_shape
-            .iter()
-            .map(|&dim| (0, dim as isize, 1))
-            .collect();
-
-        for (i, axis) in axes.into_iter().enumerate() {
-            let axis = if axis < 0 {
-                (input_rank as i64 + axis) as usize
-            } else {
-                axis as usize
-            };
-            let dim = input_shape[axis] as i64;
-            let step = steps[i];
-            if step == 0 {
-                return Err(MilliOpGraphError::InvalidInput(
-                    "Step must not be 0".to_string(),
-                ));
-            }
-
-            // Clamp start/end per ONNX spec
-            let (start, end) = if step > 0 {
-                let s = starts[i].clamp(-dim, dim);
-                let s = if s < 0 { s + dim } else { s };
-                let e = ends[i].clamp(-dim, dim);
-                let e = if e < 0 { e + dim } else { e };
-                (s as isize, e as isize)
-            } else {
-                // Negative step: start clamped to [-1, dim-1], end to [-dim-1, dim-1]
-                let s = starts[i].clamp(-dim, dim - 1);
-                let s = if s < 0 { s + dim } else { s };
-                let e = ends[i].clamp(-dim - 1, dim);
-                let e = if e < 0 { e + dim } else { e };
-                (s as isize, e as isize)
-            };
-
-            slices[axis] = (start, end, step as isize);
-        }
-
-        let output = data_input.slice_with_steps(&slices, backend)?;
-        Ok(Box::new([(self.output, output)].into_iter()))
+        Ok(vec![(self.output, out_info)])
     }
 
     fn eval_new<'p, P2: crate::pool::Pool + 'p>(

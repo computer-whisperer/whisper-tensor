@@ -144,33 +144,6 @@ impl MilliOp for EyeLike {
         Ok(vec![(self.output, out)])
     }
 
-    fn eval(
-        &self,
-        inputs: &HashMap<
-            GlobalId,
-            crate::migration::numeric_tensor::NumericTensor<crate::tensor_rank::DynRank>,
-        >,
-        _config: &super::MilliEvalConfig,
-        _backend: &mut crate::backends::eval_backend::EvalBackend,
-    ) -> super::EvalResult {
-        let input = &inputs[&self.input];
-        let shape = input.shape();
-        if shape.len() != 2 {
-            return Err(MilliOpGraphError::InvalidInput(
-                "EyeLike requires 2D".into(),
-            ));
-        }
-        let tensor = Self::build_tensor(
-            shape[0] as usize,
-            shape[1] as usize,
-            self.k,
-            self.output_dtype,
-            &crate::pool::SystemPool,
-        );
-        let legacy = crate::nano_graph::lower::new_numeric_to_legacy(&tensor);
-        Ok(Box::new(std::iter::once((self.output, legacy))))
-    }
-
     fn eval_new<'p, P2: Pool + 'p>(
         &self,
         inputs: &[crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>],

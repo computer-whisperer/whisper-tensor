@@ -1,8 +1,4 @@
 use super::AccumulationMode;
-use crate::DynRank;
-use crate::backends::eval_backend::EvalBackend;
-use crate::dtype::DType;
-use crate::migration::numeric_tensor::NumericTensor;
 use crate::milli_graph::MilliOpGraphError;
 use crate::milli_graph::ops::MilliOp;
 use crate::numeric_dtype::NumericDType;
@@ -469,66 +465,7 @@ impl MilliOp for SimpleBinary {
             return Ok(results);
         }
 
-        Ok(vec![((self.output, out_info))])
-    }
-
-    fn eval(
-        &self,
-        inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
-        _config: &super::MilliEvalConfig,
-        backend: &mut EvalBackend,
-    ) -> Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, MilliOpGraphError>
-    {
-        let a = &inputs[&self.a];
-        let b = &inputs[&self.b];
-        let out = match self.which_op {
-            WhichSimpleBinaryOp::Add => NumericTensor::<DynRank>::add(a, b, backend)?,
-            WhichSimpleBinaryOp::Sub => NumericTensor::<DynRank>::sub(a, b, backend)?,
-            WhichSimpleBinaryOp::Mul => NumericTensor::<DynRank>::mul(a, b, backend)?,
-            WhichSimpleBinaryOp::Div => NumericTensor::<DynRank>::div(a, b, backend)?,
-            WhichSimpleBinaryOp::Modulo(fmod) => {
-                let is_float =
-                    [DType::F64, DType::F32, DType::BF16, DType::F16].contains(&a.dtype());
-                let fmod = if is_float {
-                    true
-                } else {
-                    fmod.unwrap_or(false)
-                };
-                if fmod {
-                    NumericTensor::<DynRank>::fmod(a, b, backend)?
-                } else {
-                    NumericTensor::<DynRank>::imod(a, b, backend)?
-                }
-            }
-            WhichSimpleBinaryOp::And => NumericTensor::<DynRank>::and(a, b, backend)?,
-            WhichSimpleBinaryOp::Or => NumericTensor::<DynRank>::or(a, b, backend)?,
-            WhichSimpleBinaryOp::Xor => NumericTensor::<DynRank>::xor(a, b, backend)?,
-            WhichSimpleBinaryOp::BitwiseAnd => {
-                NumericTensor::<DynRank>::bitwise_and(a, b, backend)?
-            }
-            WhichSimpleBinaryOp::BitwiseOr => NumericTensor::<DynRank>::bitwise_or(a, b, backend)?,
-            WhichSimpleBinaryOp::BitwiseXor => {
-                NumericTensor::<DynRank>::bitwise_xor(a, b, backend)?
-            }
-            WhichSimpleBinaryOp::Equal => NumericTensor::<DynRank>::equal(a, b, backend)?,
-            WhichSimpleBinaryOp::Greater => NumericTensor::<DynRank>::greater(a, b, backend)?,
-            WhichSimpleBinaryOp::GreaterOrEqual => {
-                NumericTensor::<DynRank>::greater_or_equal(a, b, backend)?
-            }
-            WhichSimpleBinaryOp::Less => NumericTensor::<DynRank>::less(a, b, backend)?,
-            WhichSimpleBinaryOp::LessOrEqual => {
-                NumericTensor::<DynRank>::less_or_equal(a, b, backend)?
-            }
-            WhichSimpleBinaryOp::Max => NumericTensor::<DynRank>::max(a, b, backend)?,
-            WhichSimpleBinaryOp::Min => NumericTensor::<DynRank>::min(a, b, backend)?,
-            WhichSimpleBinaryOp::BitShiftLeft => {
-                NumericTensor::<DynRank>::bitshift_left(a, b, backend)?
-            }
-            WhichSimpleBinaryOp::BitShiftRight => {
-                NumericTensor::<DynRank>::bitshift_right(a, b, backend)?
-            }
-        };
-        Ok(Box::new([(self.output, out)].into_iter()))
+        Ok(vec![(self.output, out_info)])
     }
 
     fn eval_new<'p, P2: crate::pool::Pool + 'p>(
@@ -930,18 +867,7 @@ impl MilliOp for Pow {
             return Ok(results);
         }
 
-        Ok(vec![((self.output, out_info))])
-    }
-
-    fn eval(
-        &self,
-        inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
-        _config: &super::MilliEvalConfig,
-        backend: &mut EvalBackend,
-    ) -> Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, MilliOpGraphError>
-    {
-        let out = NumericTensor::<DynRank>::pow(&inputs[&self.a], &inputs[&self.b], backend)?;
-        Ok(Box::new([(self.output, out)].into_iter()))
+        Ok(vec![(self.output, out_info)])
     }
 
     fn eval_new<'p, P2: crate::pool::Pool + 'p>(
@@ -1615,38 +1541,7 @@ impl MilliOp for MatMul {
             return Ok(results);
         }
 
-        Ok(vec![((self.output, out_info))])
-    }
-
-    fn eval(
-        &self,
-        inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
-        config: &super::MilliEvalConfig,
-        backend: &mut EvalBackend,
-    ) -> Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, MilliOpGraphError>
-    {
-        let a_input = &inputs[&self.a];
-        let b_input = &inputs[&self.b];
-        let accumulate_legacy = self.accumulate_dtype.to_legacy();
-        let accumulate_dtype = if accumulate_legacy != a_input.dtype() {
-            Some(accumulate_legacy)
-        } else {
-            None
-        };
-        let mode = if config.relaxed_accumulation {
-            AccumulationMode::Pairwise // allows BLAS
-        } else {
-            self.accumulation_mode
-        };
-        let out = NumericTensor::<DynRank>::matmul(
-            a_input,
-            b_input,
-            accumulate_dtype,
-            self.output_dtype.to_legacy(),
-            mode,
-            backend,
-        )?;
-        Ok(Box::new([(self.output, out)].into_iter()))
+        Ok(vec![(self.output, out_info)])
     }
 
     fn backward(
@@ -1823,9 +1718,12 @@ impl MilliOp for MatMul {
 
             let out_batch_offset = batch_idx * m * n;
 
+            let product_dtype = self.product_dtype;
+            let accumulate_dtype = self.accumulate_dtype;
+
             for mi in 0..m {
                 for ni in 0..n {
-                    let mut acc = 0.0f64;
+                    let mut acc = NumericScalar::zero(accumulate_dtype);
                     for ki in 0..k {
                         let a_idx = a_batch_offset
                             + if a_rank >= 2 {
@@ -1839,10 +1737,13 @@ impl MilliOp for MatMul {
                             } else {
                                 ki
                             };
-                        acc += a.read_element(a_idx).to_f64() * b.read_element(b_idx).to_f64();
+                        let av = a.read_element(a_idx).cast_to(product_dtype);
+                        let bv = b.read_element(b_idx).cast_to(product_dtype);
+                        let product = av.mul(bv).cast_to(accumulate_dtype);
+                        acc = acc.add(product);
                     }
                     let out_idx = out_batch_offset + mi * n + ni;
-                    out.write_element(out_idx, NumericScalar::from_f64(acc).cast_to(out_dtype));
+                    out.write_element(out_idx, acc.cast_to(out_dtype));
                 }
             }
         }

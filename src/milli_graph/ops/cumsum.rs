@@ -1,8 +1,4 @@
-use crate::DynRank;
-use crate::backends::eval_backend::EvalBackend;
 use crate::graph::{GlobalId, Node};
-use crate::migration::numeric_scalar::NumericScalarType;
-use crate::migration::numeric_tensor::NumericTensor;
 use crate::milli_graph::MilliOpGraph;
 use crate::milli_graph::MilliOpGraphError;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
@@ -376,16 +372,4 @@ impl MilliOp for CumSum {
         )])
     }
 
-    fn eval(
-        &self,
-        inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
-        _config: &super::MilliEvalConfig,
-        backend: &mut EvalBackend,
-    ) -> Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, MilliOpGraphError>
-    {
-        let data = &inputs[&self.input];
-        let axis = i64::cast_from_numeric_scalar(&inputs[&self.axis].first_element());
-        let out = data.cumsum(Some(axis as isize), self.exclusive, self.reverse, backend)?;
-        Ok(Box::new([(self.output, out)].into_iter()))
-    }
 }

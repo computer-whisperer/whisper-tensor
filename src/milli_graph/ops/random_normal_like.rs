@@ -1,8 +1,5 @@
-use crate::DynRank;
-use crate::backends::eval_backend::EvalBackend;
 use crate::dtype::DType;
 use crate::graph::GlobalId;
-use crate::migration::numeric_tensor::NumericTensor;
 use crate::milli_graph::MilliOpGraphError;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use rand::{Rng, RngExt};
@@ -144,38 +141,6 @@ impl MilliOp for RandomNormalLike {
                 symbolic_resolver,
             ),
         )])
-    }
-
-    fn eval(
-        &self,
-        inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
-        _config: &super::MilliEvalConfig,
-        backend: &mut EvalBackend,
-    ) -> Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, MilliOpGraphError>
-    {
-        let input = &inputs[&self.input];
-        let shape = input.shape();
-        let total: usize = shape.iter().map(|&s| s as usize).product();
-
-        let values = if let Some(seed) = self.seed {
-            use rand::SeedableRng;
-            let mut rng = rand::rngs::StdRng::seed_from_u64(seed.to_bits() as u64);
-            fill_normal(&mut rng, total, self.mean, self.scale)
-        } else {
-            let mut rng = rand::rng();
-            fill_normal(&mut rng, total, self.mean, self.scale)
-        };
-
-        let shape_usize: Vec<usize> = shape.iter().map(|&s| s as usize).collect();
-        let out = NumericTensor::<DynRank>::from_vec_shape(values, shape_usize).map_err(|e| {
-            MilliOpGraphError::InvalidInput(format!("RandomNormalLike output creation failed: {e}"))
-        })?;
-
-        // Cast to target dtype if specified, otherwise use input's dtype
-        let target_dtype = self.dtype.unwrap_or_else(|| input.dtype());
-        let out = out.cast(target_dtype, backend)?;
-
-        Ok(Box::new([(self.output, out)].into_iter()))
     }
 
     fn eval_new<'p, P2: crate::pool::Pool + 'p>(

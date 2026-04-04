@@ -1,6 +1,4 @@
-use crate::backends::eval_backend::EvalBackend;
 use crate::graph::{GlobalId, Node};
-use crate::migration::numeric_tensor::NumericTensor;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
 use crate::nano_graph::lower::{NanoLoweringContext, TensorAtomMap};
@@ -8,7 +6,7 @@ use crate::nano_graph::ops::{ScalarBinOp, ScalarOp, ScalarUnaryOp};
 use crate::nano_graph::pattern::InputRef;
 use crate::pool::Pool;
 use crate::tensor_info::TensorInfo;
-use crate::{DynRank, TrigOp};
+use crate::TrigOp;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -406,40 +404,7 @@ impl MilliOp for SimpleUnaryOp {
             return Ok(results);
         }
 
-        Ok(vec![((self.output, out_info))])
-    }
-
-    fn eval(
-        &self,
-        inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
-        _config: &super::MilliEvalConfig,
-        backend: &mut EvalBackend,
-    ) -> Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, MilliOpGraphError>
-    {
-        let input = &inputs[&self.input];
-        let out = match self.op {
-            WhichSimpleUnaryOp::Neg => input.neg(backend)?,
-            WhichSimpleUnaryOp::Abs => input.abs(backend)?,
-            WhichSimpleUnaryOp::Exp => input.exp(backend)?,
-            WhichSimpleUnaryOp::Ln => input.ln(backend)?,
-            WhichSimpleUnaryOp::Sqrt => input.sqrt(backend)?,
-            WhichSimpleUnaryOp::Not => input.not(backend)?,
-            WhichSimpleUnaryOp::Sign => input.sign(backend)?,
-            WhichSimpleUnaryOp::BitwiseNot => input.bitwise_not(backend)?,
-            WhichSimpleUnaryOp::Reciprocal => input.reciprocal(backend)?,
-            WhichSimpleUnaryOp::Trig(trig_op) => input.trig(trig_op, backend)?,
-            WhichSimpleUnaryOp::Floor => input.floor(backend)?,
-            WhichSimpleUnaryOp::Ceil => input.ceil(backend)?,
-            WhichSimpleUnaryOp::Round => input.round(backend)?,
-            WhichSimpleUnaryOp::IsInf {
-                detect_positive,
-                detect_negative,
-            } => input.is_inf(detect_positive, detect_negative)?,
-            WhichSimpleUnaryOp::IsNan => input.is_nan(backend)?,
-            WhichSimpleUnaryOp::Erf => input.erf(backend)?,
-            WhichSimpleUnaryOp::Log1p => input.log1p(backend)?,
-        };
-        Ok(Box::new([(self.output, out)].into_iter()))
+        Ok(vec![(self.output, out_info)])
     }
 
     fn eval_new<'p, P2: crate::pool::Pool + 'p>(
@@ -748,18 +713,7 @@ impl MilliOp for ClampMin {
             return Ok(results);
         }
 
-        Ok(vec![((self.output, out))])
-    }
-
-    fn eval(
-        &self,
-        inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
-        _config: &super::MilliEvalConfig,
-        backend: &mut EvalBackend,
-    ) -> Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, MilliOpGraphError>
-    {
-        let out = inputs[&self.input].clamp_min(self.value, backend)?;
-        Ok(Box::new([(self.output, out)].into_iter()))
+        Ok(vec![(self.output, out)])
     }
 
     fn backward(

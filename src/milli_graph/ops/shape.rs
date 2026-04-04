@@ -1,10 +1,9 @@
 use crate::DynRank;
-use crate::backends::eval_backend::EvalBackend;
 use crate::backends::ndarray_backend::NDArrayNumericTensor;
 use crate::graph::{GlobalId, Node};
 use crate::migration::numeric_tensor::NumericTensor;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
-use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
+use crate::milli_graph::MilliOpGraph;
 use crate::pool::Pool;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -99,7 +98,7 @@ impl MilliOp for Shape {
                 // All dims concrete — produce a Numeric tensor.
                 let out: NumericTensor<DynRank> =
                     NDArrayNumericTensor::<P1>::from(dim_vals).to_dyn().into();
-                return Ok(vec![((self.output, TensorInfo::from_legacy(&out, pool)))]);
+                return Ok(vec![(self.output, TensorInfo::from_legacy(&out, pool))]);
             }
         }
 
@@ -115,25 +114,7 @@ impl MilliOp for Shape {
             symbolic_resolver,
         );
 
-        Ok(vec![((self.output, out_info))])
-    }
-
-    fn eval(
-        &self,
-        inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
-        _config: &super::MilliEvalConfig,
-        _backend: &mut EvalBackend,
-    ) -> Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, MilliOpGraphError>
-    {
-        let output_shape = inputs[&self.input]
-            .shape()
-            .into_iter()
-            .map(|x| x as i64)
-            .collect::<Vec<_>>();
-        let out: NumericTensor<DynRank> = NDArrayNumericTensor::<P1>::from(output_shape)
-            .to_dyn()
-            .into();
-        Ok(Box::new([(self.output, out)].into_iter()))
+        Ok(vec![(self.output, out_info)])
     }
 
     fn eval_new<'p, P2: crate::pool::Pool + 'p>(

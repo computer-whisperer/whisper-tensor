@@ -1,7 +1,4 @@
-use crate::DynRank;
-use crate::backends::eval_backend::EvalBackend;
 use crate::graph::{GlobalId, Node};
-use crate::migration::numeric_tensor::NumericTensor;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
 use crate::nano_graph::lower::{DimKind, NanoLoweringContext, TensorAtomMap};
@@ -311,7 +308,7 @@ impl MilliOp for Transpose {
             return Ok(results);
         }
 
-        Ok(vec![((self.output, out_info))])
+        Ok(vec![(self.output, out_info)])
     }
 
     fn backward(
@@ -349,33 +346,6 @@ impl MilliOp for Transpose {
         let mut result = HashMap::new();
         result.insert(self.data, grad_input);
         Some(result)
-    }
-
-    fn eval(
-        &self,
-        inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
-        _config: &super::MilliEvalConfig,
-        backend: &mut EvalBackend,
-    ) -> Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, MilliOpGraphError>
-    {
-        // Handle partial perms: if perm has fewer elements than the rank,
-        // prepend identity dims. This allows perm=[-1,-2] to mean "swap last
-        // two dims" regardless of rank.
-        let perm = if let Some(ref p) = self.perm {
-            let rank = inputs[&self.data].rank();
-            if p.len() < rank {
-                let prefix_len = rank - p.len();
-                let mut full_perm: Vec<i64> = (0..prefix_len as i64).collect();
-                full_perm.extend(p.iter().map(|&x| if x < 0 { x + rank as i64 } else { x }));
-                Some(full_perm)
-            } else {
-                Some(p.clone())
-            }
-        } else {
-            None
-        };
-        let out = inputs[&self.data].transpose(perm, backend)?;
-        Ok(Box::new([(self.output, out)].into_iter()))
     }
 
     fn eval_new<'p, P2: crate::pool::Pool + 'p>(

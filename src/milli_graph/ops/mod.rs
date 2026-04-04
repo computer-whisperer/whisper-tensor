@@ -524,13 +524,6 @@ pub trait MilliOp: Node<OpKind = String> {
         constant_fold(self, known_inputs, &[], pool).ok_or(MilliOpGraphError::UnableToInfer)
     }
 
-    fn eval(
-        &self,
-        inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
-        config: &MilliEvalConfig,
-        _backend: &mut EvalBackend,
-    ) -> EvalResult;
-
     /// Generate backward ops for this milli op.
     /// `output_grads` maps each output tensor ID to its gradient tensor ID.
     /// New gradient ops are added directly to `graph`.
@@ -1019,15 +1012,6 @@ macro_rules! delegate {
 }
 
 impl MilliOp for AnyMilliOp {
-    delegate!(eval(
-        inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
-        config: &MilliEvalConfig,
-        backend: &mut EvalBackend
-    ) -> Result<
-        Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>,
-        MilliOpGraphError,
-    > );
-
     fn infer<'p, P: Pool + 'p>(
         &self,
         known_inputs: &HashMap<GlobalId, TensorInfo<'p, P>>,
