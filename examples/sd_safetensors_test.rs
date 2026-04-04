@@ -2,10 +2,11 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Instant;
 use whisper_tensor::DynRank;
-use whisper_tensor::backends::eval_backend::EvalBackend;
-use whisper_tensor::dtype::DType;
+use whisper_tensor::numeric_dtype::NumericDType;
+use whisper_tensor::numeric_scalar::NumericScalar;
+use whisper_tensor::numeric_tensor::NumericTensor;
 use whisper_tensor::loader::{ConfigValue, ConfigValues, Loader};
-use whisper_tensor::migration::numeric_tensor::NumericTensor;
+use whisper_tensor::pool::SystemPool;
 use whisper_tensor_import::loaders::SD15Loader;
 
 const CHECKPOINT: &str =
@@ -13,6 +14,7 @@ const CHECKPOINT: &str =
 
 fn main() {
     tracing_subscriber::fmt::init();
+    let pool = SystemPool;
 
     let total_start = Instant::now();
 
@@ -39,14 +41,12 @@ fn main() {
         output.interfaces.len(),
     );
 
-    let mut backend = EvalBackend::NDArray;
-
     // --- Run text encoder ---
     println!("\n=== Text encoder ===");
-    let seq_len = 77;
+    let seq_len = 77u64;
 
     // "a photo of a cat"
-    let mut cond_ids = vec![0i32; seq_len];
+    let mut cond_ids = vec![0i32; seq_len as usize];
     cond_ids[0] = 49406; // BOS
     cond_ids[1] = 320; // "a"
     cond_ids[2] = 1125; // "photo"
@@ -55,54 +55,51 @@ fn main() {
     cond_ids[5] = 2368; // "cat"
     cond_ids[6] = 49407; // EOS
 
-    let mut uncond_ids = vec![0i32; seq_len];
+    let mut uncond_ids = vec![0i32; seq_len as usize];
     uncond_ids[0] = 49406;
     uncond_ids[1] = 49407;
 
-    let cond_input = NumericTensor::<DynRank>::from_vec_shape(cond_ids, vec![1, seq_len]).unwrap();
-    let uncond_input =
-        NumericTensor::<DynRank>::from_vec_shape(uncond_ids, vec![1, seq_len]).unwrap();
+    let cond_input = make_i32_tensor(&cond_ids, vec![1, seq_len], &pool);
+    let uncond_input = make_i32_tensor(&uncond_ids, vec![1, seq_len], &pool);
 
     let start = Instant::now();
-    let cond_hidden = text_encoder
-        .eval(
-            HashMap::from([("input_ids".to_string(), cond_input)]),
-            &mut (),
-            None,
-            &mut backend,
+    let cond_input_view = cond_input.view();
+    let cond_hidden_out = text_encoder
+        .eval_pool(
+            HashMap::from([("input_ids".to_string(), &cond_input_view)]),
+            &pool,
         )
         .expect("text_encoder cond failed");
-    let cond_hidden = cond_hidden.get("last_hidden_state").unwrap().clone();
+    let cond_hidden = cond_hidden_out.get("last_hidden_state").unwrap();
     println!(
         "  cond_hidden: dtype={:?}, shape={:?} ({:.2?})",
         cond_hidden.dtype(),
         cond_hidden.shape(),
         start.elapsed(),
     );
-    debug_tensor("  cond_hidden", &cond_hidden, &mut backend);
+    debug_tensor("  cond_hidden", cond_hidden, &pool);
 
     let start = Instant::now();
-    let uncond_hidden = text_encoder
-        .eval(
-            HashMap::from([("input_ids".to_string(), uncond_input)]),
-            &mut (),
-            None,
-            &mut backend,
+    let uncond_input_view = uncond_input.view();
+    let uncond_hidden_out = text_encoder
+        .eval_pool(
+            HashMap::from([("input_ids".to_string(), &uncond_input_view)]),
+            &pool,
         )
         .expect("text_encoder uncond failed");
-    let uncond_hidden = uncond_hidden.get("last_hidden_state").unwrap().clone();
+    let uncond_hidden = uncond_hidden_out.get("last_hidden_state").unwrap();
     println!(
         "  uncond_hidden: dtype={:?}, shape={:?} ({:.2?})",
         uncond_hidden.dtype(),
         uncond_hidden.shape(),
         start.elapsed(),
     );
-    debug_tensor("  uncond_hidden", &uncond_hidden, &mut backend);
+    debug_tensor("  uncond_hidden", uncond_hidden, &pool);
 
     // --- Scheduler ---
     let num_inference_steps = 20;
-    let latent_h = 64;
-    let latent_w = 64;
+    let latent_h = 64u64;
+    let latent_w = 64u64;
     let guidance_scale: f32 = 7.5;
 
     let (timestep_values, dt_values, sigmas, init_sigma) =
@@ -119,7 +116,7 @@ fn main() {
     // --- Initial latent noise ---
     use rand::SeedableRng;
     let mut latent_rng = rand::rngs::StdRng::seed_from_u64(42);
-    let latent_n = 4 * latent_h * latent_w;
+    let latent_n = (4 * latent_h * latent_w) as usize;
     let initial_noise: Vec<f32> = {
         let mut vals = Vec::with_capacity(latent_n);
         while vals.len() + 1 < latent_n {
@@ -139,9 +136,7 @@ fn main() {
         vals
     };
     let scaled_noise: Vec<f32> = initial_noise.iter().map(|&x| x * init_sigma).collect();
-    let mut latent =
-        NumericTensor::<DynRank>::from_vec_shape(scaled_noise, vec![1, 4, latent_h, latent_w])
-            .unwrap();
+    let mut latent = make_f32_tensor(&scaled_noise, vec![1, 4, latent_h, latent_w], &pool);
 
     // --- Denoising loop ---
     println!("\n=== Denoising ({num_inference_steps} steps) ===");
@@ -153,59 +148,49 @@ fn main() {
 
         // Scale: latent / sqrt(sigma^2 + 1)
         let scale = 1.0 / (sigma * sigma + 1.0).sqrt();
-        let latent_vals = tensor_to_f32(&latent, &mut backend);
+        let latent_vals = tensor_to_f32(&latent);
         let scaled_vals: Vec<f32> = latent_vals.iter().map(|&v| v * scale).collect();
-        let scaled_latent =
-            NumericTensor::<DynRank>::from_vec_shape(scaled_vals, vec![1, 4, latent_h, latent_w])
-                .unwrap();
+        let scaled_latent = make_f32_tensor(&scaled_vals, vec![1, 4, latent_h, latent_w], &pool);
 
-        let f16_latent = scaled_latent.cast(DType::F16, &mut backend).unwrap();
-        let f16_ts = NumericTensor::<DynRank>::from_vec_shape(vec![ts], vec![1])
-            .unwrap()
-            .cast(DType::F16, &mut backend)
-            .unwrap();
+        let f16_latent = cast_tensor(&scaled_latent, NumericDType::F16, &pool);
+        let ts_f32 = make_f32_tensor(&[ts], vec![1], &pool);
+        let f16_ts = cast_tensor(&ts_f32, NumericDType::F16, &pool);
 
         // UNet unconditional
         let step_start = Instant::now();
+        let f16_latent_view = f16_latent.view();
+        let f16_ts_view = f16_ts.view();
+        let uncond_hidden_view = uncond_hidden.view();
         let uncond_out = unet
-            .eval(
+            .eval_pool(
                 HashMap::from([
-                    ("sample".to_string(), f16_latent.clone()),
-                    ("timestep".to_string(), f16_ts.clone()),
-                    ("encoder_hidden_states".to_string(), uncond_hidden.clone()),
+                    ("sample".to_string(), &f16_latent_view),
+                    ("timestep".to_string(), &f16_ts_view),
+                    ("encoder_hidden_states".to_string(), &uncond_hidden_view),
                 ]),
-                &mut (),
-                None,
-                &mut backend,
+                &pool,
             )
             .expect("unet uncond failed");
-        let uncond_noise = uncond_out.get("out_sample").unwrap().clone();
+        let uncond_noise = uncond_out.get("out_sample").unwrap();
 
         // UNet conditional
+        let cond_hidden_view = cond_hidden.view();
         let cond_out = unet
-            .eval(
+            .eval_pool(
                 HashMap::from([
-                    ("sample".to_string(), f16_latent),
-                    ("timestep".to_string(), f16_ts),
-                    ("encoder_hidden_states".to_string(), cond_hidden.clone()),
+                    ("sample".to_string(), &f16_latent_view),
+                    ("timestep".to_string(), &f16_ts_view),
+                    ("encoder_hidden_states".to_string(), &cond_hidden_view),
                 ]),
-                &mut (),
-                None,
-                &mut backend,
+                &pool,
             )
             .expect("unet cond failed");
-        let cond_noise = cond_out.get("out_sample").unwrap().clone();
+        let cond_noise = cond_out.get("out_sample").unwrap();
 
         // Cast to f32 for CFG
-        let uncond_f32 = tensor_to_f32(
-            &uncond_noise.cast(DType::F32, &mut backend).unwrap(),
-            &mut backend,
-        );
-        let cond_f32 = tensor_to_f32(
-            &cond_noise.cast(DType::F32, &mut backend).unwrap(),
-            &mut backend,
-        );
-        let latent_vals = tensor_to_f32(&latent, &mut backend);
+        let uncond_f32 = tensor_to_f32(&cast_tensor(uncond_noise, NumericDType::F32, &pool));
+        let cond_f32 = tensor_to_f32(&cast_tensor(cond_noise, NumericDType::F32, &pool));
+        let latent_vals = tensor_to_f32(&latent);
 
         // CFG + Euler step
         let new_vals: Vec<f32> = latent_vals
@@ -227,30 +212,27 @@ fn main() {
             );
         }
 
-        latent = NumericTensor::<DynRank>::from_vec_shape(new_vals, vec![1, 4, latent_h, latent_w])
-            .unwrap();
+        latent = make_f32_tensor(&new_vals, vec![1, 4, latent_h, latent_w], &pool);
     }
     println!("  Denoising took {:.2?}", denoise_start.elapsed());
 
     // --- VAE decode ---
     println!("\n=== VAE decode ===");
-    let lat_f32 = tensor_to_f32(&latent, &mut backend);
+    let lat_f32 = tensor_to_f32(&latent);
     let scaled: Vec<f32> = lat_f32.iter().map(|&v| v / 0.18215).collect();
-    let scaled_tensor =
-        NumericTensor::<DynRank>::from_vec_shape(scaled, vec![1, 4, latent_h, latent_w]).unwrap();
-    let scaled_f16 = scaled_tensor.cast(DType::F16, &mut backend).unwrap();
-    debug_tensor("  vae_input", &scaled_f16, &mut backend);
+    let scaled_tensor = make_f32_tensor(&scaled, vec![1, 4, latent_h, latent_w], &pool);
+    let scaled_f16 = cast_tensor(&scaled_tensor, NumericDType::F16, &pool);
+    debug_tensor("  vae_input", &scaled_f16, &pool);
 
     let start = Instant::now();
+    let scaled_f16_view = scaled_f16.view();
     let vae_out = vae_decoder
-        .eval(
-            HashMap::from([("latent_sample".to_string(), scaled_f16)]),
-            &mut (),
-            None,
-            &mut backend,
+        .eval_pool(
+            HashMap::from([("latent_sample".to_string(), &scaled_f16_view)]),
+            &pool,
         )
         .expect("vae_decoder failed");
-    let image_tensor = vae_out.get("sample").unwrap().clone();
+    let image_tensor = vae_out.get("sample").unwrap();
     println!(
         "  VAE decode: dtype={:?}, shape={:?} ({:.2?})",
         image_tensor.dtype(),
@@ -259,7 +241,8 @@ fn main() {
     );
 
     // --- Output ---
-    let image_f32 = tensor_to_f32(&image_tensor, &mut backend);
+    let image_f32_tensor = cast_tensor(image_tensor, NumericDType::F32, &pool);
+    let image_f32 = tensor_to_f32(&image_f32_tensor);
     let nan_count = image_f32.iter().filter(|v| v.is_nan()).count();
     let min_val = image_f32.iter().cloned().fold(f32::INFINITY, f32::min);
     let max_val = image_f32.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
@@ -290,20 +273,54 @@ fn main() {
     println!("  Total time: {:.2?}", total_start.elapsed());
 }
 
-fn debug_tensor(label: &str, tensor: &NumericTensor<DynRank>, backend: &mut EvalBackend) {
-    let vals = tensor_to_f32(tensor, backend);
-    let nan_count = vals.iter().filter(|v| v.is_nan()).count();
-    let inf_count = vals.iter().filter(|v| v.is_infinite()).count();
-    let min = vals.iter().cloned().fold(f32::INFINITY, f32::min);
-    let max = vals.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-    println!("{label}: min={min:.4}, max={max:.4}, nan={nan_count}, inf={inf_count}");
+fn make_f32_tensor<'a>(
+    data: &[f32],
+    shape: Vec<u64>,
+    pool: &'a SystemPool,
+) -> NumericTensor<'a, DynRank, SystemPool> {
+    NumericTensor::from_fn(shape, NumericDType::F32, pool, |i| {
+        NumericScalar::from_f32(data[i])
+    })
+    .unwrap()
 }
 
-fn tensor_to_f32(tensor: &NumericTensor<DynRank>, backend: &mut EvalBackend) -> Vec<f32> {
-    let f32_tensor = tensor
-        .cast(DType::F32, backend)
-        .expect("Cast to f32 failed");
-    let ndarray = f32_tensor.to_ndarray().expect("to_ndarray failed");
-    let flat = ndarray.flatten();
-    flat.try_into().expect("flatten to vec failed")
+fn make_i32_tensor<'a>(
+    data: &[i32],
+    shape: Vec<u64>,
+    pool: &'a SystemPool,
+) -> NumericTensor<'a, DynRank, SystemPool> {
+    NumericTensor::from_fn(shape, NumericDType::I32, pool, |i| {
+        NumericScalar::from_i32(data[i])
+    })
+    .unwrap()
+}
+
+fn cast_tensor<'a>(
+    tensor: &NumericTensor<'_, DynRank, SystemPool>,
+    target_dtype: NumericDType,
+    pool: &'a SystemPool,
+) -> NumericTensor<'a, DynRank, SystemPool> {
+    let shape: Vec<u64> = tensor.shape().clone();
+    NumericTensor::from_fn(shape, target_dtype, pool, |i| {
+        tensor.read_element(i).cast_to(target_dtype)
+    })
+    .unwrap()
+}
+
+fn tensor_to_f32(tensor: &NumericTensor<'_, DynRank, SystemPool>) -> Vec<f32> {
+    (0..tensor.numel())
+        .map(|i| tensor.read_element(i).cast_to(NumericDType::F32).to_f32())
+        .collect()
+}
+
+fn debug_tensor(name: &str, tensor: &NumericTensor<'_, DynRank, SystemPool>, pool: &SystemPool) {
+    let f32_tensor = cast_tensor(tensor, NumericDType::F32, pool);
+    let flat: Vec<f32> = (0..f32_tensor.numel())
+        .map(|i| f32_tensor.read_element(i).to_f32())
+        .collect();
+    let nan_count = flat.iter().filter(|v| v.is_nan()).count();
+    let inf_count = flat.iter().filter(|v| v.is_infinite()).count();
+    let min = flat.iter().cloned().fold(f32::INFINITY, f32::min);
+    let max = flat.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    println!("{name}: min={min:.4}, max={max:.4}, nan={nan_count}, inf={inf_count}");
 }

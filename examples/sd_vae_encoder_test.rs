@@ -5,10 +5,10 @@ use std::fs::File;
 use std::path::Path;
 use std::time::Instant;
 use whisper_tensor::DynRank;
-use whisper_tensor::backends::eval_backend::EvalBackend;
-use whisper_tensor::dtype::DType;
-use whisper_tensor::migration::numeric_tensor::NumericTensor;
-use whisper_tensor::model::Model;
+use whisper_tensor::numeric_dtype::NumericDType;
+use whisper_tensor::numeric_scalar::NumericScalar;
+use whisper_tensor::numeric_tensor::NumericTensor;
+use whisper_tensor::pool::SystemPool;
 use whisper_tensor_import::identify_and_load;
 use whisper_tensor_import::onnx_graph::WeightStorageStrategy;
 
@@ -24,14 +24,21 @@ fn load_npy_f32(name: &str) -> (Vec<f32>, Vec<usize>) {
     (values, shape)
 }
 
-fn load_npy_as_f16_tensor(name: &str) -> NumericTensor<DynRank> {
+fn load_npy_as_f16_tensor<'a>(
+    name: &str,
+    pool: &'a SystemPool,
+) -> NumericTensor<'a, DynRank, SystemPool> {
     let (values, shape) = load_npy_f32(name);
-    let f16_values: Vec<half::f16> = values.iter().map(|&x| half::f16::from_f32(x)).collect();
-    NumericTensor::<DynRank>::from_vec_shape(f16_values, shape).unwrap()
+    let shape_u64: Vec<u64> = shape.iter().map(|&s| s as u64).collect();
+    NumericTensor::from_fn(shape_u64, NumericDType::F16, pool, |i| {
+        NumericScalar::from_f32(values[i]).cast_to(NumericDType::F16)
+    })
+    .unwrap()
 }
 
 fn main() {
     tracing_subscriber::fmt::init();
+    let pool = SystemPool;
 
     let input_path = Path::new(SD_BASE).join("vae_encoder").join("model.onnx");
     println!("Loading vae_encoder from {}", input_path.display());
@@ -39,21 +46,20 @@ fn main() {
     let onnx_data = identify_and_load(&input_path, WeightStorageStrategy::EmbeddedData)
         .expect("Failed to import model");
     let mut rng = rand::rng();
-    let model = Model::new_from_onnx(&onnx_data, &mut rng, input_path.parent())
+    let model = whisper_tensor::model::Model::new_from_onnx(&onnx_data, &mut rng, input_path.parent())
         .expect("Failed to load model");
 
-    let mut backend = EvalBackend::NDArray;
-
     println!("\n=== VAE Encoder ===");
-    let image = load_npy_as_f16_tensor("vae_encoder_sample_float16.npy");
+    let image = load_npy_as_f16_tensor("vae_encoder_sample_float16.npy", &pool);
     println!("  sample: {:?} {:?}", image.dtype(), image.shape());
 
+    let image_view = image.view();
     let mut inputs = HashMap::new();
-    inputs.insert("sample".to_string(), image);
+    inputs.insert("sample".to_string(), &image_view);
 
     let start = Instant::now();
     let outputs = model
-        .eval(inputs, &mut (), None, &mut backend)
+        .eval_pool(inputs, &pool)
         .expect("Inference failed");
     println!("  Inference took {:.2?}", start.elapsed());
 
@@ -71,9 +77,10 @@ fn main() {
         );
         println!("  Shape: PASS");
 
-        let actual_f32 = out.cast(DType::F32, &mut backend).unwrap();
-        let actual_nd = actual_f32.to_ndarray().unwrap();
-        let actual_flat: Vec<f32> = actual_nd.flatten().try_into().unwrap();
+        let actual_f32 = cast_tensor(out, NumericDType::F32, &pool);
+        let actual_flat: Vec<f32> = (0..actual_f32.numel())
+            .map(|i| actual_f32.read_element(i).to_f32())
+            .collect();
 
         // Compare statistics rather than exact values
         let actual_mean = actual_flat.iter().sum::<f32>() / actual_flat.len() as f32;
@@ -112,4 +119,16 @@ fn main() {
             println!("  Statistics: WARNING (std ratio outside expected range)");
         }
     }
+}
+
+fn cast_tensor<'a>(
+    tensor: &NumericTensor<'_, DynRank, SystemPool>,
+    target_dtype: NumericDType,
+    pool: &'a SystemPool,
+) -> NumericTensor<'a, DynRank, SystemPool> {
+    let shape: Vec<u64> = tensor.shape().clone();
+    NumericTensor::from_fn(shape, target_dtype, pool, |i| {
+        tensor.read_element(i).cast_to(target_dtype)
+    })
+    .unwrap()
 }

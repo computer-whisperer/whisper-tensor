@@ -9,17 +9,22 @@
 use std::collections::HashMap;
 
 use rand::RngExt;
-use whisper_tensor::backends::eval_backend::EvalBackend;
 use whisper_tensor::graph::GlobalId;
-use whisper_tensor::migration::numeric_tensor::NumericTensor;
 use whisper_tensor::milli_graph::{
     BackwardGenOptions, LossInputSource, LossWiring, MilliGraphGenOptions, MilliOpGraph,
     OptimizerGenOptions, OptimizerKind,
 };
 use whisper_tensor::numeric_dtype::{NumericDType, ONNXDType};
+use whisper_tensor::numeric_scalar::NumericScalar;
+use whisper_tensor::numeric_tensor::NumericTensor;
+use whisper_tensor::pool::SystemPool;
 use whisper_tensor::scalar_info::ScalarInfoTyped;
 use whisper_tensor::symbolic_graph::{SymbolicGraphMutator, TensorType};
 use whisper_tensor::tensor_rank::DynRank;
+
+type PoolTensor = NumericTensor<'static, DynRank, SystemPool>;
+
+static POOL: SystemPool = SystemPool;
 
 // --- Config ---
 
@@ -69,6 +74,25 @@ struct Gpt2Ids {
     input_ids: GlobalId,
     trainable: Vec<GlobalId>,
     logits: GlobalId,
+    /// IDs + data for constants created via push_constant_tensor, needed as
+    /// milli_graph external inputs.
+    constants: HashMap<GlobalId, PoolTensor>,
+}
+
+fn make_f32_tensor(data: Vec<f32>, shape: Vec<usize>) -> PoolTensor {
+    let shape_u64: Vec<u64> = shape.iter().map(|&d| d as u64).collect();
+    NumericTensor::from_fn(shape_u64, NumericDType::F32, &POOL, |i| {
+        NumericScalar::from_f32(data[i])
+    })
+    .unwrap()
+}
+
+fn make_i64_tensor(data: Vec<i64>, shape: Vec<usize>) -> PoolTensor {
+    let shape_u64: Vec<u64> = shape.iter().map(|&d| d as u64).collect();
+    NumericTensor::from_fn(shape_u64, NumericDType::I64, &POOL, |i| {
+        NumericScalar::from_i64(data[i])
+    })
+    .unwrap()
 }
 
 fn rand_normal(rng: &mut impl rand::Rng) -> f32 {
@@ -111,6 +135,7 @@ fn build_gpt2_graph(
     let ff_dim = 4 * embd;
 
     let mut trainable = Vec::new();
+    let mut constants: HashMap<GlobalId, PoolTensor> = HashMap::new();
 
     // Input: token IDs [batch, seq_len] as I64
     let input_ids = m.push_typed_tensor(
@@ -122,9 +147,12 @@ fn build_gpt2_graph(
     );
     m.push_input(input_ids);
 
-    // Position indices [seq_len] — constant
+    // Position indices [seq_len] -- constant
+    let pos_data: Vec<i64> = (0..config.seq_len as i64).collect();
+    let pos_pool = make_i64_tensor(pos_data.clone(), vec![config.seq_len]);
     let position_ids =
-        m.push_constant_tensor((0..config.seq_len as i64).collect(), vec![seq], None, rng);
+        m.push_constant_tensor(pos_data, vec![seq], None, rng);
+    constants.insert(position_ids, pos_pool);
 
     // --- Embeddings ---
     let wte = make_param(&mut m, &mut trainable, "wte", vec![s(vocab), s(embd)], rng);
@@ -147,11 +175,15 @@ fn build_gpt2_graph(
             mask_data[i * seq as usize + j] = -1e9;
         }
     }
+    let mask_pool = make_f32_tensor(mask_data.clone(), vec![1, 1, seq as usize, seq as usize]);
     let causal_mask = m.push_constant_tensor(mask_data, vec![1, 1, seq, seq], None, rng);
+    constants.insert(causal_mask, mask_pool);
 
     // Attention scale constant
     let scale_val = 1.0 / (head_dim as f32).sqrt();
+    let scale_pool = make_f32_tensor(vec![scale_val], vec![1]);
     let scale_tensor = m.push_constant_tensor(vec![scale_val], vec![1u64], None, rng);
+    constants.insert(scale_tensor, scale_pool);
 
     // --- Transformer blocks ---
     for layer in 0..config.n_layer {
@@ -225,7 +257,7 @@ fn build_gpt2_graph(
         let v = m.push_linear(&format!("{p}.attn.v"), ln1, v_w, rng);
         let v = m.push_add(&format!("{p}.attn.v_b"), v, v_b, rng);
 
-        // Reshape to multi-head and transpose: [B,S,E] → [B,S,H,D] → [B,H,S,D]
+        // Reshape to multi-head and transpose: [B,S,E] -> [B,S,H,D] -> [B,H,S,D]
         let mut reshape = |m: &mut SymbolicGraphMutator, name: &str, x: GlobalId| -> GlobalId {
             let r = m.push_reshape(
                 &format!("{name}_mh"),
@@ -247,7 +279,7 @@ fn build_gpt2_graph(
         let weights = m.push_softmax(&format!("{p}.attn_w"), scores, -1, rng);
         let ctx = m.push_matmul(&format!("{p}.ctx"), weights, v, rng);
 
-        // Reshape back: [B,H,S,D] → [B,S,H,D] → [B,S,E]
+        // Reshape back: [B,H,S,D] -> [B,S,H,D] -> [B,S,E]
         let ctx = m.push_transpose(&format!("{p}.ctx_t"), ctx, &[0, 2, 1, 3], rng);
         let ctx = m.push_reshape(
             &format!("{p}.ctx_r"),
@@ -292,7 +324,7 @@ fn build_gpt2_graph(
         );
         let ln2 = m.push_layer_norm(&format!("{p}.ln2"), hidden, ln2_w, Some(ln2_b), 1e-5, rng);
 
-        // MLP: fc → gelu → proj
+        // MLP: fc -> gelu -> proj
         let fc_w = make_param(
             &mut m,
             &mut trainable,
@@ -347,13 +379,14 @@ fn build_gpt2_graph(
             input_ids,
             trainable,
             logits,
+            constants,
         },
     )
 }
 
 // --- Weight initialization ---
 
-fn init_param(name: &str, shape: &[usize], rng: &mut impl rand::Rng) -> NumericTensor<DynRank> {
+fn init_param(name: &str, shape: &[usize], rng: &mut impl rand::Rng) -> PoolTensor {
     let n: usize = shape.iter().product();
     let std_dev = 0.02f32;
     let data: Vec<f32> = if name.ends_with(".bias") {
@@ -363,7 +396,24 @@ fn init_param(name: &str, shape: &[usize], rng: &mut impl rand::Rng) -> NumericT
     } else {
         (0..n).map(|_| rand_normal(rng) * std_dev).collect()
     };
-    NumericTensor::<DynRank>::from_vec_shape(data, shape.to_vec()).unwrap()
+    make_f32_tensor(data, shape.to_vec())
+}
+
+fn pool_eval_milli<'p>(
+    graph: &MilliOpGraph,
+    inputs: &HashMap<GlobalId, PoolTensor>,
+    pool: &'p SystemPool,
+) -> HashMap<GlobalId, NumericTensor<'p, DynRank, SystemPool>> {
+    let views: HashMap<GlobalId, _> = inputs.iter().map(|(&id, t)| (id, t.view())).collect();
+    let view_refs: HashMap<GlobalId, _> = views.iter().map(|(&id, v)| (id, v)).collect();
+    graph.pool_eval(&view_refs, pool).unwrap()
+}
+
+fn read_f32_vec(t: &NumericTensor<'_, DynRank, SystemPool>) -> Vec<f32> {
+    let view = t.view();
+    (0..view.numel())
+        .map(|i| view.read_element(i).to_f64() as f32)
+        .collect()
 }
 
 // --- Main ---
@@ -378,8 +428,7 @@ fn main() {
     );
 
     let (mutator, ids) = build_gpt2_graph(&config, rng);
-    let (graph, store) = mutator.get_inner();
-    let constant_tensors = graph.get_initialized_tensors(&store);
+    let (graph, _store) = mutator.get_inner();
     println!("SymbolicGraph: {} ops", graph.get_operations().len());
 
     // Build training graph
@@ -427,7 +476,7 @@ fn main() {
     );
 
     // Initialize parameters
-    let mut param_values: HashMap<GlobalId, NumericTensor<DynRank>> = HashMap::new();
+    let mut param_values: HashMap<GlobalId, PoolTensor> = HashMap::new();
     for &pid in &ids.trainable {
         let info = graph.get_tensor_info(pid).unwrap();
         let name = info.onnx_name.as_deref().unwrap_or("?");
@@ -447,13 +496,11 @@ fn main() {
     // Initialize optimizer state
     for (_key, state) in &meta.state_updates {
         let src = &param_values[&_key.0];
-        let n: usize = src.shape().iter().map(|&x| x as usize).product();
-        let zeros = NumericTensor::<DynRank>::from_vec_shape(
-            vec![0.0f32; n],
-            src.shape().iter().map(|&x| x as usize).collect(),
-        )
-        .unwrap();
-        param_values.insert(state.input, zeros);
+        let n = src.numel();
+        param_values.insert(
+            state.input,
+            make_f32_tensor(vec![0.0f32; n], src.shape().iter().map(|&x| x as usize).collect()),
+        );
     }
 
     // Synthetic training data
@@ -465,8 +512,6 @@ fn main() {
             .collect();
         all_tokens.push(tokens);
     }
-
-    let mut backend = EvalBackend::NDArray;
 
     println!("\nTraining...");
     for epoch in 0..3 {
@@ -487,45 +532,38 @@ fn main() {
                 }
             }
 
-            let input_tensor = NumericTensor::<DynRank>::from_vec_shape(
+            let input_tensor = make_i64_tensor(
                 input_data,
                 vec![config.batch_size, config.seq_len],
-            )
-            .unwrap();
-            let target_tensor = NumericTensor::<DynRank>::from_vec_shape(
+            );
+            let target_tensor = make_f32_tensor(
                 target_data,
                 vec![config.batch_size * config.seq_len, config.vocab_size],
-            )
-            .unwrap();
+            );
 
-            let mut inputs: HashMap<GlobalId, NumericTensor<DynRank>> = HashMap::new();
+            let mut inputs: HashMap<GlobalId, PoolTensor> = HashMap::new();
             inputs.insert(ids.input_ids, input_tensor);
             inputs.insert(meta.external_inputs[0], target_tensor);
-            for (k, v) in &constant_tensors {
+            // Supply graph constants
+            for (k, v) in &ids.constants {
                 inputs.insert(*k, v.clone());
             }
             for (&pid, val) in &param_values {
                 inputs.insert(pid, val.clone());
             }
 
-            let results: HashMap<_, _> = training_graph
-                .eval(&inputs, &mut (), &mut backend)
-                .unwrap()
-                .collect();
+            let results = pool_eval_milli(&training_graph, &inputs, &POOL);
 
-            let loss_val: f32 = results[&meta.loss.unwrap()]
-                .flatten()
-                .unwrap()
-                .try_into()
-                .map(|v: Vec<f32>| v[0])
-                .unwrap();
+            let loss_val = read_f32_vec(&results[&meta.loss.unwrap()])[0];
             epoch_loss += loss_val;
 
             for (&ext, &new_out) in &meta.param_updates {
-                param_values.insert(ext, results[&new_out].clone());
+                let result_view = results[&new_out].view();
+                param_values.insert(ext, result_view.to_tensor(&POOL).unwrap());
             }
             for state in meta.state_updates.values() {
-                param_values.insert(state.input, results[&state.output].clone());
+                let result_view = results[&state.output].view();
+                param_values.insert(state.input, result_view.to_tensor(&POOL).unwrap());
             }
 
             println!(

@@ -5,10 +5,10 @@ use std::fs::File;
 use std::path::Path;
 use std::time::Instant;
 use whisper_tensor::DynRank;
-use whisper_tensor::backends::eval_backend::EvalBackend;
-use whisper_tensor::dtype::DType;
-use whisper_tensor::migration::numeric_tensor::NumericTensor;
-use whisper_tensor::model::Model;
+use whisper_tensor::numeric_dtype::NumericDType;
+use whisper_tensor::numeric_scalar::NumericScalar;
+use whisper_tensor::numeric_tensor::NumericTensor;
+use whisper_tensor::pool::SystemPool;
 use whisper_tensor_import::identify_and_load;
 use whisper_tensor_import::onnx_graph::WeightStorageStrategy;
 
@@ -24,7 +24,12 @@ fn load_npy_f32(name: &str) -> (Vec<f32>, Vec<usize>) {
     (values, shape)
 }
 
-fn compare(name: &str, actual: &NumericTensor<DynRank>, ref_name: &str, backend: &mut EvalBackend) {
+fn compare<'a>(
+    name: &str,
+    actual: &NumericTensor<'a, DynRank, SystemPool>,
+    ref_name: &str,
+    pool: &SystemPool,
+) {
     let (ref_values, ref_shape) = load_npy_f32(ref_name);
 
     let actual_shape: Vec<usize> = actual.shape().iter().map(|&s| s as usize).collect();
@@ -33,9 +38,10 @@ fn compare(name: &str, actual: &NumericTensor<DynRank>, ref_name: &str, backend:
         "{name}: shape mismatch: actual={actual_shape:?} vs ref={ref_shape:?}"
     );
 
-    let actual_f32 = actual.cast(DType::F32, backend).unwrap();
-    let actual_nd = actual_f32.to_ndarray().unwrap();
-    let actual_flat: Vec<f32> = actual_nd.flatten().try_into().unwrap();
+    let actual_f32 = cast_tensor(actual, NumericDType::F32, pool);
+    let actual_flat: Vec<f32> = (0..actual_f32.numel())
+        .map(|i| actual_f32.read_element(i).to_f32())
+        .collect();
 
     assert_eq!(
         actual_flat.len(),
@@ -86,6 +92,7 @@ fn compare(name: &str, actual: &NumericTensor<DynRank>, ref_name: &str, backend:
 
 fn main() {
     tracing_subscriber::fmt::init();
+    let pool = SystemPool;
 
     let input_path = Path::new(SD_BASE).join("text_encoder").join("model.onnx");
     println!("Loading text_encoder from {}", input_path.display());
@@ -93,23 +100,26 @@ fn main() {
     let onnx_data = identify_and_load(&input_path, WeightStorageStrategy::EmbeddedData)
         .expect("Failed to import model");
     let mut rng = rand::rng();
-    let model = Model::new_from_onnx(&onnx_data, &mut rng, input_path.parent())
+    let model = whisper_tensor::model::Model::new_from_onnx(&onnx_data, &mut rng, input_path.parent())
         .expect("Failed to load model");
-
-    let mut backend = EvalBackend::NDArray;
 
     // --- Conditional ---
     println!("\n=== Conditional encoding ===");
     let (input_f32, input_shape) = load_npy_f32("text_encoder_input_ids_int32.npy");
     let input_i32: Vec<i32> = input_f32.iter().map(|&x| x as i32).collect();
-    let input_tensor = NumericTensor::<DynRank>::from_vec_shape(input_i32, input_shape).unwrap();
+    let shape_u64: Vec<u64> = input_shape.iter().map(|&s| s as u64).collect();
+    let input_tensor = NumericTensor::from_fn(shape_u64, NumericDType::I32, &pool, |i| {
+        NumericScalar::from_i32(input_i32[i])
+    })
+    .unwrap();
 
+    let input_view = input_tensor.view();
     let mut inputs = HashMap::new();
-    inputs.insert("input_ids".to_string(), input_tensor);
+    inputs.insert("input_ids".to_string(), &input_view);
 
     let start = Instant::now();
     let outputs = model
-        .eval(inputs, &mut (), None, &mut backend)
+        .eval_pool(inputs, &pool)
         .expect("Inference failed");
     println!("  Inference took {:.2?}", start.elapsed());
 
@@ -126,7 +136,7 @@ fn main() {
             "last_hidden_state",
             hidden,
             "text_encoder_last_hidden_state_float16.npy",
-            &mut backend,
+            &pool,
         );
     }
     if let Some(pooler) = outputs.get("pooler_output") {
@@ -134,7 +144,7 @@ fn main() {
             "pooler_output",
             pooler,
             "text_encoder_pooler_output_float16.npy",
-            &mut backend,
+            &pool,
         );
     }
 
@@ -142,14 +152,19 @@ fn main() {
     println!("\n=== Unconditional encoding ===");
     let (input_f32, input_shape) = load_npy_f32("text_encoder_uncond_input_ids_int32.npy");
     let input_i32: Vec<i32> = input_f32.iter().map(|&x| x as i32).collect();
-    let input_tensor = NumericTensor::<DynRank>::from_vec_shape(input_i32, input_shape).unwrap();
+    let shape_u64: Vec<u64> = input_shape.iter().map(|&s| s as u64).collect();
+    let input_tensor = NumericTensor::from_fn(shape_u64, NumericDType::I32, &pool, |i| {
+        NumericScalar::from_i32(input_i32[i])
+    })
+    .unwrap();
 
+    let input_view = input_tensor.view();
     let mut inputs = HashMap::new();
-    inputs.insert("input_ids".to_string(), input_tensor);
+    inputs.insert("input_ids".to_string(), &input_view);
 
     let start = Instant::now();
     let outputs = model
-        .eval(inputs, &mut (), None, &mut backend)
+        .eval_pool(inputs, &pool)
         .expect("Inference failed");
     println!("  Inference took {:.2?}", start.elapsed());
 
@@ -158,7 +173,7 @@ fn main() {
             "last_hidden_state",
             hidden,
             "text_encoder_uncond_last_hidden_state_float16.npy",
-            &mut backend,
+            &pool,
         );
     }
     if let Some(pooler) = outputs.get("pooler_output") {
@@ -166,7 +181,19 @@ fn main() {
             "pooler_output",
             pooler,
             "text_encoder_uncond_pooler_output_float16.npy",
-            &mut backend,
+            &pool,
         );
     }
+}
+
+fn cast_tensor<'a>(
+    tensor: &NumericTensor<'_, DynRank, SystemPool>,
+    target_dtype: NumericDType,
+    pool: &'a SystemPool,
+) -> NumericTensor<'a, DynRank, SystemPool> {
+    let shape: Vec<u64> = tensor.shape().clone();
+    NumericTensor::from_fn(shape, target_dtype, pool, |i| {
+        tensor.read_element(i).cast_to(target_dtype)
+    })
+    .unwrap()
 }

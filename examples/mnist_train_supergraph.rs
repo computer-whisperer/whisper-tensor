@@ -4,21 +4,22 @@
 /// by a SuperGraph Scan node instead of a manual Rust loop. Epochs are still a
 /// Rust loop (so we can eval accuracy between them).
 ///
-/// This exercises the SuperGraph → Scan → MilliOpGraph nesting and highlights
+/// This exercises the SuperGraph -> Scan -> MilliOpGraph nesting and highlights
 /// the ergonomic gaps in wiring a training loop this way.
 use std::collections::HashMap;
 
 use rand::RngExt;
-use whisper_tensor::backends::eval_backend::EvalBackend;
 use whisper_tensor::graph::GlobalId;
-use whisper_tensor::migration::numeric_tensor::NumericTensor;
 use whisper_tensor::milli_graph::{
     BackwardGenOptions, LossInputSource, LossWiring, MilliGraphGenOptions, MilliOpGraph,
     OptimizerGenOptions, OptimizerKind,
 };
 use whisper_tensor::numeric_dtype::{NumericDType, ONNXDType};
+use whisper_tensor::numeric_scalar::NumericScalar;
+use whisper_tensor::numeric_tensor::NumericTensor;
+use whisper_tensor::pool::SystemPool;
 use whisper_tensor::scalar_info::ScalarInfoTyped;
-use whisper_tensor::super_graph::cache::SuperGraphTensorCache;
+use whisper_tensor::super_graph::cache::SuperGraphCache;
 use whisper_tensor::super_graph::data::SuperGraphData;
 use whisper_tensor::super_graph::links::{SuperGraphLinkDouble, SuperGraphLinkTriple};
 use whisper_tensor::super_graph::nodes::{
@@ -27,8 +28,12 @@ use whisper_tensor::super_graph::nodes::{
 use whisper_tensor::super_graph::{
     SuperGraphAnyLink, SuperGraphBuilder, SuperGraphContext, SuperGraphLink, SuperGraphLinkKind,
 };
-use whisper_tensor::symbolic_graph::{SharedPoolTensor, SymbolicGraphMutator, TensorType};
+use whisper_tensor::symbolic_graph::{SymbolicGraphMutator, TensorType};
 use whisper_tensor::tensor_rank::DynRank;
+
+type PoolTensor = NumericTensor<'static, DynRank, SystemPool>;
+
+static POOL: SystemPool = SystemPool;
 
 // --- Data (shared with mnist_train.rs) ---
 
@@ -177,31 +182,30 @@ fn rand_normal(rng: &mut impl rand::Rng) -> f32 {
     (-2.0f32 * u1.ln()).sqrt() * (2.0f32 * std::f32::consts::PI * u2).cos()
 }
 
+fn make_f32_tensor(data: Vec<f32>, shape: Vec<usize>) -> PoolTensor {
+    let shape_u64: Vec<u64> = shape.iter().map(|&d| d as u64).collect();
+    NumericTensor::from_fn(shape_u64, NumericDType::F32, &POOL, |i| {
+        NumericScalar::from_f32(data[i])
+    })
+    .unwrap()
+}
+
 fn init_weights(
     rng: &mut impl rand::Rng,
     param_ids: &[GlobalId],
-) -> HashMap<GlobalId, NumericTensor<DynRank>> {
+) -> HashMap<GlobalId, PoolTensor> {
     let mut params = HashMap::new();
     let std1 = (2.0f32 / 784.0).sqrt();
     let w1: Vec<f32> = (0..784 * 128).map(|_| rand_normal(rng) * std1).collect();
-    params.insert(
-        param_ids[0],
-        NumericTensor::from_vec_shape(w1, vec![784, 128]).unwrap(),
-    );
+    params.insert(param_ids[0], make_f32_tensor(w1, vec![784, 128]));
     params.insert(
         param_ids[1],
-        NumericTensor::from_vec_shape(vec![0.0f32; 128], vec![128]).unwrap(),
+        make_f32_tensor(vec![0.0f32; 128], vec![128]),
     );
     let std2 = (2.0f32 / 128.0).sqrt();
     let w2: Vec<f32> = (0..128 * 10).map(|_| rand_normal(rng) * std2).collect();
-    params.insert(
-        param_ids[2],
-        NumericTensor::from_vec_shape(w2, vec![128, 10]).unwrap(),
-    );
-    params.insert(
-        param_ids[3],
-        NumericTensor::from_vec_shape(vec![0.0f32; 10], vec![10]).unwrap(),
-    );
+    params.insert(param_ids[2], make_f32_tensor(w2, vec![128, 10]));
+    params.insert(param_ids[3], make_f32_tensor(vec![0.0f32; 10], vec![10]));
     params
 }
 
@@ -209,28 +213,41 @@ fn get_batch(
     dataset: &Dataset,
     start: usize,
     batch_size: usize,
-) -> (NumericTensor<DynRank>, NumericTensor<DynRank>) {
+) -> (PoolTensor, PoolTensor) {
     let actual_batch = batch_size.min(dataset.num_samples - start);
     let img_slice = &dataset.images[start * 784..(start + actual_batch) * 784];
-    let img_tensor =
-        NumericTensor::<DynRank>::from_vec_shape(img_slice.to_vec(), vec![actual_batch, 784])
-            .unwrap();
+    let img_tensor = make_f32_tensor(img_slice.to_vec(), vec![actual_batch, 784]);
     let mut one_hot = vec![0.0f32; actual_batch * 10];
     for i in 0..actual_batch {
         one_hot[i * 10 + dataset.labels[start + i] as usize] = 1.0;
     }
-    let label_tensor =
-        NumericTensor::<DynRank>::from_vec_shape(one_hot, vec![actual_batch, 10]).unwrap();
+    let label_tensor = make_f32_tensor(one_hot, vec![actual_batch, 10]);
     (img_tensor, label_tensor)
+}
+
+fn pool_eval_milli<'p>(
+    graph: &MilliOpGraph,
+    inputs: &HashMap<GlobalId, PoolTensor>,
+    pool: &'p SystemPool,
+) -> HashMap<GlobalId, NumericTensor<'p, DynRank, SystemPool>> {
+    let views: HashMap<GlobalId, _> = inputs.iter().map(|(&id, t)| (id, t.view())).collect();
+    let view_refs: HashMap<GlobalId, _> = views.iter().map(|(&id, v)| (id, v)).collect();
+    graph.pool_eval(&view_refs, pool).unwrap()
+}
+
+fn read_f32_vec(t: &NumericTensor<'_, DynRank, SystemPool>) -> Vec<f32> {
+    let view = t.view();
+    (0..view.numel())
+        .map(|i| view.read_element(i).to_f64() as f32)
+        .collect()
 }
 
 fn eval_accuracy(
     fwd_graph: &MilliOpGraph,
     test: &Dataset,
-    params: &HashMap<GlobalId, NumericTensor<DynRank>>,
+    params: &HashMap<GlobalId, PoolTensor>,
     image_id: GlobalId,
     logits_id: GlobalId,
-    backend: &mut EvalBackend,
 ) -> f32 {
     let batch_size = 256;
     let mut correct = 0usize;
@@ -241,8 +258,8 @@ fn eval_accuracy(
         let actual = batch_size.min(test.num_samples - i);
         let mut inputs = params.clone();
         inputs.insert(image_id, img_batch);
-        let results: HashMap<_, _> = fwd_graph.eval(&inputs, &mut (), backend).unwrap().collect();
-        let logits: Vec<f32> = results[&logits_id].flatten().unwrap().try_into().unwrap();
+        let results = pool_eval_milli(fwd_graph, &inputs, &POOL);
+        let logits = read_f32_vec(&results[&logits_id]);
         for b in 0..actual {
             let row = &logits[b * 10..(b + 1) * 10];
             let pred = row
@@ -319,19 +336,16 @@ fn main() {
     let num_batches = data.train.num_samples / batch_size; // drop incomplete tail
     let used_samples = num_batches * batch_size;
 
-    let batched_images = NumericTensor::<DynRank>::from_vec_shape(
+    let batched_images = make_f32_tensor(
         data.train.images[..used_samples * 784].to_vec(),
         vec![num_batches, batch_size, 784],
-    )
-    .unwrap();
+    );
 
     let mut one_hot_all = vec![0.0f32; used_samples * 10];
     for i in 0..used_samples {
         one_hot_all[i * 10 + data.train.labels[i] as usize] = 1.0;
     }
-    let batched_labels =
-        NumericTensor::<DynRank>::from_vec_shape(one_hot_all, vec![num_batches, batch_size, 10])
-            .unwrap();
+    let batched_labels = make_f32_tensor(one_hot_all, vec![num_batches, batch_size, 10]);
 
     eprintln!(
         "Pre-batched: {} batches of {} (dropped {} samples)",
@@ -341,10 +355,6 @@ fn main() {
     );
 
     // 5. Build inner SuperGraph (one training step = one MilliOpGraph eval)
-    //
-    //    The MilliOpGraph node reads/writes tensors keyed by its own external IDs.
-    //    The inner SuperGraph just wraps it, declaring which of those IDs are
-    //    inputs vs outputs.
     let labels_ext_id = meta.external_inputs[0];
     let loss_id = meta.loss.unwrap();
 
@@ -366,11 +376,6 @@ fn main() {
     let inner_graph = inner_builder.build(&mut rng, &inner_input_links, &inner_output_links);
 
     // 6. Build outer SuperGraph with Scan
-    //
-    //    Outer links are fresh IDs that live in the outer namespace.
-    //    The Scan maps: outer links → inner links (MilliOpGraph IDs) → outputs.
-
-    // -- Outer links for inputs/outputs --
     let iter_count_link = SuperGraphLink::new(SuperGraphLinkKind::Tensor, &mut rng);
     let outer_images_link = SuperGraphLink::new(SuperGraphLinkKind::Tensor, &mut rng);
     let outer_labels_link = SuperGraphLink::new(SuperGraphLinkKind::Tensor, &mut rng);
@@ -389,8 +394,7 @@ fn main() {
         })
         .collect();
 
-    // -- State links: thread params across iterations --
-    //    (outer_initial, inner_input=ext_param_id, inner_output=new_param_id)
+    // State links: thread params across iterations
     let state_links: Vec<SuperGraphLinkTriple> = outer_param_links
         .iter()
         .map(|&(ext_param, outer_initial, _)| {
@@ -403,20 +407,20 @@ fn main() {
         })
         .collect();
 
-    // -- Scan inputs: slice training data along axis 0 --
+    // Scan inputs: slice training data along axis 0
     let scan_inputs = vec![
         (outer_images_link, SuperGraphLink::tensor(image_id), 0u32),
         (outer_labels_link, SuperGraphLink::tensor(labels_ext_id), 0),
     ];
 
-    // -- Scan outputs: collect per-batch loss along axis 0 --
+    // Scan outputs: collect per-batch loss along axis 0
     let scan_outputs = vec![(
         SuperGraphLink::tensor(loss_id), // inner (from iter_outputs)
         collected_losses_link,           // outer (accumulated tensor)
         0u32,                            // concat axis
     )];
 
-    // -- Simple outputs: final param values from last iteration --
+    // Simple outputs: final param values from last iteration
     let simple_outputs: Vec<SuperGraphLinkDouble> = outer_param_links
         .iter()
         .map(|&(ext_param, _, outer_final)| {
@@ -456,7 +460,6 @@ fn main() {
 
     // 8. Training loop (one Scan = one epoch over all batches)
     let num_epochs = 5;
-    let mut backend = EvalBackend::NDArray;
 
     let acc = eval_accuracy(
         &fwd_graph,
@@ -464,50 +467,46 @@ fn main() {
         &params,
         image_id,
         logits_id,
-        &mut backend,
     );
     eprintln!("Initial test accuracy: {:.2}%", acc * 100.0);
 
-    let iter_count_tensor =
-        NumericTensor::<DynRank>::from_vec_shape(vec![num_batches as i64], vec![1]).unwrap();
+    let iter_count_tensor = NumericTensor::<DynRank, _>::from_fn(
+        vec![1u64],
+        NumericDType::I64,
+        &POOL,
+        |_| NumericScalar::from_i64(num_batches as i64),
+    )
+    .unwrap();
 
     for epoch in 0..num_epochs {
         // Populate outer SuperGraph data
-        let mut sg_data = SuperGraphData::new();
-        sg_data.tensors.insert(
-            iter_count_link,
-            SharedPoolTensor::from(iter_count_tensor.clone()),
-        );
-        sg_data.tensors.insert(
-            outer_images_link,
-            SharedPoolTensor::from(batched_images.clone()),
-        );
-        sg_data.tensors.insert(
-            outer_labels_link,
-            SharedPoolTensor::from(batched_labels.clone()),
-        );
+        let mut sg_data: SuperGraphData<'_, '_, SystemPool> = SuperGraphData::new();
+        sg_data.tensors.insert(iter_count_link, iter_count_tensor.clone());
+        sg_data.tensors.insert(outer_images_link, batched_images.clone());
+        sg_data.tensors.insert(outer_labels_link, batched_labels.clone());
         for &(ext_param, outer_initial, _) in &outer_param_links {
-            sg_data.tensors.insert(
-                outer_initial,
-                SharedPoolTensor::from(params[&ext_param].clone()),
-            );
+            sg_data
+                .tensors
+                .insert(outer_initial, params[&ext_param].clone());
         }
 
         // Run one epoch
-        let mut tensor_cache = SuperGraphTensorCache::new();
         let mut observer = ();
-        let mut context = SuperGraphContext::new(&mut observer, &mut tensor_cache);
+        let mut caches = SuperGraphCache::new();
+        let mut context = SuperGraphContext::new(&POOL, &mut observer);
+        context.caches = Some(&mut caches);
 
         let results = epoch_graph.run(sg_data, &mut context).unwrap();
 
         // Extract collected losses and average
-        let losses_legacy = results.tensors[&collected_losses_link].to_legacy();
-        let losses: Vec<f32> = losses_legacy.flatten().unwrap().try_into().unwrap();
+        let losses_tensor = &results.tensors[&collected_losses_link];
+        let losses = read_f32_vec(losses_tensor);
         let avg_loss = losses.iter().map(|&v| v as f64).sum::<f64>() / losses.len() as f64;
 
         // Extract updated params
         for &(ext_param, _, outer_final) in &outer_param_links {
-            params.insert(ext_param, results.tensors[&outer_final].to_legacy());
+            let result_view = results.tensors[&outer_final].view();
+            params.insert(ext_param, result_view.to_tensor(&POOL).unwrap());
         }
 
         let acc = eval_accuracy(
@@ -516,7 +515,6 @@ fn main() {
             &params,
             image_id,
             logits_id,
-            &mut backend,
         );
         eprintln!(
             "Epoch {}/{}: loss = {:.4}, test accuracy = {:.2}%",

@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 use std::time::Instant;
-use whisper_tensor::backends::eval_backend::EvalBackend;
 use whisper_tensor::interfaces::AnyInterface;
 use whisper_tensor::loader::{ConfigValue, ConfigValues, Loader};
+use whisper_tensor::pool::SystemPool;
 use whisper_tensor_import::loaders::SDXLLoader;
 
 const CHECKPOINT: &str = "/mnt/secondary/neural_networks/sd_xl_base_1.0.safetensors";
@@ -10,6 +10,7 @@ const CHECKPOINT: &str = "/mnt/secondary/neural_networks/sd_xl_base_1.0.safetens
 fn main() {
     tracing_subscriber::fmt::init();
     let total_start = Instant::now();
+    let pool = SystemPool;
 
     // Load via SDXL loader
     println!("=== Loading SDXL via SDXLLoader ===");
@@ -62,10 +63,9 @@ fn main() {
         latent_w * 8,
         latent_h * 8,
     );
-    let mut backend = EvalBackend::NDArray;
     let start = Instant::now();
 
-    let image_tensor = interface
+    let image = interface
         .run(
             &models,
             prompt.to_string(),
@@ -74,27 +74,30 @@ fn main() {
             vec![1, channels, latent_h, latent_w],
             steps,
             guidance_scale,
-            &mut backend,
+            &pool,
         )
-        .expect("Interface run failed")
-        .tensor;
+        .expect("Interface run failed");
 
-    let image_legacy = image_tensor.to_legacy();
+    let view = image.tensor.view();
     println!(
         "  Output: dtype={:?}, shape={:?}, took {:.2?}",
-        image_legacy.dtype(),
-        image_legacy.shape(),
+        view.dtype(),
+        view.shape(),
         start.elapsed(),
     );
 
-    let f32_tensor = image_legacy
-        .cast(whisper_tensor::dtype::DType::F32, &mut backend)
-        .expect("cast failed");
-    let ndarray = f32_tensor.to_ndarray().expect("to_ndarray failed");
-    let flat: Vec<f32> = ndarray.flatten().try_into().expect("flatten failed");
-    let nan_count = flat.iter().filter(|v: &&f32| v.is_nan()).count();
-    let min_val = flat.iter().cloned().fold(f32::INFINITY, f32::min);
-    let max_val = flat.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    let numel = view.numel();
+    let mut nan_count = 0usize;
+    let mut min_val = f32::INFINITY;
+    let mut max_val = f32::NEG_INFINITY;
+    for i in 0..numel {
+        let v = view.read_element(i).to_f64() as f32;
+        if v.is_nan() {
+            nan_count += 1;
+        }
+        min_val = min_val.min(v);
+        max_val = max_val.max(v);
+    }
     println!("  Image: min={min_val:.4}, max={max_val:.4}, nan={nan_count}");
     println!("\n=== Complete in {:.2?} ===", total_start.elapsed());
 }

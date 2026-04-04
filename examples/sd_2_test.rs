@@ -1,9 +1,11 @@
 use std::path::Path;
 use std::time::Instant;
 use whisper_tensor::DynRank;
-use whisper_tensor::backends::eval_backend::EvalBackend;
-use whisper_tensor::migration::numeric_tensor::NumericTensor;
+use whisper_tensor::numeric_dtype::NumericDType;
+use whisper_tensor::numeric_scalar::NumericScalar;
+use whisper_tensor::numeric_tensor::NumericTensor;
 use whisper_tensor::model::Model;
+use whisper_tensor::pool::SystemPool;
 use whisper_tensor_import::models::diffusion::sd2;
 use whisper_tensor_import::onnx_graph::WeightStorageStrategy;
 
@@ -11,6 +13,7 @@ const CHECKPOINT: &str = "/mnt/secondary/neural_networks/sd2.1/v2-1_768-ema-prun
 
 fn main() {
     tracing_subscriber::fmt::init();
+    let pool = SystemPool;
 
     let total_start = Instant::now();
     let checkpoint_path = Path::new(CHECKPOINT);
@@ -48,13 +51,11 @@ fn main() {
         Model::new_from_onnx(&vae_onnx, &mut rng, base_dir).expect("vae_decoder load failed");
     println!("  vae_decoder loaded in {:.2?}", start.elapsed());
 
-    let mut backend = EvalBackend::NDArray;
-
     // --- Test text encoder ---
     println!("\n=== Testing text encoder ===");
     {
         let seq_len = 77;
-        // "a photo of a cat" — using CLIP BOS/EOS token IDs (same vocab as SD 1.5)
+        // "a photo of a cat" -- using CLIP BOS/EOS token IDs (same vocab as SD 1.5)
         let mut cond_ids = vec![0i32; seq_len];
         cond_ids[0] = 49406; // BOS
         cond_ids[1] = 320; // "a"
@@ -63,15 +64,14 @@ fn main() {
         cond_ids[4] = 320; // "a"
         cond_ids[5] = 2368; // "cat"
         cond_ids[6] = 49407; // EOS
-        let input = NumericTensor::<DynRank>::from_vec_shape(cond_ids, vec![1, seq_len]).unwrap();
+        let input = make_i32_tensor(&cond_ids, vec![1, seq_len as u64], &pool);
 
+        let input_view = input.view();
         let start = Instant::now();
         let out = text_encoder
-            .eval(
-                std::collections::HashMap::from([("input_ids".to_string(), input)]),
-                &mut (),
-                None,
-                &mut backend,
+            .eval_pool(
+                std::collections::HashMap::from([("input_ids".to_string(), &input_view)]),
+                &pool,
             )
             .expect("text_encoder eval failed");
         let hidden = out.get("last_hidden_state").unwrap();
@@ -81,41 +81,45 @@ fn main() {
             hidden.shape(),
             start.elapsed()
         );
-        debug_tensor("  hidden_state", hidden, &mut backend);
+        debug_tensor("  hidden_state", hidden, &pool);
     }
 
     // --- Test UNet (single step) ---
     println!("\n=== Testing UNet (single step) ===");
     {
-        let latent_h = 8;
-        let latent_w = 8;
+        let latent_h = 8u64;
+        let latent_w = 8u64;
 
         // Dummy latent
-        let latent = NumericTensor::<DynRank>::from_vec_shape(
-            vec![0.0f32; 4 * latent_h * latent_w],
+        let latent = make_f32_tensor(
+            &vec![0.0f32; (4 * latent_h * latent_w) as usize],
             vec![1, 4, latent_h, latent_w],
-        )
-        .unwrap();
+            &pool,
+        );
 
         // Dummy timestep
-        let timestep = NumericTensor::<DynRank>::from_vec_shape(vec![999.0f32], vec![1]).unwrap();
+        let timestep = make_f32_tensor(&[999.0f32], vec![1], &pool);
 
         // Dummy context (1024-dim for SD 2)
-        let context =
-            NumericTensor::<DynRank>::from_vec_shape(vec![0.0f32; 77 * 1024], vec![1, 77, 1024])
-                .unwrap();
+        let context = make_f32_tensor(
+            &vec![0.0f32; 77 * 1024],
+            vec![1, 77, 1024],
+            &pool,
+        );
+
+        let latent_view = latent.view();
+        let timestep_view = timestep.view();
+        let context_view = context.view();
 
         let start = Instant::now();
         let out = unet
-            .eval(
+            .eval_pool(
                 std::collections::HashMap::from([
-                    ("sample".to_string(), latent),
-                    ("timestep".to_string(), timestep),
-                    ("encoder_hidden_states".to_string(), context),
+                    ("sample".to_string(), &latent_view),
+                    ("timestep".to_string(), &timestep_view),
+                    ("encoder_hidden_states".to_string(), &context_view),
                 ]),
-                &mut (),
-                None,
-                &mut backend,
+                &pool,
             )
             .expect("unet eval failed");
         let noise = out.get("out_sample").unwrap();
@@ -125,27 +129,26 @@ fn main() {
             noise.shape(),
             start.elapsed()
         );
-        debug_tensor("  noise_pred", noise, &mut backend);
+        debug_tensor("  noise_pred", noise, &pool);
     }
 
     // --- Test VAE decoder ---
     println!("\n=== Testing VAE decoder ===");
     {
-        let latent_h = 8;
-        let latent_w = 8;
-        let latent = NumericTensor::<DynRank>::from_vec_shape(
-            vec![0.0f32; 4 * latent_h * latent_w],
+        let latent_h = 8u64;
+        let latent_w = 8u64;
+        let latent = make_f32_tensor(
+            &vec![0.0f32; (4 * latent_h * latent_w) as usize],
             vec![1, 4, latent_h, latent_w],
-        )
-        .unwrap();
+            &pool,
+        );
 
+        let latent_view = latent.view();
         let start = Instant::now();
         let out = vae_decoder
-            .eval(
-                std::collections::HashMap::from([("latent_sample".to_string(), latent)]),
-                &mut (),
-                None,
-                &mut backend,
+            .eval_pool(
+                std::collections::HashMap::from([("latent_sample".to_string(), &latent_view)]),
+                &pool,
             )
             .expect("vae_decoder eval failed");
         let image = out.get("sample").unwrap();
@@ -155,17 +158,51 @@ fn main() {
             image.shape(),
             start.elapsed()
         );
-        debug_tensor("  image", image, &mut backend);
+        debug_tensor("  image", image, &pool);
     }
 
     println!("\n=== Complete in {:.2?} ===", total_start.elapsed());
 }
 
-fn debug_tensor(name: &str, tensor: &NumericTensor<DynRank>, backend: &mut EvalBackend) {
-    use whisper_tensor::dtype::DType;
-    let f32_tensor = tensor.cast(DType::F32, backend).expect("cast failed");
-    let ndarray = f32_tensor.to_ndarray().expect("to_ndarray failed");
-    let flat: Vec<f32> = ndarray.flatten().try_into().expect("flatten failed");
+fn make_f32_tensor<'a>(
+    data: &[f32],
+    shape: Vec<u64>,
+    pool: &'a SystemPool,
+) -> NumericTensor<'a, DynRank, SystemPool> {
+    NumericTensor::from_fn(shape, NumericDType::F32, pool, |i| {
+        NumericScalar::from_f32(data[i])
+    })
+    .unwrap()
+}
+
+fn make_i32_tensor<'a>(
+    data: &[i32],
+    shape: Vec<u64>,
+    pool: &'a SystemPool,
+) -> NumericTensor<'a, DynRank, SystemPool> {
+    NumericTensor::from_fn(shape, NumericDType::I32, pool, |i| {
+        NumericScalar::from_i32(data[i])
+    })
+    .unwrap()
+}
+
+fn cast_tensor<'a>(
+    tensor: &NumericTensor<'_, DynRank, SystemPool>,
+    target_dtype: NumericDType,
+    pool: &'a SystemPool,
+) -> NumericTensor<'a, DynRank, SystemPool> {
+    let shape: Vec<u64> = tensor.shape().clone();
+    NumericTensor::from_fn(shape, target_dtype, pool, |i| {
+        tensor.read_element(i).cast_to(target_dtype)
+    })
+    .unwrap()
+}
+
+fn debug_tensor(name: &str, tensor: &NumericTensor<'_, DynRank, SystemPool>, pool: &SystemPool) {
+    let f32_tensor = cast_tensor(tensor, NumericDType::F32, pool);
+    let flat: Vec<f32> = (0..f32_tensor.numel())
+        .map(|i| f32_tensor.read_element(i).to_f32())
+        .collect();
     let nan_count = flat.iter().filter(|v| v.is_nan()).count();
     let inf_count = flat.iter().filter(|v| v.is_infinite()).count();
     let min_val = flat.iter().cloned().fold(f32::INFINITY, f32::min);

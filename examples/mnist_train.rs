@@ -1,12 +1,12 @@
 /// MNIST training example using whisper-tensor's training infrastructure.
 ///
-/// Architecture: 2-layer MLP (784 → 128 → 10) with ReLU activation.
+/// Architecture: 2-layer MLP (784 -> 128 -> 10) with ReLU activation.
 /// Loss: Cross-entropy
 /// Optimizer: SGD
 ///
 /// This example exercises the full training pipeline:
-///   SymbolicGraph → generate_milli_graph_with_options (forward + backward + optimizer)
-///   → training loop via MilliOpGraph::eval
+///   SymbolicGraph -> generate_milli_graph_with_options (forward + backward + optimizer)
+///   -> training loop via MilliOpGraph::pool_eval
 ///
 /// Place MNIST IDX files in data/mnist/:
 ///   train-images-idx3-ubyte, train-labels-idx1-ubyte,
@@ -16,17 +16,22 @@
 use std::collections::HashMap;
 
 use rand::RngExt;
-use whisper_tensor::backends::eval_backend::EvalBackend;
 use whisper_tensor::graph::GlobalId;
-use whisper_tensor::migration::numeric_tensor::NumericTensor;
 use whisper_tensor::milli_graph::{
     BackwardGenOptions, LossInputSource, LossWiring, MilliGraphGenOptions, MilliOpGraph,
     OptimizerGenOptions, OptimizerKind,
 };
 use whisper_tensor::numeric_dtype::{NumericDType, ONNXDType};
+use whisper_tensor::numeric_scalar::NumericScalar;
+use whisper_tensor::numeric_tensor::NumericTensor;
+use whisper_tensor::pool::SystemPool;
 use whisper_tensor::scalar_info::ScalarInfoTyped;
 use whisper_tensor::symbolic_graph::{SymbolicGraphMutator, TensorType};
 use whisper_tensor::tensor_rank::DynRank;
+
+type PoolTensor = NumericTensor<'static, DynRank, SystemPool>;
+
+static POOL: SystemPool = SystemPool;
 
 // --- Data ---
 
@@ -115,23 +120,36 @@ fn generate_synthetic_data() -> MnistData {
     }
 }
 
+fn make_f32_tensor(data: Vec<f32>, shape: Vec<usize>) -> PoolTensor {
+    let shape_u64: Vec<u64> = shape.iter().map(|&d| d as u64).collect();
+    NumericTensor::from_fn(shape_u64, NumericDType::F32, &POOL, |i| {
+        NumericScalar::from_f32(data[i])
+    })
+    .unwrap()
+}
+
+fn make_i64_tensor(data: Vec<i64>, shape: Vec<usize>) -> PoolTensor {
+    let shape_u64: Vec<u64> = shape.iter().map(|&d| d as u64).collect();
+    NumericTensor::from_fn(shape_u64, NumericDType::I64, &POOL, |i| {
+        NumericScalar::from_i64(data[i])
+    })
+    .unwrap()
+}
+
 fn get_batch(
     dataset: &Dataset,
     start: usize,
     batch_size: usize,
-) -> (NumericTensor<DynRank>, NumericTensor<DynRank>) {
+) -> (PoolTensor, PoolTensor) {
     let actual_batch = batch_size.min(dataset.num_samples - start);
     let img_slice = &dataset.images[start * 784..(start + actual_batch) * 784];
-    let img_tensor =
-        NumericTensor::<DynRank>::from_vec_shape(img_slice.to_vec(), vec![actual_batch, 784])
-            .unwrap();
+    let img_tensor = make_f32_tensor(img_slice.to_vec(), vec![actual_batch, 784]);
 
     let mut one_hot = vec![0.0f32; actual_batch * 10];
     for i in 0..actual_batch {
         one_hot[i * 10 + dataset.labels[start + i] as usize] = 1.0;
     }
-    let label_tensor =
-        NumericTensor::<DynRank>::from_vec_shape(one_hot, vec![actual_batch, 10]).unwrap();
+    let label_tensor = make_f32_tensor(one_hot, vec![actual_batch, 10]);
 
     (img_tensor, label_tensor)
 }
@@ -212,38 +230,43 @@ fn rand_normal(rng: &mut impl rand::Rng) -> f32 {
 fn init_weights(
     rng: &mut impl rand::Rng,
     param_ids: &[GlobalId],
-) -> HashMap<GlobalId, NumericTensor<DynRank>> {
+) -> HashMap<GlobalId, PoolTensor> {
     let mut params = HashMap::new();
 
-    // W1 [784, 128] — He init
+    // W1 [784, 128] -- He init
     let std1 = (2.0f32 / 784.0).sqrt();
     let w1: Vec<f32> = (0..784 * 128).map(|_| rand_normal(rng) * std1).collect();
-    params.insert(
-        param_ids[0],
-        NumericTensor::from_vec_shape(w1, vec![784, 128]).unwrap(),
-    );
+    params.insert(param_ids[0], make_f32_tensor(w1, vec![784, 128]));
 
-    // b1 [128] — zeros
-    params.insert(
-        param_ids[1],
-        NumericTensor::from_vec_shape(vec![0.0f32; 128], vec![128]).unwrap(),
-    );
+    // b1 [128] -- zeros
+    params.insert(param_ids[1], make_f32_tensor(vec![0.0f32; 128], vec![128]));
 
-    // W2 [128, 10] — He init
+    // W2 [128, 10] -- He init
     let std2 = (2.0f32 / 128.0).sqrt();
     let w2: Vec<f32> = (0..128 * 10).map(|_| rand_normal(rng) * std2).collect();
-    params.insert(
-        param_ids[2],
-        NumericTensor::from_vec_shape(w2, vec![128, 10]).unwrap(),
-    );
+    params.insert(param_ids[2], make_f32_tensor(w2, vec![128, 10]));
 
-    // b2 [10] — zeros
-    params.insert(
-        param_ids[3],
-        NumericTensor::from_vec_shape(vec![0.0f32; 10], vec![10]).unwrap(),
-    );
+    // b2 [10] -- zeros
+    params.insert(param_ids[3], make_f32_tensor(vec![0.0f32; 10], vec![10]));
 
     params
+}
+
+fn pool_eval_milli<'p>(
+    graph: &MilliOpGraph,
+    inputs: &HashMap<GlobalId, PoolTensor>,
+    pool: &'p SystemPool,
+) -> HashMap<GlobalId, NumericTensor<'p, DynRank, SystemPool>> {
+    let views: HashMap<GlobalId, _> = inputs.iter().map(|(&id, t)| (id, t.view())).collect();
+    let view_refs: HashMap<GlobalId, _> = views.iter().map(|(&id, v)| (id, v)).collect();
+    graph.pool_eval(&view_refs, pool).unwrap()
+}
+
+fn read_f32_vec(t: &NumericTensor<'_, DynRank, SystemPool>) -> Vec<f32> {
+    let view = t.view();
+    (0..view.numel())
+        .map(|i| view.read_element(i).to_f64() as f32)
+        .collect()
 }
 
 fn main() {
@@ -306,7 +329,6 @@ fn main() {
     let mut params = init_weights(&mut rng, &param_ids);
 
     // 6. Training loop
-    let mut backend = EvalBackend::NDArray;
     let batch_size = 64;
     let num_epochs = 5;
 
@@ -316,7 +338,6 @@ fn main() {
         &params,
         image_id,
         logits_id,
-        &mut backend,
     );
     eprintln!("Initial test accuracy: {:.2}%", acc * 100.0);
 
@@ -328,26 +349,22 @@ fn main() {
         while batch_start < data.train.num_samples {
             let (img_batch, label_batch) = get_batch(&data.train, batch_start, batch_size);
 
-            let mut inputs: HashMap<GlobalId, NumericTensor<DynRank>> = params.clone();
+            let mut inputs: HashMap<GlobalId, PoolTensor> = params.clone();
             inputs.insert(image_id, img_batch);
             inputs.insert(meta.external_inputs[0], label_batch);
 
-            let results: HashMap<_, _> = training_graph
-                .eval(&inputs, &mut (), &mut backend)
-                .unwrap()
-                .collect();
+            let results = pool_eval_milli(&training_graph, &inputs, &POOL);
 
-            let loss_val: Vec<f32> = results[&meta.loss.unwrap()]
-                .flatten()
-                .unwrap()
-                .try_into()
-                .unwrap();
+            let loss_val = read_f32_vec(&results[&meta.loss.unwrap()]);
             epoch_loss += loss_val[0] as f64;
             num_batches += 1;
 
             // Feed updated parameters back
             for (&ext_param, &new_param_output) in &meta.param_updates {
-                params.insert(ext_param, results[&new_param_output].clone());
+                // Copy result tensor to a 'static tensor for storage
+                let result_view = results[&new_param_output].view();
+                let copied = result_view.to_tensor(&POOL).unwrap();
+                params.insert(ext_param, copied);
             }
 
             batch_start += batch_size;
@@ -360,7 +377,6 @@ fn main() {
             &params,
             image_id,
             logits_id,
-            &mut backend,
         );
         eprintln!(
             "Epoch {}/{}: loss = {:.4}, test accuracy = {:.2}%",
@@ -377,10 +393,9 @@ fn main() {
 fn eval_accuracy(
     fwd_graph: &MilliOpGraph,
     test: &Dataset,
-    params: &HashMap<GlobalId, NumericTensor<DynRank>>,
+    params: &HashMap<GlobalId, PoolTensor>,
     image_id: GlobalId,
     logits_id: GlobalId,
-    backend: &mut EvalBackend,
 ) -> f32 {
     let batch_size = 256;
     let mut correct = 0usize;
@@ -394,8 +409,8 @@ fn eval_accuracy(
         let mut inputs = params.clone();
         inputs.insert(image_id, img_batch);
 
-        let results: HashMap<_, _> = fwd_graph.eval(&inputs, &mut (), backend).unwrap().collect();
-        let logits: Vec<f32> = results[&logits_id].flatten().unwrap().try_into().unwrap();
+        let results = pool_eval_milli(fwd_graph, &inputs, &POOL);
+        let logits = read_f32_vec(&results[&logits_id]);
 
         for b in 0..actual {
             let row = &logits[b * 10..(b + 1) * 10];

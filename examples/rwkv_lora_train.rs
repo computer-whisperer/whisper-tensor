@@ -5,7 +5,7 @@
 ///
 /// The base model weights stay frozen (constants in the graph). Only the LoRA
 /// A/B matrices are trainable. RNN state is threaded forward between tokens
-/// but gradients do not flow through state (no BPTT — that's a future extension
+/// but gradients do not flow through state (no BPTT -- that's a future extension
 /// using `external_gradients`).
 ///
 /// STATUS: Currently broken at runtime due to BF16/F32 dtype mismatches in the
@@ -15,14 +15,6 @@
 /// does not support mixed-dtype binary ops. This will be resolved by upcoming
 /// changes to how milli-ops handle dtypes.
 ///
-/// Known dtype issue sites:
-///   - Mul/Div/MatMul backward: grad (F32 from loss) × forward value (BF16)
-///   - ClampMin backward: F32 threshold constant vs BF16 input
-///   - Sqrt/Tanh backward: F32 scalar constants (2.0, 1.0) vs BF16 output
-///   - SGD optimizer: F32 learning rate × BF16 gradient
-///   - ReduceMean backward: hardcoded Cast to F32
-///   - Adam/AdamW optimizer: all F32 constants vs BF16 state
-///
 /// Usage:
 ///   cargo run --example rwkv_lora_train --release -- <path-to-rwkv7.pth>
 use std::collections::{HashMap, HashSet};
@@ -30,17 +22,18 @@ use std::path::Path;
 
 use half::bf16;
 use rand::RngExt;
-use whisper_tensor::backends::eval_backend::EvalBackend;
 use whisper_tensor::graph::GlobalId;
 use whisper_tensor::metadata::TokenizerInfo;
-use whisper_tensor::migration::numeric_tensor::NumericTensor;
 use whisper_tensor::milli_graph::{
     BackwardGenOptions, LossInputSource, LossWiring, MilliGraphGenOptions, MilliOpGraph,
     OptimizerGenOptions, OptimizerKind,
 };
 use whisper_tensor::numeric_dtype::{NumericDType, ONNXDType};
+use whisper_tensor::numeric_scalar::NumericScalar;
+use whisper_tensor::numeric_tensor::NumericTensor;
+use whisper_tensor::pool::{Pool, SystemPool};
 use whisper_tensor::scalar_info::ScalarInfoTyped;
-use whisper_tensor::super_graph::cache::SuperGraphTensorCache;
+use whisper_tensor::super_graph::cache::SuperGraphCache;
 use whisper_tensor::super_graph::data::SuperGraphData;
 use whisper_tensor::super_graph::links::{SuperGraphLinkDouble, SuperGraphLinkTriple};
 use whisper_tensor::super_graph::nodes::{
@@ -49,9 +42,70 @@ use whisper_tensor::super_graph::nodes::{
 use whisper_tensor::super_graph::{
     SuperGraphAnyLink, SuperGraphBuilder, SuperGraphContext, SuperGraphLink, SuperGraphLinkKind,
 };
-use whisper_tensor::symbolic_graph::{SharedPoolTensor, SymbolicGraphMutator, TensorType};
+use whisper_tensor::symbolic_graph::{SymbolicGraphMutator, TensorType};
 use whisper_tensor::tensor_rank::DynRank;
 use whisper_tensor::tokenizer::{AnyTokenizer, Tokenizer};
+
+type PoolTensor = NumericTensor<'static, DynRank, SystemPool>;
+
+static POOL: SystemPool = SystemPool;
+
+// ---------------------------------------------------------------------------
+// Tensor resolution helper (replaces deleted get_initialized_tensors)
+// ---------------------------------------------------------------------------
+
+/// Walk all tensors in the SymbolicGraph and resolve Constants and initialized
+/// Inputs to pool-based tensors, returning a map from GlobalId to PoolTensor.
+/// This replicates the old `get_initialized_tensors(&store)` behavior.
+fn resolve_initialized_tensors(
+    graph: &whisper_tensor::symbolic_graph::SymbolicGraph,
+    store: &whisper_tensor::symbolic_graph::tensor_store::TensorStore,
+) -> HashMap<GlobalId, PoolTensor> {
+    use whisper_tensor::symbolic_graph::{StoredOrNotTensor, TensorType};
+    use whisper_tensor::numeric_tensor::TensorLayout;
+
+    let mut result = HashMap::new();
+    let tensors_by_name = graph.get_tensors_by_name();
+    // Get all tensor IDs from the name map (covers all named tensors)
+    let tensor_ids: Vec<GlobalId> = tensors_by_name.values().copied().collect();
+
+    for &tensor_id in &tensor_ids {
+        let Some(info) = graph.get_tensor_info(tensor_id) else {
+            continue;
+        };
+        let stored_ref = match &info.tensor_type {
+            TensorType::Constant(s) | TensorType::Input(Some(s)) => Some(s),
+            _ => None,
+        };
+        let Some(stored_ref) = stored_ref else {
+            continue;
+        };
+        match stored_ref {
+            StoredOrNotTensor::Stored(store_id) => {
+                if let Some(stored) = store.get_tensor(*store_id)
+                    && let Some(t) = stored.to_pool_tensor(&POOL)
+                {
+                    result.insert(tensor_id, t);
+                }
+            }
+            StoredOrNotTensor::Inline(shared) => {
+                let src = &*shared.0;
+                let layout = TensorLayout::<DynRank>::row_major(
+                    src.shape().clone(),
+                    src.dtype(),
+                );
+                if let Ok(buf) = POOL.allocate(layout.buffer_size_bytes()) {
+                    let mut tensor = NumericTensor::from_parts(buf, layout);
+                    for i in 0..src.numel() {
+                        tensor.write_element(i, src.read_element(i));
+                    }
+                    result.insert(tensor_id, tensor);
+                }
+            }
+        }
+    }
+    result
+}
 
 // ---------------------------------------------------------------------------
 // LoRA injection
@@ -70,21 +124,12 @@ const LORA_TARGETS: &[&str] = &[
 const LORA_RANK: usize = 16;
 
 /// Inject LoRA adapters on all target linear layers in the graph.
-///
-/// For each target MatMul `y = activation @ weight`:
-///   lora_out = (activation @ A) @ B
-///   combined = y + lora_out
-///   downstream consumers now use `combined` instead of `y`
-///
-/// Returns the list of LoRA parameter GlobalIds (trainable), paired as (A, B).
 fn inject_lora(m: &mut SymbolicGraphMutator, rng: &mut impl rand::Rng) -> Vec<GlobalId> {
     let mut trainable = Vec::new();
 
-    // Collect all target ops (avoid borrow issues with find_ops_by_name)
     let mut targets: Vec<(GlobalId, String)> = Vec::new();
     for pattern in LORA_TARGETS {
         for (op_id, name) in m.find_ops_by_name(pattern) {
-            // Only match the MatMul itself, not bias adds (".bias" suffix)
             if name.ends_with(".bias") {
                 continue;
             }
@@ -151,13 +196,36 @@ fn rand_normal(rng: &mut impl rand::Rng) -> f32 {
     (-2.0f32 * u1.ln()).sqrt() * (2.0f32 * std::f32::consts::PI * u2).cos()
 }
 
+fn make_i32_tensor(data: Vec<i32>, shape: Vec<usize>) -> PoolTensor {
+    let shape_u64: Vec<u64> = shape.iter().map(|&d| d as u64).collect();
+    NumericTensor::from_fn(shape_u64, NumericDType::I32, &POOL, |i| {
+        NumericScalar::from_i32(data[i])
+    })
+    .unwrap()
+}
+
+fn make_f32_tensor(data: Vec<f32>, shape: Vec<usize>) -> PoolTensor {
+    let shape_u64: Vec<u64> = shape.iter().map(|&d| d as u64).collect();
+    NumericTensor::from_fn(shape_u64, NumericDType::F32, &POOL, |i| {
+        NumericScalar::from_f32(data[i])
+    })
+    .unwrap()
+}
+
+fn read_f32_vec(t: &PoolTensor) -> Vec<f32> {
+    let view = t.view();
+    (0..view.numel())
+        .map(|i| view.read_element(i).to_f64() as f32)
+        .collect()
+}
+
 /// Determine LoRA weight shapes from the base model's weight tensors.
 fn compute_lora_shapes(
     graph: &whisper_tensor::symbolic_graph::SymbolicGraph,
     store: &whisper_tensor::symbolic_graph::tensor_store::TensorStore,
     trainable: &[GlobalId],
 ) -> HashMap<GlobalId, (usize, usize)> {
-    let initialized = graph.get_initialized_tensors(store);
+    let initialized = resolve_initialized_tensors(graph, store);
     let tensors_by_name = graph.get_tensors_by_name();
     let mut shapes = HashMap::new();
 
@@ -188,7 +256,7 @@ fn init_lora_weights(
     trainable: &[GlobalId],
     shapes: &HashMap<GlobalId, (usize, usize)>,
     rng: &mut impl rand::Rng,
-) -> HashMap<GlobalId, NumericTensor<DynRank>> {
+) -> HashMap<GlobalId, PoolTensor> {
     let mut params = HashMap::new();
     for (i, &id) in trainable.iter().enumerate() {
         let &(rows, cols) = &shapes[&id];
@@ -203,10 +271,12 @@ fn init_lora_weights(
         };
         let name = graph.get_tensor_name(id).unwrap_or("?");
         eprintln!("  {name}: [{rows}, {cols}]");
-        params.insert(
-            id,
-            NumericTensor::from_vec_shape(values, vec![rows, cols]).unwrap(),
-        );
+        let shape_u64 = vec![rows as u64, cols as u64];
+        let tensor = NumericTensor::from_fn(shape_u64, NumericDType::BF16, &POOL, |i| {
+            NumericScalar::from_bf16(values[i])
+        })
+        .unwrap();
+        params.insert(id, tensor);
     }
     params
 }
@@ -224,7 +294,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pth_path = Path::new(&args[1]);
     let mut rng = rand::rng();
 
-    // ── 1. Load model ────────────────────────────────────────────────
+    // -- 1. Load model --
     eprintln!("Loading RWKV7 from {}...", pth_path.display());
     let onnx_data = whisper_tensor_import::models::llm::rwkv7::load_rwkv7_pth(
         pth_path,
@@ -237,18 +307,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     eprintln!("Graph: {} ops", mutator.graph_ref().get_operations().len());
 
-    // ── 2. Inject LoRA ───────────────────────────────────────────────
+    // -- 2. Inject LoRA --
     eprintln!("\nInjecting LoRA (rank={LORA_RANK})...");
     let trainable = inject_lora(&mut mutator, &mut rng);
     eprintln!("{} trainable LoRA params", trainable.len());
 
-    // ── 3. Extract graph, compute shapes, init LoRA weights ──────────
+    // -- 3. Extract graph, compute shapes, init LoRA weights --
     let (graph, store) = mutator.get_inner();
     let lora_shapes = compute_lora_shapes(&graph, &store, &trainable);
     eprintln!("\nInitializing LoRA weights...");
     let lora_params = init_lora_weights(&graph, &trainable, &lora_shapes, &mut rng);
 
-    // ── 4. Discover graph structure ──────────────────────────────────
+    // -- 4. Discover graph structure --
     let names_by_id = graph.get_tensors_by_name();
     let id_by_name: HashMap<&str, GlobalId> =
         names_by_id.iter().map(|(k, v)| (k.as_str(), *v)).collect();
@@ -276,8 +346,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     eprintln!("{} state pairs ({layer} layers)", state_pairs.len());
 
-    // ── 5. Build training milli graph ────────────────────────────────
-    //    Using SGD to avoid optimizer state threading complexity.
+    // -- 5. Build training milli graph --
     eprintln!("\nBuilding training graph...");
     let (loss_graph, loss_info) = MilliOpGraph::cross_entropy_loss(&mut rng);
     let options = MilliGraphGenOptions {
@@ -310,23 +379,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let loss_id = meta.loss.unwrap();
     let targets_ext_id = meta.external_inputs[0];
 
-    // Forward-only graph for perplexity eval (later)
-    // let _fwd_graph = graph.generate_milli_graph(&mut rng);
-
-    // ── 6. Categorize all training graph inputs ──────────────────────
-    //
-    //    Every milli graph input must come from exactly one Scan source:
-    //      scan_inputs:   sliced per iteration (tokens, targets)
-    //      state_links:   threaded across iterations (LoRA params, RNN state)
-    //      simple_inputs: constant per iteration (base model weights)
-
+    // -- 6. Categorize all training graph inputs --
     let all_milli_inputs: Vec<GlobalId> = training_graph.get_inputs();
-    let base_constants = graph.get_initialized_tensors(&store);
+    let base_constants = resolve_initialized_tensors(&graph, &store);
 
     let trainable_set: HashSet<GlobalId> = trainable.iter().copied().collect();
     let state_in_set: HashSet<GlobalId> = state_pairs.iter().map(|&(i, _)| i).collect();
 
-    // Inputs that are NOT scan/state: base constants + any other initialized tensors
     let special_ids: HashSet<GlobalId> = {
         let mut s = trainable_set.clone();
         s.extend(&state_in_set);
@@ -349,15 +408,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         state_pairs.len()
     );
 
-    // ── 7. Tokenize training text ────────────────────────────────────
+    // -- 7. Tokenize training text --
     let training_text = "The quick brown fox jumps over the lazy dog. \
         A journey of a thousand miles begins with a single step. \
         To be or not to be, that is the question.";
 
     let tokenizer = AnyTokenizer::from_tokenizer_info(&TokenizerInfo::RWKVWorld);
     let tokens: Vec<u32> = tokenizer.encode(training_text);
-    let seq_len = tokens.len() - 1; // input/target pairs
-    eprintln!("{} tokens → {seq_len} training steps", tokens.len());
+    let seq_len = tokens.len() - 1;
+    eprintln!("{} tokens -> {seq_len} training steps", tokens.len());
 
     let vocab_size = {
         let info = graph.get_tensor_info(output_id);
@@ -371,28 +430,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // Batched for Scan: [seq_len, 1, 1] tokens, [seq_len, 1, 1, vocab_size] targets
-    let batched_tokens = NumericTensor::<DynRank>::from_vec_shape(
+    let batched_tokens = make_i32_tensor(
         tokens[..seq_len].iter().map(|&t| t as i32).collect(),
         vec![seq_len, 1, 1],
-    )?;
+    );
 
     let mut one_hot = vec![0.0f32; seq_len * vocab_size];
     for (i, &t) in tokens[1..].iter().enumerate() {
         one_hot[i * vocab_size + t as usize] = 1.0;
     }
-    let batched_targets =
-        NumericTensor::<DynRank>::from_vec_shape(one_hot, vec![seq_len, 1, 1, vocab_size])?;
+    let batched_targets = make_f32_tensor(one_hot, vec![seq_len, 1, 1, vocab_size]);
 
-    // ── 8. Build SuperGraph with Scan ────────────────────────────────
+    // -- 8. Build SuperGraph with Scan --
     eprintln!("\nBuilding SuperGraph...");
 
-    // Inner graph: wraps the training MilliOpGraph
     let inner_input_links: Vec<_> = all_milli_inputs
         .iter()
         .map(|&id| SuperGraphAnyLink::tensor(id))
         .collect();
 
-    // Inner outputs: updated params + loss + updated state
     let mut inner_output_links: Vec<_> = meta
         .param_updates
         .values()
@@ -413,7 +469,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let outer_targets_link = SuperGraphLink::new(SuperGraphLinkKind::Tensor, &mut rng);
     let collected_losses_link = SuperGraphLink::new(SuperGraphLinkKind::Tensor, &mut rng);
 
-    // Simple inputs: base constants (one outer link → inner id, per constant)
+    // Simple inputs: base constants
     let constant_simple_inputs: Vec<(SuperGraphLink, GlobalId)> = constant_input_ids
         .iter()
         .map(|&id| {
@@ -523,7 +579,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut outer_builder = SuperGraphBuilder::new();
     outer_builder.add_node(scan_node.to_any());
 
-    // Outer inputs: iter_count, data, constants, param inits, state inits
+    // Outer inputs
     let mut outer_input_links = vec![iter_count_link, outer_tokens_link, outer_targets_link];
     for &(outer, _) in &constant_simple_inputs {
         outer_input_links.push(outer);
@@ -535,7 +591,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         outer_input_links.push(outer_init);
     }
 
-    // Outer outputs: losses, final params, final state
+    // Outer outputs
     let mut outer_output_links = vec![collected_losses_link];
     for &(_, _, outer_final) in &outer_param_links {
         outer_output_links.push(outer_final);
@@ -547,12 +603,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let epoch_graph = outer_builder.build(&mut rng, &outer_input_links, &outer_output_links);
     eprintln!("SuperGraph built.");
 
-    // ── 9. Load base constants ───────────────────────────────────────
+    // -- 9. Load base constants --
     eprintln!("\nLoading base model weights...");
     eprintln!("  {} constant tensors", base_constants.len());
 
     // Initialize RNN state (zeros from the model's initialized tensors)
-    let initial_state: HashMap<GlobalId, NumericTensor<DynRank>> = state_pairs
+    let initial_state: HashMap<GlobalId, PoolTensor> = state_pairs
         .iter()
         .map(|&(si, _)| {
             let t = base_constants
@@ -563,85 +619,78 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .collect();
 
-    // ── 10. Training loop ────────────────────────────────────────────
+    // -- 10. Training loop --
     let num_epochs = 3;
-    let mut backend = EvalBackend::NDArray;
     let mut current_params = lora_params;
     let mut current_state = initial_state;
 
-    let iter_count_tensor =
-        NumericTensor::<DynRank>::from_vec_shape(vec![seq_len as i64], vec![1])?;
+    let iter_count_tensor = NumericTensor::<DynRank, _>::from_fn(
+        vec![1u64],
+        NumericDType::I64,
+        &POOL,
+        |_| NumericScalar::from_i64(seq_len as i64),
+    )
+    .unwrap();
 
     eprintln!("\nTraining ({num_epochs} epochs, {seq_len} steps each)...\n");
 
     for epoch in 0..num_epochs {
-        let mut sg_data = SuperGraphData::new();
+        let mut sg_data: SuperGraphData<'_, '_, SystemPool> = SuperGraphData::new();
 
-        sg_data.tensors.insert(
-            iter_count_link,
-            SharedPoolTensor::from(iter_count_tensor.clone()),
-        );
-        sg_data.tensors.insert(
-            outer_tokens_link,
-            SharedPoolTensor::from(batched_tokens.clone()),
-        );
-        sg_data.tensors.insert(
-            outer_targets_link,
-            SharedPoolTensor::from(batched_targets.clone()),
-        );
+        sg_data.tensors.insert(iter_count_link, iter_count_tensor.clone());
+        sg_data.tensors.insert(outer_tokens_link, batched_tokens.clone());
+        sg_data.tensors.insert(outer_targets_link, batched_targets.clone());
 
         // Constants (simple inputs)
         for &(outer_link, inner_id) in &constant_simple_inputs {
             if let Some(t) = base_constants.get(&inner_id) {
-                sg_data
-                    .tensors
-                    .insert(outer_link, SharedPoolTensor::from(t.clone()));
+                sg_data.tensors.insert(outer_link, t.clone());
             }
         }
 
         // LoRA params (state init)
         for &(ext_param, outer_init, _) in &outer_param_links {
-            sg_data.tensors.insert(
-                outer_init,
-                SharedPoolTensor::from(current_params[&ext_param].clone()),
-            );
+            sg_data
+                .tensors
+                .insert(outer_init, current_params[&ext_param].clone());
         }
 
         // RNN state (state init)
         for &(si, _, outer_init, _) in &outer_rnn_links {
-            sg_data.tensors.insert(
-                outer_init,
-                SharedPoolTensor::from(current_state[&si].clone()),
-            );
+            sg_data
+                .tensors
+                .insert(outer_init, current_state[&si].clone());
         }
 
-        let mut tensor_cache = SuperGraphTensorCache::new();
         let mut observer = ();
-        let mut context = SuperGraphContext::new(&mut observer, &mut tensor_cache);
+        let mut caches = SuperGraphCache::new();
+        let mut context = SuperGraphContext::new(&POOL, &mut observer);
+        context.caches = Some(&mut caches);
 
         let results = epoch_graph.run(sg_data, &mut context)?;
 
         // Extract results
-        let losses_legacy = results.tensors[&collected_losses_link].to_legacy();
-        let losses: Vec<f32> = losses_legacy.flatten()?.try_into()?;
+        let losses = read_f32_vec(&results.tensors[&collected_losses_link]);
         let avg_loss = losses.iter().map(|&v| v as f64).sum::<f64>() / losses.len() as f64;
         let first_loss = losses.first().copied().unwrap_or(0.0);
         let last_loss = losses.last().copied().unwrap_or(0.0);
 
         eprintln!(
-            "Epoch {}/{}: loss {first_loss:.4} → {last_loss:.4} (avg {avg_loss:.4})",
+            "Epoch {}/{}: loss {first_loss:.4} -> {last_loss:.4} (avg {avg_loss:.4})",
             epoch + 1,
             num_epochs
         );
 
         // Update params
         for &(ext_param, _, outer_final) in &outer_param_links {
-            current_params.insert(ext_param, results.tensors[&outer_final].to_legacy());
+            let view = results.tensors[&outer_final].view();
+            current_params.insert(ext_param, view.to_tensor(&POOL).unwrap());
         }
 
-        // Update state for next epoch (or reset to zeros)
+        // Update state for next epoch
         for &(si, _, _, outer_final) in &outer_rnn_links {
-            current_state.insert(si, results.tensors[&outer_final].to_legacy());
+            let view = results.tensors[&outer_final].view();
+            current_state.insert(si, view.to_tensor(&POOL).unwrap());
         }
     }
 

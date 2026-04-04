@@ -5,10 +5,10 @@ use std::fs::File;
 use std::path::Path;
 use std::time::Instant;
 use whisper_tensor::DynRank;
-use whisper_tensor::backends::eval_backend::EvalBackend;
-use whisper_tensor::dtype::DType;
-use whisper_tensor::migration::numeric_tensor::NumericTensor;
-use whisper_tensor::model::Model;
+use whisper_tensor::numeric_dtype::NumericDType;
+use whisper_tensor::numeric_scalar::NumericScalar;
+use whisper_tensor::numeric_tensor::NumericTensor;
+use whisper_tensor::pool::SystemPool;
 use whisper_tensor_import::identify_and_load;
 use whisper_tensor_import::onnx_graph::WeightStorageStrategy;
 
@@ -24,13 +24,24 @@ fn load_npy_f32(name: &str) -> (Vec<f32>, Vec<usize>) {
     (values, shape)
 }
 
-fn load_npy_as_f16_tensor(name: &str) -> NumericTensor<DynRank> {
+fn load_npy_as_f16_tensor<'a>(
+    name: &str,
+    pool: &'a SystemPool,
+) -> NumericTensor<'a, DynRank, SystemPool> {
     let (values, shape) = load_npy_f32(name);
-    let f16_values: Vec<half::f16> = values.iter().map(|&x| half::f16::from_f32(x)).collect();
-    NumericTensor::<DynRank>::from_vec_shape(f16_values, shape).unwrap()
+    let shape_u64: Vec<u64> = shape.iter().map(|&s| s as u64).collect();
+    NumericTensor::from_fn(shape_u64, NumericDType::F16, pool, |i| {
+        NumericScalar::from_f32(values[i]).cast_to(NumericDType::F16)
+    })
+    .unwrap()
 }
 
-fn compare(name: &str, actual: &NumericTensor<DynRank>, ref_name: &str, backend: &mut EvalBackend) {
+fn compare(
+    name: &str,
+    actual: &NumericTensor<'_, DynRank, SystemPool>,
+    ref_name: &str,
+    pool: &SystemPool,
+) {
     let (ref_values, ref_shape) = load_npy_f32(ref_name);
 
     let actual_shape: Vec<usize> = actual.shape().iter().map(|&s| s as usize).collect();
@@ -39,9 +50,10 @@ fn compare(name: &str, actual: &NumericTensor<DynRank>, ref_name: &str, backend:
         "{name}: shape mismatch: actual={actual_shape:?} vs ref={ref_shape:?}"
     );
 
-    let actual_f32 = actual.cast(DType::F32, backend).unwrap();
-    let actual_nd = actual_f32.to_ndarray().unwrap();
-    let actual_flat: Vec<f32> = actual_nd.flatten().try_into().unwrap();
+    let actual_f32 = cast_tensor(actual, NumericDType::F32, pool);
+    let actual_flat: Vec<f32> = (0..actual_f32.numel())
+        .map(|i| actual_f32.read_element(i).to_f32())
+        .collect();
 
     let mut max_abs_diff: f32 = 0.0;
     let mut max_rel_diff: f32 = 0.0;
@@ -86,6 +98,7 @@ fn compare(name: &str, actual: &NumericTensor<DynRank>, ref_name: &str, backend:
 
 fn main() {
     tracing_subscriber::fmt::init();
+    let pool = SystemPool;
 
     let input_path = Path::new(SD_BASE).join("unet").join("model.onnx");
     println!("Loading unet from {}", input_path.display());
@@ -93,15 +106,13 @@ fn main() {
     let onnx_data = identify_and_load(&input_path, WeightStorageStrategy::EmbeddedData)
         .expect("Failed to import model");
     let mut rng = rand::rng();
-    let model = Model::new_from_onnx(&onnx_data, &mut rng, input_path.parent())
+    let model = whisper_tensor::model::Model::new_from_onnx(&onnx_data, &mut rng, input_path.parent())
         .expect("Failed to load model");
 
-    let mut backend = EvalBackend::NDArray;
-
     println!("\n=== UNet single step ===");
-    let sample = load_npy_as_f16_tensor("unet_sample_float16.npy");
-    let timestep = load_npy_as_f16_tensor("unet_timestep_float16.npy");
-    let encoder_hidden_states = load_npy_as_f16_tensor("unet_encoder_hidden_states_float16.npy");
+    let sample = load_npy_as_f16_tensor("unet_sample_float16.npy", &pool);
+    let timestep = load_npy_as_f16_tensor("unet_timestep_float16.npy", &pool);
+    let encoder_hidden_states = load_npy_as_f16_tensor("unet_encoder_hidden_states_float16.npy", &pool);
 
     println!("  sample: {:?} {:?}", sample.dtype(), sample.shape());
     println!("  timestep: {:?} {:?}", timestep.dtype(), timestep.shape());
@@ -111,14 +122,18 @@ fn main() {
         encoder_hidden_states.shape()
     );
 
+    let sample_view = sample.view();
+    let timestep_view = timestep.view();
+    let ehs_view = encoder_hidden_states.view();
+
     let mut inputs = HashMap::new();
-    inputs.insert("sample".to_string(), sample);
-    inputs.insert("timestep".to_string(), timestep);
-    inputs.insert("encoder_hidden_states".to_string(), encoder_hidden_states);
+    inputs.insert("sample".to_string(), &sample_view);
+    inputs.insert("timestep".to_string(), &timestep_view);
+    inputs.insert("encoder_hidden_states".to_string(), &ehs_view);
 
     let start = Instant::now();
     let outputs = model
-        .eval(inputs, &mut (), None, &mut backend)
+        .eval_pool(inputs, &pool)
         .expect("Inference failed");
     println!("  Inference took {:.2?}", start.elapsed());
 
@@ -127,7 +142,19 @@ fn main() {
             "out_sample",
             out,
             "unet_out_sample_float16.npy",
-            &mut backend,
+            &pool,
         );
     }
+}
+
+fn cast_tensor<'a>(
+    tensor: &NumericTensor<'_, DynRank, SystemPool>,
+    target_dtype: NumericDType,
+    pool: &'a SystemPool,
+) -> NumericTensor<'a, DynRank, SystemPool> {
+    let shape: Vec<u64> = tensor.shape().clone();
+    NumericTensor::from_fn(shape, target_dtype, pool, |i| {
+        tensor.read_element(i).cast_to(target_dtype)
+    })
+    .unwrap()
 }
