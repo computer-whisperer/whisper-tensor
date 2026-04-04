@@ -69,8 +69,8 @@ fn build_zero_inputs(
 ) -> HashMap<String, NumericTensor<'static, DynRank, SystemPool>> {
     let input_infos = model.get_input_tensor_info();
     let mut inputs = HashMap::new();
-    for (name, (legacy_dtype, shape_desc)) in input_infos {
-        let Some(dtype) = NumericDType::from_legacy(legacy_dtype) else {
+    for (name, (onnx_dtype, shape_desc)) in input_infos {
+        let Some(dtype) = onnx_dtype.as_numeric() else {
             continue;
         };
         let shape: Vec<u64> = shape_desc

@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::PathBuf;
-use whisper_tensor::backends::eval_backend::EvalBackend;
 use whisper_tensor::loader::{ConfigValue, ConfigValues, Loader};
+use whisper_tensor::pool::SystemPool;
 use whisper_tensor_import::loaders::OnnxLoader;
 
 fn main() {
@@ -41,17 +41,16 @@ fn main() {
     print!("{prompt:}");
     std::io::stdout().flush().unwrap();
     let mut context = prompt.clone();
+    let pool = SystemPool;
 
     for _ in 0..10 {
         let res = interface
             .run_string_in_string_out(
                 model,
-                None,
                 context.clone(),
                 &mut tokenizer_cache,
                 None,
-                None,
-                &mut EvalBackend::NDArray,
+                &pool,
             )
             .unwrap();
         print!("{res:}");

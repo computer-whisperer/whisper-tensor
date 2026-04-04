@@ -7,8 +7,8 @@ use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Once;
-use whisper_tensor::dtype::{DType, DTypeError};
 use whisper_tensor::model::Model;
+use whisper_tensor::numeric_dtype::{ONNXDType, ONNXDTypeError};
 use whisper_tensor::numeric_tensor::NumericTensorView;
 use whisper_tensor::onnx::TensorProto;
 use whisper_tensor::pool::Pool;
@@ -29,7 +29,7 @@ enum TestError {
     #[error("Error: {0}")]
     ErrorS(String),
     #[error(transparent)]
-    DTypeError(#[from] DTypeError),
+    DTypeError(#[from] ONNXDTypeError),
     #[error(transparent)]
     OtherError(#[from] anyhow::Error),
 }
@@ -145,12 +145,11 @@ impl OnnxNodeTest {
                 .map_err(|e| format!("Model execution failed: {e:?}"))?;
 
             // Build output type info from actual model outputs for dtype fixup.
-            // Only numeric outputs have DType info.
-            let output_type_info: HashMap<String, (DType, Vec<Option<u64>>)> = outputs
+            let output_type_info: HashMap<String, (ONNXDType, Vec<Option<u64>>)> = outputs
                 .iter()
                 .filter_map(|(name, tensor)| {
                     let nt = tensor.as_numeric().ok()?;
-                    Some((name.clone(), (nt.dtype().to_legacy(), vec![])))
+                    Some((name.clone(), (ONNXDType::Numeric(nt.dtype()), vec![])))
                 })
                 .collect();
             let mut expected =
@@ -281,7 +280,7 @@ impl TestDataSet {
 /// Applies dtype fixup for old ONNX test data (e.g. BF16/F16 stored as UINT16).
 fn parse_tensors_as_onnx<'p, P: Pool + 'p>(
     proto_map: &HashMap<String, Vec<u8>>,
-    type_info: &HashMap<String, (DType, Vec<Option<u64>>)>,
+    type_info: &HashMap<String, (ONNXDType, Vec<Option<u64>>)>,
     pool: &'p P,
 ) -> Result<HashMap<String, whisper_tensor::numeric_dtype::ONNXTensor<'p, P>>, ONNXDecodingError> {
     use whisper_tensor::symbolic_graph::tensor_proto_to_onnx_tensor;
@@ -293,15 +292,16 @@ fn parse_tensors_as_onnx<'p, P: Pool + 'p>(
         // Dtype fixup for old ONNX test data (only applies to numeric tensors).
         if let Some((expected_dtype, _)) = type_info.get(&tensor_proto.name) {
             let expected_onnx = onnx_dtype_code(*expected_dtype);
-            let proto_size = DType::try_from(
-                whisper_tensor::onnx::tensor_proto::DataType::try_from(tensor_proto.data_type)
-                    .unwrap(),
-            )
-            .ok()
-            .and_then(|d| d.bytes_per_element());
+            let proto_dtype = ONNXDType::from_onnx_i32(tensor_proto.data_type).ok();
+            let proto_size = proto_dtype
+                .and_then(|d| d.as_numeric())
+                .map(|d| d.bytes_per_element());
+            let expected_size = expected_dtype
+                .as_numeric()
+                .map(|d| d.bytes_per_element());
             if tensor_proto.data_type != expected_onnx
-                && expected_dtype.bytes_per_element().is_some()
-                && expected_dtype.bytes_per_element() == proto_size
+                && expected_size.is_some()
+                && expected_size == proto_size
             {
                 tensor_proto.data_type = expected_onnx;
             }
@@ -313,27 +313,31 @@ fn parse_tensors_as_onnx<'p, P: Pool + 'p>(
     Ok(result)
 }
 
-fn onnx_dtype_code(dtype: DType) -> i32 {
+fn onnx_dtype_code(dtype: ONNXDType) -> i32 {
+    use whisper_tensor::numeric_dtype::NumericDType;
     use whisper_tensor::onnx::tensor_proto::DataType;
     match dtype {
-        DType::F32 => DataType::Float as i32,
-        DType::F64 => DataType::Double as i32,
-        DType::F16 => DataType::Float16 as i32,
-        DType::BF16 => DataType::Bfloat16 as i32,
-        DType::I8 => DataType::Int8 as i32,
-        DType::I16 => DataType::Int16 as i32,
-        DType::I32 => DataType::Int32 as i32,
-        DType::I64 => DataType::Int64 as i32,
-        DType::U8 => DataType::Uint8 as i32,
-        DType::U16 => DataType::Uint16 as i32,
-        DType::U32 => DataType::Uint32 as i32,
-        DType::U64 => DataType::Uint64 as i32,
-        DType::BOOL => DataType::Bool as i32,
-        DType::U4 => DataType::Uint4 as i32,
-        DType::I4 => DataType::Int4 as i32,
-        DType::F8E4M3FN => DataType::Float8e4m3fn as i32,
-        DType::F8E5M2 => DataType::Float8e5m2 as i32,
-        _ => DataType::Undefined as i32,
+        ONNXDType::String => DataType::String as i32,
+        ONNXDType::Numeric(ndt) => match ndt {
+            NumericDType::F32 => DataType::Float as i32,
+            NumericDType::F64 => DataType::Double as i32,
+            NumericDType::F16 => DataType::Float16 as i32,
+            NumericDType::BF16 => DataType::Bfloat16 as i32,
+            NumericDType::I8 => DataType::Int8 as i32,
+            NumericDType::I16 => DataType::Int16 as i32,
+            NumericDType::I32 => DataType::Int32 as i32,
+            NumericDType::I64 => DataType::Int64 as i32,
+            NumericDType::U8 => DataType::Uint8 as i32,
+            NumericDType::U16 => DataType::Uint16 as i32,
+            NumericDType::U32 => DataType::Uint32 as i32,
+            NumericDType::U64 => DataType::Uint64 as i32,
+            NumericDType::BOOL => DataType::Bool as i32,
+            NumericDType::U4 => DataType::Uint4 as i32,
+            NumericDType::I4 => DataType::Int4 as i32,
+            NumericDType::F8E4M3FN => DataType::Float8e4m3fn as i32,
+            NumericDType::F8E5M2 => DataType::Float8e5m2 as i32,
+            _ => DataType::Undefined as i32,
+        },
     }
 }
 

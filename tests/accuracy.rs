@@ -258,12 +258,12 @@ fn validate_onnx_model(
     let model_input_info = model.get_input_tensor_info();
     let mut owned_inputs: HashMap<String, NumericTensor<'_, DynRank, SystemPool>> = HashMap::new();
 
-    for (name, (legacy_dtype, shape_desc)) in &model_input_info {
+    for (name, (onnx_dtype, shape_desc)) in &model_input_info {
         if golden_inputs.contains_key(name) {
             continue; // Will use golden tensor directly
         }
-        let Some(dtype) = NumericDType::from_legacy(*legacy_dtype) else {
-            continue; // STRING or Packed — skip
+        let Some(dtype) = onnx_dtype.as_numeric() else {
+            continue; // STRING — skip
         };
         let concrete_shape: Vec<u64> = shape_desc.iter().map(|d| d.unwrap_or(0)).collect();
         let tensor = zero_tensor(dtype, concrete_shape.clone(), &pool);
