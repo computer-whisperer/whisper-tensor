@@ -223,7 +223,7 @@ pub(super) fn build_rnn_supergraph(
         let input_tensor_dtype = input_tensor_info
             .dtype
             .expect("token input tensor has no dtype")
-            .to_legacy();
+            .expect_numeric("token input tensor dtype");
 
         let (mut milli_graph, input_map) =
             MilliOpGraph::new(std::iter::once(sub_token_input.global_id()), rng);
@@ -231,7 +231,7 @@ pub(super) fn build_rnn_supergraph(
         let mut x = Cast::push_new_with_label(
             &mut milli_graph,
             milli_op_graph_input,
-            NumericDType::from_legacy(input_tensor_dtype).unwrap(),
+            input_tensor_dtype,
             Some("token.cast_dtype".to_string()),
             rng,
         );

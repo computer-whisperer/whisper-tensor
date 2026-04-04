@@ -1,7 +1,6 @@
 use rand::Rng;
 use std::path::PathBuf;
 use std::sync::Arc;
-use whisper_tensor::dtype::DType;
 use whisper_tensor::interfaces::{SchedulerType, VideoGenerationInterface};
 use whisper_tensor::loader::*;
 use whisper_tensor::metadata::TokenizerInfo;
@@ -166,7 +165,7 @@ fn load_wan(base_path: PathBuf) -> Result<LoaderOutput, LoaderError> {
         build_wan_interface(
             &mut rng,
             TokenizerInfo::HFTokenizer("google/umt5-xxl".to_string()),
-            whisper_tensor::dtype::DType::BF16,
+            NumericDType::BF16,
         )
     };
 
@@ -185,7 +184,7 @@ fn load_wan(base_path: PathBuf) -> Result<LoaderOutput, LoaderError> {
 fn build_wan_interface(
     rng: &mut impl Rng,
     t5_tokenizer: TokenizerInfo,
-    model_dtype: DType,
+    model_dtype: NumericDType,
 ) -> VideoGenerationInterface {
     let mut builder = SuperGraphBuilder::new();
 
@@ -319,7 +318,7 @@ fn build_wan_denoising_loop(
     dt_input: SuperGraphLink,
     iteration_count_input: SuperGraphLink,
     guidance_scale_input: SuperGraphLink,
-    model_dtype: DType,
+    model_dtype: NumericDType,
     dit_model_index: usize,
 ) -> SuperGraphLink {
     let outer_final_latent = builder.new_tensor_link(rng);

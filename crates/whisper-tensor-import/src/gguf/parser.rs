@@ -237,7 +237,7 @@ fn resolve_simple_block_quant(
     let block_size = 32usize;
     let scale_bytes = 2usize; // f16 scale
     let min_bytes = if has_min { 2usize } else { 0 };
-    let data_bytes = (block_size * weight_bits as usize + 7) / 8;
+    let data_bytes = (block_size * weight_bits as usize).div_ceil(8);
     let block_bytes = scale_bytes + min_bytes + data_bytes;
     let n = num_elements as usize;
     let num_blocks = n / block_size;

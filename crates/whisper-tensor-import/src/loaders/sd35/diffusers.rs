@@ -3,10 +3,10 @@ use crate::onnx_graph::weights::{SafetensorsWeightManager, WeightManager};
 use memmap2::Mmap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use whisper_tensor::dtype::DType;
 use whisper_tensor::loader::{LoadedInterface, LoadedModel, LoaderError, LoaderOutput};
 use whisper_tensor::metadata::TokenizerInfo;
 use whisper_tensor::model::Model;
+use whisper_tensor::numeric_dtype::NumericDType;
 
 fn with_safetensors_manager<R>(
     files: &[PathBuf],
@@ -88,11 +88,13 @@ impl WeightManager for ClipProjectionRemapWeightManager {
     }
 }
 
-fn onnx_dtype_to_runtime(dtype: crate::onnx_graph::tensor::DType) -> Result<DType, LoaderError> {
+fn onnx_dtype_to_runtime(
+    dtype: crate::onnx_graph::tensor::DType,
+) -> Result<NumericDType, LoaderError> {
     match dtype {
-        crate::onnx_graph::tensor::DType::F16 => Ok(DType::F16),
-        crate::onnx_graph::tensor::DType::BF16 => Ok(DType::BF16),
-        crate::onnx_graph::tensor::DType::F32 => Ok(DType::F32),
+        crate::onnx_graph::tensor::DType::F16 => Ok(NumericDType::F16),
+        crate::onnx_graph::tensor::DType::BF16 => Ok(NumericDType::BF16),
+        crate::onnx_graph::tensor::DType::F32 => Ok(NumericDType::F32),
         other => Err(LoaderError::LoadFailed(anyhow::anyhow!(
             "Unsupported model dtype for SD3.5: {:?}",
             other
@@ -177,9 +179,9 @@ pub(super) fn load_diffusers_sd3_pipeline(
     })
     .and_then(onnx_dtype_to_runtime)?;
     let import_dtype = match model_dtype {
-        DType::F16 => crate::onnx_graph::tensor::DType::F16,
-        DType::BF16 => crate::onnx_graph::tensor::DType::BF16,
-        DType::F32 => crate::onnx_graph::tensor::DType::F32,
+        NumericDType::F16 => crate::onnx_graph::tensor::DType::F16,
+        NumericDType::BF16 => crate::onnx_graph::tensor::DType::BF16,
+        NumericDType::F32 => crate::onnx_graph::tensor::DType::F32,
         _ => crate::onnx_graph::tensor::DType::F16,
     };
 

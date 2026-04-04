@@ -3,6 +3,7 @@ use std::sync::Arc;
 use whisper_tensor::loader::*;
 use whisper_tensor::metadata::TokenizerInfo;
 use whisper_tensor::model::Model;
+use whisper_tensor::numeric_dtype::NumericDType;
 
 use crate::models::diffusion::sd_common::CastingWeightManager;
 use crate::onnx_graph::weights::{SafetensorsWeightManager, WeightManager};
@@ -301,17 +302,15 @@ fn load_multi_file(config: &ConfigValues, img_size: usize) -> Result<LoaderOutpu
 fn detect_compute_dtype(
     wm: &SafetensorsWeightManager,
     canary: &str,
-) -> Result<(whisper_tensor::dtype::DType, bool), LoaderError> {
+) -> Result<(NumericDType, bool), LoaderError> {
     let storage_dtype =
         crate::models::diffusion::sd_common::detect_model_dtype_with_canary(wm, canary);
     println!("Detected DiT storage dtype: {storage_dtype:?}");
     match storage_dtype {
-        crate::onnx_graph::tensor::DType::F8E4M3FN => {
-            Ok((whisper_tensor::dtype::DType::BF16, true))
-        }
-        crate::onnx_graph::tensor::DType::BF16 => Ok((whisper_tensor::dtype::DType::BF16, false)),
-        crate::onnx_graph::tensor::DType::F16 => Ok((whisper_tensor::dtype::DType::F16, false)),
-        crate::onnx_graph::tensor::DType::F32 => Ok((whisper_tensor::dtype::DType::F32, false)),
+        crate::onnx_graph::tensor::DType::F8E4M3FN => Ok((NumericDType::BF16, true)),
+        crate::onnx_graph::tensor::DType::BF16 => Ok((NumericDType::BF16, false)),
+        crate::onnx_graph::tensor::DType::F16 => Ok((NumericDType::F16, false)),
+        crate::onnx_graph::tensor::DType::F32 => Ok((NumericDType::F32, false)),
         other => Err(LoaderError::LoadFailed(anyhow::anyhow!(
             "Unsupported DiT storage dtype: {other:?}"
         ))),
@@ -333,7 +332,7 @@ fn make_flux_config(
 fn assemble_output(
     reference_path: &Path,
     variant: &str,
-    compute_dtype: whisper_tensor::dtype::DType,
+    compute_dtype: NumericDType,
     has_guidance: bool,
     components: [(&str, Vec<u8>); 4],
 ) -> Result<LoaderOutput, LoaderError> {
@@ -393,7 +392,7 @@ fn build_flux_interface(
     rng: &mut impl rand::Rng,
     clip_tokenizer: TokenizerInfo,
     t5_tokenizer: TokenizerInfo,
-    model_dtype: whisper_tensor::dtype::DType,
+    model_dtype: NumericDType,
     has_guidance: bool,
 ) -> whisper_tensor::interfaces::ImageGenerationInterface {
     use super::shared::interface_helpers::{

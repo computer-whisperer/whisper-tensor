@@ -4,12 +4,12 @@ use clap::Parser;
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::PathBuf;
-use whisper_tensor::backends::eval_backend::EvalBackend;
 use whisper_tensor::interfaces::AnyInterface;
 use whisper_tensor::loader::{ConfigValue, ConfigValues, Loader, LoaderOutput};
-use whisper_tensor::migration::numeric_tensor::NumericTensor;
+use whisper_tensor::numeric_dtype::NumericPrimitive;
+use whisper_tensor::numeric_tensor::NumericTensor;
+use whisper_tensor::pool::{Pool, TrackedPool};
 use whisper_tensor::super_graph::cache::SuperGraphCache;
-use whisper_tensor::symbolic_graph::SharedPoolTensor;
 use whisper_tensor::tensor_rank::DynRank;
 use whisper_tensor::tokenizer::Tokenizer;
 
@@ -462,7 +462,7 @@ fn cmd_image(
         latent_h * 8,
     );
 
-    let mut backend = EvalBackend::NDArray;
+    let pool = TrackedPool::new(None);
     let start = std::time::Instant::now();
 
     let image_tensor = interface
@@ -474,7 +474,7 @@ fn cmd_image(
             vec![1, channels, latent_h, latent_w],
             steps,
             guidance_scale,
-            &mut backend,
+            &pool,
         )
         .map(|x| x.tensor)
         .unwrap_or_else(|e| {
@@ -484,7 +484,7 @@ fn cmd_image(
 
     eprintln!("Generated in {:.2?}", start.elapsed());
 
-    save_image_tensor(&image_tensor.to_legacy(), &output_path, &mut backend);
+    save_image_tensor(&image_tensor, &output_path);
     eprintln!("Saved to {}", output_path.display());
 }
 
@@ -507,6 +507,8 @@ fn cmd_tts(output: LoaderOutput, opts: TtsRunOptions) {
     use whisper_tensor::super_graph::SuperGraphContext;
 
     use whisper_tensor::super_graph::data::SuperGraphData;
+
+    let pool = TrackedPool::new(None);
 
     let TtsRunOptions {
         model_dir,
@@ -573,7 +575,7 @@ fn cmd_tts(output: LoaderOutput, opts: TtsRunOptions) {
                         eprintln!("Failed to decode embedded voice '{}': {}", voice.name, e);
                         std::process::exit(1);
                     });
-                NumericTensor::<DynRank>::from_vec_shape(style_values, vec![1, 256]).unwrap()
+                pool_tensor(&style_values, vec![1, 256], &pool)
             } else {
                 let voice_bin = model_dir.join("voices").join(format!("{voice_name}.bin"));
                 if !voice_bin.exists() {
@@ -581,16 +583,13 @@ fn cmd_tts(output: LoaderOutput, opts: TtsRunOptions) {
                     list_available_voices(&model_dir);
                     std::process::exit(1);
                 }
-                load_voice_style_bin(&voice_bin, approx_tokens)
+                load_voice_style_bin(&voice_bin, approx_tokens, &pool)
             };
 
-            let speed_tensor =
-                NumericTensor::<DynRank>::from_vec_shape(vec![speed], vec![1]).unwrap();
+            let speed_tensor = pool_tensor(&[speed], vec![1], &pool);
 
-            data.tensors
-                .insert(*style_link, SharedPoolTensor::from(style_tensor));
-            data.tensors
-                .insert(*speed_link, SharedPoolTensor::from(speed_tensor));
+            data.tensors.insert(*style_link, style_tensor);
+            data.tensors.insert(*speed_link, speed_tensor);
         }
         TTSInputConfig::Piper {
             scales_link,
@@ -598,21 +597,12 @@ fn cmd_tts(output: LoaderOutput, opts: TtsRunOptions) {
             ..
         } => {
             let length_scale = 1.0 / speed;
-            let scales_tensor = NumericTensor::<DynRank>::from_vec_shape(
-                vec![0.667f32, length_scale, 0.8],
-                vec![3],
-            )
-            .unwrap();
+            let scales_tensor = pool_tensor(&[0.667f32, length_scale, 0.8], vec![3], &pool);
 
-            data.tensors
-                .insert(*scales_link, SharedPoolTensor::from(scales_tensor));
+            data.tensors.insert(*scales_link, scales_tensor);
             if let Some(sid_link) = speaker_id_link {
-                data.tensors.insert(
-                    *sid_link,
-                    SharedPoolTensor::from(
-                        NumericTensor::<DynRank>::from_vec_shape(vec![0i64], vec![1]).unwrap(),
-                    ),
-                );
+                data.tensors
+                    .insert(*sid_link, pool_tensor(&[0i64], vec![1], &pool));
             }
         }
         TTSInputConfig::F5 {
@@ -665,41 +655,27 @@ fn cmd_tts(output: LoaderOutput, opts: TtsRunOptions) {
 
             // Build input tensors
             let ref_audio_tensor =
-                NumericTensor::<DynRank>::from_vec_shape(ref_samples, vec![1, 1, ref_audio_len])
-                    .unwrap();
+                pool_tensor(&ref_samples, vec![1, 1, ref_audio_len as u64], &pool);
 
-            let max_duration_tensor =
-                NumericTensor::<DynRank>::from_vec_shape(vec![max_duration as i64], vec![])
-                    .unwrap();
+            let max_duration_tensor = pool_tensor(&[max_duration as i64], vec![], &pool);
 
             // Build ODE loop inputs
             let nfe = *nfe_steps;
             let iterations = nfe - 1; // 31 iterations for nfe=32
             let time_steps: Vec<i32> = (0..iterations as i32).collect();
-            let time_steps_tensor =
-                NumericTensor::<DynRank>::from_vec_shape(time_steps, vec![iterations as usize])
-                    .unwrap();
-            let iteration_count_tensor =
-                NumericTensor::<DynRank>::from_vec_shape(vec![iterations as i64], vec![]).unwrap();
+            let time_steps_tensor = pool_tensor(&time_steps, vec![iterations as u64], &pool);
+            let iteration_count_tensor = pool_tensor(&[iterations as i64], vec![], &pool);
 
+            data.tensors.insert(*ref_audio_link, ref_audio_tensor);
+            data.tensors.insert(*max_duration_link, max_duration_tensor);
+            data.tensors.insert(*time_steps_link, time_steps_tensor);
             data.tensors
-                .insert(*ref_audio_link, SharedPoolTensor::from(ref_audio_tensor));
-            data.tensors.insert(
-                *max_duration_link,
-                SharedPoolTensor::from(max_duration_tensor),
-            );
-            data.tensors
-                .insert(*time_steps_link, SharedPoolTensor::from(time_steps_tensor));
-            data.tensors.insert(
-                *iteration_count_link,
-                SharedPoolTensor::from(iteration_count_tensor),
-            );
+                .insert(*iteration_count_link, iteration_count_tensor);
         }
     }
 
     // Run inference
     eprintln!("Running inference...");
-    let mut backend = EvalBackend::NDArray;
     let start = std::time::Instant::now();
 
     let symbolic_graphs: Vec<_> = output
@@ -710,7 +686,7 @@ fn cmd_tts(output: LoaderOutput, opts: TtsRunOptions) {
     let super_graph_output = {
         let mut observer = ();
         let mut context = SuperGraphContext {
-            pool: &whisper_tensor::pool::SystemPool,
+            pool: &pool,
             observer: &mut observer,
             caches: None,
             symbolic_graphs,
@@ -731,7 +707,7 @@ fn cmd_tts(output: LoaderOutput, opts: TtsRunOptions) {
 
     eprintln!("Generated in {:.2?}", start.elapsed());
 
-    let samples = audio_tensor_to_samples(&audio.samples.to_legacy(), &mut backend);
+    let samples = tensor_to_f32_vec(&audio.samples);
     save_wav(&samples, audio.sample_rate_hz, &output_path);
     eprintln!(
         "Saved {:.1}s of audio to {}",
@@ -740,17 +716,12 @@ fn cmd_tts(output: LoaderOutput, opts: TtsRunOptions) {
     );
 }
 
-/// Extract f32 samples from an audio output tensor.
-fn audio_tensor_to_samples(audio: &NumericTensor<DynRank>, backend: &mut EvalBackend) -> Vec<f32> {
-    let audio_f32 = audio
-        .cast(whisper_tensor::dtype::DType::F32, backend)
-        .expect("cast to f32 failed");
-    let audio_ndarray = audio_f32.to_ndarray().expect("to_ndarray failed");
-    audio_ndarray.flatten().try_into().expect("flatten failed")
-}
-
 /// Load a voice style vector from a .bin file (Kokoro format), indexed by token count.
-fn load_voice_style_bin(path: &std::path::Path, num_tokens: usize) -> NumericTensor<DynRank> {
+fn load_voice_style_bin<'p, P: Pool + 'p>(
+    path: &std::path::Path,
+    num_tokens: usize,
+    pool: &'p P,
+) -> NumericTensor<'p, DynRank, P> {
     let data = std::fs::read(path).expect("Failed to read voice file");
     let floats: Vec<f32> = data
         .chunks_exact(4)
@@ -762,7 +733,7 @@ fn load_voice_style_bin(path: &std::path::Path, num_tokens: usize) -> NumericTen
     let start = idx * 256;
     let style: Vec<f32> = floats[start..start + 256].to_vec();
 
-    NumericTensor::<DynRank>::from_vec_shape(style, vec![1, 256]).unwrap()
+    pool_tensor(&style, vec![1, 256], pool)
 }
 
 /// List available voices in a model directory.
@@ -808,6 +779,8 @@ fn cmd_stt(output: LoaderOutput, audio_path: PathBuf, _model_dir: Option<PathBuf
 
     use whisper_tensor::super_graph::data::{SuperGraphAudioClip, SuperGraphData};
 
+    let pool = TrackedPool::new(None);
+
     let interface = output
         .interfaces
         .iter()
@@ -832,18 +805,17 @@ fn cmd_stt(output: LoaderOutput, audio_path: PathBuf, _model_dir: Option<PathBuf
     );
 
     let audio_len = samples.len();
-    let audio_tensor = NumericTensor::<DynRank>::from_vec_shape(samples, vec![audio_len]).unwrap();
+    let audio_tensor = pool_tensor(&samples, vec![audio_len as u64], &pool);
 
     // Run unified STT supergraph (encoder + fixed-step decoder generation)
     eprintln!("Running STT supergraph...");
-    let mut backend = EvalBackend::NDArray;
     let start = std::time::Instant::now();
 
     let output_data = {
         let mut data = SuperGraphData::new();
         data.audio_clips.insert(
             interface.audio_input_link,
-            SuperGraphAudioClip::new(SharedPoolTensor::from(audio_tensor), interface.sample_rate),
+            SuperGraphAudioClip::new(audio_tensor, interface.sample_rate),
         );
         data.tensor_maps.insert(
             interface.encoder_weights_link,
@@ -859,7 +831,7 @@ fn cmd_stt(output: LoaderOutput, audio_path: PathBuf, _model_dir: Option<PathBuf
         ];
         let mut observer = ();
         let mut context = SuperGraphContext {
-            pool: &whisper_tensor::pool::SystemPool,
+            pool: &pool,
             observer: &mut observer,
             caches: None,
             symbolic_graphs,
@@ -877,11 +849,9 @@ fn cmd_stt(output: LoaderOutput, audio_path: PathBuf, _model_dir: Option<PathBuf
         .tensors
         .get(&interface.output_token_link)
         .expect("No STT output token tensor");
-    let token_nd = token_tensor
-        .to_legacy()
-        .to_ndarray()
-        .expect("to_ndarray failed");
-    let mut token_ids: Vec<u32> = token_nd.flatten().try_into().expect("flatten failed");
+    let mut token_ids: Vec<u32> = (0..token_tensor.numel())
+        .map(|i| token_tensor.read_element(i).to_i64() as u32)
+        .collect();
     if let Some(pos) = token_ids.iter().position(|&t| t == interface.eos_token_id) {
         token_ids.truncate(pos);
     }
@@ -962,6 +932,23 @@ fn load_wav_f16(path: &std::path::Path, target_sr: u32) -> Vec<half::f16> {
 // Utilities
 // ============================================================================
 
+/// Create a pool-backed tensor from a slice of NumericPrimitive values.
+fn pool_tensor<'p, T: NumericPrimitive, P: Pool + 'p>(
+    data: &[T],
+    shape: Vec<u64>,
+    pool: &'p P,
+) -> NumericTensor<'p, DynRank, P> {
+    NumericTensor::from_fn(shape, T::NUMERIC_DTYPE, pool, |i| data[i].to_scalar())
+        .expect("pool allocation failed")
+}
+
+/// Extract all elements from a tensor as f32 values.
+fn tensor_to_f32_vec<'p, P: Pool + 'p>(tensor: &NumericTensor<'p, DynRank, P>) -> Vec<f32> {
+    (0..tensor.numel())
+        .map(|i| tensor.read_element(i).to_f32())
+        .collect()
+}
+
 /// Generate standard normal noise via Box-Muller transform.
 fn generate_gaussian_noise(n: usize, seed: u64) -> Vec<f32> {
     use rand::SeedableRng;
@@ -983,16 +970,11 @@ fn generate_gaussian_noise(n: usize, seed: u64) -> Vec<f32> {
 }
 
 /// Convert an NCHW image tensor (values in [-1, 1]) to an RGB PNG file.
-fn save_image_tensor(
-    tensor: &NumericTensor<DynRank>,
+fn save_image_tensor<'p, P: Pool + 'p>(
+    tensor: &NumericTensor<'p, DynRank, P>,
     path: &std::path::Path,
-    backend: &mut EvalBackend,
 ) {
-    let f32_tensor = tensor
-        .cast(whisper_tensor::dtype::DType::F32, backend)
-        .expect("cast to f32 failed");
-    let ndarray = f32_tensor.to_ndarray().expect("to_ndarray failed");
-    let image_f32: Vec<f32> = ndarray.flatten().try_into().expect("flatten failed");
+    let image_f32 = tensor_to_f32_vec(tensor);
 
     let shape = tensor.shape();
     let ch = shape[1] as usize;

@@ -13,10 +13,8 @@ use std::time::Instant;
 
 use whisper_tensor::graph::GlobalId;
 use whisper_tensor::model::Model;
-use whisper_tensor::numeric_dtype::NumericDType;
-use whisper_tensor::numeric_tensor::{NumericTensorView, TensorLayout};
+use whisper_tensor::numeric_tensor::{NumericTensor, NumericTensorView, TensorLayout};
 use whisper_tensor::pool::{Pool, SystemPool};
-use whisper_tensor::symbolic_graph::SharedPoolTensor;
 use whisper_tensor::symbolic_graph::observer::SymbolicGraphObserver;
 use whisper_tensor::tensor_rank::DynRank;
 use whisper_tensor::{npy, npy::write_npy_file};
@@ -27,16 +25,21 @@ use whisper_tensor_import::onnx_graph::WeightStorageStrategy;
 // Observer
 // ---------------------------------------------------------------------------
 
-pub struct TensorDumpObserver {
+pub struct TensorDumpObserver<'p, P: Pool + 'p> {
+    pool: &'p P,
     /// GlobalId → ONNX name, for the tensors we want to capture.
     watched_ids: HashMap<GlobalId, String>,
     /// Captured tensor values, keyed by ONNX name.
-    pub captured: HashMap<String, SharedPoolTensor>,
+    pub captured: HashMap<String, NumericTensor<'p, DynRank, P>>,
     call_count: usize,
 }
 
-impl TensorDumpObserver {
-    pub fn new(graph: &whisper_tensor::symbolic_graph::SymbolicGraph, names: &[String]) -> Self {
+impl<'p, P: Pool + 'p> TensorDumpObserver<'p, P> {
+    pub fn new(
+        graph: &whisper_tensor::symbolic_graph::SymbolicGraph,
+        names: &[String],
+        pool: &'p P,
+    ) -> Self {
         let names_by_name = graph.get_tensors_by_name();
         let name_set: HashSet<&str> = names.iter().map(|s| s.as_str()).collect();
         let mut watched_ids = HashMap::new();
@@ -55,6 +58,7 @@ impl TensorDumpObserver {
         }
         eprintln!("Watching {} tensors", watched_ids.len());
         Self {
+            pool,
             watched_ids,
             captured: HashMap::new(),
             call_count: 0,
@@ -62,7 +66,7 @@ impl TensorDumpObserver {
     }
 }
 
-impl SymbolicGraphObserver for TensorDumpObserver {
+impl<'p, P: Pool + 'p> SymbolicGraphObserver for TensorDumpObserver<'p, P> {
     fn on_op_executed(&mut self, _: &[GlobalId], _: Instant, _: Instant) {}
     fn on_tensor_assigned(
         &mut self,
@@ -82,8 +86,11 @@ impl SymbolicGraphObserver for TensorDumpObserver {
                     n,
                     &preview
                 );
-                self.captured
-                    .insert(name.clone(), SharedPoolTensor::from_view(tensor));
+                // Copy the view into an owned tensor in our pool
+                let owned = tensor
+                    .to_tensor(self.pool)
+                    .expect("pool allocation for tensor capture");
+                self.captured.insert(name.clone(), owned);
             }
         }
     }
@@ -149,7 +156,7 @@ pub fn cmd_dump_tensors(
         return;
     }
 
-    let mut observer = TensorDumpObserver::new(graph, &tensor_names);
+    let mut observer = TensorDumpObserver::new(graph, &tensor_names, &pool);
 
     // Prepare inputs
     let model_input_info = model.get_input_tensor_info().unwrap();
@@ -172,11 +179,11 @@ pub fn cmd_dump_tensors(
 
     // Auto-fill missing inputs with zeros
     let mut zero_inputs = HashMap::new();
-    for (name, (legacy_dtype, shape)) in &model_input_info {
+    for (name, (onnx_dtype, shape)) in &model_input_info {
         if npy_inputs.contains_key(name) {
             continue;
         }
-        let Some(dtype) = NumericDType::from_legacy(*legacy_dtype) else {
+        let Some(dtype) = onnx_dtype.as_numeric() else {
             continue;
         };
         let concrete_shape: Vec<u64> = shape.iter().map(|d| d.unwrap_or(0)).collect();

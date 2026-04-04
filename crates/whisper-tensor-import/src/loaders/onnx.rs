@@ -1,5 +1,4 @@
 use super::shared::onnx_bytes_to_model;
-use whisper_tensor::dtype::DType;
 use whisper_tensor::interfaces::TextInferenceTokensInLogitOutInterface;
 use whisper_tensor::loader::*;
 use whisper_tensor::metadata::TokenizerInfo;
@@ -85,8 +84,8 @@ impl Loader for OnnxLoader {
                 let logit_output_name = output_info.name().unwrap();
                 let input_dtype = input_info
                     .dtype
-                    .map(|d| d.to_legacy())
-                    .unwrap_or(DType::I32);
+                    .and_then(|d| d.as_numeric())
+                    .unwrap_or(NumericDType::I32);
                 let input_rank = input_info.shape.as_ref().map_or(2, |s| s.len());
                 let output_rank = output_info.shape.as_ref().map_or(3, |s| s.len());
 
@@ -119,7 +118,7 @@ fn build_simple_transformer_supergraph(
     tokenizer: TokenizerInfo,
     token_input_name: &str,
     logit_output_name: &str,
-    input_dtype: DType,
+    input_dtype: NumericDType,
     input_rank: usize,
     output_rank: usize,
     rng: &mut impl rand::Rng,
@@ -144,7 +143,7 @@ fn build_simple_transformer_supergraph(
         let mut x = Cast::push_new_with_label(
             &mut milli_graph,
             milli_op_graph_input,
-            NumericDType::from_legacy(input_dtype).unwrap(),
+            input_dtype,
             Some("input.cast_dtype".to_string()),
             rng,
         );

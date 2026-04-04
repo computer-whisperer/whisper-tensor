@@ -1,7 +1,6 @@
 use rand::Rng;
 use std::path::PathBuf;
 use std::sync::Arc;
-use whisper_tensor::dtype::DType;
 use whisper_tensor::interfaces::{SchedulerType, VideoGenerationInterface};
 use whisper_tensor::loader::*;
 use whisper_tensor::metadata::TokenizerInfo;
@@ -172,7 +171,7 @@ fn load_ltx_video(base_path: PathBuf) -> Result<LoaderOutput, LoaderError> {
         build_ltxv_interface(
             &mut rng,
             TokenizerInfo::HFTokenizer("google/t5-v1_1-xxl".to_string()),
-            DType::BF16,
+            NumericDType::BF16,
         )
     };
 
@@ -191,7 +190,7 @@ fn load_ltx_video(base_path: PathBuf) -> Result<LoaderOutput, LoaderError> {
 fn build_ltxv_interface(
     rng: &mut impl Rng,
     t5_tokenizer: TokenizerInfo,
-    model_dtype: DType,
+    model_dtype: NumericDType,
 ) -> VideoGenerationInterface {
     let mut builder = SuperGraphBuilder::new();
 
@@ -325,7 +324,7 @@ fn build_ltxv_denoising_loop(
     dt_input: SuperGraphLink,
     iteration_count_input: SuperGraphLink,
     guidance_scale_input: SuperGraphLink,
-    model_dtype: DType,
+    model_dtype: NumericDType,
     dit_model_index: usize,
 ) -> SuperGraphLink {
     let outer_final_latent = builder.new_tensor_link(rng);

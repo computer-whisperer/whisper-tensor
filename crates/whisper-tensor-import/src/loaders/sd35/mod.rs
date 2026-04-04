@@ -11,9 +11,9 @@ use self::path::{
     is_sd3_diffusers_safetensors_dir, load_onnx_model, resolve_component_onnx,
     resolve_component_onnx_any,
 };
-use whisper_tensor::dtype::DType;
 use whisper_tensor::loader::*;
 use whisper_tensor::metadata::TokenizerInfo;
+use whisper_tensor::numeric_dtype::NumericDType;
 
 /// Loader for Stable Diffusion 3.5 ONNX pipelines.
 ///
@@ -186,7 +186,7 @@ impl Loader for SD35Loader {
 
         let model_dtype =
             infer_model_dtype(transformer_model.get_symbolic_graph(), &transformer_io)
-                .unwrap_or(DType::F16);
+                .unwrap_or(NumericDType::F16);
         let latent_channels =
             infer_latent_channels(transformer_model.get_symbolic_graph(), &transformer_io)
                 .unwrap_or(16);
@@ -272,7 +272,7 @@ pub(super) fn build_sd3_interface(
     rng: &mut impl rand::Rng,
     clip_tokenizer: TokenizerInfo,
     t5_tokenizer: TokenizerInfo,
-    model_dtype: DType,
+    model_dtype: NumericDType,
     t5_sequence_length: usize,
     clip_l_input_name: &str,
     clip_l_eos_input_name: Option<&str>,
@@ -301,7 +301,6 @@ pub(super) fn build_sd3_interface(
     use whisper_tensor::interfaces::{ImageGenerationInterface, SchedulerType};
     use whisper_tensor::milli_graph::MilliOpGraph;
     use whisper_tensor::milli_graph::ops::{Cast, Concat as MilliConcat, Constant, Pad, PadMode};
-    use whisper_tensor::numeric_dtype::NumericDType;
     use whisper_tensor::super_graph::SuperGraphBuilder;
     use whisper_tensor::super_graph::nodes::{
         SuperGraphNode, SuperGraphNodeMilliOpGraph, SuperGraphNodeModelExecution,
@@ -528,21 +527,11 @@ pub(super) fn build_sd3_interface(
         );
         let combined_context =
             MilliConcat::push_new(&mut mg, vec![clip_hidden_padded, t5_hidden], -2, rng);
-        let combined_context = Cast::push_new(
-            &mut mg,
-            combined_context,
-            NumericDType::from_legacy(model_dtype).unwrap(),
-            rng,
-        );
+        let combined_context = Cast::push_new(&mut mg, combined_context, model_dtype, rng);
 
         // [1,768] + [1,1280] -> [1,2048]
         let pooled = MilliConcat::push_new(&mut mg, vec![l_pooled, g_pooled], -1, rng);
-        let pooled = Cast::push_new(
-            &mut mg,
-            pooled,
-            NumericDType::from_legacy(model_dtype).unwrap(),
-            rng,
-        );
+        let pooled = Cast::push_new(&mut mg, pooled, model_dtype, rng);
 
         mg.set_output_map([
             (combined_context, cond_context.global_id()),
@@ -586,20 +575,10 @@ pub(super) fn build_sd3_interface(
         );
         let combined_context =
             MilliConcat::push_new(&mut mg, vec![clip_hidden_padded, t5_hidden], -2, rng);
-        let combined_context = Cast::push_new(
-            &mut mg,
-            combined_context,
-            NumericDType::from_legacy(model_dtype).unwrap(),
-            rng,
-        );
+        let combined_context = Cast::push_new(&mut mg, combined_context, model_dtype, rng);
 
         let pooled = MilliConcat::push_new(&mut mg, vec![l_pooled, g_pooled], -1, rng);
-        let pooled = Cast::push_new(
-            &mut mg,
-            pooled,
-            NumericDType::from_legacy(model_dtype).unwrap(),
-            rng,
-        );
+        let pooled = Cast::push_new(&mut mg, pooled, model_dtype, rng);
 
         mg.set_output_map([
             (combined_context, uncond_context.global_id()),

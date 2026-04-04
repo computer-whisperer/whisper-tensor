@@ -1,5 +1,5 @@
-use whisper_tensor::dtype::DType;
 use whisper_tensor::loader::LoaderError;
+use whisper_tensor::numeric_dtype::NumericDType;
 use whisper_tensor::symbolic_graph::SymbolicGraph;
 
 pub(super) struct ClipEncoderIo {
@@ -172,9 +172,12 @@ pub(super) fn infer_vae_io(
     Ok(VaeDecoderIo { input, output })
 }
 
-pub(super) fn infer_model_dtype(graph: &SymbolicGraph, io: &TransformerIo) -> Option<DType> {
+pub(super) fn infer_model_dtype(graph: &SymbolicGraph, io: &TransformerIo) -> Option<NumericDType> {
     let tid = graph.get_tensors_by_name().get(&io.latent_input).copied()?;
-    graph.get_tensor_info(tid)?.dtype.map(|d| d.to_legacy())
+    graph
+        .get_tensor_info(tid)?
+        .dtype
+        .and_then(|d| d.as_numeric())
 }
 
 pub(super) fn infer_t5_seq_len(graph: &SymbolicGraph, io: &T5EncoderIo) -> Option<usize> {

@@ -1,7 +1,6 @@
 use rand::Rng;
 use std::path::PathBuf;
 use std::sync::Arc;
-use whisper_tensor::dtype::DType;
 use whisper_tensor::interfaces::{SchedulerType, VideoGenerationInterface};
 use whisper_tensor::loader::*;
 use whisper_tensor::metadata::TokenizerInfo;
@@ -182,7 +181,7 @@ fn load_hunyuan_video(base_path: PathBuf) -> Result<LoaderOutput, LoaderError> {
     // Build VideoGenerationInterface
     let interface = {
         let mut rng = rand::rng();
-        build_hunyuan_video_interface(&mut rng, DType::BF16)
+        build_hunyuan_video_interface(&mut rng, NumericDType::BF16)
     };
 
     let interfaces = vec![LoadedInterface {
@@ -199,7 +198,7 @@ fn load_hunyuan_video(base_path: PathBuf) -> Result<LoaderOutput, LoaderError> {
 
 fn build_hunyuan_video_interface(
     rng: &mut impl Rng,
-    model_dtype: DType,
+    model_dtype: NumericDType,
 ) -> VideoGenerationInterface {
     let mut builder = SuperGraphBuilder::new();
 
@@ -375,7 +374,7 @@ fn build_hunyuan_denoising_loop(
     dt_input: SuperGraphLink,
     iteration_count_input: SuperGraphLink,
     guidance_scale_input: SuperGraphLink,
-    model_dtype: DType,
+    model_dtype: NumericDType,
     dit_model_index: usize,
 ) -> SuperGraphLink {
     use whisper_tensor::milli_graph::ops::{Constant, SimpleBinary};

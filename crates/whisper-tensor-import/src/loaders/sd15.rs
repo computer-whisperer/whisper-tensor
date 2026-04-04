@@ -2,6 +2,7 @@ use std::sync::Arc;
 use whisper_tensor::loader::*;
 use whisper_tensor::metadata::TokenizerInfo;
 use whisper_tensor::model::Model;
+use whisper_tensor::numeric_dtype::NumericDType;
 
 /// Loader for Stable Diffusion 1.5 checkpoints (.safetensors).
 pub struct SD15Loader;
@@ -41,9 +42,9 @@ impl Loader for SD15Loader {
                 .map_err(|e| LoaderError::LoadFailed(e.into()))?;
             let import_dtype = crate::models::diffusion::sd_common::detect_model_dtype(&wm);
             match import_dtype {
-                crate::onnx_graph::tensor::DType::F16 => whisper_tensor::dtype::DType::F16,
-                crate::onnx_graph::tensor::DType::BF16 => whisper_tensor::dtype::DType::BF16,
-                crate::onnx_graph::tensor::DType::F32 => whisper_tensor::dtype::DType::F32,
+                crate::onnx_graph::tensor::DType::F16 => NumericDType::F16,
+                crate::onnx_graph::tensor::DType::BF16 => NumericDType::BF16,
+                crate::onnx_graph::tensor::DType::F32 => NumericDType::F32,
                 other => {
                     return Err(LoaderError::LoadFailed(anyhow::anyhow!(
                         "Unsupported model dtype: {:?}",

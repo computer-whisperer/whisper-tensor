@@ -1,7 +1,6 @@
 //! Shared helpers for building image/video generation interface supergraphs.
 
 use rand::Rng;
-use whisper_tensor::dtype::DType;
 use whisper_tensor::milli_graph::MilliOpGraph;
 use whisper_tensor::milli_graph::ops::{
     ArgMax, Cast, Constant, SimpleBinary, SimpleUnaryOp, Unsqueeze,
@@ -19,18 +18,13 @@ pub fn build_cast_node(
     builder: &mut SuperGraphBuilder,
     rng: &mut impl Rng,
     input: SuperGraphLink,
-    dtype: DType,
+    dtype: NumericDType,
 ) -> SuperGraphLink {
     let output = builder.new_tensor_link(rng);
     let (mut mg, input_map) = MilliOpGraph::new(std::iter::once(input.global_id()), rng);
     let inp = *input_map.get(&input.global_id()).unwrap();
-    let casted = Cast::push_new_with_label(
-        &mut mg,
-        inp,
-        NumericDType::from_legacy(dtype).unwrap(),
-        Some(format!("cast_to_{dtype:?}")),
-        rng,
-    );
+    let casted =
+        Cast::push_new_with_label(&mut mg, inp, dtype, Some(format!("cast_to_{dtype:?}")), rng);
     mg.set_output_map(std::iter::once((casted, output.global_id())));
     let mut node = SuperGraphNodeMilliOpGraph::new(mg, rng);
     node.label = Some(format!("cast_to_{dtype:?}"));
@@ -85,7 +79,7 @@ pub fn build_input_prep(
     inner_timestep: SuperGraphLink,
     cast_latent: SuperGraphLink,
     cast_timestep: SuperGraphLink,
-    model_dtype: DType,
+    model_dtype: NumericDType,
     label: &str,
 ) {
     let (mut mg, input_map) = MilliOpGraph::new(
@@ -95,12 +89,7 @@ pub fn build_input_prep(
     let lat_in = *input_map.get(&inner_latent_in.global_id()).unwrap();
     let ts_in = *input_map.get(&inner_timestep.global_id()).unwrap();
 
-    let lat_cast = Cast::push_new(
-        &mut mg,
-        lat_in,
-        NumericDType::from_legacy(model_dtype).unwrap(),
-        rng,
-    );
+    let lat_cast = Cast::push_new(&mut mg, lat_in, model_dtype, rng);
     let ts_shape = Constant::from_vec(&mut mg, vec![1i64], rng);
     let ts_reshaped =
         whisper_tensor::milli_graph::ops::Reshape::push_new(&mut mg, ts_in, ts_shape, false, rng);
@@ -175,7 +164,7 @@ pub(crate) fn build_denoising_loop(
     dt_input: SuperGraphLink,
     sigmas_input: SuperGraphLink,
     iteration_count_input: SuperGraphLink,
-    model_dtype: DType,
+    model_dtype: NumericDType,
     unet_model_index: usize,
 ) -> SuperGraphLink {
     let outer_final_latent = builder.new_tensor_link(rng);
@@ -273,14 +262,14 @@ pub(crate) fn build_denoising_loop(
         let lat_cast = Cast::push_new_with_label(
             &mut mg,
             scaled_lat,
-            NumericDType::from_legacy(model_dtype).unwrap(),
+            model_dtype,
             Some("latent.cast_model_dtype".to_string()),
             rng,
         );
         let ts_cast = Cast::push_new_with_label(
             &mut mg,
             ts_in,
-            NumericDType::from_legacy(model_dtype).unwrap(),
+            model_dtype,
             Some("timestep.cast_model_dtype".to_string()),
             rng,
         );
@@ -507,7 +496,7 @@ pub(crate) fn build_vae_decode(
     vae_weights: SuperGraphLink,
     vae_model_index: usize,
     vae_scale_factor: f32,
-    model_dtype: DType,
+    model_dtype: NumericDType,
 ) -> SuperGraphLink {
     // Scale latent by 1/vae_scale_factor and cast to model_dtype
     let scaled_latent = builder.new_tensor_link(rng);
@@ -525,7 +514,7 @@ pub(crate) fn build_vae_decode(
         let scaled_cast = Cast::push_new_with_label(
             &mut mg,
             scaled,
-            NumericDType::from_legacy(model_dtype).unwrap(),
+            model_dtype,
             Some("vae_latent.cast_model_dtype".to_string()),
             rng,
         );
@@ -561,7 +550,7 @@ pub(crate) fn build_vae_decode_with_shift(
     vae_model_index: usize,
     vae_scale_factor: f32,
     vae_shift_factor: f32,
-    model_dtype: DType,
+    model_dtype: NumericDType,
     vae_input_name: &str,
     vae_output_name: &str,
 ) -> SuperGraphLink {
@@ -592,7 +581,7 @@ pub(crate) fn build_vae_decode_with_shift(
         let casted = Cast::push_new_with_label(
             &mut mg,
             shifted,
-            NumericDType::from_legacy(model_dtype).unwrap(),
+            model_dtype,
             Some("vae_latent.cast_model_dtype".to_string()),
             rng,
         );
@@ -635,7 +624,7 @@ pub(crate) fn build_flux_denoising_loop(
     _sigmas_input: SuperGraphLink,
     iteration_count_input: SuperGraphLink,
     guidance_input: Option<SuperGraphLink>,
-    model_dtype: DType,
+    model_dtype: NumericDType,
     dit_model_index: usize,
 ) -> SuperGraphLink {
     let outer_final_latent = builder.new_tensor_link(rng);
@@ -709,7 +698,7 @@ pub(crate) fn build_flux_denoising_loop(
         let lat_cast = Cast::push_new_with_label(
             &mut mg,
             lat_in,
-            NumericDType::from_legacy(model_dtype).unwrap(),
+            model_dtype,
             Some("latent.cast_model_dtype".to_string()),
             rng,
         );
@@ -983,7 +972,7 @@ pub(crate) fn build_sd3_denoising_loop(
     dt_input: SuperGraphLink,
     _sigmas_input: SuperGraphLink,
     iteration_count_input: SuperGraphLink,
-    model_dtype: DType,
+    model_dtype: NumericDType,
     transformer_model_index: usize,
     transformer_latent_input_name: &str,
     transformer_timestep_input_name: &str,
@@ -1058,14 +1047,14 @@ pub(crate) fn build_sd3_denoising_loop(
         let lat_cast = Cast::push_new_with_label(
             &mut mg,
             lat_in,
-            NumericDType::from_legacy(model_dtype).unwrap(),
+            model_dtype,
             Some("latent.cast_model_dtype".to_string()),
             rng,
         );
         let ts_cast = Cast::push_new_with_label(
             &mut mg,
             ts_in,
-            NumericDType::from_legacy(model_dtype).unwrap(),
+            model_dtype,
             Some("timestep.cast_model_dtype".to_string()),
             rng,
         );
@@ -1260,7 +1249,7 @@ pub(crate) fn build_sd3_denoising_loop(
 pub(crate) fn build_single_te_cfg_interface(
     rng: &mut impl Rng,
     tokenizer: whisper_tensor::metadata::TokenizerInfo,
-    model_dtype: DType,
+    model_dtype: NumericDType,
     vae_scale_factor: f32,
 ) -> whisper_tensor::interfaces::ImageGenerationInterface {
     use whisper_tensor::interfaces::{ImageGenerationInterface, SchedulerType};

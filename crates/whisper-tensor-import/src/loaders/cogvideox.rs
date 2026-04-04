@@ -1,7 +1,6 @@
 use rand::Rng;
 use std::path::PathBuf;
 use std::sync::Arc;
-use whisper_tensor::dtype::DType;
 use whisper_tensor::interfaces::{SchedulerType, VideoGenerationInterface};
 use whisper_tensor::loader::*;
 use whisper_tensor::metadata::TokenizerInfo;
@@ -193,7 +192,7 @@ fn load_cogvideox(base_path: PathBuf) -> Result<LoaderOutput, LoaderError> {
         build_cogvideox_interface(
             &mut rng,
             TokenizerInfo::HFTokenizer("google-t5/t5-base".to_string()),
-            whisper_tensor::dtype::DType::BF16,
+            NumericDType::BF16,
             num_frames,
         )
     };
@@ -213,7 +212,7 @@ fn load_cogvideox(base_path: PathBuf) -> Result<LoaderOutput, LoaderError> {
 fn build_cogvideox_interface(
     rng: &mut impl Rng,
     t5_tokenizer: TokenizerInfo,
-    model_dtype: DType,
+    model_dtype: NumericDType,
     num_frames: usize,
 ) -> VideoGenerationInterface {
     let mut builder = SuperGraphBuilder::new();
@@ -350,7 +349,7 @@ fn build_cogvideox_denoising_loop(
     sigmas_input: SuperGraphLink,
     iteration_count_input: SuperGraphLink,
     guidance_scale_input: SuperGraphLink,
-    model_dtype: DType,
+    model_dtype: NumericDType,
     dit_model_index: usize,
 ) -> SuperGraphLink {
     let outer_final_latent = builder.new_tensor_link(rng);
