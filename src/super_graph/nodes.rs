@@ -1,11 +1,8 @@
 use crate::DynRank;
-use crate::backends::eval_backend::EvalBackend;
-use crate::compiler::CompiledProgramObserver;
 use crate::graph::{
     GlobalId, Graph, Node, NodeMetadata, NodeSlotEditError, Property, PropertyValue, SlotDirection,
 };
 use crate::metadata::TokenizerInfo;
-use crate::migration::numeric_tensor::NumericTensor;
 use crate::milli_graph::MilliOpGraph;
 use crate::milli_graph::observer::MilliOpGraphObserver;
 use crate::numeric_dtype::NumericDType;
@@ -22,12 +19,12 @@ use crate::super_graph::observer::SuperGraphObserver;
 use crate::super_graph::{
     SuperGraph, SuperGraphBuilder, SuperGraphContext, SuperGraphData, SuperGraphError,
 };
-use crate::symbolic_graph::observer::SymbolicGraphObserver;
+
 use crate::tokenizer::{AnyTokenizer, Tokenizer};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::ptr;
+
 use std::time::Instant;
 
 pub trait SuperGraphNode {
@@ -340,121 +337,13 @@ impl SuperGraphNodeModelExecution {
     }
 }
 
-struct SymbolicGraphObserverWrapper<'a, T: SuperGraphObserver> {
-    inner: &'a mut T,
-    path: Vec<GlobalId>,
-}
-
-impl<'a, T: SuperGraphObserver> SymbolicGraphObserverWrapper<'a, T> {
-    fn new(inner: &'a mut T, path: &[GlobalId]) -> Self {
-        Self {
-            inner,
-            path: path.to_vec(),
-        }
-    }
-}
-
-impl<'a, T: SuperGraphObserver> SymbolicGraphObserver for SymbolicGraphObserverWrapper<'a, T> {
-    fn on_op_executed(
-        &mut self,
-        node_path: &[GlobalId],
-        start_instant: Instant,
-        end_instant: Instant,
-    ) {
-        let node_path = self
-            .path
-            .clone()
-            .into_iter()
-            .chain(node_path.iter().cloned())
-            .collect::<Vec<_>>();
-        self.inner
-            .on_node_executed(node_path.as_slice(), "", start_instant, end_instant)
-    }
-
-    fn on_tensor_assigned(
-        &mut self,
-        tensor_path: &[GlobalId],
-        tensor: &crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>,
-    ) {
-        let tensor_path = self
-            .path
-            .clone()
-            .into_iter()
-            .chain(tensor_path.iter().cloned())
-            .collect::<Vec<_>>();
-        self.inner
-            .on_tensor_assigned(tensor_path.as_slice(), tensor)
-    }
-
-    fn on_loading_weight(&mut self, path: &[GlobalId], weight_name: Option<String>) {
-        let path = self
-            .path
-            .clone()
-            .into_iter()
-            .chain(path.iter().cloned())
-            .collect::<Vec<_>>();
-        self.inner.on_loading_weight(path.as_slice(), weight_name);
-    }
-
-    fn should_cancel(&mut self) -> bool {
-        self.inner.should_cancel()
-    }
-}
-
-impl<'a, T: SuperGraphObserver> CompiledProgramObserver for SymbolicGraphObserverWrapper<'a, T> {
-    fn on_op_executed(
-        &mut self,
-        node_path: &[GlobalId],
-        start_instant: Instant,
-        end_instant: Instant,
-    ) {
-        let node_path = self
-            .path
-            .clone()
-            .into_iter()
-            .chain(node_path.iter().cloned())
-            .collect::<Vec<_>>();
-        self.inner
-            .on_node_executed(node_path.as_slice(), "", start_instant, end_instant)
-    }
-
-    fn on_tensor_assigned(
-        &mut self,
-        tensor_path: &[GlobalId],
-        tensor: &crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>,
-    ) {
-        let tensor_path = self
-            .path
-            .clone()
-            .into_iter()
-            .chain(tensor_path.iter().cloned())
-            .collect::<Vec<_>>();
-        self.inner
-            .on_tensor_assigned(tensor_path.as_slice(), tensor)
-    }
-
-    fn on_loading_weight(&mut self, path: &[GlobalId], weight_name: Option<String>) {
-        let path = self
-            .path
-            .clone()
-            .into_iter()
-            .chain(path.iter().cloned())
-            .collect::<Vec<_>>();
-        self.inner.on_loading_weight(path.as_slice(), weight_name);
-    }
-
-    fn should_cancel(&mut self) -> bool {
-        self.inner.should_cancel()
-    }
-}
-
 impl SuperGraphNode for SuperGraphNodeModelExecution {
     fn to_any(self) -> SuperGraphAnyNode {
         SuperGraphAnyNode::ModelExecution(self)
     }
     fn eval<'short, 'model, 'p, P: Pool + 'p, T: SuperGraphObserver>(
         &'short self,
-        node_path: &[GlobalId],
+        _node_path: &[GlobalId],
         data: &mut SuperGraphData<'p, 'model, P>,
         context: &mut SuperGraphContext<'short, 'model, 'p, P, T>,
     ) -> Result<(), SuperGraphError> {
@@ -466,107 +355,45 @@ impl SuperGraphNode for SuperGraphNodeModelExecution {
             ))
         })?;
 
-        let tensor_cache = {
-            let mut res = None;
-            for (a, b) in &mut context.super_graph_tensor_cache.caches {
-                if ptr::eq(*a, *tensor_store) {
-                    res = Some(b)
-                }
-            }
-            res
-        };
-
         let symbolic_graph = context.symbolic_graphs[self.symbolic_graph_id];
 
-        if context.use_compiled_models
-            && let Some(compiled_models) = &context.compiled_models
-        {
-            // Compiled path: still uses legacy eval via CompiledProgram.
-            let legacy_inputs: HashMap<String, NumericTensor<DynRank>> = self
-                .tensor_inputs
-                .iter()
-                .map(|(link, name)| {
-                    let link = require_node_link(*link, "ModelExecution", "tensor_inputs")?;
-                    let value = data.tensors.get(&link).ok_or_else(|| {
-                        SuperGraphError::MissingLinkError(format!(
-                            ": ModelExecution missing tensor input {:?}",
-                            link
-                        ))
-                    })?;
-                    Ok((
-                        name.clone(),
-                        crate::nano_graph::lower::new_numeric_to_legacy(value),
-                    ))
-                })
-                .collect::<Result<_, SuperGraphError>>()?;
-            let global_id = node_path
-                .iter()
-                .chain(core::iter::once(&self.global_id))
-                .cloned()
-                .collect::<Vec<_>>();
-            let mut observer =
-                SymbolicGraphObserverWrapper::new(context.observer, global_id.as_slice());
-            let mut backend = EvalBackend::NDArray;
-            let compiled_model = &compiled_models
-                .iter()
-                .find(|(x, _y)| core::ptr::addr_eq(*x, symbolic_graph))
-                .ok_or(SuperGraphError::ModelNotCompiledError)?
-                .1;
-            let outputs = compiled_model.run(
-                &mut backend,
-                tensor_store,
-                tensor_cache,
-                legacy_inputs,
-                &mut observer,
-            )?;
-            let outputs = outputs.collect::<HashMap<_, _>>();
-            for (name, link) in &self.tensor_outputs {
-                let link = require_node_link(*link, "ModelExecution", "tensor_outputs")?;
-                let legacy = outputs.get(name).unwrap();
-                data.tensors.insert(
-                    link,
-                    crate::nano_graph::lower::legacy_numeric_to_new(legacy, context.pool),
-                );
-            }
-        } else {
-            // Pool eval path: use context.pool directly.
-            let tensors_by_name = symbolic_graph.get_tensors_by_name();
-            let input_views: Vec<(GlobalId, crate::numeric_tensor::NumericTensorView<'_, DynRank>)> = self
-                .tensor_inputs
-                .iter()
-                .filter_map(|(link, name)| {
-                    let link = (*link)?;
-                    let &tensor_id = tensors_by_name.get(name)?;
-                    let tensor = data.tensors.get(&link)?;
-                    Some((tensor_id, tensor.view()))
-                })
-                .collect();
-            let view_map: HashMap<
-                GlobalId,
-                &crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>,
-            > = input_views.iter().map(|(id, view)| (*id, view)).collect();
+        let tensors_by_name = symbolic_graph.get_tensors_by_name();
+        let input_views: Vec<(
+            GlobalId,
+            crate::numeric_tensor::NumericTensorView<'_, DynRank>,
+        )> = self
+            .tensor_inputs
+            .iter()
+            .filter_map(|(link, name)| {
+                let link = (*link)?;
+                let &tensor_id = tensors_by_name.get(name)?;
+                let tensor = data.tensors.get(&link)?;
+                Some((tensor_id, tensor.view()))
+            })
+            .collect();
+        let view_map: HashMap<
+            GlobalId,
+            &crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>,
+        > = input_views.iter().map(|(id, view)| (*id, view)).collect();
 
-            let results =
-                symbolic_graph.pool_eval_with_store(&view_map, tensor_store, context.pool)?;
+        let results = symbolic_graph.pool_eval_with_store(&view_map, tensor_store, context.pool)?;
 
-            let tensors_by_id: HashMap<GlobalId, &str> = tensors_by_name
-                .iter()
-                .map(|(name, &id)| (id, name.as_str()))
-                .collect();
+        let tensors_by_id: HashMap<GlobalId, &str> = tensors_by_name
+            .iter()
+            .map(|(name, &id)| (id, name.as_str()))
+            .collect();
 
-            for (id, tensor) in results {
-                if let Some(&name) = tensors_by_id.get(&id) {
-                    for (out_name, link) in &self.tensor_outputs {
-                        if out_name == name {
-                            let link =
-                                require_node_link(*link, "ModelExecution", "tensor_outputs")?;
-                            data.tensors.insert(link, tensor);
-                            break;
-                        }
+        for (id, tensor) in results {
+            if let Some(&name) = tensors_by_id.get(&id) {
+                for (out_name, link) in &self.tensor_outputs {
+                    if out_name == name {
+                        let link = require_node_link(*link, "ModelExecution", "tensor_outputs")?;
+                        data.tensors.insert(link, tensor);
+                        break;
                     }
                 }
             }
-        };
+        }
 
         Ok(())
     }
@@ -819,12 +646,9 @@ impl SuperGraphNode for SuperGraphNodeTokenizerEncode {
                 }
                 ids.push(*eos as i32);
                 ids.resize(*seq_len, *pad as i32);
-                PoolNumericTensor::from_fn(
-                    vec![1, *seq_len as u64],
-                    NumericDType::I32,
-                    pool,
-                    |i| NumericScalar::from_i32(ids[i]),
-                )
+                PoolNumericTensor::from_fn(vec![1, *seq_len as u64], NumericDType::I32, pool, |i| {
+                    NumericScalar::from_i32(ids[i])
+                })
                 .map_err(alloc_err)?
             }
             SuperGraphNodeTokenizerEncodeMode::RawPad { seq_len, pad } => {
@@ -832,12 +656,9 @@ impl SuperGraphNode for SuperGraphNodeTokenizerEncode {
                 let mut ids: Vec<i32> =
                     encoded.iter().take(*seq_len).map(|&id| id as i32).collect();
                 ids.resize(*seq_len, *pad as i32);
-                PoolNumericTensor::from_fn(
-                    vec![1, *seq_len as u64],
-                    NumericDType::I32,
-                    pool,
-                    |i| NumericScalar::from_i32(ids[i]),
-                )
+                PoolNumericTensor::from_fn(vec![1, *seq_len as u64], NumericDType::I32, pool, |i| {
+                    NumericScalar::from_i32(ids[i])
+                })
                 .map_err(alloc_err)?
             }
         };
@@ -1167,12 +988,9 @@ impl SuperGraphNode for SuperGraphNodePiperPhonemesToTensor {
         let pool = context.pool;
         data.tensors.insert(
             token_ids_output_link,
-            PoolNumericTensor::from_fn(
-                vec![1, num_tokens as u64],
-                NumericDType::I64,
-                pool,
-                |i| NumericScalar::from_i64(token_ids[i]),
-            )
+            PoolNumericTensor::from_fn(vec![1, num_tokens as u64], NumericDType::I64, pool, |i| {
+                NumericScalar::from_i64(token_ids[i])
+            })
             .map_err(alloc_err)?,
         );
         data.tensors.insert(
@@ -1482,13 +1300,13 @@ impl SuperGraphNode for SuperGraphNodeTensorToImage {
             require_node_link(self.tensor_input, "TensorToImage", "tensor_input")?;
         let image_output_link =
             require_node_link(self.image_output, "TensorToImage", "image_output")?;
-        let tensor = data
-            .tensors
-            .remove(&tensor_input_link)
-            .ok_or(SuperGraphError::MissingLinkError(format!(
-                ": missing tensor input link {:?}",
-                tensor_input_link
-            )))?;
+        let tensor =
+            data.tensors
+                .remove(&tensor_input_link)
+                .ok_or(SuperGraphError::MissingLinkError(format!(
+                    ": missing tensor input link {:?}",
+                    tensor_input_link
+                )))?;
         data.images
             .insert(image_output_link, SuperGraphImage::new(tensor));
         Ok(())
@@ -1572,13 +1390,13 @@ impl SuperGraphNode for SuperGraphNodeTensorToAudioClip {
             require_node_link(self.tensor_input, "TensorToAudioClip", "tensor_input")?;
         let audio_output_link =
             require_node_link(self.audio_output, "TensorToAudioClip", "audio_output")?;
-        let tensor = data
-            .tensors
-            .remove(&tensor_input_link)
-            .ok_or(SuperGraphError::MissingLinkError(format!(
-                ": missing tensor input link {:?}",
-                tensor_input_link
-            )))?;
+        let tensor =
+            data.tensors
+                .remove(&tensor_input_link)
+                .ok_or(SuperGraphError::MissingLinkError(format!(
+                    ": missing tensor input link {:?}",
+                    tensor_input_link
+                )))?;
         data.audio_clips.insert(
             audio_output_link,
             SuperGraphAudioClip::new(tensor, self.sample_rate_hz),
@@ -1664,13 +1482,13 @@ impl SuperGraphNode for SuperGraphNodeTensorToVideoClip {
             require_node_link(self.tensor_input, "TensorToVideoClip", "tensor_input")?;
         let video_output_link =
             require_node_link(self.video_output, "TensorToVideoClip", "video_output")?;
-        let tensor = data
-            .tensors
-            .remove(&tensor_input_link)
-            .ok_or(SuperGraphError::MissingLinkError(format!(
-                ": missing tensor input link {:?}",
-                tensor_input_link
-            )))?;
+        let tensor =
+            data.tensors
+                .remove(&tensor_input_link)
+                .ok_or(SuperGraphError::MissingLinkError(format!(
+                    ": missing tensor input link {:?}",
+                    tensor_input_link
+                )))?;
         data.video_clips.insert(
             video_output_link,
             super::data::SuperGraphVideoClip::new(tensor, self.fps),
@@ -1759,7 +1577,9 @@ impl SuperGraphNode for SuperGraphNodeVideoClipToTensor {
                     ": missing video clip input link {:?}",
                     video_input_link
                 )))?;
-        let tensor_copy = clip.frames.to_tensor(context.pool)
+        let tensor_copy = clip
+            .frames
+            .to_tensor(context.pool)
             .map_err(|e| SuperGraphError::InvalidInputError(format!("allocation: {e}")))?;
         data.tensors.insert(tensor_output_link, tensor_copy);
         Ok(())
@@ -1858,10 +1678,11 @@ impl SuperGraphNode for SuperGraphNodeAudioClipToTensor {
                 audio_input_link, expected, clip.sample_rate_hz
             )));
         }
-        let tensor_copy = clip.samples.to_tensor(context.pool)
+        let tensor_copy = clip
+            .samples
+            .to_tensor(context.pool)
             .map_err(|e| SuperGraphError::InvalidInputError(format!("allocation: {e}")))?;
-        data.tensors
-            .insert(tensor_output_link, tensor_copy);
+        data.tensors.insert(tensor_output_link, tensor_copy);
         Ok(())
     }
 
@@ -2365,8 +2186,7 @@ fn eval_scan<'short, 'model, 'p, P: Pool + 'p, T: SuperGraphObserver>(
     data: &mut SuperGraphData<'p, 'model, P>,
     context: &mut SuperGraphContext<'short, 'model, 'p, P, T>,
 ) -> Result<(), SuperGraphError> {
-    let iteration_count_link =
-        require_node_link(scan.iteration_count, "Scan", "iteration_count")?;
+    let iteration_count_link = require_node_link(scan.iteration_count, "Scan", "iteration_count")?;
     let iteration_count_tensor =
         data.tensors
             .get(&iteration_count_link)
@@ -2435,13 +2255,13 @@ fn eval_scan<'short, 'model, 'p, P: Pool + 'p, T: SuperGraphObserver>(
             for (outer, inner, scan_axis) in &scan.scan_inputs {
                 let outer = require_node_link(*outer, "Scan", "scan_inputs.outer")?;
                 let inner = require_node_link(*inner, "Scan", "scan_inputs.inner")?;
-                let tensor =
-                    data.tensors
-                        .get(&outer)
-                        .ok_or(SuperGraphError::MissingLinkError(format!(
-                            ": scan_input outer={:?} inner={:?}",
-                            outer, inner
-                        )))?;
+                let tensor = data
+                    .tensors
+                    .get(&outer)
+                    .ok_or(SuperGraphError::MissingLinkError(format!(
+                        ": scan_input outer={:?} inner={:?}",
+                        outer, inner
+                    )))?;
                 let shape = tensor.shape();
                 let axis = *scan_axis as usize;
                 let mut slice_ranges: Vec<(u64, u64)> = Vec::new();
@@ -2452,16 +2272,14 @@ fn eval_scan<'short, 'model, 'p, P: Pool + 'p, T: SuperGraphObserver>(
                         slice_ranges.push((0, d));
                     }
                 }
-                let sliced = tensor.slice(&slice_ranges).map_err(|e| {
-                    SuperGraphError::InvalidInputError(format!("scan slice: {e}"))
-                })?;
+                let sliced = tensor
+                    .slice(&slice_ranges)
+                    .map_err(|e| SuperGraphError::InvalidInputError(format!("scan slice: {e}")))?;
                 // Squeeze the scan axis (size 1 after slicing) — elements unchanged
                 let squeezed_shape: Vec<u64> = shape
                     .iter()
                     .enumerate()
-                    .filter_map(|(j, &d)| {
-                        if j == axis { None } else { Some(d) }
-                    })
+                    .filter_map(|(j, &d)| if j == axis { None } else { Some(d) })
                     .collect();
                 let squeezed = PoolNumericTensor::from_fn(
                     squeezed_shape,
@@ -2558,17 +2376,13 @@ fn eval_scan<'short, 'model, 'p, P: Pool + 'p, T: SuperGraphObserver>(
             concat_shape.push(n_parts);
         }
         let part_numel = parts[0].numel();
-        let concat = PoolNumericTensor::from_fn(
-            concat_shape,
-            parts[0].dtype(),
-            context.pool,
-            |flat_idx| {
+        let concat =
+            PoolNumericTensor::from_fn(concat_shape, parts[0].dtype(), context.pool, |flat_idx| {
                 let part_idx = flat_idx / part_numel;
                 let elem_idx = flat_idx % part_numel;
                 parts[part_idx].read_element(elem_idx)
-            },
-        )
-        .map_err(alloc_err)?;
+            })
+            .map_err(alloc_err)?;
         output_data.tensors.insert(link, concat);
     }
 
@@ -2876,9 +2690,7 @@ impl SuperGraphNode for SuperGraphNodeRNNCacheRead {
                 .get(&tokens_input_link)
                 .ok_or(SuperGraphError::MissingLinkError(String::new()))?
                 .to_tensor(context.pool)
-                .map_err(|e| {
-                    SuperGraphError::InvalidInputError(format!("allocation: {e}"))
-                })?;
+                .map_err(|e| SuperGraphError::InvalidInputError(format!("allocation: {e}")))?;
             data.tensors.insert(tokens_output_link, tokens_copy);
         }
         Ok(())
@@ -3080,9 +2892,9 @@ impl SuperGraphNode for SuperGraphNodeTensorCacheRead {
         if let Some(caches) = &mut context.caches
             && let Some(value) = caches.tensor_cache.get(&key_input)
         {
-            let output = value.to_tensor(context.pool).map_err(|e| {
-                SuperGraphError::InvalidInputError(format!("allocation: {e}"))
-            })?;
+            let output = value
+                .to_tensor(context.pool)
+                .map_err(|e| SuperGraphError::InvalidInputError(format!("allocation: {e}")))?;
             data.tensors.insert(value_output_link, output);
             hit = true;
         }
@@ -3092,9 +2904,7 @@ impl SuperGraphNode for SuperGraphNodeTensorCacheRead {
                 .get(&default_input_link)
                 .ok_or(SuperGraphError::MissingLinkError(String::new()))?
                 .to_tensor(context.pool)
-                .map_err(|e| {
-                    SuperGraphError::InvalidInputError(format!("allocation: {e}"))
-                })?;
+                .map_err(|e| SuperGraphError::InvalidInputError(format!("allocation: {e}")))?;
             data.tensors.insert(value_output_link, default_input);
         }
         data.tensors
@@ -3189,9 +2999,9 @@ impl SuperGraphNode for SuperGraphNodeTensorCacheWrite {
                 .tensors
                 .get(&value_input_link)
                 .ok_or(SuperGraphError::MissingLinkError(String::new()))?;
-            let cached = value_input.to_tensor(&crate::pool::SystemPool).map_err(|e| {
-                SuperGraphError::InvalidInputError(format!("allocation: {e}"))
-            })?;
+            let cached = value_input
+                .to_tensor(&crate::pool::SystemPool)
+                .map_err(|e| SuperGraphError::InvalidInputError(format!("allocation: {e}")))?;
             caches.tensor_cache.insert(key_input, cached);
         }
         Ok(())
@@ -3309,20 +3119,17 @@ impl SuperGraphNode for SuperGraphNodeTensorPackCacheRead {
             for (name, output) in &self.value_outputs {
                 let output_link =
                     require_node_link(*output, "TensorPackCacheRead", "value_outputs")?;
-                let default_link = default_input_links
-                    .iter()
-                    .find(|(n, _)| n == name)
-                    .ok_or(SuperGraphError::InvalidInputError(format!(
+                let default_link = default_input_links.iter().find(|(n, _)| n == name).ok_or(
+                    SuperGraphError::InvalidInputError(format!(
                         "TensorPackCacheRead missing default input for key '{name}'"
-                    )))?;
+                    )),
+                )?;
                 let default_value = data
                     .tensors
                     .get(&default_link.1)
                     .ok_or(SuperGraphError::MissingLinkError(String::new()))?
                     .to_tensor(context.pool)
-                    .map_err(|e| {
-                        SuperGraphError::InvalidInputError(format!("allocation: {e}"))
-                    })?;
+                    .map_err(|e| SuperGraphError::InvalidInputError(format!("allocation: {e}")))?;
                 data.tensors.insert(output_link, default_value);
             }
         }

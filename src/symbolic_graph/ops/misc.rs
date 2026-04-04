@@ -2,12 +2,12 @@ use crate::graph::{GlobalId, Node, Property, PropertyValue};
 use crate::milli_graph::ops::*;
 use crate::milli_graph::{MilliLoweringContext, MilliOpGraph};
 use crate::numeric_dtype::{NumericDType, ONNXDType};
+use crate::onnx;
 use crate::symbolic_graph::ops::{EvalError, Operation};
 use crate::symbolic_graph::{
     ONNXDecodingError, SymbolicGraph, SymbolicGraphMutator, query_attribute_float,
     query_attribute_graph, query_attribute_int, query_attribute_ints, query_attribute_string,
 };
-use crate::onnx;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};

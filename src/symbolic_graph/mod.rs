@@ -142,7 +142,7 @@ fn query_attribute_graph<'a>(
 /// Clone (pool buffers aren't trivially cloneable).
 #[derive(Clone, Debug)]
 pub struct InlineConstantTensor(
-    pub std::sync::Arc<
+    pub  std::sync::Arc<
         crate::numeric_tensor::NumericTensor<'static, DynRank, crate::pool::SystemPool>,
     >,
 );
@@ -1944,9 +1944,9 @@ impl SymbolicGraphMutator {
                 onnx_name: name.clone(),
                 dtype: Some(ONNXDType::Numeric(value.dtype())),
                 shape: Some(shape),
-                tensor_type: TensorType::Constant(StoredOrNotTensor::Inline(
-                    InlineConstantTensor(std::sync::Arc::new(value)),
-                )),
+                tensor_type: TensorType::Constant(StoredOrNotTensor::Inline(InlineConstantTensor(
+                    std::sync::Arc::new(value),
+                ))),
                 global_id,
             },
         );
@@ -1963,8 +1963,7 @@ impl SymbolicGraphMutator {
         rng: &mut impl Rng,
     ) -> GlobalId {
         // Bridge: convert legacy NDArray tensor → pool tensor for inline storage.
-        let legacy =
-            crate::migration::numeric_tensor::NumericTensor::NDArray(value);
+        let legacy = crate::migration::numeric_tensor::NumericTensor::NDArray(value);
         let pool_tensor =
             crate::nano_graph::lower::legacy_numeric_to_new(&legacy, &crate::pool::SystemPool);
         let mut shape = Vec::new();
@@ -1979,9 +1978,9 @@ impl SymbolicGraphMutator {
                 onnx_name: name.clone(),
                 dtype: Some(ONNXDType::Numeric(pool_tensor.dtype())),
                 shape: Some(shape),
-                tensor_type: TensorType::Constant(StoredOrNotTensor::Inline(
-                    InlineConstantTensor(std::sync::Arc::new(pool_tensor)),
-                )),
+                tensor_type: TensorType::Constant(StoredOrNotTensor::Inline(InlineConstantTensor(
+                    std::sync::Arc::new(pool_tensor),
+                ))),
                 global_id,
             },
         );

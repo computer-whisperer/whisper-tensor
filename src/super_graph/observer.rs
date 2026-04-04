@@ -31,8 +31,7 @@ impl SuperGraphObserver for () {
     fn on_tensor_assigned(&mut self, _path: &[GlobalId], _tensor: &NumericTensorView<'_, DynRank>) {
     }
     fn on_loading_weight(&mut self, _path: &[GlobalId], _weight_name: Option<String>) {}
-    fn on_progress(&mut self, _path: &[GlobalId], _tier: i64, _numerator: f64, _denominator: f64) {
-    }
+    fn on_progress(&mut self, _path: &[GlobalId], _tier: i64, _numerator: f64, _denominator: f64) {}
     fn should_cancel(&mut self) -> bool {
         false
     }

@@ -203,8 +203,7 @@ impl MilliOp for Reshape {
                     && kp > 0
                 {
                     let inferred = total / kp;
-                    let minus_one_idx =
-                        shape_values.iter().position(|&v| v == -1).unwrap();
+                    let minus_one_idx = shape_values.iter().position(|&v| v == -1).unwrap();
                     hint_dims[minus_one_idx] = ScalarInfoTyped::Numeric(inferred);
                 }
             }

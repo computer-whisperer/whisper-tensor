@@ -1794,10 +1794,7 @@ impl<'a> NanoLoweringContext<'a> {
         };
 
         let out_dt = Self::ndt(out_info);
-        let in_dt = all_infos
-            .get(&in_id)
-            .map(Self::ndt)
-            .unwrap_or(out_dt);
+        let in_dt = all_infos.get(&in_id).map(Self::ndt).unwrap_or(out_dt);
         let compute_dt = match in_dt {
             NumericDType::BF16 | NumericDType::F16 => NumericDType::F32,
             other => other,

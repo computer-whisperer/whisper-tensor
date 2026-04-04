@@ -588,7 +588,6 @@ impl MilliOp for Pad {
             TensorInfo::from_dtype_and_shape_scalars(out_dtype, &out_dims),
         )])
     }
-
 }
 
 /// Reflect index: maps negative or out-of-bounds indices via reflection.

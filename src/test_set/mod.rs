@@ -348,11 +348,7 @@ pub fn run_case_via_pool_eval(case: &TestCase) -> Result<(), String> {
             .collect();
 
         // Build output AtomRanges from the graph's output ids.
-        let output_ids: Vec<GlobalId> = case
-            .graph
-            .output_ordering
-            .clone()
-            .unwrap_or_default();
+        let output_ids: Vec<GlobalId> = case.graph.output_ordering.clone().unwrap_or_default();
 
         let mut output_ranges: Vec<AtomRange> = Vec::new();
         for &out_id in &output_ids {

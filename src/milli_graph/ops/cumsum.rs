@@ -375,5 +375,4 @@ impl MilliOp for CumSum {
             TensorInfo::new_from_first_element_and_rank(first, data_info.rank(), symbolic_resolver),
         )])
     }
-
 }

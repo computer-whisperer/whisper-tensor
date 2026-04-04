@@ -1216,7 +1216,10 @@ impl MilliOpGraph {
                                 !matches!(s, crate::scalar_info::ScalarInfoTyped::Numeric(_))
                             })
                             .count();
-                        if sym_count > 0 && known_product > 0 && (numel as u64).is_multiple_of(known_product) {
+                        if sym_count > 0
+                            && known_product > 0
+                            && (numel as u64).is_multiple_of(known_product)
+                        {
                             let sym_total = numel as u64 / known_product;
                             if sym_count == 1 {
                                 // Single unknown dim: resolve directly.

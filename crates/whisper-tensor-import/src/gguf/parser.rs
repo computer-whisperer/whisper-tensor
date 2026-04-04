@@ -230,7 +230,10 @@ fn resolve_simple_block_quant(
     has_min: bool,
     num_elements: u64,
 ) -> (TensorFormat, usize) {
-    let fmt = TensorFormat::SimpleBlockQuant { weight_bits, has_min };
+    let fmt = TensorFormat::SimpleBlockQuant {
+        weight_bits,
+        has_min,
+    };
     let block_size = 32usize;
     let scale_bytes = 2usize; // f16 scale
     let min_bytes = if has_min { 2usize } else { 0 };
@@ -267,11 +270,17 @@ fn resolve_ggml_type(
     match ggml_type {
         0 => {
             // GGML_TYPE_F32
-            Ok((TensorFormat::Element(NumericDType::F32), num_elements as usize * 4))
+            Ok((
+                TensorFormat::Element(NumericDType::F32),
+                num_elements as usize * 4,
+            ))
         }
         1 => {
             // GGML_TYPE_F16
-            Ok((TensorFormat::Element(NumericDType::F16), num_elements as usize * 2))
+            Ok((
+                TensorFormat::Element(NumericDType::F16),
+                num_elements as usize * 2,
+            ))
         }
         // Simple block quants (block_size=32)
         2 => Ok(resolve_simple_block_quant(4, false, num_elements)), // Q4_0
@@ -427,7 +436,10 @@ mod tests {
             .expect("missing token_embd");
         assert_eq!(
             embd.format,
-            TensorFormat::SimpleBlockQuant { weight_bits: 4, has_min: false }
+            TensorFormat::SimpleBlockQuant {
+                weight_bits: 4,
+                has_min: false
+            }
         );
         assert_eq!(embd.dimensions, vec![128256, 4096]);
 
@@ -465,7 +477,8 @@ mod tests {
         assert!(
             matches!(
                 q_proj.format,
-                TensorFormat::KQuant(KQuantVariant::Q4_K) | TensorFormat::KQuant(KQuantVariant::Q6_K)
+                TensorFormat::KQuant(KQuantVariant::Q4_K)
+                    | TensorFormat::KQuant(KQuantVariant::Q6_K)
             ),
             "Unexpected format for Q4_K_M attention: {:?}",
             q_proj.format

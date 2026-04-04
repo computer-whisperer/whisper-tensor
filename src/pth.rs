@@ -841,9 +841,7 @@ impl PthTensors {
             )?;
         }
 
-        let elem_size = tensor_info
-            .dtype
-            .bytes_per_element();
+        let elem_size = tensor_info.dtype.bytes_per_element();
         let numel = tensor_info.layout.num_elements();
         let byte_len = numel.saturating_mul(elem_size);
 

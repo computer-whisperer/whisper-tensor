@@ -332,7 +332,6 @@ impl MilliOp for Dilate {
 
         Ok(vec![(self.output, out_info)])
     }
-
 }
 
 #[cfg(test)]

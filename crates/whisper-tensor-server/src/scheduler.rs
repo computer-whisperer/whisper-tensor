@@ -6,18 +6,16 @@ use crate::{
 use crossbeam::queue::ArrayQueue;
 use log::error;
 use std::collections::{HashMap, HashSet};
-use std::ptr;
+
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tokio::sync::{Notify, mpsc};
-use whisper_tensor::backends::ModelLoadedTensorCache;
 use whisper_tensor::backends::eval_backend::EvalBackend;
 use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
-use whisper_tensor::compiler::CompilationSubject;
 use whisper_tensor::graph::GlobalId;
 use whisper_tensor::migration::numeric_tensor::NumericTensor;
 use whisper_tensor::super_graph::SuperGraphContext;
-use whisper_tensor::super_graph::cache::{SuperGraphCache, SuperGraphTensorCache};
+use whisper_tensor::super_graph::cache::SuperGraphCache;
 use whisper_tensor::super_graph::data::SuperGraphData;
 use whisper_tensor::super_graph::observer::SuperGraphObserver;
 use whisper_tensor::symbolic_graph::SharedPoolTensor;
@@ -428,18 +426,11 @@ pub async fn scheduler(
     loop {
         if let Some(x) = input.recv().await {
             let caches = caches.clone();
-            let ndarray_tensor_load_caches = Arc::new(Mutex::new(HashMap::new()));
+
             match x {
-                SchedulerJob::CompileModelRequest { model_id } => {
-                    let model = model_server.get_model(model_id).await;
-                    if let Some(model) = model {
-                        let symbolic_graph = Arc::new(model.get_symbolic_graph().clone());
-                        let subject = CompilationSubject::SymbolicGraph { symbolic_graph };
-                        let program = compiler::build_program(subject);
-                        model_server
-                            .set_compiled_model(model_id, Arc::new(program))
-                            .await;
-                    }
+                SchedulerJob::CompileModelRequest { model_id: _ } => {
+                    // Compiler stub removed — compilation is a no-op until
+                    // the real compiler is wired in.
                 }
                 SchedulerJob::SuperGraphRequest((req, resp_sender, reporter)) => {
                     ensure_observer_settings(
@@ -457,7 +448,6 @@ pub async fn scheduler(
                     }
                     // Collect links to needed models
                     let mut model_id_map = HashMap::new();
-                    let mut compiled_models = HashMap::new();
                     let cancellation_registry_for_request = cancellation_registry.clone();
                     let observer_settings_registry_for_request = observer_settings_registry.clone();
                     let (models, symbolic_graph_models) = {
@@ -465,11 +455,9 @@ pub async fn scheduler(
                         let mut symbolic_graph_models = Vec::new();
                         for (link, &model_id) in &req.model_inputs {
                             let model = model_server.get_model(model_id).await;
-                            let compiled_model = model_server.get_compiled_model(model_id).await;
                             if let Some(model) = model {
                                 models.insert(*link, model.clone());
                                 model_id_map.insert(model_id, model);
-                                compiled_models.insert(model_id, compiled_model);
                             }
                         }
                         for model_id in req.symbolic_graph_ids {
@@ -481,8 +469,6 @@ pub async fn scheduler(
                     // Dispatch tight loop
                     let result = tokio::task::spawn_blocking(move || {
                         let mut ndarray_backend = EvalBackend::NDArray;
-                        let use_compiler =
-                            matches!(req.backend_mode, SuperGraphRequestBackendMode::Compiler);
                         let backend = &mut ndarray_backend;
                         {
                             let mut super_graph_data = SuperGraphData::new();
@@ -526,65 +512,23 @@ pub async fn scheduler(
                                 Some(observer_settings_registry_for_request.clone()),
                             );
                             let mut caches = caches.lock().unwrap();
-                            let mut ndarray_tensor_load_caches =
-                                ndarray_tensor_load_caches.lock().unwrap();
-                            // setup tensor caches
                             let res = {
-                                let mut super_graph_tensor_cache = {
-                                    let mut res = SuperGraphTensorCache::new();
-                                    for (a, b) in &model_id_map {
-                                        if let Some(x) = ndarray_tensor_load_caches.remove(a) {
-                                            res.caches.push((b.get_tensor_store(), x));
-                                        } else {
-                                            res.caches.push((
-                                                b.get_tensor_store(),
-                                                ModelLoadedTensorCache::default(),
-                                            ));
-                                        }
-                                    }
-                                    res
-                                };
                                 let cache = req
                                     .use_cache
                                     .map(|x| caches.entry(x).or_insert_with(SuperGraphCache::new));
-                                let compiled_models = {
-                                    let mut ret = vec![];
-                                    for (a, b) in &compiled_models {
-                                        if let Some(x) = b {
-                                            ret.push((
-                                                model_id_map.get(a).unwrap().as_ref(),
-                                                x.as_ref(),
-                                            ));
-                                        }
-                                    }
-                                    ret
-                                };
                                 let symbolic_graph_refs = symbolic_graph_models
                                     .iter()
                                     .map(|x| x.get_symbolic_graph())
                                     .collect();
                                 let mut context = SuperGraphContext {
+                                    pool: &whisper_tensor::pool::SystemPool,
                                     observer: &mut observer,
                                     caches: cache,
-                                    use_compiled_models: use_compiler,
                                     symbolic_graphs: symbolic_graph_refs,
-                                    compiled_models: Some(compiled_models),
-                                    super_graph_tensor_cache: &mut super_graph_tensor_cache,
                                 };
-                                let ret = req
-                                    .super_graph
+                                req.super_graph
                                     .run(super_graph_data, &mut context)
-                                    .map_err(|x| x.to_string())?;
-                                // Re-pack tensor caches
-                                for (a, b) in super_graph_tensor_cache.caches {
-                                    for (aa, bb) in &model_id_map {
-                                        if ptr::addr_eq(a, bb.as_ref()) {
-                                            ndarray_tensor_load_caches.insert(*aa, b);
-                                            break;
-                                        }
-                                    }
-                                }
-                                ret
+                                    .map_err(|x| x.to_string())?
                             };
 
                             let SuperGraphData {

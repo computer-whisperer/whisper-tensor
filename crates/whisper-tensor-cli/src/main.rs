@@ -4,7 +4,6 @@ use clap::Parser;
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::PathBuf;
-use whisper_tensor::backends::ModelLoadedTensorCache;
 use whisper_tensor::backends::eval_backend::EvalBackend;
 use whisper_tensor::interfaces::AnyInterface;
 use whisper_tensor::loader::{ConfigValue, ConfigValues, Loader, LoaderOutput};
@@ -394,25 +393,22 @@ fn cmd_generate(output: LoaderOutput, prompt: Option<String>, max_tokens: usize)
 
     eprintln!("Model loaded. Generating...\n");
 
-    let mut backend = EvalBackend::NDArray;
     let mut tokenizer_cache = HashMap::new();
     let mut super_graph_caches = SuperGraphCache::new();
-    let mut model_cache = ModelLoadedTensorCache::new();
 
     print!("{prompt}");
     std::io::stdout().flush().unwrap();
 
+    let pool = whisper_tensor::pool::SystemPool;
     let mut context = prompt;
     for _ in 0..max_tokens {
         let token = interface
             .run_string_in_string_out(
                 model,
-                None,
                 context.clone(),
                 &mut tokenizer_cache,
-                Some(&mut model_cache),
                 Some(&mut super_graph_caches),
-                &mut backend,
+                &pool,
             )
             .unwrap_or_else(|e| {
                 eprintln!("\nInference error: {e}");
@@ -509,7 +505,7 @@ struct TtsRunOptions {
 fn cmd_tts(output: LoaderOutput, opts: TtsRunOptions) {
     use whisper_tensor::interfaces::TTSInputConfig;
     use whisper_tensor::super_graph::SuperGraphContext;
-    use whisper_tensor::super_graph::cache::SuperGraphTensorCache;
+
     use whisper_tensor::super_graph::data::SuperGraphData;
 
     let TtsRunOptions {
@@ -713,14 +709,11 @@ fn cmd_tts(output: LoaderOutput, opts: TtsRunOptions) {
         .collect();
     let super_graph_output = {
         let mut observer = ();
-        let mut super_graph_tensor_cache = SuperGraphTensorCache::new();
         let mut context = SuperGraphContext {
+            pool: &whisper_tensor::pool::SystemPool,
             observer: &mut observer,
-            super_graph_tensor_cache: &mut super_graph_tensor_cache,
             caches: None,
             symbolic_graphs,
-            use_compiled_models: false,
-            compiled_models: None,
         };
         interface
             .super_graph
@@ -812,7 +805,7 @@ fn save_wav(samples: &[f32], sample_rate: u32, path: &std::path::Path) {
 
 fn cmd_stt(output: LoaderOutput, audio_path: PathBuf, _model_dir: Option<PathBuf>) {
     use whisper_tensor::super_graph::SuperGraphContext;
-    use whisper_tensor::super_graph::cache::SuperGraphTensorCache;
+
     use whisper_tensor::super_graph::data::{SuperGraphAudioClip, SuperGraphData};
 
     let interface = output
@@ -865,14 +858,11 @@ fn cmd_stt(output: LoaderOutput, audio_path: PathBuf, _model_dir: Option<PathBuf
             output.models[1].model.get_symbolic_graph(),
         ];
         let mut observer = ();
-        let mut tensor_cache = SuperGraphTensorCache::new();
         let mut context = SuperGraphContext {
+            pool: &whisper_tensor::pool::SystemPool,
             observer: &mut observer,
-            super_graph_tensor_cache: &mut tensor_cache,
             caches: None,
             symbolic_graphs,
-            use_compiled_models: false,
-            compiled_models: None,
         };
         interface
             .super_graph

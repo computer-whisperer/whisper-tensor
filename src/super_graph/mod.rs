@@ -5,13 +5,10 @@ pub mod nodes;
 pub mod observer;
 
 use crate::backends::eval_backend::EvalRuntimeError;
-use crate::compiler::{CompiledProgram, CompilerError};
 use crate::graph::{GlobalId, Graph, Link, collect_disconnected_node_slots};
-use crate::migration::numeric_tensor::NumericTensorError;
-use crate::migration::numeric_tensor_typed::TypedNumericTensorError;
 use crate::milli_graph::MilliOpGraphError;
-use crate::model::{Model, ModelError};
-use crate::super_graph::cache::{SuperGraphCache, SuperGraphTensorCache};
+use crate::model::ModelError;
+use crate::super_graph::cache::SuperGraphCache;
 use crate::super_graph::data::SuperGraphData;
 pub use crate::super_graph::links::{
     SuperGraphAnyLink, SuperGraphAtomicLinkKind, SuperGraphLink, SuperGraphLinkInfo,
@@ -34,14 +31,6 @@ pub enum SuperGraphError {
     TokenizerError(#[from] TokenizerError),
     #[error(transparent)]
     MilliOpGraphError(#[from] MilliOpGraphError),
-    #[error(transparent)]
-    NumericTensorError(#[from] NumericTensorError),
-    #[error(transparent)]
-    TypedNumericTensorError(#[from] TypedNumericTensorError),
-    #[error("Model not in compiled cache")]
-    ModelNotCompiledError,
-    #[error(transparent)]
-    CompilerError(#[from] CompilerError),
     #[error("Missing link{0}")]
     MissingLinkError(String),
     #[error("Invalid input: {0}")]
@@ -58,35 +47,24 @@ pub enum SuperGraphError {
 
 pub type SuperGraphHash = u64;
 
-pub struct SuperGraphContext<'short, 'model, 'p, P: crate::pool::Pool + 'p, T: SuperGraphObserver>
-{
+pub struct SuperGraphContext<'short, 'model, 'p, P: crate::pool::Pool + 'p, T: SuperGraphObserver> {
     pub pool: &'p P,
     pub observer: &'short mut T,
     pub caches: Option<&'short mut SuperGraphCache>,
-    pub super_graph_tensor_cache: &'short mut SuperGraphTensorCache<'model>,
-    pub use_compiled_models: bool,
     pub symbolic_graphs: Vec<&'model SymbolicGraph>,
-    pub compiled_models: Option<Vec<(&'model Model, &'short CompiledProgram)>>,
 }
 
 impl<'short, 'model, 'p, P: crate::pool::Pool + 'p, T: SuperGraphObserver>
     SuperGraphContext<'short, 'model, 'p, P, T>
 {
-    /// Construct a context with only the required fields; caches, compiled
-    /// models, and symbolic graphs default to empty/None.
-    pub fn new(
-        pool: &'p P,
-        observer: &'short mut T,
-        tensor_cache: &'short mut SuperGraphTensorCache<'model>,
-    ) -> Self {
+    /// Construct a context with only the required fields; caches and
+    /// symbolic graphs default to empty/None.
+    pub fn new(pool: &'p P, observer: &'short mut T) -> Self {
         Self {
             pool,
             observer,
             caches: None,
-            super_graph_tensor_cache: tensor_cache,
-            use_compiled_models: false,
             symbolic_graphs: vec![],
-            compiled_models: None,
         }
     }
 }
@@ -171,13 +149,8 @@ impl SuperGraph {
             }
         }
 
-        let output_data = data.into_selected(
-            &self
-                .output_links
-                .iter()
-                .cloned()
-                .collect::<Vec<_>>(),
-        )?;
+        let output_data =
+            data.into_selected(&self.output_links.iter().cloned().collect::<Vec<_>>())?;
 
         Ok(output_data)
     }
@@ -408,7 +381,6 @@ impl Graph for SuperGraph {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::super_graph::cache::SuperGraphTensorCache;
     use crate::super_graph::data::SuperGraphData;
 
     #[test]
@@ -443,8 +415,7 @@ mod tests {
         use crate::pool::SystemPool;
         static POOL: SystemPool = SystemPool;
         let mut observer = ();
-        let mut tensor_cache = SuperGraphTensorCache::new();
-        let mut context = SuperGraphContext::new(&POOL, &mut observer, &mut tensor_cache);
+        let mut context = SuperGraphContext::new(&POOL, &mut observer);
 
         let result = graph.eval(&[], SuperGraphData::new(), &mut context);
         assert!(matches!(result, Err(SuperGraphError::InvalidGraph(_))));

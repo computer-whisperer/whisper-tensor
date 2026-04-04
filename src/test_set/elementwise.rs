@@ -802,7 +802,14 @@ fn sign_case() -> TestCase {
         data_sets: vec![unary_data_set(
             "f32",
             &ids,
-            tensor_f32(&[std::f32::consts::PI, -2.0, 0.0, -0.0, f32::INFINITY, f32::NEG_INFINITY]),
+            tensor_f32(&[
+                std::f32::consts::PI,
+                -2.0,
+                0.0,
+                -0.0,
+                f32::INFINITY,
+                f32::NEG_INFINITY,
+            ]),
             tensor_f32(&[1.0, -1.0, 0.0, 0.0, 1.0, -1.0]),
             Tolerance::for_dtype(NumericDType::F32),
         )],

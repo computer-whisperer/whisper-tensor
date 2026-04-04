@@ -188,7 +188,10 @@ impl Operation for ConstantOperation {
         let total_elements = t.numel();
 
         let mut params = vec![
-            Property::new("dtype", PropertyValue::DType(crate::numeric_dtype::ONNXDType::Numeric(t.dtype()))),
+            Property::new(
+                "dtype",
+                PropertyValue::DType(crate::numeric_dtype::ONNXDType::Numeric(t.dtype())),
+            ),
             Property::new("shape", PropertyValue::IntList(shape)),
         ];
 

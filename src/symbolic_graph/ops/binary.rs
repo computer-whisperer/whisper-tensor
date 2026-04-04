@@ -114,92 +114,92 @@ impl Operation for BinaryOperation {
                 }),
             ) = (inputs.get(&self.a), inputs.get(&self.b))
         {
-                // Broadcast shapes.
-                let rank = shape_a.len().max(shape_b.len());
-                let mut out_shape = vec![0u64; rank];
-                let mut strides_a = vec![0usize; rank];
-                let mut strides_b = vec![0usize; rank];
-                for i in 0..rank {
-                    let da = if i < rank - shape_a.len() {
+            // Broadcast shapes.
+            let rank = shape_a.len().max(shape_b.len());
+            let mut out_shape = vec![0u64; rank];
+            let mut strides_a = vec![0usize; rank];
+            let mut strides_b = vec![0usize; rank];
+            for i in 0..rank {
+                let da = if i < rank - shape_a.len() {
+                    1
+                } else {
+                    shape_a[i - (rank - shape_a.len())]
+                };
+                let db = if i < rank - shape_b.len() {
+                    1
+                } else {
+                    shape_b[i - (rank - shape_b.len())]
+                };
+                out_shape[i] = da.max(db);
+                strides_a[i] = if da == 1 { 0 } else { 1 };
+                strides_b[i] = if db == 1 { 0 } else { 1 };
+            }
+            // Convert strides to row-major element strides.
+            for i in (0..rank.saturating_sub(1)).rev() {
+                strides_a[i] *= strides_a.get(i + 1).copied().unwrap_or(1);
+                strides_b[i] *= strides_b.get(i + 1).copied().unwrap_or(1);
+            }
+            // Recompute properly.
+            let sa_shape: Vec<u64> = (0..rank)
+                .map(|i| {
+                    if i < rank - shape_a.len() {
                         1
                     } else {
                         shape_a[i - (rank - shape_a.len())]
-                    };
-                    let db = if i < rank - shape_b.len() {
+                    }
+                })
+                .collect();
+            let sb_shape: Vec<u64> = (0..rank)
+                .map(|i| {
+                    if i < rank - shape_b.len() {
                         1
                     } else {
                         shape_b[i - (rank - shape_b.len())]
-                    };
-                    out_shape[i] = da.max(db);
-                    strides_a[i] = if da == 1 { 0 } else { 1 };
-                    strides_b[i] = if db == 1 { 0 } else { 1 };
-                }
-                // Convert strides to row-major element strides.
-                for i in (0..rank.saturating_sub(1)).rev() {
-                    strides_a[i] *= strides_a.get(i + 1).copied().unwrap_or(1);
-                    strides_b[i] *= strides_b.get(i + 1).copied().unwrap_or(1);
-                }
-                // Recompute properly.
-                let sa_shape: Vec<u64> = (0..rank)
-                    .map(|i| {
-                        if i < rank - shape_a.len() {
-                            1
-                        } else {
-                            shape_a[i - (rank - shape_a.len())]
-                        }
-                    })
-                    .collect();
-                let sb_shape: Vec<u64> = (0..rank)
-                    .map(|i| {
-                        if i < rank - shape_b.len() {
-                            1
-                        } else {
-                            shape_b[i - (rank - shape_b.len())]
-                        }
-                    })
-                    .collect();
-                let mut sa_strides = vec![1usize; rank];
-                let mut sb_strides = vec![1usize; rank];
-                for i in (0..rank.saturating_sub(1)).rev() {
-                    sa_strides[i] = sa_strides[i + 1] * sa_shape[i + 1] as usize;
-                    sb_strides[i] = sb_strides[i + 1] * sb_shape[i + 1] as usize;
-                }
-
-                let numel: usize = out_shape.iter().product::<u64>() as usize;
-                let mut out_strides = vec![1usize; rank];
-                for i in (0..rank.saturating_sub(1)).rev() {
-                    out_strides[i] = out_strides[i + 1] * out_shape[i + 1] as usize;
-                }
-
-                let layout =
-                    crate::numeric_tensor::TensorLayout::<crate::tensor_rank::DynRank>::row_major(
-                        out_shape,
-                        crate::numeric_dtype::NumericDType::BOOL,
-                    );
-                let buf = pool
-                    .allocate(layout.buffer_size_bytes())
-                    .map_err(|e| super::EvalError::InvalidInput(format!("pool alloc: {e}")))?;
-                let mut out = crate::numeric_tensor::NumericTensor::from_parts(buf, layout);
-
-                for flat in 0..numel {
-                    let mut rem = flat;
-                    let mut idx_a = 0usize;
-                    let mut idx_b = 0usize;
-                    for d in 0..rank {
-                        let coord = rem / out_strides[d];
-                        rem %= out_strides[d];
-                        let ca = if sa_shape[d] == 1 { 0 } else { coord };
-                        let cb = if sb_shape[d] == 1 { 0 } else { coord };
-                        idx_a += ca * sa_strides[d];
-                        idx_b += cb * sb_strides[d];
                     }
-                    let eq = data_a[idx_a] == data_b[idx_b];
-                    out.write_element(flat, crate::numeric_scalar::NumericScalar::from_bool(eq));
-                }
+                })
+                .collect();
+            let mut sa_strides = vec![1usize; rank];
+            let mut sb_strides = vec![1usize; rank];
+            for i in (0..rank.saturating_sub(1)).rev() {
+                sa_strides[i] = sa_strides[i + 1] * sa_shape[i + 1] as usize;
+                sb_strides[i] = sb_strides[i + 1] * sb_shape[i + 1] as usize;
+            }
 
-                let mut results = HashMap::new();
-                results.insert(self.output, crate::numeric_dtype::ONNXTensor::Numeric(out));
-                return Ok(results);
+            let numel: usize = out_shape.iter().product::<u64>() as usize;
+            let mut out_strides = vec![1usize; rank];
+            for i in (0..rank.saturating_sub(1)).rev() {
+                out_strides[i] = out_strides[i + 1] * out_shape[i + 1] as usize;
+            }
+
+            let layout =
+                crate::numeric_tensor::TensorLayout::<crate::tensor_rank::DynRank>::row_major(
+                    out_shape,
+                    crate::numeric_dtype::NumericDType::BOOL,
+                );
+            let buf = pool
+                .allocate(layout.buffer_size_bytes())
+                .map_err(|e| super::EvalError::InvalidInput(format!("pool alloc: {e}")))?;
+            let mut out = crate::numeric_tensor::NumericTensor::from_parts(buf, layout);
+
+            for flat in 0..numel {
+                let mut rem = flat;
+                let mut idx_a = 0usize;
+                let mut idx_b = 0usize;
+                for d in 0..rank {
+                    let coord = rem / out_strides[d];
+                    rem %= out_strides[d];
+                    let ca = if sa_shape[d] == 1 { 0 } else { coord };
+                    let cb = if sb_shape[d] == 1 { 0 } else { coord };
+                    idx_a += ca * sa_strides[d];
+                    idx_b += cb * sb_strides[d];
+                }
+                let eq = data_a[idx_a] == data_b[idx_b];
+                out.write_element(flat, crate::numeric_scalar::NumericScalar::from_bool(eq));
+            }
+
+            let mut results = HashMap::new();
+            results.insert(self.output, crate::numeric_dtype::ONNXTensor::Numeric(out));
+            return Ok(results);
         }
 
         // Default: numeric path via milli-op lowering.

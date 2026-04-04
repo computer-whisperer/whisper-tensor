@@ -1,3 +1,4 @@
+use crate::TrigOp;
 use crate::graph::{GlobalId, Node};
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
@@ -6,7 +7,6 @@ use crate::nano_graph::ops::{ScalarBinOp, ScalarOp, ScalarUnaryOp};
 use crate::nano_graph::pattern::InputRef;
 use crate::pool::Pool;
 use crate::tensor_info::TensorInfo;
-use crate::TrigOp;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 

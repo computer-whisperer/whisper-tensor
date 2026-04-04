@@ -367,7 +367,6 @@ impl MilliOp for ArgMax {
             ),
         )])
     }
-
 }
 
 impl Node for ArgMax {

@@ -196,7 +196,6 @@ impl MilliOp for ReduceMin {
 
         Ok(vec![(self.output, out_info)])
     }
-
 }
 
 impl Node for ReduceMin {

@@ -749,9 +749,7 @@ impl MilliOp for Resize {
                         let scales: Vec<f32> = resolved_axes
                             .iter()
                             .enumerate()
-                            .map(|(i, &axis)| {
-                                sizes_vec[i] as f32 / input_conc[axis] as f32
-                            })
+                            .map(|(i, &axis)| sizes_vec[i] as f32 / input_conc[axis] as f32)
                             .collect();
                         let chosen_scale = if matches!(
                             self.keep_aspect_ratio_policy,
@@ -762,16 +760,15 @@ impl MilliOp for Resize {
                             scales.iter().copied().fold(0.0f32, f32::max)
                         };
                         for &axis in &resolved_axes {
-                            let v =
-                                round_half_up(chosen_scale * input_conc[axis] as f32);
+                            let v = round_half_up(chosen_scale * input_conc[axis] as f32);
                             out_dims[axis] = ScalarInfoTyped::Numeric(v as u64);
                         }
                     } else {
                         // Input shape is partially symbolic — can't compute aspect ratio
                         for &axis in &resolved_axes {
-                            out_dims[axis] = ScalarInfoTyped::Symbolic(
-                                SymbolicScalarTyped::new(symbolic_resolver),
-                            );
+                            out_dims[axis] = ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(
+                                symbolic_resolver,
+                            ));
                         }
                     }
                 }
@@ -799,9 +796,9 @@ impl MilliOp for Resize {
                             out_dims[axis] = ScalarInfoTyped::Numeric(new_size);
                         }
                         ScalarInfoTyped::Symbolic(_) => {
-                            out_dims[axis] = ScalarInfoTyped::Symbolic(
-                                SymbolicScalarTyped::new(symbolic_resolver),
-                            );
+                            out_dims[axis] = ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(
+                                symbolic_resolver,
+                            ));
                         }
                     }
                 }

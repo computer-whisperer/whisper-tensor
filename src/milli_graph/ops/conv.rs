@@ -248,7 +248,6 @@ fn im2col_2d(input_data: &[f32], col: &mut [f32], p: &Im2Col2dParams) {
     }
 }
 
-
 /// Helper: build Conv output with known batch + out_channels but symbolic spatial dims.
 fn make_symbolic_output<'p, P: Pool + 'p>(
     output_id: GlobalId,

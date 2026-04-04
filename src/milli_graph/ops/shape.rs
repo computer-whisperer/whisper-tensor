@@ -1,6 +1,6 @@
 use crate::graph::{GlobalId, Node};
-use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::MilliOpGraph;
+use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::pool::Pool;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

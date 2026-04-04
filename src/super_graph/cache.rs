@@ -1,7 +1,5 @@
-use crate::backends::ModelLoadedTensorCache;
 use crate::numeric_tensor::NumericTensor;
 use crate::pool::SystemPool;
-use crate::symbolic_graph::tensor_store::TensorStore;
 use crate::tensor_rank::DynRank;
 use std::collections::HashMap;
 
@@ -23,16 +21,5 @@ impl SuperGraphCache {
             tensor_cache: HashMap::new(),
             tensor_pack_cache: HashMap::new(),
         }
-    }
-}
-
-#[derive(Default)]
-pub struct SuperGraphTensorCache<'model> {
-    pub caches: Vec<(&'model TensorStore, ModelLoadedTensorCache)>,
-}
-
-impl<'model> SuperGraphTensorCache<'model> {
-    pub fn new() -> Self {
-        Self { caches: Vec::new() }
     }
 }

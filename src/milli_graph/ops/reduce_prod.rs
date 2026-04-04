@@ -237,13 +237,9 @@ impl MilliOp for ReduceProd {
                 vec![1]
             };
             let one = crate::numeric_scalar::NumericScalar::from_f64(1.0).cast_to(out_dtype);
-            let out_tensor = crate::numeric_tensor::NumericTensor::from_fn(
-                out_shape,
-                out_dtype,
-                pool,
-                |_| one,
-            )
-            .map_err(|_| MilliOpGraphError::UnableToInfer)?;
+            let out_tensor =
+                crate::numeric_tensor::NumericTensor::from_fn(out_shape, out_dtype, pool, |_| one)
+                    .map_err(|_| MilliOpGraphError::UnableToInfer)?;
             return Ok(vec![(
                 self.output,
                 TensorInfo::Ranked(crate::tensor_info::TensorInfoRanked::Shaped(
@@ -264,5 +260,4 @@ impl MilliOp for ReduceProd {
 
         Ok(vec![(self.output, out_info)])
     }
-
 }

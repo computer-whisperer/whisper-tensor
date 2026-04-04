@@ -150,83 +150,91 @@ impl<'p, 'models, P: Pool + 'p> SuperGraphData<'p, 'models, P> {
 
         match input.kind() {
             SuperGraphLinkKind::Tensor => {
-                let value = source
-                    .tensors
-                    .remove(&input)
-                    .ok_or(SuperGraphError::MissingLinkError(format!(
-                        ": missing tensor link {:?}",
-                        input
-                    )))?;
+                let value =
+                    source
+                        .tensors
+                        .remove(&input)
+                        .ok_or(SuperGraphError::MissingLinkError(format!(
+                            ": missing tensor link {:?}",
+                            input
+                        )))?;
                 self.tensors.insert(output, value);
             }
             SuperGraphLinkKind::String => {
-                let value = source
-                    .strings
-                    .remove(&input)
-                    .ok_or(SuperGraphError::MissingLinkError(format!(
-                        ": missing string link {:?}",
-                        input
-                    )))?;
+                let value =
+                    source
+                        .strings
+                        .remove(&input)
+                        .ok_or(SuperGraphError::MissingLinkError(format!(
+                            ": missing string link {:?}",
+                            input
+                        )))?;
                 self.strings.insert(output, value);
             }
             SuperGraphLinkKind::Tokenizer => {
-                let value = source
-                    .tokenizers
-                    .remove(&input)
-                    .ok_or(SuperGraphError::MissingLinkError(format!(
-                        ": missing tokenizer link {:?}",
-                        input
-                    )))?;
+                let value =
+                    source
+                        .tokenizers
+                        .remove(&input)
+                        .ok_or(SuperGraphError::MissingLinkError(format!(
+                            ": missing tokenizer link {:?}",
+                            input
+                        )))?;
                 self.tokenizers.insert(output, value);
             }
             SuperGraphLinkKind::TensorMap => {
-                let value = source
-                    .tensor_maps
-                    .remove(&input)
-                    .ok_or(SuperGraphError::MissingLinkError(format!(
-                        ": missing tensor_map link {:?}",
-                        input
-                    )))?;
+                let value =
+                    source
+                        .tensor_maps
+                        .remove(&input)
+                        .ok_or(SuperGraphError::MissingLinkError(format!(
+                            ": missing tensor_map link {:?}",
+                            input
+                        )))?;
                 self.tensor_maps.insert(output, value);
             }
             SuperGraphLinkKind::Hash => {
-                let value = source
-                    .hashes
-                    .remove(&input)
-                    .ok_or(SuperGraphError::MissingLinkError(format!(
-                        ": missing hash link {:?}",
-                        input
-                    )))?;
+                let value =
+                    source
+                        .hashes
+                        .remove(&input)
+                        .ok_or(SuperGraphError::MissingLinkError(format!(
+                            ": missing hash link {:?}",
+                            input
+                        )))?;
                 self.hashes.insert(output, value);
             }
             SuperGraphLinkKind::Image => {
-                let value = source
-                    .images
-                    .remove(&input)
-                    .ok_or(SuperGraphError::MissingLinkError(format!(
-                        ": missing image link {:?}",
-                        input
-                    )))?;
+                let value =
+                    source
+                        .images
+                        .remove(&input)
+                        .ok_or(SuperGraphError::MissingLinkError(format!(
+                            ": missing image link {:?}",
+                            input
+                        )))?;
                 self.images.insert(output, value);
             }
             SuperGraphLinkKind::AudioClip => {
-                let value = source
-                    .audio_clips
-                    .remove(&input)
-                    .ok_or(SuperGraphError::MissingLinkError(format!(
-                        ": missing audio clip link {:?}",
-                        input
-                    )))?;
+                let value =
+                    source
+                        .audio_clips
+                        .remove(&input)
+                        .ok_or(SuperGraphError::MissingLinkError(format!(
+                            ": missing audio clip link {:?}",
+                            input
+                        )))?;
                 self.audio_clips.insert(output, value);
             }
             SuperGraphLinkKind::VideoClip => {
-                let value = source
-                    .video_clips
-                    .remove(&input)
-                    .ok_or(SuperGraphError::MissingLinkError(format!(
-                        ": missing video clip link {:?}",
-                        input
-                    )))?;
+                let value =
+                    source
+                        .video_clips
+                        .remove(&input)
+                        .ok_or(SuperGraphError::MissingLinkError(format!(
+                            ": missing video clip link {:?}",
+                            input
+                        )))?;
                 self.video_clips.insert(output, value);
             }
             SuperGraphLinkKind::MultimodalItem => {
@@ -239,13 +247,14 @@ impl<'p, 'models, P: Pool + 'p> SuperGraphData<'p, 'models, P> {
                 self.multimodal_items.insert(output, value);
             }
             SuperGraphLinkKind::List(item_kind) => {
-                let value = source
-                    .lists
-                    .remove(&input)
-                    .ok_or(SuperGraphError::MissingLinkError(format!(
-                        ": missing list link {:?}",
-                        input
-                    )))?;
+                let value =
+                    source
+                        .lists
+                        .remove(&input)
+                        .ok_or(SuperGraphError::MissingLinkError(format!(
+                            ": missing list link {:?}",
+                            input
+                        )))?;
                 if value.item_kind() != item_kind {
                     return Err(SuperGraphError::InvalidInputError(format!(
                         "list item kind mismatch for {:?}: link declares {:?}, value contains {:?}",
@@ -343,11 +352,10 @@ impl<'p, 'models, P: Pool + 'p> SuperGraphData<'p, 'models, P> {
                         ": missing image link {:?}",
                         input
                     )))?;
-                let copy = value
-                    .tensor
-                    .view()
-                    .to_tensor(pool)
-                    .map_err(|e| SuperGraphError::InvalidInputError(format!("allocation: {e}")))?;
+                let copy =
+                    value.tensor.view().to_tensor(pool).map_err(|e| {
+                        SuperGraphError::InvalidInputError(format!("allocation: {e}"))
+                    })?;
                 self.images.insert(output, SuperGraphImage::new(copy));
             }
             SuperGraphLinkKind::AudioClip => {
@@ -359,15 +367,12 @@ impl<'p, 'models, P: Pool + 'p> SuperGraphData<'p, 'models, P> {
                             ": missing audio clip link {:?}",
                             input
                         )))?;
-                let copy = value
-                    .samples
-                    .view()
-                    .to_tensor(pool)
-                    .map_err(|e| SuperGraphError::InvalidInputError(format!("allocation: {e}")))?;
-                self.audio_clips.insert(
-                    output,
-                    SuperGraphAudioClip::new(copy, value.sample_rate_hz),
-                );
+                let copy =
+                    value.samples.view().to_tensor(pool).map_err(|e| {
+                        SuperGraphError::InvalidInputError(format!("allocation: {e}"))
+                    })?;
+                self.audio_clips
+                    .insert(output, SuperGraphAudioClip::new(copy, value.sample_rate_hz));
             }
             SuperGraphLinkKind::VideoClip => {
                 let value =
@@ -378,11 +383,10 @@ impl<'p, 'models, P: Pool + 'p> SuperGraphData<'p, 'models, P> {
                             ": missing video clip link {:?}",
                             input
                         )))?;
-                let copy = value
-                    .frames
-                    .view()
-                    .to_tensor(pool)
-                    .map_err(|e| SuperGraphError::InvalidInputError(format!("allocation: {e}")))?;
+                let copy =
+                    value.frames.view().to_tensor(pool).map_err(|e| {
+                        SuperGraphError::InvalidInputError(format!("allocation: {e}"))
+                    })?;
                 self.video_clips
                     .insert(output, SuperGraphVideoClip::new(copy, value.fps));
             }
@@ -396,36 +400,24 @@ impl<'p, 'models, P: Pool + 'p> SuperGraphData<'p, 'models, P> {
                 let copied = match value {
                     SuperGraphMultimodalItem::Text(s) => SuperGraphMultimodalItem::Text(s.clone()),
                     SuperGraphMultimodalItem::Image(img) => {
-                        let t = img
-                            .tensor
-                            .view()
-                            .to_tensor(pool)
-                            .map_err(|e| {
-                                SuperGraphError::InvalidInputError(format!("allocation: {e}"))
-                            })?;
+                        let t = img.tensor.view().to_tensor(pool).map_err(|e| {
+                            SuperGraphError::InvalidInputError(format!("allocation: {e}"))
+                        })?;
                         SuperGraphMultimodalItem::Image(SuperGraphImage::new(t))
                     }
                     SuperGraphMultimodalItem::AudioClip(clip) => {
-                        let t = clip
-                            .samples
-                            .view()
-                            .to_tensor(pool)
-                            .map_err(|e| {
-                                SuperGraphError::InvalidInputError(format!("allocation: {e}"))
-                            })?;
+                        let t = clip.samples.view().to_tensor(pool).map_err(|e| {
+                            SuperGraphError::InvalidInputError(format!("allocation: {e}"))
+                        })?;
                         SuperGraphMultimodalItem::AudioClip(SuperGraphAudioClip::new(
                             t,
                             clip.sample_rate_hz,
                         ))
                     }
                     SuperGraphMultimodalItem::VideoClip(clip) => {
-                        let t = clip
-                            .frames
-                            .view()
-                            .to_tensor(pool)
-                            .map_err(|e| {
-                                SuperGraphError::InvalidInputError(format!("allocation: {e}"))
-                            })?;
+                        let t = clip.frames.view().to_tensor(pool).map_err(|e| {
+                            SuperGraphError::InvalidInputError(format!("allocation: {e}"))
+                        })?;
                         SuperGraphMultimodalItem::VideoClip(SuperGraphVideoClip::new(t, clip.fps))
                     }
                 };
@@ -435,7 +427,8 @@ impl<'p, 'models, P: Pool + 'p> SuperGraphData<'p, 'models, P> {
                 // Lists contain owned tensors/media that would each need deep-copying.
                 // This is not yet needed by any caller — Scan simple_inputs are never lists.
                 return Err(SuperGraphError::InvalidInputError(
-                    "copy_link_from not supported for List (use take_link_from instead)".to_string()
+                    "copy_link_from not supported for List (use take_link_from instead)"
+                        .to_string(),
                 ));
             }
         }
@@ -444,10 +437,7 @@ impl<'p, 'models, P: Pool + 'p> SuperGraphData<'p, 'models, P> {
     }
 
     /// Consume self, extracting only the requested links. All other data is dropped.
-    pub fn into_selected(
-        mut self,
-        links: &[SuperGraphAnyLink],
-    ) -> Result<Self, SuperGraphError> {
+    pub fn into_selected(mut self, links: &[SuperGraphAnyLink]) -> Result<Self, SuperGraphError> {
         let mut selected = Self::new();
         for &link in links {
             selected.take_link_from(&mut self, link, link)?;
