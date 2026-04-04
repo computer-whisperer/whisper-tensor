@@ -1,5 +1,4 @@
 use crate::DynRank;
-use crate::dtype::{DType, DTypeError};
 use crate::graph::{GlobalId, Graph, Node, collect_disconnected_node_slots};
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::numeric_dtype::NumericDType;
@@ -50,8 +49,6 @@ pub enum MilliOpGraphError {
     InvalidInput(String),
     #[error("Invalid graph structure: {0}")]
     InvalidGraph(String),
-    #[error(transparent)]
-    DTypeError(#[from] DTypeError),
     #[error(transparent)]
     TensorInfoError(#[from] TensorInfoError),
     #[error("Unable to do any type if inference")]
@@ -1363,8 +1360,7 @@ impl MilliOpGraph {
                         known.entry(out_id).or_insert_with(|| {
                             TensorInfo::Minimal(MinimalTensor::new(
                                 ScalarInfo::Symbolic(SymbolicScalar::new(
-                                    crate::numeric_dtype::NumericDType::from_legacy(DType::F32)
-                                        .unwrap(),
+                                    NumericDType::F32,
                                     &mut resolver,
                                 )),
                                 SymbolicScalarTyped::new(&mut resolver),

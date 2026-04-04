@@ -96,7 +96,6 @@ pub use unary::{
 pub use window::{WindowKind, WindowOperation};
 
 use crate::backends::ndarray_backend::NDArrayNumericTensorError;
-use crate::dtype::{DType, DTypeError};
 use crate::graph::{GlobalId, Node, Property};
 use crate::migration::numeric_tensor::NumericTensorError;
 use crate::milli_graph::{MilliLoweringContext, MilliOpGraph, MilliOpGraphError};
@@ -114,22 +113,16 @@ pub enum EvalError {
     NDArrayNumericTensorError(#[from] NDArrayNumericTensorError),
     #[error(transparent)]
     NumericTensorError(#[from] NumericTensorError),
-    #[error("Unexpected dtype: expected {0}, got {1}")]
-    UnexpectedDType(DType, DType),
     #[error("Unimplemented operator: {0}")]
     UnimplementedOperatorError(String),
     #[error(transparent)]
     MilliOpGraphError(#[from] MilliOpGraphError),
     #[error("Invalid input for operation {0}")]
     InvalidInput(String),
-    #[error(transparent)]
-    DTypeError(#[from] DTypeError),
     #[error("Unexpected shape: expected {0:?}, got {1:?} in shape {2:?}")]
     UnexpectedDimension(u64, u64, Vec<u64>),
     #[error("Unexpected rank: expected {0}, got {1}")]
     UnexpectedRank(usize, usize),
-    #[error("Missing input tensor: {0} {1:?} {2:?}")]
-    MissingInputTensor(String, Option<DType>, Option<Vec<usize>>),
 }
 
 pub trait Operation: Node {
