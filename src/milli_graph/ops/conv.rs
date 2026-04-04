@@ -3,7 +3,6 @@ use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
 use crate::pool::Pool;
 use rand::Rng;
-use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -249,130 +248,6 @@ fn im2col_2d(input_data: &[f32], col: &mut [f32], p: &Im2Col2dParams) {
     }
 }
 
-/// Parameters for generic n-dimensional convolution.
-struct ConvNdParams<'a> {
-    input_data: &'a [f32],
-    weight_data: &'a [f32],
-    bias_data: Option<&'a [f32]>,
-    batch_size: usize,
-    in_channels: usize,
-    out_channels: usize,
-    group: usize,
-    channels_per_group_in: usize,
-    channels_per_group_out: usize,
-    n_spatial: usize,
-    input_spatial: &'a [usize],
-    out_spatial: &'a [usize],
-    kernel_shape: &'a [usize],
-    strides: &'a [usize],
-    dilations: &'a [usize],
-    pad_begin: &'a [usize],
-}
-
-/// Generic n-dimensional convolution fallback (1D, 3D+).
-fn conv_nd_generic(p: &ConvNdParams) -> Vec<f32> {
-    let out_spatial_size: usize = p.out_spatial.iter().product();
-    let total_out = p.batch_size * p.out_channels * out_spatial_size;
-    let in_channel_stride: usize = p.input_spatial.iter().product();
-    let in_batch_stride = p.in_channels * in_channel_stride;
-    let w_kernel_size: usize = p.kernel_shape.iter().product();
-    let w_cin_stride = w_kernel_size;
-    let w_cout_stride = p.channels_per_group_in * w_cin_stride;
-
-    let mut in_spatial_strides = vec![1usize; p.n_spatial];
-    for i in (0..p.n_spatial.saturating_sub(1)).rev() {
-        in_spatial_strides[i] = in_spatial_strides[i + 1] * p.input_spatial[i + 1];
-    }
-    let mut out_spatial_strides = vec![1usize; p.n_spatial];
-    for i in (0..p.n_spatial.saturating_sub(1)).rev() {
-        out_spatial_strides[i] = out_spatial_strides[i + 1] * p.out_spatial[i + 1];
-    }
-    let mut kernel_strides = vec![1usize; p.n_spatial];
-    for i in (0..p.n_spatial.saturating_sub(1)).rev() {
-        kernel_strides[i] = kernel_strides[i + 1] * p.kernel_shape[i + 1];
-    }
-
-    let mut output_data = vec![0.0f32; total_out];
-
-    // Collect work items for parallelism
-    let work_items: Vec<(usize, usize, usize)> = (0..p.batch_size)
-        .flat_map(|n| {
-            (0..p.group).flat_map(move |g| (0..p.channels_per_group_out).map(move |co| (n, g, co)))
-        })
-        .collect();
-
-    let chunk_results: Vec<(usize, Vec<f32>)> = work_items
-        .par_iter()
-        .map(|&(n, g, co)| {
-            let m = g * p.channels_per_group_out + co;
-            let bias_val = p.bias_data.map_or(0.0, |b| b[m]);
-            let mut out_buf = vec![0.0f32; out_spatial_size];
-
-            let mut out_coords = vec![0usize; p.n_spatial];
-            let mut k_coords = vec![0usize; p.n_spatial];
-
-            for ci in 0..p.channels_per_group_in {
-                let in_c = g * p.channels_per_group_in + ci;
-
-                for (out_idx, out_val) in out_buf.iter_mut().enumerate() {
-                    // Decompose out_idx into spatial coordinates
-                    let mut remaining = out_idx;
-                    for d in 0..p.n_spatial {
-                        out_coords[d] = remaining / out_spatial_strides[d];
-                        remaining %= out_spatial_strides[d];
-                    }
-
-                    let mut sum = 0.0f32;
-
-                    for k_idx in 0..w_kernel_size {
-                        let mut k_remaining = k_idx;
-                        for d in 0..p.n_spatial {
-                            k_coords[d] = k_remaining / kernel_strides[d];
-                            k_remaining %= kernel_strides[d];
-                        }
-
-                        let mut in_bounds = true;
-                        let mut in_spatial_offset = 0usize;
-                        for d in 0..p.n_spatial {
-                            let pos = (out_coords[d] * p.strides[d] + k_coords[d] * p.dilations[d])
-                                as isize
-                                - p.pad_begin[d] as isize;
-                            if pos < 0 || pos >= p.input_spatial[d] as isize {
-                                in_bounds = false;
-                                break;
-                            }
-                            in_spatial_offset += pos as usize * in_spatial_strides[d];
-                        }
-
-                        if in_bounds {
-                            let in_offset =
-                                n * in_batch_stride + in_c * in_channel_stride + in_spatial_offset;
-                            let w_offset = m * w_cout_stride + ci * w_cin_stride + k_idx;
-                            sum += p.input_data[in_offset] * p.weight_data[w_offset];
-                        }
-                    }
-                    *out_val += sum;
-                }
-            }
-
-            // Add bias
-            if bias_val != 0.0 {
-                for v in &mut out_buf {
-                    *v += bias_val;
-                }
-            }
-
-            let out_offset = n * (p.out_channels * out_spatial_size) + m * out_spatial_size;
-            (out_offset, out_buf)
-        })
-        .collect();
-
-    for (offset, buf) in chunk_results {
-        output_data[offset..offset + buf.len()].copy_from_slice(&buf);
-    }
-
-    output_data
-}
 
 /// Helper: build Conv output with known batch + out_channels but symbolic spatial dims.
 fn make_symbolic_output<'p, P: Pool + 'p>(
@@ -452,10 +327,10 @@ impl Conv {
         if !in_map.segments.is_empty() || !w_map.segments.is_empty() {
             return crate::milli_graph::ops::LowerResult::Unsupported;
         }
-        if let Some(ref bm) = bias_map {
-            if !bm.segments.is_empty() {
-                return crate::milli_graph::ops::LowerResult::Unsupported;
-            }
+        if let Some(ref bm) = bias_map
+            && !bm.segments.is_empty()
+        {
+            return crate::milli_graph::ops::LowerResult::Unsupported;
         }
 
         let groups = self.group as u64;
@@ -1480,7 +1355,7 @@ impl MilliOp for ConvWeightGrad {
         &self,
         known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'p, P>>,
         _symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
-        pool: &'p P,
+        _pool: &'p P,
     ) -> Result<Vec<(GlobalId, crate::tensor_info::TensorInfo<'p, P>)>, MilliOpGraphError> {
         // Weight shape: [out_channels, in_channels/groups, *kernel_shape]
         let grad_info = known_inputs
@@ -1787,6 +1662,7 @@ impl MilliOp for ConvBiasGrad {
         // Sum all elements with the same channel index.
         let channel_stride = if rank >= 2 {
             let mut s = 1usize;
+            #[allow(clippy::needless_range_loop)]
             for d in 2..rank {
                 s *= shape[d] as usize;
             }

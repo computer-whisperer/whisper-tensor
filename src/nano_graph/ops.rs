@@ -5,7 +5,6 @@ use std::sync::Arc;
 use crate::numeric_dtype::NumericDType;
 use crate::numeric_scalar::NumericScalar;
 use crate::numeric_tensor::{NumericTensor, NumericTensorView};
-use crate::pool::Pool;
 use crate::tensor_rank::DynRank;
 
 /// Binary scalar operations.

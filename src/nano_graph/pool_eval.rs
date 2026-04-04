@@ -42,8 +42,8 @@ pub fn pool_eval<'p, P: Pool + 'p>(
         .map(|it| {
             let dtype = it.dtype;
             InputBuffer {
-                base: it.base_id,
-                count: it.count,
+                _base: it.base_id,
+                _count: it.count,
                 dtype,
                 data: vec![0u8; dtype.bytes_per_element() * it.count as usize],
             }
@@ -129,7 +129,7 @@ pub fn pool_eval<'p, P: Pool + 'p>(
                 for inp in &opaque_op.inputs {
                     let inp_layout =
                         TensorLayout::<DynRank>::row_major(inp.shape.clone(), inp.dtype);
-                    let mut inp_buf = pool
+                    let inp_buf = pool
                         .allocate(inp_layout.buffer_size_bytes())
                         .map_err(PoolEvalError::Allocation)?;
                     let mut inp_tensor: NumericTensor<'p, DynRank, P> =
@@ -155,7 +155,7 @@ pub fn pool_eval<'p, P: Pool + 'p>(
                     .iter()
                     .map(|sys_t| {
                         let layout = sys_t.layout().clone();
-                        let mut buf = pool
+                        let buf = pool
                             .allocate(layout.buffer_size_bytes())
                             .expect("pool alloc failed copying opaque result");
                         let mut t = NumericTensor::from_parts(buf, layout);
@@ -386,8 +386,8 @@ pub enum PoolEvalError {
 
 /// Input tensor buffer — owns a Vec<u8> with elements at native dtype width.
 struct InputBuffer {
-    base: AtomId,
-    count: u64,
+    _base: AtomId,
+    _count: u64,
     dtype: NumericDType,
     data: Vec<u8>,
 }

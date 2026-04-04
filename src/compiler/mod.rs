@@ -110,6 +110,7 @@ pub struct CompiledProgram {
     pub interim_graph: Arc<SymbolicGraph>,
 }
 
+#[allow(dead_code)]
 struct SymbolicGraphObserverWrapper<'a, T: CompiledProgramObserver> {
     observer: &'a mut T,
 }

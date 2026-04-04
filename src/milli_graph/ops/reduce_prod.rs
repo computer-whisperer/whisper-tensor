@@ -215,41 +215,41 @@ impl MilliOp for ReduceProd {
 
         // Handle empty reduction: if the data input has 0 elements in the
         // reduced axes, the product is the identity value (1).
-        if let Some(concrete) = data_info.as_concrete() {
-            if concrete.numel() == 0 {
-                let out_shape: Vec<u64> = if let Some(out_dims) = super::infer_reduce_output_shape(
-                    data_info,
-                    self.axes,
-                    self.keepdims,
-                    self.noop_with_empty_axes,
-                    known_inputs,
-                    symbolic_resolver,
-                ) {
-                    out_dims
-                        .iter()
-                        .map(|d| match d {
-                            crate::scalar_info::ScalarInfoTyped::Numeric(v) => *v,
-                            _ => 1,
-                        })
-                        .collect()
-                } else {
-                    vec![1]
-                };
-                let one = crate::numeric_scalar::NumericScalar::from_f64(1.0).cast_to(out_dtype);
-                let out_tensor = crate::numeric_tensor::NumericTensor::from_fn(
-                    out_shape,
-                    out_dtype,
-                    pool,
-                    |_| one,
-                )
-                .map_err(|_| MilliOpGraphError::UnableToInfer)?;
-                return Ok(vec![(
-                    self.output,
-                    TensorInfo::Ranked(crate::tensor_info::TensorInfoRanked::Shaped(
-                        crate::tensor_info::TensorInfoShaped::Numeric(out_tensor),
-                    )),
-                )]);
-            }
+        if let Some(concrete) = data_info.as_concrete()
+            && concrete.numel() == 0
+        {
+            let out_shape: Vec<u64> = if let Some(out_dims) = super::infer_reduce_output_shape(
+                data_info,
+                self.axes,
+                self.keepdims,
+                self.noop_with_empty_axes,
+                known_inputs,
+                symbolic_resolver,
+            ) {
+                out_dims
+                    .iter()
+                    .map(|d| match d {
+                        crate::scalar_info::ScalarInfoTyped::Numeric(v) => *v,
+                        _ => 1,
+                    })
+                    .collect()
+            } else {
+                vec![1]
+            };
+            let one = crate::numeric_scalar::NumericScalar::from_f64(1.0).cast_to(out_dtype);
+            let out_tensor = crate::numeric_tensor::NumericTensor::from_fn(
+                out_shape,
+                out_dtype,
+                pool,
+                |_| one,
+            )
+            .map_err(|_| MilliOpGraphError::UnableToInfer)?;
+            return Ok(vec![(
+                self.output,
+                TensorInfo::Ranked(crate::tensor_info::TensorInfoRanked::Shaped(
+                    crate::tensor_info::TensorInfoShaped::Numeric(out_tensor),
+                )),
+            )]);
         }
 
         // Check if all inputs are concrete; if so, try constant fold with output hints.

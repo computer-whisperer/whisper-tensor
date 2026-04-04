@@ -230,7 +230,7 @@ impl MilliOp for SumTo {
         }
 
         // Reshape to target_shape if needed.
-        if keepdims_shape.iter().map(|&x| x as u64).collect::<Vec<_>>() != target_shape {
+        if keepdims_shape != target_shape {
             let layout = TensorLayout::<DynRank>::row_major(target_shape, dtype);
             let buf = pool
                 .allocate(layout.buffer_size_bytes())

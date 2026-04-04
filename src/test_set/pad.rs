@@ -122,7 +122,7 @@ fn pad_ref(data: &[f32], shape: &[usize], pads: &[i64], fill: f32) -> (Vec<f32>,
 
     // Copy interior elements.
     let in_total: usize = shape.iter().product();
-    for i in 0..in_total {
+    for (i, &val) in data[..in_total].iter().enumerate() {
         let mut rem = i;
         let mut out_idx = 0;
         for d in 0..rank {
@@ -130,7 +130,7 @@ fn pad_ref(data: &[f32], shape: &[usize], pads: &[i64], fill: f32) -> (Vec<f32>,
             rem %= in_strides[d];
             out_idx += (coord + pb[d]) * out_strides[d];
         }
-        out[out_idx] = data[i];
+        out[out_idx] = val;
     }
     (out, out_shape)
 }

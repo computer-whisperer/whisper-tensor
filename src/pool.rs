@@ -235,14 +235,14 @@ impl Pool for TrackedPool {
         let _guard = self.alloc_lock.lock().unwrap_or_else(|e| e.into_inner());
 
         let current = self.bytes_in_use.load(Ordering::Relaxed);
-        if let Some(budget) = self.budget {
-            if current.checked_add(size).is_none_or(|total| total > budget) {
-                return Err(AllocationError::BudgetExceeded {
-                    requested: size,
-                    budget,
-                    in_use: current,
-                });
-            }
+        if let Some(budget) = self.budget
+            && current.checked_add(size).is_none_or(|total| total > budget)
+        {
+            return Err(AllocationError::BudgetExceeded {
+                requested: size,
+                budget,
+                in_use: current,
+            });
         }
 
         let ptr = unsafe { alloc_aligned_zeroed(size) };

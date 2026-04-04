@@ -160,20 +160,17 @@ impl MilliOp for Reshape {
             });
             let mut hint_dims: Vec<ScalarInfoTyped<u64>> = Vec::new();
             let mut has_minus_one = false;
-            let mut all_resolved = true;
             for (i, &sv) in shape_values.iter().enumerate() {
                 if sv == 0 {
                     if let Some(ref ds) = data_shape_known {
                         if let Some(Some(d)) = ds.get(i) {
                             hint_dims.push(ScalarInfoTyped::Numeric(*d));
                         } else {
-                            all_resolved = false;
                             hint_dims.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(
                                 symbolic_resolver,
                             )));
                         }
                     } else {
-                        all_resolved = false;
                         hint_dims.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(
                             symbolic_resolver,
                         )));
@@ -186,31 +183,29 @@ impl MilliOp for Reshape {
                 } else if sv > 0 {
                     hint_dims.push(ScalarInfoTyped::Numeric(sv as u64));
                 } else {
-                    all_resolved = false;
                     hint_dims.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(
                         symbolic_resolver,
                     )));
                 }
             }
             // Try to resolve -1 dimension
-            if has_minus_one {
-                if let Some(ref ds) = data_shape_known {
-                    if ds.iter().all(|d| d.is_some()) {
-                        let total: u64 = ds.iter().map(|d| d.unwrap()).product();
-                        let known_product: Option<u64> = hint_dims
-                            .iter()
-                            .enumerate()
-                            .filter(|(idx, _)| shape_values[*idx] != -1)
-                            .try_fold(1u64, |acc, (_, d)| d.as_numeric().map(|v| acc * v));
-                        if let Some(kp) = known_product {
-                            if kp > 0 {
-                                let inferred = total / kp;
-                                let minus_one_idx =
-                                    shape_values.iter().position(|&v| v == -1).unwrap();
-                                hint_dims[minus_one_idx] = ScalarInfoTyped::Numeric(inferred);
-                            }
-                        }
-                    }
+            if has_minus_one
+                && let Some(ref ds) = data_shape_known
+                && ds.iter().all(|d| d.is_some())
+            {
+                let total: u64 = ds.iter().map(|d| d.unwrap()).product();
+                let known_product: Option<u64> = hint_dims
+                    .iter()
+                    .enumerate()
+                    .filter(|(idx, _)| shape_values[*idx] != -1)
+                    .try_fold(1u64, |acc, (_, d)| d.as_numeric().map(|v| acc * v));
+                if let Some(kp) = known_product
+                    && kp > 0
+                {
+                    let inferred = total / kp;
+                    let minus_one_idx =
+                        shape_values.iter().position(|&v| v == -1).unwrap();
+                    hint_dims[minus_one_idx] = ScalarInfoTyped::Numeric(inferred);
                 }
             }
             TensorInfo::from_dtype_and_shape_scalars(out_dtype, &hint_dims)

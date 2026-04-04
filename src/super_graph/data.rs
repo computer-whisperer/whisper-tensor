@@ -97,6 +97,12 @@ pub struct SuperGraphData<'p, 'models, P: Pool + 'p> {
     pub lists: HashMap<SuperGraphLink, SuperGraphListValue<'p, 'models, P>>,
 }
 
+impl<'p, 'models, P: Pool + 'p> Default for SuperGraphData<'p, 'models, P> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<'p, 'models, P: Pool + 'p> SuperGraphData<'p, 'models, P> {
     pub fn new() -> Self {
         Self {
@@ -428,9 +434,9 @@ impl<'p, 'models, P: Pool + 'p> SuperGraphData<'p, 'models, P> {
             SuperGraphLinkKind::List(_) => {
                 // Lists contain owned tensors/media that would each need deep-copying.
                 // This is not yet needed by any caller — Scan simple_inputs are never lists.
-                return Err(SuperGraphError::InvalidInputError(format!(
-                    "copy_link_from not supported for List (use take_link_from instead)"
-                )));
+                return Err(SuperGraphError::InvalidInputError(
+                    "copy_link_from not supported for List (use take_link_from instead)".to_string()
+                ));
             }
         }
 

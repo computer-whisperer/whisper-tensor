@@ -214,7 +214,7 @@ impl MilliOpGraph {
             .collect();
         let new_tensors: Vec<_> = infos
             .iter()
-            .map(|(id, info)| (*id, info.as_concrete().expect("must be concrete").clone()))
+            .map(|(id, info)| (*id, info.as_concrete().expect("must be concrete")))
             .collect();
         let views: Vec<_> = new_tensors.iter().map(|(id, t)| (*id, t.view())).collect();
         let view_map: HashMap<GlobalId, &NumericTensorView<'_, DynRank>> =
@@ -267,17 +267,14 @@ impl MilliOpGraph {
                 continue; // Missing inputs — skip
             }
 
-            let input_view_refs: Vec<_> = input_views.iter().collect();
-            match op.eval_new(&input_views, &POOL) {
-                Ok(output_tensors) => {
-                    let output_ids: Vec<GlobalId> = op.outputs().collect();
-                    for (i, tensor) in output_tensors.into_iter().enumerate() {
-                        if let Some(&out_id) = output_ids.get(i) {
-                            intermediates.insert(out_id, tensor);
-                        }
+            let _input_view_refs: Vec<_> = input_views.iter().collect();
+            if let Ok(output_tensors) = op.eval_new(&input_views, &POOL) {
+                let output_ids: Vec<GlobalId> = op.outputs().collect();
+                for (i, tensor) in output_tensors.into_iter().enumerate() {
+                    if let Some(&out_id) = output_ids.get(i) {
+                        intermediates.insert(out_id, tensor);
                     }
                 }
-                Err(_) => {} // eval_new failed — skip this op
             }
         }
 

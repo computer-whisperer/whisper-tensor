@@ -172,6 +172,7 @@ impl crate::nano_graph::ops::OpaqueEval for ArgMaxEval {
             let mut rem = out_flat;
             let mut base = 0usize;
             let mut out_dim_idx = 0;
+            #[allow(clippy::needless_range_loop)]
             for d in 0..rank {
                 if d == axis {
                     if self.keepdims {
@@ -279,6 +280,7 @@ impl MilliOp for ArgMax {
             let mut rem = out_flat;
             let mut base = 0usize;
             let mut out_dim_idx = 0;
+            #[allow(clippy::needless_range_loop)]
             for d in 0..rank {
                 if d == axis {
                     if self.keepdims {

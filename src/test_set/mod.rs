@@ -351,8 +351,7 @@ pub fn run_case_via_pool_eval(case: &TestCase) -> Result<(), String> {
         let output_ids: Vec<GlobalId> = case
             .graph
             .output_ordering
-            .as_ref()
-            .map(|v| v.clone())
+            .clone()
             .unwrap_or_default();
 
         let mut output_ranges: Vec<AtomRange> = Vec::new();
@@ -361,15 +360,15 @@ pub fn run_case_via_pool_eval(case: &TestCase) -> Result<(), String> {
                 let mut seen = std::collections::HashSet::new();
                 for i in 0..tam.count {
                     let atom = tam.atom_id_for_element(i);
-                    if let Some(gi) = lower_result.graph.find_group_idx(atom) {
-                        if seen.insert(gi) {
-                            let g = &lower_result.graph.groups()[gi];
-                            output_ranges.push(AtomRange {
-                                base: g.base_id,
-                                count: g.count,
-                                dtype: g.output_dtype,
-                            });
-                        }
+                    if let Some(gi) = lower_result.graph.find_group_idx(atom)
+                        && seen.insert(gi)
+                    {
+                        let g = &lower_result.graph.groups()[gi];
+                        output_ranges.push(AtomRange {
+                            base: g.base_id,
+                            count: g.count,
+                            dtype: g.output_dtype,
+                        });
                     }
                 }
             }

@@ -118,6 +118,7 @@ impl ScalarInfo {
     /// symbolic identity with a type cast.
     ///
     /// Primarily used for shape-dim extraction (T = u64, i64, u32).
+    #[allow(dead_code)]
     pub(crate) fn cast<T>(&self) -> ScalarInfoTyped<T>
     where
         T: DTypeOfPrimitive + NumericScalarType + PartialEq + Copy + Clone,

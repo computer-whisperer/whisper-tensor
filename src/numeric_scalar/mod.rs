@@ -146,6 +146,7 @@ impl NumericScalar {
     }
 
     /// `self + other` in the scalar's dtype.
+    #[allow(clippy::should_implement_trait)]
     pub fn add(self, other: Self) -> Self {
         use crate::scalar_ops::add;
         let (a, b) = (self.raw(), other.raw());
@@ -159,6 +160,7 @@ impl NumericScalar {
     }
 
     /// `self - other` in the scalar's dtype.
+    #[allow(clippy::should_implement_trait)]
     pub fn sub(self, other: Self) -> Self {
         use crate::scalar_ops::sub;
         let (a, b) = (self.raw(), other.raw());
@@ -172,6 +174,7 @@ impl NumericScalar {
     }
 
     /// `self * other` in the scalar's dtype.
+    #[allow(clippy::should_implement_trait)]
     pub fn mul(self, other: Self) -> Self {
         use crate::scalar_ops::mul;
         let (a, b) = (self.raw(), other.raw());
@@ -185,6 +188,7 @@ impl NumericScalar {
     }
 
     /// `self / other` in the scalar's dtype.
+    #[allow(clippy::should_implement_trait)]
     pub fn div(self, other: Self) -> Self {
         use crate::scalar_ops::div;
         let (a, b) = (self.raw(), other.raw());

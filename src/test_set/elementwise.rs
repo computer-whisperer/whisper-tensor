@@ -279,8 +279,8 @@ fn neg_case() -> TestCase {
             unary_data_set(
                 "f32",
                 &ids,
-                tensor_f32(&[1.0, -2.5, 0.0, 3.14]),
-                tensor_f32(&[-1.0, 2.5, -0.0, -3.14]),
+                tensor_f32(&[1.0, -2.5, 0.0, std::f32::consts::PI]),
+                tensor_f32(&[-1.0, 2.5, -0.0, -std::f32::consts::PI]),
                 Tolerance::for_dtype(NumericDType::F32),
             ),
             unary_data_set(
@@ -802,7 +802,7 @@ fn sign_case() -> TestCase {
         data_sets: vec![unary_data_set(
             "f32",
             &ids,
-            tensor_f32(&[3.14, -2.0, 0.0, -0.0, f32::INFINITY, f32::NEG_INFINITY]),
+            tensor_f32(&[std::f32::consts::PI, -2.0, 0.0, -0.0, f32::INFINITY, f32::NEG_INFINITY]),
             tensor_f32(&[1.0, -1.0, 0.0, 0.0, 1.0, -1.0]),
             Tolerance::for_dtype(NumericDType::F32),
         )],
@@ -1126,7 +1126,7 @@ fn tanh_case() -> TestCase {
 // ---------------------------------------------------------------------------
 
 fn pow_case() -> TestCase {
-    let (graph, ids) = build_binary_graph(|g, a, b, rng| Pow::push_new(g, a, b, rng));
+    let (graph, ids) = build_binary_graph(Pow::push_new);
 
     TestCase {
         name: "pow".to_string(),

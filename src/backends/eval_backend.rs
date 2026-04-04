@@ -39,10 +39,7 @@ impl<'a> EvalBackend<'a> {
     }
 
     pub fn is_on_backend<R: Rank>(&self, tensor: &NumericTensor<R>) -> bool {
-        match (self, tensor) {
-            (EvalBackend::NDArray, NumericTensor::NDArray(_)) => true,
-            _ => false,
-        }
+        matches!((self, tensor), (EvalBackend::NDArray, NumericTensor::NDArray(_)))
     }
 }
 

@@ -267,7 +267,7 @@ impl Slice {
         }
 
         // Negative steps: fall back to boundary (rare).
-        return crate::milli_graph::ops::LowerResult::Unsupported;
+        crate::milli_graph::ops::LowerResult::Unsupported
     }
 
     pub fn remap_tensors(&mut self, map: &HashMap<GlobalId, GlobalId>, rng: &mut impl rand::Rng) {

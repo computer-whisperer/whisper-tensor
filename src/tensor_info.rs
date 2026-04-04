@@ -129,6 +129,7 @@ where
         Self { shape, values }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn new_symbolic(
         first_element: ScalarInfoTyped<T>,
         shape: R::KnownDims,
@@ -150,6 +151,7 @@ where
     pub(crate) fn rank(&self) -> usize {
         self.shape.len()
     }
+    #[allow(dead_code)]
     pub(crate) fn first_element(&self) -> &ScalarInfoTyped<T> {
         &self.values[0]
     }
@@ -157,6 +159,7 @@ where
         assert_eq!(index.len(), 1);
         self.values.get(index[0] as usize)
     }
+    #[allow(dead_code)]
     pub(crate) fn reshape(&self, new_shape: R::KnownDims) -> Self {
         Self {
             shape: new_shape,
@@ -193,6 +196,7 @@ where
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn to_vec(&self) -> Vec<T> {
         self.values
             .iter()
@@ -446,6 +450,7 @@ where
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn as_numeric(&self) -> Option<&NumericTensorTyped<T, R>> {
         match self {
             TensorInfoTypedShaped::Numeric(numeric) => Some(numeric),
@@ -515,6 +520,7 @@ where
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn as_shaped(&self) -> Option<&TensorInfoTypedShaped<T, R>> {
         match self {
             TensorInfoTypedRanked::Shaped(shaped) => Some(shaped),
@@ -522,6 +528,7 @@ where
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn as_numeric(&self) -> Option<&NumericTensorTyped<T, R>> {
         match self {
             TensorInfoTypedRanked::Shaped(shaped) => shaped.as_numeric(),
@@ -603,6 +610,7 @@ impl<'p, R: Rank, P: Pool + 'p> TensorInfoShaped<'p, R, P> {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn to_dyn_rank(&self, pool: &'p P) -> TensorInfoShaped<'p, DynRank, P> {
         self.try_to_rank(pool).unwrap()
     }
@@ -944,6 +952,7 @@ impl<'p, P: Pool + 'p> TensorInfo<'p, P> {
 
     /// Returns the concrete legacy NumericTensor if this TensorInfo holds concrete numeric data.
     /// Temporary bridge: reads elements from the pool-backed tensor into a legacy NumericTensor.
+    #[allow(dead_code)]
     pub(crate) fn as_numeric(&self) -> Option<NumericTensor<DynRank>> {
         let new_tensor = self.as_concrete()?;
         Some(crate::nano_graph::lower::new_numeric_to_legacy(new_tensor))
@@ -966,7 +975,7 @@ impl<'p, P: Pool + 'p> TensorInfo<'p, P> {
             TensorInfo::Ranked(TensorInfoRanked::Shaped(TensorInfoShaped::Numeric(tensor)))
         } else {
             // Allocation failed — fall back to shape-only info.
-            Self::from_dtype_and_shape(view.dtype(), &view.shape())
+            Self::from_dtype_and_shape(view.dtype(), view.shape())
         }
     }
 

@@ -9,10 +9,8 @@ use crate::graph::{
     GlobalId, Graph, Link, LinkCategory, LinkMetadata, Node, NodeMetadata, Property,
 };
 use crate::migration::numeric_scalar::NumericScalar;
-use crate::migration::numeric_tensor::NumericTensor;
 use crate::numeric_dtype::{NumericDType, ONNXDType};
 use crate::scalar_info::ScalarInfoTyped;
-use crate::symbolic_graph::observer::SymbolicGraphObserver;
 use crate::symbolic_graph::ops::{AnyOperation, EvalError, Operation};
 use crate::symbolic_graph::tensor_store::{StoredTensor, TensorStore, TensorStoreTensorId};
 use crate::symbolic_scalar::{SymbolicResolver, SymbolicScalar, SymbolicScalarTyped};
@@ -1090,10 +1088,10 @@ impl SymbolicGraph {
             if let Some(stored_ref) = stored_ref {
                 match stored_ref {
                     StoredOrNotTensor::Stored(store_id) => {
-                        if let Some(stored) = tensor_store.get_tensor(*store_id) {
-                            if let Some(new_tensor) = stored.to_pool_tensor(&POOL_S) {
-                                out.push((tensor_id, new_tensor));
-                            }
+                        if let Some(stored) = tensor_store.get_tensor(*store_id)
+                            && let Some(new_tensor) = stored.to_pool_tensor(&POOL_S)
+                        {
+                            out.push((tensor_id, new_tensor));
                         }
                     }
                     StoredOrNotTensor::Inline(shared) => {
@@ -1155,10 +1153,10 @@ impl SymbolicGraph {
                 if let Some(stored_ref) = stored_ref {
                     match stored_ref {
                         StoredOrNotTensor::Stored(store_id) => {
-                            if let Some(stored) = tensor_store.get_tensor(*store_id) {
-                                if let Some(new_tensor) = stored.to_pool_tensor(&POOL_S) {
-                                    out.push((tensor_id, new_tensor));
-                                }
+                            if let Some(stored) = tensor_store.get_tensor(*store_id)
+                                && let Some(new_tensor) = stored.to_pool_tensor(&POOL_S)
+                            {
+                                out.push((tensor_id, new_tensor));
                             }
                         }
                         StoredOrNotTensor::Inline(shared) => {
@@ -1325,10 +1323,10 @@ impl SymbolicGraph {
                 let end_instant = std::time::Instant::now();
                 observer.on_op_executed(&[op.global_id()], start_instant, end_instant);
                 for (tensor_id, value) in outputs {
-                    if let Some(tensor_info) = self.get_tensor_info(tensor_id) {
-                        if let Ok(nt) = value.as_numeric() {
-                            observer.on_tensor_assigned(&[tensor_info.global_id()], &nt.view());
-                        }
+                    if let Some(tensor_info) = self.get_tensor_info(tensor_id)
+                        && let Ok(nt) = value.as_numeric()
+                    {
+                        observer.on_tensor_assigned(&[tensor_info.global_id()], &nt.view());
                     }
                     active_tensors.insert(tensor_id, value);
                 }
@@ -1518,7 +1516,6 @@ pub(crate) fn tensor_proto_to_pool_tensor_from_ndarray(
     crate::numeric_tensor::NumericTensor<'static, DynRank, crate::pool::SystemPool>,
     ONNXDecodingError,
 > {
-    use crate::numeric_dtype::NumericDType;
     use crate::numeric_tensor::TensorLayout;
     use crate::pool::{Pool, SystemPool};
     use crate::tensor_info::TensorInfo;

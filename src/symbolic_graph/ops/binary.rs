@@ -102,8 +102,8 @@ impl Operation for BinaryOperation {
         pool: &'p P,
     ) -> Result<HashMap<GlobalId, crate::numeric_dtype::ONNXTensor<'p, P>>, super::EvalError> {
         // String Equal: compare strings element-wise with broadcasting, produce Bool tensor.
-        if matches!(self.which, WhichBinaryOperation::Equal) {
-            if let (
+        if matches!(self.which, WhichBinaryOperation::Equal)
+            && let (
                 Some(crate::numeric_dtype::ONNXTensorView::String {
                     shape: shape_a,
                     data: data_a,
@@ -113,7 +113,7 @@ impl Operation for BinaryOperation {
                     data: data_b,
                 }),
             ) = (inputs.get(&self.a), inputs.get(&self.b))
-            {
+        {
                 // Broadcast shapes.
                 let rank = shape_a.len().max(shape_b.len());
                 let mut out_shape = vec![0u64; rank];
@@ -136,12 +136,7 @@ impl Operation for BinaryOperation {
                 }
                 // Convert strides to row-major element strides.
                 for i in (0..rank.saturating_sub(1)).rev() {
-                    strides_a[i] *= strides_a.get(i + 1).copied().unwrap_or(1)
-                        * if strides_a[i + 1] > 0 || i + 1 >= rank {
-                            1
-                        } else {
-                            1
-                        };
+                    strides_a[i] *= strides_a.get(i + 1).copied().unwrap_or(1);
                     strides_b[i] *= strides_b.get(i + 1).copied().unwrap_or(1);
                 }
                 // Recompute properly.
@@ -205,7 +200,6 @@ impl Operation for BinaryOperation {
                 let mut results = HashMap::new();
                 results.insert(self.output, crate::numeric_dtype::ONNXTensor::Numeric(out));
                 return Ok(results);
-            }
         }
 
         // Default: numeric path via milli-op lowering.

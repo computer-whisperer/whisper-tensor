@@ -26,7 +26,7 @@ pub fn read_raw_bits(data: &[u8], bit_offset: usize, total_bits: u8) -> u64 {
     let byte_off = bit_offset / 8;
     let bit_shift = (bit_offset % 8) as u32;
 
-    let bytes_needed = ((bit_shift as usize + total_bits as usize) + 7) / 8;
+    let bytes_needed = (bit_shift as usize + total_bits as usize).div_ceil(8);
     let mut buf = [0u8; 9];
     let available = data.len().saturating_sub(byte_off);
     let to_copy = bytes_needed.min(available).min(9);
@@ -62,7 +62,7 @@ pub fn write_raw_bits(data: &mut [u8], bit_offset: usize, total_bits: u8, value:
         value & ((1u64 << total_bits) - 1)
     };
 
-    let bytes_needed = ((bit_shift as usize + total_bits as usize) + 7) / 8;
+    let bytes_needed = (bit_shift as usize + total_bits as usize).div_ceil(8);
     let available = data.len().saturating_sub(byte_off);
     let to_touch = bytes_needed.min(available).min(9);
 

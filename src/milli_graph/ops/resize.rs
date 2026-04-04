@@ -177,220 +177,6 @@ impl crate::graph::Node for Resize {
 }
 
 // =============================================================================
-// Fast paths for common cases
-// =============================================================================
-
-/// Compute the original (input-space) coordinate for a given output coordinate.
-/// Shared by both nearest and linear fast paths.
-fn fast_path_original_coord(
-    out_coord: usize,
-    scale: f32,
-    in_size: usize,
-    out_size: usize,
-    coord_transform: ResizeCoordTransform,
-) -> f32 {
-    let x = out_coord as f32;
-    match coord_transform {
-        ResizeCoordTransform::HalfPixel => (x + 0.5) / scale - 0.5,
-        ResizeCoordTransform::Asymmetric => x / scale,
-        ResizeCoordTransform::PytorchHalfPixel => {
-            if out_size > 1 {
-                (x + 0.5) / scale - 0.5
-            } else {
-                -0.5
-            }
-        }
-        ResizeCoordTransform::AlignCorners => {
-            let output_width = scale * in_size as f32;
-            if output_width <= 1.0 {
-                0.0
-            } else {
-                x * (in_size as f32 - 1.0) / (output_width - 1.0)
-            }
-        }
-        ResizeCoordTransform::HalfPixelSymmetric => {
-            let output_width = scale * in_size as f32;
-            let adjustment = out_size as f32 / output_width;
-            let center = in_size as f32 / 2.0;
-            let offset = center * (1.0 - adjustment);
-            offset + (x + 0.5) / scale - 0.5
-        }
-        ResizeCoordTransform::TFCropAndResize => x / scale, // simplified, no ROI
-    }
-}
-
-/// Map an output coordinate back to an input coordinate for nearest-mode.
-/// Returns the clamped input index.
-fn nearest_input_coord(
-    out_coord: usize,
-    scale: f32,
-    in_size: usize,
-    out_size: usize,
-    coord_transform: ResizeCoordTransform,
-    nearest_mode: ResizeNearestMode,
-) -> usize {
-    let x_ori = fast_path_original_coord(out_coord, scale, in_size, out_size, coord_transform);
-
-    let nearest_idx = match nearest_mode {
-        ResizeNearestMode::RoundPreferFloor => {
-            if x_ori == x_ori.floor() + 0.5 {
-                x_ori.floor() as i64
-            } else {
-                (x_ori + 0.5).floor() as i64
-            }
-        }
-        ResizeNearestMode::RoundPreferCeil => x_ori.round() as i64,
-        ResizeNearestMode::Floor => x_ori.floor() as i64,
-        ResizeNearestMode::Ceil => x_ori.ceil() as i64,
-    };
-    nearest_idx.max(0).min(in_size as i64 - 1) as usize
-}
-
-struct NchwNearestParams {
-    n: usize,
-    c: usize,
-    in_h: usize,
-    in_w: usize,
-    out_h: usize,
-    out_w: usize,
-    scale_h: f32,
-    scale_w: f32,
-    coord_transform: ResizeCoordTransform,
-    nearest_mode: ResizeNearestMode,
-}
-
-/// Fast path: NCHW nearest resize where only H and W change.
-/// Parallelizes across N*C channels.
-fn resize_nchw_nearest(input: &[f32], p: &NchwNearestParams) -> Vec<f32> {
-    // Precompute index maps for H and W
-    let h_map: Vec<usize> = (0..p.out_h)
-        .map(|oh| {
-            nearest_input_coord(
-                oh,
-                p.scale_h,
-                p.in_h,
-                p.out_h,
-                p.coord_transform,
-                p.nearest_mode,
-            )
-        })
-        .collect();
-    let w_map: Vec<usize> = (0..p.out_w)
-        .map(|ow| {
-            nearest_input_coord(
-                ow,
-                p.scale_w,
-                p.in_w,
-                p.out_w,
-                p.coord_transform,
-                p.nearest_mode,
-            )
-        })
-        .collect();
-
-    let in_spatial = p.in_h * p.in_w;
-    let out_spatial = p.out_h * p.out_w;
-    let total_channels = p.n * p.c;
-
-    let chunks: Vec<Vec<f32>> = (0..total_channels)
-        .into_par_iter()
-        .map(|ch| {
-            let in_base = ch * in_spatial;
-            let mut out_buf = vec![0.0f32; out_spatial];
-            for (oh, &ih) in h_map.iter().enumerate() {
-                let in_row = in_base + ih * p.in_w;
-                let out_row = oh * p.out_w;
-                for ow in 0..p.out_w {
-                    out_buf[out_row + ow] = input[in_row + w_map[ow]];
-                }
-            }
-            out_buf
-        })
-        .collect();
-
-    let mut output = Vec::with_capacity(total_channels * out_spatial);
-    for chunk in chunks {
-        output.extend_from_slice(&chunk);
-    }
-    output
-}
-
-struct NchwLinearParams {
-    n: usize,
-    c: usize,
-    in_h: usize,
-    in_w: usize,
-    out_h: usize,
-    out_w: usize,
-    scale_h: f32,
-    scale_w: f32,
-    coord_transform: ResizeCoordTransform,
-}
-
-/// Fast path: NCHW bilinear resize where only H and W change.
-/// Parallelizes across N*C channels.
-fn resize_nchw_linear(input: &[f32], p: &NchwLinearParams) -> Vec<f32> {
-    // Precompute interpolation parameters for H and W
-    let h_params: Vec<(usize, usize, f32)> = (0..p.out_h)
-        .map(|oh| bilinear_params(oh, p.scale_h, p.in_h, p.out_h, p.coord_transform))
-        .collect();
-    let w_params: Vec<(usize, usize, f32)> = (0..p.out_w)
-        .map(|ow| bilinear_params(ow, p.scale_w, p.in_w, p.out_w, p.coord_transform))
-        .collect();
-
-    let in_spatial = p.in_h * p.in_w;
-    let out_spatial = p.out_h * p.out_w;
-    let total_channels = p.n * p.c;
-
-    let chunks: Vec<Vec<f32>> = (0..total_channels)
-        .into_par_iter()
-        .map(|ch| {
-            let in_base = ch * in_spatial;
-            let mut out_buf = vec![0.0f32; out_spatial];
-            for (oh, &(ih0, ih1, fh)) in h_params.iter().enumerate() {
-                let out_row = oh * p.out_w;
-                for ow in 0..p.out_w {
-                    let (iw0, iw1, fw) = w_params[ow];
-                    // Bilinear: (1-fh)*(1-fw)*TL + (1-fh)*fw*TR + fh*(1-fw)*BL + fh*fw*BR
-                    let tl = input[in_base + ih0 * p.in_w + iw0];
-                    let tr = input[in_base + ih0 * p.in_w + iw1];
-                    let bl = input[in_base + ih1 * p.in_w + iw0];
-                    let br = input[in_base + ih1 * p.in_w + iw1];
-                    out_buf[out_row + ow] =
-                        (1.0 - fh) * ((1.0 - fw) * tl + fw * tr) + fh * ((1.0 - fw) * bl + fw * br);
-                }
-            }
-            out_buf
-        })
-        .collect();
-
-    let mut output = Vec::with_capacity(total_channels * out_spatial);
-    for chunk in chunks {
-        output.extend_from_slice(&chunk);
-    }
-    output
-}
-
-/// Compute bilinear interpolation parameters for one output coordinate.
-/// Returns (idx0, idx1, frac) where frac is the weight for idx1.
-fn bilinear_params(
-    out_coord: usize,
-    scale: f32,
-    in_size: usize,
-    out_size: usize,
-    coord_transform: ResizeCoordTransform,
-) -> (usize, usize, f32) {
-    let x_ori = fast_path_original_coord(out_coord, scale, in_size, out_size, coord_transform);
-
-    let x0_raw = x_ori.floor() as i64;
-    let x1_raw = x0_raw + 1;
-    let frac = x_ori - x0_raw as f32;
-    // Clamp independently for edge-padding
-    let x0 = x0_raw.max(0).min(in_size as i64 - 1) as usize;
-    let x1 = x1_raw.max(0).min(in_size as i64 - 1) as usize;
-    (x0, x1, frac)
-}
-
 // =============================================================================
 // Generic fallback (ONNX-spec-compliant separable interpolation)
 // =============================================================================
@@ -936,96 +722,93 @@ impl MilliOp for Resize {
         };
 
         // Try sizes first (takes priority over scales per ONNX spec)
-        if let Some(sizes_id) = self.sizes {
-            if let Some(sizes_info) = known_inputs.get(&sizes_id) {
-                if let Some(sizes_vec) = sizes_info.to_i64_vec() {
-                    if !sizes_vec.is_empty() {
-                        // Get concrete input shape for keep_aspect_ratio computation
-                        let input_concrete: Option<Vec<u64>> = shape
+        if let Some(sizes_id) = self.sizes
+            && let Some(sizes_info) = known_inputs.get(&sizes_id)
+            && let Some(sizes_vec) = sizes_info.to_i64_vec()
+            && !sizes_vec.is_empty()
+        {
+            // Get concrete input shape for keep_aspect_ratio computation
+            let input_concrete: Option<Vec<u64>> = shape
+                .iter()
+                .map(|d| match d {
+                    ScalarInfoTyped::Numeric(v) => Some(*v),
+                    ScalarInfoTyped::Symbolic(_) => None,
+                })
+                .collect();
+
+            let mut out_dims = shape.to_vec();
+            match self.keep_aspect_ratio_policy {
+                ResizeKeepAspectRatioPolicy::Stretch => {
+                    for (i, &axis) in resolved_axes.iter().enumerate() {
+                        out_dims[axis] = ScalarInfoTyped::Numeric(sizes_vec[i] as u64);
+                    }
+                }
+                ResizeKeepAspectRatioPolicy::NotLarger
+                | ResizeKeepAspectRatioPolicy::NotSmaller => {
+                    if let Some(ref input_conc) = input_concrete {
+                        let scales: Vec<f32> = resolved_axes
                             .iter()
-                            .map(|d| match d {
-                                ScalarInfoTyped::Numeric(v) => Some(*v),
-                                ScalarInfoTyped::Symbolic(_) => None,
+                            .enumerate()
+                            .map(|(i, &axis)| {
+                                sizes_vec[i] as f32 / input_conc[axis] as f32
                             })
                             .collect();
-
-                        let mut out_dims = shape.to_vec();
-                        match self.keep_aspect_ratio_policy {
-                            ResizeKeepAspectRatioPolicy::Stretch => {
-                                for (i, &axis) in resolved_axes.iter().enumerate() {
-                                    out_dims[axis] = ScalarInfoTyped::Numeric(sizes_vec[i] as u64);
-                                }
-                            }
+                        let chosen_scale = if matches!(
+                            self.keep_aspect_ratio_policy,
                             ResizeKeepAspectRatioPolicy::NotLarger
-                            | ResizeKeepAspectRatioPolicy::NotSmaller => {
-                                if let Some(ref input_conc) = input_concrete {
-                                    let scales: Vec<f32> = resolved_axes
-                                        .iter()
-                                        .enumerate()
-                                        .map(|(i, &axis)| {
-                                            sizes_vec[i] as f32 / input_conc[axis] as f32
-                                        })
-                                        .collect();
-                                    let chosen_scale = if matches!(
-                                        self.keep_aspect_ratio_policy,
-                                        ResizeKeepAspectRatioPolicy::NotLarger
-                                    ) {
-                                        scales.iter().copied().fold(f32::INFINITY, f32::min)
-                                    } else {
-                                        scales.iter().copied().fold(0.0f32, f32::max)
-                                    };
-                                    for &axis in &resolved_axes {
-                                        let v =
-                                            round_half_up(chosen_scale * input_conc[axis] as f32);
-                                        out_dims[axis] = ScalarInfoTyped::Numeric(v as u64);
-                                    }
-                                } else {
-                                    // Input shape is partially symbolic — can't compute aspect ratio
-                                    for &axis in &resolved_axes {
-                                        out_dims[axis] = ScalarInfoTyped::Symbolic(
-                                            SymbolicScalarTyped::new(symbolic_resolver),
-                                        );
-                                    }
-                                }
-                            }
+                        ) {
+                            scales.iter().copied().fold(f32::INFINITY, f32::min)
+                        } else {
+                            scales.iter().copied().fold(0.0f32, f32::max)
+                        };
+                        for &axis in &resolved_axes {
+                            let v =
+                                round_half_up(chosen_scale * input_conc[axis] as f32);
+                            out_dims[axis] = ScalarInfoTyped::Numeric(v as u64);
                         }
-                        return Ok(vec![(
-                            self.output,
-                            TensorInfo::from_dtype_and_shape_scalars(out_dtype, &out_dims),
-                        )]);
+                    } else {
+                        // Input shape is partially symbolic — can't compute aspect ratio
+                        for &axis in &resolved_axes {
+                            out_dims[axis] = ScalarInfoTyped::Symbolic(
+                                SymbolicScalarTyped::new(symbolic_resolver),
+                            );
+                        }
                     }
                 }
             }
+            return Ok(vec![(
+                self.output,
+                TensorInfo::from_dtype_and_shape_scalars(out_dtype, &out_dims),
+            )]);
         }
 
         // Try scales
-        if let Some(scales_id) = self.scales {
-            if let Some(scales_tensor) = known_inputs
+        if let Some(scales_id) = self.scales
+            && let Some(scales_tensor) = known_inputs
                 .get(&scales_id)
                 .and_then(|info| info.as_concrete())
-            {
-                let numel = scales_tensor.numel();
-                if numel > 0 && (0..numel).any(|i| scales_tensor.read_element(i).to_f64() != 0.0) {
-                    let mut out_dims = shape.to_vec();
-                    for (i, &axis) in resolved_axes.iter().enumerate() {
-                        let scale = scales_tensor.read_element(i).to_f64() as f32;
-                        match &shape[axis] {
-                            ScalarInfoTyped::Numeric(v) => {
-                                let new_size = (*v as f32 * scale).floor() as u64;
-                                out_dims[axis] = ScalarInfoTyped::Numeric(new_size);
-                            }
-                            ScalarInfoTyped::Symbolic(_) => {
-                                out_dims[axis] = ScalarInfoTyped::Symbolic(
-                                    SymbolicScalarTyped::new(symbolic_resolver),
-                                );
-                            }
+        {
+            let numel = scales_tensor.numel();
+            if numel > 0 && (0..numel).any(|i| scales_tensor.read_element(i).to_f64() != 0.0) {
+                let mut out_dims = shape.to_vec();
+                for (i, &axis) in resolved_axes.iter().enumerate() {
+                    let scale = scales_tensor.read_element(i).to_f64() as f32;
+                    match &shape[axis] {
+                        ScalarInfoTyped::Numeric(v) => {
+                            let new_size = (*v as f32 * scale).floor() as u64;
+                            out_dims[axis] = ScalarInfoTyped::Numeric(new_size);
+                        }
+                        ScalarInfoTyped::Symbolic(_) => {
+                            out_dims[axis] = ScalarInfoTyped::Symbolic(
+                                SymbolicScalarTyped::new(symbolic_resolver),
+                            );
                         }
                     }
-                    return Ok(vec![(
-                        self.output,
-                        TensorInfo::from_dtype_and_shape_scalars(out_dtype, &out_dims),
-                    )]);
                 }
+                return Ok(vec![(
+                    self.output,
+                    TensorInfo::from_dtype_and_shape_scalars(out_dtype, &out_dims),
+                )]);
             }
         }
 

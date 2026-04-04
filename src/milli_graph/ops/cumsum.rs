@@ -143,6 +143,7 @@ impl crate::nano_graph::ops::OpaqueEval for CumSumEval {
             let base = {
                 let mut rem = line;
                 let mut idx = 0usize;
+                #[allow(clippy::needless_range_loop)]
                 for d in 0..rank {
                     if d == axis {
                         continue;
@@ -151,6 +152,7 @@ impl crate::nano_graph::ops::OpaqueEval for CumSumEval {
                     // Effective stride in the "outer" iteration: product of non-axis dims after d.
                     let outer_stride = {
                         let mut os = 1usize;
+                        #[allow(clippy::needless_range_loop)]
                         for d2 in (d + 1)..rank {
                             if d2 != axis {
                                 os *= shape[d2] as usize;
@@ -276,6 +278,7 @@ impl MilliOp for CumSum {
             let base = {
                 let mut rem = line;
                 let mut idx = 0usize;
+                #[allow(clippy::needless_range_loop)]
                 for d in 0..rank {
                     if d == axis {
                         continue;
@@ -283,6 +286,7 @@ impl MilliOp for CumSum {
                     let dim_stride = strides[d];
                     let outer_stride = {
                         let mut os = 1usize;
+                        #[allow(clippy::needless_range_loop)]
                         for d2 in (d + 1)..rank {
                             if d2 != axis {
                                 os *= shape[d2] as usize;
@@ -346,7 +350,7 @@ impl MilliOp for CumSum {
         symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
         _pool: &'p P,
     ) -> Result<Vec<(GlobalId, crate::tensor_info::TensorInfo<'p, P>)>, MilliOpGraphError> {
-        use crate::scalar_info::{ScalarInfo, ScalarInfoTyped};
+        use crate::scalar_info::ScalarInfo;
         use crate::symbolic_scalar::SymbolicScalar;
         use crate::tensor_info::TensorInfo;
 

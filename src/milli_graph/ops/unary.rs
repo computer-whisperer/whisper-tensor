@@ -220,7 +220,7 @@ impl SimpleUnaryOp {
                 op: ScalarUnaryOp::IsNan,
                 compute_dtype: all_infos
                     .get(&in_id)
-                    .map(|i| NanoLoweringContext::ndt(i))
+                    .map(NanoLoweringContext::ndt)
                     .unwrap_or(dt),
             },
             WhichSimpleUnaryOp::Erf => ScalarOp::Unary {
@@ -245,7 +245,7 @@ impl SimpleUnaryOp {
                 },
                 compute_dtype: all_infos
                     .get(&in_id)
-                    .map(|i| NanoLoweringContext::ndt(i))
+                    .map(NanoLoweringContext::ndt)
                     .unwrap_or(dt),
             },
             WhichSimpleUnaryOp::BitwiseNot => ScalarOp::Unary {

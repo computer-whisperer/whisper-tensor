@@ -2,11 +2,9 @@ use crate::dtype::DType;
 use crate::migration::numeric_tensor::NumericTensor;
 use crate::numeric_dtype::NumericDType;
 use crate::numeric_tensor::TensorFormat;
-use crate::packed_tensor::PackedTensor;
 use crate::tensor_rank::DynRank;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::Arc;
 
 #[derive(Hash, Eq, PartialEq, Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct TensorStoreTensorId(u64);
@@ -60,7 +58,6 @@ impl StoredTensor {
         &self,
         pool: &'p P,
     ) -> Option<crate::numeric_tensor::NumericTensor<'p, DynRank, P>> {
-        use crate::numeric_dtype::NumericDType;
         use crate::numeric_tensor::{NumericTensor as NewTensor, TensorLayout};
 
         match self {

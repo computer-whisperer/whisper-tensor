@@ -1,4 +1,3 @@
-use crate::dtype::DType;
 use crate::migration::numeric_scalar::NumericScalarType;
 use crate::numeric_dtype::NumericDType;
 use serde::{Deserialize, Serialize};
@@ -98,6 +97,7 @@ impl SymbolicScalar {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn cast<T>(&self) -> SymbolicScalarTyped<T>
     where
         T: Copy + Clone + NumericScalarType,

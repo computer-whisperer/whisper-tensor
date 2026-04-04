@@ -451,7 +451,7 @@ fn round_to_nearest_even(value: f64) -> u64 {
     } else if frac < 0.5 {
         floor_u64
     } else {
-        if floor_u64 % 2 == 0 {
+        if floor_u64.is_multiple_of(2) {
             floor_u64
         } else {
             floor_u64 + 1

@@ -137,7 +137,7 @@ impl TextInferenceTokensInLogitOutInterface {
         let mut backend = EvalBackend::NDArray;
         let logits = logits.slice(
             &[logits_shape[0] - 1..logits_shape[0], 0..logits_shape[1]],
-            &mut backend,
+            &backend,
         )?;
         let logits = logits.squeeze(0)?;
         let token_id = logits.argmax(0, true, false, &mut backend)?;
@@ -272,7 +272,7 @@ impl MultimodalLanguageInterface {
         let mut backend = EvalBackend::NDArray;
         let logits = logits.slice(
             &[logits_shape[0] - 1..logits_shape[0], 0..logits_shape[1]],
-            &mut backend,
+            &backend,
         )?;
         let logits = logits.squeeze(0)?;
         let token_id = logits.argmax(0, true, false, &mut backend)?;

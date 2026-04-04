@@ -174,11 +174,11 @@ impl MilliOp for EyeLike {
         // If infer constant-folded, register_constant handles it automatically.
         // Otherwise fall through to opaque (eval_new).
         let info = ctx.all_infos.get(&self.output);
-        if let Some(info) = info {
-            if info.as_concrete().is_some() {
-                ctx.register_constant(self.output, info);
-                return super::LowerResult::Lowered;
-            }
+        if let Some(info) = info
+            && info.as_concrete().is_some()
+        {
+            ctx.register_constant(self.output, info);
+            return super::LowerResult::Lowered;
         }
         super::LowerResult::Unsupported
     }

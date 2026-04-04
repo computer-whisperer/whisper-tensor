@@ -7,7 +7,6 @@
 
 use std::collections::HashMap;
 
-use crate::dtype::DType;
 use crate::graph::{GlobalId, Graph, Node};
 use crate::milli_graph::MilliOpGraph;
 use crate::milli_graph::ops::AnyMilliOp;
@@ -750,7 +749,7 @@ impl<'a> NanoLoweringContext<'a> {
             let gid = self.nano.push_group(
                 run_len as u64,
                 dt,
-                ScalarOp::Literal(run_val.clone()),
+                ScalarOp::Literal(*run_val),
                 sym_dims.clone(),
                 vec![],
             );
@@ -1474,7 +1473,7 @@ impl<'a> NanoLoweringContext<'a> {
             return crate::milli_graph::ops::LowerResult::Unsupported;
         };
 
-        let in_dt = all_infos.get(&in_id).map(|i| Self::ndt(i));
+        let in_dt = all_infos.get(&in_id).map(Self::ndt);
         let out_dt = Self::ndt(out_info);
 
         // If dtypes match, this is a no-op — just re-register the tensor.
@@ -1797,7 +1796,7 @@ impl<'a> NanoLoweringContext<'a> {
         let out_dt = Self::ndt(out_info);
         let in_dt = all_infos
             .get(&in_id)
-            .map(|i| Self::ndt(i))
+            .map(Self::ndt)
             .unwrap_or(out_dt);
         let compute_dt = match in_dt {
             NumericDType::BF16 | NumericDType::F16 => NumericDType::F32,

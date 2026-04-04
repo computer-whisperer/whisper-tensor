@@ -1,4 +1,4 @@
-use crate::graph::{GlobalId, Graph, Node, Property, PropertyValue};
+use crate::graph::{GlobalId, Node, Property, PropertyValue};
 use crate::milli_graph::ops::*;
 use crate::milli_graph::{MilliLoweringContext, MilliOpGraph};
 use crate::numeric_scalar::NumericScalar as NewNumericScalar;

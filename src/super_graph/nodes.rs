@@ -2194,11 +2194,13 @@ impl SuperGraphNodeMilliOpGraph {
     }
 }
 
+#[allow(dead_code)]
 struct MilliOpGraphObserverWrapper<'a, T: SuperGraphObserver> {
     inner: &'a mut T,
     node_path: Vec<GlobalId>,
 }
 
+#[allow(dead_code)]
 impl<'a, T: SuperGraphObserver> MilliOpGraphObserverWrapper<'a, T> {
     fn new(inner: &'a mut T, node_path: &[GlobalId]) -> Self {
         Self {
@@ -2455,8 +2457,8 @@ fn eval_scan<'short, 'model, 'p, P: Pool + 'p, T: SuperGraphObserver>(
                     }
                     slice_ranges
                 };
-                let mut backend = EvalBackend::NDArray;
-                let sliced = tensor_legacy.slice(slice_arg.as_slice(), &mut backend)?;
+                let backend = EvalBackend::NDArray;
+                let sliced = tensor_legacy.slice(slice_arg.as_slice(), &backend)?;
                 let squeezed = sliced.squeeze(*scan_axis as usize)?;
                 iter_inputs.tensors.insert(
                     inner,
@@ -2541,11 +2543,11 @@ fn eval_scan<'short, 'model, 'p, P: Pool + 'p, T: SuperGraphObserver>(
             .map(|tensor| tensor.unsqueeze(axis))
             .collect::<Result<Vec<_>, _>>()?;
         let unsqueezed_ref = unsqueezed.iter().collect::<Vec<_>>();
-        let mut backend = EvalBackend::NDArray;
+        let backend = EvalBackend::NDArray;
         let concat_legacy = NumericTensor::<DynRank>::concat(
             unsqueezed_ref.as_slice(),
             axis,
-            &mut backend,
+            &backend,
         )?;
         output_data.tensors.insert(
             link,

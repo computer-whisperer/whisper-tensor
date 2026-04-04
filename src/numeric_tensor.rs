@@ -25,6 +25,7 @@ use crate::tensor_rank::{DimContainer, Rank};
 ///
 /// All variants use 256-element super-blocks.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[allow(non_camel_case_types)]
 pub enum KQuantVariant {
     Q2_K,
     Q3_K,
@@ -388,7 +389,7 @@ impl<R: Rank> TensorLayout<R> {
             } => {
                 let dims = shape.as_slice();
                 if dims.is_empty() {
-                    return ((*offset_bits + dtype.total_bits() as u64 + 7) / 8) as usize;
+                    return (*offset_bits + dtype.total_bits() as u64).div_ceil(8) as usize;
                 }
                 let element_bits = dtype.total_bits() as u64;
                 let extent: u64 = offset_bits
@@ -398,7 +399,7 @@ impl<R: Rank> TensorLayout<R> {
                         .map(|(&dim, &stride)| if dim > 0 { (dim - 1) * stride } else { 0 })
                         .sum::<u64>()
                     + element_bits;
-                ((extent + 7) / 8) as usize
+                extent.div_ceil(8) as usize
             }
             TensorLayout::SimpleBlockQuant {
                 shape,

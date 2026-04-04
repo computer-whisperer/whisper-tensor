@@ -237,7 +237,7 @@ impl SimpleBinary {
         // Use input dtype for compute_dtype when output is BOOL.
         let input_dt = all_infos
             .get(&a_id)
-            .map(|i| crate::nano_graph::NanoLoweringContext::ndt(i))
+            .map(crate::nano_graph::NanoLoweringContext::ndt)
             .unwrap_or(out_dt);
         let compute_dt = if out_dt == NumericDType::BOOL {
             input_dt

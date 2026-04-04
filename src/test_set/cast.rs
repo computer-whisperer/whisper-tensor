@@ -104,10 +104,10 @@ fn cast_f32_to_bf16_case() -> TestCase {
             cast_data_set(
                 "lossy_values",
                 &ids,
-                tensor_f32(&[0.1, 3.14, -7.77]),
+                tensor_f32(&[0.1, std::f32::consts::PI, -7.77]),
                 tensor_bf16(&[
                     bf16::from_f32(0.1),
-                    bf16::from_f32(3.14),
+                    bf16::from_f32(std::f32::consts::PI),
                     bf16::from_f32(-7.77),
                 ]),
                 Tolerance::for_dtype(NumericDType::BF16),

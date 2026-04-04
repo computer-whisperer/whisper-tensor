@@ -111,7 +111,7 @@ impl MilliOp for RandomNormalLike {
         _pool: &'p P,
     ) -> Result<Vec<(GlobalId, crate::tensor_info::TensorInfo<'p, P>)>, MilliOpGraphError> {
         use crate::numeric_dtype::NumericDType;
-        use crate::scalar_info::{ScalarInfo, ScalarInfoTyped};
+        use crate::scalar_info::ScalarInfo;
         use crate::symbolic_scalar::SymbolicScalar;
         use crate::tensor_info::TensorInfo;
 
@@ -161,7 +161,7 @@ impl MilliOp for RandomNormalLike {
 
         let out_dtype = self
             .dtype
-            .and_then(|dt| crate::numeric_dtype::NumericDType::from_legacy(dt))
+            .and_then(crate::numeric_dtype::NumericDType::from_legacy)
             .unwrap_or_else(|| input.dtype());
 
         let layout = TensorLayout::<DynRank>::row_major(shape, out_dtype);

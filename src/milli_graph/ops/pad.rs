@@ -262,7 +262,7 @@ impl Pad {
                     let b = ctx.nano.push_group(
                         pending_zeros,
                         dt,
-                        ScalarOp::Literal(fill_scalar.clone()),
+                        ScalarOp::Literal(fill_scalar),
                         sym_dims.clone(),
                         vec![],
                     );

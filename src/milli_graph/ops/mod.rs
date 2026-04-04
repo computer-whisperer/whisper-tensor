@@ -84,7 +84,6 @@ pub use unary::*;
 pub use unsqueeze::*;
 pub use where_op::*;
 
-use crate::backends::eval_backend::EvalBackend;
 use crate::backends::ndarray_backend::NDArrayNumericTensor;
 use crate::graph::{GlobalId, Node, NodeMetadata, NodeSlotEditError, SlotDirection};
 use crate::migration::numeric_tensor::NumericTensor;
@@ -371,6 +370,7 @@ pub fn constant_fold<'p, P: Pool + 'p>(
 /// `init` is the identity element (zero for sum, -inf for max, +inf for min, etc.).
 /// `acc` is the accumulation function applied per element.
 /// `finalize` is applied to each output element after accumulation (e.g., divide by count for mean).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn reduce_eval_new<'p, P2: Pool + 'p>(
     inputs: &[crate::numeric_tensor::NumericTensorView<'_, DynRank>],
     axes_input_idx: Option<usize>,
@@ -478,6 +478,7 @@ pub(crate) fn reduce_eval_new<'p, P2: Pool + 'p>(
         let mut rem = flat_in;
         let mut out_flat = 0usize;
         let mut out_dim_idx = 0;
+        #[allow(clippy::needless_range_loop)]
         for i in 0..rank {
             let idx = rem / in_strides[i];
             rem %= in_strides[i];

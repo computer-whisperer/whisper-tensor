@@ -110,6 +110,7 @@ impl MilliOp for NonZero {
 
                 for (col, &flat) in nz_flat.iter().enumerate() {
                     let mut rem = flat;
+                    #[allow(clippy::needless_range_loop)]
                     for row in 0..rank {
                         let idx = rem / strides[row];
                         rem %= strides[row];

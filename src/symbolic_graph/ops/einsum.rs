@@ -636,8 +636,8 @@ impl Operation for EinsumOperation {
                     // Keep labels needed by future inputs or the final output
                     let mut future: std::collections::HashSet<char> =
                         output_sub.iter().copied().collect();
-                    for j in (i + 1)..self.inputs.len() {
-                        for &c in &input_subs[j] {
+                    for sub in &input_subs[(i + 1)..] {
+                        for &c in sub {
                             future.insert(c);
                         }
                     }

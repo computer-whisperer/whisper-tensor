@@ -815,15 +815,16 @@ fn reduce_mean_broadcast_mul() -> TestCase {
 // path the ONNX tests use (symbolic op → milli graph → pool_eval).
 // ---------------------------------------------------------------------------
 
+#[allow(dead_code)]
 fn rms_norm_symbolic_eval_pool() -> TestCase {
-    use crate::symbolic_graph::ops::{Operation, RMSNormalizationOperation};
+    use crate::symbolic_graph::ops::RMSNormalizationOperation;
 
     let mut rng = rng();
     let input_id = GlobalId::new(&mut rng);
     let scale_id = GlobalId::new(&mut rng);
     let output_id = GlobalId::new(&mut rng);
 
-    let op = RMSNormalizationOperation::new(input_id, scale_id, None, output_id, 1e-5, &mut rng);
+    let _op = RMSNormalizationOperation::new(input_id, scale_id, None, output_id, 1e-5, &mut rng);
 
     let x_data: Vec<f32> = vec![
         1.7640524,
@@ -842,7 +843,7 @@ fn rms_norm_symbolic_eval_pool() -> TestCase {
     let scale_data: Vec<f32> = vec![1.2302907, 1.2023798, -0.3873268, -0.30230275];
 
     // Expected: same as rms_norm_multirow
-    let mut expected = vec![0.0f32; 12];
+    let mut expected = [0.0f32; 12];
     for row in 0..3 {
         let sq_sum: f32 = (0..4)
             .map(|c| x_data[row * 4 + c] * x_data[row * 4 + c])
@@ -856,7 +857,7 @@ fn rms_norm_symbolic_eval_pool() -> TestCase {
     // We can't use the TestCase/TestDataSet runner here since it expects a MilliOpGraph.
     // Instead, run the symbolic op's eval_pool directly in a test function.
     // Use a dummy TestCase with empty data_sets, and add a custom runner below.
-    let (graph, _) = MilliOpGraph::new(vec![input_id, scale_id].into_iter(), &mut rng);
+    let (graph, _) = MilliOpGraph::new([input_id, scale_id], &mut rng);
     TestCase {
         name: "rms_norm_symbolic_eval_pool".into(),
         graph,

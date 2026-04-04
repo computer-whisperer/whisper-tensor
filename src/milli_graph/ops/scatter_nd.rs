@@ -108,7 +108,7 @@ impl MilliOp for ScatterND {
         let updates = &inputs[2];
         let data_shape = data.shape();
         let indices_shape = indices.shape();
-        let data_rank = data_shape.len();
+        let _data_rank = data_shape.len();
         let dtype = data.dtype();
 
         let k = *indices_shape.last().unwrap() as usize;

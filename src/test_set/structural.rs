@@ -255,7 +255,7 @@ fn shape_op() -> TestCase {
         graph,
         data_sets: vec![TestDataSet {
             label: "2x3x4".into(),
-            inputs: HashMap::from([(ext, tensor_f32_shaped(vec![2, 3, 4], &vec![0.0; 24]))]),
+            inputs: HashMap::from([(ext, tensor_f32_shaped(vec![2, 3, 4], &[0.0; 24]))]),
             expected_outputs: HashMap::from([(out, tensor_i64_shaped(vec![3], &[2, 3, 4]))]),
             tolerance: Tolerance::for_dtype(NumericDType::I64),
         }],

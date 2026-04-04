@@ -122,7 +122,7 @@ impl ReduceMean {
         };
         let out_dt = NanoLoweringContext::ndt(out_info);
         let in_dt = in_info
-            .map(|i| NanoLoweringContext::ndt(i))
+            .map(NanoLoweringContext::ndt)
             .unwrap_or(out_dt);
 
         // For BF16/F16: keep entire mean computation in F32, cast at the end.

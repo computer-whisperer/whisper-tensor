@@ -128,7 +128,7 @@ pub fn legacy_to_new(
     legacy: &LegacyNumericTensor<LegacyDynRank>,
 ) -> NumericTensor<'static, DynRank, SystemPool> {
     let dtype = NumericDType::from_legacy(legacy.dtype()).unwrap();
-    let shape: Vec<u64> = legacy.shape().iter().map(|&d| d as u64).collect();
+    let shape: Vec<u64> = legacy.shape().to_vec();
     let nd = legacy.to_ndarray().unwrap();
 
     let mut t = NumericTensor::zeros(shape, dtype, &POOL).unwrap();

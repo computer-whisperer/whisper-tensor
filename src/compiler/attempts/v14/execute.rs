@@ -55,6 +55,7 @@ pub fn execute(
 }
 
 /// Evaluate a single span: gather inputs from the store, run eval, return outputs.
+#[allow(unused, unreachable_code)]
 fn eval_span(
     span: &Span,
     store: &HashMap<AtomId, NDArrayNumericTensor<DynRank>>,

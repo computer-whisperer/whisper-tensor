@@ -230,16 +230,16 @@ impl Split {
                 && let Some(ranked) = in_info.as_ranked()
             {
                 let shape = ranked.shape();
-                if axis < shape.len() {
-                    if let crate::scalar_info::ScalarInfoTyped::Numeric(dim) = &shape[axis] {
-                        let base = *dim / n as u64;
-                        let extra = *dim % n as u64;
-                        let mut offset = 0u64;
-                        for i in 0..output_id_idx {
-                            offset += base + if (i as u64) < extra { 1 } else { 0 };
-                        }
-                        return offset;
+                if axis < shape.len()
+                    && let crate::scalar_info::ScalarInfoTyped::Numeric(dim) = &shape[axis]
+                {
+                    let base = *dim / n as u64;
+                    let extra = *dim % n as u64;
+                    let mut offset = 0u64;
+                    for i in 0..output_id_idx {
+                        offset += base + if (i as u64) < extra { 1 } else { 0 };
                     }
+                    return offset;
                 }
             }
         }
@@ -398,7 +398,7 @@ impl MilliOp for Split {
                             ))
                         })?;
                     cast.try_to_rank::<P1>()
-                        .and_then(|r| Vec::<i64>::try_from(r))
+                        .and_then(Vec::<i64>::try_from)
                         .map_err(|e| {
                             crate::nano_graph::pool_eval::PoolEvalError::Unsupported(format!(
                                 "{e:?}"

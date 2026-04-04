@@ -121,7 +121,7 @@ impl Operation for OneHotOperation {
         } else {
             axis_const
         };
-        let norm_axis_plus_one = milli_ops::SimpleBinary::add(&mut graph, norm_axis, one, rng);
+        let _norm_axis_plus_one = milli_ops::SimpleBinary::add(&mut graph, norm_axis, one, rng);
 
         // Build reshape target: [1, ..., 1] with depth at axis position.
         let nd = milli_ops::SimpleBinary::sub(&mut graph, output_rank, one, rng);

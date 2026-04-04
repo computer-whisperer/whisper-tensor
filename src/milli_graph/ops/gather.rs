@@ -558,7 +558,7 @@ impl MilliOp for Gather {
         // Output shape: data_shape[..axis] ++ idx_shape ++ data_shape[axis+1..]
         let mut out_shape = Vec::new();
         out_shape.extend_from_slice(&data_shape[..axis]);
-        out_shape.extend_from_slice(&idx_shape);
+        out_shape.extend_from_slice(idx_shape);
         out_shape.extend_from_slice(&data_shape[axis + 1..]);
         let out_numel: usize = out_shape.iter().product::<u64>() as usize;
 
@@ -603,6 +603,7 @@ impl MilliOp for Gather {
 
             // Index coords → flat index into indices tensor
             let mut idx_flat = 0usize;
+            #[allow(clippy::needless_range_loop)]
             for d in 0..idx_ndim {
                 let out_d = prefix_dims + d;
                 let coord = rem / out_strides[out_d];

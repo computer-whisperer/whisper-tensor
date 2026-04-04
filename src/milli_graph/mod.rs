@@ -1,6 +1,6 @@
 use crate::DynRank;
 use crate::dtype::{DType, DTypeError};
-use crate::graph::{GlobalId, Graph, Link, Node, collect_disconnected_node_slots};
+use crate::graph::{GlobalId, Graph, Node, collect_disconnected_node_slots};
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::numeric_dtype::NumericDType;
 use crate::scalar_info::ScalarInfo;
@@ -1219,7 +1219,7 @@ impl MilliOpGraph {
                                 !matches!(s, crate::scalar_info::ScalarInfoTyped::Numeric(_))
                             })
                             .count();
-                        if sym_count > 0 && known_product > 0 && numel as u64 % known_product == 0 {
+                        if sym_count > 0 && known_product > 0 && (numel as u64).is_multiple_of(known_product) {
                             let sym_total = numel as u64 / known_product;
                             if sym_count == 1 {
                                 // Single unknown dim: resolve directly.

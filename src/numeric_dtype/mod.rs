@@ -296,7 +296,7 @@ impl NumericDType {
     /// Sub-byte types (U4, I4, Bool, F4E2M1) round up to 1 byte.
     pub const fn bytes_per_element(&self) -> usize {
         let bits = self.total_bits() as usize;
-        (bits + 7) / 8
+        bits.div_ceil(8)
     }
 
     /// Whether this is a floating-point type.

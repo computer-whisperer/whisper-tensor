@@ -216,7 +216,7 @@ impl MilliOp for TopK {
                 // Collect elements along axis for this slice
                 let mut elements: Vec<(f64, usize)> = Vec::with_capacity(axis_len);
                 for ai in 0..axis_len {
-                    let _flat = outer * in_strides.get(0).copied().unwrap_or(1).max(if axis == 0 { axis_len * inner_size } else { 1 })
+                    let _flat = outer * in_strides.first().copied().unwrap_or(1).max(if axis == 0 { axis_len * inner_size } else { 1 })
                         // Compute flat index properly
                         ;
                     // Actually compute it correctly using strides
@@ -256,6 +256,7 @@ impl MilliOp for TopK {
                 }
 
                 // Write top k
+                #[allow(clippy::needless_range_loop)]
                 for ki in 0..k {
                     let (val, orig_idx) = elements[ki];
                     // Compute output flat index

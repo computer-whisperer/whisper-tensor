@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use crate::backends::eval_backend::EvalRuntimeError;
 use crate::dtype::DType;
@@ -123,10 +123,10 @@ impl Model {
 
         let mut named_outputs = HashMap::new();
         for (id, tensor) in all_tensors {
-            if output_ids.contains(&id) {
-                if let Some(&name) = id_to_name.get(&id) {
-                    named_outputs.insert(name.to_string(), tensor);
-                }
+            if output_ids.contains(&id)
+                && let Some(&name) = id_to_name.get(&id)
+            {
+                named_outputs.insert(name.to_string(), tensor);
             }
         }
         Ok(named_outputs)
@@ -172,10 +172,10 @@ impl Model {
 
         let mut named_outputs = HashMap::new();
         for (id, tensor) in all_tensors {
-            if output_ids.contains(&id) {
-                if let Some(&name) = id_to_name.get(&id) {
-                    named_outputs.insert(name.to_string(), tensor);
-                }
+            if output_ids.contains(&id)
+                && let Some(&name) = id_to_name.get(&id)
+            {
+                named_outputs.insert(name.to_string(), tensor);
             }
         }
         Ok(named_outputs)

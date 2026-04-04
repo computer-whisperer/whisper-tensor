@@ -4,7 +4,6 @@ use crate::numeric_dtype::NumericDType;
 use crate::symbolic_graph::ops::Operation;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 /// Quantized matrix multiplication (fused dequantize-transpose-matmul).
 ///

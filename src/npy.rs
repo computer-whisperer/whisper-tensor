@@ -102,7 +102,7 @@ pub fn write_npy(view: &NumericTensorView<'_, DynRank>) -> Vec<u8> {
     buf.push(0); // minor
     buf.extend_from_slice(&header_len.to_le_bytes());
     buf.extend_from_slice(header_content.as_bytes());
-    buf.extend(std::iter::repeat(b' ').take(padding));
+    buf.extend(std::iter::repeat_n(b' ', padding));
     buf.push(b'\n');
 
     // Write raw tensor data — element by element via scalar LE bytes.
@@ -238,7 +238,7 @@ mod tests {
         buf.push(0); // minor
         buf.extend_from_slice(&header_len.to_le_bytes());
         buf.extend_from_slice(header_content.as_bytes());
-        buf.extend(std::iter::repeat(b' ').take(padding));
+        buf.extend(std::iter::repeat_n(b' ', padding));
         buf.push(b'\n');
         buf.extend_from_slice(data);
         buf
