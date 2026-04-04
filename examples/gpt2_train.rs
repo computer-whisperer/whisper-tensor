@@ -10,13 +10,13 @@ use std::collections::HashMap;
 
 use rand::RngExt;
 use whisper_tensor::backends::eval_backend::EvalBackend;
-use whisper_tensor::dtype::DType;
 use whisper_tensor::graph::GlobalId;
 use whisper_tensor::migration::numeric_tensor::NumericTensor;
 use whisper_tensor::milli_graph::{
     BackwardGenOptions, LossInputSource, LossWiring, MilliGraphGenOptions, MilliOpGraph,
     OptimizerGenOptions, OptimizerKind,
 };
+use whisper_tensor::numeric_dtype::{NumericDType, ONNXDType};
 use whisper_tensor::scalar_info::ScalarInfoTyped;
 use whisper_tensor::symbolic_graph::{SymbolicGraphMutator, TensorType};
 use whisper_tensor::tensor_rank::DynRank;
@@ -87,7 +87,7 @@ fn make_param(
     let id = m.push_typed_tensor(
         name,
         TensorType::Input(None),
-        Some(DType::F32),
+        Some(ONNXDType::Numeric(NumericDType::F32)),
         Some(shape),
         rng,
     );
@@ -116,7 +116,7 @@ fn build_gpt2_graph(
     let input_ids = m.push_typed_tensor(
         "input_ids",
         TensorType::Input(None),
-        Some(DType::I64),
+        Some(ONNXDType::Numeric(NumericDType::I64)),
         Some(vec![s(batch), s(seq)]),
         rng,
     );

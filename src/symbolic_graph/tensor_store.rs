@@ -1,4 +1,3 @@
-use crate::dtype::DType;
 use crate::numeric_dtype::NumericDType;
 use crate::numeric_tensor::TensorFormat;
 use crate::tensor_rank::DynRank;
@@ -180,14 +179,6 @@ impl StoredTensor {
             | StoredTensor::ExternalPth { format, .. }
             | StoredTensor::ExternalSafetensors { format, .. }
             | StoredTensor::ExternalGGUF { format, .. } => *format,
-        }
-    }
-
-    /// Legacy DType accessor — returns None for quantized formats.
-    pub fn dtype(&self) -> Option<DType> {
-        match self.format() {
-            TensorFormat::Element(ndt) => Some(ndt.to_legacy()),
-            TensorFormat::SimpleBlockQuant { .. } | TensorFormat::KQuant(_) => None,
         }
     }
 

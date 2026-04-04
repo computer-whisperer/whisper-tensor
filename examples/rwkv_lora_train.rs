@@ -31,7 +31,6 @@ use std::path::Path;
 use half::bf16;
 use rand::RngExt;
 use whisper_tensor::backends::eval_backend::EvalBackend;
-use whisper_tensor::dtype::DType;
 use whisper_tensor::graph::GlobalId;
 use whisper_tensor::metadata::TokenizerInfo;
 use whisper_tensor::migration::numeric_tensor::NumericTensor;
@@ -39,6 +38,7 @@ use whisper_tensor::milli_graph::{
     BackwardGenOptions, LossInputSource, LossWiring, MilliGraphGenOptions, MilliOpGraph,
     OptimizerGenOptions, OptimizerKind,
 };
+use whisper_tensor::numeric_dtype::{NumericDType, ONNXDType};
 use whisper_tensor::scalar_info::ScalarInfoTyped;
 use whisper_tensor::super_graph::cache::SuperGraphTensorCache;
 use whisper_tensor::super_graph::data::SuperGraphData;
@@ -113,7 +113,7 @@ fn inject_lora(m: &mut SymbolicGraphMutator, rng: &mut impl rand::Rng) -> Vec<Gl
         let lora_a = m.push_typed_tensor(
             &format!("{name}.lora_a"),
             TensorType::Input(None),
-            Some(DType::BF16),
+            Some(ONNXDType::Numeric(NumericDType::BF16)),
             None,
             rng,
         );
@@ -123,7 +123,7 @@ fn inject_lora(m: &mut SymbolicGraphMutator, rng: &mut impl rand::Rng) -> Vec<Gl
         let lora_b = m.push_typed_tensor(
             &format!("{name}.lora_b"),
             TensorType::Input(None),
-            Some(DType::BF16),
+            Some(ONNXDType::Numeric(NumericDType::BF16)),
             None,
             rng,
         );

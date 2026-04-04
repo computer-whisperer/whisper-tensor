@@ -10,13 +10,13 @@ use std::collections::HashMap;
 
 use rand::RngExt;
 use whisper_tensor::backends::eval_backend::EvalBackend;
-use whisper_tensor::dtype::DType;
 use whisper_tensor::graph::GlobalId;
 use whisper_tensor::migration::numeric_tensor::NumericTensor;
 use whisper_tensor::milli_graph::{
     BackwardGenOptions, LossInputSource, LossWiring, MilliGraphGenOptions, MilliOpGraph,
     OptimizerGenOptions, OptimizerKind,
 };
+use whisper_tensor::numeric_dtype::{NumericDType, ONNXDType};
 use whisper_tensor::scalar_info::ScalarInfoTyped;
 use whisper_tensor::super_graph::cache::SuperGraphTensorCache;
 use whisper_tensor::super_graph::data::SuperGraphData;
@@ -122,35 +122,35 @@ fn build_mlp_graph(
     let images = m.push_typed_tensor(
         "images",
         TensorType::Input(None),
-        Some(DType::F32),
+        Some(ONNXDType::Numeric(NumericDType::F32)),
         Some(vec![s(0), s(784)]),
         rng,
     );
     let w1 = m.push_typed_tensor(
         "W1",
         TensorType::Input(None),
-        Some(DType::F32),
+        Some(ONNXDType::Numeric(NumericDType::F32)),
         Some(vec![s(784), s(128)]),
         rng,
     );
     let b1 = m.push_typed_tensor(
         "b1",
         TensorType::Input(None),
-        Some(DType::F32),
+        Some(ONNXDType::Numeric(NumericDType::F32)),
         Some(vec![s(128)]),
         rng,
     );
     let w2 = m.push_typed_tensor(
         "W2",
         TensorType::Input(None),
-        Some(DType::F32),
+        Some(ONNXDType::Numeric(NumericDType::F32)),
         Some(vec![s(128), s(10)]),
         rng,
     );
     let b2 = m.push_typed_tensor(
         "b2",
         TensorType::Input(None),
-        Some(DType::F32),
+        Some(ONNXDType::Numeric(NumericDType::F32)),
         Some(vec![s(10)]),
         rng,
     );

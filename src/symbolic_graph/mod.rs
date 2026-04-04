@@ -3,7 +3,6 @@ pub mod observer;
 pub mod ops;
 pub mod tensor_store;
 
-use crate::dtype::DType;
 use crate::graph::{
     GlobalId, Graph, Link, LinkCategory, LinkMetadata, Node, NodeMetadata, Property,
 };
@@ -42,8 +41,6 @@ pub enum ONNXDecodingError {
     UnknownTensorName(String),
     #[error("Missing expected attribute \"{1}\" for op {0}")]
     MissingAttribute(String, String),
-    #[error(transparent)]
-    DTypeError(#[from] crate::dtype::DTypeError),
     #[error(transparent)]
     ONNXDTypeError(#[from] crate::numeric_dtype::ONNXDTypeError),
     #[error("Unsupported ONNX: {0}")]
@@ -233,10 +230,14 @@ impl StoredOrNotTensor {
         }
     }
 
-    pub fn dtype(&self, tensor_store: &TensorStore) -> Option<DType> {
+    pub fn onnx_dtype(&self, tensor_store: &TensorStore) -> Option<ONNXDType> {
         match self {
-            StoredOrNotTensor::Stored(id) => tensor_store.get_tensor(*id).unwrap().dtype(),
-            StoredOrNotTensor::Inline(t) => Some(t.inner().dtype().to_legacy()),
+            StoredOrNotTensor::Stored(id) => tensor_store
+                .get_tensor(*id)
+                .unwrap()
+                .numeric_dtype()
+                .map(ONNXDType::Numeric),
+            StoredOrNotTensor::Inline(t) => Some(ONNXDType::Numeric(t.inner().dtype())),
         }
     }
 
@@ -1826,7 +1827,7 @@ impl SymbolicGraphMutator {
             global_id,
             ONNXTensorInfo {
                 onnx_name: name.clone(),
-                dtype: tensor_ref.dtype().map(ONNXDType::from_legacy),
+                dtype: tensor_ref.numeric_dtype().map(ONNXDType::Numeric),
                 shape: Some(shape),
                 tensor_type: TensorType::Constant(StoredOrNotTensor::Stored(id)),
                 global_id,
@@ -1967,7 +1968,7 @@ impl SymbolicGraphMutator {
         for s in tensor_ref.shape() {
             shape.push(ScalarInfoTyped::Numeric(s))
         }
-        let dtype = tensor_ref.dtype().map(ONNXDType::from_legacy);
+        let dtype = tensor_ref.numeric_dtype().map(ONNXDType::Numeric);
         let global_id = GlobalId::new(rng);
         let g = self.graph.as_mut().unwrap();
         g.tensors.insert(
@@ -2016,7 +2017,7 @@ impl SymbolicGraphMutator {
         &mut self,
         name: &str,
         tensor_type: TensorType,
-        dtype: Option<DType>,
+        dtype: Option<ONNXDType>,
         shape: Option<Vec<ScalarInfoTyped<u64>>>,
         rng: &mut impl Rng,
     ) -> GlobalId {
@@ -2025,7 +2026,7 @@ impl SymbolicGraphMutator {
         let tensor = ONNXTensorInfo {
             onnx_name: Some(name.to_string()),
             tensor_type,
-            dtype: dtype.map(ONNXDType::from_legacy),
+            dtype,
             shape,
             global_id,
         };
@@ -3497,7 +3498,7 @@ mod tests {
         // Test that external_gradients seeds backward correctly.
         // Build a simple y = x @ W graph. Provide an external upstream gradient
         // for y. Verify that W gets a gradient and x gets an input_gradient.
-        use crate::dtype::DType;
+
         use crate::milli_graph::{
             BackwardGenOptions, ExternalGradient, LossInputSource, LossWiring,
             MilliGraphGenOptions, MilliOpGraph,
@@ -3529,7 +3530,7 @@ mod tests {
         let x = m.push_typed_tensor(
             "x",
             TensorType::Input(None),
-            Some(DType::F32),
+            Some(ONNXDType::Numeric(NumericDType::F32)),
             Some(vec![s(2), s(3)]),
             rng,
         );
@@ -3537,7 +3538,7 @@ mod tests {
         let w = m.push_typed_tensor(
             "W",
             TensorType::Input(None),
-            Some(DType::F32),
+            Some(ONNXDType::Numeric(NumericDType::F32)),
             Some(vec![s(3), s(4)]),
             rng,
         );
@@ -3636,7 +3637,7 @@ mod tests {
         // Build: x [2,3] -> MatMul(x, W) -> y [2,4] -> Relu -> z [2,4]
         // Surgery: interpose Add(y, lora_out) = combined, redirect Relu to use combined
         // This simulates LoRA adapter injection.
-        use crate::dtype::DType;
+
         use crate::numeric_dtype::NumericDType;
         use crate::numeric_scalar::NumericScalar;
         use crate::numeric_tensor::NumericTensor as PoolTensor;
@@ -3661,7 +3662,7 @@ mod tests {
         let x = m.push_typed_tensor(
             "x",
             TensorType::Input(None),
-            Some(DType::F32),
+            Some(ONNXDType::Numeric(NumericDType::F32)),
             Some(vec![s(2), s(3)]),
             rng,
         );
@@ -3669,7 +3670,7 @@ mod tests {
         let w = m.push_typed_tensor(
             "W",
             TensorType::Input(None),
-            Some(DType::F32),
+            Some(ONNXDType::Numeric(NumericDType::F32)),
             Some(vec![s(3), s(4)]),
             rng,
         );
@@ -3696,7 +3697,7 @@ mod tests {
         let a = m.push_typed_tensor(
             "lora_A",
             TensorType::Input(None),
-            Some(DType::F32),
+            Some(ONNXDType::Numeric(NumericDType::F32)),
             Some(vec![s(3), s(2)]),
             rng,
         );
@@ -3704,7 +3705,7 @@ mod tests {
         let b = m.push_typed_tensor(
             "lora_B",
             TensorType::Input(None),
-            Some(DType::F32),
+            Some(ONNXDType::Numeric(NumericDType::F32)),
             Some(vec![s(2), s(4)]),
             rng,
         );

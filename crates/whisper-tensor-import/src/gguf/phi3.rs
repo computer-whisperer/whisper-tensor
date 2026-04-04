@@ -1,9 +1,8 @@
 use crate::gguf::parser::GgufFile;
 use std::path::Path;
-use whisper_tensor::dtype::DType;
 use whisper_tensor::graph::GlobalId;
 use whisper_tensor::model::Model;
-use whisper_tensor::numeric_dtype::NumericDType;
+use whisper_tensor::numeric_dtype::{NumericDType, ONNXDType};
 use whisper_tensor::scalar_info::ScalarInfoTyped;
 use whisper_tensor::symbolic_graph::tensor_store::StoredTensor;
 use whisper_tensor::symbolic_graph::{SymbolicGraphMutator, TensorType};
@@ -193,7 +192,7 @@ impl<'a> GraphBuilder<'a> {
     fn input_tensor(
         &mut self,
         name: &str,
-        dtype: DType,
+        dtype: ONNXDType,
         shape: Vec<Option<u64>>,
         rng: &mut impl rand::Rng,
     ) -> GlobalId {
@@ -226,7 +225,12 @@ impl<'a> GraphBuilder<'a> {
         let mut state_pairs = Vec::new();
 
         // -- Input --
-        let input_ids = self.input_tensor("input_ids", DType::I64, vec![Some(1), None], rng);
+        let input_ids = self.input_tensor(
+            "input_ids",
+            ONNXDType::Numeric(NumericDType::I64),
+            vec![Some(1), None],
+            rng,
+        );
 
         // -- Embedding --
         let embed_weight = self.load_weight("token_embd.weight", rng)?;
@@ -361,7 +365,7 @@ impl<'a> GraphBuilder<'a> {
             // KV cache inputs
             let kv_cache_k = self.input_tensor(
                 &format!("kv_cache_input_k_{i}"),
-                DType::F32,
+                ONNXDType::Numeric(NumericDType::F32),
                 vec![
                     Some(1),
                     Some(config.num_key_value_heads as u64),
@@ -372,7 +376,7 @@ impl<'a> GraphBuilder<'a> {
             );
             let kv_cache_v = self.input_tensor(
                 &format!("kv_cache_input_v_{i}"),
-                DType::F32,
+                ONNXDType::Numeric(NumericDType::F32),
                 vec![
                     Some(1),
                     Some(config.num_key_value_heads as u64),
@@ -625,7 +629,7 @@ impl<'a> GraphBuilder<'a> {
         let logits = self.m.push_typed_tensor(
             "logits",
             TensorType::Intermediate,
-            Some(DType::F32),
+            Some(ONNXDType::Numeric(NumericDType::F32)),
             Some(vec![
                 ScalarInfoTyped::Numeric(1),
                 ScalarInfoTyped::Numeric(0),
