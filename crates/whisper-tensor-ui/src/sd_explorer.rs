@@ -3,8 +3,11 @@ use crate::websockets::ServerRequestManager;
 use crate::widgets::progress_report::SuperGraphProgressWidgetState;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
-use whisper_tensor::dtype::DType;
+use whisper_tensor::numeric_dtype::NumericDType;
+use whisper_tensor::numeric_scalar::NumericScalar;
+use whisper_tensor::numeric_tensor::NumericTensor;
+use whisper_tensor::pool::SystemPool;
+use whisper_tensor::tensor_rank::DynRank;
 use whisper_tensor::interfaces::{AnyInterface, ImageGenerationInterface};
 use whisper_tensor::super_graph::links::SuperGraphLink;
 use whisper_tensor_server::{SuperGraphRequest, SuperGraphRequestBackendMode};
@@ -237,27 +240,37 @@ impl SDExplorerApp {
             }
         };
 
-        let latent_tensor = NDArrayNumericTensor::from_vec_shape(
-            initial_noise,
-            &vec![
-                1,
-                channels as u64,
-                state.latent_h as u64,
-                state.latent_w as u64,
-            ],
+        let latent_shape = vec![
+            1,
+            channels as u64,
+            state.latent_h as u64,
+            state.latent_w as u64,
+        ];
+        let latent_tensor = NumericTensor::<DynRank, SystemPool>::from_fn(
+            latent_shape,
+            NumericDType::F32,
+            &SystemPool,
+            |i| NumericScalar::from_f32(initial_noise[i]),
         )
         .unwrap();
 
-        let timesteps_tensor =
-            NDArrayNumericTensor::from_vec_shape(timestep_values, &vec![state.num_steps as u64])
-                .unwrap();
-        let dt_tensor =
-            NDArrayNumericTensor::from_vec_shape(dt_values, &vec![state.num_steps as u64]).unwrap();
-        let sigmas_tensor =
-            NDArrayNumericTensor::from_vec_shape(sigma_values, &vec![state.num_steps as u64])
-                .unwrap();
-        let iter_count =
-            NDArrayNumericTensor::from_vec_shape(vec![state.num_steps as i64], &vec![1]).unwrap();
+        let n_steps = state.num_steps as u64;
+        let timesteps_tensor = NumericTensor::<DynRank, SystemPool>::from_fn(
+            vec![n_steps], NumericDType::F32, &SystemPool,
+            |i| NumericScalar::from_f32(timestep_values[i]),
+        ).unwrap();
+        let dt_tensor = NumericTensor::<DynRank, SystemPool>::from_fn(
+            vec![n_steps], NumericDType::F32, &SystemPool,
+            |i| NumericScalar::from_f32(dt_values[i]),
+        ).unwrap();
+        let sigmas_tensor = NumericTensor::<DynRank, SystemPool>::from_fn(
+            vec![n_steps], NumericDType::F32, &SystemPool,
+            |i| NumericScalar::from_f32(sigma_values[i]),
+        ).unwrap();
+        let iter_count = NumericTensor::<DynRank, SystemPool>::from_fn(
+            vec![1], NumericDType::I64, &SystemPool,
+            |_| NumericScalar::from_i64(state.num_steps as i64),
+        ).unwrap();
 
         tensor_inputs.insert(sd.initial_latent_input, latent_tensor);
         tensor_inputs.insert(sd.timesteps_input, timesteps_tensor);
@@ -265,7 +278,10 @@ impl SDExplorerApp {
         tensor_inputs.insert(sd.sigmas_input, sigmas_tensor);
         tensor_inputs.insert(sd.iteration_count_input, iter_count);
         if let Some(gs_link) = sd.guidance_scale_input {
-            let guidance = NDArrayNumericTensor::from_vec(vec![state.guidance_scale]).to_dyn();
+            let guidance = NumericTensor::<DynRank, SystemPool>::from_fn(
+                vec![1], NumericDType::F32, &SystemPool,
+                |_| NumericScalar::from_f32(state.guidance_scale),
+            ).unwrap();
             tensor_inputs.insert(gs_link, guidance);
         }
 
@@ -300,7 +316,7 @@ impl SDExplorerApp {
 
 /// Convert an output tensor (NCHW, f16) to an egui texture and color image.
 pub(crate) fn tensor_to_egui_texture(
-    tensor: &NDArrayNumericTensor<whisper_tensor::DynRank>,
+    tensor: &NumericTensor<'static, DynRank, SystemPool>,
     ctx: &egui::Context,
 ) -> (egui::TextureHandle, egui::ColorImage) {
     let shape = tensor.shape();
@@ -308,10 +324,10 @@ pub(crate) fn tensor_to_egui_texture(
     let img_h = shape[2] as usize;
     let img_w = shape[3] as usize;
 
-    // Cast to f32
-    let f32_tensor = tensor.cast(DType::F32).unwrap();
-    let flat = f32_tensor.flatten();
-    let f32_data: Vec<f32> = flat.try_to_vec().unwrap();
+    // Read all elements as f32
+    let f32_data: Vec<f32> = (0..tensor.numel())
+        .map(|i| tensor.read_element(i).to_f64() as f32)
+        .collect();
 
     // NCHW → RGBA pixels, remap [-1, 1] → [0, 255]
     let mut pixels = vec![egui::Color32::BLACK; img_h * img_w];

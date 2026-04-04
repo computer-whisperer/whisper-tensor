@@ -1,8 +1,8 @@
 use egui::{self, Align, FontId, Id, Response, Ui};
 use egui_extras::{Column, TableBuilder};
-use whisper_tensor::DynRank;
-use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
-use whisper_tensor::migration::numeric_scalar::NumericScalarType;
+use whisper_tensor::numeric_tensor::NumericTensor;
+use whisper_tensor::pool::SystemPool;
+use whisper_tensor::tensor_rank::DynRank;
 
 /// State you should persist in your egui app.
 #[derive(Clone, Debug)]
@@ -184,9 +184,20 @@ fn non_singleton_axes(shape: &[u64]) -> Vec<usize> {
         .collect()
 }
 
+/// Compute a flat (row-major) index from a multi-dimensional index.
+fn nd_to_flat(idx: &[u64], shape: &[u64]) -> usize {
+    let mut flat: u64 = 0;
+    let mut stride: u64 = 1;
+    for i in (0..shape.len()).rev() {
+        flat += idx[i] * stride;
+        stride *= shape[i];
+    }
+    flat as usize
+}
+
 pub fn tensor_view(
     ui: &mut Ui,
-    tensor: &NDArrayNumericTensor<DynRank>,
+    tensor: &NumericTensor<'static, DynRank, SystemPool>,
     state: &mut TensorViewState,
 ) -> Response {
     let shape = tensor.shape().to_vec();
@@ -208,16 +219,16 @@ pub fn tensor_view(
                 ui.horizontal(|ui| {
                     ui.label(format!("{}  {:?}", tensor.dtype(), shape));
                     if ui.button("Copy Full").clicked() {
-                        ui.ctx().copy_text(format!("{:#}", tensor));
+                        ui.ctx().copy_text(format!("{:?}", tensor));
                     }
                 });
                 // All zeros index
-                let idx = vec![0u64; ndim];
-                let txt = tensor
-                    .get(&idx)
-                    .map(|v| v.to_string())
-                    .unwrap_or_else(|| "—".into());
-                ui.monospace(txt);
+                if tensor.numel() > 0 {
+                    let val = tensor.read_element(0);
+                    ui.monospace(format!("{}", val.to_f64()));
+                } else {
+                    ui.monospace("—");
+                }
             })
             .response;
     }
@@ -232,7 +243,7 @@ pub fn tensor_view(
             ui.horizontal(|ui| {
                 ui.label(format!("{}  {:?}", tensor.dtype(), shape));
                 if ui.button("Copy Full").clicked() {
-                    let text = format!("{:#}", tensor);
+                    let text = format!("{:?}", tensor);
                     ui.ctx().copy_text(text);
                 }
                 if ui.button("Copy Visible Slice").clicked() {
@@ -433,13 +444,12 @@ pub fn tensor_view(
                                 }
                             }
 
-                            let txt = match tensor.get(&idx) {
-                                Some(v) => format_number(
-                                    f64::cast_from_numeric_scalar(&v),
-                                    state.precision,
-                                    state.scientific,
-                                ),
-                                None => String::from("—"),
+                            let flat = nd_to_flat(&idx, &shape);
+                            let txt = if flat < tensor.numel() {
+                                let v = tensor.read_element(flat);
+                                format_number(v.to_f64(), state.precision, state.scientific)
+                            } else {
+                                String::from("—")
                             };
 
                             row.col(|ui| {
@@ -489,11 +499,14 @@ fn format_number(v: f64, precision: usize, scientific: bool) -> String {
 }
 
 /// Produce a textual dump of the currently visible 2D slice (for Copy).
-fn slice_to_string(t: &NDArrayNumericTensor<DynRank>, s: &TensorViewState) -> String {
-    let ndim = t.rank();
+fn slice_to_string(t: &NumericTensor<'static, DynRank, SystemPool>, s: &TensorViewState) -> String {
     let shape = t.shape();
+    let ndim = shape.len();
     if ndim == 0 {
-        return t.first_element().to_string();
+        if t.numel() > 0 {
+            return format!("{}", t.read_element(0).to_f64());
+        }
+        return String::from("—");
     }
 
     let is_vector = ndim == 1;
@@ -505,10 +518,12 @@ fn slice_to_string(t: &NDArrayNumericTensor<DynRank>, s: &TensorViewState) -> St
         let mut out = String::from("vector slice axis0\n[");
         for j in 0..cols {
             let c = s.col_offset + j;
-            let val = t
-                .get(&vec![c])
-                .map(|x| f64::cast_from_numeric_scalar(&x))
-                .unwrap_or(f64::NAN);
+            let flat = nd_to_flat(&[c], shape);
+            let val = if flat < t.numel() {
+                t.read_element(flat).to_f64()
+            } else {
+                f64::NAN
+            };
             if j > 0 {
                 out.push_str(", ");
             }
@@ -539,10 +554,12 @@ fn slice_to_string(t: &NDArrayNumericTensor<DynRank>, s: &TensorViewState) -> St
                 }
                 idx[s.row_axis] = r;
                 idx[s.col_axis] = c;
-                let val = t
-                    .get(&idx)
-                    .map(|x| f64::cast_from_numeric_scalar(&x))
-                    .unwrap_or(f64::NAN);
+                let flat = nd_to_flat(&idx, shape);
+                let val = if flat < t.numel() {
+                    t.read_element(flat).to_f64()
+                } else {
+                    f64::NAN
+                };
                 if j > 0 {
                     out.push_str(", ");
                 }

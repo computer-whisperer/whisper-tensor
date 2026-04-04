@@ -1,6 +1,6 @@
-use whisper_tensor::DynRank;
-use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
-use whisper_tensor::dtype::DType;
+use whisper_tensor::numeric_tensor::NumericTensor;
+use whisper_tensor::pool::SystemPool;
+use whisper_tensor::tensor_rank::DynRank;
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::OnceLock;
@@ -145,14 +145,11 @@ fn linear_resample_mono(
 }
 
 pub(crate) fn tensor_to_audio_samples(
-    audio_tensor: &NDArrayNumericTensor<DynRank>,
+    audio_tensor: &NumericTensor<'static, DynRank, SystemPool>,
 ) -> Result<Vec<f32>, String> {
-    let f32_tensor = audio_tensor
-        .cast(DType::F32)
-        .map_err(|err| format!("failed to cast audio tensor to f32: {err}"))?;
-    let flat = f32_tensor.flatten();
-    flat.try_to_vec()
-        .map_err(|err| format!("failed to flatten audio tensor: {err}"))
+    Ok((0..audio_tensor.numel())
+        .map(|i| audio_tensor.read_element(i).to_f64() as f32)
+        .collect())
 }
 
 pub(crate) fn play_audio_samples(samples: &[f32], sample_rate_hz: u32) -> Result<(), String> {

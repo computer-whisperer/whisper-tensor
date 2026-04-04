@@ -1,12 +1,12 @@
 use std::sync::Arc;
 use std::sync::atomic::AtomicU32;
 use tokio::sync::{RwLock, watch};
-use whisper_tensor::DynRank;
-use whisper_tensor::compiler::CompiledProgram;
 use whisper_tensor::loader::{ConfigValues, Loader};
-use whisper_tensor::migration::numeric_tensor::NumericTensor;
 use whisper_tensor::model::Model;
+use whisper_tensor::numeric_tensor::NumericTensor;
+use whisper_tensor::pool::SystemPool;
 use whisper_tensor::symbolic_graph::tensor_store::TensorStoreTensorId;
+use whisper_tensor::tensor_rank::DynRank;
 
 use crate::{
     CurrentInterfacesReportEntry, CurrentModelsAndInterfacesReport, CurrentModelsReportEntry,
@@ -17,7 +17,7 @@ pub struct ModelData {
     pub model: Arc<Model>,
     pub model_id: LoadedModelId,
     pub model_name: String,
-    pub compiled_program: Option<Arc<CompiledProgram>>,
+    pub model_compiled: bool,
 }
 
 pub struct ModelServer {
@@ -74,7 +74,7 @@ impl ModelServer {
                 model_id: model.model_id,
                 model_name: model.model_name.clone(),
                 num_ops: model.model.get_symbolic_graph().get_operations().len() as u64,
-                model_compiled: model.compiled_program.is_some(),
+                model_compiled: model.model_compiled,
             });
         }
 
@@ -114,7 +114,7 @@ impl ModelServer {
                     model: loaded_model.model,
                     model_id,
                     model_name: loaded_model.name,
-                    compiled_program: None,
+                    model_compiled: false,
                 });
                 model_ids.push(model_id);
             }
@@ -156,30 +156,6 @@ impl ModelServer {
             .map(|model| model.model.clone())
     }
 
-    pub async fn get_compiled_model(
-        &self,
-        model_id: LoadedModelId,
-    ) -> Option<Arc<CompiledProgram>> {
-        let guard = self.models.read().await;
-        guard
-            .iter()
-            .find(|model| model.model_id == model_id)
-            .and_then(|model| model.compiled_program.clone())
-    }
-
-    pub async fn set_compiled_model(
-        &self,
-        model_id: LoadedModelId,
-        compiled_program: Arc<CompiledProgram>,
-    ) {
-        let mut guard = self.models.write().await;
-        if let Some(model) = guard.iter_mut().find(|model| model.model_id == model_id) {
-            model.compiled_program = Some(compiled_program);
-        }
-        drop(guard);
-        self.generate_new_model_report().await;
-    }
-
     pub async fn with_model<T>(
         &self,
         model_id: LoadedModelId,
@@ -197,14 +173,14 @@ impl ModelServer {
         &self,
         model_id: LoadedModelId,
         stored_tensor_id: TensorStoreTensorId,
-    ) -> Result<NumericTensor<DynRank>, String> {
+    ) -> Result<NumericTensor<'static, DynRank, SystemPool>, String> {
         let guard = self.models.read().await;
         if let Some(model) = guard.iter().find(|model| model.model_id == model_id) {
             model
                 .model
                 .get_tensor_store()
                 .get_tensor(stored_tensor_id)
-                .map(|x| x.to_numeric())
+                .and_then(|x| x.to_pool_tensor(&SystemPool))
                 .ok_or("Tensor not found in Tensor Store".to_string())
         } else {
             Err(format!("Model with id {model_id} not found"))

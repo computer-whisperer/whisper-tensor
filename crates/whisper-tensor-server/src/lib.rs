@@ -8,17 +8,16 @@ pub mod scheduler;
 use std::collections::HashMap;
 use std::fmt::Display;
 use std::time::Duration;
-use whisper_tensor::DynRank;
-use whisper_tensor::backends::eval_backend::EvalBackend;
-use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
-use whisper_tensor::dtype::DType;
 use whisper_tensor::graph::GlobalId;
 use whisper_tensor::interfaces::AnyInterface;
 use whisper_tensor::loader::{ConfigField, ConfigValues};
-use whisper_tensor::migration::numeric_tensor::NumericTensor;
+use whisper_tensor::numeric_dtype::NumericDType;
+use whisper_tensor::numeric_tensor::NumericTensor;
+use whisper_tensor::pool::SystemPool;
 use whisper_tensor::super_graph::links::SuperGraphLink;
 use whisper_tensor::super_graph::{SuperGraph, SuperGraphHash};
 use whisper_tensor::symbolic_graph::tensor_store::TensorStoreTensorId;
+use whisper_tensor::tensor_rank::DynRank;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct LoadedModelId(pub u32);
@@ -54,7 +53,7 @@ impl Display for SuperGraphRequestBackendMode {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SuperGraphAudioInput {
-    pub samples: NDArrayNumericTensor<DynRank>,
+    pub samples: NumericTensor<'static, DynRank, SystemPool>,
     pub sample_rate_hz: u32,
 }
 
@@ -66,7 +65,7 @@ pub struct SuperGraphRequest {
     pub backend_mode: SuperGraphRequestBackendMode,
     pub string_inputs: HashMap<SuperGraphLink, String>,
     pub hash_inputs: HashMap<SuperGraphLink, SuperGraphHash>,
-    pub tensor_inputs: HashMap<SuperGraphLink, NDArrayNumericTensor<DynRank>>,
+    pub tensor_inputs: HashMap<SuperGraphLink, NumericTensor<'static, DynRank, SystemPool>>,
     pub audio_inputs: HashMap<SuperGraphLink, SuperGraphAudioInput>,
     pub model_inputs: HashMap<SuperGraphLink, LoadedModelId>,
     pub symbolic_graph_ids: Vec<LoadedModelId>,
@@ -87,7 +86,7 @@ pub struct SuperGraphObserverSettingsUpdate {
 pub struct SuperGraphResponseData {
     pub string_outputs: HashMap<SuperGraphLink, String>,
     pub hash_outputs: HashMap<SuperGraphLink, SuperGraphHash>,
-    pub tensor_outputs: HashMap<SuperGraphLink, NDArrayNumericTensor<DynRank>>,
+    pub tensor_outputs: HashMap<SuperGraphLink, NumericTensor<'static, DynRank, SystemPool>>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -157,7 +156,7 @@ pub struct AbbreviatedTensorValue {
     pub value: Option<(Vec<u8>, ScaleParams)>,
     /// Mask of non-finite values (NaN/Inf). If present, true = non-finite.
     pub non_finite_mask: Option<Vec<bool>>,
-    pub dtype: DType,
+    pub dtype: NumericDType,
     pub shape: Vec<u64>,
 }
 
@@ -169,51 +168,42 @@ pub enum ScaleMode {
 }
 
 impl AbbreviatedTensorValue {
+    /// Compute a downsampled digest of the tensor as f32 bin-means.
+    ///
+    /// Divides the flattened tensor into `digest_len` equal-ish bins and
+    /// returns the mean of each bin.
     fn get_digest(
-        tensor: &NumericTensor<DynRank>,
+        tensor: &whisper_tensor::numeric_tensor::NumericTensorView<'_, DynRank>,
         digest_len: u64,
-        backend: &mut EvalBackend,
     ) -> DigestResult {
-        match tensor.dtype() {
-            DType::F32 | DType::F64 | DType::BF16 | DType::F16 => {
-                // Ok
-            }
-            _ => {
-                return (None, None);
-            }
+        if !tensor.dtype().is_float() {
+            return (None, None);
         }
-        let flattened_tensor = tensor.flatten().unwrap().to_dyn_rank();
-        // Cast to f32 before cumsum to avoid overflow (f16 cumsum saturates at ±65504)
-        let flattened_f32 = flattened_tensor.cast(DType::F32, backend).unwrap();
-        let num_elements = flattened_f32.shape()[0];
+
+        let num_elements = tensor.numel() as u64;
         let digest_len = digest_len.min(num_elements);
-        let digest = if num_elements > digest_len {
-            let ones = flattened_f32.ones_like(backend).unwrap();
-            let ps = flattened_f32
-                .cumsum(Some(0), false, false, backend)
-                .unwrap();
-            let pc = ones.cumsum(Some(0), false, false, backend).unwrap();
-            let edges_0 = (0..digest_len)
-                .map(|x| (((x * num_elements) / digest_len) as i64).min(num_elements as i64 - 1))
-                .collect::<Vec<_>>();
-            let edges_1 = (1..digest_len + 1)
-                .map(|x| (((x * num_elements) / digest_len) as i64).min(num_elements as i64 - 1))
-                .collect::<Vec<_>>();
-            let edges_0_array = NumericTensor::from_vec(edges_0).to_dyn_rank();
-            let edges_1_array = NumericTensor::from_vec(edges_1).to_dyn_rank();
-            let s_hi = NumericTensor::gather(&ps, &edges_1_array, 0, backend).unwrap();
-            let s_lo = NumericTensor::gather(&ps, &edges_0_array, 0, backend).unwrap();
-            let c_hi = NumericTensor::gather(&pc, &edges_1_array, 0, backend).unwrap();
-            let c_lo = NumericTensor::gather(&pc, &edges_0_array, 0, backend).unwrap();
-            let sum_k = NumericTensor::sub(&s_hi, &s_lo, backend).unwrap();
-            let tmp = NumericTensor::sub(&c_hi, &c_lo, backend).unwrap();
-            let tmp2 = tmp.ones_like(backend).unwrap();
-            let cnt_k = NumericTensor::max(&tmp, &tmp2, backend).unwrap();
-            NumericTensor::div(&sum_k, &cnt_k, backend).unwrap()
+        if digest_len == 0 {
+            return (None, None);
+        }
+
+        let res_vec: Vec<f32> = if num_elements > digest_len {
+            // Bin-mean downsampling: divide into digest_len bins, average each
+            (0..digest_len)
+                .map(|i| {
+                    let start = (i * num_elements / digest_len) as usize;
+                    let end = ((i + 1) * num_elements / digest_len) as usize;
+                    let count = (end - start).max(1);
+                    let sum: f64 = (start..end)
+                        .map(|j| tensor.read_element(j).to_f64())
+                        .sum();
+                    (sum / count as f64) as f32
+                })
+                .collect()
         } else {
-            flattened_f32
+            (0..num_elements as usize)
+                .map(|i| tensor.read_element(i).to_f64() as f32)
+                .collect()
         };
-        let res_vec: Vec<f32> = digest.to_ndarray().unwrap().flatten().try_to_vec().unwrap();
 
         let has_non_finite = res_vec.iter().any(|v| !v.is_finite());
         let non_finite_mask = if has_non_finite {
@@ -346,12 +336,11 @@ impl AbbreviatedTensorValue {
         n.clamp(0, 255) as u8
     }
 
-    pub fn from_tensor(
-        tensor: &NumericTensor<DynRank>,
+    pub fn from_tensor_view(
+        tensor: &whisper_tensor::numeric_tensor::NumericTensorView<'_, DynRank>,
         digest_len: u64,
-        backend: &mut EvalBackend,
     ) -> Self {
-        let (value, non_finite_mask) = Self::get_digest(tensor, digest_len, backend);
+        let (value, non_finite_mask) = Self::get_digest(tensor, digest_len);
         Self {
             value,
             non_finite_mask,
@@ -367,7 +356,7 @@ pub struct SuperGraphExecutionReport {
     pub node_executions: Vec<(Vec<GlobalId>, String, Duration, Duration)>,
     pub loading_weight_reports: Vec<(Vec<GlobalId>, Option<String>, Duration)>,
     pub abbreviated_tensor_assignments: Vec<(Vec<GlobalId>, AbbreviatedTensorValue)>,
-    pub tensor_assignments: Vec<(Vec<GlobalId>, NDArrayNumericTensor<DynRank>)>,
+    pub tensor_assignments: Vec<(Vec<GlobalId>, NumericTensor<'static, DynRank, SystemPool>)>,
     pub progress_reports: Vec<(Vec<GlobalId>, i64, f64, f64)>,
 }
 
@@ -400,7 +389,7 @@ pub enum WebsocketServerClientMessage {
     TensorStoreReturn(
         LoadedModelId,
         TensorStoreTensorId,
-        Result<NDArrayNumericTensor<DynRank>, String>,
+        Result<NumericTensor<'static, DynRank, SystemPool>, String>,
     ),
     HFTokenizerReturn(String, Result<Vec<u8>, String>),
     TokenizerFileReturn(String, Result<Vec<u8>, String>),

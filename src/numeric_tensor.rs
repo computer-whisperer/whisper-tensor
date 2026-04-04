@@ -135,13 +135,6 @@ impl From<NumericDType> for TensorFormat {
     }
 }
 
-impl TensorFormat {
-    /// Convert from legacy DType. Returns None for STRING and Packed types.
-    pub fn from_legacy_dtype(dt: crate::dtype::DType) -> Option<Self> {
-        NumericDType::from_legacy(dt).map(TensorFormat::Element)
-    }
-}
-
 impl fmt::Display for TensorFormat {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -170,7 +163,7 @@ impl fmt::Display for TensorFormat {
 ///
 /// All core access methods live here. [`NumericTensor`] and [`NumericTensorView`]
 /// simply delegate to these methods, passing their data pointer.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TensorLayout<R: Rank> {
     /// Uniform-stride elements of a single numeric type.
     /// Strides (in bits, per dimension) fully describe element spacing.
@@ -872,6 +865,114 @@ impl<'a, R: Rank, P: Pool + 'a> NumericTensor<'a, R, P> {
 
     pub fn buffer_mut(&mut self) -> &mut [u8] {
         &mut self.buffer
+    }
+}
+
+impl<'a, R: Rank, P: Pool + 'a> Clone for NumericTensor<'a, R, P>
+where
+    P::Buffer<'a>: Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            buffer: self.buffer.clone(),
+            layout: self.layout.clone(),
+        }
+    }
+}
+
+impl<'a, R: Rank, P: Pool + 'a> Serialize for NumericTensor<'a, R, P>
+where
+    R::KnownDims: Serialize,
+{
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut s = serializer.serialize_struct("NumericTensor", 2)?;
+        s.serialize_field("layout", &self.layout)?;
+        s.serialize_field("data", &*self.buffer)?;
+        s.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for NumericTensor<'static, crate::tensor_rank::DynRank, crate::pool::SystemPool> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::{self, MapAccess, SeqAccess, Visitor};
+
+        #[derive(Deserialize)]
+        #[serde(field_identifier, rename_all = "lowercase")]
+        enum Field {
+            Layout,
+            Data,
+        }
+
+        struct NumericTensorVisitor;
+
+        impl<'de> Visitor<'de> for NumericTensorVisitor {
+            type Value = NumericTensor<'static, crate::tensor_rank::DynRank, crate::pool::SystemPool>;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("a NumericTensor with layout and data fields")
+            }
+
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+                let layout: TensorLayout<crate::tensor_rank::DynRank> = seq
+                    .next_element()?
+                    .ok_or_else(|| de::Error::invalid_length(0, &self))?;
+                let data: Vec<u8> = seq
+                    .next_element()?
+                    .ok_or_else(|| de::Error::invalid_length(1, &self))?;
+                let expected = layout.buffer_size_bytes();
+                if data.len() != expected {
+                    return Err(de::Error::custom(format!(
+                        "buffer length {} does not match layout expected {}",
+                        data.len(),
+                        expected
+                    )));
+                }
+                let mut buffer = crate::pool::SystemPool
+                    .allocate(expected)
+                    .map_err(de::Error::custom)?;
+                (*buffer).copy_from_slice(&data);
+                Ok(NumericTensor::from_parts(buffer, layout))
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                let mut layout: Option<TensorLayout<crate::tensor_rank::DynRank>> = None;
+                let mut data: Option<Vec<u8>> = None;
+                while let Some(key) = map.next_key()? {
+                    match key {
+                        Field::Layout => {
+                            if layout.is_some() {
+                                return Err(de::Error::duplicate_field("layout"));
+                            }
+                            layout = Some(map.next_value()?);
+                        }
+                        Field::Data => {
+                            if data.is_some() {
+                                return Err(de::Error::duplicate_field("data"));
+                            }
+                            data = Some(map.next_value()?);
+                        }
+                    }
+                }
+                let layout = layout.ok_or_else(|| de::Error::missing_field("layout"))?;
+                let data = data.ok_or_else(|| de::Error::missing_field("data"))?;
+                let expected = layout.buffer_size_bytes();
+                if data.len() != expected {
+                    return Err(de::Error::custom(format!(
+                        "buffer length {} does not match layout expected {}",
+                        data.len(),
+                        expected
+                    )));
+                }
+                let mut buffer = crate::pool::SystemPool
+                    .allocate(expected)
+                    .map_err(de::Error::custom)?;
+                (*buffer).copy_from_slice(&data);
+                Ok(NumericTensor::from_parts(buffer, layout))
+            }
+        }
+
+        deserializer.deserialize_struct("NumericTensor", &["layout", "data"], NumericTensorVisitor)
     }
 }
 
@@ -1642,5 +1743,72 @@ mod tests {
             err,
             TensorLayoutError::TransposeInvalidPerm { rank: 2 }
         ));
+    }
+
+    // -- Serde roundtrip --
+
+    #[test]
+    fn serde_roundtrip_f32() {
+        let pool = SystemPool;
+        let original = NumericTensor::<DynRank, SystemPool>::from_fn(
+            vec![2, 3],
+            NumericDType::F32,
+            &pool,
+            |i| crate::numeric_scalar::NumericScalar::from_f32(i as f32 * 1.5),
+        )
+        .unwrap();
+
+        let mut serialized = Vec::new();
+        ciborium::into_writer(&original, &mut serialized).unwrap();
+        let deserialized: NumericTensor<'static, DynRank, SystemPool> =
+            ciborium::from_reader(serialized.as_slice()).unwrap();
+
+        assert_eq!(deserialized.shape(), original.shape());
+        assert_eq!(deserialized.dtype(), original.dtype());
+        for i in 0..original.numel() {
+            assert_eq!(deserialized.read_element(i), original.read_element(i));
+        }
+    }
+
+    #[test]
+    fn serde_roundtrip_i32() {
+        let pool = SystemPool;
+        let original = NumericTensor::<DynRank, SystemPool>::from_fn(
+            vec![5],
+            NumericDType::I32,
+            &pool,
+            |i| crate::numeric_scalar::NumericScalar::from_i32(i as i32 * -3),
+        )
+        .unwrap();
+
+        let mut serialized = Vec::new();
+        ciborium::into_writer(&original, &mut serialized).unwrap();
+        let deserialized: NumericTensor<'static, DynRank, SystemPool> =
+            ciborium::from_reader(serialized.as_slice()).unwrap();
+
+        assert_eq!(deserialized.shape(), original.shape());
+        assert_eq!(deserialized.dtype(), original.dtype());
+        for i in 0..original.numel() {
+            assert_eq!(deserialized.read_element(i), original.read_element(i));
+        }
+    }
+
+    #[test]
+    fn clone_system_pool_tensor() {
+        let pool = SystemPool;
+        let original = NumericTensor::<DynRank, SystemPool>::from_fn(
+            vec![3],
+            NumericDType::F32,
+            &pool,
+            |i| crate::numeric_scalar::NumericScalar::from_f32(i as f32),
+        )
+        .unwrap();
+
+        let cloned = original.clone();
+        assert_eq!(cloned.shape(), original.shape());
+        assert_eq!(cloned.dtype(), original.dtype());
+        for i in 0..original.numel() {
+            assert_eq!(cloned.read_element(i), original.read_element(i));
+        }
     }
 }

@@ -6,7 +6,11 @@ use log::info;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::HashMap;
-use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
+use whisper_tensor::numeric_dtype::NumericDType;
+use whisper_tensor::numeric_scalar::NumericScalar;
+use whisper_tensor::numeric_tensor::NumericTensor;
+use whisper_tensor::pool::SystemPool;
+use whisper_tensor::tensor_rank::DynRank;
 use whisper_tensor::interfaces::AnyInterface;
 use whisper_tensor::metadata::TokenizerInfo;
 use whisper_tensor::super_graph::links::SuperGraphLink;
@@ -96,11 +100,10 @@ impl LLMExplorerApp {
                     let returned_tokens = shape[0];
                     let mut outputs = Vec::new();
                     for i in 0..returned_tokens as usize {
-                        let sliced_output_tensor = response_tokens
-                            .slice(&[i..i + 1, 0..logits_per_token as usize])
-                            .unwrap();
-                        let output = sliced_output_tensor.flatten();
-                        let output_vec: Vec<f32> = output.try_into().unwrap();
+                        let row_start = i * logits_per_token as usize;
+                        let output_vec: Vec<f32> = (0..logits_per_token as usize)
+                            .map(|j| response_tokens.read_element(row_start + j).to_f64() as f32)
+                            .collect();
                         let mut idx_and_val = output_vec
                             .iter()
                             .enumerate()
@@ -435,7 +438,13 @@ impl LLMExplorerApp {
                         }
                         self.progress_widget_state.clear();
                         let tokens = self.llm_explorer_cached_token_list.clone().unwrap();
-                        let tokens_tensor = NDArrayNumericTensor::from_vec(tokens.clone()).to_dyn();
+                        let tokens_tensor = NumericTensor::<DynRank, SystemPool>::from_fn(
+                            vec![tokens.len() as u64],
+                            NumericDType::U32,
+                            &SystemPool,
+                            |i| NumericScalar::from_u32(tokens[i]),
+                        )
+                        .unwrap();
                         let token =
                             server_request_manager.submit_supergraph_request(SuperGraphRequest {
                                 do_node_execution_reports: false,

@@ -780,15 +780,10 @@ impl GraphExplorerApp {
                                                         let logits_per_token = shape[1];
                                                         let returned_tokens = shape[0];
                                                         for i in 0..returned_tokens as usize {
-                                                            let sliced_output_tensor = response_tokens
-                                                                .slice(&[
-                                                                    i..i + 1,
-                                                                    0..logits_per_token as usize,
-                                                                ])
-                                                                .unwrap();
-                                                            let output = sliced_output_tensor.flatten();
-                                                            let output_vec: Vec<f32> =
-                                                                output.try_into().unwrap();
+                                                            let row_start = i * logits_per_token as usize;
+                                                            let output_vec: Vec<f32> = (0..logits_per_token as usize)
+                                                                .map(|j| response_tokens.read_element(row_start + j).to_f64() as f32)
+                                                                .collect();
                                                             let mut idx_and_val = output_vec
                                                                 .iter()
                                                                 .enumerate()
@@ -879,11 +874,12 @@ impl GraphExplorerApp {
                                                     if ui.button("Run").clicked() {
                                                         let tokens =
                                                             text_inference_data.tokens.clone();
-                                                        let tokens_tensor =
-                                                            NDArrayNumericTensor::from_vec(
-                                                                tokens.clone(),
-                                                            )
-                                                                .to_dyn();
+                                                        let tokens_tensor = NumericTensor::<DynRank, SystemPool>::from_fn(
+                                                            vec![tokens.len() as u64],
+                                                            NumericDType::U32,
+                                                            &SystemPool,
+                                                            |i| NumericScalar::from_u32(tokens[i]),
+                                                        ).unwrap();
                                                         text_inference_data.progress_widget_state.clear();
                                                         let swatch_settings = if state.do_explorer_swatches_in_view || state.do_all_explorer_swatches {
                                                             Some(AbbreviatedTensorReportSettings{
@@ -1210,40 +1206,51 @@ impl GraphExplorerApp {
                                                     }
                                                 };
 
+                                                let latent_shape = vec![
+                                                    1,
+                                                    channels as u64,
+                                                    sd_data.latent_h as u64,
+                                                    sd_data.latent_w as u64,
+                                                ];
                                                 let latent_tensor =
-                                                    NDArrayNumericTensor::from_vec_shape(
-                                                        initial_noise,
-                                                        &vec![
-                                                            1,
-                                                            channels as u64,
-                                                            sd_data.latent_h as u64,
-                                                            sd_data.latent_w as u64,
-                                                        ],
+                                                    NumericTensor::<DynRank, SystemPool>::from_fn(
+                                                        latent_shape,
+                                                        NumericDType::F32,
+                                                        &SystemPool,
+                                                        |i| NumericScalar::from_f32(initial_noise[i]),
                                                     )
                                                     .unwrap();
 
                                                 let timesteps_tensor =
-                                                    NDArrayNumericTensor::from_vec_shape(
-                                                        timestep_values,
-                                                        &vec![sd_data.num_steps as u64],
+                                                    NumericTensor::<DynRank, SystemPool>::from_fn(
+                                                        vec![sd_data.num_steps as u64],
+                                                        NumericDType::F32,
+                                                        &SystemPool,
+                                                        |i| NumericScalar::from_f32(timestep_values[i]),
                                                     )
                                                     .unwrap();
                                                 let dt_tensor =
-                                                    NDArrayNumericTensor::from_vec_shape(
-                                                        dt_values,
-                                                        &vec![sd_data.num_steps as u64],
+                                                    NumericTensor::<DynRank, SystemPool>::from_fn(
+                                                        vec![sd_data.num_steps as u64],
+                                                        NumericDType::F32,
+                                                        &SystemPool,
+                                                        |i| NumericScalar::from_f32(dt_values[i]),
                                                     )
                                                     .unwrap();
                                                 let sigmas_tensor =
-                                                    NDArrayNumericTensor::from_vec_shape(
-                                                        sigma_values,
-                                                        &vec![sd_data.num_steps as u64],
+                                                    NumericTensor::<DynRank, SystemPool>::from_fn(
+                                                        vec![sd_data.num_steps as u64],
+                                                        NumericDType::F32,
+                                                        &SystemPool,
+                                                        |i| NumericScalar::from_f32(sigma_values[i]),
                                                     )
                                                     .unwrap();
                                                 let iter_count =
-                                                    NDArrayNumericTensor::from_vec_shape(
-                                                        vec![sd_data.num_steps as i64],
-                                                        &vec![1],
+                                                    NumericTensor::<DynRank, SystemPool>::from_fn(
+                                                        vec![1],
+                                                        NumericDType::I64,
+                                                        &SystemPool,
+                                                        |_| NumericScalar::from_i64(sd_data.num_steps as i64),
                                                     )
                                                     .unwrap();
 
@@ -1269,10 +1276,13 @@ impl GraphExplorerApp {
                                                     sd_interface.guidance_scale_input
                                                 {
                                                     let guidance =
-                                                        NDArrayNumericTensor::from_vec(vec![
-                                                            sd_data.guidance_scale,
-                                                        ])
-                                                        .to_dyn();
+                                                        NumericTensor::<DynRank, SystemPool>::from_fn(
+                                                            vec![1],
+                                                            NumericDType::F32,
+                                                            &SystemPool,
+                                                            |_| NumericScalar::from_f32(sd_data.guidance_scale),
+                                                        )
+                                                        .unwrap();
                                                     tensor_inputs.insert(gs_link, guidance);
                                                 }
 
@@ -1636,13 +1646,17 @@ impl GraphExplorerApp {
                                                                 .style_for_token_count(approx_tokens)
                                                             {
                                                                 Ok(style_values) => {
-                                                                    let style = NDArrayNumericTensor::<DynRank>::from_vec_shape(
-                                                                        style_values,
-                                                                        &vec![1, KokoroVoiceEmbedding::STYLE_DIM as u64],
+                                                                    let style = NumericTensor::<DynRank, SystemPool>::from_fn(
+                                                                        vec![1, KokoroVoiceEmbedding::STYLE_DIM as u64],
+                                                                        NumericDType::F32,
+                                                                        &SystemPool,
+                                                                        |i| NumericScalar::from_f32(style_values[i]),
                                                                     ).unwrap();
-                                                                    let speed = NDArrayNumericTensor::<DynRank>::from_vec_shape(
-                                                                        vec![tts_data.speed],
-                                                                        &vec![1],
+                                                                    let speed = NumericTensor::<DynRank, SystemPool>::from_fn(
+                                                                        vec![1],
+                                                                        NumericDType::F32,
+                                                                        &SystemPool,
+                                                                        |_| NumericScalar::from_f32(tts_data.speed),
                                                                     ).unwrap();
                                                                     tensor_inputs
                                                                         .insert(*style_link, style);
@@ -1674,15 +1688,20 @@ impl GraphExplorerApp {
                                                     } => {
                                                         let length_scale =
                                                             1.0 / tts_data.speed.max(0.1);
-                                                        let scales = NDArrayNumericTensor::<DynRank>::from_vec_shape(
-                                                            vec![0.667f32, length_scale, 0.8],
-                                                            &vec![3],
+                                                        let scale_values = [0.667f32, length_scale, 0.8];
+                                                        let scales = NumericTensor::<DynRank, SystemPool>::from_fn(
+                                                            vec![3],
+                                                            NumericDType::F32,
+                                                            &SystemPool,
+                                                            |i| NumericScalar::from_f32(scale_values[i]),
                                                         ).unwrap();
                                                         tensor_inputs.insert(*scales_link, scales);
                                                         if let Some(sid_link) = speaker_id_link {
-                                                            let speaker_id = NDArrayNumericTensor::<DynRank>::from_vec_shape(
-                                                                vec![tts_data.piper_speaker_id],
-                                                                &vec![1],
+                                                            let speaker_id = NumericTensor::<DynRank, SystemPool>::from_fn(
+                                                                vec![1],
+                                                                NumericDType::I64,
+                                                                &SystemPool,
+                                                                |_| NumericScalar::from_i64(tts_data.piper_speaker_id),
                                                             ).unwrap();
                                                             tensor_inputs.insert(
                                                                 *sid_link,
@@ -1950,74 +1969,55 @@ impl GraphExplorerApp {
                                             if let Some(token_tensor) =
                                                 data.tensor_outputs.remove(&output_link)
                                             {
-                                                match token_tensor.cast(DType::U32) {
-                                                    Ok(token_tensor) => {
-                                                        match token_tensor.flatten().try_to_vec() {
-                                                            Ok(mut token_ids) => {
-                                                                if let Some(pos) = token_ids
-                                                                    .iter()
-                                                                    .position(|&token| token == eos_token_id)
-                                                                {
-                                                                    token_ids.truncate(pos);
-                                                                }
-                                                                stt_data.transcription_tokens =
-                                                                    Some(token_ids.clone());
-                                                                stt_data.transcription_text = None;
-                                                                match loaded_tokenizers
-                                                                    .loaded_tokenizers
-                                                                    .get(&tokenizer_info)
-                                                                    .cloned()
-                                                                    .flatten()
-                                                                {
-                                                                    Some(Ok(tokenizer)) => {
-                                                                        match tokenizer.decode(&token_ids) {
-                                                                            Ok(text) => {
-                                                                                stt_data.status_message = Some(
-                                                                                    format!(
-                                                                                        "Transcription complete ({} tokens)",
-                                                                                        token_ids.len()
-                                                                                    ),
-                                                                                );
-                                                                                stt_data.transcription_text =
-                                                                                    Some(text);
-                                                                            }
-                                                                            Err(err) => {
-                                                                                stt_data.status_message = Some(
-                                                                                    format!(
-                                                                                        "Token decode failed: {err} (raw tokens shown)"
-                                                                                    ),
-                                                                                );
-                                                                            }
-                                                                        }
-                                                                    }
-                                                                    Some(Err(err)) => {
-                                                                        stt_data.status_message = Some(format!(
-                                                                            "Tokenizer load failed: {err} (raw tokens shown)"
-                                                                        ));
-                                                                    }
-                                                                    None => {
-                                                                        stt_data.status_message = Some(
-                                                                            "Tokenizer not loaded yet (raw tokens shown)"
-                                                                                .to_string(),
-                                                                        );
-                                                                    }
-                                                                }
+                                                let mut token_ids: Vec<u32> = (0..token_tensor.numel())
+                                                    .map(|i| token_tensor.read_element(i).to_i64() as u32)
+                                                    .collect();
+                                                if let Some(pos) = token_ids
+                                                    .iter()
+                                                    .position(|&token| token == eos_token_id)
+                                                {
+                                                    token_ids.truncate(pos);
+                                                }
+                                                stt_data.transcription_tokens =
+                                                    Some(token_ids.clone());
+                                                stt_data.transcription_text = None;
+                                                match loaded_tokenizers
+                                                    .loaded_tokenizers
+                                                    .get(&tokenizer_info)
+                                                    .cloned()
+                                                    .flatten()
+                                                {
+                                                    Some(Ok(tokenizer)) => {
+                                                        match tokenizer.decode(&token_ids) {
+                                                            Ok(text) => {
+                                                                stt_data.status_message = Some(
+                                                                    format!(
+                                                                        "Transcription complete ({} tokens)",
+                                                                        token_ids.len()
+                                                                    ),
+                                                                );
+                                                                stt_data.transcription_text =
+                                                                    Some(text);
                                                             }
                                                             Err(err) => {
-                                                                stt_data.status_message = Some(format!(
-                                                                    "Error: token decode failed: {err}"
-                                                                ));
-                                                                stt_data.transcription_text = None;
-                                                                stt_data.transcription_tokens = None;
+                                                                stt_data.status_message = Some(
+                                                                    format!(
+                                                                        "Token decode failed: {err} (raw tokens shown)"
+                                                                    ),
+                                                                );
                                                             }
                                                         }
                                                     }
-                                                    Err(err) => {
+                                                    Some(Err(err)) => {
                                                         stt_data.status_message = Some(format!(
-                                                            "Error: token cast failed: {err}"
+                                                            "Tokenizer load failed: {err} (raw tokens shown)"
                                                         ));
-                                                        stt_data.transcription_text = None;
-                                                        stt_data.transcription_tokens = None;
+                                                    }
+                                                    None => {
+                                                        stt_data.status_message = Some(
+                                                            "Tokenizer not loaded yet (raw tokens shown)"
+                                                                .to_string(),
+                                                        );
                                                     }
                                                 }
                                             } else {
@@ -2184,9 +2184,11 @@ impl GraphExplorerApp {
                                                                         interface.model_ids.len()
                                                                     ));
                                                                 } else {
-                                                                    let audio_tensor = NDArrayNumericTensor::<DynRank>::from_vec_shape(
-                                                                        samples.clone(),
-                                                                        &vec![samples.len() as u64],
+                                                                    let audio_tensor = NumericTensor::<DynRank, SystemPool>::from_fn(
+                                                                        vec![samples.len() as u64],
+                                                                        NumericDType::F32,
+                                                                        &SystemPool,
+                                                                        |i| NumericScalar::from_f32(samples[i]),
                                                                     )
                                                                     .unwrap();
 

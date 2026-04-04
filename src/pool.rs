@@ -161,6 +161,24 @@ impl Drop for SystemBuffer {
     }
 }
 
+impl Clone for SystemBuffer {
+    fn clone(&self) -> Self {
+        if self.len == 0 {
+            return SystemBuffer {
+                ptr: std::ptr::NonNull::dangling().as_ptr(),
+                len: 0,
+            };
+        }
+        let ptr = unsafe { alloc_aligned_zeroed(self.len) };
+        assert!(!ptr.is_null(), "SystemBuffer::clone allocation failed");
+        unsafe { std::ptr::copy_nonoverlapping(self.ptr, ptr, self.len) };
+        SystemBuffer {
+            ptr,
+            len: self.len,
+        }
+    }
+}
+
 impl std::fmt::Debug for SystemBuffer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SystemBuffer")

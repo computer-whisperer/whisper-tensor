@@ -221,7 +221,7 @@ pub async fn handle_client_session(
                         tracing::debug!("Getting stored tensor");
                         let res = model_server.get_stored_tensor_id(model_id, stored_tensor_id).await;
                         server_tx.send(WebsocketServerClientMessage::TensorStoreReturn(
-                            model_id, stored_tensor_id, res.map(|x| x.to_ndarray().unwrap())
+                            model_id, stored_tensor_id, res
                         )).ok();
                         on_message_sent();
                     }

@@ -1,7 +1,7 @@
 use crate::model_server::ModelServer;
 use crate::{
     AbbreviatedTensorReportSettings, AbbreviatedTensorValue, LoadedModelId, SuperGraphRequest,
-    SuperGraphRequestBackendMode, SuperGraphResponse, SuperGraphResponseData,
+    SuperGraphResponse, SuperGraphResponseData,
 };
 use crossbeam::queue::ArrayQueue;
 use log::error;
@@ -10,16 +10,14 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tokio::sync::{Notify, mpsc};
-use whisper_tensor::backends::eval_backend::EvalBackend;
-use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
 use whisper_tensor::graph::GlobalId;
-use whisper_tensor::migration::numeric_tensor::NumericTensor;
+use whisper_tensor::numeric_tensor::{NumericTensor, NumericTensorView};
+use whisper_tensor::pool::SystemPool;
 use whisper_tensor::super_graph::SuperGraphContext;
 use whisper_tensor::super_graph::cache::SuperGraphCache;
 use whisper_tensor::super_graph::data::SuperGraphData;
 use whisper_tensor::super_graph::observer::SuperGraphObserver;
-use whisper_tensor::symbolic_graph::SharedPoolTensor;
-use whisper_tensor::{DynRank, compiler};
+use whisper_tensor::tensor_rank::DynRank;
 
 #[derive(Debug)]
 pub struct SchedulerReportSuperGraphNodeExecuted {
@@ -34,7 +32,7 @@ pub struct SchedulerReportSuperGraphNodeExecuted {
 pub struct SchedulerReportSuperGraphTensorAssigned {
     pub attention: Option<u64>,
     pub path: Vec<GlobalId>,
-    pub value: NDArrayNumericTensor<DynRank>,
+    pub value: NumericTensor<'static, DynRank, SystemPool>,
 }
 
 #[derive(Debug)]
@@ -298,16 +296,16 @@ impl SuperGraphObserver for LocalSuperGraphObserver {
         }
     }
 
-    fn on_tensor_assigned(&mut self, path: &[GlobalId], tensor: &SharedPoolTensor) {
+    fn on_tensor_assigned(&mut self, path: &[GlobalId], tensor: &NumericTensorView<'_, DynRank>) {
         self.refresh_dynamic_settings();
-        let tensor_legacy = tensor.to_legacy();
         if let Some(reporter) = &mut self.reporter {
             if self.subscribed_tensors.contains(path) {
+                let owned = tensor.to_tensor(&SystemPool).unwrap();
                 let report = SchedulerReport::SuperGraphTensorAssignedFull(
                     SchedulerReportSuperGraphTensorAssigned {
                         attention: self.attention,
                         path: path.to_vec(),
-                        value: tensor_legacy.to_ndarray().unwrap(),
+                        value: owned,
                     },
                 );
                 reporter.push_report(report);
@@ -320,15 +318,13 @@ impl SuperGraphObserver for LocalSuperGraphObserver {
                         false
                     };
                 if do_it {
-                    let mut backend = EvalBackend::NDArray;
                     let report = SchedulerReport::SuperGraphTensorAssignedAbbreviated(
                         SchedulerReportSuperGraphTensorAssignedAbbreviated {
                             attention: self.attention,
                             path: path.to_vec(),
-                            value: AbbreviatedTensorValue::from_tensor(
-                                &tensor_legacy,
+                            value: AbbreviatedTensorValue::from_tensor_view(
+                                tensor,
                                 settings.downsampled_size,
-                                &mut backend,
                             ),
                         },
                     );
@@ -468,21 +464,17 @@ pub async fn scheduler(
                     };
                     // Dispatch tight loop
                     let result = tokio::task::spawn_blocking(move || {
-                        let mut ndarray_backend = EvalBackend::NDArray;
-                        let backend = &mut ndarray_backend;
                         {
+                            let pool = &SystemPool;
                             let mut super_graph_data = SuperGraphData::new();
                             for (link, tensor) in req.tensor_inputs {
-                                super_graph_data.tensors.insert(
-                                    link,
-                                    SharedPoolTensor::from(NumericTensor::from(tensor)),
-                                );
+                                super_graph_data.tensors.insert(link, tensor);
                             }
                             for (link, clip) in req.audio_inputs {
                                 super_graph_data.audio_clips.insert(
                                     link,
                                     whisper_tensor::super_graph::data::SuperGraphAudioClip::new(
-                                        SharedPoolTensor::from(NumericTensor::from(clip.samples)),
+                                        clip.samples,
                                         clip.sample_rate_hz,
                                     ),
                                 );
@@ -521,7 +513,7 @@ pub async fn scheduler(
                                     .map(|x| x.get_symbolic_graph())
                                     .collect();
                                 let mut context = SuperGraphContext {
-                                    pool: &whisper_tensor::pool::SystemPool,
+                                    pool,
                                     observer: &mut observer,
                                     caches: cache,
                                     symbolic_graphs: symbolic_graph_refs,
@@ -541,16 +533,14 @@ pub async fn scheduler(
                             } = res;
 
                             let mut tensor_outputs = tensors
-                                .iter()
-                                .map(|(k, v)| (*k, v.to_legacy().to_ndarray().unwrap()))
+                                .into_iter()
+                                .map(|(k, v)| (k, v))
                                 .collect::<HashMap<_, _>>();
                             for (link, image) in images {
-                                tensor_outputs
-                                    .insert(link, image.tensor.to_legacy().to_ndarray().unwrap());
+                                tensor_outputs.insert(link, image.tensor);
                             }
                             for (link, clip) in audio_clips {
-                                tensor_outputs
-                                    .insert(link, clip.samples.to_legacy().to_ndarray().unwrap());
+                                tensor_outputs.insert(link, clip.samples);
                             }
 
                             Ok(SuperGraphResponseData {

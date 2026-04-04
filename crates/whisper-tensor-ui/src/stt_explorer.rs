@@ -8,9 +8,11 @@ use crate::websockets::ServerRequestManager;
 use crate::widgets::progress_report::SuperGraphProgressWidgetState;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use whisper_tensor::DynRank;
-use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
-use whisper_tensor::dtype::DType;
+use whisper_tensor::numeric_dtype::NumericDType;
+use whisper_tensor::numeric_scalar::NumericScalar;
+use whisper_tensor::numeric_tensor::NumericTensor;
+use whisper_tensor::pool::SystemPool;
+use whisper_tensor::tensor_rank::DynRank;
 use whisper_tensor::interfaces::{AnyInterface, SpeechToTextInterface};
 use whisper_tensor::metadata::TokenizerInfo;
 use whisper_tensor::super_graph::links::SuperGraphLink;
@@ -220,24 +222,9 @@ impl STTExplorerApp {
                     return;
                 };
 
-                let token_tensor = match token_tensor.cast(DType::U32) {
-                    Ok(x) => x,
-                    Err(err) => {
-                        self.status_message = Some(format!("Error: token cast failed: {err}"));
-                        self.transcription_text = None;
-                        self.transcription_tokens = None;
-                        return;
-                    }
-                };
-                let mut token_ids: Vec<u32> = match token_tensor.flatten().try_to_vec() {
-                    Ok(x) => x,
-                    Err(err) => {
-                        self.status_message = Some(format!("Error: token decode failed: {err}"));
-                        self.transcription_text = None;
-                        self.transcription_tokens = None;
-                        return;
-                    }
-                };
+                let mut token_ids: Vec<u32> = (0..token_tensor.numel())
+                    .map(|i| token_tensor.read_element(i).to_i64() as u32)
+                    .collect();
                 if let Some(pos) = token_ids
                     .iter()
                     .position(|&token| token == pending.eos_token_id)
@@ -320,9 +307,11 @@ impl STTExplorerApp {
             return;
         }
 
-        let audio_tensor = NDArrayNumericTensor::<DynRank>::from_vec_shape(
-            samples.clone(),
-            &vec![samples.len() as u64],
+        let audio_tensor = NumericTensor::<DynRank, SystemPool>::from_fn(
+            vec![samples.len() as u64],
+            NumericDType::F32,
+            &SystemPool,
+            |i| NumericScalar::from_f32(samples[i]),
         )
         .unwrap();
 

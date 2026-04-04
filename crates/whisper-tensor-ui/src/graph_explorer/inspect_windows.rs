@@ -6,8 +6,9 @@ use crate::graph_explorer::{
 use crate::websockets::ServerRequestManager;
 use crate::widgets::tensor_view::{TensorViewState, tensor_view};
 use egui::{Color32, CornerRadius, RichText, Stroke, Vec2};
-use whisper_tensor::DynRank;
-use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
+use whisper_tensor::numeric_tensor::NumericTensor;
+use whisper_tensor::pool::SystemPool;
+use whisper_tensor::tensor_rank::DynRank;
 use whisper_tensor::graph::{GlobalId, Graph, GraphDyn, Property};
 use whisper_tensor::scalar_info::ScalarInfoTyped;
 use whisper_tensor::symbolic_graph::SymbolicGraph;
@@ -76,7 +77,7 @@ pub(crate) struct InspectWindowGraphLink {
 
     // Stored tensor fetching
     pub(crate) stored_value_requested: Option<TensorStoreTensorId>,
-    pub(crate) stored_value: Option<Result<NDArrayNumericTensor<DynRank>, String>>,
+    pub(crate) stored_value: Option<Result<NumericTensor<'static, DynRank, SystemPool>, String>>,
 
     // Tensor view states
     pub(crate) value_view_state: TensorViewState,
@@ -233,7 +234,7 @@ fn format_path_breadcrumb(
 }
 
 /// Compute statistics from a tensor
-pub(crate) fn compute_tensor_stats(tensor: &NDArrayNumericTensor<DynRank>) -> TensorStats {
+pub(crate) fn compute_tensor_stats(tensor: &NumericTensor<'static, DynRank, SystemPool>) -> TensorStats {
     let mut stats = TensorStats::default();
 
     // Get total elements
@@ -244,37 +245,33 @@ pub(crate) fn compute_tensor_stats(tensor: &NDArrayNumericTensor<DynRank>) -> Te
         return stats;
     }
 
-    // Flatten and convert to Vec<f32> for stats computation
-    let flattened = tensor.flatten();
-    if let Ok(values) = TryInto::<Vec<f32>>::try_into(flattened) {
-        let mut sum = 0.0f64;
-        let mut sum_sq = 0.0f64;
-        stats.min = f64::INFINITY;
-        stats.max = f64::NEG_INFINITY;
+    let mut sum = 0.0f64;
+    let mut sum_sq = 0.0f64;
+    stats.min = f64::INFINITY;
+    stats.max = f64::NEG_INFINITY;
 
-        for &v in &values {
-            let v64 = v as f64;
-            if v.is_nan() {
-                stats.nan_count += 1;
-            } else if v.is_infinite() {
-                stats.inf_count += 1;
-            } else {
-                if v == 0.0 {
-                    stats.zero_count += 1;
-                }
-                stats.min = stats.min.min(v64);
-                stats.max = stats.max.max(v64);
-                sum += v64;
-                sum_sq += v64 * v64;
+    for i in 0..stats.total_elements {
+        let v64 = tensor.read_element(i).to_f64();
+        if v64.is_nan() {
+            stats.nan_count += 1;
+        } else if v64.is_infinite() {
+            stats.inf_count += 1;
+        } else {
+            if v64 == 0.0 {
+                stats.zero_count += 1;
             }
+            stats.min = stats.min.min(v64);
+            stats.max = stats.max.max(v64);
+            sum += v64;
+            sum_sq += v64 * v64;
         }
+    }
 
-        let valid_count = stats.total_elements - stats.nan_count - stats.inf_count;
-        if valid_count > 0 {
-            stats.mean = sum / valid_count as f64;
-            let variance = (sum_sq / valid_count as f64) - (stats.mean * stats.mean);
-            stats.std = variance.max(0.0).sqrt();
-        }
+    let valid_count = stats.total_elements - stats.nan_count - stats.inf_count;
+    if valid_count > 0 {
+        stats.mean = sum / valid_count as f64;
+        let variance = (sum_sq / valid_count as f64) - (stats.mean * stats.mean);
+        stats.std = variance.max(0.0).sqrt();
     }
 
     stats

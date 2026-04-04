@@ -267,7 +267,7 @@ async fn handle_socket(
                                             tracing::debug!("Getting stored tensor");
                                             let res = model_server.get_stored_tensor_id(model_id, stored_tensor_id).await;
                                             let msg_out = WebsocketServerClientMessage::TensorStoreReturn(
-                                                model_id, stored_tensor_id, res.map(|x| x.to_ndarray().unwrap())
+                                                model_id, stored_tensor_id, res
                                             );
                                             send_message(&mut socket, msg_out).await;
                                         }

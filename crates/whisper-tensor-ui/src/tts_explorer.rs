@@ -6,7 +6,11 @@ use crate::websockets::ServerRequestManager;
 use crate::widgets::progress_report::SuperGraphProgressWidgetState;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
+use whisper_tensor::numeric_dtype::NumericDType;
+use whisper_tensor::numeric_scalar::NumericScalar;
+use whisper_tensor::numeric_tensor::NumericTensor;
+use whisper_tensor::pool::SystemPool;
+use whisper_tensor::tensor_rank::DynRank;
 use whisper_tensor::interfaces::{
     AnyInterface, KokoroVoiceEmbedding, TTSInputConfig, TextToSpeechInterface,
 };
@@ -35,7 +39,7 @@ impl Default for TTSExplorerState {
 pub(crate) struct TTSExplorerApp {
     selected_interface_id: Option<InterfaceId>,
     pending_request: Option<(u64, SuperGraphLink, u32)>,
-    generated_audio: Option<NDArrayNumericTensor<whisper_tensor::DynRank>>,
+    generated_audio: Option<NumericTensor<'static, DynRank, SystemPool>>,
     generated_sample_rate_hz: Option<u32>,
     status_message: Option<String>,
     progress_widget_state: SuperGraphProgressWidgetState,
@@ -306,16 +310,15 @@ impl TTSExplorerApp {
                         return;
                     }
                 };
-                let style = NDArrayNumericTensor::<whisper_tensor::DynRank>::from_vec_shape(
-                    style_values,
-                    &vec![1, KokoroVoiceEmbedding::STYLE_DIM as u64],
-                )
-                .unwrap();
-                let speed = NDArrayNumericTensor::<whisper_tensor::DynRank>::from_vec_shape(
-                    vec![state.speed],
-                    &vec![1],
-                )
-                .unwrap();
+                let style = NumericTensor::<DynRank, SystemPool>::from_fn(
+                    vec![1, KokoroVoiceEmbedding::STYLE_DIM as u64],
+                    NumericDType::F32, &SystemPool,
+                    |i| NumericScalar::from_f32(style_values[i]),
+                ).unwrap();
+                let speed = NumericTensor::<DynRank, SystemPool>::from_fn(
+                    vec![1], NumericDType::F32, &SystemPool,
+                    |_| NumericScalar::from_f32(state.speed),
+                ).unwrap();
                 tensor_inputs.insert(*style_link, style);
                 tensor_inputs.insert(*speed_link, speed);
             }
@@ -325,18 +328,17 @@ impl TTSExplorerApp {
                 ..
             } => {
                 let length_scale = 1.0 / state.speed.max(0.1);
-                let scales = NDArrayNumericTensor::<whisper_tensor::DynRank>::from_vec_shape(
-                    vec![0.667f32, length_scale, 0.8],
-                    &vec![3],
-                )
-                .unwrap();
+                let scale_vals = [0.667f32, length_scale, 0.8];
+                let scales = NumericTensor::<DynRank, SystemPool>::from_fn(
+                    vec![3], NumericDType::F32, &SystemPool,
+                    |i| NumericScalar::from_f32(scale_vals[i]),
+                ).unwrap();
                 tensor_inputs.insert(*scales_link, scales);
                 if let Some(sid_link) = speaker_id_link {
-                    let sid = NDArrayNumericTensor::<whisper_tensor::DynRank>::from_vec_shape(
-                        vec![state.piper_speaker_id],
-                        &vec![1],
-                    )
-                    .unwrap();
+                    let sid = NumericTensor::<DynRank, SystemPool>::from_fn(
+                        vec![1], NumericDType::I64, &SystemPool,
+                        |_| NumericScalar::from_i64(state.piper_speaker_id),
+                    ).unwrap();
                     tensor_inputs.insert(*sid_link, sid);
                 }
             }

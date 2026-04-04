@@ -78,9 +78,11 @@ use tensor_swatch::build_tensor_swatch;
 use voice_helpers::{ensure_kokoro_voice_selection, selected_kokoro_voice};
 #[cfg(target_arch = "wasm32")]
 use web_time::{Duration, Instant};
-use whisper_tensor::DynRank;
-use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
-use whisper_tensor::dtype::DType;
+use whisper_tensor::numeric_dtype::NumericDType;
+use whisper_tensor::numeric_scalar::NumericScalar;
+use whisper_tensor::numeric_tensor::NumericTensor;
+use whisper_tensor::pool::SystemPool;
+use whisper_tensor::tensor_rank::DynRank;
 use whisper_tensor::graph::{GlobalId, SlotDirection};
 use whisper_tensor::interfaces::{
     AnyInterface, ImageGenerationInterface, KokoroVoiceEmbedding, TTSInputConfig,
@@ -182,7 +184,7 @@ pub(crate) struct TTSInferenceData {
     selected_mode: SuperGraphRequestBackendMode,
     pending_request: Option<(u64, SuperGraphLink, u32)>,
     progress_widget_state: SuperGraphProgressWidgetState,
-    generated_audio: Option<NDArrayNumericTensor<DynRank>>,
+    generated_audio: Option<NumericTensor<'static, DynRank, SystemPool>>,
     generated_sample_rate_hz: Option<u32>,
     status_message: Option<String>,
 }
@@ -244,7 +246,7 @@ pub(crate) struct GraphExplorerApp {
     pub(crate) next_explorer_hovered: Option<GlobalId>,
     inspect_window_tensor_subscriptions: HashSet<Vec<GlobalId>>,
     inspect_window_tensor_subscription_returns:
-        HashMap<Vec<GlobalId>, NDArrayNumericTensor<DynRank>>,
+        HashMap<Vec<GlobalId>, NumericTensor<'static, DynRank, SystemPool>>,
     pub inspect_windows: Vec<AnyInspectWindow>,
     graph_layouts: HashMap<Vec<GlobalId>, Result<GraphLayout, GraphLayoutError>>,
     model_view_scene_rects: HashMap<Vec<GlobalId>, Rect>,
