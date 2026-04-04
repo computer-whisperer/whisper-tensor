@@ -8,7 +8,6 @@ use crate::dtype::DType;
 use crate::graph::{
     GlobalId, Graph, Link, LinkCategory, LinkMetadata, Node, NodeMetadata, Property,
 };
-use crate::migration::numeric_scalar::NumericScalar;
 use crate::numeric_dtype::{NumericDType, ONNXDType};
 use crate::scalar_info::ScalarInfoTyped;
 use crate::symbolic_graph::ops::{AnyOperation, EvalError, Operation};
@@ -16,8 +15,6 @@ use crate::symbolic_graph::tensor_store::{StoredTensor, TensorStore, TensorStore
 use crate::symbolic_scalar::{SymbolicResolver, SymbolicScalar, SymbolicScalarTyped};
 use crate::tensor_rank::DynRank;
 use crate::{TrigOp, onnx};
-use arbitrary_int::traits::Integer;
-use arbitrary_int::{i4, u4};
 use prost::Message;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -1345,6 +1342,7 @@ impl SymbolicGraph {
 /// Unpack ONNX 4-bit packed data: each byte holds two elements,
 /// first in the low nibble (bits 0-3), second in the high nibble (bits 4-7).
 /// Returns exactly `numel` unpacked values (each as a u8 in 0..=15).
+#[cfg(test)]
 fn unpack_4bit_pairs(packed: &[u8], numel: usize) -> Vec<u8> {
     let mut out = Vec::with_capacity(numel);
     for &byte in packed {
@@ -1538,196 +1536,6 @@ pub(crate) fn tensor_proto_to_pool_tensor_from_ndarray(
         tensor.write_element(i, concrete.read_element(i));
     }
     Ok(tensor)
-}
-
-impl TryFrom<&onnx::TensorProto> for NDArrayNumericTensor<DynRank> {
-    type Error = ONNXDecodingError;
-
-    fn try_from(tensor: &onnx::TensorProto) -> Result<Self, Self::Error> {
-        let dtype = DType::try_from(
-            onnx::tensor_proto::DataType::try_from(tensor.data_type)
-                .map_err(|x| ONNXDecodingError::ProtobufDecodeError(anyhow::Error::from(x)))?,
-        )?;
-
-        let shape: Vec<u64> = tensor.dims.iter().map(|x| *x as u64).collect();
-
-        let out = if !tensor.raw_data.is_empty() {
-            match dtype {
-                // ONNX packs two 4-bit elements per byte: first in low nibble, second in high nibble.
-                DType::U4 => {
-                    let numel: u64 = shape.iter().product();
-                    let data: Vec<u4> = unpack_4bit_pairs(&tensor.raw_data, numel as usize)
-                        .iter()
-                        .map(|&b| u4::masked_new(b))
-                        .collect();
-                    NDArrayNumericTensor::from_vec_shape(data, &shape)?
-                }
-                DType::I4 => {
-                    let numel: u64 = shape.iter().product();
-                    let data: Vec<i4> = unpack_4bit_pairs(&tensor.raw_data, numel as usize)
-                        .iter()
-                        .map(|&b| i4::masked_new(b as i8))
-                        .collect();
-                    NDArrayNumericTensor::from_vec_shape(data, &shape)?
-                }
-                _ => NDArrayNumericTensor::from_raw_data(&tensor.raw_data, dtype, shape)?,
-            }
-        } else if !tensor.float_data.is_empty() {
-            match dtype {
-                DType::F32 => {
-                    NDArrayNumericTensor::from_vec_shape(tensor.float_data.clone(), &shape)?
-                }
-                _ => Err(ONNXDecodingError::UnsupportedONNX(
-                    "Unsupported dtype in float_data field!".to_string(),
-                ))?,
-            }
-        } else if !tensor.double_data.is_empty() {
-            match dtype {
-                DType::F64 => {
-                    NDArrayNumericTensor::from_vec_shape(tensor.double_data.clone(), &shape)?
-                }
-                _ => Err(ONNXDecodingError::UnsupportedONNX(
-                    "Unsupported dtype in double_data field!".to_string(),
-                ))?,
-            }
-        } else if !tensor.int32_data.is_empty() {
-            match dtype {
-                DType::I32 => {
-                    NDArrayNumericTensor::from_vec_shape(tensor.int32_data.clone(), &shape)?
-                }
-                DType::U16 => NDArrayNumericTensor::from_vec_shape(
-                    tensor
-                        .int32_data
-                        .iter()
-                        .map(|x| *x as u16)
-                        .collect::<Vec<_>>(),
-                    &shape,
-                )?,
-                DType::I16 => NDArrayNumericTensor::from_vec_shape(
-                    tensor
-                        .int32_data
-                        .iter()
-                        .map(|x| *x as i16)
-                        .collect::<Vec<_>>(),
-                    &shape,
-                )?,
-                DType::U8 => NDArrayNumericTensor::from_vec_shape(
-                    tensor
-                        .int32_data
-                        .iter()
-                        .map(|x| *x as u8)
-                        .collect::<Vec<_>>(),
-                    &shape,
-                )?,
-                DType::I8 => NDArrayNumericTensor::from_vec_shape(
-                    tensor
-                        .int32_data
-                        .iter()
-                        .map(|x| *x as i8)
-                        .collect::<Vec<_>>(),
-                    &shape,
-                )?,
-                DType::F8E4M3FN => NDArrayNumericTensor::from_vec_shape(
-                    tensor
-                        .int32_data
-                        .iter()
-                        .map(|x| float8::F8E4M3::from_bits(*x as u8))
-                        .collect::<Vec<_>>(),
-                    &shape,
-                )?,
-                DType::F8E5M2 => NDArrayNumericTensor::from_vec_shape(
-                    tensor
-                        .int32_data
-                        .iter()
-                        .map(|x| float8::F8E5M2::from_bits(*x as u8))
-                        .collect::<Vec<_>>(),
-                    &shape,
-                )?,
-                DType::F16 => NDArrayNumericTensor::from_vec_shape(
-                    tensor
-                        .int32_data
-                        .iter()
-                        .map(|x| half::f16::from_bits(*x as u16))
-                        .collect::<Vec<_>>(),
-                    &shape,
-                )?,
-                DType::BF16 => NDArrayNumericTensor::from_vec_shape(
-                    tensor
-                        .int32_data
-                        .iter()
-                        .map(|x| half::bf16::from_bits(*x as u16))
-                        .collect::<Vec<_>>(),
-                    &shape,
-                )?,
-                // ONNX packs two 4-bit elements per int32: first in low nibble, second in high nibble.
-                DType::U4 => {
-                    let numel: u64 = shape.iter().product();
-                    let bytes: Vec<u8> = tensor.int32_data.iter().map(|x| *x as u8).collect();
-                    let data: Vec<u4> = unpack_4bit_pairs(&bytes, numel as usize)
-                        .iter()
-                        .map(|&b| u4::masked_new(b))
-                        .collect();
-                    NDArrayNumericTensor::from_vec_shape(data, &shape)?
-                }
-                DType::I4 => {
-                    let numel: u64 = shape.iter().product();
-                    let bytes: Vec<u8> = tensor.int32_data.iter().map(|x| *x as u8).collect();
-                    let data: Vec<i4> = unpack_4bit_pairs(&bytes, numel as usize)
-                        .iter()
-                        .map(|&b| i4::masked_new(b as i8))
-                        .collect();
-                    NDArrayNumericTensor::from_vec_shape(data, &shape)?
-                }
-                _ => Err(ONNXDecodingError::UnsupportedONNX(
-                    "Unsupported dtype in int32_data field!".to_string(),
-                ))?,
-            }
-        } else if !tensor.int64_data.is_empty() {
-            match dtype {
-                DType::I64 => {
-                    NDArrayNumericTensor::from_vec_shape(tensor.int64_data.clone(), &shape)?
-                }
-                _ => Err(ONNXDecodingError::UnsupportedONNX(
-                    "Unsupported dtype in int32_data field!".to_string(),
-                ))?,
-            }
-        } else if !tensor.uint64_data.is_empty() {
-            match dtype {
-                DType::U64 => {
-                    NDArrayNumericTensor::from_vec_shape(tensor.uint64_data.clone(), &shape)?
-                }
-                DType::U32 => NDArrayNumericTensor::from_vec_shape(
-                    tensor
-                        .uint64_data
-                        .iter()
-                        .map(|x| *x as u32)
-                        .collect::<Vec<_>>(),
-                    &shape,
-                )?,
-                _ => Err(ONNXDecodingError::UnsupportedONNX(
-                    "Unsupported dtype in int32_data field!".to_string(),
-                ))?,
-            }
-        } else if !tensor.string_data.is_empty() {
-            match dtype {
-                DType::STRING => {
-                    let strings = tensor
-                        .string_data
-                        .iter()
-                        .map(|x| String::from_utf8(x.clone()).unwrap())
-                        .collect::<Vec<_>>();
-                    NDArrayNumericTensor::from_vec_shape(strings, &shape)?
-                }
-                _ => Err(ONNXDecodingError::UnsupportedONNX(
-                    "Unsupported dtype in string field!".to_string(),
-                ))?,
-            }
-        } else {
-            NDArrayNumericTensor::fill(NumericScalar::zero_of(dtype), &shape)?
-        };
-        assert_eq!(out.dtype(), dtype);
-        Ok(out)
-    }
 }
 
 pub struct SymbolicGraphMutator {
@@ -4011,24 +3819,27 @@ mod tests {
     #[test]
     fn test_onnx_u4_tensor_from_raw_data() {
         use crate::onnx;
+        use crate::pool::SystemPool;
         let mut tensor = onnx::TensorProto::default();
         tensor.data_type = onnx::tensor_proto::DataType::Uint4 as i32;
         tensor.dims = vec![4];
         // Pack [3, 7, 1, 15]: byte0 = 3 | (7<<4) = 0x73, byte1 = 1 | (15<<4) = 0xF1
         tensor.raw_data = vec![0x73, 0xF1];
 
-        let nd: NDArrayNumericTensor<DynRank> = (&tensor).try_into().unwrap();
-        assert_eq!(nd.dtype(), DType::U4);
-        assert_eq!(nd.num_elements(), 4);
-        assert_eq!(nd.get(&vec![0]).unwrap(), NumericScalar::U4(u4::new(3)));
-        assert_eq!(nd.get(&vec![1]).unwrap(), NumericScalar::U4(u4::new(7)));
-        assert_eq!(nd.get(&vec![2]).unwrap(), NumericScalar::U4(u4::new(1)));
-        assert_eq!(nd.get(&vec![3]).unwrap(), NumericScalar::U4(u4::new(15)));
+        let pool = SystemPool;
+        let t = tensor_proto_to_pool_tensor(&tensor, &pool).unwrap();
+        assert_eq!(t.dtype(), crate::numeric_dtype::NumericDType::U4);
+        assert_eq!(t.numel(), 4);
+        assert_eq!(t.read_element(0).to_i64(), 3);
+        assert_eq!(t.read_element(1).to_i64(), 7);
+        assert_eq!(t.read_element(2).to_i64(), 1);
+        assert_eq!(t.read_element(3).to_i64(), 15);
     }
 
     #[test]
     fn test_onnx_i4_tensor_from_int32_data() {
         use crate::onnx;
+        use crate::pool::SystemPool;
         let mut tensor = onnx::TensorProto::default();
         tensor.data_type = onnx::tensor_proto::DataType::Int4 as i32;
         tensor.dims = vec![4];
@@ -4037,12 +3848,13 @@ mod tests {
         // -8 in 4-bit = 0x8, 7 = 0x7 → byte = 0x8 | (0x7 << 4) = 0x78
         tensor.int32_data = vec![0x3F, 0x78];
 
-        let nd: NDArrayNumericTensor<DynRank> = (&tensor).try_into().unwrap();
-        assert_eq!(nd.dtype(), DType::I4);
-        assert_eq!(nd.num_elements(), 4);
-        assert_eq!(nd.get(&vec![0]).unwrap(), NumericScalar::I4(i4::new(-1)));
-        assert_eq!(nd.get(&vec![1]).unwrap(), NumericScalar::I4(i4::new(3)));
-        assert_eq!(nd.get(&vec![2]).unwrap(), NumericScalar::I4(i4::new(-8)));
-        assert_eq!(nd.get(&vec![3]).unwrap(), NumericScalar::I4(i4::new(7)));
+        let pool = SystemPool;
+        let t = tensor_proto_to_pool_tensor(&tensor, &pool).unwrap();
+        assert_eq!(t.dtype(), crate::numeric_dtype::NumericDType::I4);
+        assert_eq!(t.numel(), 4);
+        assert_eq!(t.read_element(0).to_i64(), -1);
+        assert_eq!(t.read_element(1).to_i64(), 3);
+        assert_eq!(t.read_element(2).to_i64(), -8);
+        assert_eq!(t.read_element(3).to_i64(), 7);
     }
 }
