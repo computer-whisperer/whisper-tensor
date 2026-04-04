@@ -39,10 +39,6 @@ impl MilliLoweringContext {
 
 #[derive(Debug, thiserror::Error)]
 pub enum MilliOpGraphError {
-    #[error(transparent)]
-    NumericTensorError(#[from] crate::migration::numeric_tensor::NumericTensorError),
-    #[error(transparent)]
-    NDArrayNumericTensorError(#[from] crate::backends::ndarray_backend::NDArrayNumericTensorError),
     #[error("Unimplemented milli operator: {0}")]
     UnimplementedOperatorError(String),
     #[error("Invalid input for operation {0}")]

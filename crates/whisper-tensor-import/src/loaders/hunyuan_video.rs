@@ -378,7 +378,6 @@ fn build_hunyuan_denoising_loop(
     model_dtype: DType,
     dit_model_index: usize,
 ) -> SuperGraphLink {
-    use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
     use whisper_tensor::milli_graph::ops::{Constant, SimpleBinary};
 
     let outer_final_latent = builder.new_tensor_link(rng);
@@ -422,17 +421,9 @@ fn build_hunyuan_denoising_loop(
         let (mut mg, input_map) =
             MilliOpGraph::new(std::iter::once(inner_guidance.global_id()), rng);
         let g_in = *input_map.get(&inner_guidance.global_id()).unwrap();
-        let scale = Constant::push_new(
-            &mut mg,
-            NDArrayNumericTensor::from_vec_shape(vec![1000.0f32], &vec![1]).unwrap(),
-            rng,
-        );
+        let scale = Constant::from_vec(&mut mg, vec![1000.0f32], rng);
         let scaled = SimpleBinary::mul(&mut mg, g_in, scale, rng);
-        let shape = Constant::push_new(
-            &mut mg,
-            NDArrayNumericTensor::from_vec_shape(vec![1i64], &vec![1]).unwrap(),
-            rng,
-        );
+        let shape = Constant::from_vec(&mut mg, vec![1i64], rng);
         let reshaped =
             whisper_tensor::milli_graph::ops::Reshape::push_new(&mut mg, scaled, shape, false, rng);
         mg.set_output_map(std::iter::once((reshaped, cast_guidance.global_id())));

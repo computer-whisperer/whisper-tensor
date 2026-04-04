@@ -1,7 +1,5 @@
 use crate::onnx_graph::WeightStorageStrategy;
 use std::collections::HashMap;
-use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
-use whisper_tensor::dtype::DType;
 use whisper_tensor::interfaces::TextInferenceTokensInLogitOutInterface;
 use whisper_tensor::metadata::TokenizerInfo;
 use whisper_tensor::milli_graph::MilliOpGraph;
@@ -98,9 +96,9 @@ pub(super) fn build_rnn_supergraph(
     let progress_tier_link = {
         let progress_tier_link = super_graph_builder.new_tensor_link(rng);
         let (mut milli_graph, _) = MilliOpGraph::new(std::iter::empty(), rng);
-        let tier_zero = Constant::push_new_with_label(
+        let tier_zero = Constant::from_vec_with_label(
             &mut milli_graph,
-            NDArrayNumericTensor::from_vec_shape(vec![0i64], &vec![1]).unwrap(),
+            vec![0i64],
             Some("progress_tier_zero".to_string()),
             rng,
         );
@@ -132,24 +130,31 @@ pub(super) fn build_rnn_supergraph(
                 .iter()
                 .map(|x| x.as_numeric().copied().unwrap_or(0))
                 .collect();
-            let input_tensor_dtype = input_tensor_info
+            let input_tensor_ndt = input_tensor_info
                 .dtype
                 .expect("state pair input tensor has no dtype")
-                .to_legacy();
-            let num_elements = input_tensor_shape.iter().product::<u64>();
-            let input_tensor = NDArrayNumericTensor::from_vec_shape(
-                vec![0.0; num_elements as usize],
-                &input_tensor_shape,
-            )
-            .unwrap()
-            .cast(input_tensor_dtype)
-            .unwrap();
-            let input_tensor_tid = Constant::push_new_with_label(
-                &mut milli_graph,
-                input_tensor,
-                Some(format!("state_init_{}", input_name)),
-                rng,
-            );
+                .expect_numeric("state pair input tensor dtype");
+            let input_tensor_tid = {
+                use whisper_tensor::DynRank;
+                use whisper_tensor::numeric_scalar::NumericScalar;
+                use whisper_tensor::numeric_tensor::NumericTensor;
+                use whisper_tensor::pool::SystemPool;
+                use whisper_tensor::symbolic_graph::InlineConstantTensor;
+                let tensor = NumericTensor::<DynRank, SystemPool>::from_fn(
+                    input_tensor_shape,
+                    input_tensor_ndt,
+                    &SystemPool,
+                    |_| NumericScalar::zero(input_tensor_ndt),
+                )
+                .expect("system pool allocation for state init constant");
+                let ict = InlineConstantTensor(std::sync::Arc::new(tensor));
+                Constant::push_new_pool(
+                    &mut milli_graph,
+                    ict,
+                    Some(format!("state_init_{}", input_name)),
+                    rng,
+                )
+            };
             output_map.insert(input_tensor_tid, link.global_id());
             output_order.push(link.global_id());
         }
@@ -230,9 +235,9 @@ pub(super) fn build_rnn_supergraph(
             Some("token.cast_dtype".to_string()),
             rng,
         );
-        let zero_tid = Constant::push_new_with_label(
+        let zero_tid = Constant::from_vec_with_label(
             &mut milli_graph,
-            NDArrayNumericTensor::from_vec_shape(vec![0i64], &vec![1]).unwrap(),
+            vec![0i64],
             Some("token.unsqueeze_axis".to_string()),
             rng,
         );
@@ -297,9 +302,9 @@ pub(super) fn build_rnn_supergraph(
             MilliOpGraph::new(std::iter::once(sub_logit_output.global_id()), rng);
         let milli_op_graph_input = *input_map.get(&sub_logit_output.global_id()).unwrap();
         let mut x = milli_op_graph_input;
-        let zero_tid = Constant::push_new_with_label(
+        let zero_tid = Constant::from_vec_with_label(
             &mut milli_graph,
-            NDArrayNumericTensor::from_vec_shape(vec![0i64], &vec![1]).unwrap(),
+            vec![0i64],
             Some("logits.squeeze_axis".to_string()),
             rng,
         );
@@ -336,9 +341,9 @@ pub(super) fn build_rnn_supergraph(
         let (mut milli_graph, input_map) =
             MilliOpGraph::new(std::iter::once(sub_step_in.global_id()), rng);
         let step_in = *input_map.get(&sub_step_in.global_id()).unwrap();
-        let one = Constant::push_new_with_label(
+        let one = Constant::from_vec_with_label(
             &mut milli_graph,
-            NDArrayNumericTensor::from_vec_shape(vec![1i64], &vec![1]).unwrap(),
+            vec![1i64],
             Some("step.one".to_string()),
             rng,
         );

@@ -95,9 +95,7 @@ pub use unary::{
 };
 pub use window::{WindowKind, WindowOperation};
 
-use crate::backends::ndarray_backend::NDArrayNumericTensorError;
 use crate::graph::{GlobalId, Node, Property};
-use crate::migration::numeric_tensor::NumericTensorError;
 use crate::milli_graph::{MilliLoweringContext, MilliOpGraph, MilliOpGraphError};
 use crate::numeric_dtype::NumericDType;
 use crate::symbolic_graph::SymbolicGraph;
@@ -109,10 +107,6 @@ use wyrand::WyRand;
 
 #[derive(Debug, thiserror::Error)]
 pub enum EvalError {
-    #[error(transparent)]
-    NDArrayNumericTensorError(#[from] NDArrayNumericTensorError),
-    #[error(transparent)]
-    NumericTensorError(#[from] NumericTensorError),
     #[error("Unimplemented operator: {0}")]
     UnimplementedOperatorError(String),
     #[error(transparent)]

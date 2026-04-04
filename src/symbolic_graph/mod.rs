@@ -3,7 +3,7 @@ pub mod observer;
 pub mod ops;
 pub mod tensor_store;
 
-use crate::backends::ndarray_backend::{NDArrayNumericTensor, NDArrayNumericTensorError};
+use crate::backends::ndarray_backend::NDArrayNumericTensor;
 use crate::dtype::DType;
 use crate::graph::{
     GlobalId, Graph, Link, LinkCategory, LinkMetadata, Node, NodeMetadata, Property,
@@ -46,8 +46,6 @@ pub enum ONNXDecodingError {
     DTypeError(#[from] crate::dtype::DTypeError),
     #[error(transparent)]
     ONNXDTypeError(#[from] crate::numeric_dtype::ONNXDTypeError),
-    #[error(transparent)]
-    NDArrayNumericTensorError(#[from] NDArrayNumericTensorError),
     #[error("Unsupported ONNX: {0}")]
     UnsupportedONNX(String),
 }
@@ -1505,37 +1503,6 @@ pub fn tensor_proto_to_pool_tensor<'p, P: crate::pool::Pool + 'p>(
         .allocate(layout.buffer_size_bytes())
         .map_err(|_| ONNXDecodingError::UnsupportedONNX("allocation failed".into()))?;
     Ok(NewTensor::from_parts(buf, layout))
-}
-
-/// Bridge: convert a legacy NDArrayNumericTensor to a pool tensor.
-pub(crate) fn tensor_proto_to_pool_tensor_from_ndarray(
-    nd: &NDArrayNumericTensor<DynRank>,
-) -> Result<
-    crate::numeric_tensor::NumericTensor<'static, DynRank, crate::pool::SystemPool>,
-    ONNXDecodingError,
-> {
-    use crate::numeric_tensor::TensorLayout;
-    use crate::pool::{Pool, SystemPool};
-    use crate::tensor_info::TensorInfo;
-
-    let info = TensorInfo::from_legacy(
-        &crate::migration::numeric_tensor::NumericTensor::NDArray(nd.clone()),
-        &SystemPool,
-    );
-    let concrete = info.as_concrete().ok_or_else(|| {
-        ONNXDecodingError::UnsupportedONNX("cannot bridge NDArray to pool tensor".into())
-    })?;
-    let ndt = concrete.dtype();
-    let shape = concrete.shape().clone();
-    let layout = TensorLayout::<DynRank>::row_major(shape, ndt);
-    let buf = SystemPool
-        .allocate(layout.buffer_size_bytes())
-        .map_err(|_| ONNXDecodingError::UnsupportedONNX("allocation failed".into()))?;
-    let mut tensor = crate::numeric_tensor::NumericTensor::from_parts(buf, layout);
-    for i in 0..concrete.numel() {
-        tensor.write_element(i, concrete.read_element(i));
-    }
-    Ok(tensor)
 }
 
 pub struct SymbolicGraphMutator {

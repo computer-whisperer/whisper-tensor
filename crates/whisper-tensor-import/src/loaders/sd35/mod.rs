@@ -298,7 +298,6 @@ pub(super) fn build_sd3_interface(
     use super::shared::interface_helpers::{
         build_eos_indices_node, build_sd3_denoising_loop, build_vae_decode_with_shift,
     };
-    use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
     use whisper_tensor::interfaces::{ImageGenerationInterface, SchedulerType};
     use whisper_tensor::milli_graph::MilliOpGraph;
     use whisper_tensor::milli_graph::ops::{Cast, Concat as MilliConcat, Constant, Pad, PadMode};
@@ -517,11 +516,7 @@ pub(super) fn build_sd3_interface(
         // [1,77,768] + [1,77,1280] -> [1,77,2048]
         let clip_hidden = MilliConcat::push_new(&mut mg, vec![l_hidden, g_hidden], -1, rng);
         // Pad feature dim to 4096, then append T5 along sequence dim.
-        let pads = Constant::push_new(
-            &mut mg,
-            NDArrayNumericTensor::from_vec_shape(vec![0i64, 0, 0, 0, 0, 2048], &vec![6]).unwrap(),
-            rng,
-        );
+        let pads = Constant::from_vec(&mut mg, vec![0i64, 0, 0, 0, 0, 2048], rng);
         let clip_hidden_padded = Pad::push_new(
             &mut mg,
             clip_hidden,
@@ -579,11 +574,7 @@ pub(super) fn build_sd3_interface(
         let g_pooled = *input_map.get(&clip_g_pooled_neg.global_id()).unwrap();
 
         let clip_hidden = MilliConcat::push_new(&mut mg, vec![l_hidden, g_hidden], -1, rng);
-        let pads = Constant::push_new(
-            &mut mg,
-            NDArrayNumericTensor::from_vec_shape(vec![0i64, 0, 0, 0, 0, 2048], &vec![6]).unwrap(),
-            rng,
-        );
+        let pads = Constant::from_vec(&mut mg, vec![0i64, 0, 0, 0, 0, 2048], rng);
         let clip_hidden_padded = Pad::push_new(
             &mut mg,
             clip_hidden,

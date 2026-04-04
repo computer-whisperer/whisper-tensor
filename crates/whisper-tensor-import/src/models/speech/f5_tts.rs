@@ -1,7 +1,5 @@
 use super::onnx_bytes_to_model;
 use std::path::Path;
-use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
-use whisper_tensor::dtype::DType;
 use whisper_tensor::interfaces::{TTSInputConfig, TextToSpeechInterface};
 use whisper_tensor::loader::{LoadedInterface, LoaderError, LoaderOutput};
 use whisper_tensor::milli_graph::MilliOpGraph;
@@ -249,9 +247,9 @@ fn build_f5_denoising_loop(
 
     {
         let (mut mg, _) = MilliOpGraph::new(std::iter::empty(), rng);
-        let tier = Constant::push_new_with_label(
+        let tier = Constant::from_vec_with_label(
             &mut mg,
-            NDArrayNumericTensor::from_vec_shape(vec![0i64], &vec![1]).unwrap(),
+            vec![0i64],
             Some("progress_tier_zero".to_string()),
             rng,
         );
@@ -328,12 +326,8 @@ fn build_f5_denoising_loop(
 
         // dt = 1/32 as f16 (matching model dtype)
         let dt_val = 1.0f32 / NFE_STEPS as f32;
-        let dt = Constant::push_new_with_label(
-            &mut mg,
-            NDArrayNumericTensor::from_vec_shape(vec![dt_val], &vec![1]).unwrap(),
-            Some("ode.dt".to_string()),
-            rng,
-        );
+        let dt =
+            Constant::from_vec_with_label(&mut mg, vec![dt_val], Some("ode.dt".to_string()), rng);
         let dt = Cast::push_new_with_label(
             &mut mg,
             dt,
@@ -343,12 +337,8 @@ fn build_f5_denoising_loop(
         );
 
         // one_minus_dt = 1 - dt
-        let one = Constant::push_new_with_label(
-            &mut mg,
-            NDArrayNumericTensor::from_vec_shape(vec![1.0f32], &vec![1]).unwrap(),
-            Some("ode.one".to_string()),
-            rng,
-        );
+        let one =
+            Constant::from_vec_with_label(&mut mg, vec![1.0f32], Some("ode.one".to_string()), rng);
         let one = Cast::push_new_with_label(
             &mut mg,
             one,
@@ -373,12 +363,8 @@ fn build_f5_denoising_loop(
         let (mut mg, input_map) =
             MilliOpGraph::new(std::iter::once(inner_step_in.global_id()), rng);
         let step_in = *input_map.get(&inner_step_in.global_id()).unwrap();
-        let one = Constant::push_new_with_label(
-            &mut mg,
-            NDArrayNumericTensor::from_vec_shape(vec![1i64], &vec![1]).unwrap(),
-            Some("step.one".to_string()),
-            rng,
-        );
+        let one =
+            Constant::from_vec_with_label(&mut mg, vec![1i64], Some("step.one".to_string()), rng);
         let step_next = SimpleBinary::add(&mut mg, step_in, one, rng);
         mg.set_output_map(std::iter::once((step_next, inner_step_out.global_id())));
         let mut node = SuperGraphNodeMilliOpGraph::new(mg, rng);

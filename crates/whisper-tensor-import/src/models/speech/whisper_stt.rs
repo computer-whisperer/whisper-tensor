@@ -1,7 +1,5 @@
 use crate::models::speech::whisper::WhisperConfig;
 use std::collections::HashMap;
-use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
-use whisper_tensor::dtype::DType;
 use whisper_tensor::milli_graph::MilliOpGraph;
 use whisper_tensor::milli_graph::ops::{
     ArgMax, Cast, Concat as MilliConcat, Constant, SimpleBinary, Squeeze, Unsqueeze, Where,
@@ -114,41 +112,25 @@ pub(crate) fn build_whisper_supergraph(
                 .map(|x| x as i64)
                 .collect()
         };
-        let prefix_token_tensor = Constant::push_new(
-            &mut mg,
-            NDArrayNumericTensor::from_vec_shape(
-                prefix_values.clone(),
-                &vec![prefix_values.len() as u64],
-            )
-            .unwrap(),
-            rng,
-        );
+        let prefix_token_tensor = Constant::from_vec(&mut mg, prefix_values.clone(), rng);
         output_map.insert(prefix_token_tensor, prefix_tokens_link.global_id());
         output_order.push(prefix_tokens_link.global_id());
 
-        let prefix_iterations = Constant::push_new(
-            &mut mg,
-            NDArrayNumericTensor::from_vec_shape(vec![prefix_values.len() as i64], &vec![1])
-                .unwrap(),
-            rng,
-        );
+        let prefix_iterations = Constant::from_vec(&mut mg, vec![prefix_values.len() as i64], rng);
         output_map.insert(prefix_iterations, prefix_iteration_count_link.global_id());
         output_order.push(prefix_iteration_count_link.global_id());
 
         let head_dim = config.d_model / config.decoder_attention_heads;
         for (_, link) in &kv_state_zero_links {
-            let init = Constant::push_new(
+            let init = Constant::from_vec_shape(
                 &mut mg,
-                NDArrayNumericTensor::from_vec_shape(
-                    Vec::<f32>::new(),
-                    &vec![
-                        1u64,
-                        config.decoder_attention_heads as u64,
-                        0,
-                        head_dim as u64,
-                    ],
-                )
-                .unwrap(),
+                Vec::<f32>::new(),
+                vec![
+                    1u64,
+                    config.decoder_attention_heads as u64,
+                    0,
+                    head_dim as u64,
+                ],
                 rng,
             );
             output_map.insert(init, link.global_id());
@@ -193,11 +175,7 @@ pub(crate) fn build_whisper_supergraph(
             MilliOpGraph::new(std::iter::once(prefill_token_in.global_id()), rng);
         let token_in = *input_map.get(&prefill_token_in.global_id()).unwrap();
         let token_i64 = Cast::push_new(&mut mg, token_in, NumericDType::I64, rng);
-        let axis0 = Constant::push_new(
-            &mut mg,
-            NDArrayNumericTensor::from_vec_shape(vec![0i64], &vec![1]).unwrap(),
-            rng,
-        );
+        let axis0 = Constant::from_vec(&mut mg, vec![0i64], rng);
         let token_2d = Unsqueeze::push_new(&mut mg, token_i64, axis0, rng);
         let out = prefill_builder.new_tensor_link(rng);
         prefill_builder.set_link_label(out, "decoder_input_ids");
@@ -238,11 +216,7 @@ pub(crate) fn build_whisper_supergraph(
         let (mut mg, input_map) =
             MilliOpGraph::new(std::iter::once(prefill_raw_logits.global_id()), rng);
         let logits = *input_map.get(&prefill_raw_logits.global_id()).unwrap();
-        let axis0 = Constant::push_new(
-            &mut mg,
-            NDArrayNumericTensor::from_vec_shape(vec![0i64], &vec![1]).unwrap(),
-            rng,
-        );
+        let axis0 = Constant::from_vec(&mut mg, vec![0i64], rng);
         let squeezed = Squeeze::push_new(&mut mg, logits, axis0, rng);
         let squeezed = Squeeze::push_new(&mut mg, squeezed, axis0, rng);
         let logits_f32 = Cast::push_new(&mut mg, squeezed, NumericDType::F32, rng);
@@ -328,17 +302,9 @@ pub(crate) fn build_whisper_supergraph(
             .unwrap();
         let next_token_scalar = ArgMax::push_new(&mut mg, last_logits, 0, false, false, rng);
         let next_token_scalar = Cast::push_new(&mut mg, next_token_scalar, NumericDType::I64, rng);
-        let axis0 = Constant::push_new(
-            &mut mg,
-            NDArrayNumericTensor::from_vec_shape(vec![0i64], &vec![1]).unwrap(),
-            rng,
-        );
+        let axis0 = Constant::from_vec(&mut mg, vec![0i64], rng);
         let next_token = Unsqueeze::push_new(&mut mg, next_token_scalar, axis0, rng);
-        let eos_token = Constant::push_new(
-            &mut mg,
-            NDArrayNumericTensor::from_vec_shape(vec![eos_token_id as i64], &vec![1]).unwrap(),
-            rng,
-        );
+        let eos_token = Constant::from_vec(&mut mg, vec![eos_token_id as i64], rng);
         let initial_finished = SimpleBinary::equal(&mut mg, next_token, eos_token, rng);
         mg.set_output_map([
             (next_token, token_state_init_link.global_id()),
@@ -355,16 +321,8 @@ pub(crate) fn build_whisper_supergraph(
     builder.set_link_label(generation_progress_zero_link, "generation_step_zero");
     {
         let (mut mg, _) = MilliOpGraph::new(std::iter::empty(), rng);
-        let loop_count = Constant::push_new(
-            &mut mg,
-            NDArrayNumericTensor::from_vec_shape(vec![max_decode_steps as i64], &vec![1]).unwrap(),
-            rng,
-        );
-        let progress_zero = Constant::push_new(
-            &mut mg,
-            NDArrayNumericTensor::from_vec_shape(vec![0i64], &vec![1]).unwrap(),
-            rng,
-        );
+        let loop_count = Constant::from_vec(&mut mg, vec![max_decode_steps as i64], rng);
+        let progress_zero = Constant::from_vec(&mut mg, vec![0i64], rng);
         mg.set_output_map([
             (loop_count, generation_iteration_count_link.global_id()),
             (progress_zero, generation_progress_zero_link.global_id()),
@@ -420,11 +378,7 @@ pub(crate) fn build_whisper_supergraph(
         let (mut mg, input_map) = MilliOpGraph::new(std::iter::once(sub_token_in.global_id()), rng);
         let token_in = *input_map.get(&sub_token_in.global_id()).unwrap();
         let token_i64 = Cast::push_new(&mut mg, token_in, NumericDType::I64, rng);
-        let axis0 = Constant::push_new(
-            &mut mg,
-            NDArrayNumericTensor::from_vec_shape(vec![0i64], &vec![1]).unwrap(),
-            rng,
-        );
+        let axis0 = Constant::from_vec(&mut mg, vec![0i64], rng);
         let token_2d = Unsqueeze::push_new(&mut mg, token_i64, axis0, rng);
         let out = sub_builder.new_tensor_link(rng);
         sub_builder.set_link_label(out, "decoder_input_ids");
@@ -472,11 +426,7 @@ pub(crate) fn build_whisper_supergraph(
         let finished_in = *input_map.get(&sub_finished_in.global_id()).unwrap();
         let step_in = *input_map.get(&sub_step_in.global_id()).unwrap();
 
-        let axis0 = Constant::push_new(
-            &mut mg,
-            NDArrayNumericTensor::from_vec_shape(vec![0i64], &vec![1]).unwrap(),
-            rng,
-        );
+        let axis0 = Constant::from_vec(&mut mg, vec![0i64], rng);
         let squeezed = Squeeze::push_new(&mut mg, logits, axis0, rng);
         let squeezed = Squeeze::push_new(&mut mg, squeezed, axis0, rng);
         let logits_f32 = Cast::push_new(&mut mg, squeezed, NumericDType::F32, rng);
@@ -484,19 +434,11 @@ pub(crate) fn build_whisper_supergraph(
         let next_token_scalar = Cast::push_new(&mut mg, next_token_scalar, NumericDType::I64, rng);
         let next_token = Unsqueeze::push_new(&mut mg, next_token_scalar, axis0, rng);
 
-        let eos_token = Constant::push_new(
-            &mut mg,
-            NDArrayNumericTensor::from_vec_shape(vec![eos_token_id as i64], &vec![1]).unwrap(),
-            rng,
-        );
+        let eos_token = Constant::from_vec(&mut mg, vec![eos_token_id as i64], rng);
         let eos_hit = SimpleBinary::equal(&mut mg, next_token, eos_token, rng);
         let next_finished = SimpleBinary::or(&mut mg, finished_in, eos_hit, rng);
         let emitted_token = Where::push_new(&mut mg, finished_in, eos_token, next_token, rng);
-        let one = Constant::push_new(
-            &mut mg,
-            NDArrayNumericTensor::from_vec_shape(vec![1i64], &vec![1]).unwrap(),
-            rng,
-        );
+        let one = Constant::from_vec(&mut mg, vec![1i64], rng);
         let next_step = SimpleBinary::add(&mut mg, step_in, one, rng);
 
         mg.set_output_map([
@@ -576,11 +518,7 @@ pub(crate) fn build_whisper_supergraph(
         let (mut mg, input_map) =
             MilliOpGraph::new(std::iter::once(generated_tokens_raw.global_id()), rng);
         let tokens = *input_map.get(&generated_tokens_raw.global_id()).unwrap();
-        let axis1 = Constant::push_new(
-            &mut mg,
-            NDArrayNumericTensor::from_vec_shape(vec![1i64], &vec![1]).unwrap(),
-            rng,
-        );
+        let axis1 = Constant::from_vec(&mut mg, vec![1i64], rng);
         let squeezed = Squeeze::push_new(&mut mg, tokens, axis1, rng);
         mg.set_output_map(std::iter::once((squeezed, out.global_id())));
         let mut node = SuperGraphNodeMilliOpGraph::new(mg, rng);

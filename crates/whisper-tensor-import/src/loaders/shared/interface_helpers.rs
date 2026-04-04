@@ -1,7 +1,6 @@
 //! Shared helpers for building image/video generation interface supergraphs.
 
 use rand::Rng;
-use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
 use whisper_tensor::dtype::DType;
 use whisper_tensor::milli_graph::MilliOpGraph;
 use whisper_tensor::milli_graph::ops::{
@@ -48,11 +47,7 @@ pub fn build_zeros_like(
 ) {
     let (mut mg, input_map) = MilliOpGraph::new(std::iter::once(input.global_id()), rng);
     let inp = *input_map.get(&input.global_id()).unwrap();
-    let zero = Constant::push_new(
-        &mut mg,
-        NDArrayNumericTensor::from_vec_shape(vec![0.0f32], &vec![1]).unwrap(),
-        rng,
-    );
+    let zero = Constant::from_vec(&mut mg, vec![0.0f32], rng);
     let zero_cast = whisper_tensor::milli_graph::ops::CastLike::push_new(&mut mg, zero, inp, rng);
     let zeros = SimpleBinary::mul(&mut mg, inp, zero_cast, rng);
     mg.set_output_map(std::iter::once((zeros, output.global_id())));
@@ -69,9 +64,9 @@ pub fn build_progress_init(
     label: &str,
 ) {
     let (mut mg, _) = MilliOpGraph::new(std::iter::empty(), rng);
-    let tier = Constant::push_new_with_label(
+    let tier = Constant::from_vec_with_label(
         &mut mg,
-        NDArrayNumericTensor::from_vec_shape(vec![0i64], &vec![1]).unwrap(),
+        vec![0i64],
         Some("progress_tier_zero".to_string()),
         rng,
     );
@@ -106,11 +101,7 @@ pub fn build_input_prep(
         NumericDType::from_legacy(model_dtype).unwrap(),
         rng,
     );
-    let ts_shape = Constant::push_new(
-        &mut mg,
-        NDArrayNumericTensor::from_vec_shape(vec![1i64], &vec![1]).unwrap(),
-        rng,
-    );
+    let ts_shape = Constant::from_vec(&mut mg, vec![1i64], rng);
     let ts_reshaped =
         whisper_tensor::milli_graph::ops::Reshape::push_new(&mut mg, ts_in, ts_shape, false, rng);
 
@@ -132,11 +123,7 @@ pub fn build_step_increment(
 ) {
     let (mut mg, input_map) = MilliOpGraph::new(std::iter::once(step_in.global_id()), rng);
     let s_in = *input_map.get(&step_in.global_id()).unwrap();
-    let one = Constant::push_new(
-        &mut mg,
-        NDArrayNumericTensor::from_vec_shape(vec![1i64], &vec![1]).unwrap(),
-        rng,
-    );
+    let one = Constant::from_vec(&mut mg, vec![1i64], rng);
     let s_next = SimpleBinary::add(&mut mg, s_in, one, rng);
     mg.set_output_map(std::iter::once((s_next, step_out.global_id())));
     let mut node = SuperGraphNodeMilliOpGraph::new(mg, rng);
@@ -198,9 +185,9 @@ pub(crate) fn build_denoising_loop(
 
     {
         let (mut mg, _) = MilliOpGraph::new(std::iter::empty(), rng);
-        let tier = Constant::push_new_with_label(
+        let tier = Constant::from_vec_with_label(
             &mut mg,
-            NDArrayNumericTensor::from_vec_shape(vec![0i64], &vec![1]).unwrap(),
+            vec![0i64],
             Some("progress_tier_zero".to_string()),
             rng,
         );
@@ -272,9 +259,9 @@ pub(crate) fn build_denoising_loop(
 
         // scale = 1 / sqrt(sigma^2 + 1)
         let sigma_sq = SimpleBinary::mul(&mut mg, sigma_in, sigma_in, rng);
-        let one = Constant::push_new_with_label(
+        let one = Constant::from_vec_with_label(
             &mut mg,
-            NDArrayNumericTensor::from_vec_shape(vec![1.0f32], &vec![1]).unwrap(),
+            vec![1.0f32],
             Some("sigma.one".to_string()),
             rng,
         );
@@ -297,9 +284,9 @@ pub(crate) fn build_denoising_loop(
             Some("timestep.cast_model_dtype".to_string()),
             rng,
         );
-        let zero_axis = Constant::push_new_with_label(
+        let zero_axis = Constant::from_vec_with_label(
             &mut mg,
-            NDArrayNumericTensor::from_vec_shape(vec![0i64], &vec![1]).unwrap(),
+            vec![0i64],
             Some("timestep.unsqueeze_axis".to_string()),
             rng,
         );
@@ -419,12 +406,8 @@ pub(crate) fn build_denoising_loop(
         let (mut mg, input_map) =
             MilliOpGraph::new(std::iter::once(inner_step_in.global_id()), rng);
         let step_in = *input_map.get(&inner_step_in.global_id()).unwrap();
-        let one = Constant::push_new_with_label(
-            &mut mg,
-            NDArrayNumericTensor::from_vec_shape(vec![1i64], &vec![1]).unwrap(),
-            Some("step.one".to_string()),
-            rng,
-        );
+        let one =
+            Constant::from_vec_with_label(&mut mg, vec![1i64], Some("step.one".to_string()), rng);
         let step_next = SimpleBinary::add(&mut mg, step_in, one, rng);
         mg.set_output_map(std::iter::once((step_next, inner_step_out.global_id())));
         let mut node = SuperGraphNodeMilliOpGraph::new(mg, rng);
@@ -532,10 +515,9 @@ pub(crate) fn build_vae_decode(
         let (mut mg, input_map) = MilliOpGraph::new(std::iter::once(latent.global_id()), rng);
         let lat_in = *input_map.get(&latent.global_id()).unwrap();
 
-        let scale = Constant::push_new_with_label(
+        let scale = Constant::from_vec_with_label(
             &mut mg,
-            NDArrayNumericTensor::from_vec_shape(vec![1.0f32 / vae_scale_factor], &vec![1])
-                .unwrap(),
+            vec![1.0f32 / vae_scale_factor],
             Some("vae.inv_scale".to_string()),
             rng,
         );
@@ -589,18 +571,17 @@ pub(crate) fn build_vae_decode_with_shift(
         let (mut mg, input_map) = MilliOpGraph::new(std::iter::once(latent.global_id()), rng);
         let lat_in = *input_map.get(&latent.global_id()).unwrap();
 
-        let inv_scale = Constant::push_new_with_label(
+        let inv_scale = Constant::from_vec_with_label(
             &mut mg,
-            NDArrayNumericTensor::from_vec_shape(vec![1.0f32 / vae_scale_factor], &vec![1])
-                .unwrap(),
+            vec![1.0f32 / vae_scale_factor],
             Some("vae.inv_scale".to_string()),
             rng,
         );
         let scaled = SimpleBinary::mul(&mut mg, lat_in, inv_scale, rng);
         let shifted = if vae_shift_factor != 0.0 {
-            let shift = Constant::push_new_with_label(
+            let shift = Constant::from_vec_with_label(
                 &mut mg,
-                NDArrayNumericTensor::from_vec_shape(vec![vae_shift_factor], &vec![1]).unwrap(),
+                vec![vae_shift_factor],
                 Some("vae.shift".to_string()),
                 rng,
             );
@@ -664,9 +645,9 @@ pub(crate) fn build_flux_denoising_loop(
 
     {
         let (mut mg, _) = MilliOpGraph::new(std::iter::empty(), rng);
-        let tier = Constant::push_new_with_label(
+        let tier = Constant::from_vec_with_label(
             &mut mg,
-            NDArrayNumericTensor::from_vec_shape(vec![0i64], &vec![1]).unwrap(),
+            vec![0i64],
             Some("progress_tier_zero".to_string()),
             rng,
         );
@@ -734,9 +715,9 @@ pub(crate) fn build_flux_denoising_loop(
         );
 
         // Reshape timestep from scalar to [1, 1]
-        let ts_shape = Constant::push_new_with_label(
+        let ts_shape = Constant::from_vec_with_label(
             &mut mg,
-            NDArrayNumericTensor::from_vec_shape(vec![1i64, 1], &vec![2]).unwrap(),
+            vec![1i64, 1],
             Some("timestep.shape_1x1".to_string()),
             rng,
         );
@@ -757,9 +738,9 @@ pub(crate) fn build_flux_denoising_loop(
         // Reshape guidance from scalar to [1, 1] (same as timestep)
         if let (Some(ig), Some(cg)) = (inner_guidance, cast_guidance) {
             let g_in = *input_map.get(&ig.global_id()).unwrap();
-            let g_shape = Constant::push_new_with_label(
+            let g_shape = Constant::from_vec_with_label(
                 &mut mg,
-                NDArrayNumericTensor::from_vec_shape(vec![1i64, 1], &vec![2]).unwrap(),
+                vec![1i64, 1],
                 Some("guidance.shape_1x1".to_string()),
                 rng,
             );
@@ -839,12 +820,8 @@ pub(crate) fn build_flux_denoising_loop(
         let (mut mg, input_map) =
             MilliOpGraph::new(std::iter::once(inner_step_in.global_id()), rng);
         let step_in = *input_map.get(&inner_step_in.global_id()).unwrap();
-        let one = Constant::push_new_with_label(
-            &mut mg,
-            NDArrayNumericTensor::from_vec_shape(vec![1i64], &vec![1]).unwrap(),
-            Some("step.one".to_string()),
-            rng,
-        );
+        let one =
+            Constant::from_vec_with_label(&mut mg, vec![1i64], Some("step.one".to_string()), rng);
         let step_next = SimpleBinary::add(&mut mg, step_in, one, rng);
         mg.set_output_map(std::iter::once((step_next, inner_step_out.global_id())));
         let mut node = SuperGraphNodeMilliOpGraph::new(mg, rng);
@@ -951,15 +928,15 @@ pub(crate) fn build_flux_vae_decode(
             rng,
         );
 
-        let inv_scale = Constant::push_new_with_label(
+        let inv_scale = Constant::from_vec_with_label(
             &mut mg,
-            NDArrayNumericTensor::from_vec_shape(vec![1.0f32 / 0.3611], &vec![1]).unwrap(),
+            vec![1.0f32 / 0.3611],
             Some("flux_vae.inv_scale".to_string()),
             rng,
         );
-        let shift = Constant::push_new_with_label(
+        let shift = Constant::from_vec_with_label(
             &mut mg,
-            NDArrayNumericTensor::from_vec_shape(vec![0.1159f32], &vec![1]).unwrap(),
+            vec![0.1159f32],
             Some("flux_vae.shift".to_string()),
             rng,
         );
@@ -1021,9 +998,9 @@ pub(crate) fn build_sd3_denoising_loop(
 
     {
         let (mut mg, _) = MilliOpGraph::new(std::iter::empty(), rng);
-        let tier = Constant::push_new_with_label(
+        let tier = Constant::from_vec_with_label(
             &mut mg,
-            NDArrayNumericTensor::from_vec_shape(vec![0i64], &vec![1]).unwrap(),
+            vec![0i64],
             Some("progress_tier_zero".to_string()),
             rng,
         );
@@ -1092,9 +1069,9 @@ pub(crate) fn build_sd3_denoising_loop(
             Some("timestep.cast_model_dtype".to_string()),
             rng,
         );
-        let zero_axis = Constant::push_new_with_label(
+        let zero_axis = Constant::from_vec_with_label(
             &mut mg,
-            NDArrayNumericTensor::from_vec_shape(vec![0i64], &vec![1]).unwrap(),
+            vec![0i64],
             Some("timestep.unsqueeze_axis".to_string()),
             rng,
         );
@@ -1208,12 +1185,8 @@ pub(crate) fn build_sd3_denoising_loop(
         let (mut mg, input_map) =
             MilliOpGraph::new(std::iter::once(inner_step_in.global_id()), rng);
         let step_in = *input_map.get(&inner_step_in.global_id()).unwrap();
-        let one = Constant::push_new_with_label(
-            &mut mg,
-            NDArrayNumericTensor::from_vec_shape(vec![1i64], &vec![1]).unwrap(),
-            Some("step.one".to_string()),
-            rng,
-        );
+        let one =
+            Constant::from_vec_with_label(&mut mg, vec![1i64], Some("step.one".to_string()), rng);
         let step_next = SimpleBinary::add(&mut mg, step_in, one, rng);
         mg.set_output_map(std::iter::once((step_next, inner_step_out.global_id())));
         let mut node = SuperGraphNodeMilliOpGraph::new(mg, rng);

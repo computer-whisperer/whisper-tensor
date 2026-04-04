@@ -1,5 +1,4 @@
 use super::shared::{build_rnn_supergraph, default_storage, onnx_bytes_to_model};
-use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
 use whisper_tensor::dtype::DType;
 use whisper_tensor::interfaces::TextInferenceTokensInLogitOutInterface;
 use whisper_tensor::loader::*;
@@ -182,9 +181,9 @@ fn build_simple_transformer_supergraph(
             Some("input.cast_dtype".to_string()),
             rng,
         );
-        let zero_tid = Constant::push_new_with_label(
+        let zero_tid = Constant::from_vec_with_label(
             &mut milli_graph,
-            NDArrayNumericTensor::from_vec_shape(vec![0i64], &vec![1]).unwrap(),
+            vec![0i64],
             Some("input.unsqueeze_axis".to_string()),
             rng,
         );
@@ -221,9 +220,9 @@ fn build_simple_transformer_supergraph(
             MilliOpGraph::new(std::iter::once(raw_logit_output_link.global_id()), rng);
         let milli_op_graph_input = *input_map.get(&raw_logit_output_link.global_id()).unwrap();
         let mut x = milli_op_graph_input;
-        let zero_tid = Constant::push_new_with_label(
+        let zero_tid = Constant::from_vec_with_label(
             &mut milli_graph,
-            NDArrayNumericTensor::from_vec_shape(vec![0i64], &vec![1]).unwrap(),
+            vec![0i64],
             Some("output.squeeze_axis".to_string()),
             rng,
         );

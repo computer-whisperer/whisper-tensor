@@ -112,7 +112,6 @@ fn build_sdxl_interface(
     tokenizer: TokenizerInfo,
     model_dtype: whisper_tensor::dtype::DType,
 ) -> whisper_tensor::interfaces::ImageGenerationInterface {
-    use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
     use whisper_tensor::interfaces::{ImageGenerationInterface, SchedulerType};
     use whisper_tensor::milli_graph::MilliOpGraph;
     use whisper_tensor::milli_graph::ops::{Cast, Concat as MilliConcat, Constant, Pad, PadMode};
@@ -242,11 +241,7 @@ fn build_sdxl_interface(
         );
 
         // Pad pooled [1,1280] -> [1,2816] (add 1536 zeros on right of dim 1)
-        let pads = Constant::push_new(
-            &mut mg,
-            NDArrayNumericTensor::from_vec_shape(vec![0i64, 0, 0, 1536], &vec![4]).unwrap(),
-            rng,
-        );
+        let pads = Constant::from_vec(&mut mg, vec![0i64, 0, 0, 1536], rng);
         let padded = Pad::push_new(&mut mg, pooled, pads, None, None, PadMode::Constant, rng);
         let y_cast = Cast::push_new(
             &mut mg,
@@ -324,11 +319,7 @@ fn build_sdxl_interface(
             rng,
         );
 
-        let pads = Constant::push_new(
-            &mut mg,
-            NDArrayNumericTensor::from_vec_shape(vec![0i64, 0, 0, 1536], &vec![4]).unwrap(),
-            rng,
-        );
+        let pads = Constant::from_vec(&mut mg, vec![0i64, 0, 0, 1536], rng);
         let padded = Pad::push_new(&mut mg, pooled, pads, None, None, PadMode::Constant, rng);
         let y_cast = Cast::push_new(
             &mut mg,

@@ -1,7 +1,6 @@
 use rand::Rng;
 use std::path::PathBuf;
 use std::sync::Arc;
-use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
 use whisper_tensor::dtype::DType;
 use whisper_tensor::interfaces::{SchedulerType, VideoGenerationInterface};
 use whisper_tensor::loader::*;
@@ -456,16 +455,8 @@ fn build_cogvideox_denoising_loop(
         let scaled = SimpleBinary::mul(&mut mg, diff, gs_in, rng);
         let v_pred = SimpleBinary::add(&mut mg, uncond_f32, scaled, rng);
 
-        let idx_0 = Constant::push_new(
-            &mut mg,
-            NDArrayNumericTensor::from_vec_shape(vec![0i64], &vec![1]).unwrap(),
-            rng,
-        );
-        let idx_1 = Constant::push_new(
-            &mut mg,
-            NDArrayNumericTensor::from_vec_shape(vec![1i64], &vec![1]).unwrap(),
-            rng,
-        );
+        let idx_0 = Constant::from_vec(&mut mg, vec![0i64], rng);
+        let idx_1 = Constant::from_vec(&mut mg, vec![1i64], rng);
         let alpha_t =
             whisper_tensor::milli_graph::ops::Gather::push_new(&mut mg, as_in, idx_0, 0, rng);
         let sigma_t =

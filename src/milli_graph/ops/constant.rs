@@ -1,5 +1,4 @@
 use crate::DynRank;
-use crate::backends::ndarray_backend::NDArrayNumericTensor;
 use crate::graph::{GlobalId, Node};
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
@@ -120,6 +119,17 @@ impl Constant {
         Self::push_new_pool(graph, data, label, rng)
     }
 
+    /// Push a shaped constant tensor from values + shape.
+    pub fn from_vec_shape<T: ConstantValue>(
+        graph: &mut MilliOpGraph,
+        values: Vec<T>,
+        shape: Vec<u64>,
+        rng: &mut impl Rng,
+    ) -> GlobalId {
+        let data = build_inline_constant(&values, shape);
+        Self::push_new_pool(graph, data, None, rng)
+    }
+
     /// Push a scalar (shape [1]) constant.
     pub fn new_scalar<T: ConstantValue>(
         graph: &mut MilliOpGraph,
@@ -138,33 +148,6 @@ impl Constant {
     ) -> GlobalId {
         let data = build_inline_constant(&[v], vec![1]);
         Self::push_new_pool(graph, data, label, rng)
-    }
-
-    /// Push a constant from a legacy NDArrayNumericTensor (bridges internally).
-    /// Prefer `from_vec` or `new_scalar` for new code.
-    pub fn push_new(
-        graph: &mut MilliOpGraph,
-        a: NDArrayNumericTensor<DynRank>,
-        rng: &mut impl Rng,
-    ) -> GlobalId {
-        Self::push_new_with_label(graph, a, None, rng)
-    }
-
-    /// Push from legacy NDArray with label. Prefer `from_vec_with_label` for new code.
-    pub fn push_new_with_label(
-        graph: &mut MilliOpGraph,
-        a: NDArrayNumericTensor<DynRank>,
-        label: Option<String>,
-        rng: &mut impl Rng,
-    ) -> GlobalId {
-        let pool_tensor = crate::symbolic_graph::tensor_proto_to_pool_tensor_from_ndarray(&a)
-            .expect("bridge constant to pool tensor");
-        Self::push_new_pool(
-            graph,
-            InlineConstantTensor(std::sync::Arc::new(pool_tensor)),
-            label,
-            rng,
-        )
     }
 
     /// Push a constant from an inline constant tensor directly.

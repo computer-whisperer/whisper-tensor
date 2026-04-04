@@ -4,15 +4,12 @@
 
 use std::collections::HashMap;
 
-use ndarray::{ArcArray, IxDyn};
-use rand::SeedableRng;
-use rand::rngs::SmallRng;
-
-use crate::backends::ndarray_backend::NDArrayNumericTensor;
 use crate::graph::GlobalId;
 use crate::milli_graph::ops::{self, Constant};
 use crate::milli_graph::{self, MilliOpGraph, ops_helpers};
 use crate::numeric_dtype::NumericDType;
+use rand::SeedableRng;
+use rand::rngs::SmallRng;
 
 use super::tensor_f32_shaped;
 use super::{TestCase, TestDataSet, Tolerance};
@@ -173,8 +170,8 @@ fn f32_const(
     shape: Vec<usize>,
     rng: &mut SmallRng,
 ) -> GlobalId {
-    let t = NDArrayNumericTensor::F32(ArcArray::from_shape_vec(IxDyn(&shape), vals).unwrap());
-    Constant::push_new(graph, t, rng)
+    let shape_u64 = shape.iter().map(|&d| d as u64).collect();
+    Constant::from_vec_shape(graph, vals, shape_u64, rng)
 }
 
 fn i64_const(graph: &mut MilliOpGraph, vals: Vec<i64>, rng: &mut SmallRng) -> GlobalId {
