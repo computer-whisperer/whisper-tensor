@@ -19,17 +19,10 @@ impl<'a> core::fmt::Display for EvalBackend<'a> {
 
 impl<'a> EvalBackend<'a> {
     pub fn supports_dtype(&self, _dtype: DType) -> bool {
-        match self {
-            EvalBackend::NDArray => !_dtype.is_packed(),
-            _ => false,
-        }
+        matches!(self, EvalBackend::NDArray)
     }
 
     pub fn to_native_type(&mut self, tensor: &NumericTensor<DynRank>) -> NumericTensor<DynRank> {
-        // Packed tensors stay packed — operations that consume them handle dequantization.
-        if matches!(tensor, NumericTensor::Packed(_)) {
-            return tensor.clone();
-        }
         match self {
             EvalBackend::NDArray => tensor.to_ndarray().unwrap().into(),
             _ => {

@@ -136,51 +136,9 @@ impl From<NumericDType> for TensorFormat {
 }
 
 impl TensorFormat {
-    /// Convert from legacy DType. Returns None for STRING.
+    /// Convert from legacy DType. Returns None for STRING and Packed types.
     pub fn from_legacy_dtype(dt: crate::dtype::DType) -> Option<Self> {
-        if let Some(pf) = dt.packed_format() {
-            Some(TensorFormat::from(pf))
-        } else {
-            NumericDType::from_legacy(dt).map(TensorFormat::Element)
-        }
-    }
-}
-
-impl From<crate::migration::packed_format::PackedFormat> for TensorFormat {
-    fn from(pf: crate::migration::packed_format::PackedFormat) -> Self {
-        use crate::migration::packed_format::PackedFormat;
-        match pf {
-            PackedFormat::Q4_0 => TensorFormat::SimpleBlockQuant {
-                weight_bits: 4,
-                has_min: false,
-            },
-            PackedFormat::Q4_1 => TensorFormat::SimpleBlockQuant {
-                weight_bits: 4,
-                has_min: true,
-            },
-            PackedFormat::Q5_0 => TensorFormat::SimpleBlockQuant {
-                weight_bits: 5,
-                has_min: false,
-            },
-            PackedFormat::Q5_1 => TensorFormat::SimpleBlockQuant {
-                weight_bits: 5,
-                has_min: true,
-            },
-            PackedFormat::Q8_0 => TensorFormat::SimpleBlockQuant {
-                weight_bits: 8,
-                has_min: false,
-            },
-            PackedFormat::Q8_1 => TensorFormat::SimpleBlockQuant {
-                weight_bits: 8,
-                has_min: true,
-            },
-            PackedFormat::Q2_K => TensorFormat::KQuant(KQuantVariant::Q2_K),
-            PackedFormat::Q3_K => TensorFormat::KQuant(KQuantVariant::Q3_K),
-            PackedFormat::Q4_K => TensorFormat::KQuant(KQuantVariant::Q4_K),
-            PackedFormat::Q5_K => TensorFormat::KQuant(KQuantVariant::Q5_K),
-            PackedFormat::Q6_K => TensorFormat::KQuant(KQuantVariant::Q6_K),
-            PackedFormat::Q8_K => TensorFormat::KQuant(KQuantVariant::Q8_K),
-        }
+        NumericDType::from_legacy(dt).map(TensorFormat::Element)
     }
 }
 
@@ -540,59 +498,6 @@ fn flat_to_bit_offset(flat_index: usize, dims: &[u64], strides: &[u64]) -> usize
     bit_offset as usize
 }
 
-// ---------------------------------------------------------------------------
-// Conversion from legacy PackedFormat
-// ---------------------------------------------------------------------------
-
-use crate::migration::packed_format::PackedFormat;
-
-impl<R: Rank> TensorLayout<R> {
-    /// Convert a legacy PackedFormat + shape into the appropriate TensorLayout arm.
-    pub fn from_legacy_packed(shape: R::KnownDims, format: PackedFormat) -> Self {
-        match format {
-            PackedFormat::Q4_0 => Self::simple_block_quant(shape, 4, false),
-            PackedFormat::Q4_1 => Self::simple_block_quant(shape, 4, true),
-            PackedFormat::Q5_0 => Self::simple_block_quant(shape, 5, false),
-            PackedFormat::Q5_1 => Self::simple_block_quant(shape, 5, true),
-            PackedFormat::Q8_0 => Self::simple_block_quant(shape, 8, false),
-            PackedFormat::Q8_1 => Self::simple_block_quant(shape, 8, true),
-            PackedFormat::Q2_K => Self::k_quant(shape, KQuantVariant::Q2_K),
-            PackedFormat::Q3_K => Self::k_quant(shape, KQuantVariant::Q3_K),
-            PackedFormat::Q4_K => Self::k_quant(shape, KQuantVariant::Q4_K),
-            PackedFormat::Q5_K => Self::k_quant(shape, KQuantVariant::Q5_K),
-            PackedFormat::Q6_K => Self::k_quant(shape, KQuantVariant::Q6_K),
-            PackedFormat::Q8_K => Self::k_quant(shape, KQuantVariant::Q8_K),
-        }
-    }
-
-    /// Convert back to a legacy PackedFormat (for quantized arms only).
-    pub fn to_legacy_packed(&self) -> Option<PackedFormat> {
-        match self {
-            TensorLayout::ElementStrided { .. } => None,
-            TensorLayout::SimpleBlockQuant {
-                weight_bits,
-                has_min,
-                ..
-            } => match (*weight_bits, *has_min) {
-                (4, false) => Some(PackedFormat::Q4_0),
-                (4, true) => Some(PackedFormat::Q4_1),
-                (5, false) => Some(PackedFormat::Q5_0),
-                (5, true) => Some(PackedFormat::Q5_1),
-                (8, false) => Some(PackedFormat::Q8_0),
-                (8, true) => Some(PackedFormat::Q8_1),
-                _ => None,
-            },
-            TensorLayout::KQuant { variant, .. } => Some(match variant {
-                KQuantVariant::Q2_K => PackedFormat::Q2_K,
-                KQuantVariant::Q3_K => PackedFormat::Q3_K,
-                KQuantVariant::Q4_K => PackedFormat::Q4_K,
-                KQuantVariant::Q5_K => PackedFormat::Q5_K,
-                KQuantVariant::Q6_K => PackedFormat::Q6_K,
-                KQuantVariant::Q8_K => PackedFormat::Q8_K,
-            }),
-        }
-    }
-}
 
 // ---------------------------------------------------------------------------
 // TensorLayoutError
@@ -1209,50 +1114,6 @@ mod tests {
     }
 
     // -- Legacy conversion --
-
-    #[test]
-    fn legacy_packed_format_roundtrip() {
-        let legacy_formats = [
-            PackedFormat::Q4_0,
-            PackedFormat::Q4_1,
-            PackedFormat::Q5_0,
-            PackedFormat::Q5_1,
-            PackedFormat::Q8_0,
-            PackedFormat::Q8_1,
-            PackedFormat::Q2_K,
-            PackedFormat::Q3_K,
-            PackedFormat::Q4_K,
-            PackedFormat::Q5_K,
-            PackedFormat::Q6_K,
-            PackedFormat::Q8_K,
-        ];
-        for fmt in legacy_formats {
-            let shape: Vec<u64> = vec![256]; // minimum for K-quants
-            let layout = TensorLayout::<DynRank>::from_legacy_packed(shape.clone(), fmt);
-            let back = layout.to_legacy_packed().unwrap();
-            assert_eq!(fmt, back, "roundtrip failed for {fmt}");
-        }
-    }
-
-    #[test]
-    fn legacy_buffer_size_matches() {
-        // Verify our buffer_size_bytes matches the legacy PackedFormat::storage_bytes
-        let cases: &[(PackedFormat, usize)] = &[
-            (PackedFormat::Q4_0, 1024),
-            (PackedFormat::Q4_K, 256),
-            (PackedFormat::Q6_K, 512),
-        ];
-        for &(fmt, numel) in cases {
-            let shape: Vec<u64> = vec![numel as u64];
-            let legacy_bytes = fmt.storage_bytes(numel);
-            let layout = TensorLayout::<DynRank>::from_legacy_packed(shape, fmt);
-            assert_eq!(
-                layout.buffer_size_bytes(),
-                legacy_bytes,
-                "buffer size mismatch for {fmt} with {numel} elements"
-            );
-        }
-    }
 
     // -- Slice --
 

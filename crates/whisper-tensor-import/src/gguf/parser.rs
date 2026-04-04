@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::io::{Read, Seek};
 use std::path::{Path, PathBuf};
-use whisper_tensor::dtype::DType;
-use whisper_tensor::migration::packed_format::PackedFormat;
+use whisper_tensor::numeric_dtype::NumericDType;
+use whisper_tensor::numeric_tensor::{KQuantVariant, TensorFormat};
 
 const GGUF_MAGIC: u32 = 0x46554747; // "GGUF" as LE u32
 const GGUF_VERSION_3: u32 = 3;
@@ -112,8 +112,8 @@ pub struct GgufTensorInfo {
     pub ggml_type: u32,
     /// Byte offset from the start of the tensor data section.
     pub offset_in_data: u64,
-    /// Our DType (either a packed format or an element type like F32/F16).
-    pub dtype: DType,
+    /// Format of this tensor (element type like F32/F16 or quantized).
+    pub format: TensorFormat,
     /// Byte length of this tensor's data.
     pub byte_length: usize,
 }
@@ -178,14 +178,14 @@ impl GgufFile {
             let ggml_type = read_u32(f)?;
             let offset_in_data = read_u64(f)?;
 
-            let (dtype, byte_length) = resolve_ggml_type(ggml_type, &dimensions)?;
+            let (format, byte_length) = resolve_ggml_type(ggml_type, &dimensions)?;
 
             tensors.push(GgufTensorInfo {
                 name,
                 dimensions,
                 ggml_type,
                 offset_in_data,
-                dtype,
+                format,
                 byte_length,
             });
         }
@@ -225,28 +225,69 @@ impl GgufFile {
     }
 }
 
-/// Map a ggml_type id + dimensions to our DType and compute the byte length.
-fn resolve_ggml_type(ggml_type: u32, dimensions: &[u64]) -> Result<(DType, usize), GgufParseError> {
+fn resolve_simple_block_quant(
+    weight_bits: u8,
+    has_min: bool,
+    num_elements: u64,
+) -> (TensorFormat, usize) {
+    let fmt = TensorFormat::SimpleBlockQuant { weight_bits, has_min };
+    let block_size = 32usize;
+    let scale_bytes = 2usize; // f16 scale
+    let min_bytes = if has_min { 2usize } else { 0 };
+    let data_bytes = (block_size * weight_bits as usize + 7) / 8;
+    let block_bytes = scale_bytes + min_bytes + data_bytes;
+    let n = num_elements as usize;
+    let num_blocks = n / block_size;
+    (fmt, num_blocks * block_bytes)
+}
+
+fn resolve_k_quant(variant: KQuantVariant, num_elements: u64) -> (TensorFormat, usize) {
+    let fmt = TensorFormat::KQuant(variant);
+    let block_size = 256usize;
+    let block_bytes = match variant {
+        KQuantVariant::Q2_K => 84,
+        KQuantVariant::Q3_K => 110,
+        KQuantVariant::Q4_K => 144,
+        KQuantVariant::Q5_K => 176,
+        KQuantVariant::Q6_K => 210,
+        KQuantVariant::Q8_K => 292,
+    };
+    let n = num_elements as usize;
+    let num_blocks = n / block_size;
+    (fmt, num_blocks * block_bytes)
+}
+
+/// Map a ggml_type id + dimensions to our TensorFormat and compute the byte length.
+fn resolve_ggml_type(
+    ggml_type: u32,
+    dimensions: &[u64],
+) -> Result<(TensorFormat, usize), GgufParseError> {
     // Non-packed types first
     let num_elements: u64 = dimensions.iter().product();
     match ggml_type {
         0 => {
             // GGML_TYPE_F32
-            Ok((DType::F32, num_elements as usize * 4))
+            Ok((TensorFormat::Element(NumericDType::F32), num_elements as usize * 4))
         }
         1 => {
             // GGML_TYPE_F16
-            Ok((DType::F16, num_elements as usize * 2))
+            Ok((TensorFormat::Element(NumericDType::F16), num_elements as usize * 2))
         }
-        _ => {
-            // Try packed formats
-            if let Some(fmt) = PackedFormat::from_ggml_type_id(ggml_type) {
-                let byte_length = fmt.storage_bytes(num_elements as usize);
-                Ok((DType::Packed(fmt), byte_length))
-            } else {
-                Err(GgufParseError::UnknownGgmlType(ggml_type))
-            }
-        }
+        // Simple block quants (block_size=32)
+        2 => Ok(resolve_simple_block_quant(4, false, num_elements)), // Q4_0
+        3 => Ok(resolve_simple_block_quant(4, true, num_elements)),  // Q4_1
+        6 => Ok(resolve_simple_block_quant(5, false, num_elements)), // Q5_0
+        7 => Ok(resolve_simple_block_quant(5, true, num_elements)),  // Q5_1
+        8 => Ok(resolve_simple_block_quant(8, false, num_elements)), // Q8_0
+        9 => Ok(resolve_simple_block_quant(8, true, num_elements)),  // Q8_1
+        // K-quants (block_size=256)
+        10 => Ok(resolve_k_quant(KQuantVariant::Q2_K, num_elements)),
+        11 => Ok(resolve_k_quant(KQuantVariant::Q3_K, num_elements)),
+        12 => Ok(resolve_k_quant(KQuantVariant::Q4_K, num_elements)),
+        13 => Ok(resolve_k_quant(KQuantVariant::Q5_K, num_elements)),
+        14 => Ok(resolve_k_quant(KQuantVariant::Q6_K, num_elements)),
+        15 => Ok(resolve_k_quant(KQuantVariant::Q8_K, num_elements)),
+        _ => Err(GgufParseError::UnknownGgmlType(ggml_type)),
     }
 }
 
@@ -384,14 +425,17 @@ mod tests {
         let embd = gguf
             .get_tensor("token_embd.weight")
             .expect("missing token_embd");
-        assert_eq!(embd.dtype, DType::Packed(PackedFormat::Q4_0));
+        assert_eq!(
+            embd.format,
+            TensorFormat::SimpleBlockQuant { weight_bits: 4, has_min: false }
+        );
         assert_eq!(embd.dimensions, vec![128256, 4096]);
 
         // Check that an F32 norm weight exists
         let norm = gguf
             .get_tensor("output_norm.weight")
             .expect("missing output_norm");
-        assert_eq!(norm.dtype, DType::F32);
+        assert_eq!(norm.format, TensorFormat::Element(NumericDType::F32));
         assert_eq!(norm.dimensions, vec![4096]);
 
         // Check metadata
@@ -420,11 +464,11 @@ mod tests {
         // Q4_K_M uses Q4_K for most attention weights
         assert!(
             matches!(
-                q_proj.dtype,
-                DType::Packed(PackedFormat::Q4_K) | DType::Packed(PackedFormat::Q6_K)
+                q_proj.format,
+                TensorFormat::KQuant(KQuantVariant::Q4_K) | TensorFormat::KQuant(KQuantVariant::Q6_K)
             ),
-            "Unexpected dtype for Q4_K_M attention: {:?}",
-            q_proj.dtype
+            "Unexpected format for Q4_K_M attention: {:?}",
+            q_proj.format
         );
     }
 }

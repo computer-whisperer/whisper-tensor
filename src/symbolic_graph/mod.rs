@@ -238,10 +238,10 @@ impl StoredOrNotTensor {
         }
     }
 
-    pub fn dtype(&self, tensor_store: &TensorStore) -> DType {
+    pub fn dtype(&self, tensor_store: &TensorStore) -> Option<DType> {
         match self {
             StoredOrNotTensor::Stored(id) => tensor_store.get_tensor(*id).unwrap().dtype(),
-            StoredOrNotTensor::Inline(t) => t.inner().dtype().to_legacy(),
+            StoredOrNotTensor::Inline(t) => Some(t.inner().dtype().to_legacy()),
         }
     }
 
@@ -2051,7 +2051,7 @@ impl SymbolicGraphMutator {
             global_id,
             ONNXTensorInfo {
                 onnx_name: name.clone(),
-                dtype: Some(ONNXDType::from_legacy(tensor_ref.dtype())),
+                dtype: tensor_ref.dtype().map(ONNXDType::from_legacy),
                 shape: Some(shape),
                 tensor_type: TensorType::Constant(StoredOrNotTensor::Stored(id)),
                 global_id,
@@ -2194,14 +2194,14 @@ impl SymbolicGraphMutator {
         for s in tensor_ref.shape() {
             shape.push(ScalarInfoTyped::Numeric(s))
         }
-        let dtype = ONNXDType::from_legacy(tensor_ref.dtype());
+        let dtype = tensor_ref.dtype().map(ONNXDType::from_legacy);
         let global_id = GlobalId::new(rng);
         let g = self.graph.as_mut().unwrap();
         g.tensors.insert(
             global_id,
             ONNXTensorInfo {
                 onnx_name: name.clone(),
-                dtype: Some(dtype),
+                dtype,
                 shape: Some(shape),
                 tensor_type: TensorType::Constant(StoredOrNotTensor::Stored(id)),
                 global_id,

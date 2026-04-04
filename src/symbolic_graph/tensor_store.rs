@@ -204,39 +204,11 @@ impl StoredTensor {
         }
     }
 
-    /// Legacy DType accessor — bridges to the old type system.
-    pub fn dtype(&self) -> DType {
+    /// Legacy DType accessor — returns None for quantized formats.
+    pub fn dtype(&self) -> Option<DType> {
         match self.format() {
-            TensorFormat::Element(ndt) => ndt.to_legacy(),
-            TensorFormat::SimpleBlockQuant {
-                weight_bits,
-                has_min,
-            } => {
-                use crate::migration::packed_format::PackedFormat;
-                let pf = match (weight_bits, has_min) {
-                    (4, false) => PackedFormat::Q4_0,
-                    (4, true) => PackedFormat::Q4_1,
-                    (5, false) => PackedFormat::Q5_0,
-                    (5, true) => PackedFormat::Q5_1,
-                    (8, false) => PackedFormat::Q8_0,
-                    (8, true) => PackedFormat::Q8_1,
-                    _ => unreachable!(),
-                };
-                DType::Packed(pf)
-            }
-            TensorFormat::KQuant(v) => {
-                use crate::migration::packed_format::PackedFormat;
-                use crate::numeric_tensor::KQuantVariant;
-                let pf = match v {
-                    KQuantVariant::Q2_K => PackedFormat::Q2_K,
-                    KQuantVariant::Q3_K => PackedFormat::Q3_K,
-                    KQuantVariant::Q4_K => PackedFormat::Q4_K,
-                    KQuantVariant::Q5_K => PackedFormat::Q5_K,
-                    KQuantVariant::Q6_K => PackedFormat::Q6_K,
-                    KQuantVariant::Q8_K => PackedFormat::Q8_K,
-                };
-                DType::Packed(pf)
-            }
+            TensorFormat::Element(ndt) => Some(ndt.to_legacy()),
+            TensorFormat::SimpleBlockQuant { .. } | TensorFormat::KQuant(_) => None,
         }
     }
 

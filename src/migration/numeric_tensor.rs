@@ -10,7 +10,6 @@ use crate::TrigOp;
 use crate::backends::ndarray_backend::conversions::NDArrayNumericTensorType;
 use crate::migration::numeric_scalar::NumericScalar;
 use crate::migration::numeric_tensor_typed::NumericTensorTyped;
-use crate::packed_tensor::PackedTensor;
 use crate::tensor_rank::{DimContainer, DynRank, Rank};
 
 #[derive(Debug, thiserror::Error)]
@@ -24,7 +23,6 @@ pub enum NumericTensorError {
 #[derive(Debug, Clone)]
 pub enum NumericTensor<R: Rank> {
     NDArray(NDArrayNumericTensor<R>),
-    Packed(PackedTensor<R>),
 }
 
 impl<R: Rank> NumericTensor<R> {
@@ -36,22 +34,13 @@ impl<R: Rank> NumericTensor<R> {
     ///
     /// Returns an NDArrayNumericTensor that contains the same data and metadata.
     pub fn to_ndarray(&self) -> Result<NDArrayNumericTensor<R>, NumericTensorError> {
-        match self {
-            NumericTensor::NDArray(x) => Ok(x.clone()),
-            NumericTensor::Packed(x) => Ok(x.dequantize()),
-        }
+        let NumericTensor::NDArray(x) = self;
+        Ok(x.clone())
     }
 
-    /// Consume this tensor and convert it into the NDArray backend without changing shape, dtype, or values.
-    ///
-    /// - If already NDArray, returns the inner handle (clone of pointer/rc if applicable).
-    /// - Otherwise performs a zero-copy view when supported or a value-preserving copy.
-    /// - Errors if the target backend cannot represent the dtype/shape.
     pub fn into_ndarray(self) -> Result<NDArrayNumericTensor<R>, NumericTensorError> {
-        match self {
-            NumericTensor::NDArray(x) => Ok(x.clone()),
-            NumericTensor::Packed(x) => Ok(x.dequantize()),
-        }
+        let NumericTensor::NDArray(x) = self;
+        Ok(x.clone())
     }
 
     /// Return a view or copy of this tensor with a new shape.
@@ -94,34 +83,22 @@ impl<R: Rank> NumericTensor<R> {
 
     /// Convert to a dynamically-ranked tensor view (DynRank), preserving data and shape.
     pub fn to_dyn_rank(&self) -> NumericTensor<DynRank> {
-        if let NumericTensor::Packed(x) = self {
-            return NumericTensor::Packed(x.to_dyn_rank());
-        }
         NumericTensor::NDArray(self.to_ndarray().unwrap().to_dyn())
     }
 
-    /// Return the element dtype of this tensor.
     pub fn dtype(&self) -> DType {
-        match self {
-            NumericTensor::NDArray(x) => x.dtype(),
-            NumericTensor::Packed(x) => x.dtype(),
-        }
+        let NumericTensor::NDArray(x) = self;
+        x.dtype()
     }
 
-    /// Return the shape of this tensor as rank-typed dimensions.
     pub fn shape(&self) -> R::KnownDims {
-        match self {
-            NumericTensor::NDArray(x) => x.shape(),
-            NumericTensor::Packed(x) => x.shape().clone(),
-        }
+        let NumericTensor::NDArray(x) = self;
+        x.shape()
     }
 
-    /// Return the number of dimensions (rank) of this tensor.
     pub fn rank(&self) -> usize {
-        match self {
-            NumericTensor::NDArray(x) => x.rank(),
-            NumericTensor::Packed(x) => x.rank(),
-        }
+        let NumericTensor::NDArray(x) = self;
+        x.rank()
     }
 
     /// Return the total number of elements in this tensor (product of shape dims).

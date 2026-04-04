@@ -557,7 +557,7 @@ impl NumericDType {
             DType::U8 => Self::U8,
             DType::U4 => Self::U4,
             DType::BOOL => Self::BOOL,
-            DType::STRING | DType::Packed(_) => return None,
+            DType::STRING => return None,
         })
     }
 
@@ -714,10 +714,8 @@ mod tests {
     }
 
     #[test]
-    fn legacy_string_and_packed_return_none() {
+    fn legacy_string_returns_none() {
         assert!(NumericDType::from_legacy(DType::STRING).is_none());
-        use crate::migration::packed_format::PackedFormat;
-        assert!(NumericDType::from_legacy(DType::Packed(PackedFormat::Q4_0)).is_none());
     }
 
     #[test]

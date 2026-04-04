@@ -19,7 +19,6 @@ pub mod npy;
 pub mod numeric_dtype;
 pub mod numeric_scalar;
 pub mod numeric_tensor;
-pub mod packed_tensor;
 pub mod phonemization;
 pub mod pool;
 pub mod pth;

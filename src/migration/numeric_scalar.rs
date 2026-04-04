@@ -113,7 +113,6 @@ impl NumericScalar {
             DType::F4E2M1 => {
                 panic!("4-bit float scalar types not yet implemented")
             }
-            DType::Packed(fmt) => panic!("Cannot create scalar zero for packed format {fmt}"),
         }
     }
 
