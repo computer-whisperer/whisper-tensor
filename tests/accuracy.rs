@@ -255,7 +255,7 @@ fn validate_onnx_model(
 
     // Prepare inputs: golden snapshot values override model defaults.
     // Inputs NOT in the golden snapshot (e.g., state tensors) get zero-filled.
-    let model_input_info = model.get_input_tensor_info().expect("get input info");
+    let model_input_info = model.get_input_tensor_info();
     let mut owned_inputs: HashMap<String, NumericTensor<'_, DynRank, SystemPool>> = HashMap::new();
 
     for (name, (legacy_dtype, shape_desc)) in &model_input_info {

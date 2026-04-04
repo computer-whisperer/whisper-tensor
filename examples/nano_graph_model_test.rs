@@ -60,7 +60,7 @@ fn main() {
     }
 
     // ---- Create inputs ----
-    let input_info = model.get_input_tensor_info().unwrap();
+    let input_info = model.get_input_tensor_info();
     let sym_graph = model.get_symbolic_graph();
     let tensor_store = model.get_tensor_store();
     let tensors_by_name = sym_graph.get_tensors_by_name();

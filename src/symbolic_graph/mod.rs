@@ -3212,7 +3212,6 @@ impl NodeMetadata for GraphOperation {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backends::eval_backend::EvalBackend;
 
     /// Helper: load an ONNX node test, evaluate via generate_milli_graph + pool_eval,
     /// compare against ONNX expected outputs.

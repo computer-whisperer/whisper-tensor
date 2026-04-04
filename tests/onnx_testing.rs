@@ -104,7 +104,7 @@ impl OnnxNodeTest {
             .map_err(|e| format!("Failed to load model: {e:?}"))?;
 
         // Get model's declared input dtypes for fixup of old test data
-        let model_input_info = model.get_input_tensor_info().unwrap_or_default();
+        let model_input_info = model.get_input_tensor_info();
 
         // Run each test data set
         for (i, test_data_set) in self.test_data_sets.iter().enumerate() {

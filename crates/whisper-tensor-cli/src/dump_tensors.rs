@@ -159,7 +159,7 @@ pub fn cmd_dump_tensors(
     let mut observer = TensorDumpObserver::new(graph, &tensor_names, &pool);
 
     // Prepare inputs
-    let model_input_info = model.get_input_tensor_info().unwrap();
+    let model_input_info = model.get_input_tensor_info();
 
     // Load explicitly provided .npy inputs
     let npy_inputs: HashMap<String, _> = input_npys

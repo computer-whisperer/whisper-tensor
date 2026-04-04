@@ -2,7 +2,6 @@
 
 #[cfg(feature = "cranelift")]
 pub mod codegen;
-pub mod execute;
 pub mod executor;
 pub mod partitioner_i;
 pub mod partitioner_j;

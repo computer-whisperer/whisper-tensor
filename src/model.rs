@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 
-use crate::backends::eval_backend::EvalRuntimeError;
 use crate::numeric_dtype::ONNXDType;
 use crate::numeric_tensor::NumericTensorView;
 use crate::pool::Pool;
@@ -19,8 +18,6 @@ use crate::scalar_info::ScalarInfoTyped;
 pub enum ModelError {
     #[error(transparent)]
     ONNXDecodingError(#[from] ONNXDecodingError),
-    #[error(transparent)]
-    EvalRuntimeError(#[from] EvalRuntimeError),
     #[error(transparent)]
     DecodeError(#[from] DecodeError),
     #[error("Unconfigured Backend")]
@@ -181,7 +178,7 @@ impl Model {
     #[allow(clippy::type_complexity)]
     pub fn get_input_tensor_info(
         &self,
-    ) -> Result<HashMap<String, (ONNXDType, Vec<Option<u64>>)>, EvalRuntimeError> {
+    ) -> HashMap<String, (ONNXDType, Vec<Option<u64>>)> {
         let input_ids = self.graph.get_inputs();
         let mut results = HashMap::new();
         for tensor_id in input_ids {
@@ -199,6 +196,6 @@ impl Model {
                 results.insert(name.clone(), (onnx_dtype, shape));
             }
         }
-        Ok(results)
+        results
     }
 }

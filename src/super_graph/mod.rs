@@ -4,7 +4,6 @@ pub mod links;
 pub mod nodes;
 pub mod observer;
 
-use crate::backends::eval_backend::EvalRuntimeError;
 use crate::graph::{GlobalId, Graph, Link, collect_disconnected_node_slots};
 use crate::milli_graph::MilliOpGraphError;
 use crate::model::ModelError;
@@ -37,8 +36,6 @@ pub enum SuperGraphError {
     InvalidInputError(String),
     #[error("Invalid graph structure: {0}")]
     InvalidGraph(String),
-    #[error(transparent)]
-    EvalRuntimeError(#[from] EvalRuntimeError),
     #[error(transparent)]
     SymbolicEvalError(#[from] crate::symbolic_graph::ops::EvalError),
     #[error("Execution cancelled")]
