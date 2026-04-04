@@ -1,5 +1,5 @@
 use crate::graph::{GlobalId, Node};
-use crate::milli_graph::ops::{AnyMilliOp, MilliOp, MilliOpTensorIDOrLiteral};
+use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
 use crate::nano_graph::lower::{ConcatSegment, DimKind, TensorAtomMap};
 use crate::nano_graph::pattern::AtomId;
@@ -402,7 +402,7 @@ impl MilliOp for Concat {
             let grad_i = super::Split::push_new(
                 graph,
                 grad_output,
-                Some(MilliOpTensorIDOrLiteral::TensorID(split_sizes)),
+                Some(split_sizes),
                 self.axis,
                 Some(n),
                 i,

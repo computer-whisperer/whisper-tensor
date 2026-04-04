@@ -84,7 +84,6 @@ pub use unary::*;
 pub use unsqueeze::*;
 pub use where_op::*;
 
-use crate::backends::ndarray_backend::NDArrayNumericTensor;
 use crate::graph::{GlobalId, Node, NodeMetadata, NodeSlotEditError, SlotDirection};
 use crate::milli_graph::MilliOpGraphError;
 use crate::pool::Pool;
@@ -134,12 +133,6 @@ pub enum AccumulationMode {
     /// - `n == 1` → `values[0]`
     /// - otherwise → `op(pairwise(values[0..n/2]), pairwise(values[n/2..n]))`
     Pairwise,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum MilliOpTensorIDOrLiteral {
-    TensorID(GlobalId),
-    Literal(NDArrayNumericTensor<DynRank>),
 }
 
 /// Configuration for milli-op evaluation.

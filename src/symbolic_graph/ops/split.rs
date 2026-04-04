@@ -1,4 +1,3 @@
-use crate::backends::ndarray_backend::NDArrayNumericTensor;
 use crate::graph::{GlobalId, Node, Property, PropertyValue};
 use crate::milli_graph::{self, MilliLoweringContext, MilliOpGraph};
 use crate::onnx;
@@ -99,22 +98,18 @@ impl Operation for SplitOperation {
         let mut output_map = HashMap::new();
 
         let split = if let Some(split) = self.split {
-            Some(milli_graph::ops::MilliOpTensorIDOrLiteral::TensorID(
-                input_map[&split],
-            ))
+            Some(input_map[&split])
         } else {
-            self.split_attribute.as_ref().map(|split| {
-                milli_graph::ops::MilliOpTensorIDOrLiteral::Literal(
-                    NDArrayNumericTensor::from_vec(split.clone()).to_dyn(),
-                )
-            })
+            self.split_attribute
+                .as_ref()
+                .map(|sizes| milli_graph::ops::Constant::from_vec(&mut graph, sizes.clone(), rng))
         };
 
         for (output_id, output_tensor_id) in self.outputs.iter().enumerate() {
             let out = milli_graph::ops::Split::push_new(
                 &mut graph,
                 input_map[&self.input],
-                split.clone(),
+                split,
                 self.axis.unwrap_or_default(),
                 self.num_outputs.map(|x| x as usize).or_else(|| {
                     // Opset 13: when no split sizes and no num_outputs, infer from output count

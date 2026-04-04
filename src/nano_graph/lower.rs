@@ -4096,9 +4096,7 @@ mod tests {
                 let q = crate::milli_graph::ops::Split::push_new(
                     g,
                     x,
-                    Some(crate::milli_graph::ops::MilliOpTensorIDOrLiteral::TensorID(
-                        split_sizes,
-                    )),
+                    Some(split_sizes),
                     2,
                     Some(3),
                     0,
@@ -4107,9 +4105,7 @@ mod tests {
                 let k = crate::milli_graph::ops::Split::push_new(
                     g,
                     x,
-                    Some(crate::milli_graph::ops::MilliOpTensorIDOrLiteral::TensorID(
-                        split_sizes,
-                    )),
+                    Some(split_sizes),
                     2,
                     Some(3),
                     1,
@@ -4118,9 +4114,7 @@ mod tests {
                 let v = crate::milli_graph::ops::Split::push_new(
                     g,
                     x,
-                    Some(crate::milli_graph::ops::MilliOpTensorIDOrLiteral::TensorID(
-                        split_sizes,
-                    )),
+                    Some(split_sizes),
                     2,
                     Some(3),
                     2,
@@ -4171,9 +4165,7 @@ mod tests {
                 let q = crate::milli_graph::ops::Split::push_new(
                     g,
                     proj,
-                    Some(crate::milli_graph::ops::MilliOpTensorIDOrLiteral::TensorID(
-                        split_sizes,
-                    )),
+                    Some(split_sizes),
                     2,
                     Some(3),
                     0,
@@ -4182,9 +4174,7 @@ mod tests {
                 let k = crate::milli_graph::ops::Split::push_new(
                     g,
                     proj,
-                    Some(crate::milli_graph::ops::MilliOpTensorIDOrLiteral::TensorID(
-                        split_sizes,
-                    )),
+                    Some(split_sizes),
                     2,
                     Some(3),
                     1,
@@ -4193,9 +4183,7 @@ mod tests {
                 let v = crate::milli_graph::ops::Split::push_new(
                     g,
                     proj,
-                    Some(crate::milli_graph::ops::MilliOpTensorIDOrLiteral::TensorID(
-                        split_sizes,
-                    )),
+                    Some(split_sizes),
                     2,
                     Some(3),
                     2,
@@ -4248,9 +4236,7 @@ mod tests {
                 let q_raw = crate::milli_graph::ops::Split::push_new(
                     g,
                     proj,
-                    Some(crate::milli_graph::ops::MilliOpTensorIDOrLiteral::TensorID(
-                        split_sizes,
-                    )),
+                    Some(split_sizes),
                     2,
                     Some(3),
                     0,
@@ -4259,9 +4245,7 @@ mod tests {
                 let k_raw = crate::milli_graph::ops::Split::push_new(
                     g,
                     proj,
-                    Some(crate::milli_graph::ops::MilliOpTensorIDOrLiteral::TensorID(
-                        split_sizes,
-                    )),
+                    Some(split_sizes),
                     2,
                     Some(3),
                     1,
@@ -4270,9 +4254,7 @@ mod tests {
                 let v_raw = crate::milli_graph::ops::Split::push_new(
                     g,
                     proj,
-                    Some(crate::milli_graph::ops::MilliOpTensorIDOrLiteral::TensorID(
-                        split_sizes,
-                    )),
+                    Some(split_sizes),
                     2,
                     Some(3),
                     2,

@@ -1,11 +1,10 @@
 use crate::graph::{GlobalId, Node};
-use crate::milli_graph::ops::{AnyMilliOp, MilliOp, MilliOpTensorIDOrLiteral};
+use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
 use crate::nano_graph::lower::{DimKind, NanoLoweringContext, TensorAtomMap};
 use crate::pool::Pool;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use typenum::P1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Split {
@@ -13,7 +12,7 @@ pub struct Split {
     pub(crate) label: Option<String>,
     output: GlobalId,
     data: GlobalId,
-    split: Option<MilliOpTensorIDOrLiteral>,
+    split: Option<GlobalId>,
     axis: i64,
     num_outputs: Option<usize>,
     output_id: usize,
@@ -28,14 +27,14 @@ impl Split {
         self.output_id
     }
 
-    pub(crate) fn split_tensor(&self) -> Option<&MilliOpTensorIDOrLiteral> {
-        self.split.as_ref()
+    pub(crate) fn split_tensor(&self) -> Option<GlobalId> {
+        self.split
     }
 
     pub fn push_new(
         graph: &mut MilliOpGraph,
         data: GlobalId,
-        split: Option<MilliOpTensorIDOrLiteral>,
+        split: Option<GlobalId>,
         axis: i64,
         num_outputs: Option<usize>,
         output_id: usize,
@@ -48,7 +47,7 @@ impl Split {
     pub fn push_new_with_label(
         graph: &mut MilliOpGraph,
         data: GlobalId,
-        split: Option<MilliOpTensorIDOrLiteral>,
+        split: Option<GlobalId>,
         axis: i64,
         num_outputs: Option<usize>,
         output_id: usize,
@@ -204,9 +203,8 @@ impl Split {
     ) -> u64 {
         let all_infos = ctx.all_infos;
         // Try to get concrete split sizes from the split tensor.
-        if let Some(crate::milli_graph::ops::MilliOpTensorIDOrLiteral::TensorID(tensor_id)) =
-            self.split_tensor()
-            && let Some(info) = all_infos.get(tensor_id)
+        if let Some(tensor_id) = self.split_tensor()
+            && let Some(info) = all_infos.get(&tensor_id)
             && let Some(vals) = info.to_i64_vec()
         {
             let offset: i64 = vals[..output_id_idx].iter().sum();
@@ -251,7 +249,7 @@ impl Split {
         self.global_id = GlobalId::new(rng);
         super::remap(&mut self.output, map);
         super::remap(&mut self.data, map);
-        if let Some(super::MilliOpTensorIDOrLiteral::TensorID(ref mut id)) = self.split {
+        if let Some(ref mut id) = self.split {
             super::remap(id, map);
         }
     }
@@ -267,8 +265,8 @@ impl Node for Split {
     }
     fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         let mut ids = vec![self.data];
-        if let Some(MilliOpTensorIDOrLiteral::TensorID(id)) = &self.split {
-            ids.push(*id);
+        if let Some(id) = self.split {
+            ids.push(id);
         }
         Box::new(ids.into_iter())
     }
@@ -304,16 +302,11 @@ impl MilliOp for Split {
         };
 
         // Determine the split size for this output_id.
-        let split_sizes: Vec<i64> = if let Some(split) = &self.split {
-            match split {
-                MilliOpTensorIDOrLiteral::TensorID(id) => {
-                    let info = known_inputs
-                        .get(id)
-                        .ok_or(MilliOpGraphError::UnableToInfer)?;
-                    info.to_i64_vec().ok_or(MilliOpGraphError::UnableToInfer)?
-                }
-                MilliOpTensorIDOrLiteral::Literal(lit) => lit.try_to_rank::<P1>()?.try_into()?,
-            }
+        let split_sizes: Vec<i64> = if let Some(split_id) = self.split {
+            let info = known_inputs
+                .get(&split_id)
+                .ok_or(MilliOpGraphError::UnableToInfer)?;
+            info.to_i64_vec().ok_or(MilliOpGraphError::UnableToInfer)?
         } else if let Some(num_outputs) = self.num_outputs {
             // Compute from data shape along axis.
             if let ScalarInfoTyped::Numeric(dim_val) = &data_shape[axis] {
@@ -362,8 +355,6 @@ impl MilliOp for Split {
         Vec<crate::numeric_tensor::NumericTensor<'p, crate::tensor_rank::DynRank, P2>>,
         crate::nano_graph::pool_eval::PoolEvalError,
     > {
-        use crate::tensor_rank::DynRank;
-
         let data = &inputs[0];
         let data_shape = data.shape();
         let rank = data_shape.len();
@@ -374,38 +365,12 @@ impl MilliOp for Split {
         };
 
         // Determine split sizes
-        let split_sizes: Vec<i64> = if let Some(ref split) = self.split {
-            match split {
-                MilliOpTensorIDOrLiteral::TensorID(_) => {
-                    // inputs[1] is the split tensor
-                    let split_tensor = &inputs[1];
-                    (0..split_tensor.numel())
-                        .map(|i| split_tensor.read_element(i).to_i64())
-                        .collect()
-                }
-                MilliOpTensorIDOrLiteral::Literal(lit) => {
-                    let legacy: crate::migration::numeric_tensor::NumericTensor<DynRank> =
-                        lit.clone().into();
-                    // Extract values via casting
-                    let cast = legacy
-                        .cast(
-                            crate::dtype::DType::I64,
-                            &mut crate::backends::eval_backend::EvalBackend::NDArray,
-                        )
-                        .map_err(|e| {
-                            crate::nano_graph::pool_eval::PoolEvalError::Unsupported(format!(
-                                "{e:?}"
-                            ))
-                        })?;
-                    cast.try_to_rank::<P1>()
-                        .and_then(Vec::<i64>::try_from)
-                        .map_err(|e| {
-                            crate::nano_graph::pool_eval::PoolEvalError::Unsupported(format!(
-                                "{e:?}"
-                            ))
-                        })?
-                }
-            }
+        let split_sizes: Vec<i64> = if self.split.is_some() {
+            // inputs[1] is the split tensor
+            let split_tensor = &inputs[1];
+            (0..split_tensor.numel())
+                .map(|i| split_tensor.read_element(i).to_i64())
+                .collect()
         } else if let Some(num_outputs) = self.num_outputs {
             let dim = data_shape[axis] as usize;
             let base = dim / num_outputs;

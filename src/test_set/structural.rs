@@ -419,20 +419,10 @@ fn split_axis0() -> TestCase {
     let ext = GlobalId::new(&mut rng);
     let (mut graph, imap) = MilliOpGraph::new([ext], &mut rng);
 
-    let split_lit = ops::MilliOpTensorIDOrLiteral::Literal(NDArrayNumericTensor::I64(
-        ArcArray::from_shape_vec(IxDyn(&[2]), vec![2, 2]).unwrap(),
-    ));
     let ident = ops::ClampMin::push_new(&mut graph, imap[&ext], f32::NEG_INFINITY, &mut rng);
-    let out0 = ops::Split::push_new(
-        &mut graph,
-        ident,
-        Some(split_lit.clone()),
-        0,
-        None,
-        0,
-        &mut rng,
-    );
-    let out1 = ops::Split::push_new(&mut graph, ident, Some(split_lit), 0, None, 1, &mut rng);
+    let split_sizes = ops::Constant::from_vec(&mut graph, vec![2i64, 2], &mut rng);
+    let out0 = ops::Split::push_new(&mut graph, ident, Some(split_sizes), 0, None, 0, &mut rng);
+    let out1 = ops::Split::push_new(&mut graph, ident, Some(split_sizes), 0, None, 1, &mut rng);
     graph.set_outputs(vec![out0, out1]);
 
     TestCase {

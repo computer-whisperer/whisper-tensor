@@ -240,9 +240,7 @@ impl Operation for RotaryEmbeddingOperation {
             let x1u = milli_graph::ops::Split::push_new(
                 &mut graph,
                 xr5,
-                Some(milli_graph::ops::MilliOpTensorIDOrLiteral::TensorID(
-                    split_sizes,
-                )),
+                Some(split_sizes),
                 -1,
                 None,
                 0,
@@ -251,9 +249,7 @@ impl Operation for RotaryEmbeddingOperation {
             let x2u = milli_graph::ops::Split::push_new(
                 &mut graph,
                 xr5,
-                Some(milli_graph::ops::MilliOpTensorIDOrLiteral::TensorID(
-                    split_sizes,
-                )),
+                Some(split_sizes),
                 -1,
                 None,
                 1,
@@ -272,9 +268,7 @@ impl Operation for RotaryEmbeddingOperation {
                 let x1 = milli_graph::ops::Split::push_new(
                     &mut graph,
                     x_rotate,
-                    Some(milli_graph::ops::MilliOpTensorIDOrLiteral::TensorID(
-                        split_sizes,
-                    )),
+                    Some(split_sizes),
                     -1,
                     None,
                     0,
@@ -283,9 +277,7 @@ impl Operation for RotaryEmbeddingOperation {
                 let x2 = milli_graph::ops::Split::push_new(
                     &mut graph,
                     x_rotate,
-                    Some(milli_graph::ops::MilliOpTensorIDOrLiteral::TensorID(
-                        split_sizes,
-                    )),
+                    Some(split_sizes),
                     -1,
                     None,
                     1,
@@ -308,9 +300,7 @@ impl Operation for RotaryEmbeddingOperation {
                 let x1u = milli_graph::ops::Split::push_new(
                     &mut graph,
                     xr5,
-                    Some(milli_graph::ops::MilliOpTensorIDOrLiteral::TensorID(
-                        split_sizes,
-                    )),
+                    Some(split_sizes),
                     -2,
                     None,
                     0,
@@ -319,9 +309,7 @@ impl Operation for RotaryEmbeddingOperation {
                 let x2u = milli_graph::ops::Split::push_new(
                     &mut graph,
                     xr5,
-                    Some(milli_graph::ops::MilliOpTensorIDOrLiteral::TensorID(
-                        split_sizes,
-                    )),
+                    Some(split_sizes),
                     -2,
                     None,
                     1,
