@@ -1,9 +1,10 @@
 use crate::backends::ModelLoadedTensorCache;
-use crate::backends::eval_backend::EvalBackend;
 use crate::compiler::CompiledProgram;
 use crate::metadata::TokenizerInfo;
-use crate::migration::numeric_tensor::NumericTensor;
 use crate::model::Model;
+use crate::numeric_dtype::NumericDType;
+use crate::numeric_scalar::NumericScalar;
+use crate::numeric_tensor::NumericTensor;
 use crate::pool::Pool;
 use crate::super_graph::cache::{SuperGraphCache, SuperGraphTensorCache};
 use crate::super_graph::data::{SuperGraphData, SuperGraphImage};
@@ -14,6 +15,26 @@ use crate::tokenizer::{AnyTokenizer, Tokenizer};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
+
+/// Find the index of the maximum element in a tensor view (argmax over all elements).
+fn argmax_flat(view: &crate::numeric_tensor::NumericTensorView<'_, DynRank>) -> u32 {
+    let n = view.numel();
+    assert!(n > 0, "argmax on empty tensor");
+    let mut best_idx: u32 = 0;
+    let mut best_val = f64::NEG_INFINITY;
+    for i in 0..n {
+        let v = view.read_element(i).to_f64();
+        if v > best_val {
+            best_val = v;
+            best_idx = i as u32;
+        }
+    }
+    best_idx
+}
+
+fn alloc_err(e: crate::pool::AllocationError) -> SuperGraphError {
+    SuperGraphError::InvalidInputError(format!("allocation: {e}"))
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum AnyInterface {
@@ -83,17 +104,22 @@ impl TextInferenceTokensInLogitOutInterface {
             }
         };
         let tokens = tokenizer.encode(text_in.as_str());
-        let tokens_tensor = NumericTensor::from_vec(tokens.clone()).to_dyn_rank();
+        let tokens_tensor = NumericTensor::from_fn(
+            vec![tokens.len() as u64],
+            NumericDType::U32,
+            pool,
+            |i| NumericScalar::from_u32(tokens[i]),
+        )
+        .map_err(alloc_err)?;
 
         let super_graph_data = {
             let mut super_graph_data = SuperGraphData::new();
             super_graph_data
                 .tensor_maps
                 .insert(self.model_input_link, model.get_tensor_store());
-            super_graph_data.tensors.insert(
-                self.token_context_input_link,
-                crate::nano_graph::lower::legacy_numeric_to_new(&tokens_tensor, pool),
-            );
+            super_graph_data
+                .tensors
+                .insert(self.token_context_input_link, tokens_tensor);
             super_graph_data.hashes.insert(self.cache_key_input_link, 0);
             super_graph_data
         };
@@ -131,18 +157,13 @@ impl TextInferenceTokensInLogitOutInterface {
             .tensors
             .get(&self.logit_output_link)
             .unwrap();
-        let logits = crate::nano_graph::lower::new_numeric_to_legacy(logits);
-        let logits_shape = logits.shape();
-        // Select last position
-        let mut backend = EvalBackend::NDArray;
-        let logits = logits.slice(
-            &[logits_shape[0] - 1..logits_shape[0], 0..logits_shape[1]],
-            &backend,
-        )?;
-        let logits = logits.squeeze(0)?;
-        let token_id = logits.argmax(0, true, false, &mut backend)?;
+        let shape = logits.shape();
+        // Select last position and argmax
+        let last_row = logits
+            .slice(&[(shape[0] - 1, shape[0]), (0, shape[1])])
+            .map_err(|e| SuperGraphError::InvalidInputError(format!("logits slice: {e}")))?;
+        let token_id = argmax_flat(&last_row);
 
-        let token_id: u32 = token_id.first_element().into();
         let token_str = tokenizer.decode(&[token_id])?;
         Ok(token_str)
     }
@@ -193,7 +214,7 @@ impl MultimodalLanguageInterface {
         model: &Model,
         compiled_model: Option<&CompiledProgram>,
         text_in: String,
-        modal_inputs: HashMap<SuperGraphLink, NumericTensor<DynRank>>,
+        modal_inputs: HashMap<SuperGraphLink, NumericTensor<'p, DynRank, P>>,
         tokenizer_cache: &mut HashMap<TokenizerInfo, Arc<AnyTokenizer>>,
         tensor_cache: Option<&mut ModelLoadedTensorCache>,
         super_graph_caches: Option<&mut SuperGraphCache>,
@@ -209,27 +230,23 @@ impl MultimodalLanguageInterface {
             }
         };
         let tokens = tokenizer.encode(text_in.as_str());
-        let tokens_tensor = NumericTensor::from_vec(tokens).to_dyn_rank();
+        let tokens_tensor = NumericTensor::from_fn(
+            vec![tokens.len() as u64],
+            NumericDType::U32,
+            pool,
+            |i| NumericScalar::from_u32(tokens[i]),
+        )
+        .map_err(alloc_err)?;
 
         let super_graph_data = {
             let mut super_graph_data = SuperGraphData::new();
             super_graph_data
                 .tensor_maps
                 .insert(self.model_input_link, model.get_tensor_store());
-            super_graph_data.tensors.extend(
-                modal_inputs
-                    .into_iter()
-                    .map(|(k, v)| {
-                        (
-                            k,
-                            crate::nano_graph::lower::legacy_numeric_to_new(&v, pool),
-                        )
-                    }),
-            );
-            super_graph_data.tensors.insert(
-                self.token_context_input_link,
-                crate::nano_graph::lower::legacy_numeric_to_new(&tokens_tensor, pool),
-            );
+            super_graph_data.tensors.extend(modal_inputs);
+            super_graph_data
+                .tensors
+                .insert(self.token_context_input_link, tokens_tensor);
             super_graph_data.hashes.insert(self.cache_key_input_link, 0);
             super_graph_data
         };
@@ -267,17 +284,13 @@ impl MultimodalLanguageInterface {
             .tensors
             .get(&self.logit_output_link)
             .unwrap();
-        let logits = crate::nano_graph::lower::new_numeric_to_legacy(logits);
-        let logits_shape = logits.shape();
-        let mut backend = EvalBackend::NDArray;
-        let logits = logits.slice(
-            &[logits_shape[0] - 1..logits_shape[0], 0..logits_shape[1]],
-            &backend,
-        )?;
-        let logits = logits.squeeze(0)?;
-        let token_id = logits.argmax(0, true, false, &mut backend)?;
+        let shape = logits.shape();
+        // Select last position and argmax
+        let last_row = logits
+            .slice(&[(shape[0] - 1, shape[0]), (0, shape[1])])
+            .map_err(|e| SuperGraphError::InvalidInputError(format!("logits slice: {e}")))?;
+        let token_id = argmax_flat(&last_row);
 
-        let token_id: u32 = token_id.first_element().into();
         let token_str = tokenizer.decode(&[token_id])?;
         Ok(token_str)
     }
@@ -507,34 +520,29 @@ impl ImageGenerationInterface {
         );
 
         // Compute schedule and prepare latent based on scheduler type
-        let (timestep_values, dt_values, sigma_values, latent_tensor) = match &self.scheduler {
+        let (timestep_values, dt_values, sigma_values, latent_data) = match &self.scheduler {
             SchedulerType::EulerDiscrete => {
                 let (ts, dt, sigmas, init_sigma) =
                     Self::compute_euler_schedule(num_inference_steps);
                 let scaled: Vec<f32> = initial_noise.iter().map(|&x| x * init_sigma).collect();
-                let lat = NumericTensor::<DynRank>::from_vec_shape(scaled, latent_shape).unwrap();
-                (ts, dt, sigmas, lat)
+                (ts, dt, sigmas, scaled)
             }
             SchedulerType::RectifiedFlow => {
                 let (ts, dt, sigmas) = Self::compute_flux_schedule(num_inference_steps);
-                let lat =
-                    NumericTensor::<DynRank>::from_vec_shape(initial_noise, latent_shape).unwrap();
-                (ts, dt, sigmas, lat)
+                (ts, dt, sigmas, initial_noise)
             }
             _ => unreachable!("ImageGenerationInterface only uses EulerDiscrete or RectifiedFlow"),
         };
 
-        let timesteps_tensor =
-            NumericTensor::<DynRank>::from_vec_shape(timestep_values, vec![num_inference_steps])
-                .unwrap();
-        let dt_tensor =
-            NumericTensor::<DynRank>::from_vec_shape(dt_values, vec![num_inference_steps]).unwrap();
-        let sigmas_tensor =
-            NumericTensor::<DynRank>::from_vec_shape(sigma_values, vec![num_inference_steps])
-                .unwrap();
-        let iter_count =
-            NumericTensor::<DynRank>::from_vec_shape(vec![num_inference_steps as i64], vec![1])
-                .unwrap();
+        let f32_tensor = |data: &[f32], shape: Vec<u64>| -> Result<NumericTensor<'p, DynRank, P>, SuperGraphError> {
+            NumericTensor::from_fn(shape, NumericDType::F32, pool, |i| {
+                NumericScalar::from_f32(data[i])
+            })
+            .map_err(alloc_err)
+        };
+
+        let latent_shape_u64: Vec<u64> = latent_shape.iter().map(|&d| d as u64).collect();
+        let n = num_inference_steps as u64;
 
         // Pack data
         let mut data = SuperGraphData::new();
@@ -544,21 +552,29 @@ impl ImageGenerationInterface {
             data.strings
                 .insert(negative_link, negative_prompt.unwrap_or_default());
         }
-        let to_pool =
-            |t: &NumericTensor<DynRank>| crate::nano_graph::lower::legacy_numeric_to_new(t, pool);
         data.tensors
-            .insert(self.initial_latent_input, to_pool(&latent_tensor));
+            .insert(self.initial_latent_input, f32_tensor(&latent_data, latent_shape_u64)?);
         data.tensors
-            .insert(self.timesteps_input, to_pool(&timesteps_tensor));
-        data.tensors.insert(self.dt_input, to_pool(&dt_tensor));
+            .insert(self.timesteps_input, f32_tensor(&timestep_values, vec![n])?);
         data.tensors
-            .insert(self.sigmas_input, to_pool(&sigmas_tensor));
+            .insert(self.dt_input, f32_tensor(&dt_values, vec![n])?);
         data.tensors
-            .insert(self.iteration_count_input, to_pool(&iter_count));
+            .insert(self.sigmas_input, f32_tensor(&sigma_values, vec![n])?);
+        data.tensors.insert(
+            self.iteration_count_input,
+            NumericTensor::from_fn(vec![1], NumericDType::I64, pool, |_| {
+                NumericScalar::from_i64(num_inference_steps as i64)
+            })
+            .map_err(alloc_err)?,
+        );
         if let Some(gs_link) = self.guidance_scale_input {
-            let guidance =
-                NumericTensor::<DynRank>::from_vec_shape(vec![guidance_scale], vec![]).unwrap();
-            data.tensors.insert(gs_link, to_pool(&guidance));
+            data.tensors.insert(
+                gs_link,
+                NumericTensor::from_fn(vec![], NumericDType::F32, pool, |_| {
+                    NumericScalar::from_f32(guidance_scale)
+                })
+                .map_err(alloc_err)?,
+            );
         }
         for (weight_link, model) in self.model_weights.iter().zip(models.iter()) {
             data.tensor_maps
