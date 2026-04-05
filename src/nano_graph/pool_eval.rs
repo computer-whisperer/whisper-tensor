@@ -15,8 +15,9 @@ use crate::numeric_tensor::{NumericTensor, NumericTensorView, TensorLayout};
 use crate::pool::{AllocationError, Pool};
 use crate::tensor_rank::DynRank;
 
+use super::lower::TensorAtomMapInfo;
 use super::ops::{ReduceKind, ScalarBinOp, ScalarOp, ScalarUnaryOp};
-use super::pattern::{AtomId, AtomRange, NanoGraph};
+use super::pattern::{AtomId, NanoGraph};
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -24,59 +25,70 @@ use super::pattern::{AtomId, AtomRange, NanoGraph};
 
 /// Evaluate a NanoGraph using pool-managed buffers.
 ///
-/// Inputs are `NumericTensorView`s (pool-type-erased). Each output range
-/// produces a `NumericTensor` allocated from `pool`, reshaped to the
-/// provided `TensorLayout`.
-///
-/// Output tensors are pre-allocated and installed as group stores before
-/// evaluation, so the scalar eval loop writes directly into the final
-/// output buffers — no post-eval copy step.
+/// Inputs and outputs are described by [`TensorAtomMapInfo`] which maps
+/// logical tensor elements to atom IDs via strides. Pool_eval uses this
+/// mapping to populate input stores and assemble correctly-shaped output
+/// tensors — callers don't need post-eval reassembly.
 pub fn pool_eval<'p, P: Pool + 'p>(
     graph: &NanoGraph,
-    inputs: &[(AtomId, &NumericTensorView<'_, DynRank>)],
-    output_ranges: &[(AtomRange, TensorLayout<DynRank>)],
+    inputs: &[(&TensorAtomMapInfo, &NumericTensorView<'_, DynRank>)],
+    outputs: &[&TensorAtomMapInfo],
     pool: &'p P,
 ) -> Result<Vec<NumericTensor<'p, DynRank, P>>, PoolEvalError> {
     let groups = graph.groups();
     let n = groups.len();
     let input_tensors = graph.input_tensors();
 
-    // --- Step 1: Populate input stores (zero-copy where possible) ---
-    let mut input_stores: Vec<AtomStore<'_, 'p, P>> = input_tensors
-        .iter()
-        .map(|it| {
-            // Start with an empty owned buffer; will be replaced by a view
-            // if a matching input is provided.
-            let layout = TensorLayout::<DynRank>::row_major(vec![it.count], it.dtype);
-            let buf = pool
-                .allocate(layout.buffer_size_bytes())
-                .expect("pool alloc for input buffer");
-            AtomStore::Owned(NumericTensor::from_parts(buf, layout))
-        })
-        .collect();
+    // --- Step 1: Populate input stores via relayout ---
+    //
+    // Build the TensorLayout the TAMI expects, then relayout the view to match.
+    // If strides already agree, relayout borrows (zero-copy). Otherwise it copies.
+    let mut input_stores: Vec<Option<AtomStore<'_, 'p, P>>> =
+        (0..input_tensors.len()).map(|_| None).collect();
 
-    for &(base, view) in inputs {
-        if let Some((ti, offset)) = graph.find_input_idx(base) {
-            let it = &input_tensors[ti];
-            // Fast path: if view covers the full input range at offset 0,
-            // dtypes match, and layout is flattenable, borrow directly (zero-copy).
-            if offset == 0
-                && view.numel() == it.count as usize
-                && view.dtype() == it.dtype
-                && let Some(flat) = view.flatten()
-            {
-                input_stores[ti] = AtomStore::View(flat);
-                continue;
-            }
-            // Slow path: element-by-element copy with potential dtype cast.
-            let store = &mut input_stores[ti];
-            for i in 0..view.numel() {
-                let scalar = view.read_element(i);
-                let cast = scalar.cast_to(it.dtype);
-                store.write_element(offset as usize + i, cast);
+    for &(tam, view) in inputs {
+        if let Some((ti, _offset)) = graph.find_input_idx(tam.base_id) {
+            let element_bits = tam.dtype.total_bits() as u64;
+            let strides_bits: Vec<u64> = tam
+                .known_strides
+                .iter()
+                .map(|&s| s * element_bits)
+                .collect();
+            let target = TensorLayout::<DynRank>::ElementStrided {
+                shape: tam.known_dims.clone(),
+                dtype: tam.dtype,
+                strides: strides_bits,
+                offset_bits: 0,
+            };
+            let cow = view
+                .relayout(target, pool)
+                .expect("pool alloc for input relayout");
+            match cow {
+                crate::numeric_tensor::NumericTensorCOW::Borrowed(flat) => {
+                    input_stores[ti] = Some(AtomStore::View(flat));
+                }
+                crate::numeric_tensor::NumericTensorCOW::Owned(tensor) => {
+                    input_stores[ti] = Some(AtomStore::Owned(tensor));
+                }
             }
         }
     }
+
+    // Fill any remaining input stores that weren't provided by the caller.
+    let input_stores: Vec<AtomStore<'_, 'p, P>> = input_stores
+        .into_iter()
+        .enumerate()
+        .map(|(ti, store)| {
+            store.unwrap_or_else(|| {
+                let it = &input_tensors[ti];
+                let layout = TensorLayout::<DynRank>::row_major(vec![it.count], it.dtype);
+                let buf = pool
+                    .allocate(layout.buffer_size_bytes())
+                    .expect("pool alloc for input buffer");
+                AtomStore::Owned(NumericTensor::from_parts(buf, layout))
+            })
+        })
+        .collect();
 
     // --- Step 2: Compute producer dependencies and use counts ---
     let mut producers: Vec<Vec<usize>> = Vec::with_capacity(n);
@@ -92,48 +104,25 @@ pub fn pool_eval<'p, P: Pool + 'p>(
         producers.push(deps);
     }
 
-    // Mark output groups with extra refcount so they survive.
-    for (range, _layout) in output_ranges {
-        let base = range.base.0;
-        let end = base + range.count;
-        let mut id = base;
-        while id < end {
-            if let Some(gi) = graph.find_group_idx(AtomId(id)) {
-                remaining[gi] += 1;
-                let g = &groups[gi];
-                id = g.base_id.0 + g.count;
-            } else {
-                id += 1;
+    // Mark groups that contribute to outputs with extra refcount so they survive.
+    for tam in outputs {
+        let ranges = tam.atom_ranges(graph);
+        for range in &ranges {
+            let mut id = range.base.0;
+            let end = range.base.0 + range.count;
+            while id < end {
+                if let Some(gi) = graph.find_group_idx(AtomId(id)) {
+                    remaining[gi] += 1;
+                    let g = &groups[gi];
+                    id = g.base_id.0 + g.count;
+                } else {
+                    id += 1;
+                }
             }
         }
     }
 
-    // --- Step 2b: Pre-allocate output group stores ---
-    //
-    // For each output range that maps 1:1 to a single group, pre-allocate
-    // the output tensor (as 1D with count atoms) and install it as the
-    // group's store. The eval loop will write directly into it.
-    // Track which group index maps to which output index.
     let mut group_stores: Vec<Option<AtomStore<'_, 'p, P>>> = (0..n).map(|_| None).collect();
-    let mut output_group_map: Vec<Option<usize>> = vec![None; n]; // gi -> output_idx
-
-    for (out_idx, (range, _layout)) in output_ranges.iter().enumerate() {
-        if let Some(gi) = graph.find_group_idx(range.base) {
-            let g = &groups[gi];
-            if g.base_id == range.base && g.count == range.count {
-                // This output range maps exactly to one group.
-                // Pre-allocate the 1D buffer for it.
-                let alloc_layout =
-                    TensorLayout::<DynRank>::row_major(vec![g.count], g.output_dtype);
-                let buffer = pool
-                    .allocate(alloc_layout.buffer_size_bytes())
-                    .map_err(PoolEvalError::Allocation)?;
-                let tensor = NumericTensor::from_parts(buffer, alloc_layout);
-                group_stores[gi] = Some(AtomStore::Owned(tensor));
-                output_group_map[gi] = Some(out_idx);
-            }
-        }
-    }
 
     // --- Step 3: Evaluate groups in topological order ---
 
@@ -216,7 +205,7 @@ pub fn pool_eval<'p, P: Pool + 'p>(
             // Free spent producers.
             for &pi in &producers[gi] {
                 remaining[pi] -= 1;
-                if remaining[pi] == 0 && output_group_map[pi].is_none() {
+                if remaining[pi] == 0 {
                     group_stores[pi] = None;
                 }
             }
@@ -226,14 +215,13 @@ pub fn pool_eval<'p, P: Pool + 'p>(
         // --- LiteralSpan: borrow the tensor directly (zero-copy) ---
         if let ScalarOp::LiteralSpan(ref tensor) = group.op
             && let Some(flat) = tensor.view().flatten()
-            && output_group_map[gi].is_none()
         {
             group_stores[gi] = Some(AtomStore::View(flat));
 
             // Free spent producers.
             for &pi in &producers[gi] {
                 remaining[pi] -= 1;
-                if remaining[pi] == 0 && output_group_map[pi].is_none() {
+                if remaining[pi] == 0 {
                     group_stores[pi] = None;
                 }
             }
@@ -244,7 +232,6 @@ pub fn pool_eval<'p, P: Pool + 'p>(
         let output_dtype = group.output_dtype;
 
         // Take the store out so we can mutate it while reading other stores.
-        // Pre-allocated output stores are taken; other groups allocate fresh.
         let mut store = group_stores[gi].take().unwrap_or_else(|| {
             let layout = TensorLayout::<DynRank>::row_major(vec![count as u64], output_dtype);
             let buffer = pool
@@ -253,7 +240,7 @@ pub fn pool_eval<'p, P: Pool + 'p>(
             AtomStore::Owned(NumericTensor::from_parts(buffer, layout))
         });
 
-        // For LiteralSpan that IS an output (couldn't take the zero-copy path above),
+        // For LiteralSpan that couldn't take the zero-copy path (non-flattenable),
         // copy element-by-element into the store.
         if let ScalarOp::LiteralSpan(ref span_tensor) = group.op {
             for i in 0..count {
@@ -263,7 +250,7 @@ pub fn pool_eval<'p, P: Pool + 'p>(
             group_stores[gi] = Some(store);
             for &pi in &producers[gi] {
                 remaining[pi] -= 1;
-                if remaining[pi] == 0 && output_group_map[pi].is_none() {
+                if remaining[pi] == 0 {
                     group_stores[pi] = None;
                 }
             }
@@ -402,64 +389,71 @@ pub fn pool_eval<'p, P: Pool + 'p>(
         // Put the store back.
         group_stores[gi] = Some(store);
 
-        // Free spent producer buffers (but not output stores).
+        // Free spent producer buffers.
         for &pi in &producers[gi] {
             remaining[pi] -= 1;
-            if remaining[pi] == 0 && output_group_map[pi].is_none() {
+            if remaining[pi] == 0 {
                 group_stores[pi] = None;
             }
         }
     }
 
-    // --- Step 4: Extract and reshape output tensors ---
+    // --- Step 4: Assemble output tensors using TAMI stride mapping ---
     //
-    // Output groups were pre-allocated and written into during eval.
-    // Take them out of the group stores and reshape to the caller's layout.
-    // For outputs spanning multiple groups or input atoms, fall back to
-    // element-by-element assembly.
-    let mut outputs: Vec<Option<NumericTensor<'p, DynRank, P>>> =
-        (0..output_ranges.len()).map(|_| None).collect();
+    // For each output TAMI, allocate the correctly-shaped tensor and
+    // populate it by reading atoms from group/input stores.
+    // Contiguous TAMIs get a fast path (take group store + reshape).
+    let mut result_tensors: Vec<NumericTensor<'p, DynRank, P>> = Vec::with_capacity(outputs.len());
 
-    for gi in 0..n {
-        if let Some(out_idx) = output_group_map[gi]
+    for tam in outputs {
+        // Fast path: non-segmented, all atoms in a single group → take store + set layout.
+        // Works for both contiguous (row-major strides) and strided (transpose) cases.
+        if tam.segments.is_empty()
+            && let Some(gi) = graph.find_group_idx(tam.base_id)
+            && groups[gi].base_id == tam.base_id
+            && groups[gi].count == tam.count
             && let Some(store) = group_stores[gi].take()
         {
-            let (_, ref target_layout) = output_ranges[out_idx];
-            let tensor = match store {
-                AtomStore::Owned(t) => t.into_layout(target_layout.clone()),
-                AtomStore::View(v) => {
-                    // Must copy — can't return a borrowed view as an owned tensor.
-                    v.to_tensor(pool)
-                        .map_err(PoolEvalError::Allocation)?
-                        .into_layout(target_layout.clone())
-                }
+            // Build a strided layout using the TAMI's strides (atom units → bits).
+            let element_bits = tam.dtype.total_bits() as u64;
+            let strides_bits: Vec<u64> = tam
+                .known_strides
+                .iter()
+                .map(|&s| s * element_bits)
+                .collect();
+            let strided_layout = TensorLayout::<DynRank>::ElementStrided {
+                shape: tam.known_dims.clone(),
+                dtype: tam.dtype,
+                strides: strides_bits,
+                offset_bits: 0,
             };
-            outputs[out_idx] = Some(tensor);
-        }
-    }
-
-    // Fallback for any outputs not covered by single-group pre-allocation.
-    for (out_idx, (range, target_layout)) in output_ranges.iter().enumerate() {
-        if outputs[out_idx].is_some() {
+            let tensor = match store {
+                AtomStore::Owned(t) => t.into_layout(strided_layout),
+                AtomStore::View(v) => v
+                    .to_tensor(pool)
+                    .map_err(PoolEvalError::Allocation)?
+                    .into_layout(strided_layout),
+            };
+            result_tensors.push(tensor);
             continue;
         }
-        let count = range.count as usize;
-        let output_dtype = range.dtype;
-        let alloc_layout = TensorLayout::<DynRank>::row_major(vec![count as u64], output_dtype);
+
+        // General path: iterate elements, use TAMI to map each to an atom,
+        // read from group/input stores.
+        let target_layout = TensorLayout::<DynRank>::row_major(tam.known_dims.clone(), tam.dtype);
         let buffer = pool
-            .allocate(alloc_layout.buffer_size_bytes())
+            .allocate(target_layout.buffer_size_bytes())
             .map_err(PoolEvalError::Allocation)?;
-        let mut out_tensor = NumericTensor::from_parts(buffer, alloc_layout);
-        for offset in 0..range.count {
-            let atom_id = AtomId(range.base.0 + offset);
-            let scalar = lookup_atom_scalar(atom_id, graph, &group_stores, &input_stores);
-            let cast = scalar.cast_to(output_dtype);
-            out_tensor.write_element(offset as usize, cast);
+        let mut out_tensor = NumericTensor::from_parts(buffer, target_layout);
+        for elem in 0..tam.count {
+            let atom = tam.atom_id_for_element(elem);
+            let scalar = lookup_atom_scalar(atom, graph, &group_stores, &input_stores);
+            out_tensor.write_element(elem as usize, scalar.cast_to(tam.dtype));
         }
-        outputs[out_idx] = Some(out_tensor.into_layout(target_layout.clone()));
+        result_tensors.push(out_tensor);
     }
 
-    Ok(outputs.into_iter().map(|o| o.unwrap()).collect())
+    Ok(result_tensors)
 }
 
 // ---------------------------------------------------------------------------

@@ -1038,7 +1038,6 @@ impl MilliOpGraph {
         MilliOpGraphError,
     > {
         use crate::nano_graph::lower;
-        use crate::nano_graph::pattern::AtomRange;
         use crate::nano_graph::pool_eval;
         use crate::tensor_info::TensorInfo;
 
@@ -1111,214 +1110,71 @@ impl MilliOpGraph {
 
         let t_milli = std::time::Instant::now();
 
-        // Map inputs to (AtomId, &View) pairs (ext → internal → atom_id).
-        let eval_inputs: Vec<_> = inputs
+        // Map inputs to (TAMI, &View) pairs.
+        let eval_input_pairs: Vec<_> = inputs
             .iter()
             .filter_map(|(&ext_id, view)| {
                 let &internal_id = self.input_map.get(&ext_id)?;
                 let tam = lower_result.tensor_map.get(&internal_id)?;
-                Some((tam.base_id, *view))
+                Some((tam, *view))
             })
+            .collect();
+        let eval_inputs: Vec<_> = eval_input_pairs
+            .iter()
+            .map(|(tam, view)| (*tam, *view))
             .collect();
 
         let output_map = output_map_ref;
 
-        // Build output AtomRanges.
+        // Build output TAMIs.
         let output_ids: Vec<GlobalId> = if let Some(ordering) = &self.output_ordering {
             ordering.clone()
         } else {
-            // No explicit ordering — use output_map values.
             output_map.values().copied().collect()
         };
 
-        // Map external output IDs → internal IDs for tensor_map lookup.
         let reverse_output: HashMap<GlobalId, GlobalId> = output_map
             .iter()
             .map(|(&internal, &external)| (external, internal))
             .collect();
 
-        // Build output ranges with target layouts using atom_ranges().
-        // Track which ext_id maps to which range indices.
-        let mut output_ranges: Vec<(AtomRange, crate::numeric_tensor::TensorLayout<DynRank>)> =
+        let mut output_tamis: Vec<(&GlobalId, &crate::nano_graph::lower::TensorAtomMapInfo)> =
             Vec::new();
-        let mut ext_id_range_map: Vec<(GlobalId, Vec<usize>)> = Vec::new();
-
-        for &ext_id in &output_ids {
-            let internal_id = reverse_output.get(&ext_id).copied().unwrap_or(ext_id);
+        for ext_id in &output_ids {
+            let internal_id = reverse_output.get(ext_id).copied().unwrap_or(*ext_id);
             if let Some(tam) = lower_result.tensor_map.get(&internal_id) {
-                let ranges = tam.atom_ranges(&lower_result.graph);
-                let start_idx = output_ranges.len();
-                for range in &ranges {
-                    let layout = crate::numeric_tensor::TensorLayout::row_major(
-                        vec![range.count],
-                        range.dtype,
-                    );
-                    output_ranges.push((range.clone(), layout));
-                }
-                let end_idx = output_ranges.len();
-                ext_id_range_map.push((ext_id, (start_idx..end_idx).collect()));
+                output_tamis.push((ext_id, tam));
             }
         }
+        let output_tami_refs: Vec<&crate::nano_graph::lower::TensorAtomMapInfo> =
+            output_tamis.iter().map(|(_, tam)| *tam).collect();
 
-        let dt_ranges = t_milli.elapsed();
-
-        // Run pool_eval — writes directly into pre-allocated output buffers.
+        // Run pool_eval — returns correctly-shaped output tensors.
         let t_eval = std::time::Instant::now();
         let eval_results =
-            pool_eval::pool_eval(&lower_result.graph, &eval_inputs, &output_ranges, pool)
+            pool_eval::pool_eval(&lower_result.graph, &eval_inputs, &output_tami_refs, pool)
                 .map_err(|e| MilliOpGraphError::InvalidInput(format!("pool_eval: {e}")))?;
         let dt_eval = t_eval.elapsed();
 
-        // Build final output tensors.
-        // For single contiguous outputs, reshape the eval result directly (no copy).
-        let mut eval_results: Vec<Option<_>> = eval_results.into_iter().map(Some).collect();
+        // Map results to external IDs.
         let mut outputs = HashMap::new();
-        for (ext_id, range_indices) in &ext_id_range_map {
-            let internal_id = reverse_output.get(ext_id).copied().unwrap_or(*ext_id);
-            let Some(tam) = lower_result.tensor_map.get(&internal_id) else {
-                continue;
-            };
-
-            // Resolve the output shape from inference.
-            let shape = resolve_output_shape(tam, all_infos.get(&internal_id));
-
-            let dtype = tam.dtype;
-            let target_layout =
-                crate::numeric_tensor::TensorLayout::<DynRank>::row_major(shape, dtype);
-
-            if range_indices.len() == 1 && tam.is_contiguous() {
-                // Single contiguous range — take and reshape directly.
-                if let Some(tensor) = eval_results[range_indices[0]].take() {
-                    outputs.insert(*ext_id, tensor.into_layout(target_layout));
-                    continue;
-                }
-            }
-
-            // Multi-range or non-contiguous: element-by-element assembly.
-            let buf = pool
-                .allocate(target_layout.buffer_size_bytes())
-                .map_err(|e| MilliOpGraphError::InvalidInput(format!("allocation: {e}")))?;
-            let mut out_tensor =
-                crate::numeric_tensor::NumericTensor::from_parts(buf, target_layout);
-            let numel = out_tensor.numel();
-            for i in 0..numel {
-                let atom = tam.atom_id_for_element(i as u64);
-                // Find which eval result range contains this atom.
-                let scalar = range_indices
-                    .iter()
-                    .find_map(|&ri| {
-                        let (ref range, _) = output_ranges[ri];
-                        if atom.0 >= range.base.0 && atom.0 < range.base.0 + range.count {
-                            let offset = (atom.0 - range.base.0) as usize;
-                            eval_results[ri].as_ref().map(|t| t.read_element(offset))
-                        } else {
-                            None
-                        }
-                    })
-                    // Fall back to input tensors (zero-cost views).
-                    .or_else(|| {
-                        let (ti, offset) = lower_result.graph.find_input_idx(atom)?;
-                        let input_view = eval_inputs.iter().find_map(|&(base, view)| {
-                            let it = &lower_result.graph.input_tensors()[ti];
-                            if base == it.base_id { Some(view) } else { None }
-                        })?;
-                        Some(input_view.read_element(offset as usize))
-                    })
-                    .ok_or_else(|| {
-                        MilliOpGraphError::InvalidGraph(format!(
-                            "output atom {atom} not in any eval range or input"
-                        ))
-                    })?;
-                out_tensor.write_element(i, scalar.cast_to(dtype));
-            }
-            outputs.insert(*ext_id, out_tensor);
+        for ((ext_id, _), tensor) in output_tamis.iter().zip(eval_results) {
+            outputs.insert(**ext_id, tensor);
         }
-        let dt_reconstruct = t_milli.elapsed() - dt_ranges - dt_eval;
+
         let dt_total = t_milli.elapsed();
         if dt_total.as_millis() > 10 {
-            let total_atoms: u64 = output_ranges.iter().map(|(r, _)| r.count).sum();
+            let total_atoms: u64 = output_tami_refs.iter().map(|t| t.count).sum();
             eprintln!(
-                "    [milli pool_eval] {:.0}ms total (ranges={:.0} eval={:.0} reconstruct={:.0}, {} atoms {} ranges)",
+                "    [milli pool_eval] {:.0}ms total (eval={:.0}, {} atoms)",
                 dt_total.as_secs_f64() * 1e3,
-                dt_ranges.as_secs_f64() * 1e3,
                 dt_eval.as_secs_f64() * 1e3,
-                dt_reconstruct.as_secs_f64() * 1e3,
                 total_atoms,
-                output_ranges.len(),
             );
         }
 
         Ok(outputs)
     }
-}
-
-/// Resolve the output shape for a tensor, preferring inferred shape over tensor_map dims.
-fn resolve_output_shape<P: crate::pool::Pool>(
-    tam: &crate::nano_graph::lower::TensorAtomMapInfo,
-    info: Option<&TensorInfo<'_, P>>,
-) -> Vec<u64> {
-    let numel = tam.count as usize;
-    if let Some(info) = info
-        && let Some(ranked) = info.as_ranked()
-    {
-        let inferred_shape = ranked.shape();
-        let all_numeric: Option<Vec<u64>> = inferred_shape
-            .iter()
-            .map(|s| {
-                if let crate::scalar_info::ScalarInfoTyped::Numeric(v) = s {
-                    Some(*v)
-                } else {
-                    None
-                }
-            })
-            .collect();
-        if let Some(shape) = all_numeric {
-            return shape;
-        }
-        // Try single-unknown dim resolution.
-        let known_product: u64 = inferred_shape
-            .iter()
-            .filter_map(|s| {
-                if let crate::scalar_info::ScalarInfoTyped::Numeric(v) = s {
-                    Some(*v)
-                } else {
-                    None
-                }
-            })
-            .product::<u64>()
-            .max(1);
-        let sym_count = inferred_shape
-            .iter()
-            .filter(|s| !matches!(s, crate::scalar_info::ScalarInfoTyped::Numeric(_)))
-            .count();
-        if sym_count > 0 && known_product > 0 && (numel as u64).is_multiple_of(known_product) {
-            let sym_total = numel as u64 / known_product;
-            if sym_count == 1 {
-                return inferred_shape
-                    .iter()
-                    .map(|s| {
-                        if let crate::scalar_info::ScalarInfoTyped::Numeric(v) = s {
-                            *v
-                        } else {
-                            sym_total
-                        }
-                    })
-                    .collect();
-            } else if sym_total == 1 {
-                return inferred_shape
-                    .iter()
-                    .map(|s| {
-                        if let crate::scalar_info::ScalarInfoTyped::Numeric(v) = s {
-                            *v
-                        } else {
-                            1
-                        }
-                    })
-                    .collect();
-            }
-        }
-    }
-    tam.known_dims.clone()
 }
 
 impl MilliOpGraph {

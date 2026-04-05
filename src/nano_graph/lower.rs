@@ -1988,53 +1988,47 @@ mod tests {
             result.unsupported_details
         );
 
-        // Map to (AtomId, view) pairs for pool_eval.
+        // Map to (TAMI, view) pairs for pool_eval.
         let input_views: Vec<_> = inputs.iter().map(|t| t.view()).collect();
-        let eval_inputs: Vec<_> = result
+        let eval_input_tamis: Vec<_> = result
             .graph
             .input_tensors()
             .iter()
             .filter_map(|it| {
                 let idx = input_ids.iter().position(|&id| id == it.tensor_id)?;
-                Some((it.base_id, &input_views[idx]))
+                // Build a contiguous TAMI for the input.
+                let tam_info = result
+                    .tensor_map
+                    .values()
+                    .find(|t| t.base_id == it.base_id)?;
+                Some((tam_info, idx))
+            })
+            .collect();
+        let eval_inputs: Vec<_> = eval_input_tamis
+            .iter()
+            .map(|(tam, idx)| (*tam, &input_views[*idx]))
+            .collect();
+
+        // Build output TAMIs.
+        let output_tamis: Vec<_> = output_ids
+            .iter()
+            .map(|out_id| {
+                let tam = result.tensor_map.get(out_id).unwrap();
+                assert!(
+                    tam.sym_dims.is_empty(),
+                    "Sym dims not yet supported in test"
+                );
+                tam
             })
             .collect();
 
-        // Build output ranges per group (not per tensor_map entry, which may be segmented).
-        // Collect all groups that contain output atoms.
-        let mut all_output_ranges: Vec<(AtomRange, crate::numeric_tensor::TensorLayout<DynRank>)> =
-            Vec::new();
-        for out_id in &output_ids {
-            let tam = result.tensor_map.get(out_id).unwrap();
-            assert!(
-                tam.sym_dims.is_empty(),
-                "Sym dims not yet supported in test"
-            );
-            for range in tam.atom_ranges(&result.graph) {
-                let layout = crate::numeric_tensor::TensorLayout::<DynRank>::row_major(
-                    vec![range.count],
-                    range.dtype,
-                );
-                all_output_ranges.push((range, layout));
-            }
-        }
-
-        // Eval NanoGraph via pool_eval.
+        // Eval NanoGraph via pool_eval — returns correctly-shaped tensors.
         let pool = TrackedPool::new(None);
         let nano_results =
-            pool_eval::pool_eval(&result.graph, &eval_inputs, &all_output_ranges, &pool).unwrap();
+            pool_eval::pool_eval(&result.graph, &eval_inputs, &output_tamis, &pool).unwrap();
 
-        // Build a lookup from AtomId -> f64.
-        let mut atom_vals: std::collections::HashMap<u64, f64> = std::collections::HashMap::new();
-        for ((range, _), tensor) in all_output_ranges.iter().zip(nano_results.iter()) {
-            for i in 0..range.count {
-                let scalar = tensor.read_element(i as usize);
-                atom_vals.insert(range.base.0 + i, scalar.to_f64());
-            }
-        }
-
-        // Compare outputs.
-        for out_id in &output_ids {
+        // Compare outputs — results are in output_ids order, already shaped.
+        for (out_id, nano_tensor) in output_ids.iter().zip(nano_results.iter()) {
             let milli_tensor = &intermediates[out_id];
             let milli_numel = milli_tensor.numel();
             let milli_flat: Vec<f64> = (0..milli_numel)
@@ -2042,13 +2036,8 @@ mod tests {
                 .collect();
             let tam = result.tensor_map.get(out_id).unwrap();
 
-            let nano_flat: Vec<f64> = (0..tam.count)
-                .map(|i| {
-                    let atom = tam.atom_id_for_element(i);
-                    *atom_vals
-                        .get(&atom.0)
-                        .unwrap_or_else(|| panic!("atom {} not found in eval results", atom))
-                })
+            let nano_flat: Vec<f64> = (0..nano_tensor.numel())
+                .map(|i| nano_tensor.read_element(i).to_f64())
                 .collect();
 
             assert_eq!(

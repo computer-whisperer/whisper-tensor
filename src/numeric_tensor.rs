@@ -472,6 +472,37 @@ impl<R: Rank> TensorLayout<R> {
             }
         }
     }
+
+    /// Write a single element without dtype checking.
+    ///
+    /// # Safety
+    /// Caller must ensure `value.dtype() == self.element_dtype()`.
+    #[inline(always)]
+    pub unsafe fn write_element_unchecked(
+        &self,
+        data: &mut [u8],
+        flat_index: usize,
+        value: NumericScalar,
+    ) {
+        match self {
+            TensorLayout::ElementStrided {
+                shape,
+                strides,
+                offset_bits,
+                dtype,
+            } => {
+                let bit_offset = *offset_bits as usize
+                    + flat_to_bit_offset(flat_index, shape.as_slice(), strides.as_slice());
+                let mut view = NumericScalarViewMut {
+                    data,
+                    bit_offset,
+                    dtype: *dtype,
+                };
+                view.write_scalar(&value);
+            }
+            _ => unsafe { std::hint::unreachable_unchecked() },
+        }
+    }
 }
 
 /// Convert a flat element index to a bit offset using shape and strides.
@@ -746,6 +777,132 @@ impl<'a, R: Rank> NumericTensorView<'a, R> {
             })
         }
     }
+
+    /// Convert this view to match a target layout, borrowing if the byte layout
+    /// already matches or copying into a new pool-allocated buffer if it doesn't.
+    ///
+    /// "Matches" means the view's bytes are already arranged according to `target`:
+    /// same dtype, same shape, same strides, and zero offset.
+    pub fn relayout<'p, P: Pool>(
+        &self,
+        target: TensorLayout<crate::tensor_rank::DynRank>,
+        pool: &'p P,
+    ) -> Result<
+        NumericTensorCOW<'a, 'p, crate::tensor_rank::DynRank, P>,
+        crate::pool::AllocationError,
+    > {
+        // Check if the view's current layout matches the target byte-for-byte.
+        let matches = match (&self.layout, &target) {
+            (
+                TensorLayout::ElementStrided {
+                    shape: s1,
+                    dtype: d1,
+                    strides: st1,
+                    offset_bits: o1,
+                },
+                TensorLayout::ElementStrided {
+                    shape: s2,
+                    dtype: d2,
+                    strides: st2,
+                    offset_bits: o2,
+                },
+            ) => {
+                d1 == d2
+                    && o1 == o2
+                    && s1.as_slice() == s2.as_slice()
+                    && st1.as_slice() == st2.as_slice()
+            }
+            _ => false,
+        };
+
+        if matches {
+            // Bytes are already in the right order — borrow with flat 1D layout.
+            let numel = target.numel() as u64;
+            let flat = TensorLayout::row_major(vec![numel], target.element_dtype());
+            Ok(NumericTensorCOW::Borrowed(NumericTensorView {
+                data: self.data,
+                layout: flat,
+            }))
+        } else {
+            // Must copy — rearrange elements from source layout to target layout.
+            let numel = target.numel();
+            let mut buffer = pool.allocate(target.buffer_size_bytes())?;
+
+            // Byte-aligned fast path: both ElementStrided, same dtype, zero offset,
+            // all strides byte-aligned. Copy raw bytes without scalar abstraction.
+            if let (
+                TensorLayout::ElementStrided {
+                    shape: src_shape,
+                    dtype: src_dtype,
+                    strides: src_strides,
+                    offset_bits: 0,
+                },
+                TensorLayout::ElementStrided {
+                    dtype: dst_dtype,
+                    strides: dst_strides,
+                    offset_bits: 0,
+                    ..
+                },
+            ) = (&self.layout, &target)
+                && src_dtype == dst_dtype
+                && src_strides.as_slice().iter().all(|s| s % 8 == 0)
+                && dst_strides.as_slice().iter().all(|s| s % 8 == 0)
+            {
+                let bpe = src_dtype.bytes_per_element();
+                let src_dims = src_shape.as_slice();
+                let src_byte_strides: Vec<usize> = src_strides
+                    .as_slice()
+                    .iter()
+                    .map(|s| (*s / 8) as usize)
+                    .collect();
+                let dst_byte_strides: Vec<usize> = dst_strides
+                    .as_slice()
+                    .iter()
+                    .map(|s| (*s / 8) as usize)
+                    .collect();
+                // Precompute row-major tail products for flat→coords decomposition.
+                let ndim = src_dims.len();
+                let mut tail_products = vec![1usize; ndim + 1];
+                for i in (0..ndim).rev() {
+                    tail_products[i] = tail_products[i + 1] * src_dims[i] as usize;
+                }
+                for flat in 0..numel {
+                    let mut src_off = 0usize;
+                    let mut dst_off = 0usize;
+                    let mut rem = flat;
+                    for d in 0..ndim {
+                        let idx = rem / tail_products[d + 1];
+                        rem %= tail_products[d + 1];
+                        src_off += idx * src_byte_strides[d];
+                        dst_off += idx * dst_byte_strides[d];
+                    }
+                    buffer[dst_off..dst_off + bpe]
+                        .copy_from_slice(&self.data[src_off..src_off + bpe]);
+                }
+
+                let flat = TensorLayout::row_major(vec![numel as u64], *src_dtype);
+                return Ok(NumericTensorCOW::Owned(NumericTensor {
+                    buffer,
+                    layout: flat,
+                }));
+            }
+
+            // General fallback via scalar read/write.
+            for i in 0..numel {
+                let scalar = self.layout.read_element(self.data, i);
+                // Safety: relayout preserves dtype — source and target have the same dtype
+                // by construction (TAMI describes the same tensor data).
+                unsafe {
+                    target.write_element_unchecked(&mut buffer, i, scalar);
+                }
+            }
+            let flat = TensorLayout::row_major(vec![numel as u64], target.element_dtype());
+            Ok(NumericTensorCOW::Owned(NumericTensor {
+                buffer,
+                layout: flat,
+            }))
+        }
+    }
 }
 
 impl<R: Rank> fmt::Debug for NumericTensorView<'_, R> {
@@ -755,6 +912,40 @@ impl<R: Rank> fmt::Debug for NumericTensorView<'_, R> {
             .field("dtype", &self.layout.element_dtype())
             .field("data_len", &self.data.len())
             .finish()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// NumericTensorCOW — borrow-or-own result from relayout
+// ---------------------------------------------------------------------------
+
+/// Copy-on-write tensor — either a borrowed view or a pool-allocated tensor.
+/// Returned by [`NumericTensorView::relayout`].
+pub enum NumericTensorCOW<'a, 'p, R: Rank, P: Pool + 'p> {
+    Borrowed(NumericTensorView<'a, R>),
+    Owned(NumericTensor<'p, R, P>),
+}
+
+impl<'a, 'p, R: Rank, P: Pool + 'p> NumericTensorCOW<'a, 'p, R, P> {
+    pub fn read_element(&self, index: usize) -> NumericScalar {
+        match self {
+            Self::Borrowed(v) => v.read_element(index),
+            Self::Owned(t) => t.read_element(index),
+        }
+    }
+
+    pub fn dtype(&self) -> NumericDType {
+        match self {
+            Self::Borrowed(v) => v.dtype(),
+            Self::Owned(t) => t.dtype(),
+        }
+    }
+
+    pub fn numel(&self) -> usize {
+        match self {
+            Self::Borrowed(v) => v.numel(),
+            Self::Owned(t) => t.numel(),
+        }
     }
 }
 

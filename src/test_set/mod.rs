@@ -324,94 +324,57 @@ pub fn run_case_via_pool_eval(case: &TestCase) -> Result<(), String> {
             ));
         }
 
-        // Map input tensors to (AtomId, view) pairs for pool_eval.
-        // Collect (AtomId, tensor) pairs, then create views with stable references.
-        let input_pairs: Vec<_> = ds
+        // Map input tensors to (TAMI, view) pairs for pool_eval.
+        let input_tam_pairs: Vec<_> = ds
             .inputs
             .iter()
             .filter_map(|(&ext_id, tensor)| {
                 let internal_id = case.graph.input_map.get(&ext_id)?;
                 let tam = lower_result.tensor_map.get(internal_id)?;
-                Some((tam.base_id, tensor))
+                Some((tam, tensor))
             })
             .collect();
 
-        let input_views: Vec<_> = input_pairs
+        let input_views: Vec<_> = input_tam_pairs
             .iter()
             .map(|(_, tensor)| tensor.view())
             .collect();
 
-        let eval_inputs: Vec<_> = input_pairs
+        let eval_inputs: Vec<_> = input_tam_pairs
             .iter()
             .zip(input_views.iter())
-            .map(|((atom_id, _), view)| (*atom_id, view))
+            .map(|((tam, _), view)| (*tam, view))
             .collect();
 
-        // Build output AtomRanges from the graph's output ids.
+        // Build output TAMIs from the graph's output ids.
         let output_ids: Vec<GlobalId> = case.graph.output_ordering.clone().unwrap_or_default();
 
-        let mut output_ranges = Vec::new();
-        for &out_id in &output_ids {
-            if let Some(tam) = lower_result.tensor_map.get(&out_id) {
-                for range in tam.atom_ranges(&lower_result.graph) {
-                    let layout = crate::numeric_tensor::TensorLayout::<crate::tensor_rank::DynRank>::row_major(
-                        vec![range.count],
-                        range.dtype,
-                    );
-                    output_ranges.push((range, layout));
-                }
-            }
-        }
+        let output_tamis: Vec<_> = output_ids
+            .iter()
+            .filter_map(|out_id| lower_result.tensor_map.get(out_id))
+            .collect();
 
-        // Run pool_eval.
-        let pool = TrackedPool::new(None); // no budget limit for tests
+        // Run pool_eval — returns correctly-shaped output tensors.
+        let pool = TrackedPool::new(None);
         let eval_results =
-            pool_eval::pool_eval(&lower_result.graph, &eval_inputs, &output_ranges, &pool)
+            pool_eval::pool_eval(&lower_result.graph, &eval_inputs, &output_tamis, &pool)
                 .map_err(|e| format!("{}[{}]: pool_eval failed: {e}", case.name, ds.label))?;
 
-        // Compare outputs.
-        for (&expected_id, expected_tensor) in &ds.expected_outputs {
-            // Fail loudly if the output isn't in tensor_map (don't silently skip).
-            let tam = lower_result.tensor_map.get(&expected_id).ok_or_else(|| {
-                format!(
-                    "{}[{}]: output {expected_id} not in tensor_map — lowering may have failed",
-                    case.name, ds.label
-                )
-            })?;
-
-            let numel = tam.count as usize;
-            let expected_dtype = expected_tensor.dtype();
-            let mut actual =
-                NumericTensor::zeros(expected_tensor.shape().clone(), expected_dtype, &POOL)
-                    .unwrap();
-
-            // For each logical element, find its atom in the eval results.
-            for i in 0..numel {
-                let atom = tam.atom_id_for_element(i as u64);
-                let (rt_idx, offset) = output_ranges
-                    .iter()
-                    .enumerate()
-                    .find_map(|(idx, (range, _))| {
-                        let range_end = range.base.0 + range.count;
-                        if atom.0 >= range.base.0 && atom.0 < range_end {
-                            Some((idx, (atom.0 - range.base.0) as usize))
-                        } else {
-                            None
-                        }
-                    })
-                    .ok_or_else(|| {
-                        format!(
-                            "{}[{}]: atom {} not in any output range",
-                            case.name, ds.label, atom
-                        )
-                    })?;
-
-                let scalar = eval_results[rt_idx].read_element(offset);
-                actual.write_element(i, scalar.cast_to(expected_dtype));
-            }
+        // Compare outputs — pool_eval returns tensors in the same order as output_tamis,
+        // which aligns with output_ids. Each result is already correctly shaped.
+        for (out_id, result_tensor) in output_ids.iter().zip(eval_results.iter()) {
+            let expected_tensor = match ds.expected_outputs.get(out_id) {
+                Some(t) => t,
+                None => continue,
+            };
 
             let ctx = format!("{}[{}] pool_eval", case.name, ds.label);
-            assert_tensors_close(&actual.view(), &expected_tensor.view(), &ds.tolerance, &ctx)?;
+            assert_tensors_close(
+                &result_tensor.view(),
+                &expected_tensor.view(),
+                &ds.tolerance,
+                &ctx,
+            )?;
         }
     }
     Ok(())
