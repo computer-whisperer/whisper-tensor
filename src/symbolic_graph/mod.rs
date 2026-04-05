@@ -1314,8 +1314,16 @@ impl SymbolicGraph {
                         .filter_map(|&id| Some((id, active_tensors.get(&id)?.view())))
                         .collect();
 
+                let op_name = ops
+                    .get(op_id)
+                    .and_then(|g| g.name.as_deref())
+                    .unwrap_or("?");
                 let start_instant = std::time::Instant::now();
                 let outputs = op.eval_pool(&input_views, pool)?;
+                let elapsed_ms = start_instant.elapsed().as_secs_f64() * 1e3;
+                if elapsed_ms > 50.0 {
+                    eprintln!("  [eval] {op_name}: {elapsed_ms:.0}ms");
+                }
                 let end_instant = std::time::Instant::now();
                 observer.on_op_executed(&[op.global_id()], start_instant, end_instant);
                 for (tensor_id, value) in outputs {

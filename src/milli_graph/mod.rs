@@ -1053,11 +1053,12 @@ impl MilliOpGraph {
             info_inputs.insert(ext_id, TensorInfo::from_view(view, &POOL_S));
         }
 
-        // Infer for output shape reconstruction. lower() re-infers internally —
-        // TODO: pass pre-computed infos to avoid the double infer.
-        let all_infos = self.infer_all(&info_inputs, &POOL_S)?;
+        // lower() runs infer_all internally and returns the result in all_infos.
+        let lower_result = lower::lower(self, &info_inputs)
+            .map_err(|e| MilliOpGraphError::LowerError(e.to_string()))?;
+        let all_infos = &lower_result.all_infos;
 
-        // Short-circuit: if all outputs are zero-element tensors, skip lowering
+        // Short-circuit: if all outputs are zero-element tensors, skip eval
         // and return empty tensors directly.
         let output_map_ref = self.output_map.as_ref().ok_or_else(|| {
             MilliOpGraphError::InvalidGraph("output_map is not configured".into())
@@ -1107,9 +1108,6 @@ impl MilliOpGraph {
                 return Ok(outputs);
             }
         }
-
-        let lower_result = lower::lower(self, &info_inputs)
-            .map_err(|e| MilliOpGraphError::LowerError(e.to_string()))?;
 
         // Map inputs to (AtomId, &View) pairs (ext → internal → atom_id).
         let eval_inputs: Vec<_> = inputs

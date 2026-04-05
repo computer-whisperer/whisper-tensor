@@ -53,7 +53,7 @@ enum GroupStrategy {
 
 /// Classify a group's distribution strategy.
 fn classify_group(
-    group: &AtomGroup,
+    group: &AtomGroup<'static, crate::pool::SystemPool>,
     num_lanes: usize,
     producers: &[usize],
     strategies: &[GroupStrategy],
@@ -61,7 +61,7 @@ fn classify_group(
     let nl = num_lanes as u64;
 
     // Literals: always duplicate (every lane needs the full constant).
-    if matches!(group.op, ScalarOp::Literal(_)) {
+    if matches!(group.op, ScalarOp::Literal(_) | ScalarOp::LiteralSpan(_)) {
         return GroupStrategy::Duplicate;
     }
 
@@ -133,7 +133,9 @@ fn classify_group(
 /// Returns (producers, successors) where:
 /// - producers[gi] = list of group indices that gi depends on
 /// - successors[gi] = list of group indices that depend on gi
-fn build_dependency_dag(graph: &NanoGraph) -> (Vec<Vec<usize>>, Vec<Vec<usize>>) {
+fn build_dependency_dag(
+    graph: &NanoGraph<'static, crate::pool::SystemPool>,
+) -> (Vec<Vec<usize>>, Vec<Vec<usize>>) {
     let groups = graph.groups();
     let n = groups.len();
     let mut producers: Vec<Vec<usize>> = Vec::with_capacity(n);
@@ -182,12 +184,12 @@ fn build_dependency_dag(graph: &NanoGraph) -> (Vec<Vec<usize>>, Vec<Vec<usize>>)
 /// - A barrier is needed when a group needs data from multiple lanes
 ///   (fan-in point).
 fn assign_phases(
-    groups: &[AtomGroup],
+    groups: &[AtomGroup<'static, crate::pool::SystemPool>],
     strategies: &[GroupStrategy],
     producers: &[Vec<usize>],
     successors: &[Vec<usize>],
     num_lanes: usize,
-    graph: &NanoGraph,
+    graph: &NanoGraph<'static, crate::pool::SystemPool>,
 ) -> Vec<usize> {
     let n = groups.len();
     let mut phase_of = vec![0usize; n];
@@ -301,7 +303,7 @@ fn record_external_range(
 /// intervals representing atoms that will actually be present in this span
 /// (from work item fragments + inlined literals).
 fn collect_external_in_range(
-    graph: &NanoGraph,
+    graph: &NanoGraph<'static, crate::pool::SystemPool>,
     lo: u64,
     hi: u64,
     fallback_dtype: NumericDType,
@@ -413,7 +415,7 @@ struct LaneWorkItem {
 
 /// Build a single span for one lane within one phase.
 fn build_span(
-    graph: &NanoGraph,
+    graph: &NanoGraph<'static, crate::pool::SystemPool>,
     work_items: &[LaneWorkItem],
     strategies: &[GroupStrategy],
     phase_of: &[usize],
@@ -501,7 +503,7 @@ fn build_span(
                     continue;
                 }
                 if !span_compute_set.contains(&gi)
-                    && matches!(g.op, ScalarOp::Literal(_))
+                    && matches!(g.op, ScalarOp::Literal(_) | ScalarOp::LiteralSpan(_))
                     && g.inputs.is_empty()
                 {
                     needed_literals.insert(gi);
@@ -514,7 +516,10 @@ fn build_span(
         if let ScalarOp::IndirectLoad { table_base, .. } = &group.op {
             if let Some(pi) = graph.find_group_idx(*table_base) {
                 if !span_compute_set.contains(&pi)
-                    && matches!(groups[pi].op, ScalarOp::Literal(_))
+                    && matches!(
+                        groups[pi].op,
+                        ScalarOp::Literal(_) | ScalarOp::LiteralSpan(_)
+                    )
                     && groups[pi].inputs.is_empty()
                 {
                     needed_literals.insert(pi);
@@ -762,7 +767,7 @@ fn merge_atom_ranges(mut ranges: Vec<AtomRange>) -> Vec<AtomRange> {
 ///
 /// Returns a sequence of phases, each containing one span per lane.
 pub fn plan(
-    graph: &NanoGraph,
+    graph: &NanoGraph<'static, crate::pool::SystemPool>,
     num_lanes: usize,
     input_tensors: &[InputTensor],
     output_atom_ids: &[AtomId],
@@ -917,7 +922,10 @@ pub fn plan(
 }
 
 /// Identify which group indices produce output atoms.
-fn identify_output_groups(graph: &NanoGraph, output_atom_ids: &[AtomId]) -> HashSet<usize> {
+fn identify_output_groups(
+    graph: &NanoGraph<'static, crate::pool::SystemPool>,
+    output_atom_ids: &[AtomId],
+) -> HashSet<usize> {
     let mut set = HashSet::new();
     for &atom_id in output_atom_ids {
         if let Some(gi) = graph.find_group_idx(atom_id) {
@@ -977,7 +985,7 @@ mod tests {
                 s.graph
                     .groups()
                     .iter()
-                    .filter(|g| !matches!(g.op, ScalarOp::Literal(_)))
+                    .filter(|g| !matches!(g.op, ScalarOp::Literal(_) | ScalarOp::LiteralSpan(_)))
                     .map(|g| g.count)
                     .sum::<u64>()
             })
@@ -1390,7 +1398,7 @@ mod tests {
                 .graph
                 .groups()
                 .iter()
-                .filter(|g| matches!(g.op, ScalarOp::Literal(_)))
+                .filter(|g| matches!(g.op, ScalarOp::Literal(_) | ScalarOp::LiteralSpan(_)))
                 .collect();
 
             assert!(

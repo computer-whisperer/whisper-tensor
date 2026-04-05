@@ -25,7 +25,7 @@ pub type GroupProvenance = Vec<(GlobalId, String)>;
 pub fn text_report(
     plan: &ExecutionPlan,
     provenance: &GroupProvenance,
-    main_graph: &NanoGraph,
+    main_graph: &NanoGraph<'static, crate::pool::SystemPool>,
 ) -> String {
     let mut out = String::new();
     let num_lanes = plan.phases.first().map_or(0, |p| p.spans.len());
@@ -193,7 +193,7 @@ pub fn text_report(
 pub fn svg_report(
     plan: &ExecutionPlan,
     provenance: &GroupProvenance,
-    main_graph: &NanoGraph,
+    main_graph: &NanoGraph<'static, crate::pool::SystemPool>,
 ) -> String {
     let num_lanes = plan.phases.first().map_or(0, |p| p.spans.len());
     let num_phases = plan.phases.len();
@@ -452,10 +452,15 @@ fn scalar_op_name(op: &ScalarOp) -> &'static str {
         ScalarOp::Reduce { .. } => "Reduce",
         ScalarOp::IndirectLoad { .. } => "IndirLoad",
         ScalarOp::OpaqueOutput { .. } => "Opaque",
+        ScalarOp::LiteralSpan(_) => "LiteralSpan",
     }
 }
 
-fn dominant_op_kind(span: &Span, main_graph: &NanoGraph, provenance: &GroupProvenance) -> String {
+fn dominant_op_kind(
+    span: &Span,
+    main_graph: &NanoGraph<'static, crate::pool::SystemPool>,
+    provenance: &GroupProvenance,
+) -> String {
     let mut op_atoms: HashMap<&str, u64> = HashMap::new();
     for group in span.graph.groups() {
         if let Some(gi) = main_graph.find_group_idx(group.base_id) {

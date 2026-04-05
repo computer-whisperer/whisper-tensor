@@ -505,12 +505,23 @@ impl MilliOp for Gather {
         let out_dtype = data_info.dtype();
         let out_info = TensorInfo::from_dtype_and_shape_scalars(out_dtype, &out_dims);
 
-        if let Some(results) = super::constant_fold(
+        let data_numel = data_info.as_concrete().map(|c| c.numel()).unwrap_or(0);
+        let idx_numel = indices_info.as_concrete().map(|c| c.numel()).unwrap_or(0);
+        let t0 = std::time::Instant::now();
+        let fold_result = super::constant_fold(
             self,
             known_inputs,
             &[(self.output, out_info.clone_with_pool(pool))],
             pool,
-        ) {
+        );
+        let dt = t0.elapsed();
+        if dt.as_millis() > 10 {
+            eprintln!(
+                "    [gather infer] constant_fold data={data_numel} idx={idx_numel}: {:.0}ms",
+                dt.as_secs_f64() * 1e3
+            );
+        }
+        if let Some(results) = fold_result {
             return Ok(results);
         }
 

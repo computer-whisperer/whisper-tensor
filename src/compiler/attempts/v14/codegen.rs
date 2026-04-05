@@ -101,18 +101,35 @@ impl BufferLayout {
     }
 
     /// Write literal group values into the buffer.
-    pub fn populate_literals(&self, graph: &NanoGraph, buffer: &mut [u8]) {
+    pub fn populate_literals(
+        &self,
+        graph: &NanoGraph<'static, crate::pool::SystemPool>,
+        buffer: &mut [u8],
+    ) {
         use crate::numeric_scalar::NumericScalar;
         for group in graph.groups() {
-            if let ScalarOp::Literal(scalar) = &group.op {
-                if let Some((slot, _)) = self.find(group.base_id) {
-                    // Cast the literal to the slot's storage dtype, then write raw bytes.
-                    let stored = scalar.cast_to(slot.dtype);
-                    for i in 0..group.count {
-                        let off = slot.byte_offset + i as usize * slot.elem_bytes;
-                        write_scalar(buffer, off, &stored);
+            match &group.op {
+                ScalarOp::Literal(scalar) => {
+                    if let Some((slot, _)) = self.find(group.base_id) {
+                        // Cast the literal to the slot's storage dtype, then write raw bytes.
+                        let stored = scalar.cast_to(slot.dtype);
+                        for i in 0..group.count {
+                            let off = slot.byte_offset + i as usize * slot.elem_bytes;
+                            write_scalar(buffer, off, &stored);
+                        }
                     }
                 }
+                ScalarOp::LiteralSpan(tensor) => {
+                    if let Some((slot, _)) = self.find(group.base_id) {
+                        for i in 0..group.count {
+                            let scalar = tensor.read_element(i as usize);
+                            let stored = scalar.cast_to(slot.dtype);
+                            let off = slot.byte_offset + i as usize * slot.elem_bytes;
+                            write_scalar(buffer, off, &stored);
+                        }
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -273,7 +290,10 @@ fn align_up(v: usize, align: usize) -> usize {
 /// multiple groups are coalesced into contiguous slabs (atom-ID-proportional
 /// offsets within the slab). This guarantees that stride arithmetic works.
 /// Other groups use liveness-based slot reuse for memory efficiency.
-pub fn compute_layout(graph: &NanoGraph, output_ranges: &[AtomRange]) -> BufferLayout {
+pub fn compute_layout(
+    graph: &NanoGraph<'static, crate::pool::SystemPool>,
+    output_ranges: &[AtomRange],
+) -> BufferLayout {
     let groups = graph.groups();
     let n = groups.len();
     let num_inputs = graph.input_tensors().len();
@@ -760,7 +780,10 @@ pub struct JitCompiledSpan {
 
 impl JitCompiledSpan {
     /// Compile a span into a JIT function ready for the executor.
-    pub fn compile(graph: &NanoGraph, output_ranges: &[AtomRange]) -> Result<Self, String> {
+    pub fn compile(
+        graph: &NanoGraph<'static, crate::pool::SystemPool>,
+        output_ranges: &[AtomRange],
+    ) -> Result<Self, String> {
         if graph.num_groups() == 0 {
             return Ok(JitCompiledSpan {
                 compiled: compile_empty_span()?,
@@ -933,7 +956,10 @@ fn read_scalar_raw(data: &[u8], dtype: NumericDType) -> crate::numeric_scalar::N
 
 /// Validate that all stride-based InputRefs access atoms within single slots.
 /// Returns a list of errors (empty = ok).
-pub fn validate_layout(graph: &NanoGraph, layout: &BufferLayout) -> Vec<String> {
+pub fn validate_layout(
+    graph: &NanoGraph<'static, crate::pool::SystemPool>,
+    layout: &BufferLayout,
+) -> Vec<String> {
     let mut errors = Vec::new();
     for (gi, group) in graph.groups().iter().enumerate() {
         for (ii, ir) in group.inputs.iter().enumerate() {
@@ -1045,14 +1071,17 @@ struct FusionChain {
 /// B is not a Reduce/IndirectLoad/Literal, B is not dead, and all of B's inputs
 /// that reference A use Affine stride=1 (Strided with dim_strides=[1],
 /// dim_shape=[MAX]).
-fn build_fusion_chains(groups: &[AtomGroup], layout: &BufferLayout) -> Vec<FusionChain> {
+fn build_fusion_chains(
+    groups: &[AtomGroup<'static, crate::pool::SystemPool>],
+    layout: &BufferLayout,
+) -> Vec<FusionChain> {
     // Fusion is opt-out. Disable with FUSION=0.
     if std::env::var("FUSION").as_deref() == Ok("0") {
         return groups
             .iter()
             .enumerate()
             .filter(|(gi, g)| {
-                !matches!(&g.op, ScalarOp::Literal(_))
+                !matches!(&g.op, ScalarOp::Literal(_) | ScalarOp::LiteralSpan(_))
                     && !(*gi < layout.group_use_counts.len() && layout.group_use_counts[*gi] == 0)
                     && g.count > 0
             })
@@ -1072,7 +1101,7 @@ fn build_fusion_chains(groups: &[AtomGroup], layout: &BufferLayout) -> Vec<Fusio
 
     for (gi, group) in groups.iter().enumerate() {
         // Skip literals and dead groups — they don't participate in chains.
-        if matches!(&group.op, ScalarOp::Literal(_)) {
+        if matches!(&group.op, ScalarOp::Literal(_) | ScalarOp::LiteralSpan(_)) {
             continue;
         }
         if gi < layout.group_use_counts.len() && layout.group_use_counts[gi] == 0 {
@@ -1118,7 +1147,10 @@ fn build_fusion_chains(groups: &[AtomGroup], layout: &BufferLayout) -> Vec<Fusio
 
 /// Check if all of a group's inputs that reference a chain producer use
 /// Affine stride=1 (eligible for register forwarding).
-fn inputs_fusable_with_chain(group: &AtomGroup, chain_ranges: &[(u64, u64)]) -> bool {
+fn inputs_fusable_with_chain(
+    group: &AtomGroup<'static, crate::pool::SystemPool>,
+    chain_ranges: &[(u64, u64)],
+) -> bool {
     for input in &group.inputs {
         match input {
             InputRef::Strided {
@@ -1174,7 +1206,7 @@ fn emit_chain(
     builder: &mut FunctionBuilder,
     module: &mut JITModule,
     chain: &FusionChain,
-    groups: &[AtomGroup],
+    groups: &[AtomGroup<'static, crate::pool::SystemPool>],
     layout: &BufferLayout,
     buffer_ptr: Value,
     math: &MathFuncs,
@@ -1287,7 +1319,7 @@ fn emit_chain(
 fn emit_group_body_forwarded(
     builder: &mut FunctionBuilder,
     module: &mut JITModule,
-    group: &AtomGroup,
+    group: &AtomGroup<'static, crate::pool::SystemPool>,
     layout: &BufferLayout,
     buffer_ptr: Value,
     i_val: Option<Value>,
@@ -1306,7 +1338,7 @@ fn emit_group_body_forwarded(
     let output_repr = repr_of(output_dtype);
 
     let result_val = match &group.op {
-        ScalarOp::Literal(_) => return Ok(()),
+        ScalarOp::Literal(_) | ScalarOp::LiteralSpan(_) => return Ok(()),
 
         ScalarOp::Identity | ScalarOp::Cast { .. } => {
             let src = load_input_forwarded(
@@ -1627,7 +1659,7 @@ fn load_input_forwarded(
 /// comparing the output byte-for-byte on a zero-initialized buffer.
 /// Only active when FUSION_VALIDATE env var is set.
 pub fn compile_span_validated(
-    graph: &NanoGraph,
+    graph: &NanoGraph<'static, crate::pool::SystemPool>,
     layout: &BufferLayout,
 ) -> Result<CompiledSpan, String> {
     let has_multi = {
@@ -1742,7 +1774,10 @@ pub fn compile_span_validated(
 }
 
 /// Compile a span's NanoGraph into native code using the given buffer layout.
-pub fn compile_span(graph: &NanoGraph, layout: &BufferLayout) -> Result<CompiledSpan, String> {
+pub fn compile_span(
+    graph: &NanoGraph<'static, crate::pool::SystemPool>,
+    layout: &BufferLayout,
+) -> Result<CompiledSpan, String> {
     let mut flag_builder = settings::builder();
     flag_builder.set("opt_level", "speed").unwrap();
     let isa_builder =
@@ -1818,7 +1853,7 @@ pub fn compile_span(graph: &NanoGraph, layout: &BufferLayout) -> Result<Compiled
 fn emit_group(
     builder: &mut FunctionBuilder,
     module: &mut JITModule,
-    group: &AtomGroup,
+    group: &AtomGroup<'static, crate::pool::SystemPool>,
     layout: &BufferLayout,
     buffer_ptr: Value,
     math: &MathFuncs,
@@ -1902,7 +1937,7 @@ fn emit_group(
 fn emit_group_body(
     builder: &mut FunctionBuilder,
     module: &mut JITModule,
-    group: &AtomGroup,
+    group: &AtomGroup<'static, crate::pool::SystemPool>,
     layout: &BufferLayout,
     buffer_ptr: Value,
     i_val: Option<Value>,
@@ -1920,7 +1955,7 @@ fn emit_group_body(
     let output_repr = repr_of(output_dtype);
 
     match &group.op {
-        ScalarOp::Literal(_) => Ok(()),
+        ScalarOp::Literal(_) | ScalarOp::LiteralSpan(_) => Ok(()),
 
         ScalarOp::Identity | ScalarOp::Cast { .. } => {
             // Identity/Cast: cast input to output_dtype.
@@ -2659,7 +2694,7 @@ fn store_result(
 fn emit_reduce(
     builder: &mut FunctionBuilder,
     module: &mut JITModule,
-    group: &AtomGroup,
+    group: &AtomGroup<'static, crate::pool::SystemPool>,
     layout: &BufferLayout,
     buffer_ptr: Value,
     i_val: Option<Value>,
@@ -3089,6 +3124,7 @@ fn op_name_short(op: &ScalarOp) -> &'static str {
         ScalarOp::Reduce { .. } => "Red",
         ScalarOp::IndirectLoad { .. } => "Ind",
         ScalarOp::OpaqueOutput { .. } => "Opq",
+        ScalarOp::LiteralSpan(_) => "LitS",
     }
 }
 

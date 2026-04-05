@@ -58,7 +58,7 @@ use super::types::{Phase, Span};
 ///     input:     Affine(Mul_base, stride=K)
 ///
 /// Returns the number of pairs relayouted.
-fn relayout_matmul_groups(graph: &mut NanoGraph) -> usize {
+fn relayout_matmul_groups(graph: &mut NanoGraph<'static, crate::pool::SystemPool>) -> usize {
     let mut count = 0;
 
     // First pass: find Reduce groups and their Mul producers.
@@ -224,9 +224,12 @@ enum GroupKind {
 }
 
 /// Classify a group based on its op and structure.
-fn classify_group(group: &AtomGroup, num_lanes: usize) -> GroupKind {
+fn classify_group(
+    group: &AtomGroup<'static, crate::pool::SystemPool>,
+    num_lanes: usize,
+) -> GroupKind {
     // Literals are always duplicated — every lane may need the values.
-    if matches!(group.op, ScalarOp::Literal(_)) {
+    if matches!(group.op, ScalarOp::Literal(_) | ScalarOp::LiteralSpan(_)) {
         return GroupKind::Duplicate;
     }
 
@@ -241,7 +244,7 @@ fn classify_group(group: &AtomGroup, num_lanes: usize) -> GroupKind {
     }
 
     match &group.op {
-        ScalarOp::Literal(_) => unreachable!(), // handled above
+        ScalarOp::Literal(_) | ScalarOp::LiteralSpan(_) => unreachable!(), // handled above
 
         // Elementwise ops: embarrassingly parallel, always split.
         ScalarOp::Binary { .. }
@@ -305,7 +308,9 @@ fn classify_group(group: &AtomGroup, num_lanes: usize) -> GroupKind {
 
 /// Build group-level dependency DAG.
 /// Returns (producers[gi], successors[gi]) as sorted vecs.
-fn build_dependency_dag(graph: &NanoGraph) -> (Vec<Vec<usize>>, Vec<Vec<usize>>) {
+fn build_dependency_dag(
+    graph: &NanoGraph<'static, crate::pool::SystemPool>,
+) -> (Vec<Vec<usize>>, Vec<Vec<usize>>) {
     let groups = graph.groups();
     let n = groups.len();
     let mut producers: Vec<Vec<usize>> = Vec::with_capacity(n);
@@ -342,10 +347,10 @@ fn build_dependency_dag(graph: &NanoGraph) -> (Vec<Vec<usize>>, Vec<Vec<usize>>)
 ///
 /// Returns phase_of[gi] for each group.
 fn assign_phases(
-    groups: &[AtomGroup],
+    groups: &[AtomGroup<'static, crate::pool::SystemPool>],
     kinds: &[GroupKind],
     producers: &[Vec<usize>],
-    graph: &NanoGraph,
+    graph: &NanoGraph<'static, crate::pool::SystemPool>,
     num_lanes: usize,
 ) -> Vec<usize> {
     let n = groups.len();
@@ -388,8 +393,8 @@ fn needs_barrier_between(
     ci: usize,
     prod_kind: GroupKind,
     cons_kind: GroupKind,
-    groups: &[AtomGroup],
-    graph: &NanoGraph,
+    groups: &[AtomGroup<'static, crate::pool::SystemPool>],
+    graph: &NanoGraph<'static, crate::pool::SystemPool>,
     num_lanes: usize,
 ) -> bool {
     let prod = &groups[pi];
@@ -459,7 +464,11 @@ fn needs_barrier_between(
 /// - Affine where the access pattern tiles identically
 /// - Broadcast (reads single atom — but from which lane?)
 /// - StridedBroadcast with repeat aligned to chunk boundaries
-fn is_lane_local_access(consumer: &AtomGroup, producer: &AtomGroup, num_lanes: usize) -> bool {
+fn is_lane_local_access(
+    consumer: &AtomGroup<'static, crate::pool::SystemPool>,
+    producer: &AtomGroup<'static, crate::pool::SystemPool>,
+    num_lanes: usize,
+) -> bool {
     let prod_base = producer.base_id.0;
     let prod_end = prod_base + producer.count;
 
@@ -608,7 +617,10 @@ fn is_lane_local_access(consumer: &AtomGroup, producer: &AtomGroup, num_lanes: u
 }
 
 /// Check if any of the consumer's inputs broadcast a single atom from the producer.
-fn is_broadcast_access(consumer: &AtomGroup, producer: &AtomGroup) -> Option<AtomId> {
+fn is_broadcast_access(
+    consumer: &AtomGroup<'static, crate::pool::SystemPool>,
+    producer: &AtomGroup<'static, crate::pool::SystemPool>,
+) -> Option<AtomId> {
     for input in &consumer.inputs {
         if let InputRef::Broadcast(id) = input {
             if producer.contains(*id) {
@@ -624,7 +636,7 @@ fn input_refs_group(
     input: &InputRef,
     consumer_count: u64,
     consumer_offset: u64,
-    producer: &AtomGroup,
+    producer: &AtomGroup<'static, crate::pool::SystemPool>,
 ) -> bool {
     if consumer_count == 0 {
         return false;
@@ -692,7 +704,11 @@ fn input_refs_group(
 // ─── Span building ─────────────────────────────────────────────────────────
 
 /// For a split group, compute the atom range for a given lane.
-fn split_range(group: &AtomGroup, lane: usize, num_lanes: usize) -> (u64, u64) {
+fn split_range(
+    group: &AtomGroup<'static, crate::pool::SystemPool>,
+    lane: usize,
+    num_lanes: usize,
+) -> (u64, u64) {
     split_count(group.count, lane, num_lanes)
 }
 
@@ -713,7 +729,7 @@ fn split_count(count: u64, lane: usize, num_lanes: usize) -> (u64, u64) {
 /// This ensures each lane's Reduce fragment reads exactly from its lane's
 /// Mul fragment, even when the consumer count doesn't divide evenly by num_lanes.
 fn split_range_aligned(
-    group: &AtomGroup,
+    group: &AtomGroup<'static, crate::pool::SystemPool>,
     lane: usize,
     num_lanes: usize,
     consumer_count: u64,
@@ -738,8 +754,8 @@ fn split_range_aligned(
 /// Collect all atom ranges that a group's inputs reference, including
 /// reduce stride ranges and indirect load tables.
 fn collect_input_atom_ranges(
-    group: &AtomGroup,
-    graph: &NanoGraph,
+    group: &AtomGroup<'static, crate::pool::SystemPool>,
+    graph: &NanoGraph<'static, crate::pool::SystemPool>,
 ) -> Vec<(AtomId, u64, NumericDType)> {
     let mut ranges = Vec::new();
     let mut seen_bases = HashSet::new();
@@ -801,7 +817,7 @@ fn collect_input_atom_ranges(
 ///
 /// Returns a sequence of phases, each containing one span per lane.
 pub fn plan(
-    graph: &NanoGraph,
+    graph: &NanoGraph<'static, crate::pool::SystemPool>,
     num_lanes: usize,
     input_tensors: &[InputTensor],
     output_atom_ids: &[AtomId],
@@ -914,7 +930,7 @@ pub fn plan(
 /// Build a single phase: create one span per lane with the appropriate
 /// group fragments.
 fn build_phase(
-    graph: &NanoGraph,
+    graph: &NanoGraph<'static, crate::pool::SystemPool>,
     phase_group_indices: &[usize],
     kinds: &[GroupKind],
     phase_of: &[usize],
@@ -1079,19 +1095,19 @@ fn build_phase(
 /// stride × consumer_chunks instead of even splits. Used for Mul groups
 /// paired with a Reduce consumer to maintain lane alignment.
 fn emit_split_group(
-    graph: &NanoGraph,
-    group: &AtomGroup,
+    graph: &NanoGraph<'static, crate::pool::SystemPool>,
+    group: &AtomGroup<'static, crate::pool::SystemPool>,
     gi: usize,
     num_lanes: usize,
     aligned_split: Option<(u64, u64)>,
-    span_graphs: &mut [NanoGraph],
+    span_graphs: &mut [NanoGraph<'static, crate::pool::SystemPool>],
     span_inputs: &mut [Vec<AtomRange>],
     span_outputs: &mut [Vec<AtomRange>],
     declared_inputs: &mut [HashSet<u64>],
     produced_in_span: &mut [HashSet<u64>],
     phase_of: &[usize],
     kinds: &[GroupKind],
-    all_groups: &[AtomGroup],
+    all_groups: &[AtomGroup<'static, crate::pool::SystemPool>],
     needs_output: bool,
     input_tensor_set: &HashMap<u64, &InputTensor>,
 ) {
@@ -1178,18 +1194,18 @@ fn clone_input_for_split(input: &InputRef) -> InputRef {
 /// Emit a duplicate group: full copy in every lane that needs it.
 /// For simplicity (and correctness), duplicate into all lanes.
 fn emit_duplicate_group(
-    graph: &NanoGraph,
-    group: &AtomGroup,
+    graph: &NanoGraph<'static, crate::pool::SystemPool>,
+    group: &AtomGroup<'static, crate::pool::SystemPool>,
     gi: usize,
     num_lanes: usize,
-    span_graphs: &mut [NanoGraph],
+    span_graphs: &mut [NanoGraph<'static, crate::pool::SystemPool>],
     span_inputs: &mut [Vec<AtomRange>],
     span_outputs: &mut [Vec<AtomRange>],
     declared_inputs: &mut [HashSet<u64>],
     produced_in_span: &mut [HashSet<u64>],
     phase_of: &[usize],
     kinds: &[GroupKind],
-    all_groups: &[AtomGroup],
+    all_groups: &[AtomGroup<'static, crate::pool::SystemPool>],
     needs_output: bool,
     input_tensor_set: &HashMap<u64, &InputTensor>,
     phase_idx: usize,
@@ -1236,18 +1252,18 @@ fn emit_duplicate_group(
 
 /// Emit a whole (unsplittable) group: put on lane 0.
 fn emit_whole_group(
-    graph: &NanoGraph,
-    group: &AtomGroup,
+    graph: &NanoGraph<'static, crate::pool::SystemPool>,
+    group: &AtomGroup<'static, crate::pool::SystemPool>,
     gi: usize,
     num_lanes: usize,
-    span_graphs: &mut [NanoGraph],
+    span_graphs: &mut [NanoGraph<'static, crate::pool::SystemPool>],
     span_inputs: &mut [Vec<AtomRange>],
     span_outputs: &mut [Vec<AtomRange>],
     declared_inputs: &mut [HashSet<u64>],
     produced_in_span: &mut [HashSet<u64>],
     phase_of: &[usize],
     kinds: &[GroupKind],
-    all_groups: &[AtomGroup],
+    all_groups: &[AtomGroup<'static, crate::pool::SystemPool>],
     needs_output: bool,
     input_tensor_set: &HashMap<u64, &InputTensor>,
 ) {
@@ -1295,13 +1311,13 @@ fn emit_whole_group(
 /// Uses the main graph's producer analysis to deterministically find all
 /// producer groups, avoiding sampling-based approaches that can miss producers.
 fn ensure_inputs_declared(
-    graph: &NanoGraph,
+    graph: &NanoGraph<'static, crate::pool::SystemPool>,
     inputs: &[InputRef],
     op: &ScalarOp,
     atom_offset: u64,
     count: u64,
     lane: usize,
-    span_graphs: &mut [NanoGraph],
+    span_graphs: &mut [NanoGraph<'static, crate::pool::SystemPool>],
     span_inputs: &mut [Vec<AtomRange>],
     declared_inputs: &mut [HashSet<u64>],
     produced_in_span: &[HashSet<u64>],
@@ -1458,7 +1474,7 @@ fn ensure_inputs_declared(
 fn find_covering_input_tensor<'a>(
     atom: &AtomId,
     input_tensor_set: &HashMap<u64, &'a InputTensor>,
-    graph: &NanoGraph,
+    graph: &NanoGraph<'static, crate::pool::SystemPool>,
 ) -> Option<InputTensor> {
     // Check graph's input tensors via find_input_idx
     if let Some((idx, _)) = graph.find_input_idx(*atom) {
@@ -1497,7 +1513,7 @@ mod tests {
                 s.graph
                     .groups()
                     .iter()
-                    .filter(|g| !matches!(g.op, ScalarOp::Literal(_)))
+                    .filter(|g| !matches!(g.op, ScalarOp::Literal(_) | ScalarOp::LiteralSpan(_)))
                     .map(|g| g.count)
                     .sum::<u64>()
             })
@@ -1869,7 +1885,7 @@ mod tests {
             for (lane, span) in phase.spans.iter().enumerate() {
                 let mut has_mul = false;
                 for g in span.graph.groups() {
-                    if !matches!(g.op, ScalarOp::Literal(_)) {
+                    if !matches!(g.op, ScalarOp::Literal(_) | ScalarOp::LiteralSpan(_)) {
                         total_non_lit += g.count;
                     }
                     if matches!(
@@ -1933,7 +1949,7 @@ mod tests {
                 .graph
                 .groups()
                 .iter()
-                .filter(|g| matches!(g.op, ScalarOp::Literal(_)))
+                .filter(|g| matches!(g.op, ScalarOp::Literal(_) | ScalarOp::LiteralSpan(_)))
                 .map(|g| g.count)
                 .sum();
             assert_eq!(

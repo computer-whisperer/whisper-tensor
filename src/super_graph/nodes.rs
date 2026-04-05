@@ -337,13 +337,67 @@ impl SuperGraphNodeModelExecution {
     }
 }
 
+/// Adapts a `SuperGraphObserver` into a `SymbolicGraphObserver` by prepending
+/// the node path to all forwarded events.
+struct SymbolicGraphObserverWrapper<'a, T: SuperGraphObserver> {
+    inner: &'a mut T,
+    path: Vec<GlobalId>,
+}
+
+impl<'a, T: SuperGraphObserver> SymbolicGraphObserverWrapper<'a, T> {
+    fn new(inner: &'a mut T, path: &[GlobalId]) -> Self {
+        Self {
+            inner,
+            path: path.to_vec(),
+        }
+    }
+}
+
+impl<T: SuperGraphObserver> crate::symbolic_graph::observer::SymbolicGraphObserver
+    for SymbolicGraphObserverWrapper<'_, T>
+{
+    fn on_op_executed(
+        &mut self,
+        node_path: &[GlobalId],
+        start_instant: Instant,
+        end_instant: Instant,
+    ) {
+        let full_path: Vec<GlobalId> = self.path.iter().chain(node_path.iter()).copied().collect();
+        self.inner
+            .on_node_executed(&full_path, "", start_instant, end_instant);
+    }
+
+    fn on_tensor_assigned(
+        &mut self,
+        tensor_path: &[GlobalId],
+        tensor: &crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>,
+    ) {
+        let full_path: Vec<GlobalId> = self
+            .path
+            .iter()
+            .chain(tensor_path.iter())
+            .copied()
+            .collect();
+        self.inner.on_tensor_assigned(&full_path, tensor);
+    }
+
+    fn on_loading_weight(&mut self, path: &[GlobalId], weight_name: Option<String>) {
+        let full_path: Vec<GlobalId> = self.path.iter().chain(path.iter()).copied().collect();
+        self.inner.on_loading_weight(&full_path, weight_name);
+    }
+
+    fn should_cancel(&mut self) -> bool {
+        self.inner.should_cancel()
+    }
+}
+
 impl SuperGraphNode for SuperGraphNodeModelExecution {
     fn to_any(self) -> SuperGraphAnyNode {
         SuperGraphAnyNode::ModelExecution(self)
     }
     fn eval<'short, 'model, 'p, P: Pool + 'p, T: SuperGraphObserver>(
         &'short self,
-        _node_path: &[GlobalId],
+        node_path: &[GlobalId],
         data: &mut SuperGraphData<'p, 'model, P>,
         context: &mut SuperGraphContext<'short, 'model, 'p, P, T>,
     ) -> Result<(), SuperGraphError> {
@@ -376,7 +430,19 @@ impl SuperGraphNode for SuperGraphNodeModelExecution {
             &crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>,
         > = input_views.iter().map(|(id, view)| (*id, view)).collect();
 
-        let results = symbolic_graph.pool_eval_with_store(&view_map, tensor_store, context.pool)?;
+        let global_id = node_path
+            .iter()
+            .chain(core::iter::once(&self.global_id))
+            .copied()
+            .collect::<Vec<_>>();
+        let mut observer = SymbolicGraphObserverWrapper::new(context.observer, &global_id);
+
+        let results = symbolic_graph.pool_eval_with_store_observed(
+            &view_map,
+            tensor_store,
+            context.pool,
+            &mut observer,
+        )?;
 
         let tensors_by_id: HashMap<GlobalId, &str> = tensors_by_name
             .iter()

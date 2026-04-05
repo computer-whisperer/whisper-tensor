@@ -12,6 +12,7 @@
 use crate::graph::GlobalId;
 use crate::nano_graph::ops::ScalarOp;
 use crate::numeric_dtype::NumericDType;
+use crate::pool::Pool;
 use crate::range_map::RangeMap;
 use std::collections::HashMap;
 
@@ -183,8 +184,8 @@ impl InputRef {
 ///
 /// A group of count=1 is a standalone atom — this is the degenerate case
 /// for ops that don't compress (e.g., Gather boundary atoms).
-#[derive(Debug, Clone)]
-pub struct AtomGroup {
+#[derive(Debug)]
+pub struct AtomGroup<'p, P: Pool + 'p = crate::pool::SystemPool> {
     /// First AtomId in this group.
     pub base_id: AtomId,
     /// Number of atoms in the group.
@@ -203,7 +204,7 @@ pub struct AtomGroup {
     /// Element dtype of this group's output.
     pub output_dtype: NumericDType,
     /// The scalar operation each atom performs.
-    pub op: ScalarOp,
+    pub op: ScalarOp<'p, P>,
     /// Symbolic dimensions this group iterates over.
     /// Each atom in the group independently iterates over these dims.
     /// E.g., `[batch, seq_len]` means each atom produces a 2D tile of values.
@@ -212,7 +213,24 @@ pub struct AtomGroup {
     pub inputs: Vec<InputRef>,
 }
 
-impl AtomGroup {
+impl<'p, P: Pool + 'p> Clone for AtomGroup<'p, P>
+where
+    P::Buffer<'p>: Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            base_id: self.base_id,
+            count: self.count,
+            atom_offset: self.atom_offset,
+            output_dtype: self.output_dtype,
+            op: self.op.clone(),
+            sym_dims: self.sym_dims.clone(),
+            inputs: self.inputs.clone(),
+        }
+    }
+}
+
+impl<P: Pool> AtomGroup<'_, P> {
     /// Returns the AtomId range `[base_id, base_id + count)`.
     pub fn atom_ids(&self) -> impl Iterator<Item = AtomId> {
         let base = self.base_id.0;
@@ -266,9 +284,8 @@ pub struct GroupUseCount {
 }
 
 /// The compressed scalar DAG for an entire computation.
-#[derive(Default, Clone)]
-pub struct NanoGraph {
-    groups: RangeMap<AtomGroup>,
+pub struct NanoGraph<'p, P: Pool + 'p = crate::pool::SystemPool> {
+    groups: RangeMap<AtomGroup<'p, P>>,
     next_atom_id: u64,
     /// External input tensors mapped into the AtomId space.
     input_ranges: RangeMap<InputTensor>,
@@ -284,7 +301,40 @@ pub struct NanoGraph {
     pub outputs: Vec<AtomId>,
 }
 
-impl NanoGraph {
+impl<'p, P: Pool + 'p> Clone for NanoGraph<'p, P>
+where
+    P::Buffer<'p>: Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            groups: self.groups.clone(),
+            next_atom_id: self.next_atom_id,
+            input_ranges: self.input_ranges.clone(),
+            opaque_ops: self.opaque_ops.clone(),
+            sym_dim_names: self.sym_dim_names.clone(),
+            sym_dim_bounds: self.sym_dim_bounds.clone(),
+            next_sym_dim: self.next_sym_dim,
+            outputs: self.outputs.clone(),
+        }
+    }
+}
+
+impl<P: Pool> Default for NanoGraph<'_, P> {
+    fn default() -> Self {
+        Self {
+            groups: RangeMap::new(),
+            next_atom_id: 0,
+            input_ranges: RangeMap::new(),
+            opaque_ops: Vec::new(),
+            sym_dim_names: HashMap::new(),
+            sym_dim_bounds: HashMap::new(),
+            next_sym_dim: 0,
+            outputs: Vec::new(),
+        }
+    }
+}
+
+impl<'p, P: Pool + 'p> NanoGraph<'p, P> {
     pub fn new() -> Self {
         Self::default()
     }
@@ -450,7 +500,7 @@ impl NanoGraph {
         base_id: AtomId,
         count: u64,
         output_dtype: NumericDType,
-        op: ScalarOp,
+        op: ScalarOp<'p, P>,
         sym_dims: Vec<SymDim>,
         inputs: Vec<InputRef>,
     ) {
@@ -507,7 +557,7 @@ impl NanoGraph {
         count: u64,
         atom_offset: u64,
         output_dtype: NumericDType,
-        op: ScalarOp,
+        op: ScalarOp<'p, P>,
         sym_dims: Vec<SymDim>,
         inputs: Vec<InputRef>,
     ) {
@@ -536,7 +586,7 @@ impl NanoGraph {
         &mut self,
         count: u64,
         output_dtype: NumericDType,
-        op: ScalarOp,
+        op: ScalarOp<'p, P>,
         sym_dims: Vec<SymDim>,
         inputs: Vec<InputRef>,
     ) -> AtomId {
@@ -561,7 +611,7 @@ impl NanoGraph {
     pub fn push_atom(
         &mut self,
         output_dtype: NumericDType,
-        op: ScalarOp,
+        op: ScalarOp<'p, P>,
         sym_dims: Vec<SymDim>,
         inputs: Vec<InputRef>,
     ) -> AtomId {
@@ -574,12 +624,12 @@ impl NanoGraph {
     }
 
     /// Look up which group an atom belongs to.
-    pub fn group_of(&self, id: AtomId) -> Option<&AtomGroup> {
+    pub fn group_of(&self, id: AtomId) -> Option<&AtomGroup<'p, P>> {
         self.groups.get(id.0).map(|(g, _)| g)
     }
 
     /// Look up group and offset for an atom.
-    pub fn group_and_offset(&self, id: AtomId) -> Option<(&AtomGroup, u64)> {
+    pub fn group_and_offset(&self, id: AtomId) -> Option<(&AtomGroup<'p, P>, u64)> {
         self.groups.get(id.0)
     }
 
@@ -589,11 +639,11 @@ impl NanoGraph {
     }
 
     /// Iterate all groups in insertion order.
-    pub fn groups(&self) -> &[AtomGroup] {
+    pub fn groups(&self) -> &[AtomGroup<'p, P>] {
         self.groups.values()
     }
 
-    pub fn groups_mut(&mut self) -> &mut [AtomGroup] {
+    pub fn groups_mut(&mut self) -> &mut [AtomGroup<'p, P>] {
         self.groups.values_mut()
     }
 
@@ -714,6 +764,7 @@ impl NanoGraph {
                 } => "ReduceProd",
                 ScalarOp::IndirectLoad { .. } => "IndirectLoad",
                 ScalarOp::OpaqueOutput { .. } => "OpaqueOutput",
+                ScalarOp::LiteralSpan(_) => "LiteralSpan",
             };
             *groups_by_op.entry(op_name).or_default() += 1;
         }
@@ -764,7 +815,7 @@ impl NanoGraph {
     /// Used by both `liveness()` and the evaluator.
     pub fn collect_all_producer_indices(
         &self,
-        group: &AtomGroup,
+        group: &AtomGroup<'p, P>,
         gi: usize,
         out: &mut std::collections::HashSet<usize>,
     ) {
@@ -1016,7 +1067,7 @@ impl NanoGraph {
 
             // Input count check.
             let expected_inputs = match &group.op {
-                ScalarOp::Literal(_) => 0,
+                ScalarOp::Literal(_) | ScalarOp::LiteralSpan(_) => 0,
                 ScalarOp::Unary { .. }
                 | ScalarOp::Identity
                 | ScalarOp::Cast { .. }
@@ -1081,11 +1132,14 @@ mod tests {
     use crate::nano_graph::ops::{ReduceKind, ScalarBinOp, ScalarOp, ScalarUnaryOp};
     use crate::numeric_dtype::NumericDType;
     use crate::numeric_scalar::NumericScalar;
+    use crate::pool::SystemPool;
+
+    type TestGraph = NanoGraph<'static, SystemPool>;
 
     /// Build a tiny graph: c = a + b, elementwise over 1024 atoms.
     #[test]
     fn test_elementwise_add() {
-        let mut g = NanoGraph::new();
+        let mut g = TestGraph::new();
 
         let a = g.push_group(
             1024,
@@ -1125,7 +1179,7 @@ mod tests {
     /// Broadcast: c[i] = a[i] + scalar_b, 1024 atoms.
     #[test]
     fn test_broadcast() {
-        let mut g = NanoGraph::new();
+        let mut g = TestGraph::new();
 
         let a = g.push_group(
             1024,
@@ -1159,7 +1213,7 @@ mod tests {
     /// Symbolic dimensions: add over [batch, 1024].
     #[test]
     fn test_symbolic_dim() {
-        let mut g = NanoGraph::new();
+        let mut g = TestGraph::new();
         let batch = g.sym_dim("batch");
 
         let a = g.push_group(
@@ -1195,7 +1249,7 @@ mod tests {
     /// Reduction over a symbolic dim.
     #[test]
     fn test_reduce_symbolic() {
-        let mut g = NanoGraph::new();
+        let mut g = TestGraph::new();
         let seq = g.sym_dim("seq_len");
 
         let input = g.push_group(
@@ -1228,7 +1282,7 @@ mod tests {
     /// Singleton atom for boundary ops.
     #[test]
     fn test_singleton_boundary() {
-        let mut g = NanoGraph::new();
+        let mut g = TestGraph::new();
         let batch = g.sym_dim("batch");
         let seq = g.sym_dim("seq_len");
 
@@ -1249,7 +1303,7 @@ mod tests {
     /// Explicit input ref for irregular addressing.
     #[test]
     fn test_explicit_input() {
-        let mut g = NanoGraph::new();
+        let mut g = TestGraph::new();
 
         // 4 source atoms.
         let src = g.push_group(

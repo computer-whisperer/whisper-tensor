@@ -5,6 +5,7 @@ use std::sync::Arc;
 use crate::numeric_dtype::NumericDType;
 use crate::numeric_scalar::NumericScalar;
 use crate::numeric_tensor::{NumericTensor, NumericTensorView};
+use crate::pool::Pool;
 use crate::tensor_rank::DynRank;
 
 /// Binary scalar operations.
@@ -152,11 +153,18 @@ impl std::fmt::Debug for OpaqueOp {
 /// The output dtype lives on the `AtomGroup`, not here. Variants that
 /// perform arithmetic carry a `compute_dtype` specifying the precision
 /// inputs are cast to before the operation executes.
-#[derive(Debug, Clone)]
-pub enum ScalarOp {
+///
+/// Generic over `'p` and `P: Pool` to allow `LiteralSpan` to hold a
+/// pool-backed tensor.
+pub enum ScalarOp<'p, P: Pool + 'p = crate::pool::SystemPool> {
     /// Produce a constant value. No inputs. The NumericScalar carries
-    /// the exact typed value (BF16, F32, etc.).
+    /// the exact typed value (BF16, F32, etc.). All atoms in the group
+    /// produce this same value (broadcast).
     Literal(NumericScalar),
+    /// Produce constant values from a 1D pool-backed tensor. No inputs.
+    /// Atom `i` reads element `i` from the tensor. The group's `count`
+    /// must equal `tensor.numel()`.
+    LiteralSpan(NumericTensor<'p, DynRank, P>),
     /// Identity pass-through. One input, output = cast(input, output_dtype).
     /// Used for index-remapping ops (Slice, strided views) and non-cast
     /// dtype reinterpretations.
@@ -203,11 +211,112 @@ pub enum ScalarOp {
     },
 }
 
-impl ScalarOp {
+// Manual impls since derive can't handle the pool generic cleanly.
+
+impl<P: Pool> std::fmt::Debug for ScalarOp<'_, P> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ScalarOp::Literal(s) => f.debug_tuple("Literal").field(s).finish(),
+            ScalarOp::LiteralSpan(t) => f
+                .debug_tuple("LiteralSpan")
+                .field(&format_args!("[{}; {}]", t.dtype(), t.numel()))
+                .finish(),
+            ScalarOp::Identity => write!(f, "Identity"),
+            ScalarOp::Cast { saturating } => f
+                .debug_struct("Cast")
+                .field("saturating", saturating)
+                .finish(),
+            ScalarOp::Binary { op, compute_dtype } => f
+                .debug_struct("Binary")
+                .field("op", op)
+                .field("compute_dtype", compute_dtype)
+                .finish(),
+            ScalarOp::Unary { op, compute_dtype } => f
+                .debug_struct("Unary")
+                .field("op", op)
+                .field("compute_dtype", compute_dtype)
+                .finish(),
+            ScalarOp::Select => write!(f, "Select"),
+            ScalarOp::Reduce {
+                kind,
+                reduce_count,
+                reduce_stride,
+                compute_dtype,
+            } => f
+                .debug_struct("Reduce")
+                .field("kind", kind)
+                .field("reduce_count", reduce_count)
+                .field("reduce_stride", reduce_stride)
+                .field("compute_dtype", compute_dtype)
+                .finish(),
+            ScalarOp::IndirectLoad { table_base } => f
+                .debug_struct("IndirectLoad")
+                .field("table_base", table_base)
+                .finish(),
+            ScalarOp::OpaqueOutput {
+                opaque_idx,
+                output_idx,
+            } => f
+                .debug_struct("OpaqueOutput")
+                .field("opaque_idx", opaque_idx)
+                .field("output_idx", output_idx)
+                .finish(),
+        }
+    }
+}
+
+impl<'p, P: Pool + 'p> Clone for ScalarOp<'p, P>
+where
+    P::Buffer<'p>: Clone,
+{
+    fn clone(&self) -> Self {
+        match self {
+            ScalarOp::Literal(s) => ScalarOp::Literal(*s),
+            ScalarOp::LiteralSpan(t) => ScalarOp::LiteralSpan(t.clone()),
+            ScalarOp::Identity => ScalarOp::Identity,
+            ScalarOp::Cast { saturating } => ScalarOp::Cast {
+                saturating: *saturating,
+            },
+            ScalarOp::Binary { op, compute_dtype } => ScalarOp::Binary {
+                op: *op,
+                compute_dtype: *compute_dtype,
+            },
+            ScalarOp::Unary { op, compute_dtype } => ScalarOp::Unary {
+                op: *op,
+                compute_dtype: *compute_dtype,
+            },
+            ScalarOp::Select => ScalarOp::Select,
+            ScalarOp::Reduce {
+                kind,
+                reduce_count,
+                reduce_stride,
+                compute_dtype,
+            } => ScalarOp::Reduce {
+                kind: *kind,
+                reduce_count: *reduce_count,
+                reduce_stride: *reduce_stride,
+                compute_dtype: *compute_dtype,
+            },
+            ScalarOp::IndirectLoad { table_base } => ScalarOp::IndirectLoad {
+                table_base: *table_base,
+            },
+            ScalarOp::OpaqueOutput {
+                opaque_idx,
+                output_idx,
+            } => ScalarOp::OpaqueOutput {
+                opaque_idx: *opaque_idx,
+                output_idx: *output_idx,
+            },
+        }
+    }
+}
+
+impl<'p, P: Pool + 'p> ScalarOp<'p, P> {
     /// Returns the compute dtype for this op (None for ops with no arithmetic).
     pub fn compute_dtype(&self) -> Option<NumericDType> {
         match self {
             ScalarOp::Literal(_)
+            | ScalarOp::LiteralSpan(_)
             | ScalarOp::Identity
             | ScalarOp::Cast { .. }
             | ScalarOp::Select

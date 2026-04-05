@@ -299,12 +299,22 @@ impl MilliOp for Transpose {
         };
 
         // If input is concrete, try constant fold via nano+pool_eval path.
-        if let Some(results) = super::constant_fold(
+        let numel = input_info.as_concrete().map(|c| c.numel()).unwrap_or(0);
+        let t0 = std::time::Instant::now();
+        let fold_result = super::constant_fold(
             self,
             known_inputs,
             &[(self.output, out_info.clone_with_pool(pool))],
             pool,
-        ) {
+        );
+        let dt = t0.elapsed();
+        if dt.as_millis() > 10 {
+            eprintln!(
+                "    [transpose infer] constant_fold numel={numel}: {:.0}ms",
+                dt.as_secs_f64() * 1e3
+            );
+        }
+        if let Some(results) = fold_result {
             return Ok(results);
         }
 

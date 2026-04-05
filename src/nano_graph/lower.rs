@@ -137,8 +137,8 @@ pub enum LowerError {
 }
 
 /// Result of lowering a MilliOpGraph.
-pub struct LowerResult {
-    pub graph: NanoGraph,
+pub struct LowerResult<'p, P: crate::pool::Pool + 'p = crate::pool::SystemPool> {
+    pub graph: NanoGraph<'p, P>,
     /// Ops that could not be lowered (treated as boundary).
     pub unsupported: Vec<(GlobalId, String)>,
     /// Human-readable detail for each unsupported op (input/output shapes).
@@ -148,6 +148,9 @@ pub struct LowerResult {
     /// Provenance: for each nano group index, the (milli_op_id, op_kind) that produced it.
     /// Length equals graph.num_groups(). Used by reporting/visualization.
     pub group_provenance: Vec<(GlobalId, String)>,
+    /// Full tensor info map from inference (dtype + shape + concrete values).
+    /// Populated by `lower()` so callers don't need to run `infer_all` separately.
+    pub all_infos: HashMap<GlobalId, LowerTensorInfo>,
 }
 
 /// Public view of how a milli tensor maps to nano atoms.
@@ -396,14 +399,9 @@ impl TensorAtomMap {
 pub fn lower(
     graph: &MilliOpGraph,
     inputs: &HashMap<GlobalId, LowerTensorInfo>,
-) -> Result<LowerResult, LowerError> {
-    let t0 = std::time::Instant::now();
+) -> Result<LowerResult<'static, SystemPool>, LowerError> {
     static POOL: SystemPool = SystemPool;
     let all_infos = graph.infer_all(inputs, &POOL)?;
-    eprintln!(
-        "  [lower] infer_all: {:.1}ms",
-        t0.elapsed().as_secs_f64() * 1e3
-    );
     let mut ctx = NanoLoweringContext::new(&all_infos);
 
     // Register all tensors that exist before ops run (graph inputs + inferred
@@ -423,19 +421,12 @@ pub fn lower(
     }
 
     // Walk ops in topological order.
-    let t1 = std::time::Instant::now();
     for &op_id in graph.op_ordering() {
         let Some(op) = graph.get_node_by_id(&op_id) else {
             continue;
         };
         ctx.lower_op(op);
     }
-    eprintln!(
-        "  [lower] ops: {:.1}ms ({} groups, {} atoms)",
-        t1.elapsed().as_secs_f64() * 1e3,
-        ctx.nano.num_groups(),
-        ctx.nano.num_atoms()
-    );
 
     // Validate the graph structure (catch degenerate/self-referencing groups).
     let validation_errors = ctx.nano.validate();
@@ -503,6 +494,7 @@ pub fn lower(
         unsupported_details: ctx.unsupported_details,
         tensor_map,
         group_provenance: ctx.group_provenance,
+        all_infos,
     })
 }
 
@@ -511,7 +503,7 @@ pub fn lower(
 pub fn lower_with_info(
     graph: &MilliOpGraph,
     inputs: &HashMap<GlobalId, LowerTensorInfo>,
-) -> Result<LowerResult, LowerError> {
+) -> Result<LowerResult<'static, SystemPool>, LowerError> {
     lower(graph, inputs)
 }
 
@@ -521,7 +513,7 @@ pub fn lower_with_info(
 /// is a shared reference to tensor shape information computed by inference,
 /// so methods can freely read tensor info without borrowing self.
 pub struct NanoLoweringContext<'a> {
-    pub nano: NanoGraph,
+    pub nano: NanoGraph<'static, crate::pool::SystemPool>,
     pub tensor_map: HashMap<GlobalId, TensorAtomMap>,
     pub all_infos: &'a HashMap<GlobalId, LowerTensorInfo>,
     next_anon_sym: usize,
@@ -600,44 +592,83 @@ impl<'a> NanoLoweringContext<'a> {
         let count = count.max(1) as usize;
         let dt = Self::ndt(info);
 
-        // Extract flat scalar values from the tensor.
         let n_elems = concrete.numel();
-        let scalars: Vec<NumericScalar> = (0..n_elems).map(|i| concrete.read_element(i)).collect();
-
-        if scalars.is_empty() {
+        if n_elems == 0 {
             self.register_input(id, info);
             return;
         }
 
-        let n = scalars.len().min(count);
+        let n = n_elems.min(count);
 
-        // Create Literal groups, coalescing runs of identical values.
-        let mut base_id = None;
-        let mut i = 0;
-        while i < n {
-            // Find run of identical values.
-            let run_val = &scalars[i];
-            let mut run_len = 1;
-            while i + run_len < n && scalars[i + run_len] == *run_val {
-                run_len += 1;
-            }
-            let gid = self.nano.push_group(
-                run_len as u64,
-                dt,
-                ScalarOp::Literal(*run_val),
-                sym_dims.clone(),
-                vec![],
+        // For single-element constants, use a broadcast Literal (no allocation).
+        // For multi-element constants, copy into a pool tensor and emit one
+        // LiteralSpan group — O(1) groups instead of O(n).
+        if n == 1 {
+            let scalar = concrete.read_element(0);
+            let base_id =
+                self.nano
+                    .push_group(1, dt, ScalarOp::Literal(scalar), sym_dims.clone(), vec![]);
+            self.tensor_map.insert(
+                id,
+                TensorAtomMap::simple(base_id, 1, dt, layout, strides, sym_dims),
             );
-            if base_id.is_none() {
-                base_id = Some(gid);
+        } else {
+            // Check if all elements are identical — use broadcast Literal.
+            let first = concrete.read_element(0);
+            let all_same = (1..n).all(|i| concrete.read_element(i) == first);
+            if all_same {
+                let base_id = self.nano.push_group(
+                    n as u64,
+                    dt,
+                    ScalarOp::Literal(first),
+                    sym_dims.clone(),
+                    vec![],
+                );
+                self.tensor_map.insert(
+                    id,
+                    TensorAtomMap::simple(base_id, n as u64, dt, layout, strides, sym_dims),
+                );
+            } else {
+                // Copy into a 1D pool tensor backing the LiteralSpan.
+                use crate::numeric_tensor::TensorLayout;
+                use crate::pool::Pool;
+                static SYS: crate::pool::SystemPool = crate::pool::SystemPool;
+                let span_layout =
+                    TensorLayout::<crate::tensor_rank::DynRank>::row_major(vec![n as u64], dt);
+                let cv = concrete.view();
+                let tensor = if cv.layout().is_contiguous() && cv.numel() == n {
+                    // Fast path: memcpy raw bytes into 1D layout.
+                    let size = span_layout.buffer_size_bytes();
+                    let mut buf = SYS
+                        .allocate(size)
+                        .expect("SystemPool allocation for LiteralSpan");
+                    buf[..size].copy_from_slice(&cv.data()[..size]);
+                    crate::numeric_tensor::NumericTensor::from_parts(buf, span_layout)
+                } else {
+                    // Slow path: element-wise copy for non-contiguous views.
+                    let buf = SYS
+                        .allocate(span_layout.buffer_size_bytes())
+                        .expect("SystemPool allocation for LiteralSpan");
+                    let mut tensor =
+                        crate::numeric_tensor::NumericTensor::from_parts(buf, span_layout);
+                    for i in 0..n {
+                        tensor.write_element(i, concrete.read_element(i));
+                    }
+                    tensor
+                };
+                let base_id = self.nano.push_group(
+                    n as u64,
+                    dt,
+                    ScalarOp::LiteralSpan(tensor),
+                    sym_dims.clone(),
+                    vec![],
+                );
+                self.tensor_map.insert(
+                    id,
+                    TensorAtomMap::simple(base_id, n as u64, dt, layout, strides, sym_dims),
+                );
             }
-            i += run_len;
         }
-
-        self.tensor_map.insert(
-            id,
-            TensorAtomMap::simple(base_id.unwrap(), n as u64, dt, layout, strides, sym_dims),
-        );
     }
 
     /// Register a graph input as leaf atoms.
@@ -1335,7 +1366,7 @@ impl<'a> NanoLoweringContext<'a> {
     fn lower_passthrough_with_op<T: Node>(
         &mut self,
         op: &T,
-        cast_op: ScalarOp,
+        cast_op: ScalarOp<'static, crate::pool::SystemPool>,
     ) -> crate::milli_graph::ops::LowerResult {
         let all_infos = self.all_infos;
         let in_id = Node::inputs(op).next().unwrap();
@@ -1473,7 +1504,7 @@ impl<'a> NanoLoweringContext<'a> {
     where
         R: Node,
         R: ReduceAccessors,
-        F: Fn(NumericDType, u64, i64) -> ScalarOp,
+        F: Fn(NumericDType, u64, i64) -> ScalarOp<'static, crate::pool::SystemPool>,
     {
         let all_infos = self.all_infos;
         let in_id = Node::inputs(reduce).next().unwrap();

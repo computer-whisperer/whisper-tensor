@@ -224,11 +224,13 @@ pub fn constant_fold<'p, P: Pool + 'p>(
     }
 
     // 2. Build LowerTensorInfo map with inputs + output hints.
+    let t_cf = std::time::Instant::now();
     let mut lower_infos: HashMap<GlobalId, LowerTensorInfo> = HashMap::new();
     for &id in &input_ids {
         let concrete = known_inputs.get(&id)?.as_concrete()?;
         lower_infos.insert(id, LowerTensorInfo::from_view(&concrete.view(), &SYS_POOL));
     }
+    let dt_s2 = t_cf.elapsed();
     for (id, hint) in output_hints {
         // Output hints are dtype+shape only (no concrete data).
         // Reconstruct as a symbolic TensorInfo for the lowering context.
@@ -264,11 +266,13 @@ pub fn constant_fold<'p, P: Pool + 'p>(
     }
 
     // 3. Lower this single op with constants embedded as Literal nano-ops.
+    let t_s3 = std::time::Instant::now();
     let mut ctx = NanoLoweringContext::new(&lower_infos);
     for &id in &input_ids {
         ctx.register_constant(id, &lower_infos[&id]);
     }
     op.lower_to_nano(&mut ctx);
+    let dt_s3 = t_s3.elapsed();
 
     // If the op wasn't lowered (unsupported or fell back to boundary), bail out.
     if !ctx.unsupported.is_empty() {
@@ -282,6 +286,7 @@ pub fn constant_fold<'p, P: Pool + 'p>(
     }
 
     // 4. Build output AtomRanges.
+    let t_s4 = std::time::Instant::now();
     let mut output_ranges: Vec<AtomRange> = Vec::new();
     for &out_id in &output_ids {
         let tam = ctx.tensor_map.get(&out_id)?;
@@ -312,24 +317,39 @@ pub fn constant_fold<'p, P: Pool + 'p>(
         }
     }
 
+    let dt_s4 = t_s4.elapsed();
+
+    // Sort ranges by base for binary search in step 6.
+    output_ranges.sort_by_key(|r| r.base.0);
+
     // 5. Run pool_eval (no external inputs — all data in Literal groups).
+    let t_s5 = std::time::Instant::now();
     let eval_results = pool_eval::pool_eval(&ctx.nano, &[], &output_ranges, pool).ok()?;
+    let dt_s5 = t_s5.elapsed();
 
     // 6. Build result TensorInfos.
     //
-    // Output atoms may span multiple eval result ranges (e.g. when Literal
-    // coalescing splits input data into several groups, and the output is a
-    // zero-cost view over those groups). For each atom we need to find which
-    // result range it belongs to.
+    // Output atoms may span multiple eval result ranges. Use binary search
+    // to find which range contains a given atom ID (O(log n) per lookup).
     let find_range = |atom: crate::nano_graph::pattern::AtomId| -> Option<(usize, usize)> {
-        for (ri, range) in output_ranges.iter().enumerate() {
+        let pos = output_ranges.partition_point(|r| r.base.0 + r.count <= atom.0);
+        if pos < output_ranges.len() {
+            let range = &output_ranges[pos];
             if atom.0 >= range.base.0 && atom.0 < range.base.0 + range.count {
-                return Some((ri, (atom.0 - range.base.0) as usize));
+                return Some((pos, (atom.0 - range.base.0) as usize));
+            }
+        }
+        // Check previous range in case of overlap at boundary.
+        if pos > 0 {
+            let range = &output_ranges[pos - 1];
+            if atom.0 >= range.base.0 && atom.0 < range.base.0 + range.count {
+                return Some((pos - 1, (atom.0 - range.base.0) as usize));
             }
         }
         None
     };
 
+    let t_s6 = std::time::Instant::now();
     let mut results = Vec::new();
     for &out_id in &output_ids {
         let tam = ctx.tensor_map.get(&out_id)?;
@@ -350,6 +370,23 @@ pub fn constant_fold<'p, P: Pool + 'p>(
             out_tensor.write_element(i, eval_results[ri].read_element(offset));
         }
         results.push((out_id, TensorInfo::from(out_tensor)));
+    }
+    let dt_s6 = t_s6.elapsed();
+
+    let total = t_cf.elapsed();
+    if total.as_millis() > 50 {
+        eprintln!(
+            "      [constant_fold] {:.0}ms total (from_view={:.0} lower={:.0} ranges={:.0} eval={:.0} build={:.0}, {} groups {} atoms {} ranges)",
+            total.as_secs_f64() * 1e3,
+            dt_s2.as_secs_f64() * 1e3,
+            dt_s3.as_secs_f64() * 1e3,
+            dt_s4.as_secs_f64() * 1e3,
+            dt_s5.as_secs_f64() * 1e3,
+            dt_s6.as_secs_f64() * 1e3,
+            ctx.nano.num_groups(),
+            ctx.nano.num_atoms(),
+            output_ranges.len(),
+        );
     }
 
     Some(results)
@@ -528,11 +565,19 @@ pub trait MilliOp: Node<OpKind = String> {
         None // default: not differentiable
     }
 
-    /// Evaluate this op on new pool-backed types.
+    /// Last-resort evaluation for ops that fundamentally cannot be expressed
+    /// as nano-op lowerings.
     ///
-    /// Used by the OpaqueOp system for ops that can't be decomposed into
-    /// scalar nano-ops. The default returns `Unsupported` — ops must override
-    /// this to be executable through pool_eval without nano decomposition.
+    /// Do NOT implement this as a performance shortcut. The design intent is
+    /// that all ops describe their computation analytically via `lower_to_nano`,
+    /// and the library makes the interpret/compile paths over that description
+    /// fast. Adding per-op eval_new bypasses the analytical description and
+    /// creates hidden implementation differences between the eval_new path and
+    /// the lowered path.
+    ///
+    /// Only implement eval_new when the op's semantics cannot be captured by
+    /// the existing ScalarOp vocabulary (e.g., ops requiring runtime-sized
+    /// output allocation, external library calls, or non-deterministic state).
     fn eval_new<'p, P2: Pool + 'p>(
         &self,
         _inputs: &[crate::numeric_tensor::NumericTensorView<'_, DynRank>],

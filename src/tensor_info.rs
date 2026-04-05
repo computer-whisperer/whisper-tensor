@@ -841,13 +841,7 @@ impl<'p, P: Pool + 'p> TensorInfo<'p, P> {
         view: &crate::numeric_tensor::NumericTensorView<'_, DynRank>,
         pool: &'p P,
     ) -> Self {
-        use crate::numeric_tensor::{NumericTensor as NewTensor, TensorLayout};
-        let layout = TensorLayout::<DynRank>::row_major(view.shape().clone(), view.dtype());
-        if let Ok(buf) = pool.allocate(layout.buffer_size_bytes()) {
-            let mut tensor = NewTensor::from_parts(buf, layout);
-            for i in 0..view.numel() {
-                tensor.write_element(i, view.read_element(i));
-            }
+        if let Ok(tensor) = view.to_tensor(pool) {
             TensorInfo::Ranked(TensorInfoRanked::Shaped(TensorInfoShaped::Numeric(tensor)))
         } else {
             // Allocation failed — fall back to shape-only info.

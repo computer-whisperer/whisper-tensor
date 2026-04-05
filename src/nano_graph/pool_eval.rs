@@ -324,6 +324,11 @@ pub fn pool_eval<'p, P: Pool + 'p>(
                             lookup_atom_dtype(table_atom, graph, &group_buffers, &input_buffers);
                         val_dtype.cast_raw(val, output_dtype)
                     }
+                    ScalarOp::LiteralSpan(tensor) => {
+                        let scalar = tensor.read_element(i as usize);
+                        let raw = scalar.view().read_raw();
+                        scalar.dtype().cast_raw(raw, output_dtype)
+                    }
                     ScalarOp::Reduce { .. } | ScalarOp::OpaqueOutput { .. } => unreachable!(),
                 };
                 write_atom(&mut tensor, i as usize, result_raw, output_dtype);

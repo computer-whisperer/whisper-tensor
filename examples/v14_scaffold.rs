@@ -551,7 +551,7 @@ fn main() {
         let partitioners: Vec<(
             &str,
             fn(
-                &NanoGraph,
+                &NanoGraph<'static, whisper_tensor::pool::SystemPool>,
                 usize,
                 &[whisper_tensor::nano_graph::pattern::InputTensor],
                 &[AId],

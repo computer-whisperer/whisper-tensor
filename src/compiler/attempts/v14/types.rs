@@ -58,7 +58,7 @@ pub struct ExecutionPlan {
     /// The original lowered NanoGraph, kept for validation and metadata.
     /// Span NanoGraphs are derived from this but may have different group
     /// boundaries (splits, rearrangements).
-    pub graph: NanoGraph,
+    pub graph: NanoGraph<'static, crate::pool::SystemPool>,
 
     /// How model-level tensors map to atom ranges in the graph.
     /// The executor uses this to know which atom ranges to fill from
@@ -142,7 +142,7 @@ pub struct Span {
     ///
     /// Atom IDs referenced by InputRefs that are not produced by any
     /// group in this graph are external — declared in `inputs`.
-    pub graph: NanoGraph,
+    pub graph: NanoGraph<'static, crate::pool::SystemPool>,
 
     /// Atom ranges this span reads from the shared value store.
     /// Includes weight data, user inputs, and prior-phase outputs.

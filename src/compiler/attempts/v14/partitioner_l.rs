@@ -38,7 +38,7 @@ use super::types::{Phase, Span};
 // ─── Public API ────────────────────────────────────────────────────────────
 
 pub fn plan(
-    graph: &NanoGraph,
+    graph: &NanoGraph<'static, crate::pool::SystemPool>,
     num_lanes: usize,
     input_tensors: &[InputTensor],
     output_atom_ids: &[AtomId],
@@ -113,13 +113,16 @@ enum GroupClass {
     Whole,
 }
 
-fn classify_groups(groups: &[AtomGroup], num_lanes: usize) -> Vec<GroupClass> {
+fn classify_groups(
+    groups: &[AtomGroup<'static, crate::pool::SystemPool>],
+    num_lanes: usize,
+) -> Vec<GroupClass> {
     groups.iter().map(|g| classify_one(g, num_lanes)).collect()
 }
 
-fn classify_one(g: &AtomGroup, num_lanes: usize) -> GroupClass {
+fn classify_one(g: &AtomGroup<'static, crate::pool::SystemPool>, num_lanes: usize) -> GroupClass {
     // Literals are always duplicated — no computation, every lane needs the value.
-    if matches!(g.op, ScalarOp::Literal(_)) {
+    if matches!(g.op, ScalarOp::Literal(_) | ScalarOp::LiteralSpan(_)) {
         return GroupClass::Duplicate;
     }
 
@@ -150,7 +153,9 @@ fn classify_one(g: &AtomGroup, num_lanes: usize) -> GroupClass {
 
 // ─── Dependency DAG ───────────────────────────────────────────────────────
 
-fn build_dependency_dag(graph: &NanoGraph) -> (Vec<Vec<usize>>, Vec<Vec<usize>>) {
+fn build_dependency_dag(
+    graph: &NanoGraph<'static, crate::pool::SystemPool>,
+) -> (Vec<Vec<usize>>, Vec<Vec<usize>>) {
     let groups = graph.groups();
     let n = groups.len();
     let mut producers: Vec<Vec<usize>> = Vec::with_capacity(n);
@@ -188,7 +193,7 @@ fn assign_phases(
     n: usize,
     producers: &[Vec<usize>],
     classes: &[GroupClass],
-    groups: &[AtomGroup],
+    groups: &[AtomGroup<'static, crate::pool::SystemPool>],
 ) -> Vec<usize> {
     let mut phase_of = vec![0usize; n];
 
@@ -248,7 +253,7 @@ fn assign_phases(
 // ─── Phase construction ───────────────────────────────────────────────────
 
 fn build_phase(
-    graph: &NanoGraph,
+    graph: &NanoGraph<'static, crate::pool::SystemPool>,
     phase_gis: &[usize],
     classes: &[GroupClass],
     producers: &[Vec<usize>],
@@ -411,7 +416,7 @@ struct WorkItem {
 // ─── Span construction ────────────────────────────────────────────────────
 
 fn build_span(
-    graph: &NanoGraph,
+    graph: &NanoGraph<'static, crate::pool::SystemPool>,
     lane_work: &[WorkItem],
     classes: &[GroupClass],
     phase_set: &HashSet<usize>,
@@ -729,8 +734,8 @@ fn empty_span() -> Span {
     }
 }
 
-fn is_literal_group(g: &AtomGroup) -> bool {
-    matches!(g.op, ScalarOp::Literal(_)) && g.inputs.is_empty()
+fn is_literal_group(g: &AtomGroup<'static, crate::pool::SystemPool>) -> bool {
+    matches!(g.op, ScalarOp::Literal(_) | ScalarOp::LiteralSpan(_)) && g.inputs.is_empty()
 }
 
 /// Check if a group needs its output exported from this span.
@@ -782,7 +787,7 @@ fn input_ref_range(input: &InputRef, count: u64, atom_offset: u64) -> (u64, u64)
 
 /// Collect dependencies for a single InputRef into external/literal sets.
 fn collect_deps_for_input(
-    graph: &NanoGraph,
+    graph: &NanoGraph<'static, crate::pool::SystemPool>,
     input: &InputRef,
     count: u64,
     atom_offset: u64,
@@ -852,7 +857,7 @@ fn collect_deps_for_input(
 
 /// Record external ranges for reduce ops that read extended stride ranges.
 fn collect_external_in_range(
-    graph: &NanoGraph,
+    graph: &NanoGraph<'static, crate::pool::SystemPool>,
     lo: u64,
     hi: u64,
     fallback_dtype: NumericDType,
@@ -910,7 +915,7 @@ fn collect_input_tensor_deps(
     input: &InputRef,
     count: u64,
     atom_offset: u64,
-    graph: &NanoGraph,
+    graph: &NanoGraph<'static, crate::pool::SystemPool>,
     input_tensors: &[InputTensor],
     needed_external: &mut BTreeMap<u64, (u64, NumericDType)>,
 ) {
@@ -1061,7 +1066,7 @@ mod tests {
                 s.graph
                     .groups()
                     .iter()
-                    .filter(|g| !matches!(g.op, ScalarOp::Literal(_)))
+                    .filter(|g| !matches!(g.op, ScalarOp::Literal(_) | ScalarOp::LiteralSpan(_)))
                     .map(|g| g.count)
                     .sum()
             })
@@ -1081,7 +1086,10 @@ mod tests {
                     let g_hi = g_lo + g.count;
                     let orig_lo = base_id.0;
                     let orig_hi = orig_lo + total_count;
-                    if g_lo >= orig_lo && g_hi <= orig_hi && !matches!(g.op, ScalarOp::Literal(_)) {
+                    if g_lo >= orig_lo
+                        && g_hi <= orig_hi
+                        && !matches!(g.op, ScalarOp::Literal(_) | ScalarOp::LiteralSpan(_))
+                    {
                         lanes_with_fragment += 1;
                     }
                 }
@@ -1384,11 +1392,9 @@ mod tests {
 
         // Check that the literal appears in every lane's span.
         for (lane_idx, span) in phases[0].spans.iter().enumerate() {
-            let has_literal = span
-                .graph
-                .groups()
-                .iter()
-                .any(|g| g.base_id == lit && matches!(g.op, ScalarOp::Literal(_)));
+            let has_literal = span.graph.groups().iter().any(|g| {
+                g.base_id == lit && matches!(g.op, ScalarOp::Literal(_) | ScalarOp::LiteralSpan(_))
+            });
             assert!(
                 has_literal,
                 "Lane {} should have a copy of the literal",
