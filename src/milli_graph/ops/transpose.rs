@@ -50,9 +50,9 @@ impl Transpose {
 }
 
 impl Transpose {
-    pub fn lower_to_nano(
+    pub fn lower_to_nano<'p, P: crate::pool::Pool + 'p>(
         &self,
-        ctx: &mut crate::nano_graph::NanoLoweringContext,
+        ctx: &mut crate::nano_graph::NanoLoweringContext<'_, 'p, P>,
     ) -> crate::milli_graph::ops::LowerResult {
         let all_infos = ctx.all_infos;
         let in_id = Node::inputs(self).next().unwrap();
@@ -419,9 +419,9 @@ impl MilliOp for Transpose {
         Ok(vec![out])
     }
 
-    fn lower_to_nano(
+    fn lower_to_nano<'p, P: crate::pool::Pool + 'p>(
         &self,
-        ctx: &mut crate::nano_graph::NanoLoweringContext,
+        ctx: &mut crate::nano_graph::NanoLoweringContext<'_, 'p, P>,
     ) -> crate::milli_graph::ops::LowerResult {
         Transpose::lower_to_nano(self, ctx)
     }

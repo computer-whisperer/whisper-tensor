@@ -62,9 +62,9 @@ impl CumSum {
         super::remap(&mut self.axis, map);
     }
 
-    pub fn lower_to_nano(
+    pub fn lower_to_nano<'p, P: crate::pool::Pool + 'p>(
         &self,
-        ctx: &mut crate::nano_graph::NanoLoweringContext,
+        ctx: &mut crate::nano_graph::NanoLoweringContext<'_, 'p, P>,
     ) -> crate::milli_graph::ops::LowerResult {
         let exclusive = self.exclusive;
         let reverse = self.reverse;

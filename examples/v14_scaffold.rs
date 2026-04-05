@@ -375,7 +375,7 @@ fn main() {
 
     profiler.phase("lower");
     let t0 = Instant::now();
-    let result = lower::lower(&milli_graph, &all_infos).unwrap();
+    let result = lower::lower(&milli_graph, &all_infos, &whisper_tensor::pool::SystemPool).unwrap();
     drop(all_infos); // Only needed for lowering — free early.
     eprintln!("Lowered in {:.1}ms", t0.elapsed().as_secs_f64() * 1e3);
 

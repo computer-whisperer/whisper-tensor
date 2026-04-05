@@ -101,9 +101,9 @@ impl Pad {
     /// Lower Pad (constant mode) to nano ops: Literal + Identity atoms in row-major order.
     ///
     /// All dimensions must be known. Pads tensor must be constant-folded.
-    pub fn lower_to_nano(
+    pub fn lower_to_nano<'p, P: crate::pool::Pool + 'p>(
         &self,
-        ctx: &mut crate::nano_graph::NanoLoweringContext,
+        ctx: &mut crate::nano_graph::NanoLoweringContext<'_, 'p, P>,
     ) -> crate::milli_graph::ops::LowerResult {
         use crate::nano_graph::lower::{DimKind, NanoLoweringContext, TensorAtomMap};
         use crate::nano_graph::ops::ScalarOp;

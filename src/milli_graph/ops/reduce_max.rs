@@ -64,9 +64,9 @@ impl ReduceMax {
 }
 
 impl ReduceMax {
-    pub fn lower_to_nano(
+    pub fn lower_to_nano<'p, P: crate::pool::Pool + 'p>(
         &self,
-        ctx: &mut crate::nano_graph::NanoLoweringContext,
+        ctx: &mut crate::nano_graph::NanoLoweringContext<'_, 'p, P>,
     ) -> crate::milli_graph::ops::LowerResult {
         use crate::nano_graph::{ReduceKind, ScalarOp};
         ctx.lower_reduce(self, |compute_dt, count, stride| ScalarOp::Reduce {
@@ -210,9 +210,9 @@ impl MilliOp for ReduceMax {
         )
     }
 
-    fn lower_to_nano(
+    fn lower_to_nano<'p, P: crate::pool::Pool + 'p>(
         &self,
-        ctx: &mut crate::nano_graph::NanoLoweringContext,
+        ctx: &mut crate::nano_graph::NanoLoweringContext<'_, 'p, P>,
     ) -> crate::milli_graph::ops::LowerResult {
         ReduceMax::lower_to_nano(self, ctx)
     }

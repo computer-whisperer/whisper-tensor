@@ -17,9 +17,8 @@ use crate::numeric_scalar::NumericScalar;
 use crate::pool::SystemPool;
 use crate::tensor_info::TensorInfo;
 
-/// Concrete LowerTensorInfo used during lowering. Uses SystemPool since lowering
-/// doesn't allocate pool-backed tensor data.
-type LowerTensorInfo = TensorInfo<'static, SystemPool>;
+/// TensorInfo type used during lowering — generic over the pool.
+pub type LowerTensorInfo<'p, P = SystemPool> = TensorInfo<'p, P>;
 
 /// Wrapper that calls `AnyMilliOp::eval_new` through the `OpaqueEval` trait.
 ///
@@ -150,7 +149,7 @@ pub struct LowerResult<'p, P: crate::pool::Pool + 'p = crate::pool::SystemPool> 
     pub group_provenance: Vec<(GlobalId, String)>,
     /// Full tensor info map from inference (dtype + shape + concrete values).
     /// Populated by `lower()` so callers don't need to run `infer_all` separately.
-    pub all_infos: HashMap<GlobalId, LowerTensorInfo>,
+    pub all_infos: HashMap<GlobalId, LowerTensorInfo<'p, P>>,
 }
 
 /// Public view of how a milli tensor maps to nano atoms.
@@ -396,13 +395,13 @@ impl TensorAtomMap {
 /// Walks ops in topological order, classifying dimensions, and building atom
 /// groups. The returned `LowerResult` contains the NanoGraph, a tensor map,
 /// and any ops that couldn't be lowered (boundary ops).
-pub fn lower(
+pub fn lower<'p, P: crate::pool::Pool + 'p>(
     graph: &MilliOpGraph,
-    inputs: &HashMap<GlobalId, LowerTensorInfo>,
-) -> Result<LowerResult<'static, SystemPool>, LowerError> {
-    static POOL: SystemPool = SystemPool;
-    let all_infos = graph.infer_all(inputs, &POOL)?;
-    let mut ctx = NanoLoweringContext::new(&all_infos);
+    inputs: &HashMap<GlobalId, LowerTensorInfo<'p, P>>,
+    pool: &'p P,
+) -> Result<LowerResult<'p, P>, LowerError> {
+    let all_infos = graph.infer_all(inputs, pool)?;
+    let mut ctx = NanoLoweringContext::new(&all_infos, pool);
 
     // Register all tensors that exist before ops run (graph inputs + inferred
     // constants) and are NOT produced by any op.
@@ -500,11 +499,12 @@ pub fn lower(
 
 /// Backward-compatible alias for `lower()`. Will be removed once all call
 /// sites are migrated.
-pub fn lower_with_info(
+pub fn lower_with_info<'p, P: crate::pool::Pool + 'p>(
     graph: &MilliOpGraph,
-    inputs: &HashMap<GlobalId, LowerTensorInfo>,
-) -> Result<LowerResult<'static, SystemPool>, LowerError> {
-    lower(graph, inputs)
+    inputs: &HashMap<GlobalId, LowerTensorInfo<'p, P>>,
+    pool: &'p P,
+) -> Result<LowerResult<'p, P>, LowerError> {
+    lower(graph, inputs, pool)
 }
 
 /// Context for lowering milli ops to nano graph.
@@ -512,10 +512,11 @@ pub fn lower_with_info(
 /// Holds all mutable state needed during lowering. The `all_infos` field
 /// is a shared reference to tensor shape information computed by inference,
 /// so methods can freely read tensor info without borrowing self.
-pub struct NanoLoweringContext<'a> {
-    pub nano: NanoGraph<'static, crate::pool::SystemPool>,
+pub struct NanoLoweringContext<'a, 'p, P: crate::pool::Pool + 'p = SystemPool> {
+    pub nano: NanoGraph<'p, P>,
     pub tensor_map: HashMap<GlobalId, TensorAtomMap>,
-    pub all_infos: &'a HashMap<GlobalId, LowerTensorInfo>,
+    pub all_infos: &'a HashMap<GlobalId, LowerTensorInfo<'p, P>>,
+    pub pool: &'p P,
     next_anon_sym: usize,
     pub unsupported: Vec<(GlobalId, String)>,
     pub unsupported_details: Vec<String>,
@@ -524,12 +525,13 @@ pub struct NanoLoweringContext<'a> {
     pub group_provenance: Vec<(GlobalId, String)>,
 }
 
-impl<'a> NanoLoweringContext<'a> {
-    pub fn new(all_infos: &'a HashMap<GlobalId, LowerTensorInfo>) -> Self {
+impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
+    pub fn new(all_infos: &'a HashMap<GlobalId, LowerTensorInfo<'p, P>>, pool: &'p P) -> Self {
         Self {
             nano: NanoGraph::new(),
             tensor_map: HashMap::new(),
             all_infos,
+            pool,
             next_anon_sym: 0,
             unsupported: Vec::new(),
             unsupported_details: Vec::new(),
@@ -538,13 +540,13 @@ impl<'a> NanoLoweringContext<'a> {
     }
 
     /// Get the NumericDType from a LowerTensorInfo.
-    pub fn ndt(info: &LowerTensorInfo) -> NumericDType {
+    pub fn ndt(info: &LowerTensorInfo<'p, P>) -> NumericDType {
         info.dtype()
     }
 
     /// Classify tensor dims and return layout info.
     /// Returns None if rank is unknown or atom count overflows u32.
-    pub fn classify_dims(&mut self, info: &LowerTensorInfo) -> Option<DimClassification> {
+    pub fn classify_dims(&mut self, info: &LowerTensorInfo<'p, P>) -> Option<DimClassification> {
         let rank = info.rank_if_known()?;
         let mut layout = Vec::with_capacity(rank);
         let mut known_dims = Vec::new();
@@ -577,7 +579,7 @@ impl<'a> NanoLoweringContext<'a> {
     /// Extracts scalar values from the LowerTensorInfo and creates Literal groups.
     /// Runs of identical values are coalesced into single groups. If the
     /// LowerTensorInfo has no numeric data, falls back to `register_input`.
-    pub fn register_constant(&mut self, id: GlobalId, info: &LowerTensorInfo) {
+    pub fn register_constant(&mut self, id: GlobalId, info: &LowerTensorInfo<'p, P>) {
         let Some(concrete) = info.as_concrete() else {
             self.register_input(id, info);
             return;
@@ -631,24 +633,24 @@ impl<'a> NanoLoweringContext<'a> {
             } else {
                 // Copy into a 1D pool tensor backing the LiteralSpan.
                 use crate::numeric_tensor::TensorLayout;
-                use crate::pool::Pool;
-                static SYS: crate::pool::SystemPool = crate::pool::SystemPool;
                 let span_layout =
                     TensorLayout::<crate::tensor_rank::DynRank>::row_major(vec![n as u64], dt);
                 let cv = concrete.view();
                 let tensor = if cv.layout().is_contiguous() && cv.numel() == n {
                     // Fast path: memcpy raw bytes into 1D layout.
                     let size = span_layout.buffer_size_bytes();
-                    let mut buf = SYS
+                    let mut buf = self
+                        .pool
                         .allocate(size)
-                        .expect("SystemPool allocation for LiteralSpan");
+                        .expect("pool allocation for LiteralSpan");
                     buf[..size].copy_from_slice(&cv.data()[..size]);
                     crate::numeric_tensor::NumericTensor::from_parts(buf, span_layout)
                 } else {
                     // Slow path: element-wise copy for non-contiguous views.
-                    let buf = SYS
+                    let buf = self
+                        .pool
                         .allocate(span_layout.buffer_size_bytes())
-                        .expect("SystemPool allocation for LiteralSpan");
+                        .expect("pool allocation for LiteralSpan");
                     let mut tensor =
                         crate::numeric_tensor::NumericTensor::from_parts(buf, span_layout);
                     for i in 0..n {
@@ -678,7 +680,7 @@ impl<'a> NanoLoweringContext<'a> {
     /// For constant tensors whose values are known at lowering time, the
     /// Literal(0.0) placeholder is similarly overridden by the executor using
     /// the tensor data from `all_infos`.
-    pub fn register_input(&mut self, id: GlobalId, info: &LowerTensorInfo) {
+    pub fn register_input(&mut self, id: GlobalId, info: &LowerTensorInfo<'p, P>) {
         let Some((layout, known_dims, sym_dims, count)) = self.classify_dims(info) else {
             // Unknown rank — register a single atom.
             let dt = Self::ndt(info);
@@ -707,7 +709,7 @@ impl<'a> NanoLoweringContext<'a> {
     pub fn register_boundary(
         &mut self,
         output_id: GlobalId,
-        info: &LowerTensorInfo,
+        info: &LowerTensorInfo<'p, P>,
         _op_kind: &str,
     ) {
         let dt = Self::ndt(info);
@@ -747,8 +749,8 @@ impl<'a> NanoLoweringContext<'a> {
         &self,
         consumer: &TensorAtomMap,
         producer: &TensorAtomMap,
-        consumer_info: &LowerTensorInfo,
-        producer_info: &LowerTensorInfo,
+        consumer_info: &LowerTensorInfo<'p, P>,
+        producer_info: &LowerTensorInfo<'p, P>,
     ) -> InputRef {
         // Segmented producers (concat): always build via atom_id_for_element
         // since they can't be expressed as a single Affine/Broadcast pattern.
@@ -804,8 +806,8 @@ impl<'a> NanoLoweringContext<'a> {
         &self,
         consumer: &TensorAtomMap,
         producer: &TensorAtomMap,
-        consumer_info: &LowerTensorInfo,
-        producer_info: &LowerTensorInfo,
+        consumer_info: &LowerTensorInfo<'p, P>,
+        producer_info: &LowerTensorInfo<'p, P>,
     ) -> InputRef {
         let c_rank = consumer_info.rank_if_known().unwrap_or(0);
         let p_rank = producer_info.rank_if_known().unwrap_or(0);
@@ -1035,8 +1037,8 @@ impl<'a> NanoLoweringContext<'a> {
         &self,
         consumer: &TensorAtomMap,
         producer: &TensorAtomMap,
-        consumer_info: &LowerTensorInfo,
-        producer_info: &LowerTensorInfo,
+        consumer_info: &LowerTensorInfo<'p, P>,
+        producer_info: &LowerTensorInfo<'p, P>,
     ) -> InputRef {
         let c_rank = consumer_info.rank_if_known().unwrap_or(0);
         let p_rank = producer_info.rank_if_known().unwrap_or(0);
@@ -1390,7 +1392,7 @@ impl<'a> NanoLoweringContext<'a> {
     fn lower_passthrough_with_op<T: Node>(
         &mut self,
         op: &T,
-        cast_op: ScalarOp<'static, crate::pool::SystemPool>,
+        cast_op: ScalarOp<'p, P>,
     ) -> crate::milli_graph::ops::LowerResult {
         let all_infos = self.all_infos;
         let in_id = Node::inputs(op).next().unwrap();
@@ -1506,7 +1508,7 @@ impl<'a> NanoLoweringContext<'a> {
 
     /// Extract concrete i64 values from a tensor in all_infos.
     pub fn extract_i64(
-        all_infos: &HashMap<GlobalId, LowerTensorInfo>,
+        all_infos: &HashMap<GlobalId, LowerTensorInfo<'p, P>>,
         id: &GlobalId,
     ) -> Option<Vec<i64>> {
         let info = all_infos.get(id)?;
@@ -1528,7 +1530,7 @@ impl<'a> NanoLoweringContext<'a> {
     where
         R: Node,
         R: ReduceAccessors,
-        F: Fn(NumericDType, u64, i64) -> ScalarOp<'static, crate::pool::SystemPool>,
+        F: Fn(NumericDType, u64, i64) -> ScalarOp<'p, P>,
     {
         let all_infos = self.all_infos;
         let in_id = Node::inputs(reduce).next().unwrap();
@@ -1779,7 +1781,7 @@ impl<'a> NanoLoweringContext<'a> {
         self.unsupported_details.push(detail);
     }
 
-    pub fn fmt_info(info: Option<&LowerTensorInfo>) -> String {
+    pub fn fmt_info(info: Option<&LowerTensorInfo<'p, P>>) -> String {
         let Some(info) = info else {
             return "?".to_string();
         };
@@ -1884,7 +1886,7 @@ mod tests {
         }
 
         // Lower to NanoGraph.
-        let result = lower_with_info(&milli, &info_inputs).unwrap();
+        let result = lower_with_info(&milli, &info_inputs, &SystemPool).unwrap();
         assert!(
             result.unsupported.is_empty(),
             "Unsupported ops: {:?}",
@@ -2147,7 +2149,7 @@ mod tests {
             LowerTensorInfo::from_dtype_and_shape(NumericDType::F32, &[8, 16]),
         );
 
-        let result = super::lower_with_info(&milli, &info).unwrap();
+        let result = super::lower_with_info(&milli, &info, &SystemPool).unwrap();
         let graph = &result.graph;
 
         // Count Mul groups — should be M=4, not M*K=32.
@@ -2277,7 +2279,7 @@ mod tests {
             data,
             LowerTensorInfo::from_view(&tensor.view(), &SystemPool),
         );
-        let result = super::lower_with_info(&milli, &info).unwrap();
+        let result = super::lower_with_info(&milli, &info, &SystemPool).unwrap();
         let identity_count = result
             .graph
             .groups()
@@ -2439,7 +2441,7 @@ mod tests {
             data,
             LowerTensorInfo::from_view(&tensor.view(), &SystemPool),
         );
-        let result = super::lower_with_info(&milli, &info).unwrap();
+        let result = super::lower_with_info(&milli, &info, &SystemPool).unwrap();
         let identity_count = result
             .graph
             .groups()

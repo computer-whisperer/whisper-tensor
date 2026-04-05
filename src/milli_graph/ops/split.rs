@@ -71,9 +71,9 @@ impl Split {
 }
 
 impl Split {
-    pub fn lower_to_nano(
+    pub fn lower_to_nano<'p, P: crate::pool::Pool + 'p>(
         &self,
-        ctx: &mut crate::nano_graph::NanoLoweringContext,
+        ctx: &mut crate::nano_graph::NanoLoweringContext<'_, 'p, P>,
     ) -> crate::milli_graph::ops::LowerResult {
         let all_infos = ctx.all_infos;
         let in_id = Node::inputs(self).next().unwrap();
@@ -195,9 +195,9 @@ impl Split {
     }
 
     /// Compute the cumulative offset along the split axis for output_id_idx.
-    fn compute_split_offset(
+    fn compute_split_offset<'p, P: crate::pool::Pool + 'p>(
         &self,
-        ctx: &crate::nano_graph::NanoLoweringContext,
+        ctx: &crate::nano_graph::NanoLoweringContext<'_, 'p, P>,
         output_id_idx: usize,
         out_split_size: u64,
     ) -> u64 {
@@ -415,9 +415,9 @@ impl MilliOp for Split {
         Ok(vec![out])
     }
 
-    fn lower_to_nano(
+    fn lower_to_nano<'p, P: crate::pool::Pool + 'p>(
         &self,
-        ctx: &mut crate::nano_graph::NanoLoweringContext,
+        ctx: &mut crate::nano_graph::NanoLoweringContext<'_, 'p, P>,
     ) -> crate::milli_graph::ops::LowerResult {
         Split::lower_to_nano(self, ctx)
     }

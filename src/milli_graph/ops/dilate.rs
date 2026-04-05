@@ -52,9 +52,9 @@ impl Dilate {
         super::remap(&mut self.input, map);
     }
 
-    pub fn lower_to_nano(
+    pub fn lower_to_nano<'p, P: crate::pool::Pool + 'p>(
         &self,
-        ctx: &mut crate::nano_graph::NanoLoweringContext,
+        ctx: &mut crate::nano_graph::NanoLoweringContext<'_, 'p, P>,
     ) -> crate::milli_graph::ops::LowerResult {
         use crate::nano_graph::lower::{DimKind, TensorAtomMap};
         use crate::nano_graph::ops::ScalarOp;

@@ -150,9 +150,9 @@ impl SimpleUnaryOp {
 }
 
 impl SimpleUnaryOp {
-    pub fn lower_to_nano(
+    pub fn lower_to_nano<'p, P: crate::pool::Pool + 'p>(
         &self,
-        ctx: &mut crate::nano_graph::NanoLoweringContext,
+        ctx: &mut crate::nano_graph::NanoLoweringContext<'_, 'p, P>,
     ) -> crate::milli_graph::ops::LowerResult {
         let all_infos = ctx.all_infos;
 
@@ -295,7 +295,7 @@ impl SimpleUnaryOp {
         };
 
         let known_dims = in_map.known_dims();
-        let input_ref = NanoLoweringContext::pointwise_input_ref(&in_map);
+        let input_ref = NanoLoweringContext::<'_, '_, P>::pointwise_input_ref(&in_map);
 
         let base_id = ctx.nano.push_group(
             in_map.count,
@@ -557,9 +557,9 @@ impl MilliOp for SimpleUnaryOp {
         Some(result)
     }
 
-    fn lower_to_nano(
+    fn lower_to_nano<'p, P: crate::pool::Pool + 'p>(
         &self,
-        ctx: &mut crate::nano_graph::NanoLoweringContext,
+        ctx: &mut crate::nano_graph::NanoLoweringContext<'_, 'p, P>,
     ) -> crate::milli_graph::ops::LowerResult {
         SimpleUnaryOp::lower_to_nano(self, ctx)
     }
@@ -609,9 +609,9 @@ impl ClampMin {
 }
 
 impl ClampMin {
-    pub fn lower_to_nano(
+    pub fn lower_to_nano<'p, P: crate::pool::Pool + 'p>(
         &self,
-        ctx: &mut crate::nano_graph::NanoLoweringContext,
+        ctx: &mut crate::nano_graph::NanoLoweringContext<'_, 'p, P>,
     ) -> crate::milli_graph::ops::LowerResult {
         let all_infos = ctx.all_infos;
         let in_id = Node::inputs(self).next().unwrap();
@@ -636,7 +636,7 @@ impl ClampMin {
         );
 
         let known_dims = in_map.known_dims();
-        let input_ref = NanoLoweringContext::pointwise_input_ref(&in_map);
+        let input_ref = NanoLoweringContext::<'_, '_, P>::pointwise_input_ref(&in_map);
 
         let base_id = ctx.nano.push_group(
             in_map.count,
@@ -769,9 +769,9 @@ impl MilliOp for ClampMin {
         Ok(vec![out])
     }
 
-    fn lower_to_nano(
+    fn lower_to_nano<'p, P: crate::pool::Pool + 'p>(
         &self,
-        ctx: &mut crate::nano_graph::NanoLoweringContext,
+        ctx: &mut crate::nano_graph::NanoLoweringContext<'_, 'p, P>,
     ) -> crate::milli_graph::ops::LowerResult {
         ClampMin::lower_to_nano(self, ctx)
     }

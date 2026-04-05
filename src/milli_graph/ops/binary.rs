@@ -208,9 +208,9 @@ impl SimpleBinary {
 }
 
 impl SimpleBinary {
-    pub fn lower_to_nano(
+    pub fn lower_to_nano<'p, P: crate::pool::Pool + 'p>(
         &self,
-        ctx: &mut crate::nano_graph::NanoLoweringContext,
+        ctx: &mut crate::nano_graph::NanoLoweringContext<'_, 'p, P>,
     ) -> crate::milli_graph::ops::LowerResult {
         use crate::nano_graph::lower::TensorAtomMap;
         use crate::nano_graph::ops::{ScalarBinOp, ScalarOp};
@@ -677,9 +677,9 @@ impl MilliOp for SimpleBinary {
         Some(result)
     }
 
-    fn lower_to_nano(
+    fn lower_to_nano<'p, P: crate::pool::Pool + 'p>(
         &self,
-        ctx: &mut crate::nano_graph::NanoLoweringContext,
+        ctx: &mut crate::nano_graph::NanoLoweringContext<'_, 'p, P>,
     ) -> crate::milli_graph::ops::LowerResult {
         SimpleBinary::lower_to_nano(self, ctx)
     }
@@ -725,9 +725,9 @@ impl Pow {
 }
 
 impl Pow {
-    pub fn lower_to_nano(
+    pub fn lower_to_nano<'p, P: crate::pool::Pool + 'p>(
         &self,
-        ctx: &mut crate::nano_graph::NanoLoweringContext,
+        ctx: &mut crate::nano_graph::NanoLoweringContext<'_, 'p, P>,
     ) -> crate::milli_graph::ops::LowerResult {
         use crate::nano_graph::lower::TensorAtomMap;
         use crate::nano_graph::ops::{ScalarBinOp, ScalarOp};
@@ -942,9 +942,9 @@ impl MilliOp for Pow {
         Ok(vec![out])
     }
 
-    fn lower_to_nano(
+    fn lower_to_nano<'p, P: crate::pool::Pool + 'p>(
         &self,
-        ctx: &mut crate::nano_graph::NanoLoweringContext,
+        ctx: &mut crate::nano_graph::NanoLoweringContext<'_, 'p, P>,
     ) -> crate::milli_graph::ops::LowerResult {
         Pow::lower_to_nano(self, ctx)
     }
@@ -1079,9 +1079,9 @@ impl MatMul {
 }
 
 impl MatMul {
-    pub fn lower_to_nano(
+    pub fn lower_to_nano<'p, P: crate::pool::Pool + 'p>(
         &self,
-        ctx: &mut crate::nano_graph::NanoLoweringContext,
+        ctx: &mut crate::nano_graph::NanoLoweringContext<'_, 'p, P>,
     ) -> crate::milli_graph::ops::LowerResult {
         use crate::nano_graph::lower::DimKind;
         use crate::nano_graph::lower::TensorAtomMap;
@@ -1332,7 +1332,7 @@ impl MatMul {
                         .sum();
                     ids.push(a_map.atom_id_for_element(flat_a));
                 }
-                crate::nano_graph::NanoLoweringContext::compress_explicit(ids)
+                crate::nano_graph::NanoLoweringContext::<'_, '_, P>::compress_explicit(ids)
             };
 
             // Input 1: B elements for all K*N positions in the merged group.
@@ -1355,7 +1355,7 @@ impl MatMul {
                     let offset = k_idx * b_k_stride + n_idx * b_n_stride;
                     ids.push(b_base.offset(offset));
                 }
-                crate::nano_graph::NanoLoweringContext::compress_explicit(ids)
+                crate::nano_graph::NanoLoweringContext::<'_, '_, P>::compress_explicit(ids)
             };
 
             let base = ctx.nano.push_group(
@@ -1751,9 +1751,9 @@ impl MilliOp for MatMul {
         Ok(vec![out])
     }
 
-    fn lower_to_nano(
+    fn lower_to_nano<'p, P: crate::pool::Pool + 'p>(
         &self,
-        ctx: &mut crate::nano_graph::NanoLoweringContext,
+        ctx: &mut crate::nano_graph::NanoLoweringContext<'_, 'p, P>,
     ) -> crate::milli_graph::ops::LowerResult {
         MatMul::lower_to_nano(self, ctx)
     }

@@ -167,9 +167,9 @@ impl MilliOp for EyeLike {
         )])
     }
 
-    fn lower_to_nano(
+    fn lower_to_nano<'p, P: crate::pool::Pool + 'p>(
         &self,
-        ctx: &mut crate::nano_graph::NanoLoweringContext,
+        ctx: &mut crate::nano_graph::NanoLoweringContext<'_, 'p, P>,
     ) -> super::LowerResult {
         // If infer constant-folded, register_constant handles it automatically.
         // Otherwise fall through to opaque (eval_new).

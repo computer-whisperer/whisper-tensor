@@ -314,7 +314,7 @@ pub fn run_case_via_pool_eval(case: &TestCase) -> Result<(), String> {
             .collect();
 
         // Lower MilliOpGraph → NanoGraph.
-        let lower_result = lower::lower(&case.graph, &info_inputs)
+        let lower_result = lower::lower(&case.graph, &info_inputs, &crate::pool::SystemPool)
             .map_err(|e| format!("{}[{}]: lower failed: {e}", case.name, ds.label))?;
 
         if !lower_result.unsupported.is_empty() {

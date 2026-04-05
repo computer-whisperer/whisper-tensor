@@ -267,7 +267,7 @@ pub fn constant_fold<'p, P: Pool + 'p>(
 
     // 3. Lower this single op with constants embedded as Literal nano-ops.
     let t_s3 = std::time::Instant::now();
-    let mut ctx = NanoLoweringContext::new(&lower_infos);
+    let mut ctx = NanoLoweringContext::new(&lower_infos, &SYS_POOL);
     for &id in &input_ids {
         ctx.register_constant(id, &lower_infos[&id]);
     }
@@ -599,7 +599,10 @@ pub trait MilliOp: Node<OpKind = String> {
     /// Returns `Lowered` if the op was decomposed into nano ops.
     /// Returns `Unsupported` if this op/configuration can't be lowered —
     /// the caller will fall through to the opaque eval_new path.
-    fn lower_to_nano(&self, _ctx: &mut crate::nano_graph::NanoLoweringContext) -> LowerResult
+    fn lower_to_nano<'p, P: Pool + 'p>(
+        &self,
+        _ctx: &mut crate::nano_graph::NanoLoweringContext<'_, 'p, P>,
+    ) -> LowerResult
     where
         Self: Sized,
     {
@@ -843,7 +846,10 @@ pub enum AnyMilliOp {
 }
 
 impl AnyMilliOp {
-    pub fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> LowerResult {
+    pub fn lower_to_nano<'p, P: Pool + 'p>(
+        &self,
+        ctx: &mut crate::nano_graph::NanoLoweringContext<'_, 'p, P>,
+    ) -> LowerResult {
         match self {
             AnyMilliOp::SimpleBinary(x) => x.lower_to_nano(ctx),
             AnyMilliOp::SimpleUnary(x) => x.lower_to_nano(ctx),
@@ -1164,7 +1170,10 @@ impl MilliOp for AnyMilliOp {
         }
     }
 
-    fn lower_to_nano(&self, ctx: &mut crate::nano_graph::NanoLoweringContext) -> LowerResult {
+    fn lower_to_nano<'p, P: Pool + 'p>(
+        &self,
+        ctx: &mut crate::nano_graph::NanoLoweringContext<'_, 'p, P>,
+    ) -> LowerResult {
         AnyMilliOp::lower_to_nano(self, ctx)
     }
 

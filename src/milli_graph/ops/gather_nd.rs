@@ -213,9 +213,9 @@ impl MilliOp for GatherND {
         Ok(vec![out])
     }
 
-    fn lower_to_nano(
+    fn lower_to_nano<'p, P: crate::pool::Pool + 'p>(
         &self,
-        _ctx: &mut crate::nano_graph::NanoLoweringContext,
+        _ctx: &mut crate::nano_graph::NanoLoweringContext<'_, 'p, P>,
     ) -> super::LowerResult {
         // GatherND nano lowering: only simple case batch_dims=0, K=data_rank (scalar gather).
         // For now, all cases fall through to opaque eval_new.

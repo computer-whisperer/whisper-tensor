@@ -1054,7 +1054,7 @@ impl MilliOpGraph {
         }
 
         // lower() runs infer_all internally and returns the result in all_infos.
-        let lower_result = lower::lower(self, &info_inputs)
+        let lower_result = lower::lower(self, &info_inputs, &POOL_S)
             .map_err(|e| MilliOpGraphError::LowerError(e.to_string()))?;
         let all_infos = &lower_result.all_infos;
 
@@ -1109,6 +1109,8 @@ impl MilliOpGraph {
             }
         }
 
+        let t_milli = std::time::Instant::now();
+
         // Map inputs to (AtomId, &View) pairs (ext → internal → atom_id).
         let eval_inputs: Vec<_> = inputs
             .iter()
@@ -1156,10 +1158,14 @@ impl MilliOpGraph {
             }
         }
 
+        let dt_ranges = t_milli.elapsed();
+
         // Run pool_eval.
+        let t_eval = std::time::Instant::now();
         let eval_results =
             pool_eval::pool_eval(&lower_result.graph, &eval_inputs, &output_ranges, pool)
                 .map_err(|e| MilliOpGraphError::InvalidInput(format!("pool_eval: {e}")))?;
+        let dt_eval = t_eval.elapsed();
 
         // Reconstruct output tensors.
         let mut outputs = HashMap::new();
@@ -1297,6 +1303,20 @@ impl MilliOpGraph {
                 out_tensor.write_element(i, scalar.cast_to(dtype));
             }
             outputs.insert(ext_id, out_tensor);
+        }
+        let dt_reconstruct = t_milli.elapsed() - dt_ranges - dt_eval;
+        let dt_total = t_milli.elapsed();
+        if dt_total.as_millis() > 10 {
+            let total_atoms: u64 = output_ranges.iter().map(|r| r.count).sum();
+            eprintln!(
+                "    [milli pool_eval] {:.0}ms total (ranges={:.0} eval={:.0} reconstruct={:.0}, {} atoms {} ranges)",
+                dt_total.as_secs_f64() * 1e3,
+                dt_ranges.as_secs_f64() * 1e3,
+                dt_eval.as_secs_f64() * 1e3,
+                dt_reconstruct.as_secs_f64() * 1e3,
+                total_atoms,
+                output_ranges.len(),
+            );
         }
 
         Ok(outputs)

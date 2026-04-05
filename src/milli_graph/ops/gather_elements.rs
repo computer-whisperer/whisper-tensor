@@ -171,9 +171,9 @@ impl MilliOp for GatherElements {
         Ok(vec![out])
     }
 
-    fn lower_to_nano(
+    fn lower_to_nano<'p, P: crate::pool::Pool + 'p>(
         &self,
-        ctx: &mut crate::nano_graph::NanoLoweringContext,
+        ctx: &mut crate::nano_graph::NanoLoweringContext<'_, 'p, P>,
     ) -> super::LowerResult {
         use crate::nano_graph::lower::{DimKind, TensorAtomMap};
         use crate::nano_graph::ops::{ScalarBinOp, ScalarOp};
