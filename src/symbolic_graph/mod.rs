@@ -868,17 +868,19 @@ impl SymbolicGraph {
                 }
 
                 // Build tensor shape map from ONNXTensorInfo
-                let tensor_shapes: HashMap<GlobalId, TensorInfo<'static, crate::pool::SystemPool>> =
-                    graph_op
-                        .op
-                        .inputs()
-                        .chain(graph_op.op.outputs())
-                        .filter_map(|id| {
-                            let info = self.get_tensor_info(id)?;
-                            let shape = info.shape.as_ref()?;
-                            Some((id, TensorInfo::from_shape_scalars(shape)))
-                        })
-                        .collect();
+                let tensor_shapes: HashMap<
+                    GlobalId,
+                    TensorInfo<'static, 'static, crate::pool::SystemPool>,
+                > = graph_op
+                    .op
+                    .inputs()
+                    .chain(graph_op.op.outputs())
+                    .filter_map(|id| {
+                        let info = self.get_tensor_info(id)?;
+                        let shape = info.shape.as_ref()?;
+                        Some((id, TensorInfo::from_shape_scalars(shape)))
+                    })
+                    .collect();
 
                 let ctx = BackwardGenContext {
                     output_grads,
@@ -1142,11 +1144,18 @@ impl SymbolicGraph {
         )> = {
             let mut out = Vec::new();
             for (&tensor_id, tensor_meta) in &self.tensors {
+                if observer.should_cancel() {
+                    break;
+                }
                 let stored_ref = match &tensor_meta.tensor_type {
                     TensorType::Constant(s) | TensorType::Input(Some(s)) => Some(s),
                     _ => None,
                 };
                 if let Some(stored_ref) = stored_ref {
+                    let label = stored_ref
+                        .loading_label(tensor_store)
+                        .or(tensor_meta.onnx_name.clone());
+                    observer.on_loading_weight(&[tensor_id], label);
                     match stored_ref {
                         StoredOrNotTensor::Stored(store_id) => {
                             if let Some(stored) = tensor_store.get_tensor(*store_id)

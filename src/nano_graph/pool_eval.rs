@@ -30,7 +30,7 @@ use super::pattern::{AtomId, NanoGraph};
 /// mapping to populate input stores and assemble correctly-shaped output
 /// tensors — callers don't need post-eval reassembly.
 pub fn pool_eval<'p, P: Pool + 'p>(
-    graph: &NanoGraph,
+    graph: &NanoGraph<'_, impl Pool>,
     inputs: &[(&TensorAtomMapInfo, &NumericTensorView<'_, DynRank>)],
     outputs: &[&TensorAtomMapInfo],
     pool: &'p P,
@@ -511,7 +511,7 @@ impl<'a, 'p, P: Pool + 'p> AtomStore<'a, 'p, P> {
 /// Read an atom as a NumericScalar from group stores or input stores.
 fn lookup_atom_scalar<P: Pool>(
     atom_id: AtomId,
-    graph: &NanoGraph,
+    graph: &NanoGraph<'_, impl Pool>,
     group_stores: &[Option<AtomStore<'_, '_, P>>],
     input_stores: &[AtomStore<'_, '_, P>],
 ) -> NumericScalar {
@@ -532,7 +532,7 @@ fn lookup_atom_scalar<P: Pool>(
 /// Read an atom's raw bits from group stores or input stores.
 fn lookup_atom_raw<P: Pool>(
     atom_id: AtomId,
-    graph: &NanoGraph,
+    graph: &NanoGraph<'_, impl Pool>,
     group_stores: &[Option<AtomStore<'_, '_, P>>],
     input_stores: &[AtomStore<'_, '_, P>],
 ) -> u64 {
@@ -543,7 +543,7 @@ fn lookup_atom_raw<P: Pool>(
 /// Get the dtype of an atom.
 fn lookup_atom_dtype<P: Pool>(
     atom_id: AtomId,
-    graph: &NanoGraph,
+    graph: &NanoGraph<'_, impl Pool>,
     group_stores: &[Option<AtomStore<'_, '_, P>>],
     input_stores: &[AtomStore<'_, '_, P>],
 ) -> NumericDType {

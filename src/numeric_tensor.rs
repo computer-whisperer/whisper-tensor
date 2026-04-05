@@ -921,6 +921,7 @@ impl<R: Rank> fmt::Debug for NumericTensorView<'_, R> {
 
 /// Copy-on-write tensor — either a borrowed view or a pool-allocated tensor.
 /// Returned by [`NumericTensorView::relayout`].
+#[derive(Debug)]
 pub enum NumericTensorCOW<'a, 'p, R: Rank, P: Pool + 'p> {
     Borrowed(NumericTensorView<'a, R>),
     Owned(NumericTensor<'p, R, P>),
@@ -945,6 +946,65 @@ impl<'a, 'p, R: Rank, P: Pool + 'p> NumericTensorCOW<'a, 'p, R, P> {
         match self {
             Self::Borrowed(v) => v.numel(),
             Self::Owned(t) => t.numel(),
+        }
+    }
+
+    pub fn view(&self) -> NumericTensorView<'_, R> {
+        match self {
+            Self::Borrowed(v) => NumericTensorView::new(v.data(), v.layout().clone()),
+            Self::Owned(t) => t.view(),
+        }
+    }
+
+    /// Return a view with the COW's borrow lifetime `'a`.
+    ///
+    /// For `Borrowed`: returns the original view (lifetime `'a`).
+    /// For `Owned`: the pool buffer outlives `'a` (requires `'p: 'a`),
+    /// so the view is valid for `'a`.
+    /// Return a view with the COW's borrow lifetime `'a`.
+    ///
+    /// For `Borrowed`: returns a view over the original `'a`-lifetime data.
+    /// For `Owned`: the pool buffer outlives `'a` (requires `'p: 'a`),
+    /// so the view is valid for `'a`.
+    pub fn long_view(&self) -> NumericTensorView<'a, R>
+    where
+        'p: 'a,
+    {
+        match self {
+            Self::Borrowed(v) => NumericTensorView::new(v.data, v.layout().clone()),
+            Self::Owned(t) => {
+                let data: &[u8] = t.buffer();
+                // SAFETY: The pool buffer lives for 'p and 'p: 'a, so 'a is valid.
+                let data: &'a [u8] = unsafe { &*(data as *const [u8]) };
+                NumericTensorView::new(data, t.layout().clone())
+            }
+        }
+    }
+
+    pub fn layout(&self) -> &TensorLayout<R> {
+        match self {
+            Self::Borrowed(v) => v.layout(),
+            Self::Owned(t) => t.layout(),
+        }
+    }
+
+    pub fn shape(&self) -> &R::KnownDims {
+        match self {
+            Self::Borrowed(v) => v.shape(),
+            Self::Owned(t) => t.shape(),
+        }
+    }
+
+    pub fn to_i64_vec(&self) -> Vec<i64> {
+        (0..self.numel())
+            .map(|i| self.read_element(i).to_i64())
+            .collect()
+    }
+
+    pub fn buffer(&self) -> &[u8] {
+        match self {
+            Self::Borrowed(v) => v.data(),
+            Self::Owned(t) => t.buffer(),
         }
     }
 }

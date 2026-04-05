@@ -155,21 +155,14 @@ pub struct MilliEvalConfig {
 /// `output_hints` provides dtype+shape info for the op's outputs (needed by
 /// lower_to_nano to classify output dimensions). Callers compute this from
 /// their symbolic inference path before calling constant_fold.
-pub fn constant_fold<'p, P: Pool + 'p>(
+pub fn constant_fold<'a, 'p: 'a, P: Pool + 'p>(
     op: &(impl MilliOp + Sized),
-    known_inputs: &HashMap<GlobalId, TensorInfo<'p, P>>,
-    output_hints: &[(GlobalId, TensorInfo<'p, P>)],
+    known_inputs: &HashMap<GlobalId, TensorInfo<'a, 'p, P>>,
+    output_hints: &[(GlobalId, TensorInfo<'a, 'p, P>)],
     pool: &'p P,
-) -> Option<Vec<(GlobalId, TensorInfo<'p, P>)>> {
+) -> Option<Vec<(GlobalId, TensorInfo<'a, 'p, P>)>> {
     use crate::nano_graph::lower::NanoLoweringContext;
     use crate::nano_graph::pool_eval;
-    use crate::pool::SystemPool;
-
-    // NanoLoweringContext is parameterized on SystemPool, so we build a
-    // SystemPool-typed TensorInfo map for the lowering context. Input data
-    // is copied from the caller's pool via from_view (no legacy round-trip).
-    type LowerTensorInfo = TensorInfo<'static, SystemPool>;
-    static SYS_POOL: SystemPool = SystemPool;
 
     // 1. Check all inputs are concrete.
     let input_ids: Vec<GlobalId> = op.inputs().collect();
@@ -222,12 +215,13 @@ pub fn constant_fold<'p, P: Pool + 'p>(
         return Some(results);
     }
 
-    // 2. Build LowerTensorInfo map with inputs + output hints.
+    // 2. Build LowerTensorInfo map — borrow concrete inputs (zero-copy),
+    //    construct symbolic output hints.
     let t_cf = std::time::Instant::now();
-    let mut lower_infos: HashMap<GlobalId, LowerTensorInfo> = HashMap::new();
+    let mut lower_infos: HashMap<GlobalId, TensorInfo<'a, 'p, P>> = HashMap::new();
     for &id in &input_ids {
         let concrete = known_inputs.get(&id)?.as_concrete()?;
-        lower_infos.insert(id, LowerTensorInfo::from_view(&concrete.view(), &SYS_POOL));
+        lower_infos.insert(id, TensorInfo::from_borrowed_view(concrete.long_view()));
     }
     let dt_s2 = t_cf.elapsed();
     for (id, hint) in output_hints {
@@ -245,14 +239,11 @@ pub fn constant_fold<'p, P: Pool + 'p>(
                     ),
                 })
                 .collect();
-            lower_infos.insert(
-                *id,
-                LowerTensorInfo::from_dtype_and_shape_scalars(dtype, &dims),
-            );
+            lower_infos.insert(*id, TensorInfo::from_dtype_and_shape_scalars(dtype, &dims));
         } else {
             lower_infos.insert(
                 *id,
-                LowerTensorInfo::Minimal(crate::tensor_info::MinimalTensor::new(
+                TensorInfo::Minimal(crate::tensor_info::MinimalTensor::new(
                     crate::scalar_info::ScalarInfo::Numeric(
                         crate::numeric_scalar::NumericScalar::zero(dtype),
                     ),
@@ -266,7 +257,7 @@ pub fn constant_fold<'p, P: Pool + 'p>(
 
     // 3. Lower this single op with constants embedded as Literal nano-ops.
     let t_s3 = std::time::Instant::now();
-    let mut ctx = NanoLoweringContext::new(&lower_infos, &SYS_POOL);
+    let mut ctx = NanoLoweringContext::new(&lower_infos, pool);
     for &id in &input_ids {
         ctx.register_constant(id, &lower_infos[&id]);
     }
@@ -489,16 +480,18 @@ pub enum LowerResult {
 }
 
 pub trait MilliOp: Node<OpKind = String> {
-    fn infer<'p, P: Pool + 'p>(
+    fn infer<'a, 'p, P: Pool + 'p>(
         &self,
-        known_inputs: &HashMap<GlobalId, TensorInfo<'p, P>>,
+        known_inputs: &HashMap<GlobalId, TensorInfo<'a, 'p, P>>,
         _symbolic_resolver: &mut SymbolicResolver,
-        pool: &'p P,
-    ) -> Result<Vec<(GlobalId, TensorInfo<'p, P>)>, MilliOpGraphError>
+        _pool: &'p P,
+    ) -> Result<Vec<(GlobalId, TensorInfo<'a, 'p, P>)>, MilliOpGraphError>
     where
         Self: Sized,
+        'p: 'a,
     {
-        constant_fold(self, known_inputs, &[], pool).ok_or(MilliOpGraphError::UnableToInfer)
+        let _ = known_inputs;
+        Err(MilliOpGraphError::UnableToInfer)
     }
 
     /// Generate backward ops for this milli op.
@@ -678,12 +671,12 @@ fn infer_multidirectional_broadcasting_shape(
 
 /// Compute per-dim output shape for a reduce op when input shape and axes are (partially) known.
 /// Returns None if we can't compute the shape (fall back to rank-only inference).
-fn infer_reduce_output_shape<'p, P: Pool + 'p>(
-    data_info: &crate::tensor_info::TensorInfo<'p, P>,
+fn infer_reduce_output_shape<'a, 'p, P: Pool + 'p>(
+    data_info: &crate::tensor_info::TensorInfo<'a, 'p, P>,
     axes_id: Option<GlobalId>,
     keepdims: bool,
     noop_with_empty_axes: bool,
-    known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'p, P>>,
+    known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'a, 'p, P>>,
     symbolic_resolver: &mut SymbolicResolver,
 ) -> Option<Vec<ScalarInfoTyped<u64>>> {
     // Need input with known per-dim shape.
@@ -1003,12 +996,15 @@ macro_rules! delegate {
 }
 
 impl MilliOp for AnyMilliOp {
-    fn infer<'p, P: Pool + 'p>(
+    fn infer<'a, 'p, P: Pool + 'p>(
         &self,
-        known_inputs: &HashMap<GlobalId, TensorInfo<'p, P>>,
+        known_inputs: &HashMap<GlobalId, TensorInfo<'a, 'p, P>>,
         symbolic_resolver: &mut SymbolicResolver,
         pool: &'p P,
-    ) -> Result<Vec<(GlobalId, TensorInfo<'p, P>)>, MilliOpGraphError> {
+    ) -> Result<Vec<(GlobalId, TensorInfo<'a, 'p, P>)>, MilliOpGraphError>
+    where
+        'p: 'a,
+    {
         match self {
             AnyMilliOp::Constant(x) => x.infer(known_inputs, symbolic_resolver, pool),
             AnyMilliOp::ConstantOfShape(x) => x.infer(known_inputs, symbolic_resolver, pool),

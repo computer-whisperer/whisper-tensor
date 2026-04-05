@@ -18,7 +18,7 @@ use crate::pool::SystemPool;
 use crate::tensor_info::TensorInfo;
 
 /// TensorInfo type used during lowering — generic over the pool.
-pub type LowerTensorInfo<'p, P = SystemPool> = TensorInfo<'p, P>;
+pub type LowerTensorInfo<'a, 'p, P = SystemPool> = TensorInfo<'a, 'p, P>;
 
 /// Wrapper that calls `AnyMilliOp::eval_new` through the `OpaqueEval` trait.
 ///
@@ -136,7 +136,7 @@ pub enum LowerError {
 }
 
 /// Result of lowering a MilliOpGraph.
-pub struct LowerResult<'p, P: crate::pool::Pool + 'p = crate::pool::SystemPool> {
+pub struct LowerResult<'a, 'p, P: crate::pool::Pool + 'p = crate::pool::SystemPool> {
     pub graph: NanoGraph<'p, P>,
     /// Ops that could not be lowered (treated as boundary).
     pub unsupported: Vec<(GlobalId, String)>,
@@ -149,7 +149,7 @@ pub struct LowerResult<'p, P: crate::pool::Pool + 'p = crate::pool::SystemPool> 
     pub group_provenance: Vec<(GlobalId, String)>,
     /// Full tensor info map from inference (dtype + shape + concrete values).
     /// Populated by `lower()` so callers don't need to run `infer_all` separately.
-    pub all_infos: HashMap<GlobalId, LowerTensorInfo<'p, P>>,
+    pub all_infos: HashMap<GlobalId, LowerTensorInfo<'a, 'p, P>>,
 }
 
 /// Public view of how a milli tensor maps to nano atoms.
@@ -494,11 +494,11 @@ impl TensorAtomMap {
 /// Walks ops in topological order, classifying dimensions, and building atom
 /// groups. The returned `LowerResult` contains the NanoGraph, a tensor map,
 /// and any ops that couldn't be lowered (boundary ops).
-pub fn lower<'p, P: crate::pool::Pool + 'p>(
+pub fn lower<'a, 'p: 'a, P: crate::pool::Pool + 'p>(
     graph: &MilliOpGraph,
-    inputs: &HashMap<GlobalId, LowerTensorInfo<'p, P>>,
+    inputs: &HashMap<GlobalId, LowerTensorInfo<'a, 'p, P>>,
     pool: &'p P,
-) -> Result<LowerResult<'p, P>, LowerError> {
+) -> Result<LowerResult<'a, 'p, P>, LowerError> {
     let all_infos = graph.infer_all(inputs, pool)?;
     let mut ctx = NanoLoweringContext::new(&all_infos, pool);
 
@@ -594,11 +594,11 @@ pub fn lower<'p, P: crate::pool::Pool + 'p>(
 
 /// Backward-compatible alias for `lower()`. Will be removed once all call
 /// sites are migrated.
-pub fn lower_with_info<'p, P: crate::pool::Pool + 'p>(
+pub fn lower_with_info<'a, 'p: 'a, P: crate::pool::Pool + 'p>(
     graph: &MilliOpGraph,
-    inputs: &HashMap<GlobalId, LowerTensorInfo<'p, P>>,
+    inputs: &HashMap<GlobalId, LowerTensorInfo<'a, 'p, P>>,
     pool: &'p P,
-) -> Result<LowerResult<'p, P>, LowerError> {
+) -> Result<LowerResult<'a, 'p, P>, LowerError> {
     lower(graph, inputs, pool)
 }
 
@@ -610,7 +610,7 @@ pub fn lower_with_info<'p, P: crate::pool::Pool + 'p>(
 pub struct NanoLoweringContext<'a, 'p, P: crate::pool::Pool + 'p = SystemPool> {
     pub nano: NanoGraph<'p, P>,
     pub tensor_map: HashMap<GlobalId, TensorAtomMap>,
-    pub all_infos: &'a HashMap<GlobalId, LowerTensorInfo<'p, P>>,
+    pub all_infos: &'a HashMap<GlobalId, LowerTensorInfo<'a, 'p, P>>,
     pub pool: &'p P,
     next_anon_sym: usize,
     pub unsupported: Vec<(GlobalId, String)>,
@@ -621,7 +621,7 @@ pub struct NanoLoweringContext<'a, 'p, P: crate::pool::Pool + 'p = SystemPool> {
 }
 
 impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
-    pub fn new(all_infos: &'a HashMap<GlobalId, LowerTensorInfo<'p, P>>, pool: &'p P) -> Self {
+    pub fn new(all_infos: &'a HashMap<GlobalId, LowerTensorInfo<'a, 'p, P>>, pool: &'p P) -> Self {
         Self {
             nano: NanoGraph::new(),
             tensor_map: HashMap::new(),
@@ -635,13 +635,16 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
     }
 
     /// Get the NumericDType from a LowerTensorInfo.
-    pub fn ndt(info: &LowerTensorInfo<'p, P>) -> NumericDType {
+    pub fn ndt(info: &LowerTensorInfo<'_, 'p, P>) -> NumericDType {
         info.dtype()
     }
 
     /// Classify tensor dims and return layout info.
     /// Returns None if rank is unknown or atom count overflows u32.
-    pub fn classify_dims(&mut self, info: &LowerTensorInfo<'p, P>) -> Option<DimClassification> {
+    pub fn classify_dims(
+        &mut self,
+        info: &LowerTensorInfo<'_, 'p, P>,
+    ) -> Option<DimClassification> {
         let rank = info.rank_if_known()?;
         let mut layout = Vec::with_capacity(rank);
         let mut known_dims = Vec::new();
@@ -674,7 +677,7 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
     /// Extracts scalar values from the LowerTensorInfo and creates Literal groups.
     /// Runs of identical values are coalesced into single groups. If the
     /// LowerTensorInfo has no numeric data, falls back to `register_input`.
-    pub fn register_constant(&mut self, id: GlobalId, info: &LowerTensorInfo<'p, P>) {
+    pub fn register_constant(&mut self, id: GlobalId, info: &LowerTensorInfo<'_, 'p, P>) {
         let Some(concrete) = info.as_concrete() else {
             self.register_input(id, info);
             return;
@@ -775,7 +778,7 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
     /// For constant tensors whose values are known at lowering time, the
     /// Literal(0.0) placeholder is similarly overridden by the executor using
     /// the tensor data from `all_infos`.
-    pub fn register_input(&mut self, id: GlobalId, info: &LowerTensorInfo<'p, P>) {
+    pub fn register_input(&mut self, id: GlobalId, info: &LowerTensorInfo<'_, 'p, P>) {
         let Some((layout, known_dims, sym_dims, count)) = self.classify_dims(info) else {
             // Unknown rank — register a single atom.
             let dt = Self::ndt(info);
@@ -804,7 +807,7 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
     pub fn register_boundary(
         &mut self,
         output_id: GlobalId,
-        info: &LowerTensorInfo<'p, P>,
+        info: &LowerTensorInfo<'_, 'p, P>,
         _op_kind: &str,
     ) {
         let dt = Self::ndt(info);
@@ -844,8 +847,8 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
         &self,
         consumer: &TensorAtomMap,
         producer: &TensorAtomMap,
-        consumer_info: &LowerTensorInfo<'p, P>,
-        producer_info: &LowerTensorInfo<'p, P>,
+        consumer_info: &LowerTensorInfo<'a, 'p, P>,
+        producer_info: &LowerTensorInfo<'a, 'p, P>,
     ) -> InputRef {
         // Segmented producers (concat): always build via atom_id_for_element
         // since they can't be expressed as a single Affine/Broadcast pattern.
@@ -901,8 +904,8 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
         &self,
         consumer: &TensorAtomMap,
         producer: &TensorAtomMap,
-        consumer_info: &LowerTensorInfo<'p, P>,
-        producer_info: &LowerTensorInfo<'p, P>,
+        consumer_info: &LowerTensorInfo<'a, 'p, P>,
+        producer_info: &LowerTensorInfo<'a, 'p, P>,
     ) -> InputRef {
         let c_rank = consumer_info.rank_if_known().unwrap_or(0);
         let p_rank = producer_info.rank_if_known().unwrap_or(0);
@@ -1132,8 +1135,8 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
         &self,
         consumer: &TensorAtomMap,
         producer: &TensorAtomMap,
-        consumer_info: &LowerTensorInfo<'p, P>,
-        producer_info: &LowerTensorInfo<'p, P>,
+        consumer_info: &LowerTensorInfo<'a, 'p, P>,
+        producer_info: &LowerTensorInfo<'a, 'p, P>,
     ) -> InputRef {
         let c_rank = consumer_info.rank_if_known().unwrap_or(0);
         let p_rank = producer_info.rank_if_known().unwrap_or(0);
@@ -1603,7 +1606,7 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
 
     /// Extract concrete i64 values from a tensor in all_infos.
     pub fn extract_i64(
-        all_infos: &HashMap<GlobalId, LowerTensorInfo<'p, P>>,
+        all_infos: &HashMap<GlobalId, LowerTensorInfo<'a, 'p, P>>,
         id: &GlobalId,
     ) -> Option<Vec<i64>> {
         let info = all_infos.get(id)?;
@@ -1876,7 +1879,7 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
         self.unsupported_details.push(detail);
     }
 
-    pub fn fmt_info(info: Option<&LowerTensorInfo<'p, P>>) -> String {
+    pub fn fmt_info(info: Option<&LowerTensorInfo<'_, 'p, P>>) -> String {
         let Some(info) = info else {
             return "?".to_string();
         };

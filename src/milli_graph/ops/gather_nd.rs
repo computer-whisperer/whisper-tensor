@@ -66,12 +66,15 @@ impl Node for GatherND {
 }
 
 impl MilliOp for GatherND {
-    fn infer<'p, P: Pool + 'p>(
+    fn infer<'a, 'p, P: Pool + 'p>(
         &self,
-        known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'p, P>>,
+        known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'a, 'p, P>>,
         _symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
         pool: &'p P,
-    ) -> Result<Vec<(GlobalId, crate::tensor_info::TensorInfo<'p, P>)>, MilliOpGraphError> {
+    ) -> Result<Vec<(GlobalId, crate::tensor_info::TensorInfo<'a, 'p, P>)>, MilliOpGraphError>
+    where
+        'p: 'a,
+    {
         let data_info = known_inputs
             .get(&self.data)
             .ok_or(MilliOpGraphError::UnableToInfer)?;

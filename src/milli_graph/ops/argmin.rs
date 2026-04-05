@@ -61,12 +61,15 @@ impl ArgMin {
 }
 
 impl MilliOp for ArgMin {
-    fn infer<'p, P: Pool + 'p>(
+    fn infer<'a, 'p, P: Pool + 'p>(
         &self,
-        known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'p, P>>,
+        known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'a, 'p, P>>,
         symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
         _pool: &'p P,
-    ) -> Result<Vec<(GlobalId, crate::tensor_info::TensorInfo<'p, P>)>, MilliOpGraphError> {
+    ) -> Result<Vec<(GlobalId, crate::tensor_info::TensorInfo<'a, 'p, P>)>, MilliOpGraphError>
+    where
+        'p: 'a,
+    {
         use crate::numeric_dtype::NumericDType;
         use crate::scalar_info::{ScalarInfo, ScalarInfoTyped};
         use crate::symbolic_scalar::SymbolicScalar;

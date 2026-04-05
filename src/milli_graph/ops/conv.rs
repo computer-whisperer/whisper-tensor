@@ -249,7 +249,7 @@ fn im2col_2d(input_data: &[f32], col: &mut [f32], p: &Im2Col2dParams) {
 }
 
 /// Helper: build Conv output with known batch + out_channels but symbolic spatial dims.
-fn make_symbolic_output<'p, P: Pool + 'p>(
+fn make_symbolic_output<'a, 'p, P: Pool + 'p>(
     output_id: GlobalId,
     out_dtype: crate::numeric_dtype::NumericDType,
     batch: &crate::scalar_info::ScalarInfoTyped<u64>,
@@ -257,7 +257,7 @@ fn make_symbolic_output<'p, P: Pool + 'p>(
     n_spatial: usize,
     symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
 ) -> Result<
-    Vec<(GlobalId, crate::tensor_info::TensorInfo<'p, P>)>,
+    Vec<(GlobalId, crate::tensor_info::TensorInfo<'a, 'p, P>)>,
     crate::milli_graph::MilliOpGraphError,
 > {
     use crate::scalar_info::ScalarInfoTyped;
@@ -753,12 +753,15 @@ impl Conv {
 }
 
 impl MilliOp for Conv {
-    fn infer<'p, P: Pool + 'p>(
+    fn infer<'a, 'p, P: Pool + 'p>(
         &self,
-        known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'p, P>>,
+        known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'a, 'p, P>>,
         symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
         _pool: &'p P,
-    ) -> Result<Vec<(GlobalId, crate::tensor_info::TensorInfo<'p, P>)>, MilliOpGraphError> {
+    ) -> Result<Vec<(GlobalId, crate::tensor_info::TensorInfo<'a, 'p, P>)>, MilliOpGraphError>
+    where
+        'p: 'a,
+    {
         use crate::milli_graph::MilliOpGraphError::UnableToInfer;
         use crate::scalar_info::ScalarInfoTyped;
         use crate::symbolic_scalar::SymbolicScalarTyped;
@@ -1076,12 +1079,15 @@ impl Node for ConvInputGrad {
 }
 
 impl MilliOp for ConvInputGrad {
-    fn infer<'p, P: crate::pool::Pool + 'p>(
+    fn infer<'a, 'p, P: crate::pool::Pool + 'p>(
         &self,
-        known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'p, P>>,
+        known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'a, 'p, P>>,
         _symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
         _pool: &'p P,
-    ) -> Result<Vec<(GlobalId, crate::tensor_info::TensorInfo<'p, P>)>, MilliOpGraphError> {
+    ) -> Result<Vec<(GlobalId, crate::tensor_info::TensorInfo<'a, 'p, P>)>, MilliOpGraphError>
+    where
+        'p: 'a,
+    {
         // Output shape = original input shape.
         let input_info = known_inputs
             .get(&self.input)
@@ -1350,12 +1356,15 @@ impl Node for ConvWeightGrad {
 }
 
 impl MilliOp for ConvWeightGrad {
-    fn infer<'p, P: crate::pool::Pool + 'p>(
+    fn infer<'a, 'p, P: crate::pool::Pool + 'p>(
         &self,
-        known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'p, P>>,
+        known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'a, 'p, P>>,
         _symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
         _pool: &'p P,
-    ) -> Result<Vec<(GlobalId, crate::tensor_info::TensorInfo<'p, P>)>, MilliOpGraphError> {
+    ) -> Result<Vec<(GlobalId, crate::tensor_info::TensorInfo<'a, 'p, P>)>, MilliOpGraphError>
+    where
+        'p: 'a,
+    {
         // Weight shape: [out_channels, in_channels/groups, *kernel_shape]
         let grad_info = known_inputs
             .get(&self.grad_output)
@@ -1599,12 +1608,15 @@ impl Node for ConvBiasGrad {
 }
 
 impl MilliOp for ConvBiasGrad {
-    fn infer<'p, P: Pool + 'p>(
+    fn infer<'a, 'p, P: Pool + 'p>(
         &self,
-        known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'p, P>>,
+        known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'a, 'p, P>>,
         _symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
         _pool: &'p P,
-    ) -> Result<Vec<(GlobalId, crate::tensor_info::TensorInfo<'p, P>)>, MilliOpGraphError> {
+    ) -> Result<Vec<(GlobalId, crate::tensor_info::TensorInfo<'a, 'p, P>)>, MilliOpGraphError>
+    where
+        'p: 'a,
+    {
         use crate::tensor_info::TensorInfo;
 
         let grad_info = known_inputs

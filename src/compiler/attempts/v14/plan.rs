@@ -13,7 +13,7 @@ use super::types::*;
 /// This is the starting point — validation and execution infrastructure
 /// are built against this before implementing a real partitioner.
 pub fn plan_trivial(
-    result: LowerResult<'static, crate::pool::SystemPool>,
+    result: LowerResult<'static, 'static, crate::pool::SystemPool>,
     tensor_map: HashMap<GlobalId, TensorMapping>,
     model_outputs: Vec<OutputMapping>,
 ) -> ExecutionPlan {

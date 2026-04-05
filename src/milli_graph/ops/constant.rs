@@ -172,12 +172,15 @@ impl Node for Constant {
 }
 
 impl MilliOp for Constant {
-    fn infer<'p, P: Pool + 'p>(
+    fn infer<'a, 'p, P: Pool + 'p>(
         &self,
-        _known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'p, P>>,
+        _known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'a, 'p, P>>,
         _symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
         pool: &'p P,
-    ) -> Result<Vec<(GlobalId, crate::tensor_info::TensorInfo<'p, P>)>, MilliOpGraphError> {
+    ) -> Result<Vec<(GlobalId, crate::tensor_info::TensorInfo<'a, 'p, P>)>, MilliOpGraphError>
+    where
+        'p: 'a,
+    {
         use crate::tensor_info::TensorInfo;
         Ok(vec![(
             self.output,
@@ -287,12 +290,15 @@ impl Node for ConstantOfShape {
 }
 
 impl MilliOp for ConstantOfShape {
-    fn infer<'p, P: Pool + 'p>(
+    fn infer<'a, 'p, P: Pool + 'p>(
         &self,
-        known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'p, P>>,
+        known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'a, 'p, P>>,
         _symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
         pool: &'p P,
-    ) -> Result<Vec<(GlobalId, crate::tensor_info::TensorInfo<'p, P>)>, MilliOpGraphError> {
+    ) -> Result<Vec<(GlobalId, crate::tensor_info::TensorInfo<'a, 'p, P>)>, MilliOpGraphError>
+    where
+        'p: 'a,
+    {
         use crate::scalar_info::ScalarInfoTyped;
         use crate::tensor_info::TensorInfo;
 

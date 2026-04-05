@@ -362,12 +362,15 @@ impl Node for SimpleUnaryOp {
 }
 
 impl MilliOp for SimpleUnaryOp {
-    fn infer<'p, P: Pool + 'p>(
+    fn infer<'a, 'p, P: Pool + 'p>(
         &self,
-        known_inputs: &HashMap<GlobalId, TensorInfo<'p, P>>,
+        known_inputs: &HashMap<GlobalId, TensorInfo<'a, 'p, P>>,
         symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
         pool: &'p P,
-    ) -> Result<Vec<(GlobalId, TensorInfo<'p, P>)>, MilliOpGraphError> {
+    ) -> Result<Vec<(GlobalId, TensorInfo<'a, 'p, P>)>, MilliOpGraphError>
+    where
+        'p: 'a,
+    {
         let input_info = known_inputs
             .get(&self.input)
             .ok_or(MilliOpGraphError::UnableToInfer)?;
@@ -687,12 +690,15 @@ impl Node for ClampMin {
 }
 
 impl MilliOp for ClampMin {
-    fn infer<'p, P: Pool + 'p>(
+    fn infer<'a, 'p, P: Pool + 'p>(
         &self,
-        known_inputs: &HashMap<GlobalId, TensorInfo<'p, P>>,
+        known_inputs: &HashMap<GlobalId, TensorInfo<'a, 'p, P>>,
         symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
         pool: &'p P,
-    ) -> Result<Vec<(GlobalId, TensorInfo<'p, P>)>, MilliOpGraphError> {
+    ) -> Result<Vec<(GlobalId, TensorInfo<'a, 'p, P>)>, MilliOpGraphError>
+    where
+        'p: 'a,
+    {
         let input_info = known_inputs
             .get(&self.input)
             .ok_or(MilliOpGraphError::UnableToInfer)?;

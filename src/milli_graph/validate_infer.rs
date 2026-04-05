@@ -109,12 +109,12 @@ impl GroundTruth {
 }
 
 /// Ablate a tensor view to the given TensorInfo level.
-fn ablate_view<'p, P: Pool + 'p>(
+fn ablate_view<'a, 'p, P: Pool + 'p>(
     view: &NumericTensorView<'_, DynRank>,
     level: AblationLevel,
     resolver: &mut SymbolicResolver,
     pool: &'p P,
-) -> TensorInfo<'p, P> {
+) -> TensorInfo<'a, 'p, P> {
     let dtype = view.dtype();
     let shape = view.shape();
     let rank = shape.len();
@@ -154,7 +154,7 @@ fn ablate_view<'p, P: Pool + 'p>(
 /// Returns `Ok(())` if every concrete claim in `inferred` matches `truth`.
 /// Returns `Err(message)` if any concrete claim is wrong.
 fn validate_against_ground_truth(
-    inferred: &TensorInfo<'_, impl crate::pool::Pool>,
+    inferred: &TensorInfo<'_, '_, impl crate::pool::Pool>,
     truth: &GroundTruth,
 ) -> Result<(), String> {
     // Check dtype -- inferred dtype is always concrete in this type system
@@ -289,7 +289,7 @@ impl MilliOpGraph {
                 let mut resolver = SymbolicResolver::new();
                 let input_ids: Vec<GlobalId> = op.inputs().collect();
 
-                let mut known: HashMap<GlobalId, TensorInfo<'_, SystemPool>> = HashMap::new();
+                let mut known: HashMap<GlobalId, TensorInfo<'_, '_, SystemPool>> = HashMap::new();
 
                 // Insert all intermediate values as Numeric TensorInfo
                 for (id, tensor) in &intermediates {

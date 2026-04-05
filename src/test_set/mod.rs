@@ -302,7 +302,7 @@ pub fn run_case_via_pool_eval(case: &TestCase) -> Result<(), String> {
 
     for ds in &case.data_sets {
         // Build TensorInfo for each input (needed by lower).
-        let info_inputs: HashMap<GlobalId, TensorInfo<'_, crate::pool::SystemPool>> = ds
+        let info_inputs: HashMap<GlobalId, TensorInfo<'_, '_, crate::pool::SystemPool>> = ds
             .inputs
             .iter()
             .map(|(&id, t)| {

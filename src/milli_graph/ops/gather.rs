@@ -460,15 +460,18 @@ impl Node for Gather {
 }
 
 impl MilliOp for Gather {
-    fn infer<'p, P: Pool + 'p>(
+    fn infer<'a, 'p, P: Pool + 'p>(
         &self,
-        known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'p, P>>,
+        known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'a, 'p, P>>,
         _symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
         pool: &'p P,
     ) -> Result<
-        Vec<(GlobalId, crate::tensor_info::TensorInfo<'p, P>)>,
+        Vec<(GlobalId, crate::tensor_info::TensorInfo<'a, 'p, P>)>,
         crate::milli_graph::MilliOpGraphError,
-    > {
+    >
+    where
+        'p: 'a,
+    {
         use crate::tensor_info::TensorInfo;
 
         let data_info = known_inputs
@@ -728,12 +731,15 @@ impl Node for GatherGrad {
 }
 
 impl MilliOp for GatherGrad {
-    fn infer<'p, P: Pool + 'p>(
+    fn infer<'a, 'p, P: Pool + 'p>(
         &self,
-        known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'p, P>>,
+        known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'a, 'p, P>>,
         _symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
         _pool: &'p P,
-    ) -> Result<Vec<(GlobalId, crate::tensor_info::TensorInfo<'p, P>)>, MilliOpGraphError> {
+    ) -> Result<Vec<(GlobalId, crate::tensor_info::TensorInfo<'a, 'p, P>)>, MilliOpGraphError>
+    where
+        'p: 'a,
+    {
         // Output shape = data input shape (scatter-add back into data's shape).
         let data_info = known_inputs
             .get(&self.data)

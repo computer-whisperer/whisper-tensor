@@ -278,7 +278,7 @@ fn main() {
     let tensors_by_name = sym_graph.get_tensors_by_name();
 
     static POOL_S: SystemPool = SystemPool;
-    let mut all_infos: HashMap<GlobalId, TensorInfo<'_, SystemPool>> = HashMap::new();
+    let mut all_infos: HashMap<GlobalId, TensorInfo<'_, '_, SystemPool>> = HashMap::new();
 
     // User inputs: build concrete tensors and insert as full-data TensorInfo.
     // The lowering's infer_all needs data for user inputs so that downstream
