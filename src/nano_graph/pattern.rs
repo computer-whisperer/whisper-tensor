@@ -297,8 +297,8 @@ pub struct NanoGraph<'p, P: Pool + 'p = crate::pool::SystemPool> {
     /// Known upper bounds for symbolic dimensions.
     pub sym_dim_bounds: HashMap<SymDim, u64>,
     next_sym_dim: u16,
-    /// Which atoms are final outputs of the computation.
-    pub outputs: Vec<AtomId>,
+    /// Which atom ranges are final outputs of the computation.
+    pub outputs: Vec<AtomRange>,
 }
 
 impl<'p, P: Pool + 'p> Clone for NanoGraph<'p, P>
@@ -658,6 +658,31 @@ impl<'p, P: Pool + 'p> NanoGraph<'p, P> {
         self.input_ranges
             .find_index(id.0)
             .map(|idx| (idx, id.0 - self.input_ranges.values()[idx].base_id.0))
+    }
+
+    /// Build an `AtomRange` for an atom that belongs to either a group or an
+    /// input tensor. Panics if `id` is not found in either.
+    pub fn atom_to_range(&self, id: AtomId) -> AtomRange {
+        if let Some(gi) = self.find_group_idx(id) {
+            let g = &self.groups()[gi];
+            AtomRange {
+                base: g.base_id,
+                count: g.count,
+                dtype: g.output_dtype,
+            }
+        } else if let Some((ti, _)) = self.find_input_idx(id) {
+            let it = &self.input_tensors()[ti];
+            AtomRange {
+                base: it.base_id,
+                count: it.count,
+                dtype: it.dtype,
+            }
+        } else {
+            panic!(
+                "atom_to_range: AtomId({}) not found in groups or inputs",
+                id.0
+            );
+        }
     }
 
     /// Number of groups.

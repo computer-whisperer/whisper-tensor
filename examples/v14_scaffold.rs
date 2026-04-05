@@ -544,7 +544,8 @@ fn main() {
         use whisper_tensor::nano_graph::AtomId as AId;
 
         let input_ts = result.graph.input_tensors();
-        let output_ids: Vec<AId> = model_outputs.iter().map(|om| om.range.base).collect();
+        let output_ids: Vec<whisper_tensor::nano_graph::pattern::AtomRange> =
+            model_outputs.iter().map(|om| om.range.clone()).collect();
         let num_lanes = 8;
 
         // Structural partitioner tests. Set RUN_STRUCTURAL=1 to enable.
@@ -554,7 +555,7 @@ fn main() {
                 &NanoGraph<'static, whisper_tensor::pool::SystemPool>,
                 usize,
                 &[whisper_tensor::nano_graph::pattern::InputTensor],
-                &[AId],
+                &[whisper_tensor::nano_graph::pattern::AtomRange],
             ) -> Vec<Phase>,
         )> = if std::env::var("RUN_STRUCTURAL").is_ok() {
             vec![
@@ -726,31 +727,23 @@ fn main() {
     // output. Walk all elements of each output tensor to find every unique
     // group, since a tensor may span many groups (e.g. the LM-head logits)
     // and segmented tensors scatter atoms across non-contiguous ranges.
-    let b_output_ids: Vec<AtomId> = {
+    let b_output_ids: Vec<whisper_tensor::nano_graph::pattern::AtomRange> = {
         let reverse_out: HashMap<GlobalId, GlobalId> = milli_graph
             .output_map
             .as_ref()
             .map(|m| m.iter().map(|(&int, &ext)| (ext, int)).collect())
             .unwrap_or_default();
-        let mut ids = Vec::new();
-        let mut seen_groups = std::collections::HashSet::new();
+        let mut ranges = Vec::new();
         for om in &model_outputs {
             let int_id = reverse_out
                 .get(&om.tensor_id)
                 .copied()
                 .unwrap_or(om.tensor_id);
             if let Some(tam) = result.tensor_map.get(&int_id) {
-                for i in 0..tam.count {
-                    let atom = tam.atom_id_for_element(i);
-                    if let Some(gi) = result.graph.find_group_idx(atom) {
-                        if seen_groups.insert(gi) {
-                            ids.push(atom);
-                        }
-                    }
-                }
+                ranges.extend(tam.atom_ranges(&result.graph));
             }
         }
-        ids
+        ranges
     };
     let t0 = Instant::now();
     let b_phases = partitioner_m::plan(

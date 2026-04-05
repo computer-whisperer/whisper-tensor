@@ -41,7 +41,7 @@ pub fn plan(
     graph: &NanoGraph<'static, crate::pool::SystemPool>,
     num_lanes: usize,
     input_tensors: &[InputTensor],
-    output_atom_ids: &[AtomId],
+    output_atom_ids: &[AtomRange],
 ) -> Vec<Phase> {
     let num_lanes = num_lanes.max(1);
     let groups = graph.groups();
@@ -76,7 +76,7 @@ pub fn plan(
     // Step 5: Identify output groups.
     let output_group_set: HashSet<usize> = output_atom_ids
         .iter()
-        .filter_map(|&aid| graph.find_group_idx(aid))
+        .filter_map(|range| graph.find_group_idx(range.base))
         .collect();
 
     // Step 6: Build phases.
@@ -1173,9 +1173,9 @@ mod tests {
             vec![],
             vec![InputRef::affine(neg, 1)],
         );
-        g.outputs.push(exp);
+        g.outputs.push(g.atom_to_range(exp));
 
-        let phases = plan(&g, NUM_LANES, &[], &[exp]);
+        let phases = plan(&g, NUM_LANES, &[], &[g.atom_to_range(exp)]);
 
         // Should be exactly 1 phase — the whole chain is split-compatible.
         assert_eq!(phases.len(), 1, "Linear chain should be 1 phase");
@@ -1255,9 +1255,9 @@ mod tests {
             vec![],
             vec![InputRef::affine(neg, 1), InputRef::affine(exp, 1)],
         );
-        g.outputs.push(add);
+        g.outputs.push(g.atom_to_range(add));
 
-        let phases = plan(&g, NUM_LANES, &[], &[add]);
+        let phases = plan(&g, NUM_LANES, &[], &[g.atom_to_range(add)]);
 
         // All split, same stripe → 1 phase.
         assert_eq!(phases.len(), 1, "Diamond should be 1 phase");
@@ -1333,7 +1333,7 @@ mod tests {
             vec![],
             vec![InputRef::affine(mul_base, k as i64)],
         );
-        g.outputs.push(red_base);
+        g.outputs.push(g.atom_to_range(red_base));
 
         let input_tensors = vec![InputTensor {
             tensor_id: GlobalId(42),
@@ -1342,7 +1342,7 @@ mod tests {
             dtype: NumericDType::F32,
         }];
 
-        let phases = plan(&g, NUM_LANES, &input_tensors, &[red_base]);
+        let phases = plan(&g, NUM_LANES, &input_tensors, &[g.atom_to_range(red_base)]);
 
         // Mul should be split across lanes (128 atoms / 4 lanes = 32 each).
         assert!(
@@ -1385,9 +1385,9 @@ mod tests {
             vec![],
             vec![InputRef::Broadcast(lit)],
         );
-        g.outputs.push(neg);
+        g.outputs.push(g.atom_to_range(neg));
 
-        let phases = plan(&g, NUM_LANES, &[], &[neg]);
+        let phases = plan(&g, NUM_LANES, &[], &[g.atom_to_range(neg)]);
         assert_eq!(phases.len(), 1);
 
         // Check that the literal appears in every lane's span.
@@ -1449,9 +1449,9 @@ mod tests {
             vec![],
             vec![InputRef::affine(neg, 1)],
         );
-        g.outputs.push(red);
+        g.outputs.push(g.atom_to_range(red));
 
-        let phases = plan(&g, NUM_LANES, &[], &[red]);
+        let phases = plan(&g, NUM_LANES, &[], &[g.atom_to_range(red)]);
 
         // ReduceSum(count=1) is Whole. It reads from Split Neg.
         // => Needs a barrier => at least 2 phases.
@@ -1503,9 +1503,9 @@ mod tests {
             vec![],
             vec![InputRef::affine(source, k as i64)],
         );
-        g.outputs.push(red);
+        g.outputs.push(g.atom_to_range(red));
 
-        let phases = plan(&g, NUM_LANES, &[], &[red]);
+        let phases = plan(&g, NUM_LANES, &[], &[g.atom_to_range(red)]);
 
         // The reduce group has count=32, 4 lanes → 8 per lane. Should be split.
         assert!(
@@ -1590,9 +1590,9 @@ mod tests {
             vec![],
             vec![InputRef::affine(pow, 1), InputRef::affine(lit_d, 1)],
         );
-        g.outputs.push(div);
+        g.outputs.push(g.atom_to_range(div));
 
-        let phases = plan(&g, NUM_LANES, &[], &[div]);
+        let phases = plan(&g, NUM_LANES, &[], &[g.atom_to_range(div)]);
 
         assert_eq!(
             phases.len(),
@@ -1682,9 +1682,9 @@ mod tests {
             vec![],
             vec![InputRef::affine(neg, 1), InputRef::Broadcast(red)],
         );
-        g.outputs.push(div);
+        g.outputs.push(g.atom_to_range(div));
 
-        let phases = plan(&g, NUM_LANES, &[], &[div]);
+        let phases = plan(&g, NUM_LANES, &[], &[g.atom_to_range(div)]);
 
         // Neg should be split.
         assert!(group_is_split_across_lanes(&phases, neg, 1000));
@@ -1736,9 +1736,9 @@ mod tests {
             vec![],
             vec![InputRef::affine(lit, 1)],
         );
-        g.outputs.push(neg);
+        g.outputs.push(g.atom_to_range(neg));
 
-        let phases = plan(&g, NUM_LANES, &[], &[neg]);
+        let phases = plan(&g, NUM_LANES, &[], &[g.atom_to_range(neg)]);
         // Should work without panic.
         assert!(!phases.is_empty());
         validate_all_spans(&phases);
@@ -1762,7 +1762,7 @@ mod tests {
             vec![],
             vec![InputRef::affine(inp, 1)],
         );
-        g.outputs.push(neg);
+        g.outputs.push(g.atom_to_range(neg));
 
         let input_tensors = vec![InputTensor {
             tensor_id: GlobalId(1),
@@ -1771,7 +1771,7 @@ mod tests {
             dtype: NumericDType::F32,
         }];
 
-        let phases = plan(&g, NUM_LANES, &input_tensors, &[neg]);
+        let phases = plan(&g, NUM_LANES, &input_tensors, &[g.atom_to_range(neg)]);
 
         assert_eq!(phases.len(), 1);
         assert!(group_is_split_across_lanes(&phases, neg, 1000));
@@ -1810,10 +1810,10 @@ mod tests {
             vec![],
             vec![InputRef::affine(lit, 1)],
         );
-        g.outputs.push(neg);
+        g.outputs.push(g.atom_to_range(neg));
 
         for num_lanes in [1, 2, 4, 8] {
-            let phases = plan(&g, num_lanes, &[], &[neg]);
+            let phases = plan(&g, num_lanes, &[], &[g.atom_to_range(neg)]);
             for phase in &phases {
                 assert_eq!(
                     phase.spans.len(),
@@ -1857,9 +1857,9 @@ mod tests {
             vec![],
             vec![InputRef::affine(indices, 1)],
         );
-        g.outputs.push(load);
+        g.outputs.push(g.atom_to_range(load));
 
-        let phases = plan(&g, NUM_LANES, &[], &[load]);
+        let phases = plan(&g, NUM_LANES, &[], &[g.atom_to_range(load)]);
 
         // IndirectLoad should be split across lanes.
         assert!(group_is_split_across_lanes(&phases, load, 100));

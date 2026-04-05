@@ -166,6 +166,52 @@ pub struct TensorAtomMapInfo {
 }
 
 impl TensorAtomMapInfo {
+    /// Return the atom ranges that compose this tensor.
+    ///
+    /// For simple contiguous tensors: a single range. For non-contiguous or
+    /// segmented tensors, needs the NanoGraph to discover distinct groups.
+    pub fn atom_ranges<'p, P: crate::pool::Pool + 'p>(
+        &self,
+        graph: &super::pattern::NanoGraph<'p, P>,
+    ) -> Vec<super::pattern::AtomRange> {
+        use super::pattern::AtomRange;
+        let is_contiguous = self.segments.is_empty()
+            && self.known_strides == TensorAtomMap::compute_strides(&self.known_dims);
+        if is_contiguous {
+            return vec![AtomRange {
+                base: self.base_id,
+                count: self.count,
+                dtype: self.dtype,
+            }];
+        }
+        // Non-contiguous or segmented: enumerate to find distinct ranges.
+        let mut ranges = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for i in 0..self.count {
+            let atom = self.atom_id_for_element(i);
+            if let Some(gi) = graph.find_group_idx(atom) {
+                if seen.insert(gi) {
+                    let g = &graph.groups()[gi];
+                    ranges.push(AtomRange {
+                        base: g.base_id,
+                        count: g.count,
+                        dtype: g.output_dtype,
+                    });
+                }
+            } else if let Some((ti, _)) = graph.find_input_idx(atom)
+                && seen.insert(usize::MAX - ti)
+            {
+                let it = &graph.input_tensors()[ti];
+                ranges.push(AtomRange {
+                    base: it.base_id,
+                    count: it.count,
+                    dtype: it.dtype,
+                });
+            }
+        }
+        ranges
+    }
+
     /// Map logical element index to AtomId using strides.
     pub fn atom_id_for_element(&self, flat: u64) -> AtomId {
         let row_major = TensorAtomMap::compute_strides(&self.known_dims);
@@ -342,6 +388,53 @@ impl TensorAtomMap {
             .collect()
     }
 
+    /// Return the atom ranges that compose this tensor.
+    ///
+    /// For simple contiguous tensors: a single range `[base, base+count)`.
+    /// For non-contiguous views (transposed strides): falls back to per-element
+    /// enumeration to discover the distinct groups.
+    /// For segmented tensors (concat): one range per segment.
+    pub fn atom_ranges<'p, P: crate::pool::Pool + 'p>(
+        &self,
+        graph: &super::pattern::NanoGraph<'p, P>,
+    ) -> Vec<super::pattern::AtomRange> {
+        use super::pattern::AtomRange;
+        if self.segments.is_empty() && self.is_contiguous() {
+            // Single contiguous range.
+            return vec![AtomRange {
+                base: self.base_id,
+                count: self.count,
+                dtype: self.dtype,
+            }];
+        }
+        // Non-contiguous or segmented: enumerate to find distinct ranges.
+        let mut ranges = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for i in 0..self.count {
+            let atom = self.atom_id_for_element(i);
+            if let Some(gi) = graph.find_group_idx(atom) {
+                if seen.insert(gi) {
+                    let g = &graph.groups()[gi];
+                    ranges.push(AtomRange {
+                        base: g.base_id,
+                        count: g.count,
+                        dtype: g.output_dtype,
+                    });
+                }
+            } else if let Some((ti, _)) = graph.find_input_idx(atom)
+                && seen.insert(usize::MAX - ti)
+            {
+                let it = &graph.input_tensors()[ti];
+                ranges.push(AtomRange {
+                    base: it.base_id,
+                    count: it.count,
+                    dtype: it.dtype,
+                });
+            }
+        }
+        ranges
+    }
+
     /// Map logical element index to AtomId using strides.
     /// Handles simple views, transposed/strided views, and segmented (concat) views.
     pub fn atom_id_for_element(&self, flat: u64) -> AtomId {
@@ -447,14 +540,10 @@ pub fn lower<'p, P: crate::pool::Pool + 'p>(
     if !output_ids.is_empty() {
         for out_id in &output_ids {
             if let Some(tam) = ctx.tensor_map.get(out_id) {
-                for i in 0..tam.count {
-                    ctx.nano.outputs.push(tam.atom_id_for_element(i));
-                }
+                ctx.nano.outputs.extend(tam.atom_ranges(&ctx.nano));
             }
         }
     }
-    // If still no outputs, register all mapped tensors from the last ops.
-    // This is a fallback — proper output mapping will be fixed later.
 
     let tensor_map: HashMap<GlobalId, TensorAtomMapInfo> = ctx
         .tensor_map

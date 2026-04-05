@@ -770,7 +770,7 @@ pub fn plan(
     graph: &NanoGraph<'static, crate::pool::SystemPool>,
     num_lanes: usize,
     input_tensors: &[InputTensor],
-    output_atom_ids: &[AtomId],
+    output_atom_ids: &[AtomRange],
 ) -> Vec<Phase> {
     let num_lanes = num_lanes.max(1);
     let groups = graph.groups();
@@ -924,11 +924,11 @@ pub fn plan(
 /// Identify which group indices produce output atoms.
 fn identify_output_groups(
     graph: &NanoGraph<'static, crate::pool::SystemPool>,
-    output_atom_ids: &[AtomId],
+    output_atom_ids: &[AtomRange],
 ) -> HashSet<usize> {
     let mut set = HashSet::new();
-    for &atom_id in output_atom_ids {
-        if let Some(gi) = graph.find_group_idx(atom_id) {
+    for range in output_atom_ids {
+        if let Some(gi) = graph.find_group_idx(range.base) {
             set.insert(gi);
         }
     }
@@ -1033,10 +1033,10 @@ mod tests {
             vec![InputRef::affine(add_id, 1), InputRef::affine(add_id, 1)],
         );
 
-        graph.outputs = vec![mul_id];
+        graph.outputs = vec![graph.atom_to_range(mul_id)];
 
         let input_tensors = graph.input_tensors().to_vec();
-        let output_ids: Vec<AtomId> = graph.outputs.clone();
+        let output_ids = graph.outputs.clone();
 
         let phases = plan(&graph, num_lanes, &input_tensors, &output_ids);
 
@@ -1128,7 +1128,7 @@ mod tests {
             vec![InputRef::affine(pow_id, 1), InputRef::Broadcast(lit)],
         );
 
-        graph.outputs = vec![div_id];
+        graph.outputs = vec![graph.atom_to_range(div_id)];
 
         let input_tensors = graph.input_tensors().to_vec();
         let output_ids = graph.outputs.clone();
@@ -1212,7 +1212,7 @@ mod tests {
             vec![InputRef::affine(b, 1), InputRef::affine(c, 1)],
         );
 
-        graph.outputs = vec![d];
+        graph.outputs = vec![graph.atom_to_range(d)];
 
         let input_tensors = graph.input_tensors().to_vec();
         let output_ids = graph.outputs.clone();
@@ -1309,7 +1309,7 @@ mod tests {
             vec![InputRef::affine(mul, k as i64)],
         );
 
-        graph.outputs = vec![reduce];
+        graph.outputs = vec![graph.atom_to_range(reduce)];
 
         let input_tensors = graph.input_tensors().to_vec();
         let output_ids = graph.outputs.clone();
@@ -1382,7 +1382,7 @@ mod tests {
             vec![InputRef::affine(lit, 1), InputRef::affine(lit, 1)],
         );
 
-        graph.outputs = vec![mul];
+        graph.outputs = vec![graph.atom_to_range(mul)];
 
         let input_tensors = graph.input_tensors().to_vec();
         let output_ids = graph.outputs.clone();
@@ -1472,7 +1472,7 @@ mod tests {
             vec![InputRef::affine(source, 1)],
         );
 
-        graph.outputs = vec![reduce];
+        graph.outputs = vec![graph.atom_to_range(reduce)];
 
         let input_tensors = graph.input_tensors().to_vec();
         let output_ids = graph.outputs.clone();
@@ -1528,7 +1528,7 @@ mod tests {
             vec![InputRef::affine(lit, 1), InputRef::affine(lit, 1)],
         );
 
-        graph.outputs = vec![add];
+        graph.outputs = vec![graph.atom_to_range(add)];
 
         let input_tensors = graph.input_tensors().to_vec();
         let output_ids = graph.outputs.clone();
@@ -1597,7 +1597,7 @@ mod tests {
             vec![InputRef::affine(add, 1), InputRef::Broadcast(lit)],
         );
 
-        graph.outputs = vec![mul];
+        graph.outputs = vec![graph.atom_to_range(mul)];
 
         let input_tensors = graph.input_tensors().to_vec();
         let output_ids = graph.outputs.clone();
@@ -1646,7 +1646,7 @@ mod tests {
             vec![InputRef::affine(lit, 1), InputRef::affine(lit, 1)],
         );
 
-        graph.outputs = vec![add];
+        graph.outputs = vec![graph.atom_to_range(add)];
 
         let input_tensors = graph.input_tensors().to_vec();
         let output_ids = graph.outputs.clone();
@@ -1666,12 +1666,14 @@ mod tests {
         }
 
         // All output atom IDs should be produced.
-        for &out_id in &output_ids {
-            assert!(
-                produced.contains(&out_id.0),
-                "Output atom {} not produced by any span",
-                out_id,
-            );
+        for out_range in &output_ids {
+            for i in 0..out_range.count {
+                assert!(
+                    produced.contains(&(out_range.base.0 + i)),
+                    "Output atom {} not produced by any span",
+                    out_range.base.0 + i,
+                );
+            }
         }
     }
 
@@ -1707,7 +1709,7 @@ mod tests {
             vec![InputRef::affine(lit, 1), InputRef::affine(lit, 1)],
         );
 
-        graph.outputs = vec![add];
+        graph.outputs = vec![graph.atom_to_range(add)];
 
         let input_tensors = graph.input_tensors().to_vec();
         let output_ids = graph.outputs.clone();
@@ -1802,7 +1804,7 @@ mod tests {
             vec![InputRef::affine(index, 1)],
         );
 
-        graph.outputs = vec![load];
+        graph.outputs = vec![graph.atom_to_range(load)];
 
         let input_tensors = graph.input_tensors().to_vec();
         let output_ids = graph.outputs.clone();
@@ -1862,7 +1864,7 @@ mod tests {
             vec![InputRef::affine(lit, 1)],
         );
 
-        graph.outputs = vec![unary];
+        graph.outputs = vec![graph.atom_to_range(unary)];
 
         let input_tensors = graph.input_tensors().to_vec();
         let output_ids = graph.outputs.clone();

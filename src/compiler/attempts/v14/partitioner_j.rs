@@ -39,7 +39,7 @@ pub fn plan(
     graph: &NanoGraph<'static, crate::pool::SystemPool>,
     num_lanes: usize,
     input_tensors: &[InputTensor],
-    output_atom_ids: &[AtomId],
+    output_atom_ids: &[AtomRange],
 ) -> Vec<Phase> {
     let num_lanes = num_lanes.max(1);
     let groups = graph.groups();
@@ -480,17 +480,17 @@ fn input_crosses_lane_boundary(
 
 fn identify_output_groups(
     graph: &NanoGraph<'static, crate::pool::SystemPool>,
-    output_atom_ids: &[AtomId],
+    output_atom_ids: &[AtomRange],
 ) -> HashSet<usize> {
     let mut out = HashSet::new();
-    for &aid in output_atom_ids {
-        if let Some(gi) = graph.find_group_idx(aid) {
+    for range in output_atom_ids {
+        if let Some(gi) = graph.find_group_idx(range.base) {
             out.insert(gi);
         }
     }
     // Also include all groups that are in the graph's outputs list.
-    for &aid in &graph.outputs {
-        if let Some(gi) = graph.find_group_idx(aid) {
+    for range in &graph.outputs {
+        if let Some(gi) = graph.find_group_idx(range.base) {
             out.insert(gi);
         }
     }
@@ -1303,10 +1303,10 @@ mod tests {
         let input = add_input(&mut g, 1, 1024);
         let sub = add_binary(&mut g, 1024, input, input, ScalarBinOp::Sub);
         let pow = add_unary(&mut g, 1024, sub, ScalarUnaryOp::Exp); // use Exp as "power-like"
-        g.outputs = vec![pow];
+        g.outputs = vec![g.atom_to_range(pow)];
 
         let input_tensors = g.input_tensors().to_vec();
-        let output_ids: Vec<AtomId> = g.outputs.clone();
+        let output_ids = g.outputs.clone();
         let phases = plan(&g, 4, &input_tensors, &output_ids);
 
         // Should be a single phase (no barriers needed for elementwise chain).
@@ -1344,7 +1344,7 @@ mod tests {
         let b = add_unary(&mut g, 1024, a, ScalarUnaryOp::Exp);
         let c = add_unary(&mut g, 1024, a, ScalarUnaryOp::Tanh);
         let d = add_binary(&mut g, 1024, b, c, ScalarBinOp::Add);
-        g.outputs = vec![d];
+        g.outputs = vec![g.atom_to_range(d)];
 
         let input_tensors = g.input_tensors().to_vec();
         let output_ids = g.outputs.clone();
@@ -1409,7 +1409,7 @@ mod tests {
             vec![],
             vec![InputRef::affine(mul, 128)],
         );
-        g.outputs = vec![reduce];
+        g.outputs = vec![g.atom_to_range(reduce)];
 
         let input_tensors = g.input_tensors().to_vec();
         let output_ids = g.outputs.clone();
@@ -1470,7 +1470,7 @@ mod tests {
             vec![],
             vec![InputRef::affine(input, 1), InputRef::modular(lit, 1, 100)],
         );
-        g.outputs = vec![add];
+        g.outputs = vec![g.atom_to_range(add)];
 
         let input_tensors = g.input_tensors().to_vec();
         let output_ids = g.outputs.clone();
@@ -1538,7 +1538,7 @@ mod tests {
             vec![],
             vec![InputRef::affine(input, 1), InputRef::Broadcast(reduce)],
         );
-        g.outputs = vec![broadcast];
+        g.outputs = vec![g.atom_to_range(broadcast)];
 
         let input_tensors = g.input_tensors().to_vec();
         let output_ids = g.outputs.clone();
@@ -1569,7 +1569,7 @@ mod tests {
         let mut g = NanoGraph::new();
         let input = add_input(&mut g, 1, 1000);
         let neg = add_unary(&mut g, 1000, input, ScalarUnaryOp::Neg);
-        g.outputs = vec![neg];
+        g.outputs = vec![g.atom_to_range(neg)];
 
         let input_tensors = g.input_tensors().to_vec();
         let output_ids = g.outputs.clone();
@@ -1621,7 +1621,7 @@ mod tests {
         let mut g = NanoGraph::new();
         let input = add_input(&mut g, 1, 800);
         let add_id = add_unary(&mut g, 800, input, ScalarUnaryOp::Exp);
-        g.outputs = vec![add_id];
+        g.outputs = vec![g.atom_to_range(add_id)];
 
         let input_tensors = g.input_tensors().to_vec();
         let output_ids = g.outputs.clone();
@@ -1681,7 +1681,7 @@ mod tests {
         let mut g = NanoGraph::new();
         let input = add_input(&mut g, 1, 1);
         let neg = add_unary(&mut g, 1, input, ScalarUnaryOp::Neg);
-        g.outputs = vec![neg];
+        g.outputs = vec![g.atom_to_range(neg)];
 
         let input_tensors = g.input_tensors().to_vec();
         let output_ids = g.outputs.clone();
@@ -1723,7 +1723,7 @@ mod tests {
             vec![],
             vec![InputRef::affine(input, 128)],
         );
-        g.outputs = vec![reduce];
+        g.outputs = vec![g.atom_to_range(reduce)];
 
         let input_tensors = g.input_tensors().to_vec();
         let output_ids = g.outputs.clone();
@@ -1759,7 +1759,7 @@ mod tests {
         let lit = add_literal(&mut g, 512);
         let add = add_binary(&mut g, 512, input, lit, ScalarBinOp::Add);
         let neg = add_unary(&mut g, 512, add, ScalarUnaryOp::Neg);
-        g.outputs = vec![neg];
+        g.outputs = vec![g.atom_to_range(neg)];
 
         let input_tensors = g.input_tensors().to_vec();
         let output_ids = g.outputs.clone();
@@ -1788,7 +1788,7 @@ mod tests {
         let input = add_input(&mut g, 1, 256);
         let a = add_unary(&mut g, 256, input, ScalarUnaryOp::Neg);
         let b = add_unary(&mut g, 256, a, ScalarUnaryOp::Exp);
-        g.outputs = vec![b];
+        g.outputs = vec![g.atom_to_range(b)];
 
         let input_tensors = g.input_tensors().to_vec();
         let output_ids = g.outputs.clone();
@@ -1829,7 +1829,7 @@ mod tests {
         let c = add_unary(&mut g, 2048, b, ScalarUnaryOp::Tanh);
         let d = add_unary(&mut g, 2048, c, ScalarUnaryOp::Sqrt);
         let e = add_unary(&mut g, 2048, d, ScalarUnaryOp::Reciprocal);
-        g.outputs = vec![e];
+        g.outputs = vec![g.atom_to_range(e)];
 
         let input_tensors = g.input_tensors().to_vec();
         let output_ids = g.outputs.clone();

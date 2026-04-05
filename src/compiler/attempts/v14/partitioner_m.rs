@@ -820,7 +820,7 @@ pub fn plan(
     graph: &NanoGraph<'static, crate::pool::SystemPool>,
     num_lanes: usize,
     input_tensors: &[InputTensor],
-    output_atom_ids: &[AtomId],
+    output_atom_ids: &[AtomRange],
 ) -> Vec<Phase> {
     let num_lanes = num_lanes.max(1);
 
@@ -880,7 +880,7 @@ pub fn plan(
     // Step 5: Collect output group indices for determining span outputs.
     let output_group_set: HashSet<usize> = output_atom_ids
         .iter()
-        .filter_map(|id| graph.find_group_idx(*id))
+        .filter_map(|range| graph.find_group_idx(range.base))
         .collect();
 
     // Track which groups are consumed by groups in later phases.
@@ -1658,7 +1658,7 @@ mod tests {
             vec![InputRef::affine(pow, 1), InputRef::affine(sub, 1)],
         );
 
-        g.outputs = vec![add];
+        g.outputs = vec![g.atom_to_range(add)];
 
         let input_tensors = vec![];
         let phases = plan(&g, num_lanes, &input_tensors, &g.outputs.clone());
@@ -1746,7 +1746,7 @@ mod tests {
             vec![InputRef::affine(b, 1), InputRef::affine(c, 1)],
         );
 
-        g.outputs = vec![d];
+        g.outputs = vec![g.atom_to_range(d)];
 
         let phases = plan(&g, num_lanes, &[], &g.outputs.clone());
 
@@ -1858,7 +1858,7 @@ mod tests {
             vec![InputRef::affine(reduce, 1), InputRef::affine(bias, 1)],
         );
 
-        g.outputs = vec![add];
+        g.outputs = vec![g.atom_to_range(add)];
 
         let it = vec![InputTensor {
             tensor_id: GlobalId(0),
@@ -1939,7 +1939,7 @@ mod tests {
             vec![InputRef::affine(lit, 1)],
         );
 
-        g.outputs = vec![neg];
+        g.outputs = vec![g.atom_to_range(neg)];
 
         let phases = plan(&g, num_lanes, &[], &g.outputs.clone());
 
@@ -2024,7 +2024,7 @@ mod tests {
             vec![InputRef::Broadcast(reduced)],
         );
 
-        g.outputs = vec![output];
+        g.outputs = vec![g.atom_to_range(output)];
 
         let phases = plan(&g, num_lanes, &[], &g.outputs.clone());
 
@@ -2087,7 +2087,7 @@ mod tests {
             vec![InputRef::affine(data, k as i64)],
         );
 
-        g.outputs = vec![reduced];
+        g.outputs = vec![g.atom_to_range(reduced)];
 
         let phases = plan(&g, num_lanes, &[], &g.outputs.clone());
 
@@ -2139,7 +2139,7 @@ mod tests {
             vec![InputRef::affine(lit, 1)],
         );
 
-        g.outputs = vec![op];
+        g.outputs = vec![g.atom_to_range(op)];
 
         let phases = plan(&g, num_lanes, &[], &g.outputs.clone());
 
@@ -2209,7 +2209,7 @@ mod tests {
             vec![InputRef::affine(inp, 1)],
         );
 
-        g.outputs = vec![neg];
+        g.outputs = vec![g.atom_to_range(neg)];
 
         let it = vec![InputTensor {
             tensor_id: GlobalId(0),
@@ -2271,7 +2271,7 @@ mod tests {
             vec![],
         );
 
-        g.outputs = vec![lit];
+        g.outputs = vec![g.atom_to_range(lit)];
 
         let phases = plan(&g, 4, &[], &g.outputs.clone());
 
@@ -2324,7 +2324,7 @@ mod tests {
             vec![],
             vec![InputRef::affine(pow, 1), InputRef::affine(sub, 1)],
         );
-        g.outputs = vec![add];
+        g.outputs = vec![g.atom_to_range(add)];
         let phases = plan(&g, 4, &[], &g.outputs.clone());
         verify_plan_full(&phases);
     }
@@ -2382,7 +2382,7 @@ mod tests {
             vec![],
             vec![InputRef::affine(reduce, 1), InputRef::affine(bias, 1)],
         );
-        g.outputs = vec![add];
+        g.outputs = vec![g.atom_to_range(add)];
         let it = vec![InputTensor {
             tensor_id: GlobalId(0),
             base_id: inp,
@@ -2555,7 +2555,7 @@ mod tests {
             ],
         );
 
-        g.outputs = vec![normalized];
+        g.outputs = vec![g.atom_to_range(normalized)];
         let it = vec![InputTensor {
             tensor_id: GlobalId(0),
             base_id: x,
@@ -2626,7 +2626,7 @@ mod tests {
             vec![InputRef::strided_broadcast(source, 1, d)],
         );
 
-        g.outputs = vec![consumer];
+        g.outputs = vec![g.atom_to_range(consumer)];
         let phases = plan(&g, num_lanes, &[], &g.outputs.clone());
         verify_plan_full(&phases);
     }
@@ -2664,7 +2664,7 @@ mod tests {
             vec![InputRef::strided_broadcast(source, 1, d)],
         );
 
-        g.outputs = vec![consumer];
+        g.outputs = vec![g.atom_to_range(consumer)];
         let phases = plan(&g, num_lanes, &[], &g.outputs.clone());
         verify_plan_full(&phases);
     }
@@ -2758,7 +2758,7 @@ mod tests {
             vec![InputRef::affine(mul2, m as i64)],
         );
 
-        g.outputs = vec![red2];
+        g.outputs = vec![g.atom_to_range(red2)];
         let it = vec![InputTensor {
             tensor_id: GlobalId(0),
             base_id: inp,
@@ -2820,7 +2820,7 @@ mod tests {
             vec![InputRef::Broadcast(reduced)],
         );
 
-        g.outputs = vec![output];
+        g.outputs = vec![g.atom_to_range(output)];
         let phases = plan(&g, num_lanes, &[], &g.outputs.clone());
         verify_plan_full(&phases);
 
@@ -2879,7 +2879,7 @@ mod tests {
             vec![InputRef::strided_broadcast(source, 1, 10)],
         );
 
-        g.outputs = vec![consumer];
+        g.outputs = vec![g.atom_to_range(consumer)];
         let phases = plan(&g, num_lanes, &[], &g.outputs.clone());
 
         // This MUST have no cross-lane violations.
@@ -2923,7 +2923,7 @@ mod tests {
             vec![InputRef::affine(neg, 1)],
         );
 
-        g.outputs = vec![exp];
+        g.outputs = vec![g.atom_to_range(exp)];
         let phases = plan(&g, num_lanes, &[], &g.outputs.clone());
         verify_plan_full(&phases);
     }
@@ -2969,7 +2969,7 @@ mod tests {
             vec![InputRef::affine(mul, k as i64)],
         );
 
-        g.outputs = vec![reduce];
+        g.outputs = vec![g.atom_to_range(reduce)];
         let it = vec![InputTensor {
             tensor_id: GlobalId(0),
             base_id: inp,
@@ -3033,7 +3033,7 @@ mod tests {
             vec![InputRef::strided_broadcast(src2, 1, d2)],
         );
 
-        g.outputs = vec![expanded1, expanded2];
+        g.outputs = vec![g.atom_to_range(expanded1), g.atom_to_range(expanded2)];
         let phases = plan(&g, num_lanes, &[], &g.outputs.clone());
         verify_plan_full(&phases);
     }
@@ -3089,7 +3089,7 @@ mod tests {
             vec![InputRef::affine(reversed, 1)],
         );
 
-        g.outputs = vec![output];
+        g.outputs = vec![g.atom_to_range(output)];
         let phases = plan(&g, num_lanes, &[], &g.outputs.clone());
         verify_plan_full(&phases);
     }
