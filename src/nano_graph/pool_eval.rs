@@ -1,6 +1,6 @@
 //! Pool-based evaluator for NanoGraph using the new numeric types.
 //!
-//! Each AtomGroup is backed by a 1D [`NumericTensor`] allocated from the pool.
+//! Each AtomGroup is backed by a [`NumericTensor`] allocated from the pool.
 //! Elements are stored at their native dtype width (e.g. 2 bytes per BF16 atom
 //! instead of 24 bytes per `NumericScalar` enum variant).
 //!
@@ -13,7 +13,7 @@ use crate::numeric_dtype::NumericDType;
 use crate::numeric_scalar::NumericScalar;
 use crate::numeric_tensor::{NumericTensor, NumericTensorView, TensorLayout};
 use crate::pool::{AllocationError, Pool};
-use crate::tensor_rank::{DynRank, P1};
+use crate::tensor_rank::DynRank;
 
 use super::ops::{ReduceKind, ScalarBinOp, ScalarOp, ScalarUnaryOp};
 use super::pattern::{AtomId, AtomRange, NanoGraph};
@@ -25,11 +25,16 @@ use super::pattern::{AtomId, AtomRange, NanoGraph};
 /// Evaluate a NanoGraph using pool-managed buffers.
 ///
 /// Inputs are `NumericTensorView`s (pool-type-erased). Each output range
-/// produces a `NumericTensor` allocated from `pool`.
+/// produces a `NumericTensor` allocated from `pool`, reshaped to the
+/// provided `TensorLayout`.
+///
+/// Output tensors are pre-allocated and installed as group stores before
+/// evaluation, so the scalar eval loop writes directly into the final
+/// output buffers — no post-eval copy step.
 pub fn pool_eval<'p, P: Pool + 'p>(
     graph: &NanoGraph,
     inputs: &[(AtomId, &NumericTensorView<'_, DynRank>)],
-    output_ranges: &[AtomRange],
+    output_ranges: &[(AtomRange, TensorLayout<DynRank>)],
     pool: &'p P,
 ) -> Result<Vec<NumericTensor<'p, DynRank, P>>, PoolEvalError> {
     let groups = graph.groups();
@@ -42,7 +47,7 @@ pub fn pool_eval<'p, P: Pool + 'p>(
         .map(|it| {
             // Start with an empty owned buffer; will be replaced by a view
             // if a matching input is provided.
-            let layout = TensorLayout::<P1>::row_major([it.count], it.dtype);
+            let layout = TensorLayout::<DynRank>::row_major(vec![it.count], it.dtype);
             let buf = pool
                 .allocate(layout.buffer_size_bytes())
                 .expect("pool alloc for input buffer");
@@ -88,7 +93,7 @@ pub fn pool_eval<'p, P: Pool + 'p>(
     }
 
     // Mark output groups with extra refcount so they survive.
-    for range in output_ranges {
+    for (range, _layout) in output_ranges {
         let base = range.base.0;
         let end = base + range.count;
         let mut id = base;
@@ -103,8 +108,34 @@ pub fn pool_eval<'p, P: Pool + 'p>(
         }
     }
 
-    // --- Step 3: Evaluate groups in topological order ---
+    // --- Step 2b: Pre-allocate output group stores ---
+    //
+    // For each output range that maps 1:1 to a single group, pre-allocate
+    // the output tensor (as 1D with count atoms) and install it as the
+    // group's store. The eval loop will write directly into it.
+    // Track which group index maps to which output index.
     let mut group_stores: Vec<Option<AtomStore<'_, 'p, P>>> = (0..n).map(|_| None).collect();
+    let mut output_group_map: Vec<Option<usize>> = vec![None; n]; // gi -> output_idx
+
+    for (out_idx, (range, _layout)) in output_ranges.iter().enumerate() {
+        if let Some(gi) = graph.find_group_idx(range.base) {
+            let g = &groups[gi];
+            if g.base_id == range.base && g.count == range.count {
+                // This output range maps exactly to one group.
+                // Pre-allocate the 1D buffer for it.
+                let alloc_layout =
+                    TensorLayout::<DynRank>::row_major(vec![g.count], g.output_dtype);
+                let buffer = pool
+                    .allocate(alloc_layout.buffer_size_bytes())
+                    .map_err(PoolEvalError::Allocation)?;
+                let tensor = NumericTensor::from_parts(buffer, alloc_layout);
+                group_stores[gi] = Some(AtomStore::Owned(tensor));
+                output_group_map[gi] = Some(out_idx);
+            }
+        }
+    }
+
+    // --- Step 3: Evaluate groups in topological order ---
 
     // Cache for opaque op results. Key: opaque_idx, Value: output tensors.
     let mut opaque_cache: HashMap<usize, Vec<NumericTensor<'p, DynRank, P>>> = HashMap::new();
@@ -167,25 +198,25 @@ pub fn pool_eval<'p, P: Pool + 'p>(
             let cached = &opaque_cache[opaque_idx];
             let result_tensor = &cached[*output_idx];
 
-            // Copy result into the group store.
+            // Copy result into the group store (or pre-allocated output store).
             let count = group.count as usize;
             let output_dtype = group.output_dtype;
-            let layout = TensorLayout::<P1>::row_major([count as u64], output_dtype);
-            let buffer = pool
-                .allocate(layout.buffer_size_bytes())
-                .map_err(PoolEvalError::Allocation)?;
-            let mut tensor = NumericTensor::from_parts(buffer, layout);
+            let store = group_stores[gi].get_or_insert_with(|| {
+                let layout = TensorLayout::<DynRank>::row_major(vec![count as u64], output_dtype);
+                let buffer = pool
+                    .allocate(layout.buffer_size_bytes())
+                    .expect("pool alloc for opaque group");
+                AtomStore::Owned(NumericTensor::from_parts(buffer, layout))
+            });
             for i in 0..count {
                 let scalar = result_tensor.read_element(i);
-                tensor.write_element(i, scalar);
+                store.write_element(i, scalar);
             }
-
-            group_stores[gi] = Some(AtomStore::Owned(tensor));
 
             // Free spent producers.
             for &pi in &producers[gi] {
                 remaining[pi] -= 1;
-                if remaining[pi] == 0 {
+                if remaining[pi] == 0 && output_group_map[pi].is_none() {
                     group_stores[pi] = None;
                 }
             }
@@ -195,13 +226,14 @@ pub fn pool_eval<'p, P: Pool + 'p>(
         // --- LiteralSpan: borrow the tensor directly (zero-copy) ---
         if let ScalarOp::LiteralSpan(ref tensor) = group.op
             && let Some(flat) = tensor.view().flatten()
+            && output_group_map[gi].is_none()
         {
             group_stores[gi] = Some(AtomStore::View(flat));
 
             // Free spent producers.
             for &pi in &producers[gi] {
                 remaining[pi] -= 1;
-                if remaining[pi] == 0 {
+                if remaining[pi] == 0 && output_group_map[pi].is_none() {
                     group_stores[pi] = None;
                 }
             }
@@ -210,164 +242,224 @@ pub fn pool_eval<'p, P: Pool + 'p>(
 
         let count = group.count as usize;
         let output_dtype = group.output_dtype;
-        let buf_size = output_dtype.bytes_per_element() * count;
-        let layout = TensorLayout::<P1>::row_major([count as u64], output_dtype);
 
-        // Allocate group buffer from the pool.
-        let buffer = pool.allocate(buf_size).map_err(PoolEvalError::Allocation)?;
-        let mut tensor: NumericTensor<'p, P1, P> = NumericTensor::from_parts(buffer, layout);
+        // Take the store out so we can mutate it while reading other stores.
+        // Pre-allocated output stores are taken; other groups allocate fresh.
+        let mut store = group_stores[gi].take().unwrap_or_else(|| {
+            let layout = TensorLayout::<DynRank>::row_major(vec![count as u64], output_dtype);
+            let buffer = pool
+                .allocate(layout.buffer_size_bytes())
+                .expect("pool alloc for group");
+            AtomStore::Owned(NumericTensor::from_parts(buffer, layout))
+        });
 
-        for i in 0..group.count {
-            let ri = i + group.atom_offset;
+        // For LiteralSpan that IS an output (couldn't take the zero-copy path above),
+        // copy element-by-element into the store.
+        if let ScalarOp::LiteralSpan(ref span_tensor) = group.op {
+            for i in 0..count {
+                store.write_element(i, span_tensor.read_element(i));
+            }
 
-            if let ScalarOp::Reduce {
-                kind,
-                reduce_count,
-                reduce_stride,
-                compute_dtype,
-            } = &group.op
-            {
-                let mut acc_raw = match kind {
-                    ReduceKind::Sum => compute_dtype.encode_from_f64(0.0),
-                    ReduceKind::Max => compute_dtype.encode_from_f64(f64::NEG_INFINITY),
-                    ReduceKind::Min => compute_dtype.encode_from_f64(f64::INFINITY),
-                    ReduceKind::Prod => compute_dtype.encode_from_f64(1.0),
-                };
-
-                let base_atom = group.inputs[0].resolve(ri);
-                for k in 0..*reduce_count {
-                    let src_id = AtomId((base_atom.0 as i64 + k as i64 * reduce_stride) as u64);
-                    let val = lookup_atom_raw(src_id, graph, &group_stores, &input_stores);
-                    let val_dtype = lookup_atom_dtype(src_id, graph, &group_stores, &input_stores);
-                    let cast_raw = val_dtype.cast_raw(val, *compute_dtype);
-
-                    let binop = match kind {
-                        ReduceKind::Sum => ScalarBinOp::Add,
-                        ReduceKind::Max => ScalarBinOp::Max,
-                        ReduceKind::Min => ScalarBinOp::Min,
-                        ReduceKind::Prod => ScalarBinOp::Mul,
-                    };
-                    acc_raw = eval_binop(&binop, acc_raw, cast_raw, *compute_dtype);
+            group_stores[gi] = Some(store);
+            for &pi in &producers[gi] {
+                remaining[pi] -= 1;
+                if remaining[pi] == 0 && output_group_map[pi].is_none() {
+                    group_stores[pi] = None;
                 }
-                let result = compute_dtype.cast_raw(acc_raw, output_dtype);
-                write_atom(&mut tensor, i as usize, result, output_dtype);
-            } else {
-                let result_raw = match &group.op {
-                    ScalarOp::Literal(scalar) => {
-                        let raw = scalar.view().read_raw();
-                        scalar.dtype().cast_raw(raw, output_dtype)
-                    }
-                    ScalarOp::Identity => {
-                        let src = group.inputs[0].resolve(ri);
-                        let val = lookup_atom_raw(src, graph, &group_stores, &input_stores);
-                        let val_dtype = lookup_atom_dtype(src, graph, &group_stores, &input_stores);
-                        val_dtype.cast_raw(val, output_dtype)
-                    }
-                    ScalarOp::Cast { saturating } => {
-                        let src = group.inputs[0].resolve(ri);
-                        let val = lookup_atom_raw(src, graph, &group_stores, &input_stores);
-                        let val_dtype = lookup_atom_dtype(src, graph, &group_stores, &input_stores);
-                        let raw = val_dtype.cast_raw(val, output_dtype);
-                        if *saturating {
-                            output_dtype.saturate_inf(raw)
-                        } else {
-                            raw
-                        }
-                    }
-                    ScalarOp::Binary { op, compute_dtype } => {
-                        let a_src = group.inputs[0].resolve(ri);
-                        let b_src = group.inputs[1].resolve(ri);
-                        let a_raw = lookup_atom_raw(a_src, graph, &group_stores, &input_stores);
-                        let b_raw = lookup_atom_raw(b_src, graph, &group_stores, &input_stores);
-                        let a_dtype = lookup_atom_dtype(a_src, graph, &group_stores, &input_stores);
-                        let b_dtype = lookup_atom_dtype(b_src, graph, &group_stores, &input_stores);
-                        let a_cast = a_dtype.cast_raw(a_raw, *compute_dtype);
-                        let b_cast = b_dtype.cast_raw(b_raw, *compute_dtype);
-                        let result = eval_binop(op, a_cast, b_cast, *compute_dtype);
-                        compute_dtype.cast_raw(result, output_dtype)
-                    }
-                    ScalarOp::Unary { op, compute_dtype } => {
-                        let src = group.inputs[0].resolve(ri);
-                        let val = lookup_atom_raw(src, graph, &group_stores, &input_stores);
-                        let val_dtype = lookup_atom_dtype(src, graph, &group_stores, &input_stores);
-                        let x = val_dtype.cast_raw(val, *compute_dtype);
-                        let result = eval_unaryop(op, x, *compute_dtype);
-                        compute_dtype.cast_raw(result, output_dtype)
-                    }
-                    ScalarOp::Select => {
-                        let cond_src = group.inputs[0].resolve(ri);
-                        let cond_scalar =
-                            lookup_atom_scalar(cond_src, graph, &group_stores, &input_stores);
-                        let cond_raw = cond_scalar.view().read_raw();
-                        let is_true = cond_scalar.dtype().decode_to_f64(cond_raw) != 0.0;
-                        let chosen_src = if is_true {
-                            group.inputs[1].resolve(ri)
-                        } else {
-                            group.inputs[2].resolve(ri)
+            }
+            continue;
+        }
+
+        {
+            for i in 0..group.count {
+                let ri = i + group.atom_offset;
+
+                if let ScalarOp::Reduce {
+                    kind,
+                    reduce_count,
+                    reduce_stride,
+                    compute_dtype,
+                } = &group.op
+                {
+                    let mut acc_raw = match kind {
+                        ReduceKind::Sum => compute_dtype.encode_from_f64(0.0),
+                        ReduceKind::Max => compute_dtype.encode_from_f64(f64::NEG_INFINITY),
+                        ReduceKind::Min => compute_dtype.encode_from_f64(f64::INFINITY),
+                        ReduceKind::Prod => compute_dtype.encode_from_f64(1.0),
+                    };
+
+                    let base_atom = group.inputs[0].resolve(ri);
+                    for k in 0..*reduce_count {
+                        let src_id = AtomId((base_atom.0 as i64 + k as i64 * reduce_stride) as u64);
+                        let val = lookup_atom_raw(src_id, graph, &group_stores, &input_stores);
+                        let val_dtype =
+                            lookup_atom_dtype(src_id, graph, &group_stores, &input_stores);
+                        let cast_raw = val_dtype.cast_raw(val, *compute_dtype);
+
+                        let binop = match kind {
+                            ReduceKind::Sum => ScalarBinOp::Add,
+                            ReduceKind::Max => ScalarBinOp::Max,
+                            ReduceKind::Min => ScalarBinOp::Min,
+                            ReduceKind::Prod => ScalarBinOp::Mul,
                         };
-                        let val = lookup_atom_raw(chosen_src, graph, &group_stores, &input_stores);
-                        let val_dtype =
-                            lookup_atom_dtype(chosen_src, graph, &group_stores, &input_stores);
-                        val_dtype.cast_raw(val, output_dtype)
+                        acc_raw = eval_binop(&binop, acc_raw, cast_raw, *compute_dtype);
                     }
-                    ScalarOp::IndirectLoad { table_base } => {
-                        let idx_src = group.inputs[0].resolve(ri);
-                        let idx_scalar =
-                            lookup_atom_scalar(idx_src, graph, &group_stores, &input_stores);
-                        let index = idx_scalar
-                            .dtype()
-                            .decode_to_f64(idx_scalar.view().read_raw())
-                            as u64;
-                        let table_atom = AtomId(table_base.0 + index);
-                        let val = lookup_atom_raw(table_atom, graph, &group_stores, &input_stores);
-                        let val_dtype =
-                            lookup_atom_dtype(table_atom, graph, &group_stores, &input_stores);
-                        val_dtype.cast_raw(val, output_dtype)
-                    }
-                    ScalarOp::LiteralSpan(tensor) => {
-                        // Fallback for non-flattenable LiteralSpan (e.g. sliced).
-                        let scalar = tensor.read_element(i as usize);
-                        let raw = scalar.view().read_raw();
-                        scalar.dtype().cast_raw(raw, output_dtype)
-                    }
-                    ScalarOp::Reduce { .. } | ScalarOp::OpaqueOutput { .. } => unreachable!(),
-                };
-                write_atom(&mut tensor, i as usize, result_raw, output_dtype);
+                    let result = compute_dtype.cast_raw(acc_raw, output_dtype);
+                    write_atom(&mut store, i as usize, result, output_dtype);
+                } else {
+                    let result_raw = match &group.op {
+                        ScalarOp::Literal(scalar) => {
+                            let raw = scalar.view().read_raw();
+                            scalar.dtype().cast_raw(raw, output_dtype)
+                        }
+                        ScalarOp::Identity => {
+                            let src = group.inputs[0].resolve(ri);
+                            let val = lookup_atom_raw(src, graph, &group_stores, &input_stores);
+                            let val_dtype =
+                                lookup_atom_dtype(src, graph, &group_stores, &input_stores);
+                            val_dtype.cast_raw(val, output_dtype)
+                        }
+                        ScalarOp::Cast { saturating } => {
+                            let src = group.inputs[0].resolve(ri);
+                            let val = lookup_atom_raw(src, graph, &group_stores, &input_stores);
+                            let val_dtype =
+                                lookup_atom_dtype(src, graph, &group_stores, &input_stores);
+                            let raw = val_dtype.cast_raw(val, output_dtype);
+                            if *saturating {
+                                output_dtype.saturate_inf(raw)
+                            } else {
+                                raw
+                            }
+                        }
+                        ScalarOp::Binary { op, compute_dtype } => {
+                            let a_src = group.inputs[0].resolve(ri);
+                            let b_src = group.inputs[1].resolve(ri);
+                            let a_raw = lookup_atom_raw(a_src, graph, &group_stores, &input_stores);
+                            let b_raw = lookup_atom_raw(b_src, graph, &group_stores, &input_stores);
+                            let a_dtype =
+                                lookup_atom_dtype(a_src, graph, &group_stores, &input_stores);
+                            let b_dtype =
+                                lookup_atom_dtype(b_src, graph, &group_stores, &input_stores);
+                            let a_cast = a_dtype.cast_raw(a_raw, *compute_dtype);
+                            let b_cast = b_dtype.cast_raw(b_raw, *compute_dtype);
+                            let result = eval_binop(op, a_cast, b_cast, *compute_dtype);
+                            compute_dtype.cast_raw(result, output_dtype)
+                        }
+                        ScalarOp::Unary { op, compute_dtype } => {
+                            let src = group.inputs[0].resolve(ri);
+                            let val = lookup_atom_raw(src, graph, &group_stores, &input_stores);
+                            let val_dtype =
+                                lookup_atom_dtype(src, graph, &group_stores, &input_stores);
+                            let x = val_dtype.cast_raw(val, *compute_dtype);
+                            let result = eval_unaryop(op, x, *compute_dtype);
+                            compute_dtype.cast_raw(result, output_dtype)
+                        }
+                        ScalarOp::Select => {
+                            let cond_src = group.inputs[0].resolve(ri);
+                            let cond_scalar =
+                                lookup_atom_scalar(cond_src, graph, &group_stores, &input_stores);
+                            let cond_raw = cond_scalar.view().read_raw();
+                            let is_true = cond_scalar.dtype().decode_to_f64(cond_raw) != 0.0;
+                            let chosen_src = if is_true {
+                                group.inputs[1].resolve(ri)
+                            } else {
+                                group.inputs[2].resolve(ri)
+                            };
+                            let val =
+                                lookup_atom_raw(chosen_src, graph, &group_stores, &input_stores);
+                            let val_dtype =
+                                lookup_atom_dtype(chosen_src, graph, &group_stores, &input_stores);
+                            val_dtype.cast_raw(val, output_dtype)
+                        }
+                        ScalarOp::IndirectLoad { table_base } => {
+                            let idx_src = group.inputs[0].resolve(ri);
+                            let idx_scalar =
+                                lookup_atom_scalar(idx_src, graph, &group_stores, &input_stores);
+                            let index = idx_scalar
+                                .dtype()
+                                .decode_to_f64(idx_scalar.view().read_raw())
+                                as u64;
+                            let table_atom = AtomId(table_base.0 + index);
+                            let val =
+                                lookup_atom_raw(table_atom, graph, &group_stores, &input_stores);
+                            let val_dtype =
+                                lookup_atom_dtype(table_atom, graph, &group_stores, &input_stores);
+                            val_dtype.cast_raw(val, output_dtype)
+                        }
+                        ScalarOp::LiteralSpan(tensor) => {
+                            // Fallback for non-flattenable LiteralSpan.
+                            let scalar = tensor.read_element(i as usize);
+                            let raw = scalar.view().read_raw();
+                            scalar.dtype().cast_raw(raw, output_dtype)
+                        }
+                        ScalarOp::Reduce { .. } | ScalarOp::OpaqueOutput { .. } => unreachable!(),
+                    };
+                    write_atom(&mut store, i as usize, result_raw, output_dtype);
+                }
             }
         }
 
-        group_stores[gi] = Some(AtomStore::Owned(tensor));
+        // Put the store back.
+        group_stores[gi] = Some(store);
 
-        // Free spent producer buffers.
+        // Free spent producer buffers (but not output stores).
         for &pi in &producers[gi] {
             remaining[pi] -= 1;
-            if remaining[pi] == 0 {
+            if remaining[pi] == 0 && output_group_map[pi].is_none() {
                 group_stores[pi] = None;
             }
         }
     }
 
-    // --- Step 4: Assemble output tensors ---
-    let mut outputs = Vec::with_capacity(output_ranges.len());
-    for range in output_ranges {
+    // --- Step 4: Extract and reshape output tensors ---
+    //
+    // Output groups were pre-allocated and written into during eval.
+    // Take them out of the group stores and reshape to the caller's layout.
+    // For outputs spanning multiple groups or input atoms, fall back to
+    // element-by-element assembly.
+    let mut outputs: Vec<Option<NumericTensor<'p, DynRank, P>>> =
+        (0..output_ranges.len()).map(|_| None).collect();
+
+    for gi in 0..n {
+        if let Some(out_idx) = output_group_map[gi]
+            && let Some(store) = group_stores[gi].take()
+        {
+            let (_, ref target_layout) = output_ranges[out_idx];
+            let tensor = match store {
+                AtomStore::Owned(t) => t.into_layout(target_layout.clone()),
+                AtomStore::View(v) => {
+                    // Must copy — can't return a borrowed view as an owned tensor.
+                    v.to_tensor(pool)
+                        .map_err(PoolEvalError::Allocation)?
+                        .into_layout(target_layout.clone())
+                }
+            };
+            outputs[out_idx] = Some(tensor);
+        }
+    }
+
+    // Fallback for any outputs not covered by single-group pre-allocation.
+    for (out_idx, (range, target_layout)) in output_ranges.iter().enumerate() {
+        if outputs[out_idx].is_some() {
+            continue;
+        }
         let count = range.count as usize;
         let output_dtype = range.dtype;
-        let layout = TensorLayout::<DynRank>::row_major(vec![count as u64], output_dtype);
+        let alloc_layout = TensorLayout::<DynRank>::row_major(vec![count as u64], output_dtype);
         let buffer = pool
-            .allocate(layout.buffer_size_bytes())
+            .allocate(alloc_layout.buffer_size_bytes())
             .map_err(PoolEvalError::Allocation)?;
-        let mut out_tensor = NumericTensor::from_parts(buffer, layout);
-
+        let mut out_tensor = NumericTensor::from_parts(buffer, alloc_layout);
         for offset in 0..range.count {
             let atom_id = AtomId(range.base.0 + offset);
             let scalar = lookup_atom_scalar(atom_id, graph, &group_stores, &input_stores);
             let cast = scalar.cast_to(output_dtype);
             out_tensor.write_element(offset as usize, cast);
         }
-        outputs.push(out_tensor);
+        outputs[out_idx] = Some(out_tensor.into_layout(target_layout.clone()));
     }
 
-    Ok(outputs)
+    Ok(outputs.into_iter().map(|o| o.unwrap()).collect())
 }
 
 // ---------------------------------------------------------------------------
@@ -386,13 +478,13 @@ pub enum PoolEvalError {
 // Internal data structures
 // ---------------------------------------------------------------------------
 
-/// Unified atom storage — either a borrowed 1D view (zero-copy) or a
-/// pool-allocated 1D tensor (for computed values).
+/// Unified atom storage — either a borrowed view (zero-copy) or a
+/// pool-allocated tensor (for computed values).
 enum AtomStore<'a, 'p, P: Pool + 'p> {
-    /// Borrowed 1D view — zero-copy for input tensors and LiteralSpan groups.
-    View(NumericTensorView<'a, P1>),
-    /// Owned 1D tensor — allocated from pool during group evaluation.
-    Owned(NumericTensor<'p, P1, P>),
+    /// Borrowed view — zero-copy for input tensors and LiteralSpan groups.
+    View(NumericTensorView<'a, DynRank>),
+    /// Owned tensor — allocated from pool during group evaluation.
+    Owned(NumericTensor<'p, DynRank, P>),
 }
 
 impl<'a, 'p, P: Pool + 'p> AtomStore<'a, 'p, P> {
@@ -470,9 +562,9 @@ fn lookup_atom_dtype<P: Pool>(
     panic!("atom {atom_id} not found");
 }
 
-/// Write a raw u64 value to a 1D tensor at a flat index.
+/// Write a raw u64 value to a tensor at a flat index.
 fn write_atom<P: Pool>(
-    tensor: &mut NumericTensor<'_, P1, P>,
+    store: &mut AtomStore<'_, '_, P>,
     index: usize,
     raw: u64,
     dtype: NumericDType,
@@ -480,7 +572,7 @@ fn write_atom<P: Pool>(
     let mut bits = [0u8; 8];
     let nbytes = dtype.bytes_per_element();
     bits[..nbytes].copy_from_slice(&raw.to_le_bytes()[..nbytes]);
-    tensor.write_element(index, NumericScalar { bits, dtype });
+    store.write_element(index, NumericScalar { bits, dtype });
 }
 
 // ---------------------------------------------------------------------------
@@ -501,7 +593,6 @@ fn bitwise_op_int(
     };
     f(a & mask, b & mask) & mask
 }
-
 fn eval_binop(op: &ScalarBinOp, a: u64, b: u64, dtype: NumericDType) -> u64 {
     match dtype {
         NumericDType::Float(ft) => match op {

@@ -566,7 +566,7 @@ impl<'a, R: Rank> NumericTensorView<'a, R> {
     /// Returns `None` for non-contiguous ElementStrided layouts (e.g. after
     /// slicing) since the flat index mapping would be incorrect.
     /// Quantized layouts are always contiguous and always succeed.
-    pub fn flatten(&self) -> Option<NumericTensorView<'a, crate::tensor_rank::P1>> {
+    pub fn flatten(&self) -> Option<NumericTensorView<'a, crate::tensor_rank::DynRank>> {
         let numel = self.numel() as u64;
         let layout = match &self.layout {
             TensorLayout::ElementStrided {
@@ -575,19 +575,19 @@ impl<'a, R: Rank> NumericTensorView<'a, R> {
                 if !self.layout.is_contiguous() || *offset_bits != 0 {
                     return None;
                 }
-                TensorLayout::row_major([numel], *dtype)
+                TensorLayout::row_major(vec![numel], *dtype)
             }
             TensorLayout::SimpleBlockQuant {
                 weight_bits,
                 has_min,
                 ..
             } => TensorLayout::SimpleBlockQuant {
-                shape: [numel],
+                shape: vec![numel],
                 weight_bits: *weight_bits,
                 has_min: *has_min,
             },
             TensorLayout::KQuant { variant, .. } => TensorLayout::KQuant {
-                shape: [numel],
+                shape: vec![numel],
                 variant: *variant,
             },
         };
@@ -860,6 +860,24 @@ impl<'a, R: Rank, P: Pool + 'a> NumericTensor<'a, R, P> {
     pub fn write_element(&mut self, flat_index: usize, value: NumericScalar) {
         self.layout
             .write_element(&mut self.buffer, flat_index, value);
+    }
+
+    /// Reinterpret this tensor with a new layout of a different rank.
+    ///
+    /// The new layout must describe the same buffer size. This is a free
+    /// operation — no data is copied, only the layout metadata changes.
+    pub fn into_layout<R2: Rank>(self, layout: TensorLayout<R2>) -> NumericTensor<'a, R2, P> {
+        debug_assert_eq!(
+            self.layout.buffer_size_bytes(),
+            layout.buffer_size_bytes(),
+            "into_layout: buffer size mismatch ({} vs {})",
+            self.layout.buffer_size_bytes(),
+            layout.buffer_size_bytes(),
+        );
+        NumericTensor {
+            buffer: self.buffer,
+            layout,
+        }
     }
 
     /// Zero-copy slice: returns a view into a sub-region of this tensor.

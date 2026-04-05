@@ -295,7 +295,7 @@ pub fn build_test_set() -> Vec<TestCase> {
 /// Flow: MilliOpGraph → lower_to_nano → pool_eval → compare
 pub fn run_case_via_pool_eval(case: &TestCase) -> Result<(), String> {
     use crate::nano_graph::lower;
-    use crate::nano_graph::pattern::AtomRange;
+
     use crate::nano_graph::pool_eval;
     use crate::pool::TrackedPool;
     use crate::tensor_info::TensorInfo;
@@ -350,22 +350,15 @@ pub fn run_case_via_pool_eval(case: &TestCase) -> Result<(), String> {
         // Build output AtomRanges from the graph's output ids.
         let output_ids: Vec<GlobalId> = case.graph.output_ordering.clone().unwrap_or_default();
 
-        let mut output_ranges: Vec<AtomRange> = Vec::new();
+        let mut output_ranges = Vec::new();
         for &out_id in &output_ids {
             if let Some(tam) = lower_result.tensor_map.get(&out_id) {
-                let mut seen = std::collections::HashSet::new();
-                for i in 0..tam.count {
-                    let atom = tam.atom_id_for_element(i);
-                    if let Some(gi) = lower_result.graph.find_group_idx(atom)
-                        && seen.insert(gi)
-                    {
-                        let g = &lower_result.graph.groups()[gi];
-                        output_ranges.push(AtomRange {
-                            base: g.base_id,
-                            count: g.count,
-                            dtype: g.output_dtype,
-                        });
-                    }
+                for range in tam.atom_ranges(&lower_result.graph) {
+                    let layout = crate::numeric_tensor::TensorLayout::<crate::tensor_rank::DynRank>::row_major(
+                        vec![range.count],
+                        range.dtype,
+                    );
+                    output_ranges.push((range, layout));
                 }
             }
         }
@@ -398,7 +391,7 @@ pub fn run_case_via_pool_eval(case: &TestCase) -> Result<(), String> {
                 let (rt_idx, offset) = output_ranges
                     .iter()
                     .enumerate()
-                    .find_map(|(idx, range)| {
+                    .find_map(|(idx, (range, _))| {
                         let range_end = range.base.0 + range.count;
                         if atom.0 >= range.base.0 && atom.0 < range_end {
                             Some((idx, (atom.0 - range.base.0) as usize))

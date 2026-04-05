@@ -285,91 +285,90 @@ pub fn constant_fold<'p, P: Pool + 'p>(
         }
     }
 
-    // 4. Build output AtomRanges.
+    // 4. Build output ranges with target layouts.
     let t_s4 = std::time::Instant::now();
-    let mut output_ranges: Vec<AtomRange> = Vec::new();
+    let mut output_ranges: Vec<(AtomRange, crate::numeric_tensor::TensorLayout<DynRank>)> =
+        Vec::new();
+    // Map each output_id to its range indices in output_ranges.
+    let mut output_id_range_map: Vec<(GlobalId, Vec<usize>)> = Vec::new();
     for &out_id in &output_ids {
         let tam = ctx.tensor_map.get(&out_id)?;
-        let mut seen = std::collections::HashSet::new();
-        for i in 0..tam.count {
-            let atom = tam.atom_id_for_element(i);
-            if let Some(gi) = ctx.nano.find_group_idx(atom)
-                && seen.insert(gi)
-            {
-                let g = &ctx.nano.groups()[gi];
-                output_ranges.push(AtomRange {
-                    base: g.base_id,
-                    count: g.count,
-                    dtype: g.output_dtype,
-                });
-            }
-            if let Some((ti, _)) = ctx.nano.find_input_idx(atom) {
-                let it = &ctx.nano.input_tensors()[ti];
-                let fake_gi = usize::MAX - ti;
-                if seen.insert(fake_gi) {
-                    output_ranges.push(AtomRange {
-                        base: it.base_id,
-                        count: it.count,
-                        dtype: it.dtype,
-                    });
-                }
-            }
+        let ranges = tam.atom_ranges(&ctx.nano);
+        let start_idx = output_ranges.len();
+        for range in &ranges {
+            // Each range gets a 1D layout — pool_eval writes atoms as flat index.
+            let layout =
+                crate::numeric_tensor::TensorLayout::row_major(vec![range.count], range.dtype);
+            output_ranges.push((range.clone(), layout));
         }
+        let end_idx = output_ranges.len();
+        output_id_range_map.push((out_id, (start_idx..end_idx).collect()));
     }
-
     let dt_s4 = t_s4.elapsed();
 
-    // Sort ranges by base for binary search in step 6.
-    output_ranges.sort_by_key(|r| r.base.0);
-
-    // 5. Run pool_eval (no external inputs — all data in Literal groups).
+    // 5. Run pool_eval — writes directly into pre-allocated output buffers.
     let t_s5 = std::time::Instant::now();
     let eval_results = pool_eval::pool_eval(&ctx.nano, &[], &output_ranges, pool).ok()?;
     let dt_s5 = t_s5.elapsed();
 
-    // 6. Build result TensorInfos.
+    // 6. Build result TensorInfos from eval results.
     //
-    // Output atoms may span multiple eval result ranges. Use binary search
-    // to find which range contains a given atom ID (O(log n) per lookup).
-    let find_range = |atom: crate::nano_graph::pattern::AtomId| -> Option<(usize, usize)> {
-        let pos = output_ranges.partition_point(|r| r.base.0 + r.count <= atom.0);
-        if pos < output_ranges.len() {
-            let range = &output_ranges[pos];
-            if atom.0 >= range.base.0 && atom.0 < range.base.0 + range.count {
-                return Some((pos, (atom.0 - range.base.0) as usize));
-            }
-        }
-        // Check previous range in case of overlap at boundary.
-        if pos > 0 {
-            let range = &output_ranges[pos - 1];
-            if atom.0 >= range.base.0 && atom.0 < range.base.0 + range.count {
-                return Some((pos - 1, (atom.0 - range.base.0) as usize));
-            }
-        }
-        None
-    };
-
+    // For single contiguous outputs, reshape the eval result directly (no copy).
+    // For multi-range or non-contiguous outputs, assemble element-by-element.
     let t_s6 = std::time::Instant::now();
     let mut results = Vec::new();
-    for &out_id in &output_ids {
-        let tam = ctx.tensor_map.get(&out_id)?;
+    // Convert to Option so we can take individual results by index.
+    let mut eval_results: Vec<Option<_>> = eval_results.into_iter().map(Some).collect();
+    for (out_id, range_indices) in &output_id_range_map {
+        let tam = ctx.tensor_map.get(out_id)?;
         let shape = tam.known_dims();
 
-        // Determine dtype from the first atom's result.
-        let first_atom = tam.atom_id_for_element(0);
-        let (first_ri, _) = find_range(first_atom)?;
-        let dtype = eval_results[first_ri].dtype();
+        if range_indices.len() == 1 && tam.is_contiguous() {
+            // Single contiguous range — take the eval result and reshape.
+            let ri = range_indices[0];
+            let tensor = eval_results[ri].take()?;
+            let dtype = tensor.dtype();
+            let target_layout = crate::numeric_tensor::TensorLayout::row_major(shape, dtype);
+            results.push((*out_id, TensorInfo::from(tensor.into_layout(target_layout))));
+        } else {
+            // Multi-range or non-contiguous: element-by-element assembly.
+            // Sort ranges for binary search.
+            let mut sorted_ranges: Vec<(usize, &AtomRange)> = range_indices
+                .iter()
+                .map(|&ri| (ri, &output_ranges[ri].0))
+                .collect();
+            sorted_ranges.sort_by_key(|(_, r)| r.base.0);
 
-        let layout = crate::numeric_tensor::TensorLayout::row_major(shape, dtype);
-        let buf = pool.allocate(layout.buffer_size_bytes()).ok()?;
-        let mut out_tensor = crate::numeric_tensor::NumericTensor::from_parts(buf, layout);
-        let numel = out_tensor.numel();
-        for i in 0..numel {
-            let atom = tam.atom_id_for_element(i as u64);
-            let (ri, offset) = find_range(atom)?;
-            out_tensor.write_element(i, eval_results[ri].read_element(offset));
+            let first_atom = tam.atom_id_for_element(0);
+            let dtype = {
+                let (ri, _) = sorted_ranges.iter().find_map(|(ri, r)| {
+                    if first_atom.0 >= r.base.0 && first_atom.0 < r.base.0 + r.count {
+                        Some((*ri, (first_atom.0 - r.base.0) as usize))
+                    } else {
+                        None
+                    }
+                })?;
+                eval_results[ri].as_ref()?.dtype()
+            };
+
+            let target_layout = crate::numeric_tensor::TensorLayout::row_major(shape, dtype);
+            let buf = pool.allocate(target_layout.buffer_size_bytes()).ok()?;
+            let mut out_tensor =
+                crate::numeric_tensor::NumericTensor::from_parts(buf, target_layout);
+            let numel = out_tensor.numel();
+            for i in 0..numel {
+                let atom = tam.atom_id_for_element(i as u64);
+                let (ri, offset) = sorted_ranges.iter().find_map(|(ri, r)| {
+                    if atom.0 >= r.base.0 && atom.0 < r.base.0 + r.count {
+                        Some((*ri, (atom.0 - r.base.0) as usize))
+                    } else {
+                        None
+                    }
+                })?;
+                out_tensor.write_element(i, eval_results[ri].as_ref()?.read_element(offset));
+            }
+            results.push((*out_id, TensorInfo::from(out_tensor)));
         }
-        results.push((out_id, TensorInfo::from(out_tensor)));
     }
     let dt_s6 = t_s6.elapsed();
 

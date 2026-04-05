@@ -166,6 +166,12 @@ pub struct TensorAtomMapInfo {
 }
 
 impl TensorAtomMapInfo {
+    /// Returns true if this tensor's atoms are contiguous with row-major strides.
+    pub fn is_contiguous(&self) -> bool {
+        self.segments.is_empty()
+            && self.known_strides == TensorAtomMap::compute_strides(&self.known_dims)
+    }
+
     /// Return the atom ranges that compose this tensor.
     ///
     /// For simple contiguous tensors: a single range. For non-contiguous or
@@ -1996,37 +2002,20 @@ mod tests {
 
         // Build output ranges per group (not per tensor_map entry, which may be segmented).
         // Collect all groups that contain output atoms.
-        let mut all_output_ranges: Vec<AtomRange> = Vec::new();
+        let mut all_output_ranges: Vec<(AtomRange, crate::numeric_tensor::TensorLayout<DynRank>)> =
+            Vec::new();
         for out_id in &output_ids {
             let tam = result.tensor_map.get(out_id).unwrap();
             assert!(
                 tam.sym_dims.is_empty(),
                 "Sym dims not yet supported in test"
             );
-            let mut seen_groups = std::collections::HashSet::new();
-            for i in 0..tam.count {
-                let atom = tam.atom_id_for_element(i);
-                if let Some(gi) = result.graph.find_group_idx(atom) {
-                    if seen_groups.insert(gi) {
-                        let g = &result.graph.groups()[gi];
-                        all_output_ranges.push(AtomRange {
-                            base: g.base_id,
-                            count: g.count,
-                            dtype: g.output_dtype,
-                        });
-                    }
-                }
-                if let Some((ti, _)) = result.graph.find_input_idx(atom) {
-                    let it = &result.graph.input_tensors()[ti];
-                    let fake_gi = usize::MAX - ti;
-                    if seen_groups.insert(fake_gi) {
-                        all_output_ranges.push(AtomRange {
-                            base: it.base_id,
-                            count: it.count,
-                            dtype: it.dtype,
-                        });
-                    }
-                }
+            for range in tam.atom_ranges(&result.graph) {
+                let layout = crate::numeric_tensor::TensorLayout::<DynRank>::row_major(
+                    vec![range.count],
+                    range.dtype,
+                );
+                all_output_ranges.push((range, layout));
             }
         }
 
@@ -2037,7 +2026,7 @@ mod tests {
 
         // Build a lookup from AtomId -> f64.
         let mut atom_vals: std::collections::HashMap<u64, f64> = std::collections::HashMap::new();
-        for (range, tensor) in all_output_ranges.iter().zip(nano_results.iter()) {
+        for ((range, _), tensor) in all_output_ranges.iter().zip(nano_results.iter()) {
             for i in 0..range.count {
                 let scalar = tensor.read_element(i as usize);
                 atom_vals.insert(range.base.0 + i, scalar.to_f64());
