@@ -560,6 +560,43 @@ impl<'a, R: Rank> NumericTensorView<'a, R> {
         self.layout.read_element(self.data, flat_index)
     }
 
+    /// Zero-copy flatten to a 1D view. The resulting view has the same data
+    /// and element count, just reinterpreted as a single dimension.
+    ///
+    /// Returns `None` for non-contiguous ElementStrided layouts (e.g. after
+    /// slicing) since the flat index mapping would be incorrect.
+    /// Quantized layouts are always contiguous and always succeed.
+    pub fn flatten(&self) -> Option<NumericTensorView<'a, crate::tensor_rank::P1>> {
+        let numel = self.numel() as u64;
+        let layout = match &self.layout {
+            TensorLayout::ElementStrided {
+                dtype, offset_bits, ..
+            } => {
+                if !self.layout.is_contiguous() || *offset_bits != 0 {
+                    return None;
+                }
+                TensorLayout::row_major([numel], *dtype)
+            }
+            TensorLayout::SimpleBlockQuant {
+                weight_bits,
+                has_min,
+                ..
+            } => TensorLayout::SimpleBlockQuant {
+                shape: [numel],
+                weight_bits: *weight_bits,
+                has_min: *has_min,
+            },
+            TensorLayout::KQuant { variant, .. } => TensorLayout::KQuant {
+                shape: [numel],
+                variant: *variant,
+            },
+        };
+        Some(NumericTensorView {
+            data: self.data,
+            layout,
+        })
+    }
+
     /// Zero-copy slice: returns a view into a sub-region.
     ///
     /// `ranges` has one `(start, end)` pair per dimension (end is exclusive).

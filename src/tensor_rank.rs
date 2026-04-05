@@ -1,7 +1,7 @@
 use crate::scalar_info::ScalarInfoTyped;
 use std::fmt::Debug;
 use std::ops::Index;
-use typenum::{P1, P2};
+pub use typenum::{P1, P2};
 
 #[derive(Debug, thiserror::Error)]
 pub enum RankError {

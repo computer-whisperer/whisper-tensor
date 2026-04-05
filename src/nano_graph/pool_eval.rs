@@ -13,7 +13,7 @@ use crate::numeric_dtype::NumericDType;
 use crate::numeric_scalar::NumericScalar;
 use crate::numeric_tensor::{NumericTensor, NumericTensorView, TensorLayout};
 use crate::pool::{AllocationError, Pool};
-use crate::tensor_rank::DynRank;
+use crate::tensor_rank::{DynRank, P1};
 
 use super::ops::{ReduceKind, ScalarBinOp, ScalarOp, ScalarUnaryOp};
 use super::pattern::{AtomId, AtomRange, NanoGraph};
@@ -36,39 +36,39 @@ pub fn pool_eval<'p, P: Pool + 'p>(
     let n = groups.len();
     let input_tensors = graph.input_tensors();
 
-    // --- Step 1: Populate input buffers as 1D NumericTensors ---
-    let input_buffers: Vec<InputBuffer> = input_tensors
+    // --- Step 1: Populate input stores (zero-copy where possible) ---
+    let mut input_stores: Vec<AtomStore<'_, 'p, P>> = input_tensors
         .iter()
         .map(|it| {
-            let dtype = it.dtype;
-            InputBuffer {
-                _base: it.base_id,
-                _count: it.count,
-                dtype,
-                data: vec![0u8; dtype.bytes_per_element() * it.count as usize],
-            }
+            // Start with an empty owned buffer; will be replaced by a view
+            // if a matching input is provided.
+            let layout = TensorLayout::<P1>::row_major([it.count], it.dtype);
+            let buf = pool
+                .allocate(layout.buffer_size_bytes())
+                .expect("pool alloc for input buffer");
+            AtomStore::Owned(NumericTensor::from_parts(buf, layout))
         })
         .collect();
 
-    // Fill input buffers from the provided tensor views.
-    let mut input_buffers = input_buffers;
     for &(base, view) in inputs {
         if let Some((ti, offset)) = graph.find_input_idx(base) {
-            let buf = &mut input_buffers[ti];
+            let it = &input_tensors[ti];
+            // Fast path: if view covers the full input range at offset 0,
+            // dtypes match, and layout is flattenable, borrow directly (zero-copy).
+            if offset == 0
+                && view.numel() == it.count as usize
+                && view.dtype() == it.dtype
+                && let Some(flat) = view.flatten()
+            {
+                input_stores[ti] = AtomStore::View(flat);
+                continue;
+            }
+            // Slow path: element-by-element copy with potential dtype cast.
+            let store = &mut input_stores[ti];
             for i in 0..view.numel() {
                 let scalar = view.read_element(i);
-                let cast = scalar.cast_to(buf.dtype);
-                let bit_offset = (offset as usize + i) * buf.dtype.total_bits() as usize;
-                crate::numeric_scalar::conversions::write_raw_bits(
-                    &mut buf.data,
-                    bit_offset,
-                    buf.dtype.total_bits(),
-                    crate::numeric_scalar::conversions::read_raw_bits(
-                        cast.raw_bits(),
-                        0,
-                        buf.dtype.total_bits(),
-                    ),
-                );
+                let cast = scalar.cast_to(it.dtype);
+                store.write_element(offset as usize + i, cast);
             }
         }
     }
@@ -104,7 +104,7 @@ pub fn pool_eval<'p, P: Pool + 'p>(
     }
 
     // --- Step 3: Evaluate groups in topological order ---
-    let mut group_buffers: Vec<Option<GroupBuffer<'p, P>>> = (0..n).map(|_| None).collect();
+    let mut group_stores: Vec<Option<AtomStore<'_, 'p, P>>> = (0..n).map(|_| None).collect();
 
     // Cache for opaque op results. Key: opaque_idx, Value: output tensors.
     let mut opaque_cache: HashMap<usize, Vec<NumericTensor<'p, DynRank, P>>> = HashMap::new();
@@ -125,7 +125,7 @@ pub fn pool_eval<'p, P: Pool + 'p>(
                 let opaque_op = &graph.opaque_ops()[*opaque_idx];
 
                 // Assemble input tensors from atom buffers.
-                let mut input_tensors = Vec::with_capacity(opaque_op.inputs.len());
+                let mut op_input_tensors = Vec::with_capacity(opaque_op.inputs.len());
                 for inp in &opaque_op.inputs {
                     let inp_layout =
                         TensorLayout::<DynRank>::row_major(inp.shape.clone(), inp.dtype);
@@ -136,19 +136,14 @@ pub fn pool_eval<'p, P: Pool + 'p>(
                         NumericTensor::from_parts(inp_buf, inp_layout);
                     for elem in 0..inp.count as usize {
                         let atom_id = AtomId(inp.base.0 + elem as u64);
-                        let val = lookup_atom_raw(atom_id, graph, &group_buffers, &input_buffers);
-                        let val_dtype =
-                            lookup_atom_dtype(atom_id, graph, &group_buffers, &input_buffers);
-                        let scalar = NumericScalar {
-                            bits: val.to_le_bytes(),
-                            dtype: val_dtype,
-                        };
+                        let scalar =
+                            lookup_atom_scalar(atom_id, graph, &group_stores, &input_stores);
                         inp_tensor.write_element(elem, scalar.cast_to(inp.dtype));
                     }
-                    input_tensors.push(inp_tensor);
+                    op_input_tensors.push(inp_tensor);
                 }
 
-                let input_views: Vec<_> = input_tensors.iter().map(|t| t.view()).collect();
+                let input_views: Vec<_> = op_input_tensors.iter().map(|t| t.view()).collect();
                 let sys_results = opaque_op.eval_fn.eval(&input_views)?;
                 // Copy SystemPool results into the caller's pool.
                 let results: Vec<NumericTensor<'p, DynRank, P>> = sys_results
@@ -172,10 +167,10 @@ pub fn pool_eval<'p, P: Pool + 'p>(
             let cached = &opaque_cache[opaque_idx];
             let result_tensor = &cached[*output_idx];
 
-            // Copy result into the group buffer.
+            // Copy result into the group store.
             let count = group.count as usize;
             let output_dtype = group.output_dtype;
-            let layout = TensorLayout::<DynRank>::row_major(vec![count as u64], output_dtype);
+            let layout = TensorLayout::<P1>::row_major([count as u64], output_dtype);
             let buffer = pool
                 .allocate(layout.buffer_size_bytes())
                 .map_err(PoolEvalError::Allocation)?;
@@ -185,16 +180,29 @@ pub fn pool_eval<'p, P: Pool + 'p>(
                 tensor.write_element(i, scalar);
             }
 
-            group_buffers[gi] = Some(GroupBuffer {
-                tensor,
-                dtype: output_dtype,
-            });
+            group_stores[gi] = Some(AtomStore::Owned(tensor));
 
             // Free spent producers.
             for &pi in &producers[gi] {
                 remaining[pi] -= 1;
                 if remaining[pi] == 0 {
-                    group_buffers[pi] = None;
+                    group_stores[pi] = None;
+                }
+            }
+            continue;
+        }
+
+        // --- LiteralSpan: borrow the tensor directly (zero-copy) ---
+        if let ScalarOp::LiteralSpan(ref tensor) = group.op
+            && let Some(flat) = tensor.view().flatten()
+        {
+            group_stores[gi] = Some(AtomStore::View(flat));
+
+            // Free spent producers.
+            for &pi in &producers[gi] {
+                remaining[pi] -= 1;
+                if remaining[pi] == 0 {
+                    group_stores[pi] = None;
                 }
             }
             continue;
@@ -203,11 +211,11 @@ pub fn pool_eval<'p, P: Pool + 'p>(
         let count = group.count as usize;
         let output_dtype = group.output_dtype;
         let buf_size = output_dtype.bytes_per_element() * count;
-        let layout = TensorLayout::<DynRank>::row_major(vec![count as u64], output_dtype);
+        let layout = TensorLayout::<P1>::row_major([count as u64], output_dtype);
 
         // Allocate group buffer from the pool.
         let buffer = pool.allocate(buf_size).map_err(PoolEvalError::Allocation)?;
-        let mut tensor = NumericTensor::from_parts(buffer, layout);
+        let mut tensor: NumericTensor<'p, P1, P> = NumericTensor::from_parts(buffer, layout);
 
         for i in 0..group.count {
             let ri = i + group.atom_offset;
@@ -229,9 +237,8 @@ pub fn pool_eval<'p, P: Pool + 'p>(
                 let base_atom = group.inputs[0].resolve(ri);
                 for k in 0..*reduce_count {
                     let src_id = AtomId((base_atom.0 as i64 + k as i64 * reduce_stride) as u64);
-                    let val = lookup_atom_raw(src_id, graph, &group_buffers, &input_buffers);
-                    let val_dtype =
-                        lookup_atom_dtype(src_id, graph, &group_buffers, &input_buffers);
+                    let val = lookup_atom_raw(src_id, graph, &group_stores, &input_stores);
+                    let val_dtype = lookup_atom_dtype(src_id, graph, &group_stores, &input_stores);
                     let cast_raw = val_dtype.cast_raw(val, *compute_dtype);
 
                     let binop = match kind {
@@ -252,16 +259,14 @@ pub fn pool_eval<'p, P: Pool + 'p>(
                     }
                     ScalarOp::Identity => {
                         let src = group.inputs[0].resolve(ri);
-                        let val = lookup_atom_raw(src, graph, &group_buffers, &input_buffers);
-                        let val_dtype =
-                            lookup_atom_dtype(src, graph, &group_buffers, &input_buffers);
+                        let val = lookup_atom_raw(src, graph, &group_stores, &input_stores);
+                        let val_dtype = lookup_atom_dtype(src, graph, &group_stores, &input_stores);
                         val_dtype.cast_raw(val, output_dtype)
                     }
                     ScalarOp::Cast { saturating } => {
                         let src = group.inputs[0].resolve(ri);
-                        let val = lookup_atom_raw(src, graph, &group_buffers, &input_buffers);
-                        let val_dtype =
-                            lookup_atom_dtype(src, graph, &group_buffers, &input_buffers);
+                        let val = lookup_atom_raw(src, graph, &group_stores, &input_stores);
+                        let val_dtype = lookup_atom_dtype(src, graph, &group_stores, &input_stores);
                         let raw = val_dtype.cast_raw(val, output_dtype);
                         if *saturating {
                             output_dtype.saturate_inf(raw)
@@ -272,12 +277,10 @@ pub fn pool_eval<'p, P: Pool + 'p>(
                     ScalarOp::Binary { op, compute_dtype } => {
                         let a_src = group.inputs[0].resolve(ri);
                         let b_src = group.inputs[1].resolve(ri);
-                        let a_raw = lookup_atom_raw(a_src, graph, &group_buffers, &input_buffers);
-                        let b_raw = lookup_atom_raw(b_src, graph, &group_buffers, &input_buffers);
-                        let a_dtype =
-                            lookup_atom_dtype(a_src, graph, &group_buffers, &input_buffers);
-                        let b_dtype =
-                            lookup_atom_dtype(b_src, graph, &group_buffers, &input_buffers);
+                        let a_raw = lookup_atom_raw(a_src, graph, &group_stores, &input_stores);
+                        let b_raw = lookup_atom_raw(b_src, graph, &group_stores, &input_stores);
+                        let a_dtype = lookup_atom_dtype(a_src, graph, &group_stores, &input_stores);
+                        let b_dtype = lookup_atom_dtype(b_src, graph, &group_stores, &input_stores);
                         let a_cast = a_dtype.cast_raw(a_raw, *compute_dtype);
                         let b_cast = b_dtype.cast_raw(b_raw, *compute_dtype);
                         let result = eval_binop(op, a_cast, b_cast, *compute_dtype);
@@ -285,46 +288,44 @@ pub fn pool_eval<'p, P: Pool + 'p>(
                     }
                     ScalarOp::Unary { op, compute_dtype } => {
                         let src = group.inputs[0].resolve(ri);
-                        let val = lookup_atom_raw(src, graph, &group_buffers, &input_buffers);
-                        let val_dtype =
-                            lookup_atom_dtype(src, graph, &group_buffers, &input_buffers);
+                        let val = lookup_atom_raw(src, graph, &group_stores, &input_stores);
+                        let val_dtype = lookup_atom_dtype(src, graph, &group_stores, &input_stores);
                         let x = val_dtype.cast_raw(val, *compute_dtype);
                         let result = eval_unaryop(op, x, *compute_dtype);
                         compute_dtype.cast_raw(result, output_dtype)
                     }
                     ScalarOp::Select => {
                         let cond_src = group.inputs[0].resolve(ri);
-                        let cond_raw =
-                            lookup_atom_raw(cond_src, graph, &group_buffers, &input_buffers);
-                        let cond_dtype =
-                            lookup_atom_dtype(cond_src, graph, &group_buffers, &input_buffers);
-                        let is_true = cond_dtype.decode_to_f64(cond_raw) != 0.0;
+                        let cond_scalar =
+                            lookup_atom_scalar(cond_src, graph, &group_stores, &input_stores);
+                        let cond_raw = cond_scalar.view().read_raw();
+                        let is_true = cond_scalar.dtype().decode_to_f64(cond_raw) != 0.0;
                         let chosen_src = if is_true {
                             group.inputs[1].resolve(ri)
                         } else {
                             group.inputs[2].resolve(ri)
                         };
-                        let val =
-                            lookup_atom_raw(chosen_src, graph, &group_buffers, &input_buffers);
+                        let val = lookup_atom_raw(chosen_src, graph, &group_stores, &input_stores);
                         let val_dtype =
-                            lookup_atom_dtype(chosen_src, graph, &group_buffers, &input_buffers);
+                            lookup_atom_dtype(chosen_src, graph, &group_stores, &input_stores);
                         val_dtype.cast_raw(val, output_dtype)
                     }
                     ScalarOp::IndirectLoad { table_base } => {
                         let idx_src = group.inputs[0].resolve(ri);
-                        let idx_raw =
-                            lookup_atom_raw(idx_src, graph, &group_buffers, &input_buffers);
-                        let idx_dtype =
-                            lookup_atom_dtype(idx_src, graph, &group_buffers, &input_buffers);
-                        let index = idx_dtype.decode_to_f64(idx_raw) as u64;
+                        let idx_scalar =
+                            lookup_atom_scalar(idx_src, graph, &group_stores, &input_stores);
+                        let index = idx_scalar
+                            .dtype()
+                            .decode_to_f64(idx_scalar.view().read_raw())
+                            as u64;
                         let table_atom = AtomId(table_base.0 + index);
-                        let val =
-                            lookup_atom_raw(table_atom, graph, &group_buffers, &input_buffers);
+                        let val = lookup_atom_raw(table_atom, graph, &group_stores, &input_stores);
                         let val_dtype =
-                            lookup_atom_dtype(table_atom, graph, &group_buffers, &input_buffers);
+                            lookup_atom_dtype(table_atom, graph, &group_stores, &input_stores);
                         val_dtype.cast_raw(val, output_dtype)
                     }
                     ScalarOp::LiteralSpan(tensor) => {
+                        // Fallback for non-flattenable LiteralSpan (e.g. sliced).
                         let scalar = tensor.read_element(i as usize);
                         let raw = scalar.view().read_raw();
                         scalar.dtype().cast_raw(raw, output_dtype)
@@ -335,16 +336,13 @@ pub fn pool_eval<'p, P: Pool + 'p>(
             }
         }
 
-        group_buffers[gi] = Some(GroupBuffer {
-            tensor,
-            dtype: output_dtype,
-        });
+        group_stores[gi] = Some(AtomStore::Owned(tensor));
 
         // Free spent producer buffers.
         for &pi in &producers[gi] {
             remaining[pi] -= 1;
             if remaining[pi] == 0 {
-                group_buffers[pi] = None;
+                group_stores[pi] = None;
             }
         }
     }
@@ -362,10 +360,9 @@ pub fn pool_eval<'p, P: Pool + 'p>(
 
         for offset in 0..range.count {
             let atom_id = AtomId(range.base.0 + offset);
-            let val = lookup_atom_raw(atom_id, graph, &group_buffers, &input_buffers);
-            let val_dtype = lookup_atom_dtype(atom_id, graph, &group_buffers, &input_buffers);
-            let cast = val_dtype.cast_raw(val, output_dtype);
-            write_atom(&mut out_tensor, offset as usize, cast, output_dtype);
+            let scalar = lookup_atom_scalar(atom_id, graph, &group_stores, &input_stores);
+            let cast = scalar.cast_to(output_dtype);
+            out_tensor.write_element(offset as usize, cast);
         }
         outputs.push(out_tensor);
     }
@@ -389,70 +386,93 @@ pub enum PoolEvalError {
 // Internal data structures
 // ---------------------------------------------------------------------------
 
-/// Input tensor buffer — owns a Vec<u8> with elements at native dtype width.
-struct InputBuffer {
-    _base: AtomId,
-    _count: u64,
-    dtype: NumericDType,
-    data: Vec<u8>,
+/// Unified atom storage — either a borrowed 1D view (zero-copy) or a
+/// pool-allocated 1D tensor (for computed values).
+enum AtomStore<'a, 'p, P: Pool + 'p> {
+    /// Borrowed 1D view — zero-copy for input tensors and LiteralSpan groups.
+    View(NumericTensorView<'a, P1>),
+    /// Owned 1D tensor — allocated from pool during group evaluation.
+    Owned(NumericTensor<'p, P1, P>),
 }
 
-/// Group output buffer — a pool-managed 1D NumericTensor.
-struct GroupBuffer<'p, P: Pool + 'p> {
-    tensor: NumericTensor<'p, DynRank, P>,
-    dtype: NumericDType,
+impl<'a, 'p, P: Pool + 'p> AtomStore<'a, 'p, P> {
+    fn read_element(&self, index: usize) -> NumericScalar {
+        match self {
+            AtomStore::View(v) => v.read_element(index),
+            AtomStore::Owned(t) => t.read_element(index),
+        }
+    }
+
+    fn dtype(&self) -> NumericDType {
+        match self {
+            AtomStore::View(v) => v.dtype(),
+            AtomStore::Owned(t) => t.dtype(),
+        }
+    }
+
+    fn write_element(&mut self, index: usize, value: NumericScalar) {
+        match self {
+            AtomStore::Owned(t) => t.write_element(index, value),
+            AtomStore::View(_) => panic!("cannot write to a borrowed view"),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Atom access
 // ---------------------------------------------------------------------------
 
-/// Read an atom's raw bits from group buffers or input buffers.
-fn lookup_atom_raw<P: Pool>(
+/// Read an atom as a NumericScalar from group stores or input stores.
+fn lookup_atom_scalar<P: Pool>(
     atom_id: AtomId,
     graph: &NanoGraph,
-    group_buffers: &[Option<GroupBuffer<'_, P>>],
-    input_buffers: &[InputBuffer],
-) -> u64 {
+    group_stores: &[Option<AtomStore<'_, '_, P>>],
+    input_stores: &[AtomStore<'_, '_, P>],
+) -> NumericScalar {
     if let Some(gi) = graph.find_group_idx(atom_id) {
-        let gb = group_buffers[gi]
+        let store = group_stores[gi]
             .as_ref()
             .unwrap_or_else(|| panic!("group {gi} buffer freed when reading atom {atom_id}"));
         let group = &graph.groups()[gi];
         let offset = (atom_id.0 - group.base_id.0) as usize;
-        return gb.tensor.read_element(offset).view().read_raw();
+        return store.read_element(offset);
     }
     if let Some((ti, offset)) = graph.find_input_idx(atom_id) {
-        let ib = &input_buffers[ti];
-        let bit_off = offset as usize * ib.dtype.total_bits() as usize;
-        return crate::numeric_scalar::conversions::read_raw_bits(
-            &ib.data,
-            bit_off,
-            ib.dtype.total_bits(),
-        );
+        return input_stores[ti].read_element(offset as usize);
     }
     panic!("atom {atom_id} not found in any group or input");
+}
+
+/// Read an atom's raw bits from group stores or input stores.
+fn lookup_atom_raw<P: Pool>(
+    atom_id: AtomId,
+    graph: &NanoGraph,
+    group_stores: &[Option<AtomStore<'_, '_, P>>],
+    input_stores: &[AtomStore<'_, '_, P>],
+) -> u64 {
+    let scalar = lookup_atom_scalar(atom_id, graph, group_stores, input_stores);
+    scalar.view().read_raw()
 }
 
 /// Get the dtype of an atom.
 fn lookup_atom_dtype<P: Pool>(
     atom_id: AtomId,
     graph: &NanoGraph,
-    group_buffers: &[Option<GroupBuffer<'_, P>>],
-    input_buffers: &[InputBuffer],
+    group_stores: &[Option<AtomStore<'_, '_, P>>],
+    input_stores: &[AtomStore<'_, '_, P>],
 ) -> NumericDType {
     if let Some(gi) = graph.find_group_idx(atom_id) {
-        return group_buffers[gi].as_ref().unwrap().dtype;
+        return group_stores[gi].as_ref().unwrap().dtype();
     }
     if let Some((ti, _)) = graph.find_input_idx(atom_id) {
-        return input_buffers[ti].dtype;
+        return input_stores[ti].dtype();
     }
     panic!("atom {atom_id} not found");
 }
 
-/// Write a raw u64 value to a tensor at a flat index.
+/// Write a raw u64 value to a 1D tensor at a flat index.
 fn write_atom<P: Pool>(
-    tensor: &mut NumericTensor<'_, DynRank, P>,
+    tensor: &mut NumericTensor<'_, P1, P>,
     index: usize,
     raw: u64,
     dtype: NumericDType,
@@ -655,7 +675,6 @@ fn eval_unaryop(op: &ScalarUnaryOp, x: u64, dtype: NumericDType) -> u64 {
             ScalarUnaryOp::Sin => crate::scalar_ops::trig::float_sin(x, &ft),
             ScalarUnaryOp::Cos => crate::scalar_ops::trig::float_cos(x, &ft),
             ScalarUnaryOp::Not => {
-                // Logical NOT for float: nonzero → 0.0, zero → 1.0
                 let val = ft.decode_f64(x);
                 ft.encode_f64(if val != 0.0 && !val.is_nan() {
                     0.0
@@ -665,7 +684,6 @@ fn eval_unaryop(op: &ScalarUnaryOp, x: u64, dtype: NumericDType) -> u64 {
             }
             ScalarUnaryOp::IsNan => {
                 let val = ft.decode_f64(x);
-                // IsNan returns in the compute dtype (typically BOOL after cast)
                 dtype.encode_from_f64(if val.is_nan() { 1.0 } else { 0.0 })
             }
             ScalarUnaryOp::IsInf {
@@ -699,7 +717,6 @@ fn eval_unaryop(op: &ScalarUnaryOp, x: u64, dtype: NumericDType) -> u64 {
             ScalarUnaryOp::Abs => crate::scalar_ops::abs::signed_abs_wrapping(x, &it),
             ScalarUnaryOp::Sign => crate::scalar_ops::sign::signed_sign(x, &it),
             ScalarUnaryOp::Not => {
-                // Logical NOT for int: nonzero → 0, zero → 1
                 let val = it.decode_signed(x);
                 it.encode_signed(if val != 0 { 0 } else { 1 })
             }
@@ -723,8 +740,6 @@ fn eval_unaryop(op: &ScalarUnaryOp, x: u64, dtype: NumericDType) -> u64 {
 }
 
 /// Encode a boolean comparison/logical result as raw bits in the given dtype.
-/// The old eval returns F32(1.0)/F32(0.0) for comparisons. We match that by
-/// encoding 1.0 or 0.0 in the compute dtype.
 fn bool_to_dtype_raw(val: u64, dtype: NumericDType) -> u64 {
     let f = if val != 0 { 1.0 } else { 0.0 };
     dtype.encode_from_f64(f)

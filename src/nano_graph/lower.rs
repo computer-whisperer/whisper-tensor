@@ -1144,6 +1144,30 @@ impl<'a> NanoLoweringContext<'a> {
     pub fn lower_op(&mut self, op: &AnyMilliOp) {
         use crate::milli_graph::ops::LowerResult;
 
+        // If inference already produced concrete values for all outputs,
+        // register them directly as constants — no need to lower analytically
+        // and re-evaluate through pool_eval.
+        let all_numeric = op.outputs().all(|out_id| {
+            self.all_infos
+                .get(&out_id)
+                .is_some_and(|i| i.as_concrete().is_some())
+        });
+        if all_numeric {
+            let groups_before = self.nano.num_groups();
+            for out_id in op.outputs() {
+                if let Some(info) = self.all_infos.get(&out_id) {
+                    self.register_constant(out_id, info);
+                }
+            }
+            let groups_after = self.nano.num_groups();
+            let op_id = op.global_id();
+            let op_kind = op.op_kind();
+            for _ in groups_before..groups_after {
+                self.group_provenance.push((op_id, op_kind.clone()));
+            }
+            return;
+        }
+
         let groups_before = self.nano.num_groups();
         match op.lower_to_nano(self) {
             LowerResult::Lowered => {}
@@ -2098,6 +2122,8 @@ mod tests {
         );
 
         // Also verify group structure directly.
+        // Use shape-only (non-concrete) inputs so lowering produces
+        // analytical groups rather than short-circuiting to constants.
         let mut rng = rand::rng();
         let (mut milli, _ext_map) =
             crate::milli_graph::MilliOpGraph::new(std::iter::empty(), &mut rng);
@@ -2110,17 +2136,15 @@ mod tests {
             NumericDType::F32,
             &mut rng,
         );
-        let a_tensor = pool_tensor(vec![1.0f32; 4 * 8], vec![4, 8]);
-        let b_tensor = pool_tensor(vec![1.0f32; 8 * 16], vec![8, 16]);
 
         let mut info = std::collections::HashMap::new();
         info.insert(
             a_id,
-            LowerTensorInfo::from_view(&a_tensor.view(), &SystemPool),
+            LowerTensorInfo::from_dtype_and_shape(NumericDType::F32, &[4, 8]),
         );
         info.insert(
             b_id,
-            LowerTensorInfo::from_view(&b_tensor.view(), &SystemPool),
+            LowerTensorInfo::from_dtype_and_shape(NumericDType::F32, &[8, 16]),
         );
 
         let result = super::lower_with_info(&milli, &info).unwrap();
