@@ -1308,7 +1308,7 @@ fn emit_group_body_forwarded(
     let result_val = match &group.op {
         ScalarOp::Literal(_) => return Ok(()),
 
-        ScalarOp::Identity => {
+        ScalarOp::Identity | ScalarOp::Cast { .. } => {
             let src = load_input_forwarded(
                 builder,
                 module,
@@ -1922,8 +1922,8 @@ fn emit_group_body(
     match &group.op {
         ScalarOp::Literal(_) => Ok(()),
 
-        ScalarOp::Identity => {
-            // Identity: cast input to output_dtype.
+        ScalarOp::Identity | ScalarOp::Cast { .. } => {
+            // Identity/Cast: cast input to output_dtype.
             let src = load_input(
                 builder,
                 module,
@@ -2969,6 +2969,58 @@ fn emit_binop(
             let x = builder.ins().bxor(a_nz, b_nz);
             cmp_result!(x)
         }
+
+        // ── IMod (mathematical modulo — result sign matches divisor) ──
+        (ScalarBinOp::IMod, ReprKind::Float) => {
+            // fmod then adjust: if result and divisor have different signs, add divisor.
+            let func_ref = module.declare_func_in_func(math.fmodf, builder.func);
+            let call = builder.ins().call(func_ref, &[a, b]);
+            let rem = builder.inst_results(call)[0];
+            // rem + b if sign(rem) != sign(b), else rem
+            let sum = builder.ins().fadd(rem, b);
+            let zero = builder.ins().f32const(0.0);
+            let rem_neg = builder.ins().fcmp(FloatCC::LessThan, rem, zero);
+            let b_neg = builder.ins().fcmp(FloatCC::LessThan, b, zero);
+            let rem_zero = builder.ins().fcmp(FloatCC::Equal, rem, zero);
+            let signs_differ = builder.ins().bxor(rem_neg, b_neg);
+            let need_adjust = builder.ins().band_not(signs_differ, rem_zero);
+            builder.ins().select(need_adjust, sum, rem)
+        }
+        (ScalarBinOp::IMod, ReprKind::Int) => {
+            // srem then adjust: if result and divisor have different signs, add divisor.
+            let zero = builder.ins().iconst(types::I64, 0);
+            let one = builder.ins().iconst(types::I64, 1);
+            let is_zero = builder.ins().icmp(IntCC::Equal, b, zero);
+            let safe_b = builder.ins().select(is_zero, one, b);
+            let rem = builder.ins().srem(a, safe_b);
+            let sum = builder.ins().iadd(rem, safe_b);
+            let rem_neg = builder.ins().icmp(IntCC::SignedLessThan, rem, zero);
+            let b_neg = builder.ins().icmp(IntCC::SignedLessThan, safe_b, zero);
+            let rem_zero = builder.ins().icmp(IntCC::Equal, rem, zero);
+            let signs_differ = builder.ins().bxor(rem_neg, b_neg);
+            let need_adjust = builder.ins().band_not(signs_differ, rem_zero);
+            let result = builder.ins().select(need_adjust, sum, rem);
+            builder.ins().select(is_zero, zero, result)
+        }
+
+        // ── Bitwise ops (integer only) ──
+        (ScalarBinOp::BitwiseAnd, ReprKind::Int) => builder.ins().band(a, b),
+        (ScalarBinOp::BitwiseOr, ReprKind::Int) => builder.ins().bor(a, b),
+        (ScalarBinOp::BitwiseXor, ReprKind::Int) => builder.ins().bxor(a, b),
+        (ScalarBinOp::BitShiftLeft, ReprKind::Int) => builder.ins().ishl(a, b),
+        (ScalarBinOp::BitShiftRight, ReprKind::Int) => builder.ins().sshr(a, b),
+
+        // Bitwise on floats — not meaningful
+        (
+            ScalarBinOp::BitwiseAnd
+            | ScalarBinOp::BitwiseOr
+            | ScalarBinOp::BitwiseXor
+            | ScalarBinOp::BitShiftLeft
+            | ScalarBinOp::BitShiftRight,
+            ReprKind::Float,
+        ) => {
+            return Err(format!("bitwise {:?} on float not supported in JIT", op));
+        }
     })
 }
 
@@ -3030,7 +3082,7 @@ fn emit_unop(
 fn op_name_short(op: &ScalarOp) -> &'static str {
     match op {
         ScalarOp::Literal(_) => "Lit",
-        ScalarOp::Identity => "Id",
+        ScalarOp::Identity | ScalarOp::Cast { .. } => "Id",
         ScalarOp::Binary { .. } => "Bin",
         ScalarOp::Unary { .. } => "Un",
         ScalarOp::Select => "Sel",

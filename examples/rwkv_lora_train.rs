@@ -61,8 +61,8 @@ fn resolve_initialized_tensors(
     graph: &whisper_tensor::symbolic_graph::SymbolicGraph,
     store: &whisper_tensor::symbolic_graph::tensor_store::TensorStore,
 ) -> HashMap<GlobalId, PoolTensor> {
-    use whisper_tensor::symbolic_graph::{StoredOrNotTensor, TensorType};
     use whisper_tensor::numeric_tensor::TensorLayout;
+    use whisper_tensor::symbolic_graph::{StoredOrNotTensor, TensorType};
 
     let mut result = HashMap::new();
     let tensors_by_name = graph.get_tensors_by_name();
@@ -90,10 +90,7 @@ fn resolve_initialized_tensors(
             }
             StoredOrNotTensor::Inline(shared) => {
                 let src = &*shared.0;
-                let layout = TensorLayout::<DynRank>::row_major(
-                    src.shape().clone(),
-                    src.dtype(),
-                );
+                let layout = TensorLayout::<DynRank>::row_major(src.shape().clone(), src.dtype());
                 if let Ok(buf) = POOL.allocate(layout.buffer_size_bytes()) {
                     let mut tensor = NumericTensor::from_parts(buf, layout);
                     for i in 0..src.numel() {
@@ -624,22 +621,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut current_params = lora_params;
     let mut current_state = initial_state;
 
-    let iter_count_tensor = NumericTensor::<DynRank, _>::from_fn(
-        vec![1u64],
-        NumericDType::I64,
-        &POOL,
-        |_| NumericScalar::from_i64(seq_len as i64),
-    )
-    .unwrap();
+    let iter_count_tensor =
+        NumericTensor::<DynRank, _>::from_fn(vec![1u64], NumericDType::I64, &POOL, |_| {
+            NumericScalar::from_i64(seq_len as i64)
+        })
+        .unwrap();
 
     eprintln!("\nTraining ({num_epochs} epochs, {seq_len} steps each)...\n");
 
     for epoch in 0..num_epochs {
         let mut sg_data: SuperGraphData<'_, '_, SystemPool> = SuperGraphData::new();
 
-        sg_data.tensors.insert(iter_count_link, iter_count_tensor.clone());
-        sg_data.tensors.insert(outer_tokens_link, batched_tokens.clone());
-        sg_data.tensors.insert(outer_targets_link, batched_targets.clone());
+        sg_data
+            .tensors
+            .insert(iter_count_link, iter_count_tensor.clone());
+        sg_data
+            .tensors
+            .insert(outer_tokens_link, batched_tokens.clone());
+        sg_data
+            .tensors
+            .insert(outer_targets_link, batched_targets.clone());
 
         // Constants (simple inputs)
         for &(outer_link, inner_id) in &constant_simple_inputs {

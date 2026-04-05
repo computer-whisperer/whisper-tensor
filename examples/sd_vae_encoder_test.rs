@@ -16,8 +16,7 @@ fn load_npy_as_f16_tensor<'a>(
     pool: &'a SystemPool,
 ) -> NumericTensor<'a, DynRank, SystemPool> {
     let path = format!("{REF_DIR}/{name}");
-    let f32_tensor =
-        whisper_tensor::npy::read_npy_file(Path::new(&path), pool).expect("read npy");
+    let f32_tensor = whisper_tensor::npy::read_npy_file(Path::new(&path), pool).expect("read npy");
     NumericTensor::from_fn(f32_tensor.shape().clone(), NumericDType::F16, pool, |i| {
         f32_tensor.read_element(i).cast_to(NumericDType::F16)
     })
@@ -34,8 +33,9 @@ fn main() {
     let onnx_data = identify_and_load(&input_path, WeightStorageStrategy::EmbeddedData)
         .expect("Failed to import model");
     let mut rng = rand::rng();
-    let model = whisper_tensor::model::Model::new_from_onnx(&onnx_data, &mut rng, input_path.parent())
-        .expect("Failed to load model");
+    let model =
+        whisper_tensor::model::Model::new_from_onnx(&onnx_data, &mut rng, input_path.parent())
+            .expect("Failed to load model");
 
     println!("\n=== VAE Encoder ===");
     let image = load_npy_as_f16_tensor("vae_encoder_sample_float16.npy", &pool);
@@ -46,39 +46,51 @@ fn main() {
     inputs.insert("sample".to_string(), &image_view);
 
     let start = Instant::now();
-    let outputs = model
-        .eval_pool(inputs, &pool)
-        .expect("Inference failed");
+    let outputs = model.eval_pool(inputs, &pool).expect("Inference failed");
     println!("  Inference took {:.2?}", start.elapsed());
 
     // VAE encoder uses RandomNormalLike, so outputs won't match reference exactly.
     // We verify: correct shape/dtype, and output statistics are in reasonable range.
     if let Some(out) = outputs.get("latent_sample") {
         let ref_path = format!("{REF_DIR}/vae_encoder_latent_sample_float16.npy");
-        let ref_tensor =
-            whisper_tensor::npy::read_npy_file(std::path::Path::new(&ref_path), &pool)
-                .expect("read ref npy");
+        let ref_tensor = whisper_tensor::npy::read_npy_file(std::path::Path::new(&ref_path), &pool)
+            .expect("read ref npy");
 
         println!("  Output: dtype={:?}, shape={:?}", out.dtype(), out.shape());
         assert_eq!(
-            out.shape(), ref_tensor.shape(),
-            "Shape mismatch: actual={:?} vs ref={:?}", out.shape(), ref_tensor.shape()
+            out.shape(),
+            ref_tensor.shape(),
+            "Shape mismatch: actual={:?} vs ref={:?}",
+            out.shape(),
+            ref_tensor.shape()
         );
         println!("  Shape: PASS");
 
         let numel = out.numel();
 
         // Compare statistics rather than exact values
-        let actual_mean = (0..numel).map(|i| out.read_element(i).to_f32()).sum::<f32>() / numel as f32;
+        let actual_mean = (0..numel)
+            .map(|i| out.read_element(i).to_f32())
+            .sum::<f32>()
+            / numel as f32;
         let actual_std = ((0..numel)
-            .map(|i| { let v = out.read_element(i).to_f32(); (v - actual_mean) * (v - actual_mean) })
+            .map(|i| {
+                let v = out.read_element(i).to_f32();
+                (v - actual_mean) * (v - actual_mean)
+            })
             .sum::<f32>()
             / numel as f32)
             .sqrt();
 
-        let ref_mean = (0..numel).map(|i| ref_tensor.read_element(i).to_f32()).sum::<f32>() / numel as f32;
+        let ref_mean = (0..numel)
+            .map(|i| ref_tensor.read_element(i).to_f32())
+            .sum::<f32>()
+            / numel as f32;
         let ref_std = ((0..numel)
-            .map(|i| { let v = ref_tensor.read_element(i).to_f32(); (v - ref_mean) * (v - ref_mean) })
+            .map(|i| {
+                let v = ref_tensor.read_element(i).to_f32();
+                (v - ref_mean) * (v - ref_mean)
+            })
             .sum::<f32>()
             / numel as f32)
             .sqrt();

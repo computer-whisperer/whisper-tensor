@@ -3,13 +3,13 @@ use crate::websockets::ServerRequestManager;
 use crate::widgets::progress_report::SuperGraphProgressWidgetState;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use whisper_tensor::interfaces::{AnyInterface, ImageGenerationInterface};
 use whisper_tensor::numeric_dtype::NumericDType;
 use whisper_tensor::numeric_scalar::NumericScalar;
 use whisper_tensor::numeric_tensor::NumericTensor;
 use whisper_tensor::pool::SystemPool;
-use whisper_tensor::tensor_rank::DynRank;
-use whisper_tensor::interfaces::{AnyInterface, ImageGenerationInterface};
 use whisper_tensor::super_graph::links::SuperGraphLink;
+use whisper_tensor::tensor_rank::DynRank;
 use whisper_tensor_server::{SuperGraphRequest, SuperGraphRequestBackendMode};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -256,21 +256,33 @@ impl SDExplorerApp {
 
         let n_steps = state.num_steps as u64;
         let timesteps_tensor = NumericTensor::<DynRank, SystemPool>::from_fn(
-            vec![n_steps], NumericDType::F32, &SystemPool,
+            vec![n_steps],
+            NumericDType::F32,
+            &SystemPool,
             |i| NumericScalar::from_f32(timestep_values[i]),
-        ).unwrap();
+        )
+        .unwrap();
         let dt_tensor = NumericTensor::<DynRank, SystemPool>::from_fn(
-            vec![n_steps], NumericDType::F32, &SystemPool,
+            vec![n_steps],
+            NumericDType::F32,
+            &SystemPool,
             |i| NumericScalar::from_f32(dt_values[i]),
-        ).unwrap();
+        )
+        .unwrap();
         let sigmas_tensor = NumericTensor::<DynRank, SystemPool>::from_fn(
-            vec![n_steps], NumericDType::F32, &SystemPool,
+            vec![n_steps],
+            NumericDType::F32,
+            &SystemPool,
             |i| NumericScalar::from_f32(sigma_values[i]),
-        ).unwrap();
+        )
+        .unwrap();
         let iter_count = NumericTensor::<DynRank, SystemPool>::from_fn(
-            vec![1], NumericDType::I64, &SystemPool,
+            vec![1],
+            NumericDType::I64,
+            &SystemPool,
             |_| NumericScalar::from_i64(state.num_steps as i64),
-        ).unwrap();
+        )
+        .unwrap();
 
         tensor_inputs.insert(sd.initial_latent_input, latent_tensor);
         tensor_inputs.insert(sd.timesteps_input, timesteps_tensor);
@@ -279,9 +291,12 @@ impl SDExplorerApp {
         tensor_inputs.insert(sd.iteration_count_input, iter_count);
         if let Some(gs_link) = sd.guidance_scale_input {
             let guidance = NumericTensor::<DynRank, SystemPool>::from_fn(
-                vec![1], NumericDType::F32, &SystemPool,
+                vec![1],
+                NumericDType::F32,
+                &SystemPool,
                 |_| NumericScalar::from_f32(state.guidance_scale),
-            ).unwrap();
+            )
+            .unwrap();
             tensor_inputs.insert(gs_link, guidance);
         }
 

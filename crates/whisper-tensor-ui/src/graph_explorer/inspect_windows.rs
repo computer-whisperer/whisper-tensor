@@ -6,14 +6,14 @@ use crate::graph_explorer::{
 use crate::websockets::ServerRequestManager;
 use crate::widgets::tensor_view::{TensorViewState, tensor_view};
 use egui::{Color32, CornerRadius, RichText, Stroke, Vec2};
+use whisper_tensor::graph::{GlobalId, Graph, GraphDyn, Property};
 use whisper_tensor::numeric_tensor::NumericTensor;
 use whisper_tensor::pool::SystemPool;
-use whisper_tensor::tensor_rank::DynRank;
-use whisper_tensor::graph::{GlobalId, Graph, GraphDyn, Property};
 use whisper_tensor::scalar_info::ScalarInfoTyped;
 use whisper_tensor::symbolic_graph::SymbolicGraph;
 use whisper_tensor::symbolic_graph::tensor_store::TensorStoreTensorId;
 use whisper_tensor::symbolic_graph::{StoredOrNotTensor, TensorType};
+use whisper_tensor::tensor_rank::DynRank;
 use whisper_tensor_server::{LoadedModelId, WebsocketClientServerMessage};
 
 // ============================================================================
@@ -234,7 +234,9 @@ fn format_path_breadcrumb(
 }
 
 /// Compute statistics from a tensor
-pub(crate) fn compute_tensor_stats(tensor: &NumericTensor<'static, DynRank, SystemPool>) -> TensorStats {
+pub(crate) fn compute_tensor_stats(
+    tensor: &NumericTensor<'static, DynRank, SystemPool>,
+) -> TensorStats {
     let mut stats = TensorStats::default();
 
     // Get total elements

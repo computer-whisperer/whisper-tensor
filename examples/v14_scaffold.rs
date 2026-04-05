@@ -289,26 +289,21 @@ fn main() {
         println!("Input '{}': {:?} {:?}", name, dtype, shape);
         let numeric_dtype = dtype.as_numeric().unwrap_or(NumericDType::F32);
         let tensor: NumericTensor<'_, DynRank, SystemPool> = match numeric_dtype {
-            NumericDType::I64 => NumericTensor::from_fn(
-                shape.clone(),
-                NumericDType::I64,
-                &POOL_S,
-                |i| NumericScalar::from_i64((i % 64) as i64),
-            )
-            .unwrap(),
-            NumericDType::F32 => NumericTensor::from_fn(
-                shape.clone(),
-                NumericDType::F32,
-                &POOL_S,
-                |i| NumericScalar::from_f32((i % 64) as f32 * 0.01),
-            )
-            .unwrap(),
-            _ => NumericTensor::from_fn(
-                shape.clone(),
-                NumericDType::F32,
-                &POOL_S,
-                |_| NumericScalar::from_f32(0.0),
-            )
+            NumericDType::I64 => {
+                NumericTensor::from_fn(shape.clone(), NumericDType::I64, &POOL_S, |i| {
+                    NumericScalar::from_i64((i % 64) as i64)
+                })
+                .unwrap()
+            }
+            NumericDType::F32 => {
+                NumericTensor::from_fn(shape.clone(), NumericDType::F32, &POOL_S, |i| {
+                    NumericScalar::from_f32((i % 64) as f32 * 0.01)
+                })
+                .unwrap()
+            }
+            _ => NumericTensor::from_fn(shape.clone(), NumericDType::F32, &POOL_S, |_| {
+                NumericScalar::from_f32(0.0)
+            })
             .unwrap(),
         };
         if let Some(id) = tensors_by_name.get(name) {
@@ -324,8 +319,8 @@ fn main() {
     // Walk graph tensors that are Constants or initialized Inputs.
     let shape_only = std::env::var("LOWER_SHAPE_ONLY").is_ok();
     {
-        use whisper_tensor::symbolic_graph::{StoredOrNotTensor, TensorType as SgTensorType};
         use whisper_tensor::numeric_tensor::TensorLayout;
+        use whisper_tensor::symbolic_graph::{StoredOrNotTensor, TensorType as SgTensorType};
 
         let all_tensor_ids: Vec<GlobalId> = tensors_by_name.values().copied().collect();
         for &tensor_id in &all_tensor_ids {
@@ -342,15 +337,13 @@ fn main() {
 
             // Try to resolve to a pool tensor.
             let resolved: Option<NumericTensor<'_, DynRank, SystemPool>> = match stored_ref {
-                StoredOrNotTensor::Stored(store_id) => {
-                    tensor_store.get_tensor(*store_id).and_then(|s| s.to_pool_tensor(&POOL_S))
-                }
+                StoredOrNotTensor::Stored(store_id) => tensor_store
+                    .get_tensor(*store_id)
+                    .and_then(|s| s.to_pool_tensor(&POOL_S)),
                 StoredOrNotTensor::Inline(shared) => {
                     let src = &*shared.0;
-                    let layout = TensorLayout::<DynRank>::row_major(
-                        src.shape().clone(),
-                        src.dtype(),
-                    );
+                    let layout =
+                        TensorLayout::<DynRank>::row_major(src.shape().clone(), src.dtype());
                     POOL_S.allocate(layout.buffer_size_bytes()).ok().map(|buf| {
                         let mut tensor = NumericTensor::from_parts(buf, layout);
                         for i in 0..src.numel() {
@@ -879,26 +872,21 @@ fn main() {
         let numeric_dtype = dtype.as_numeric().unwrap_or(NumericDType::F32);
         // Use same values as lowering (i % 64) so nano and milli see the same data.
         let tensor: PoolTensor = match numeric_dtype {
-            NumericDType::I64 => NumericTensor::from_fn(
-                shape.clone(),
-                NumericDType::I64,
-                &SystemPool,
-                |i| NumericScalar::from_i64((i % 64) as i64),
-            )
-            .unwrap(),
-            NumericDType::F32 => NumericTensor::from_fn(
-                shape.clone(),
-                NumericDType::F32,
-                &SystemPool,
-                |i| NumericScalar::from_f32((i % 64) as f32 * 0.01),
-            )
-            .unwrap(),
-            _ => NumericTensor::from_fn(
-                shape.clone(),
-                NumericDType::F32,
-                &SystemPool,
-                |_| NumericScalar::from_f32(0.0),
-            )
+            NumericDType::I64 => {
+                NumericTensor::from_fn(shape.clone(), NumericDType::I64, &SystemPool, |i| {
+                    NumericScalar::from_i64((i % 64) as i64)
+                })
+                .unwrap()
+            }
+            NumericDType::F32 => {
+                NumericTensor::from_fn(shape.clone(), NumericDType::F32, &SystemPool, |i| {
+                    NumericScalar::from_f32((i % 64) as f32 * 0.01)
+                })
+                .unwrap()
+            }
+            _ => NumericTensor::from_fn(shape.clone(), NumericDType::F32, &SystemPool, |_| {
+                NumericScalar::from_f32(0.0)
+            })
             .unwrap(),
         };
         println!("User input '{}': {:?} {:?}", name, dtype, shape);
@@ -908,31 +896,39 @@ fn main() {
     // Build milli-eval inputs: HashMap<external GlobalId, PoolTensor>.
     // Resolve initialized tensors from the graph.
     let mut milli_inputs: HashMap<GlobalId, PoolTensor> = {
-        use whisper_tensor::symbolic_graph::{StoredOrNotTensor, TensorType as SgTensorType};
         use whisper_tensor::numeric_tensor::TensorLayout;
+        use whisper_tensor::symbolic_graph::{StoredOrNotTensor, TensorType as SgTensorType};
         let mut result = HashMap::new();
         let all_ids: Vec<GlobalId> = tensors_by_name.values().copied().collect();
         for &tid in &all_ids {
-            let Some(info) = sym_graph.get_tensor_info(tid) else { continue };
+            let Some(info) = sym_graph.get_tensor_info(tid) else {
+                continue;
+            };
             let stored_ref = match &info.tensor_type {
                 SgTensorType::Constant(s) | SgTensorType::Input(Some(s)) => Some(s),
                 _ => None,
             };
-            let Some(stored_ref) = stored_ref else { continue };
+            let Some(stored_ref) = stored_ref else {
+                continue;
+            };
             let resolved: Option<PoolTensor> = match stored_ref {
-                StoredOrNotTensor::Stored(store_id) => {
-                    tensor_store.get_tensor(*store_id).and_then(|s| s.to_pool_tensor(&SystemPool))
-                }
+                StoredOrNotTensor::Stored(store_id) => tensor_store
+                    .get_tensor(*store_id)
+                    .and_then(|s| s.to_pool_tensor(&SystemPool)),
                 StoredOrNotTensor::Inline(shared) => {
                     let src = &*shared.0;
-                    let layout = TensorLayout::<DynRank>::row_major(src.shape().clone(), src.dtype());
-                    SystemPool.allocate(layout.buffer_size_bytes()).ok().map(|buf| {
-                        let mut tensor = NumericTensor::from_parts(buf, layout);
-                        for i in 0..src.numel() {
-                            tensor.write_element(i, src.read_element(i));
-                        }
-                        tensor
-                    })
+                    let layout =
+                        TensorLayout::<DynRank>::row_major(src.shape().clone(), src.dtype());
+                    SystemPool
+                        .allocate(layout.buffer_size_bytes())
+                        .ok()
+                        .map(|buf| {
+                            let mut tensor = NumericTensor::from_parts(buf, layout);
+                            for i in 0..src.numel() {
+                                tensor.write_element(i, src.read_element(i));
+                            }
+                            tensor
+                        })
                 }
             };
             if let Some(t) = resolved {
@@ -952,8 +948,10 @@ fn main() {
 
     println!("\n=== MilliOpGraph Reference Eval ===");
     let t0 = Instant::now();
-    let milli_views: HashMap<GlobalId, _> = milli_inputs.iter().map(|(&id, t)| (id, t.view())).collect();
-    let milli_view_refs: HashMap<GlobalId, _> = milli_views.iter().map(|(&id, v)| (id, v)).collect();
+    let milli_views: HashMap<GlobalId, _> =
+        milli_inputs.iter().map(|(&id, t)| (id, t.view())).collect();
+    let milli_view_refs: HashMap<GlobalId, _> =
+        milli_views.iter().map(|(&id, v)| (id, v)).collect();
     let milli_outputs: HashMap<GlobalId, PoolTensor> = milli_graph
         .pool_eval(&milli_view_refs, &SystemPool)
         .unwrap();
@@ -968,10 +966,7 @@ fn main() {
         let first_few: Vec<f64> = (0..n.min(5))
             .map(|i| view.read_element(i).to_f64())
             .collect();
-        println!(
-            "  {:?}: {} elements, first={:?}",
-            id, n, first_few
-        );
+        println!("  {:?}: {} elements, first={:?}", id, n, first_few);
     }
 
     // ── Step 10: Build shared nano inputs (AtomId-keyed) ────────────────────

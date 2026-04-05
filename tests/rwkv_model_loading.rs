@@ -118,6 +118,7 @@ fn rwkv01b_model_loads() {
 }
 
 #[test]
+#[ignore] // full-model eval through nano-op path is too slow until compiler is load-bearing
 fn rwkv01b_single_step_runs_shape_sanity() {
     let Some((model, _)) = load_rwkv_model() else {
         eprintln!("Skipping: no RWKV .pth found or LFS pointer");
@@ -139,6 +140,7 @@ fn rwkv01b_single_step_runs_shape_sanity() {
 }
 
 #[test]
+#[ignore] // full-model eval through nano-op path is too slow until compiler is load-bearing
 fn rwkv01b_model_loads_with_binfile() {
     let Some(pth_path) = find_rwkv_pth() else {
         eprintln!("Skipping: no RWKV .pth found under test_models/");

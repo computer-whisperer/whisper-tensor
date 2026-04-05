@@ -172,10 +172,7 @@ impl Clone for SystemBuffer {
         let ptr = unsafe { alloc_aligned_zeroed(self.len) };
         assert!(!ptr.is_null(), "SystemBuffer::clone allocation failed");
         unsafe { std::ptr::copy_nonoverlapping(self.ptr, ptr, self.len) };
-        SystemBuffer {
-            ptr,
-            len: self.len,
-        }
+        SystemBuffer { ptr, len: self.len }
     }
 }
 

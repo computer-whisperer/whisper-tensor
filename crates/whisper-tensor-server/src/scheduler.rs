@@ -532,10 +532,7 @@ pub async fn scheduler(
                                 ..
                             } = res;
 
-                            let mut tensor_outputs = tensors
-                                .into_iter()
-                                .map(|(k, v)| (k, v))
-                                .collect::<HashMap<_, _>>();
+                            let mut tensor_outputs: HashMap<_, _> = tensors.into_iter().collect();
                             for (link, image) in images {
                                 tensor_outputs.insert(link, image.tensor);
                             }

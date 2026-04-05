@@ -893,7 +893,9 @@ where
     }
 }
 
-impl<'de> Deserialize<'de> for NumericTensor<'static, crate::tensor_rank::DynRank, crate::pool::SystemPool> {
+impl<'de> Deserialize<'de>
+    for NumericTensor<'static, crate::tensor_rank::DynRank, crate::pool::SystemPool>
+{
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         use serde::de::{self, MapAccess, SeqAccess, Visitor};
 
@@ -907,7 +909,8 @@ impl<'de> Deserialize<'de> for NumericTensor<'static, crate::tensor_rank::DynRan
         struct NumericTensorVisitor;
 
         impl<'de> Visitor<'de> for NumericTensorVisitor {
-            type Value = NumericTensor<'static, crate::tensor_rank::DynRank, crate::pool::SystemPool>;
+            type Value =
+                NumericTensor<'static, crate::tensor_rank::DynRank, crate::pool::SystemPool>;
 
             fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
                 formatter.write_str("a NumericTensor with layout and data fields")
@@ -1773,13 +1776,11 @@ mod tests {
     #[test]
     fn serde_roundtrip_i32() {
         let pool = SystemPool;
-        let original = NumericTensor::<DynRank, SystemPool>::from_fn(
-            vec![5],
-            NumericDType::I32,
-            &pool,
-            |i| crate::numeric_scalar::NumericScalar::from_i32(i as i32 * -3),
-        )
-        .unwrap();
+        let original =
+            NumericTensor::<DynRank, SystemPool>::from_fn(vec![5], NumericDType::I32, &pool, |i| {
+                crate::numeric_scalar::NumericScalar::from_i32(i as i32 * -3)
+            })
+            .unwrap();
 
         let mut serialized = Vec::new();
         ciborium::into_writer(&original, &mut serialized).unwrap();
@@ -1796,13 +1797,11 @@ mod tests {
     #[test]
     fn clone_system_pool_tensor() {
         let pool = SystemPool;
-        let original = NumericTensor::<DynRank, SystemPool>::from_fn(
-            vec![3],
-            NumericDType::F32,
-            &pool,
-            |i| crate::numeric_scalar::NumericScalar::from_f32(i as f32),
-        )
-        .unwrap();
+        let original =
+            NumericTensor::<DynRank, SystemPool>::from_fn(vec![3], NumericDType::F32, &pool, |i| {
+                crate::numeric_scalar::NumericScalar::from_f32(i as f32)
+            })
+            .unwrap();
 
         let cloned = original.clone();
         assert_eq!(cloned.shape(), original.shape());

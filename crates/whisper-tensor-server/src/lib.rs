@@ -193,9 +193,7 @@ impl AbbreviatedTensorValue {
                     let start = (i * num_elements / digest_len) as usize;
                     let end = ((i + 1) * num_elements / digest_len) as usize;
                     let count = (end - start).max(1);
-                    let sum: f64 = (start..end)
-                        .map(|j| tensor.read_element(j).to_f64())
-                        .sum();
+                    let sum: f64 = (start..end).map(|j| tensor.read_element(j).to_f64()).sum();
                     (sum / count as f64) as f32
                 })
                 .collect()

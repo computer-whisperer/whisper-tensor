@@ -29,11 +29,7 @@ fn compare<'a>(
     );
 
     let numel = actual.numel();
-    assert_eq!(
-        numel,
-        ref_tensor.numel(),
-        "{name}: element count mismatch"
-    );
+    assert_eq!(numel, ref_tensor.numel(), "{name}: element count mismatch");
 
     let mut max_abs_diff: f32 = 0.0;
     let mut max_rel_diff: f32 = 0.0;
@@ -88,8 +84,9 @@ fn main() {
     let onnx_data = identify_and_load(&input_path, WeightStorageStrategy::EmbeddedData)
         .expect("Failed to import model");
     let mut rng = rand::rng();
-    let model = whisper_tensor::model::Model::new_from_onnx(&onnx_data, &mut rng, input_path.parent())
-        .expect("Failed to load model");
+    let model =
+        whisper_tensor::model::Model::new_from_onnx(&onnx_data, &mut rng, input_path.parent())
+            .expect("Failed to load model");
 
     // --- Conditional ---
     println!("\n=== Conditional encoding ===");
@@ -104,9 +101,7 @@ fn main() {
     inputs.insert("input_ids".to_string(), &input_view);
 
     let start = Instant::now();
-    let outputs = model
-        .eval_pool(inputs, &pool)
-        .expect("Inference failed");
+    let outputs = model.eval_pool(inputs, &pool).expect("Inference failed");
     println!("  Inference took {:.2?}", start.elapsed());
 
     for (name, tensor) in &outputs {
@@ -137,7 +132,9 @@ fn main() {
     // --- Unconditional ---
     println!("\n=== Unconditional encoding ===");
     let input_tensor = whisper_tensor::npy::read_npy_file(
-        Path::new(&format!("{REF_DIR}/text_encoder_uncond_input_ids_int32.npy")),
+        Path::new(&format!(
+            "{REF_DIR}/text_encoder_uncond_input_ids_int32.npy"
+        )),
         &pool,
     )
     .expect("read uncond input npy");
@@ -147,9 +144,7 @@ fn main() {
     inputs.insert("input_ids".to_string(), &input_view);
 
     let start = Instant::now();
-    let outputs = model
-        .eval_pool(inputs, &pool)
-        .expect("Inference failed");
+    let outputs = model.eval_pool(inputs, &pool).expect("Inference failed");
     println!("  Inference took {:.2?}", start.elapsed());
 
     if let Some(hidden) = outputs.get("last_hidden_state") {

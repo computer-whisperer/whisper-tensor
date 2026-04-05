@@ -150,8 +150,7 @@ fn build_gpt2_graph(
     // Position indices [seq_len] -- constant
     let pos_data: Vec<i64> = (0..config.seq_len as i64).collect();
     let pos_pool = make_i64_tensor(pos_data.clone(), vec![config.seq_len]);
-    let position_ids =
-        m.push_constant_tensor(pos_data, vec![seq], None, rng);
+    let position_ids = m.push_constant_tensor(pos_data, vec![seq], None, rng);
     constants.insert(position_ids, pos_pool);
 
     // --- Embeddings ---
@@ -499,7 +498,10 @@ fn main() {
         let n = src.numel();
         param_values.insert(
             state.input,
-            make_f32_tensor(vec![0.0f32; n], src.shape().iter().map(|&x| x as usize).collect()),
+            make_f32_tensor(
+                vec![0.0f32; n],
+                src.shape().iter().map(|&x| x as usize).collect(),
+            ),
         );
     }
 
@@ -532,10 +534,7 @@ fn main() {
                 }
             }
 
-            let input_tensor = make_i64_tensor(
-                input_data,
-                vec![config.batch_size, config.seq_len],
-            );
+            let input_tensor = make_i64_tensor(input_data, vec![config.batch_size, config.seq_len]);
             let target_tensor = make_f32_tensor(
                 target_data,
                 vec![config.batch_size * config.seq_len, config.vocab_size],

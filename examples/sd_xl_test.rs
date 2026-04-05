@@ -1,10 +1,10 @@
 use std::path::Path;
 use std::time::Instant;
 use whisper_tensor::DynRank;
+use whisper_tensor::model::Model;
 use whisper_tensor::numeric_dtype::NumericDType;
 use whisper_tensor::numeric_scalar::NumericScalar;
 use whisper_tensor::numeric_tensor::NumericTensor;
-use whisper_tensor::model::Model;
 use whisper_tensor::pool::SystemPool;
 use whisper_tensor_import::models::diffusion::sd_xl;
 use whisper_tensor_import::onnx_graph::WeightStorageStrategy;
@@ -172,11 +172,7 @@ fn main() {
         let timestep = cast_tensor(&timestep_f32, model_dtype, &pool);
 
         // Context in model_dtype (interface casts text encoder F32 output to model_dtype)
-        let context_f32 = make_f32_tensor(
-            &vec![0.0f32; 77 * 2048],
-            vec![1, 77, 2048],
-            &pool,
-        );
+        let context_f32 = make_f32_tensor(&vec![0.0f32; 77 * 2048], vec![1, 77, 2048], &pool);
         let context = cast_tensor(&context_f32, model_dtype, &pool);
 
         // ADM conditioning in model_dtype

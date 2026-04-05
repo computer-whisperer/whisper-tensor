@@ -176,9 +176,7 @@ impl Model {
     }
 
     #[allow(clippy::type_complexity)]
-    pub fn get_input_tensor_info(
-        &self,
-    ) -> HashMap<String, (ONNXDType, Vec<Option<u64>>)> {
+    pub fn get_input_tensor_info(&self) -> HashMap<String, (ONNXDType, Vec<Option<u64>>)> {
         let input_ids = self.graph.get_inputs();
         let mut results = HashMap::new();
         for tensor_id in input_ids {

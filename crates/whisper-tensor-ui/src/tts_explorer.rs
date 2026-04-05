@@ -6,15 +6,15 @@ use crate::websockets::ServerRequestManager;
 use crate::widgets::progress_report::SuperGraphProgressWidgetState;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use whisper_tensor::interfaces::{
+    AnyInterface, KokoroVoiceEmbedding, TTSInputConfig, TextToSpeechInterface,
+};
 use whisper_tensor::numeric_dtype::NumericDType;
 use whisper_tensor::numeric_scalar::NumericScalar;
 use whisper_tensor::numeric_tensor::NumericTensor;
 use whisper_tensor::pool::SystemPool;
-use whisper_tensor::tensor_rank::DynRank;
-use whisper_tensor::interfaces::{
-    AnyInterface, KokoroVoiceEmbedding, TTSInputConfig, TextToSpeechInterface,
-};
 use whisper_tensor::super_graph::links::SuperGraphLink;
+use whisper_tensor::tensor_rank::DynRank;
 use whisper_tensor_server::{SuperGraphRequest, SuperGraphRequestBackendMode};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -312,13 +312,18 @@ impl TTSExplorerApp {
                 };
                 let style = NumericTensor::<DynRank, SystemPool>::from_fn(
                     vec![1, KokoroVoiceEmbedding::STYLE_DIM as u64],
-                    NumericDType::F32, &SystemPool,
+                    NumericDType::F32,
+                    &SystemPool,
                     |i| NumericScalar::from_f32(style_values[i]),
-                ).unwrap();
+                )
+                .unwrap();
                 let speed = NumericTensor::<DynRank, SystemPool>::from_fn(
-                    vec![1], NumericDType::F32, &SystemPool,
+                    vec![1],
+                    NumericDType::F32,
+                    &SystemPool,
                     |_| NumericScalar::from_f32(state.speed),
-                ).unwrap();
+                )
+                .unwrap();
                 tensor_inputs.insert(*style_link, style);
                 tensor_inputs.insert(*speed_link, speed);
             }
@@ -330,15 +335,21 @@ impl TTSExplorerApp {
                 let length_scale = 1.0 / state.speed.max(0.1);
                 let scale_vals = [0.667f32, length_scale, 0.8];
                 let scales = NumericTensor::<DynRank, SystemPool>::from_fn(
-                    vec![3], NumericDType::F32, &SystemPool,
+                    vec![3],
+                    NumericDType::F32,
+                    &SystemPool,
                     |i| NumericScalar::from_f32(scale_vals[i]),
-                ).unwrap();
+                )
+                .unwrap();
                 tensor_inputs.insert(*scales_link, scales);
                 if let Some(sid_link) = speaker_id_link {
                     let sid = NumericTensor::<DynRank, SystemPool>::from_fn(
-                        vec![1], NumericDType::I64, &SystemPool,
+                        vec![1],
+                        NumericDType::I64,
+                        &SystemPool,
                         |_| NumericScalar::from_i64(state.piper_speaker_id),
-                    ).unwrap();
+                    )
+                    .unwrap();
                     tensor_inputs.insert(*sid_link, sid);
                 }
             }

@@ -56,29 +56,23 @@ fn test_dit() {
     )
     .unwrap();
 
-    let timestep = NumericTensor::<DynRank, _>::from_fn(
-        vec![1, 1],
-        NumericDType::F32,
-        &pool,
-        |_| NumericScalar::from_f32(0.5),
-    )
-    .unwrap();
+    let timestep =
+        NumericTensor::<DynRank, _>::from_fn(vec![1, 1], NumericDType::F32, &pool, |_| {
+            NumericScalar::from_f32(0.5)
+        })
+        .unwrap();
 
-    let clip_pooled = NumericTensor::<DynRank, _>::from_fn(
-        vec![1, 768],
-        NumericDType::BF16,
-        &pool,
-        |_| NumericScalar::from_f32(0.0),
-    )
-    .unwrap();
+    let clip_pooled =
+        NumericTensor::<DynRank, _>::from_fn(vec![1, 768], NumericDType::BF16, &pool, |_| {
+            NumericScalar::from_f32(0.0)
+        })
+        .unwrap();
 
-    let t5_hidden = NumericTensor::<DynRank, _>::from_fn(
-        vec![1, 256, 4096],
-        NumericDType::BF16,
-        &pool,
-        |_| NumericScalar::from_f32(0.0),
-    )
-    .unwrap();
+    let t5_hidden =
+        NumericTensor::<DynRank, _>::from_fn(vec![1, 256, 4096], NumericDType::BF16, &pool, |_| {
+            NumericScalar::from_f32(0.0)
+        })
+        .unwrap();
 
     println!("\n=== Running Flux DiT ===");
     let start = Instant::now();
@@ -158,13 +152,11 @@ fn test_vae() {
     println!("  Model loaded in {:.2?}", start.elapsed());
 
     // Small latent input: [1, 16, 8, 8] -> [1, 3, 64, 64]
-    let latent = NumericTensor::<DynRank, _>::from_fn(
-        vec![1, 16, 8, 8],
-        NumericDType::F32,
-        &pool,
-        |_| NumericScalar::from_f32(0.0),
-    )
-    .unwrap();
+    let latent =
+        NumericTensor::<DynRank, _>::from_fn(vec![1, 16, 8, 8], NumericDType::F32, &pool, |_| {
+            NumericScalar::from_f32(0.0)
+        })
+        .unwrap();
 
     println!("\n=== Running Flux VAE decoder ===");
     let start = Instant::now();
@@ -196,10 +188,7 @@ fn test_vae() {
             inf_count += 1;
         }
     }
-    println!(
-        "  sample: nan={nan_count}, inf={inf_count}, len={}",
-        numel
-    );
+    println!("  sample: nan={nan_count}, inf={inf_count}, len={}", numel);
 }
 
 fn main() {

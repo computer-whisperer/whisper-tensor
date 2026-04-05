@@ -1,5 +1,4 @@
 use crate::scalar_info::ScalarInfoTyped;
-use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
 use std::ops::Index;
 use typenum::{P1, P2};

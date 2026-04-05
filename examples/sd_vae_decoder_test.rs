@@ -16,8 +16,7 @@ fn load_npy_as_f16_tensor<'a>(
     pool: &'a SystemPool,
 ) -> NumericTensor<'a, DynRank, SystemPool> {
     let path = format!("{REF_DIR}/{name}");
-    let f32_tensor =
-        whisper_tensor::npy::read_npy_file(Path::new(&path), pool).expect("read npy");
+    let f32_tensor = whisper_tensor::npy::read_npy_file(Path::new(&path), pool).expect("read npy");
     NumericTensor::from_fn(f32_tensor.shape().clone(), NumericDType::F16, pool, |i| {
         f32_tensor.read_element(i).cast_to(NumericDType::F16)
     })
@@ -31,12 +30,15 @@ fn compare(
     pool: &SystemPool,
 ) {
     let ref_path = format!("{REF_DIR}/{ref_name}");
-    let ref_tensor =
-        whisper_tensor::npy::read_npy_file(std::path::Path::new(&ref_path), pool).expect("read ref npy");
+    let ref_tensor = whisper_tensor::npy::read_npy_file(std::path::Path::new(&ref_path), pool)
+        .expect("read ref npy");
 
     assert_eq!(
-        actual.shape(), ref_tensor.shape(),
-        "{name}: shape mismatch: actual={:?} vs ref={:?}", actual.shape(), ref_tensor.shape()
+        actual.shape(),
+        ref_tensor.shape(),
+        "{name}: shape mismatch: actual={:?} vs ref={:?}",
+        actual.shape(),
+        ref_tensor.shape()
     );
 
     let numel = actual.numel();
@@ -93,8 +95,9 @@ fn main() {
     let onnx_data = identify_and_load(&input_path, WeightStorageStrategy::EmbeddedData)
         .expect("Failed to import model");
     let mut rng = rand::rng();
-    let model = whisper_tensor::model::Model::new_from_onnx(&onnx_data, &mut rng, input_path.parent())
-        .expect("Failed to load model");
+    let model =
+        whisper_tensor::model::Model::new_from_onnx(&onnx_data, &mut rng, input_path.parent())
+            .expect("Failed to load model");
 
     println!("\n=== VAE Decoder ===");
     let latent = load_npy_as_f16_tensor("vae_decoder_latent_sample_float16.npy", &pool);
@@ -105,17 +108,10 @@ fn main() {
     inputs.insert("latent_sample".to_string(), &latent_view);
 
     let start = Instant::now();
-    let outputs = model
-        .eval_pool(inputs, &pool)
-        .expect("Inference failed");
+    let outputs = model.eval_pool(inputs, &pool).expect("Inference failed");
     println!("  Inference took {:.2?}", start.elapsed());
 
     if let Some(out) = outputs.get("sample") {
-        compare(
-            "sample",
-            out,
-            "vae_decoder_sample_float16.npy",
-            &pool,
-        );
+        compare("sample", out, "vae_decoder_sample_float16.npy", &pool);
     }
 }

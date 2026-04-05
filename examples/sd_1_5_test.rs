@@ -2,10 +2,10 @@ use std::path::Path;
 use std::time::Instant;
 use whisper_tensor::DynRank;
 use whisper_tensor::interfaces::ImageGenerationInterface;
+use whisper_tensor::model::Model;
 use whisper_tensor::numeric_dtype::NumericDType;
 use whisper_tensor::numeric_scalar::NumericScalar;
 use whisper_tensor::numeric_tensor::NumericTensor;
-use whisper_tensor::model::Model;
 use whisper_tensor::pool::SystemPool;
 #[allow(unused_imports)]
 use whisper_tensor::symbolic_graph::observer::SymbolicGraphObserver;
@@ -173,11 +173,7 @@ fn main() {
             let scale = 1.0 / (sigma * sigma + 1.0).sqrt();
             let latent_vals = tensor_to_f32(&latent);
             let scaled_latent_vals: Vec<f32> = latent_vals.iter().map(|&v| v * scale).collect();
-            let scaled_latent = make_f32_tensor(
-                &scaled_latent_vals,
-                latent.shape().clone(),
-                &pool,
-            );
+            let scaled_latent = make_f32_tensor(&scaled_latent_vals, latent.shape().clone(), &pool);
 
             // Cast latent f32->f16
             let f16_latent = cast_tensor(&scaled_latent, NumericDType::F16, &pool);
@@ -253,11 +249,7 @@ fn main() {
                 );
             }
 
-            latent = make_f32_tensor(
-                &new_latent_vals,
-                vec![1, 4, latent_h, latent_w],
-                &pool,
-            );
+            latent = make_f32_tensor(&new_latent_vals, vec![1, 4, latent_h, latent_w], &pool);
 
             if step == 0 {
                 save_npy("step0_latent_after", &latent);
@@ -276,11 +268,7 @@ fn main() {
         // Scale by 1/0.18215 and cast to f16
         let lat_f32 = tensor_to_f32(&latent);
         let scaled: Vec<f32> = lat_f32.iter().map(|&v| v / 0.18215).collect();
-        let scaled_tensor = make_f32_tensor(
-            &scaled,
-            latent.shape().clone(),
-            &pool,
-        );
+        let scaled_tensor = make_f32_tensor(&scaled, latent.shape().clone(), &pool);
         let scaled_f16 = cast_tensor(&scaled_tensor, NumericDType::F16, &pool);
 
         debug_tensor("vae_input", &scaled_f16, &pool);

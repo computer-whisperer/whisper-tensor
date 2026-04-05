@@ -190,18 +190,12 @@ fn make_f32_tensor(data: Vec<f32>, shape: Vec<usize>) -> PoolTensor {
     .unwrap()
 }
 
-fn init_weights(
-    rng: &mut impl rand::Rng,
-    param_ids: &[GlobalId],
-) -> HashMap<GlobalId, PoolTensor> {
+fn init_weights(rng: &mut impl rand::Rng, param_ids: &[GlobalId]) -> HashMap<GlobalId, PoolTensor> {
     let mut params = HashMap::new();
     let std1 = (2.0f32 / 784.0).sqrt();
     let w1: Vec<f32> = (0..784 * 128).map(|_| rand_normal(rng) * std1).collect();
     params.insert(param_ids[0], make_f32_tensor(w1, vec![784, 128]));
-    params.insert(
-        param_ids[1],
-        make_f32_tensor(vec![0.0f32; 128], vec![128]),
-    );
+    params.insert(param_ids[1], make_f32_tensor(vec![0.0f32; 128], vec![128]));
     let std2 = (2.0f32 / 128.0).sqrt();
     let w2: Vec<f32> = (0..128 * 10).map(|_| rand_normal(rng) * std2).collect();
     params.insert(param_ids[2], make_f32_tensor(w2, vec![128, 10]));
@@ -209,11 +203,7 @@ fn init_weights(
     params
 }
 
-fn get_batch(
-    dataset: &Dataset,
-    start: usize,
-    batch_size: usize,
-) -> (PoolTensor, PoolTensor) {
+fn get_batch(dataset: &Dataset, start: usize, batch_size: usize) -> (PoolTensor, PoolTensor) {
     let actual_batch = batch_size.min(dataset.num_samples - start);
     let img_slice = &dataset.images[start * 784..(start + actual_batch) * 784];
     let img_tensor = make_f32_tensor(img_slice.to_vec(), vec![actual_batch, 784]);
@@ -461,29 +451,27 @@ fn main() {
     // 8. Training loop (one Scan = one epoch over all batches)
     let num_epochs = 5;
 
-    let acc = eval_accuracy(
-        &fwd_graph,
-        &data.test,
-        &params,
-        image_id,
-        logits_id,
-    );
+    let acc = eval_accuracy(&fwd_graph, &data.test, &params, image_id, logits_id);
     eprintln!("Initial test accuracy: {:.2}%", acc * 100.0);
 
-    let iter_count_tensor = NumericTensor::<DynRank, _>::from_fn(
-        vec![1u64],
-        NumericDType::I64,
-        &POOL,
-        |_| NumericScalar::from_i64(num_batches as i64),
-    )
-    .unwrap();
+    let iter_count_tensor =
+        NumericTensor::<DynRank, _>::from_fn(vec![1u64], NumericDType::I64, &POOL, |_| {
+            NumericScalar::from_i64(num_batches as i64)
+        })
+        .unwrap();
 
     for epoch in 0..num_epochs {
         // Populate outer SuperGraph data
         let mut sg_data: SuperGraphData<'_, '_, SystemPool> = SuperGraphData::new();
-        sg_data.tensors.insert(iter_count_link, iter_count_tensor.clone());
-        sg_data.tensors.insert(outer_images_link, batched_images.clone());
-        sg_data.tensors.insert(outer_labels_link, batched_labels.clone());
+        sg_data
+            .tensors
+            .insert(iter_count_link, iter_count_tensor.clone());
+        sg_data
+            .tensors
+            .insert(outer_images_link, batched_images.clone());
+        sg_data
+            .tensors
+            .insert(outer_labels_link, batched_labels.clone());
         for &(ext_param, outer_initial, _) in &outer_param_links {
             sg_data
                 .tensors
@@ -509,13 +497,7 @@ fn main() {
             params.insert(ext_param, result_view.to_tensor(&POOL).unwrap());
         }
 
-        let acc = eval_accuracy(
-            &fwd_graph,
-            &data.test,
-            &params,
-            image_id,
-            logits_id,
-        );
+        let acc = eval_accuracy(&fwd_graph, &data.test, &params, image_id, logits_id);
         eprintln!(
             "Epoch {}/{}: loss = {:.4}, test accuracy = {:.2}%",
             epoch + 1,

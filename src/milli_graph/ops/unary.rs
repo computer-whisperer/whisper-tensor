@@ -339,7 +339,7 @@ impl Node for SimpleUnaryOp {
             WhichSimpleUnaryOp::Sign => "Sign",
             WhichSimpleUnaryOp::BitwiseNot => "Bitwise Not",
             WhichSimpleUnaryOp::Reciprocal => "Reciprocal",
-            WhichSimpleUnaryOp::Trig(trig_op) => trig_op.get_name(),
+            WhichSimpleUnaryOp::Trig(trig_op) => return trig_op.to_string(),
             WhichSimpleUnaryOp::Floor => "Floor",
             WhichSimpleUnaryOp::Ceil => "Ceil",
             WhichSimpleUnaryOp::Round => "Round",

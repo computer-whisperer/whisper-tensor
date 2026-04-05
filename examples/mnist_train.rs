@@ -136,11 +136,7 @@ fn make_i64_tensor(data: Vec<i64>, shape: Vec<usize>) -> PoolTensor {
     .unwrap()
 }
 
-fn get_batch(
-    dataset: &Dataset,
-    start: usize,
-    batch_size: usize,
-) -> (PoolTensor, PoolTensor) {
+fn get_batch(dataset: &Dataset, start: usize, batch_size: usize) -> (PoolTensor, PoolTensor) {
     let actual_batch = batch_size.min(dataset.num_samples - start);
     let img_slice = &dataset.images[start * 784..(start + actual_batch) * 784];
     let img_tensor = make_f32_tensor(img_slice.to_vec(), vec![actual_batch, 784]);
@@ -227,10 +223,7 @@ fn rand_normal(rng: &mut impl rand::Rng) -> f32 {
     (-2.0f32 * u1.ln()).sqrt() * (2.0f32 * std::f32::consts::PI * u2).cos()
 }
 
-fn init_weights(
-    rng: &mut impl rand::Rng,
-    param_ids: &[GlobalId],
-) -> HashMap<GlobalId, PoolTensor> {
+fn init_weights(rng: &mut impl rand::Rng, param_ids: &[GlobalId]) -> HashMap<GlobalId, PoolTensor> {
     let mut params = HashMap::new();
 
     // W1 [784, 128] -- He init
@@ -332,13 +325,7 @@ fn main() {
     let batch_size = 64;
     let num_epochs = 5;
 
-    let acc = eval_accuracy(
-        &fwd_graph,
-        &data.test,
-        &params,
-        image_id,
-        logits_id,
-    );
+    let acc = eval_accuracy(&fwd_graph, &data.test, &params, image_id, logits_id);
     eprintln!("Initial test accuracy: {:.2}%", acc * 100.0);
 
     for epoch in 0..num_epochs {
@@ -371,13 +358,7 @@ fn main() {
         }
 
         let avg_loss = epoch_loss / num_batches as f64;
-        let acc = eval_accuracy(
-            &fwd_graph,
-            &data.test,
-            &params,
-            image_id,
-            logits_id,
-        );
+        let acc = eval_accuracy(&fwd_graph, &data.test, &params, image_id, logits_id);
         eprintln!(
             "Epoch {}/{}: loss = {:.4}, test accuracy = {:.2}%",
             epoch + 1,

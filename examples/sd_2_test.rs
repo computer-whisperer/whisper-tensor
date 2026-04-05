@@ -1,10 +1,10 @@
 use std::path::Path;
 use std::time::Instant;
 use whisper_tensor::DynRank;
+use whisper_tensor::model::Model;
 use whisper_tensor::numeric_dtype::NumericDType;
 use whisper_tensor::numeric_scalar::NumericScalar;
 use whisper_tensor::numeric_tensor::NumericTensor;
-use whisper_tensor::model::Model;
 use whisper_tensor::pool::SystemPool;
 use whisper_tensor_import::models::diffusion::sd2;
 use whisper_tensor_import::onnx_graph::WeightStorageStrategy;
@@ -101,11 +101,7 @@ fn main() {
         let timestep = make_f32_tensor(&[999.0f32], vec![1], &pool);
 
         // Dummy context (1024-dim for SD 2)
-        let context = make_f32_tensor(
-            &vec![0.0f32; 77 * 1024],
-            vec![1, 77, 1024],
-            &pool,
-        );
+        let context = make_f32_tensor(&vec![0.0f32; 77 * 1024], vec![1, 77, 1024], &pool);
 
         let latent_view = latent.view();
         let timestep_view = timestep.view();

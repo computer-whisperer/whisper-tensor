@@ -2,10 +2,10 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Instant;
 use whisper_tensor::DynRank;
+use whisper_tensor::loader::{ConfigValue, ConfigValues, Loader};
 use whisper_tensor::numeric_dtype::NumericDType;
 use whisper_tensor::numeric_scalar::NumericScalar;
 use whisper_tensor::numeric_tensor::NumericTensor;
-use whisper_tensor::loader::{ConfigValue, ConfigValues, Loader};
 use whisper_tensor::pool::SystemPool;
 use whisper_tensor_import::loaders::SD15Loader;
 

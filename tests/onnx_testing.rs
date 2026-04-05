@@ -296,9 +296,7 @@ fn parse_tensors_as_onnx<'p, P: Pool + 'p>(
             let proto_size = proto_dtype
                 .and_then(|d| d.as_numeric())
                 .map(|d| d.bytes_per_element());
-            let expected_size = expected_dtype
-                .as_numeric()
-                .map(|d| d.bytes_per_element());
+            let expected_size = expected_dtype.as_numeric().map(|d| d.bytes_per_element());
             if tensor_proto.data_type != expected_onnx
                 && expected_size.is_some()
                 && expected_size == proto_size
