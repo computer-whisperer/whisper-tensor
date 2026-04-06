@@ -270,10 +270,8 @@ fn classify_group(
         // IndirectLoad: each lookup is independent, split freely.
         ScalarOp::IndirectLoad { .. } => GroupKind::Split,
 
-        // Reduce: depends on what it's reducing over.
-        ScalarOp::OpaqueOutput { .. } => {
-            todo!("opaque ops not supported in compiler")
-        }
+        // Opaque ops: can't be split — the eval function sees the whole tensor.
+        ScalarOp::OpaqueOutput { .. } => GroupKind::Whole,
 
         ScalarOp::Reduce {
             reduce_count,
@@ -884,10 +882,26 @@ pub fn plan(
     }
 
     // Step 5: Collect output group indices for determining span outputs.
-    let output_group_set: HashSet<usize> = output_atom_ids
-        .iter()
-        .filter_map(|range| graph.find_group_idx(range.base))
-        .collect();
+    // Each output range may span multiple groups (e.g., pad output =
+    // literal + identity + literal), so we walk through all groups
+    // overlapping each range, not just the group at range.base.
+    let output_group_set: HashSet<usize> = {
+        let groups = graph.groups();
+        let mut set = HashSet::new();
+        for range in output_atom_ids {
+            let range_lo = range.base.0;
+            let range_hi = range_lo + range.count;
+            // Walk groups that overlap [range_lo, range_hi).
+            for (gi, group) in groups.iter().enumerate() {
+                let g_lo = group.base_id.0;
+                let g_hi = g_lo + group.count;
+                if g_lo < range_hi && g_hi > range_lo {
+                    set.insert(gi);
+                }
+            }
+        }
+        set
+    };
 
     // Track which groups are consumed by groups in later phases.
     let mut cross_phase_consumed: HashSet<usize> = HashSet::new();
@@ -956,10 +970,11 @@ fn build_phase(
     let mut span_inputs: Vec<Vec<AtomRange>> = (0..num_lanes).map(|_| Vec::new()).collect();
     let mut span_outputs: Vec<Vec<AtomRange>> = (0..num_lanes).map(|_| Vec::new()).collect();
 
-    // Copy sym_dim metadata into each span graph.
+    // Copy metadata into each span graph.
     for sg in &mut span_graphs {
         sg.sym_dim_names = graph.sym_dim_names.clone();
         sg.sym_dim_bounds = graph.sym_dim_bounds.clone();
+        sg.set_opaque_ops(graph.opaque_ops().to_vec());
     }
 
     // Track which atom ranges have been declared as inputs in each span.

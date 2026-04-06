@@ -1128,7 +1128,10 @@ fn main() {
 
 /// Look up a single atom's f64 value in a PhaseStore.
 fn lookup_atom_in_store(
-    store: &whisper_tensor::compiler::attempts::v14::executor::PhaseStore<'_, impl whisper_tensor::pool::Pool>,
+    store: &whisper_tensor::compiler::attempts::v14::executor::PhaseStore<
+        '_,
+        impl whisper_tensor::pool::Pool,
+    >,
     atom: u64,
 ) -> Option<f64> {
     use whisper_tensor::nano_graph::AtomId;

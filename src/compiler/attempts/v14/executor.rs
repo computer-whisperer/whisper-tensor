@@ -66,6 +66,127 @@ pub trait CompiledSpanFn: Send + Sync {
     fn execute(&self, inputs: &[StoreSlice<'_>], outputs: &mut [SpanOutput<'_>]);
 }
 
+// ─── Pool-eval fallback span ────────────────────────────────────────────────
+
+/// A span that evaluates its NanoGraph via pool_eval instead of JIT.
+///
+/// Used for spans containing opaque ops (or any ops the JIT can't compile).
+/// The NanoGraph fragment and its declared I/O ranges are carried verbatim
+/// from the partitioner.
+pub struct PoolEvalSpan {
+    graph: crate::nano_graph::pattern::NanoGraph<'static, crate::pool::SystemPool>,
+    inputs: Vec<crate::nano_graph::AtomRange>,
+    outputs: Vec<crate::nano_graph::AtomRange>,
+}
+
+impl PoolEvalSpan {
+    pub fn new(
+        graph: crate::nano_graph::pattern::NanoGraph<'static, crate::pool::SystemPool>,
+        inputs: Vec<crate::nano_graph::AtomRange>,
+        outputs: Vec<crate::nano_graph::AtomRange>,
+    ) -> Self {
+        Self {
+            graph,
+            inputs,
+            outputs,
+        }
+    }
+}
+
+impl CompiledSpanFn for PoolEvalSpan {
+    fn execute(&self, inputs: &[StoreSlice<'_>], outputs: &mut [SpanOutput<'_>]) {
+        use crate::nano_graph::lower::TensorAtomMapInfo;
+        use crate::nano_graph::pool_eval;
+        use crate::numeric_tensor::{NumericTensor, NumericTensorView, TensorLayout};
+        use crate::pool::SystemPool;
+
+        static SYS: SystemPool = SystemPool;
+
+        // Build input TAMIs and views from the StoreSlices.
+        // Each declared input range becomes a flat 1D TAMI.
+        let mut input_tamis: Vec<TensorAtomMapInfo> = Vec::new();
+        let mut input_tensors: Vec<NumericTensor<'_, DynRank, SystemPool>> = Vec::new();
+
+        for range in &self.inputs {
+            let tami = TensorAtomMapInfo {
+                base_id: range.base,
+                count: range.count,
+                dtype: range.dtype,
+                sym_dims: vec![],
+                known_strides: vec![1],
+                known_dims: vec![range.count],
+                segments: vec![],
+            };
+
+            // Find the matching StoreSlice(s) for this range.
+            let bpe = range.dtype.bytes_per_element();
+            let needed_bytes = range.count as usize * bpe;
+            let layout = jit_flat_layout(range.count, range.dtype);
+            let mut buf = SYS
+                .allocate(layout.buffer_size_bytes().max(needed_bytes))
+                .expect("pool_eval span: alloc failed");
+
+            // Gather data from input slices that overlap this range.
+            let range_lo = range.base.0;
+            let range_hi = range_lo + range.count;
+            for slice in inputs {
+                let s_lo = slice.base.0;
+                let s_hi = s_lo + slice.count;
+                // Compute overlap.
+                let overlap_lo = range_lo.max(s_lo);
+                let overlap_hi = range_hi.min(s_hi);
+                if overlap_lo >= overlap_hi {
+                    continue;
+                }
+                let dst_off = (overlap_lo - range_lo) as usize * bpe;
+                let src_off = (overlap_lo - s_lo) as usize * bpe;
+                let copy_bytes = (overlap_hi - overlap_lo) as usize * bpe;
+                if src_off + copy_bytes <= slice.data.len() && dst_off + copy_bytes <= buf.len() {
+                    buf[dst_off..dst_off + copy_bytes]
+                        .copy_from_slice(&slice.data[src_off..src_off + copy_bytes]);
+                }
+            }
+
+            let tensor = NumericTensor::from_parts(buf, layout);
+            input_tamis.push(tami);
+            input_tensors.push(tensor);
+        }
+
+        // Build (TAMI, view) pairs for pool_eval.
+        let input_views: Vec<NumericTensorView<'_, DynRank>> =
+            input_tensors.iter().map(|t| t.view()).collect();
+        let eval_inputs: Vec<(&TensorAtomMapInfo, &NumericTensorView<'_, DynRank>)> =
+            input_tamis.iter().zip(input_views.iter()).collect();
+
+        // Build output TAMIs.
+        let output_tamis: Vec<TensorAtomMapInfo> = self
+            .outputs
+            .iter()
+            .map(|r| TensorAtomMapInfo {
+                base_id: r.base,
+                count: r.count,
+                dtype: r.dtype,
+                sym_dims: vec![],
+                known_strides: vec![1],
+                known_dims: vec![r.count],
+                segments: vec![],
+            })
+            .collect();
+        let output_tami_refs: Vec<&TensorAtomMapInfo> = output_tamis.iter().collect();
+
+        // Run pool_eval.
+        let results = pool_eval::pool_eval(&self.graph, &eval_inputs, &output_tami_refs, &SYS)
+            .expect("pool_eval span: eval failed");
+
+        // Copy results into the pre-allocated output buffers.
+        for (out_buf, result_tensor) in outputs.iter_mut().zip(results.iter()) {
+            let src = result_tensor.buffer();
+            let copy = src.len().min(out_buf.data.len());
+            out_buf.data[..copy].copy_from_slice(&src[..copy]);
+        }
+    }
+}
+
 // ─── Phase store ────────────────────────────────────────────────────────────
 
 /// Inter-phase value store with liveness-based eviction.
@@ -109,7 +230,13 @@ impl<'p, P: Pool + 'p> PhaseStore<'p, P> {
         if pos < self.entries.len() && self.entries[pos].base == base.0 {
             self.entries[pos].tensor = tensor;
         } else {
-            self.entries.insert(pos, StoreEntry { base: base.0, tensor });
+            self.entries.insert(
+                pos,
+                StoreEntry {
+                    base: base.0,
+                    tensor,
+                },
+            );
         }
     }
 
@@ -431,13 +558,18 @@ fn execute_lane<'p, P: Pool + 'p>(
         .flat_map(|range| store.gather(range.base, range.count))
         .collect();
 
-    // Pre-allocate output tensors.
+    // Pre-allocate output tensors with byte-aligned layout.
+    // JIT writes one byte per sub-byte element (e.g. BOOL), so use
+    // bytes_per_element for stride rather than total_bits.
     let mut output_tensors: Vec<NumericTensor<'p, DynRank, P>> = lane
         .outputs
         .iter()
         .map(|r| {
-            NumericTensor::zeros(vec![r.count], r.dtype, pool)
-                .expect("failed to allocate output tensor")
+            let layout = jit_flat_layout(r.count, r.dtype);
+            let buf = pool
+                .allocate(layout.buffer_size_bytes())
+                .expect("failed to allocate output tensor");
+            NumericTensor::from_parts(buf, layout)
         })
         .collect();
 
@@ -465,6 +597,21 @@ fn execute_lane<'p, P: Pool + 'p>(
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
+
+/// Create a flat 1D tensor layout with byte-aligned element strides.
+///
+/// The JIT writes one byte per element for sub-byte dtypes (e.g. BOOL), so the
+/// stride must be `bytes_per_element * 8` bits, not `total_bits`. For types ≥ 8
+/// bits this is identical to `row_major`.
+pub(crate) fn jit_flat_layout(count: u64, dtype: NumericDType) -> TensorLayout<DynRank> {
+    let stride_bits = dtype.bytes_per_element() as u64 * 8;
+    TensorLayout::<DynRank>::ElementStrided {
+        shape: vec![count],
+        dtype,
+        strides: vec![stride_bits],
+        offset_bits: 0,
+    }
+}
 
 fn read_rss_mb() -> f64 {
     std::fs::read_to_string("/proc/self/statm")

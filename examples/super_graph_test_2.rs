@@ -45,7 +45,15 @@ fn main() {
 
     for _ in 0..10 {
         let res = interface
-            .run_string_in_string_out(model, context.clone(), &mut tokenizer_cache, None, Default::default(), &mut (), &pool)
+            .run_string_in_string_out(
+                model,
+                context.clone(),
+                &mut tokenizer_cache,
+                None,
+                Default::default(),
+                &mut (),
+                &pool,
+            )
             .unwrap();
         print!("{res:}");
         std::io::stdout().flush().unwrap();

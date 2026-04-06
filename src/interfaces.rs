@@ -82,6 +82,7 @@ pub struct TextInferenceTokensInLogitOutInterface {
 }
 
 impl TextInferenceTokensInLogitOutInterface {
+    #[allow(clippy::too_many_arguments)]
     pub fn run_string_in_string_out<'p, P: Pool + 'p>(
         &self,
         model: &Model,
@@ -184,6 +185,7 @@ pub struct MultimodalLanguageInterface {
 }
 
 impl MultimodalLanguageInterface {
+    #[allow(clippy::too_many_arguments)]
     pub fn run_string_with_modal_inputs_in_string_out<'p, P: Pool + 'p>(
         &self,
         model: &Model,
@@ -248,6 +250,7 @@ impl MultimodalLanguageInterface {
         Ok(token_str)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn run_string_in_string_out<'p, P: Pool + 'p>(
         &self,
         model: &Model,

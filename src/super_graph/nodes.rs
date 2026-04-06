@@ -765,10 +765,7 @@ impl SuperGraphNodeModelExecution {
                 None => return Ok(None),
             };
             let dt = t0.elapsed();
-            eprintln!(
-                "[compiled_eval] lowered in {:.0}ms",
-                dt.as_secs_f64() * 1e3,
-            );
+            eprintln!("[compiled_eval] lowered in {:.0}ms", dt.as_secs_f64() * 1e3,);
 
             if let Some(caches) = &mut context.caches {
                 caches.lowered_model_cache.insert(sym_graph_id, cached);

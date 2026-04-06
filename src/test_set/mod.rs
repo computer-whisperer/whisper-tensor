@@ -417,6 +417,104 @@ pub fn run_case_via_graph_pool_eval(case: &TestCase) -> Result<(), String> {
     Ok(())
 }
 
+/// Run all data sets of a test case through the compiled (JIT) eval path.
+///
+/// Flow: MilliOpGraph → lower_to_nano → compile_nano_graph → execute → compare
+///
+/// Tests both the trivial plan (JIT_LANES=0, bit-perfect) and optionally the
+/// partitioned plan to catch partitioner accuracy regressions.
+#[cfg(feature = "cranelift")]
+pub fn run_case_via_compiled_eval(case: &TestCase, num_lanes: usize) -> Result<(), String> {
+    use crate::nano_graph::lower;
+    use crate::pool::TrackedPool;
+    use crate::super_graph::compiled_eval;
+    use crate::tensor_info::TensorInfo;
+
+    for ds in &case.data_sets {
+        // Build TensorInfo for each input (needed by lower).
+        let info_inputs: HashMap<GlobalId, TensorInfo<'_, '_, crate::pool::SystemPool>> = ds
+            .inputs
+            .iter()
+            .map(|(&id, t)| {
+                (
+                    id,
+                    TensorInfo::from_view(&t.view(), &crate::pool::SystemPool),
+                )
+            })
+            .collect();
+
+        // Lower MilliOpGraph → NanoGraph.
+        let lower_result = lower::lower(&case.graph, &info_inputs, &crate::pool::SystemPool)
+            .map_err(|e| format!("{}[{}]: lower failed: {e}", case.name, ds.label))?;
+
+        if !lower_result.unsupported.is_empty() {
+            return Err(format!(
+                "{}[{}]: unsupported ops: {:?}",
+                case.name, ds.label, lower_result.unsupported_details
+            ));
+        }
+
+        // Build output IDs (internal IDs — set_outputs makes ext == internal).
+        let output_ids: Vec<GlobalId> = case.graph.output_ordering.clone().unwrap_or_default();
+
+        // Build output atom ranges from TAMIs.
+        let (output_ranges, output_shapes, all_output_atom_ranges) =
+            compiled_eval::build_output_ranges(
+                &lower_result.graph,
+                &lower_result.tensor_map,
+                &output_ids,
+                |id| *id, // test graphs: ext == internal for outputs
+            );
+
+        // Compile the NanoGraph.
+        let (executable_plan, _compile_errors) = compiled_eval::compile_nano_graph(
+            &lower_result.graph,
+            &all_output_atom_ranges,
+            num_lanes,
+        )
+        .map_err(|e| format!("{}[{}]: compile failed: {e}", case.name, ds.label))?;
+
+        // Prepare inputs.
+        let input_views: Vec<_> = ds.inputs.iter().map(|(&id, t)| (id, t.view())).collect();
+        let input_view_refs: Vec<(GlobalId, &NumericTensorView<'_, DynRank>)> =
+            input_views.iter().map(|(id, v)| (*id, v)).collect();
+
+        let pool = TrackedPool::new(None);
+        let initial_inputs = compiled_eval::prepare_compiled_inputs(
+            &input_view_refs,
+            &case.graph.input_map,
+            &lower_result.tensor_map,
+            &pool,
+        )
+        .map_err(|e| format!("{}[{}]: prepare inputs failed: {e}", case.name, ds.label))?;
+
+        // Execute.
+        let store = executable_plan.execute(initial_inputs, &pool);
+
+        // Extract outputs.
+        let results = compiled_eval::extract_outputs(&output_ranges, &output_shapes, &store, &pool)
+            .map_err(|e| format!("{}[{}]: extract outputs failed: {e}", case.name, ds.label))?;
+
+        // Compare.
+        for (out_id, expected_tensor) in &ds.expected_outputs {
+            let actual = results.get(out_id).ok_or_else(|| {
+                format!(
+                    "{}[{}]: output {out_id:?} not in compiled results",
+                    case.name, ds.label
+                )
+            })?;
+            let lanes_label = if num_lanes == 0 {
+                "trivial"
+            } else {
+                "partitioned"
+            };
+            let ctx = format!("{}[{}] compiled_eval({})", case.name, ds.label, lanes_label);
+            assert_tensors_close(&actual.view(), &expected_tensor.view(), &ds.tolerance, &ctx)?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -449,5 +547,67 @@ mod tests {
             "{} test cases ({total_data_sets} data sets) passed via graph pool eval",
             cases.len()
         );
+    }
+
+    /// JIT compiled eval with trivial plan (1 phase, no partitioning).
+    /// Should be bit-perfect vs pool_eval.
+    #[test]
+    #[cfg(feature = "cranelift")]
+    fn test_all_cases_via_compiled_eval_trivial() {
+        let cases = build_test_set();
+        assert!(!cases.is_empty(), "test set should not be empty");
+        let mut failures = Vec::new();
+        let mut total_data_sets = 0;
+        for case in &cases {
+            match run_case_via_compiled_eval(case, 0) {
+                Ok(()) => {}
+                Err(e) => failures.push(e),
+            }
+            total_data_sets += case.data_sets.len();
+        }
+        if failures.is_empty() {
+            eprintln!(
+                "{} test cases ({total_data_sets} data sets) passed via compiled eval (trivial)",
+                cases.len()
+            );
+        } else {
+            panic!(
+                "{} of {} test cases failed via compiled eval (trivial):\n{}",
+                failures.len(),
+                cases.len(),
+                failures.join("\n"),
+            );
+        }
+    }
+
+    /// JIT compiled eval with partitioned plan (8 lanes).
+    /// Tests partitioner correctness — should match within dtype tolerance.
+    #[test]
+    #[cfg(feature = "cranelift")]
+    fn test_all_cases_via_compiled_eval_partitioned() {
+        let cases = build_test_set();
+        assert!(!cases.is_empty(), "test set should not be empty");
+        let mut failures = Vec::new();
+        let mut total_data_sets = 0;
+        for case in &cases {
+            match run_case_via_compiled_eval(case, 8) {
+                Ok(()) => {}
+                Err(e) => failures.push(e),
+            }
+            total_data_sets += case.data_sets.len();
+        }
+        if failures.is_empty() {
+            eprintln!(
+                "{} test cases ({total_data_sets} data sets) passed via compiled eval (partitioned)",
+                cases.len()
+            );
+        } else {
+            panic!(
+                "{} of {} test cases failed via compiled eval (partitioned):\n{}",
+                failures.len(),
+                cases.len(),
+                failures.join("\n"),
+            );
+        }
     }
 }

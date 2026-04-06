@@ -414,6 +414,11 @@ impl<'p, P: Pool + 'p> NanoGraph<'p, P> {
         &self.opaque_ops
     }
 
+    /// Set the opaque ops list (used by the partitioner to copy from the main graph).
+    pub fn set_opaque_ops(&mut self, ops: Vec<super::ops::OpaqueOp>) {
+        self.opaque_ops = ops;
+    }
+
     /// Register or retrieve a symbolic dimension by name.
     pub fn sym_dim(&mut self, name: &str) -> SymDim {
         if let Some(&sd) = self.sym_dim_names.get(name) {

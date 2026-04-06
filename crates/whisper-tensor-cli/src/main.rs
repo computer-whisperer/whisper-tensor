@@ -606,7 +606,11 @@ fn cmd_image(
             vec![1, channels, latent_h, latent_w],
             steps,
             guidance_scale,
-            if eval.disable_cache { None } else { Some(&mut super_graph_caches) },
+            if eval.disable_cache {
+                None
+            } else {
+                Some(&mut super_graph_caches)
+            },
             eval_options,
             &mut observer,
             &pool,
@@ -826,7 +830,11 @@ fn cmd_tts(output: LoaderOutput, opts: TtsRunOptions, eval: EvalArgs) {
         let mut context = SuperGraphContext {
             pool: &pool,
             observer: &mut observer,
-            caches: if eval.disable_cache { None } else { Some(&mut super_graph_caches) },
+            caches: if eval.disable_cache {
+                None
+            } else {
+                Some(&mut super_graph_caches)
+            },
             symbolic_graphs,
             eval_options,
         };
@@ -975,7 +983,11 @@ fn cmd_stt(output: LoaderOutput, audio_path: PathBuf, _model_dir: Option<PathBuf
         let mut context = SuperGraphContext {
             pool: &pool,
             observer: &mut observer,
-            caches: if eval.disable_cache { None } else { Some(&mut super_graph_caches) },
+            caches: if eval.disable_cache {
+                None
+            } else {
+                Some(&mut super_graph_caches)
+            },
             symbolic_graphs,
             eval_options,
         };

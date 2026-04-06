@@ -25,7 +25,7 @@
 //! but the output must be representative of the specified dtype.
 //!
 //! Two Cranelift "representation kinds" carry values through the IR:
-//! - `types::F32` for float dtypes (F32, BF16, F16, F64)
+//! - `types::F32` for F32/BF16/F16 dtypes, `types::F64` for F64
 //! - `types::I64` for integer dtypes (I64, I32, BOOL, U8, I8)
 
 use std::collections::{HashMap, HashSet};
@@ -672,6 +672,7 @@ extern "C" fn jit_fmodf(x: f32, y: f32) -> f32 {
 }
 
 struct MathFuncs {
+    // F32 variants
     expf: cranelift_module::FuncId,
     logf: cranelift_module::FuncId,
     tanhf: cranelift_module::FuncId,
@@ -681,6 +682,55 @@ struct MathFuncs {
     fabsf: cranelift_module::FuncId,
     powf: cranelift_module::FuncId,
     fmodf: cranelift_module::FuncId,
+    // F64 variants
+    exp: cranelift_module::FuncId,
+    log: cranelift_module::FuncId,
+    tanh: cranelift_module::FuncId,
+    pow: cranelift_module::FuncId,
+    fmod: cranelift_module::FuncId,
+}
+
+impl MathFuncs {
+    /// Get the function ID for a unary math op at the given float precision.
+    fn unary(&self, name: &str, repr: ReprKind) -> Option<cranelift_module::FuncId> {
+        match (name, repr) {
+            ("exp", ReprKind::F32) => Some(self.expf),
+            ("exp", ReprKind::F64) => Some(self.exp),
+            ("log", ReprKind::F32) => Some(self.logf),
+            ("log", ReprKind::F64) => Some(self.log),
+            ("tanh", ReprKind::F32) => Some(self.tanhf),
+            ("tanh", ReprKind::F64) => Some(self.tanh),
+            _ => None,
+        }
+    }
+
+    /// Get the function ID for a binary math op at the given float precision.
+    fn binary(&self, name: &str, repr: ReprKind) -> Option<cranelift_module::FuncId> {
+        match (name, repr) {
+            ("pow", ReprKind::F32) => Some(self.powf),
+            ("pow", ReprKind::F64) => Some(self.pow),
+            ("fmod", ReprKind::F32) => Some(self.fmodf),
+            ("fmod", ReprKind::F64) => Some(self.fmod),
+            _ => None,
+        }
+    }
+}
+
+// F64 math wrappers.
+extern "C" fn jit_exp(x: f64) -> f64 {
+    x.exp()
+}
+extern "C" fn jit_log(x: f64) -> f64 {
+    x.ln()
+}
+extern "C" fn jit_tanh(x: f64) -> f64 {
+    x.tanh()
+}
+extern "C" fn jit_pow(x: f64, y: f64) -> f64 {
+    x.powf(y)
+}
+extern "C" fn jit_fmod(x: f64, y: f64) -> f64 {
+    x % y
 }
 
 fn register_math_symbols(jit_builder: &mut JITBuilder) {
@@ -693,17 +743,32 @@ fn register_math_symbols(jit_builder: &mut JITBuilder) {
     jit_builder.symbol("jit_fabsf", jit_fabsf as *const u8);
     jit_builder.symbol("jit_powf", jit_powf as *const u8);
     jit_builder.symbol("jit_fmodf", jit_fmodf as *const u8);
+    // F64
+    jit_builder.symbol("jit_exp", jit_exp as *const u8);
+    jit_builder.symbol("jit_log", jit_log as *const u8);
+    jit_builder.symbol("jit_tanh", jit_tanh as *const u8);
+    jit_builder.symbol("jit_pow", jit_pow as *const u8);
+    jit_builder.symbol("jit_fmod", jit_fmod as *const u8);
 }
 
 fn declare_math_funcs(module: &mut JITModule) -> Result<MathFuncs, String> {
-    let mut sig1 = module.make_signature();
-    sig1.params.push(AbiParam::new(types::F32));
-    sig1.returns.push(AbiParam::new(types::F32));
+    let mut sig1_f32 = module.make_signature();
+    sig1_f32.params.push(AbiParam::new(types::F32));
+    sig1_f32.returns.push(AbiParam::new(types::F32));
 
-    let mut sig2 = module.make_signature();
-    sig2.params.push(AbiParam::new(types::F32));
-    sig2.params.push(AbiParam::new(types::F32));
-    sig2.returns.push(AbiParam::new(types::F32));
+    let mut sig2_f32 = module.make_signature();
+    sig2_f32.params.push(AbiParam::new(types::F32));
+    sig2_f32.params.push(AbiParam::new(types::F32));
+    sig2_f32.returns.push(AbiParam::new(types::F32));
+
+    let mut sig1_f64 = module.make_signature();
+    sig1_f64.params.push(AbiParam::new(types::F64));
+    sig1_f64.returns.push(AbiParam::new(types::F64));
+
+    let mut sig2_f64 = module.make_signature();
+    sig2_f64.params.push(AbiParam::new(types::F64));
+    sig2_f64.params.push(AbiParam::new(types::F64));
+    sig2_f64.returns.push(AbiParam::new(types::F64));
 
     let decl = |m: &mut JITModule, name: &str, sig: &cranelift_codegen::ir::Signature| {
         m.declare_function(name, Linkage::Import, sig)
@@ -711,15 +776,20 @@ fn declare_math_funcs(module: &mut JITModule) -> Result<MathFuncs, String> {
     };
 
     Ok(MathFuncs {
-        expf: decl(module, "jit_expf", &sig1)?,
-        logf: decl(module, "jit_logf", &sig1)?,
-        tanhf: decl(module, "jit_tanhf", &sig1)?,
-        sqrtf: decl(module, "jit_sqrtf", &sig1)?,
-        floorf: decl(module, "jit_floorf", &sig1)?,
-        ceilf: decl(module, "jit_ceilf", &sig1)?,
-        fabsf: decl(module, "jit_fabsf", &sig1)?,
-        powf: decl(module, "jit_powf", &sig2)?,
-        fmodf: decl(module, "jit_fmodf", &sig2)?,
+        expf: decl(module, "jit_expf", &sig1_f32)?,
+        logf: decl(module, "jit_logf", &sig1_f32)?,
+        tanhf: decl(module, "jit_tanhf", &sig1_f32)?,
+        sqrtf: decl(module, "jit_sqrtf", &sig1_f32)?,
+        floorf: decl(module, "jit_floorf", &sig1_f32)?,
+        ceilf: decl(module, "jit_ceilf", &sig1_f32)?,
+        fabsf: decl(module, "jit_fabsf", &sig1_f32)?,
+        powf: decl(module, "jit_powf", &sig2_f32)?,
+        fmodf: decl(module, "jit_fmodf", &sig2_f32)?,
+        exp: decl(module, "jit_exp", &sig1_f64)?,
+        log: decl(module, "jit_log", &sig1_f64)?,
+        tanh: decl(module, "jit_tanh", &sig1_f64)?,
+        pow: decl(module, "jit_pow", &sig2_f64)?,
+        fmod: decl(module, "jit_fmod", &sig2_f64)?,
     })
 }
 
@@ -1438,8 +1508,8 @@ fn emit_group_body_forwarded(
                 forwarded_or_slot_repr(&group.inputs[0], layout, group.atom_offset, forwarded);
 
             let is_nonzero = match cond_repr {
-                ReprKind::Float => {
-                    let zero = builder.ins().f32const(0.0);
+                ReprKind::F32 | ReprKind::F64 => {
+                    let zero = emit_float_zero(builder, cond_repr);
                     builder.ins().fcmp(FloatCC::NotEqual, cond, zero)
                 }
                 ReprKind::Int => {
@@ -1556,8 +1626,7 @@ fn emit_store_load_roundtrip(
             val
         }
         NumericDType::F64 => {
-            // Store: f64 store. Load: f64 load → fdemote to f32.
-            // Round-trip: promote f32→f64→fdemote f64→f32 = f32 (no-op if already f32)
+            // F64 stays in F64 repr — no truncation, no round-trip needed.
             val
         }
         NumericDType::I32 => {
@@ -1607,7 +1676,7 @@ fn forwarded_or_slot_repr(
     }
     input_slot_dtype(input, layout, atom_offset)
         .map(repr_of)
-        .unwrap_or(ReprKind::Float)
+        .unwrap_or(ReprKind::F32)
 }
 
 /// Load an input value, checking the forwarding map first.
@@ -1987,7 +2056,7 @@ fn emit_group_body(
             )?;
             let src_repr = input_slot_dtype(&group.inputs[0], layout, group.atom_offset)
                 .map(repr_of)
-                .unwrap_or(ReprKind::Float);
+                .unwrap_or(ReprKind::F32);
             let result = emit_cast_to_output(builder, src, src_repr, output_dtype);
             store_result(
                 builder,
@@ -2096,11 +2165,11 @@ fn emit_group_body(
             )?;
             let cond_repr = input_slot_dtype(&group.inputs[0], layout, group.atom_offset)
                 .map(repr_of)
-                .unwrap_or(ReprKind::Float);
+                .unwrap_or(ReprKind::F32);
 
             let is_nonzero = match cond_repr {
-                ReprKind::Float => {
-                    let zero = builder.ins().f32const(0.0);
+                ReprKind::F32 | ReprKind::F64 => {
+                    let zero = emit_float_zero(builder, cond_repr);
                     builder.ins().fcmp(FloatCC::NotEqual, cond, zero)
                 }
                 ReprKind::Int => {
@@ -2552,35 +2621,80 @@ fn addr_const(builder: &mut FunctionBuilder, buffer_ptr: Value, byte_off: i64) -
 
 // ─── Representation kinds ───────────────────────────────────────────────────
 
-/// Whether a Cranelift value is floating-point or integer.
+/// Cranelift compute representation for a value.
+///
+/// Maps dtype semantics to Cranelift types:
+/// - F64 dtypes compute in `types::F64` to preserve full precision.
+/// - F32/BF16/F16 compute in `types::F32` (hardware promotes half→F32, computes, stores back).
+/// - All integer dtypes compute in `types::I64`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum ReprKind {
-    Float, // types::F32
-    Int,   // types::I64
+    F32, // types::F32
+    F64, // types::F64
+    Int, // types::I64
+}
+
+impl ReprKind {
+    fn is_float(self) -> bool {
+        matches!(self, ReprKind::F32 | ReprKind::F64)
+    }
+
+    fn cranelift_type(self) -> types::Type {
+        match self {
+            ReprKind::F32 => types::F32,
+            ReprKind::F64 => types::F64,
+            ReprKind::Int => types::I64,
+        }
+    }
+}
+
+/// Emit a float zero constant matching the given repr.
+fn emit_float_zero(builder: &mut FunctionBuilder, repr: ReprKind) -> Value {
+    match repr {
+        ReprKind::F32 => builder.ins().f32const(0.0),
+        ReprKind::F64 => builder.ins().f64const(0.0),
+        ReprKind::Int => unreachable!("emit_float_zero on Int repr"),
+    }
+}
+
+/// Emit a float constant matching the given repr.
+fn emit_float_const(builder: &mut FunctionBuilder, repr: ReprKind, val: f64) -> Value {
+    match repr {
+        ReprKind::F32 => builder.ins().f32const(val as f32),
+        ReprKind::F64 => builder.ins().f64const(val),
+        ReprKind::Int => unreachable!("emit_float_const on Int repr"),
+    }
 }
 
 /// Map a NumericDType to its Cranelift representation kind.
 fn repr_of(dtype: NumericDType) -> ReprKind {
     match dtype {
-        NumericDType::F32 | NumericDType::BF16 | NumericDType::F16 | NumericDType::F64 => {
-            ReprKind::Float
-        }
+        NumericDType::F64 => ReprKind::F64,
+        NumericDType::F32 | NumericDType::BF16 | NumericDType::F16 => ReprKind::F32,
         _ => ReprKind::Int,
     }
 }
 
 /// Emit a cast between Cranelift representation kinds.
-/// If from == to, returns val unchanged. Otherwise converts f32↔i64.
+/// If from == to, returns val unchanged. Otherwise promotes/demotes/converts.
 fn emit_repr_cast(
     builder: &mut FunctionBuilder,
     val: Value,
     from: ReprKind,
     to: ReprKind,
 ) -> Value {
+    if from == to {
+        return val;
+    }
     match (from, to) {
-        (ReprKind::Float, ReprKind::Float) | (ReprKind::Int, ReprKind::Int) => val,
-        (ReprKind::Float, ReprKind::Int) => builder.ins().fcvt_to_sint_sat(types::I64, val),
-        (ReprKind::Int, ReprKind::Float) => builder.ins().fcvt_from_sint(types::F32, val),
+        (ReprKind::F32, ReprKind::F64) => builder.ins().fpromote(types::F64, val),
+        (ReprKind::F64, ReprKind::F32) => builder.ins().fdemote(types::F32, val),
+        (ReprKind::F32 | ReprKind::F64, ReprKind::Int) => {
+            builder.ins().fcvt_to_sint_sat(types::I64, val)
+        }
+        (ReprKind::Int, ReprKind::F32) => builder.ins().fcvt_from_sint(types::F32, val),
+        (ReprKind::Int, ReprKind::F64) => builder.ins().fcvt_from_sint(types::F64, val),
+        _ => val, // same kind
     }
 }
 
@@ -2608,9 +2722,9 @@ fn emit_cast_to_output(
                     let zero8 = builder.ins().iconst(types::I8, 0);
                     builder.ins().select(is_nz, one, zero8)
                 }
-                ReprKind::Float => {
+                ReprKind::F32 | ReprKind::F64 => {
                     // Shouldn't happen after repr_cast, but handle defensively.
-                    let zero = builder.ins().f32const(0.0);
+                    let zero = emit_float_zero(builder, target_repr);
                     let is_nz = builder.ins().fcmp(FloatCC::NotEqual, val, zero);
                     let one = builder.ins().iconst(types::I8, 1);
                     let zero8 = builder.ins().iconst(types::I8, 0);
@@ -2647,10 +2761,7 @@ fn emit_typed_load(builder: &mut FunctionBuilder, addr: Value, dtype: NumericDTy
             let shifted = builder.ins().ishl_imm(wide, 16);
             builder.ins().bitcast(types::F32, MemFlags::new(), shifted)
         }
-        NumericDType::F64 => {
-            let raw = builder.ins().load(types::F64, MemFlags::trusted(), addr, 0);
-            builder.ins().fdemote(types::F32, raw)
-        }
+        NumericDType::F64 => builder.ins().load(types::F64, MemFlags::trusted(), addr, 0),
         NumericDType::I64 => builder.ins().load(types::I64, MemFlags::trusted(), addr, 0),
         NumericDType::I32 => {
             let raw = builder.ins().load(types::I32, MemFlags::trusted(), addr, 0);
@@ -2707,6 +2818,11 @@ fn emit_typed_store(builder: &mut FunctionBuilder, addr: Value, val: Value, dtyp
         }
         NumericDType::BOOL | NumericDType::U8 | NumericDType::I8 => {
             builder.ins().store(MemFlags::trusted(), val, addr, 0); // val is i8
+        }
+        NumericDType::F64 => {
+            // val is f32 (JIT internal repr); promote to f64 for 8-byte store.
+            let wide = builder.ins().fpromote(types::F64, val);
+            builder.ins().store(MemFlags::trusted(), wide, addr, 0);
         }
         _ => {
             builder.ins().store(MemFlags::trusted(), val, addr, 0);
@@ -2796,14 +2912,13 @@ fn emit_reduce(
 
     // Accumulator variable — type depends on compute_repr.
     let acc_var = var_counter.next();
-    let acc_cl_type = match compute_repr {
-        ReprKind::Float => types::F32,
-        ReprKind::Int => types::I64,
-    };
+    let acc_cl_type = compute_repr.cranelift_type();
     builder.declare_var(acc_var, acc_cl_type);
     let init = match (is_sum, compute_repr) {
-        (true, ReprKind::Float) => builder.ins().f32const(0.0),
-        (false, ReprKind::Float) => builder.ins().f32const(f32::NEG_INFINITY),
+        (true, ReprKind::F32) => builder.ins().f32const(0.0),
+        (true, ReprKind::F64) => builder.ins().f64const(0.0),
+        (false, ReprKind::F32) => builder.ins().f32const(f32::NEG_INFINITY),
+        (false, ReprKind::F64) => builder.ins().f64const(f64::NEG_INFINITY),
         (true, ReprKind::Int) => builder.ins().iconst(types::I64, 0),
         (false, ReprKind::Int) => builder.ins().iconst(types::I64, i64::MIN),
     };
@@ -2852,8 +2967,8 @@ fn emit_reduce(
 
     let acc = builder.use_var(acc_var);
     let new_acc = match (is_sum, compute_repr) {
-        (true, ReprKind::Float) => builder.ins().fadd(acc, src_val),
-        (false, ReprKind::Float) => {
+        (true, ReprKind::F32 | ReprKind::F64) => builder.ins().fadd(acc, src_val),
+        (false, ReprKind::F32 | ReprKind::F64) => {
             let cmp = builder.ins().fcmp(FloatCC::GreaterThan, src_val, acc);
             builder.ins().select(cmp, src_val, acc)
         }
@@ -2900,13 +3015,18 @@ fn emit_binop(
     b: Value,
     compute_repr: ReprKind,
 ) -> Result<Value, String> {
-    // Comparison results: return in the compute repr (f32 1.0/0.0 or i64 1/0).
+    // Comparison results: return in the compute repr (float 1.0/0.0 or i64 1/0).
     macro_rules! cmp_result {
         ($cmp:expr) => {
             match compute_repr {
-                ReprKind::Float => {
+                ReprKind::F32 => {
                     let one = builder.ins().f32const(1.0);
                     let zero = builder.ins().f32const(0.0);
+                    builder.ins().select($cmp, one, zero)
+                }
+                ReprKind::F64 => {
+                    let one = builder.ins().f64const(1.0);
+                    let zero = builder.ins().f64const(0.0);
                     builder.ins().select($cmp, one, zero)
                 }
                 ReprKind::Int => {
@@ -2920,13 +3040,13 @@ fn emit_binop(
 
     Ok(match (op, compute_repr) {
         // ── Arithmetic ──
-        (ScalarBinOp::Add, ReprKind::Float) => builder.ins().fadd(a, b),
+        (ScalarBinOp::Add, ReprKind::F32 | ReprKind::F64) => builder.ins().fadd(a, b),
         (ScalarBinOp::Add, ReprKind::Int) => builder.ins().iadd(a, b),
-        (ScalarBinOp::Sub, ReprKind::Float) => builder.ins().fsub(a, b),
+        (ScalarBinOp::Sub, ReprKind::F32 | ReprKind::F64) => builder.ins().fsub(a, b),
         (ScalarBinOp::Sub, ReprKind::Int) => builder.ins().isub(a, b),
-        (ScalarBinOp::Mul, ReprKind::Float) => builder.ins().fmul(a, b),
+        (ScalarBinOp::Mul, ReprKind::F32 | ReprKind::F64) => builder.ins().fmul(a, b),
         (ScalarBinOp::Mul, ReprKind::Int) => builder.ins().imul(a, b),
-        (ScalarBinOp::Div, ReprKind::Float) => builder.ins().fdiv(a, b),
+        (ScalarBinOp::Div, ReprKind::F32 | ReprKind::F64) => builder.ins().fdiv(a, b),
         (ScalarBinOp::Div, ReprKind::Int) => {
             // Guard against division by zero (which traps on x86).
             // If b == 0, result is 0 (matches NumericScalar behavior).
@@ -2937,8 +3057,9 @@ fn emit_binop(
             let quot = builder.ins().sdiv(a, safe_b);
             builder.ins().select(is_zero, zero, quot)
         }
-        (ScalarBinOp::Mod, ReprKind::Float) => {
-            let func_ref = module.declare_func_in_func(math.fmodf, builder.func);
+        (ScalarBinOp::Mod, ReprKind::F32 | ReprKind::F64) => {
+            let fid = math.binary("fmod", compute_repr).unwrap();
+            let func_ref = module.declare_func_in_func(fid, builder.func);
             let call = builder.ins().call(func_ref, &[a, b]);
             builder.inst_results(call)[0]
         }
@@ -2952,7 +3073,7 @@ fn emit_binop(
         }
 
         // ── Min/Max ──
-        (ScalarBinOp::Max, ReprKind::Float) => {
+        (ScalarBinOp::Max, ReprKind::F32 | ReprKind::F64) => {
             let cmp = builder.ins().fcmp(FloatCC::GreaterThan, a, b);
             builder.ins().select(cmp, a, b)
         }
@@ -2960,7 +3081,7 @@ fn emit_binop(
             let cmp = builder.ins().icmp(IntCC::SignedGreaterThan, a, b);
             builder.ins().select(cmp, a, b)
         }
-        (ScalarBinOp::Min, ReprKind::Float) => {
+        (ScalarBinOp::Min, ReprKind::F32 | ReprKind::F64) => {
             let cmp = builder.ins().fcmp(FloatCC::LessThan, a, b);
             builder.ins().select(cmp, a, b)
         }
@@ -2970,8 +3091,9 @@ fn emit_binop(
         }
 
         // ── Pow (float only; integer pow not needed for now) ──
-        (ScalarBinOp::Pow, ReprKind::Float) => {
-            let func_ref = module.declare_func_in_func(math.powf, builder.func);
+        (ScalarBinOp::Pow, ReprKind::F32 | ReprKind::F64) => {
+            let fid = math.binary("pow", compute_repr).unwrap();
+            let func_ref = module.declare_func_in_func(fid, builder.func);
             let call = builder.ins().call(func_ref, &[a, b]);
             builder.inst_results(call)[0]
         }
@@ -2980,7 +3102,7 @@ fn emit_binop(
         }
 
         // ── Comparisons ──
-        (ScalarBinOp::Equal, ReprKind::Float) => {
+        (ScalarBinOp::Equal, ReprKind::F32 | ReprKind::F64) => {
             let cmp = builder.ins().fcmp(FloatCC::Equal, a, b);
             cmp_result!(cmp)
         }
@@ -2988,7 +3110,7 @@ fn emit_binop(
             let cmp = builder.ins().icmp(IntCC::Equal, a, b);
             cmp_result!(cmp)
         }
-        (ScalarBinOp::Greater, ReprKind::Float) => {
+        (ScalarBinOp::Greater, ReprKind::F32 | ReprKind::F64) => {
             let cmp = builder.ins().fcmp(FloatCC::GreaterThan, a, b);
             cmp_result!(cmp)
         }
@@ -2996,7 +3118,7 @@ fn emit_binop(
             let cmp = builder.ins().icmp(IntCC::SignedGreaterThan, a, b);
             cmp_result!(cmp)
         }
-        (ScalarBinOp::GreaterOrEqual, ReprKind::Float) => {
+        (ScalarBinOp::GreaterOrEqual, ReprKind::F32 | ReprKind::F64) => {
             let cmp = builder.ins().fcmp(FloatCC::GreaterThanOrEqual, a, b);
             cmp_result!(cmp)
         }
@@ -3004,7 +3126,7 @@ fn emit_binop(
             let cmp = builder.ins().icmp(IntCC::SignedGreaterThanOrEqual, a, b);
             cmp_result!(cmp)
         }
-        (ScalarBinOp::Less, ReprKind::Float) => {
+        (ScalarBinOp::Less, ReprKind::F32 | ReprKind::F64) => {
             let cmp = builder.ins().fcmp(FloatCC::LessThan, a, b);
             cmp_result!(cmp)
         }
@@ -3012,7 +3134,7 @@ fn emit_binop(
             let cmp = builder.ins().icmp(IntCC::SignedLessThan, a, b);
             cmp_result!(cmp)
         }
-        (ScalarBinOp::LessOrEqual, ReprKind::Float) => {
+        (ScalarBinOp::LessOrEqual, ReprKind::F32 | ReprKind::F64) => {
             let cmp = builder.ins().fcmp(FloatCC::LessThanOrEqual, a, b);
             cmp_result!(cmp)
         }
@@ -3022,8 +3144,8 @@ fn emit_binop(
         }
 
         // ── Logical (truthiness-based) ──
-        (ScalarBinOp::And, ReprKind::Float) => {
-            let zero = builder.ins().f32const(0.0);
+        (ScalarBinOp::And, ReprKind::F32 | ReprKind::F64) => {
+            let zero = emit_float_zero(builder, compute_repr);
             let a_nz = builder.ins().fcmp(FloatCC::NotEqual, a, zero);
             let b_nz = builder.ins().fcmp(FloatCC::NotEqual, b, zero);
             let both = builder.ins().band(a_nz, b_nz);
@@ -3036,8 +3158,8 @@ fn emit_binop(
             let both = builder.ins().band(a_nz, b_nz);
             cmp_result!(both)
         }
-        (ScalarBinOp::Or, ReprKind::Float) => {
-            let zero = builder.ins().f32const(0.0);
+        (ScalarBinOp::Or, ReprKind::F32 | ReprKind::F64) => {
+            let zero = emit_float_zero(builder, compute_repr);
             let a_nz = builder.ins().fcmp(FloatCC::NotEqual, a, zero);
             let b_nz = builder.ins().fcmp(FloatCC::NotEqual, b, zero);
             let either = builder.ins().bor(a_nz, b_nz);
@@ -3050,8 +3172,8 @@ fn emit_binop(
             let either = builder.ins().bor(a_nz, b_nz);
             cmp_result!(either)
         }
-        (ScalarBinOp::Xor, ReprKind::Float) => {
-            let zero = builder.ins().f32const(0.0);
+        (ScalarBinOp::Xor, ReprKind::F32 | ReprKind::F64) => {
+            let zero = emit_float_zero(builder, compute_repr);
             let a_nz = builder.ins().fcmp(FloatCC::NotEqual, a, zero);
             let b_nz = builder.ins().fcmp(FloatCC::NotEqual, b, zero);
             let x = builder.ins().bxor(a_nz, b_nz);
@@ -3066,14 +3188,15 @@ fn emit_binop(
         }
 
         // ── IMod (mathematical modulo — result sign matches divisor) ──
-        (ScalarBinOp::IMod, ReprKind::Float) => {
+        (ScalarBinOp::IMod, ReprKind::F32 | ReprKind::F64) => {
             // fmod then adjust: if result and divisor have different signs, add divisor.
-            let func_ref = module.declare_func_in_func(math.fmodf, builder.func);
+            let fid = math.binary("fmod", compute_repr).unwrap();
+            let func_ref = module.declare_func_in_func(fid, builder.func);
             let call = builder.ins().call(func_ref, &[a, b]);
             let rem = builder.inst_results(call)[0];
             // rem + b if sign(rem) != sign(b), else rem
             let sum = builder.ins().fadd(rem, b);
-            let zero = builder.ins().f32const(0.0);
+            let zero = emit_float_zero(builder, compute_repr);
             let rem_neg = builder.ins().fcmp(FloatCC::LessThan, rem, zero);
             let b_neg = builder.ins().fcmp(FloatCC::LessThan, b, zero);
             let rem_zero = builder.ins().fcmp(FloatCC::Equal, rem, zero);
@@ -3112,7 +3235,7 @@ fn emit_binop(
             | ScalarBinOp::BitwiseXor
             | ScalarBinOp::BitShiftLeft
             | ScalarBinOp::BitShiftRight,
-            ReprKind::Float,
+            ReprKind::F32 | ReprKind::F64,
         ) => {
             return Err(format!("bitwise {:?} on float not supported in JIT", op));
         }
@@ -3128,9 +3251,9 @@ fn emit_unop(
     compute_repr: ReprKind,
 ) -> Result<Value, String> {
     Ok(match (op, compute_repr) {
-        (ScalarUnaryOp::Neg, ReprKind::Float) => builder.ins().fneg(x),
+        (ScalarUnaryOp::Neg, ReprKind::F32 | ReprKind::F64) => builder.ins().fneg(x),
         (ScalarUnaryOp::Neg, ReprKind::Int) => builder.ins().ineg(x),
-        (ScalarUnaryOp::Abs, ReprKind::Float) => builder.ins().fabs(x),
+        (ScalarUnaryOp::Abs, ReprKind::F32 | ReprKind::F64) => builder.ins().fabs(x),
         (ScalarUnaryOp::Abs, ReprKind::Int) => {
             // abs(x) = x < 0 ? -x : x
             let zero = builder.ins().iconst(types::I64, 0);
@@ -3138,33 +3261,36 @@ fn emit_unop(
             let negated = builder.ins().ineg(x);
             builder.ins().select(neg, negated, x)
         }
-        (ScalarUnaryOp::Floor, ReprKind::Float) => builder.ins().floor(x),
+        (ScalarUnaryOp::Floor, ReprKind::F32 | ReprKind::F64) => builder.ins().floor(x),
         (ScalarUnaryOp::Floor, ReprKind::Int) => x, // no-op for integers
-        (ScalarUnaryOp::Ceil, ReprKind::Float) => builder.ins().ceil(x),
+        (ScalarUnaryOp::Ceil, ReprKind::F32 | ReprKind::F64) => builder.ins().ceil(x),
         (ScalarUnaryOp::Ceil, ReprKind::Int) => x, // no-op for integers
         // Transcendentals — float only.
-        (ScalarUnaryOp::Exp, ReprKind::Float) => {
-            let func_ref = module.declare_func_in_func(math.expf, builder.func);
+        (ScalarUnaryOp::Exp, ReprKind::F32 | ReprKind::F64) => {
+            let fid = math.unary("exp", compute_repr).unwrap();
+            let func_ref = module.declare_func_in_func(fid, builder.func);
             let call = builder.ins().call(func_ref, &[x]);
             builder.inst_results(call)[0]
         }
-        (ScalarUnaryOp::Ln, ReprKind::Float) => {
-            let func_ref = module.declare_func_in_func(math.logf, builder.func);
+        (ScalarUnaryOp::Ln, ReprKind::F32 | ReprKind::F64) => {
+            let fid = math.unary("log", compute_repr).unwrap();
+            let func_ref = module.declare_func_in_func(fid, builder.func);
             let call = builder.ins().call(func_ref, &[x]);
             builder.inst_results(call)[0]
         }
-        (ScalarUnaryOp::Sqrt, ReprKind::Float) => builder.ins().sqrt(x),
-        (ScalarUnaryOp::Reciprocal, ReprKind::Float) => {
-            let one = builder.ins().f32const(1.0);
+        (ScalarUnaryOp::Sqrt, ReprKind::F32 | ReprKind::F64) => builder.ins().sqrt(x),
+        (ScalarUnaryOp::Reciprocal, ReprKind::F32 | ReprKind::F64) => {
+            let one = emit_float_const(builder, compute_repr, 1.0);
             builder.ins().fdiv(one, x)
         }
-        (ScalarUnaryOp::Tanh, ReprKind::Float) => {
-            let func_ref = module.declare_func_in_func(math.tanhf, builder.func);
+        (ScalarUnaryOp::Tanh, ReprKind::F32 | ReprKind::F64) => {
+            let fid = math.unary("tanh", compute_repr).unwrap();
+            let func_ref = module.declare_func_in_func(fid, builder.func);
             let call = builder.ins().call(func_ref, &[x]);
             builder.inst_results(call)[0]
         }
         // Float ops not yet supported by the JIT.
-        (_, ReprKind::Float) => {
+        (_, ReprKind::F32 | ReprKind::F64) => {
             return Err(format!("float {:?} not implemented in JIT", op));
         }
         // Integer transcendentals — not meaningful, but cast through f32 if needed.
