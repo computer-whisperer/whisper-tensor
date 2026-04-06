@@ -127,9 +127,73 @@ pub(crate) fn compile_nano_graph(
         num_lanes,
     );
 
+    // Validate partitioned spans: check nanograph integrity and cross-lane deps.
+    {
+        let mut span_errors = Vec::new();
+        let mut cross_lane_violations = Vec::new();
+        for (pi, phase) in phases.iter().enumerate() {
+            // Validate each span's nanograph.
+            for (li, span) in phase.spans.iter().enumerate() {
+                for err in span.graph.validate() {
+                    span_errors.push(format!("Phase {} Lane {}: {}", pi, li, err));
+                }
+            }
+            // Check no span reads atoms produced by another span in the same phase.
+            let span_produces: Vec<Vec<(u64, u64)>> = phase
+                .spans
+                .iter()
+                .map(|s| {
+                    s.graph
+                        .groups()
+                        .iter()
+                        .map(|g| (g.base_id.0, g.base_id.0 + g.count))
+                        .collect()
+                })
+                .collect();
+            for (li, span) in phase.spans.iter().enumerate() {
+                for input in &span.inputs {
+                    let inp_lo = input.base.0;
+                    let inp_hi = inp_lo + input.count;
+                    for (other_li, other_ranges) in span_produces.iter().enumerate() {
+                        if other_li == li {
+                            continue;
+                        }
+                        for &(prod_lo, prod_hi) in other_ranges {
+                            if inp_lo < prod_hi && prod_lo < inp_hi {
+                                cross_lane_violations.push(format!(
+                                    "Phase {} lane {} input [{}, {}) overlaps lane {} produced [{}, {})",
+                                    pi, li, inp_lo, inp_hi, other_li, prod_lo, prod_hi,
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if !span_errors.is_empty() {
+            eprintln!(
+                "[compiled_eval] WARNING: {} span validation error(s):",
+                span_errors.len()
+            );
+            for e in span_errors.iter().take(20) {
+                eprintln!("  {e}");
+            }
+        }
+        if !cross_lane_violations.is_empty() {
+            eprintln!(
+                "[compiled_eval] WARNING: {} cross-lane violation(s):",
+                cross_lane_violations.len()
+            );
+            for v in cross_lane_violations.iter().take(20) {
+                eprintln!("  {v}");
+            }
+        }
+    }
+
     // Compile all spans — JIT where possible, pool_eval fallback for opaque ops.
     let t0 = std::time::Instant::now();
     let mut plan_builder = ExecutablePlanBuilder::new();
+    plan_builder.pin_outputs(all_output_atom_ranges);
     let mut compile_errors = 0usize;
     let mut pool_eval_spans = 0usize;
 
@@ -393,18 +457,22 @@ pub fn compile_lowered_model(
         .map(|(&internal, &external)| (external, internal))
         .collect();
 
-    let (output_ranges, output_shapes, all_output_atom_ranges) = build_output_ranges(
-        graph,
-        &cached.tensor_map,
-        sym_graph.get_ordered_outputs(),
-        |ext_id| {
+    let ordered_outputs = sym_graph.get_ordered_outputs();
+    let (output_ranges, output_shapes, all_output_atom_ranges) =
+        build_output_ranges(graph, &cached.tensor_map, ordered_outputs, |ext_id| {
             reverse_output
                 .get(ext_id)
                 .copied()
                 .or_else(|| cached.sym_to_internal.get(ext_id).copied())
                 .unwrap_or(*ext_id)
-        },
-    );
+        });
+    if output_ranges.len() < ordered_outputs.len() {
+        eprintln!(
+            "[compiled_eval] WARNING: {} of {} outputs failed to resolve atom ranges",
+            ordered_outputs.len() - output_ranges.len(),
+            ordered_outputs.len(),
+        );
+    }
 
     let num_lanes = std::env::var("JIT_LANES")
         .ok()

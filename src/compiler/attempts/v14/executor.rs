@@ -293,11 +293,30 @@ impl<'p, P: Pool + 'p> PhaseStore<'p, P> {
     ///
     /// `liveness` maps entry base AtomId to the last phase that reads it.
     /// Entries whose last-consumed phase is before `current_phase` are dropped.
-    pub fn evict(&mut self, current_phase: usize, liveness: &HashMap<u64, usize>) {
+    /// Entries overlapping any `pinned` range are never evicted.
+    pub fn evict(
+        &mut self,
+        current_phase: usize,
+        liveness: &HashMap<u64, usize>,
+        pinned: &[(u64, u64)],
+    ) {
         self.entries.retain(|entry| {
+            // Check if this entry overlaps any pinned range.
+            if !pinned.is_empty() {
+                let entry_end = entry.base + entry.tensor.numel() as u64;
+                let start = pinned.partition_point(|&(_, hi)| hi <= entry.base);
+                for &(pin_lo, pin_hi) in &pinned[start..] {
+                    if pin_lo >= entry_end {
+                        break;
+                    }
+                    // Overlap found — keep.
+                    return true;
+                }
+            }
+
             match liveness.get(&entry.base) {
                 Some(&last_phase) => last_phase >= current_phase,
-                // No liveness info → keep (e.g. model outputs, initial inputs
+                // No liveness info → keep (e.g. initial inputs
                 // that might be read in any phase).
                 None => true,
             }
@@ -336,6 +355,9 @@ pub struct ExecutablePlan {
     /// Liveness: maps output entry base → last phase that reads it.
     /// Used for store eviction after each phase.
     output_liveness: HashMap<u64, usize>,
+    /// Atom ranges for model outputs that must never be evicted.
+    /// Sorted by (lo, hi) for binary search.
+    pinned_output_atoms: Vec<(u64, u64)>,
 }
 
 struct ExecutablePhase {
@@ -353,6 +375,10 @@ pub struct ExecutablePlanBuilder {
     phases: Vec<ExecutablePhase>,
     /// All input ranges declared across all phases (for liveness computation).
     all_input_ranges: Vec<(usize, Vec<AtomRange>)>, // (phase_idx, ranges)
+    /// Model-output atom ranges that must survive until after the last phase.
+    /// These are pinned to the last phase during liveness computation so they
+    /// aren't evicted prematurely.
+    pinned_output_ranges: Vec<AtomRange>,
 }
 
 impl ExecutablePlanBuilder {
@@ -360,7 +386,13 @@ impl ExecutablePlanBuilder {
         ExecutablePlanBuilder {
             phases: Vec::new(),
             all_input_ranges: Vec::new(),
+            pinned_output_ranges: Vec::new(),
         }
+    }
+
+    /// Register model-output atom ranges that must survive until extraction.
+    pub fn pin_outputs(&mut self, ranges: &[AtomRange]) {
+        self.pinned_output_ranges.extend_from_slice(ranges);
     }
 
     /// Add a phase with one compiled span per lane.
@@ -427,16 +459,26 @@ impl ExecutablePlanBuilder {
             }
         }
 
+        // Build a set of atom ranges that are model outputs — these must
+        // never be evicted regardless of liveness.
+        let mut pinned_atoms: Vec<(u64, u64)> = self
+            .pinned_output_ranges
+            .iter()
+            .map(|r| (r.base.0, r.base.0 + r.count))
+            .collect();
+        pinned_atoms.sort_unstable();
+
         let tracked = output_liveness.len();
         let total_outputs = all_outputs.len();
         eprintln!(
             "  Liveness: {} output ranges tracked of {} total",
-            tracked, total_outputs
+            tracked, total_outputs,
         );
 
         ExecutablePlan {
             phases: self.phases,
             output_liveness,
+            pinned_output_atoms: pinned_atoms,
         }
     }
 }
@@ -466,7 +508,7 @@ impl ExecutablePlan {
             }
 
             // Evict entries no longer needed by future phases.
-            store.evict(pi + 1, &self.output_liveness);
+            store.evict(pi + 1, &self.output_liveness, &self.pinned_output_atoms);
         }
 
         store
@@ -506,7 +548,7 @@ impl ExecutablePlan {
 
             let t0 = Instant::now();
             let store_before = store.len();
-            store.evict(pi + 1, &self.output_liveness);
+            store.evict(pi + 1, &self.output_liveness, &self.pinned_output_atoms);
             let evict_dt = t0.elapsed();
             total_evict += evict_dt;
 

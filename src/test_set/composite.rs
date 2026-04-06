@@ -11,6 +11,7 @@ use crate::numeric_dtype::NumericDType;
 use rand::SeedableRng;
 use rand::rngs::SmallRng;
 
+use super::tensor_bf16_shaped;
 use super::tensor_f32_shaped;
 use super::{TestCase, TestDataSet, Tolerance};
 
@@ -27,6 +28,9 @@ pub fn build_cases() -> Vec<TestCase> {
         rms_norm_multirow(),
         reduce_mean_broadcast_mul(),
         cast_then_self_mul(),
+        bf16_add_mul_chain(),
+        bf16_layernorm(),
+        bf16_matmul_add(),
     ]
 }
 
@@ -998,6 +1002,296 @@ fn cast_then_self_mul() -> TestCase {
                 atol: 1e-6,
                 rtol: 1e-6,
             },
+        }],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// BF16 helpers
+// ---------------------------------------------------------------------------
+
+fn bf16_const(
+    graph: &mut MilliOpGraph,
+    vals: Vec<half::bf16>,
+    shape: Vec<usize>,
+    rng: &mut SmallRng,
+) -> GlobalId {
+    let shape_u64 = shape.iter().map(|&d| d as u64).collect();
+    Constant::from_vec_shape(graph, vals, shape_u64, rng)
+}
+
+/// Compute the expected BF16 result of an operation chain by simulating the
+/// pool_eval semantics: each step rounds through BF16.
+fn bf16_round(x: f32) -> f32 {
+    half::bf16::from_f32(x).to_f32()
+}
+
+// ---------------------------------------------------------------------------
+// BF16 multi-op chain: out = (a + b) * c + d
+//
+// Each intermediate result truncates to BF16. Values are chosen so the
+// truncation matters: 128.0 + 1.5 = 129.5 → BF16 = 130.0 (ULP at 128 is 1.0,
+// 129.5 rounds to 130.0). Then 130.0 * 0.5 = 65.0, + 0.25 = 65.25 → BF16 = 65.0.
+//
+// If the JIT skips inter-op BF16 truncation (keeps 129.5 in f32),
+// you'd get 129.5 * 0.5 = 64.75, + 0.25 = 65.0 — which happens to match
+// in this specific case. So we use multiple rows with different magnitudes
+// to catch the divergence at different ULP scales.
+// ---------------------------------------------------------------------------
+
+fn bf16_add_mul_chain() -> TestCase {
+    use half::bf16;
+
+    let mut rng = rng();
+    let ext_a = GlobalId::new(&mut rng);
+    let ext_b = GlobalId::new(&mut rng);
+    let (mut graph, imap) = MilliOpGraph::new([ext_a, ext_b], &mut rng);
+
+    // Constants in BF16
+    let c = bf16_const(
+        &mut graph,
+        vec![
+            bf16::from_f32(0.75),
+            bf16::from_f32(3.0),
+            bf16::from_f32(0.125),
+            bf16::from_f32(7.0),
+        ],
+        vec![1, 4],
+        &mut rng,
+    );
+    let d = bf16_const(
+        &mut graph,
+        vec![
+            bf16::from_f32(0.5),
+            bf16::from_f32(1.0),
+            bf16::from_f32(0.0625),
+            bf16::from_f32(2.0),
+        ],
+        vec![1, 4],
+        &mut rng,
+    );
+
+    // out = (a + b) * c + d
+    let sum = ops::SimpleBinary::add(&mut graph, imap[&ext_a], imap[&ext_b], &mut rng);
+    let prod = ops::SimpleBinary::mul(&mut graph, sum, c, &mut rng);
+    let out = ops::SimpleBinary::add(&mut graph, prod, d, &mut rng);
+    graph.set_outputs(vec![out]);
+
+    // Input values chosen around BF16 precision boundaries.
+    // Row 0: values near 1.0 (ULP = 2^-7 ≈ 0.0078)
+    // Row 1: values near 256.0 (ULP = 2.0)
+    // Row 2: values near 0.001 (ULP ≈ 2^-17)
+    // Row 3: values near 1024.0 (ULP = 8.0)
+    let a_vals = [1.0f32, 256.0, 0.001, 1024.0];
+    let b_vals = [0.125f32, 1.5, 0.0005, 5.0];
+    let c_vals = [0.75f32, 3.0, 0.125, 7.0];
+    let d_vals = [0.5f32, 1.0, 0.0625, 2.0];
+
+    // Expected: simulate BF16 semantics step by step.
+    let expected: Vec<half::bf16> = (0..4)
+        .map(|i| {
+            let a = bf16::from_f32(a_vals[i]).to_f32();
+            let b = bf16::from_f32(b_vals[i]).to_f32();
+            let c = bf16::from_f32(c_vals[i]).to_f32();
+            let d = bf16::from_f32(d_vals[i]).to_f32();
+            // Step 1: a + b, truncated to BF16
+            let sum = bf16_round(a + b);
+            // Step 2: sum * c, truncated to BF16
+            let prod = bf16_round(sum * c);
+            // Step 3: prod + d, truncated to BF16
+            bf16::from_f32(prod + d)
+        })
+        .collect();
+
+    let a_bf16: Vec<bf16> = a_vals.iter().map(|&v| bf16::from_f32(v)).collect();
+    let b_bf16: Vec<bf16> = b_vals.iter().map(|&v| bf16::from_f32(v)).collect();
+
+    TestCase {
+        name: "bf16_add_mul_chain".into(),
+        graph,
+        data_sets: vec![TestDataSet {
+            label: "1x4".into(),
+            inputs: HashMap::from([
+                (ext_a, tensor_bf16_shaped(vec![1, 4], &a_bf16)),
+                (ext_b, tensor_bf16_shaped(vec![1, 4], &b_bf16)),
+            ]),
+            expected_outputs: HashMap::from([(out, tensor_bf16_shaped(vec![1, 4], &expected))]),
+            tolerance: Tolerance::for_dtype(NumericDType::BF16),
+        }],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// BF16 layernorm: LayerNorm(x) with BF16 input/output
+//
+// Full chain: mean → subtract → variance → sqrt → divide → scale → shift
+// Each elementwise step computes in BF16 (pool_eval: f32 + truncate per step).
+// Reduces accumulate in F32 (lower_reduce promotes BF16 → F32 compute).
+// ---------------------------------------------------------------------------
+
+fn bf16_layernorm() -> TestCase {
+    use half::bf16;
+
+    let mut rng = rng();
+    let ext_x = GlobalId::new(&mut rng);
+    let (mut graph, imap) = MilliOpGraph::new([ext_x], &mut rng);
+    let x = imap[&ext_x];
+
+    let gamma = bf16_const(
+        &mut graph,
+        vec![bf16::from_f32(1.0); 4],
+        vec![1, 4],
+        &mut rng,
+    );
+    let beta = bf16_const(
+        &mut graph,
+        vec![bf16::from_f32(0.0); 4],
+        vec![1, 4],
+        &mut rng,
+    );
+    let eps = bf16_const(&mut graph, vec![bf16::from_f32(1e-5)], vec![1, 1], &mut rng);
+    let two = bf16_const(&mut graph, vec![bf16::from_f32(2.0)], vec![1, 1], &mut rng);
+
+    let axes = i64_const(&mut graph, vec![-1], &mut rng);
+    let mean = ops::ReduceMean::push_new(&mut graph, x, Some(axes), true, false, &mut rng);
+    let x_c = ops::SimpleBinary::sub(&mut graph, x, mean, &mut rng);
+    let x_c2 = ops::Pow::push_new(&mut graph, x_c, two, &mut rng);
+    let axes2 = i64_const(&mut graph, vec![-1], &mut rng);
+    let var = ops::ReduceMean::push_new(&mut graph, x_c2, Some(axes2), true, false, &mut rng);
+    let var_eps = ops::SimpleBinary::add(&mut graph, var, eps, &mut rng);
+    let std = ops::SimpleUnaryOp::sqrt(&mut graph, var_eps, &mut rng);
+    let norm = ops::SimpleBinary::div(&mut graph, x_c, std, &mut rng);
+    let scaled = ops::SimpleBinary::mul(&mut graph, norm, gamma, &mut rng);
+    let out = ops::SimpleBinary::add(&mut graph, scaled, beta, &mut rng);
+    graph.set_outputs(vec![out]);
+
+    // Compute expected output by running the reference pool_eval path.
+    // We pass BF16 data and let pool_eval produce the authoritative result.
+    let x_vals: Vec<bf16> = [1.0f32, 2.0, 3.0, 4.0]
+        .iter()
+        .map(|&v| bf16::from_f32(v))
+        .collect();
+    let input_tensor = tensor_bf16_shaped(vec![1, 4], &x_vals);
+
+    // Run pool_eval as oracle.
+    let input_map: HashMap<GlobalId, _> = HashMap::from([(ext_x, input_tensor.view())]);
+    let input_refs: HashMap<
+        GlobalId,
+        &crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>,
+    > = input_map.iter().map(|(&id, v)| (id, v)).collect();
+    let pool = crate::pool::TrackedPool::new(None);
+    let pool_results = graph
+        .pool_eval(&input_refs, &pool)
+        .expect("pool_eval oracle");
+    let expected_view = pool_results[&out].view();
+    let expected_static = {
+        let shape = expected_view.shape().to_vec();
+        let mut t = crate::numeric_tensor::NumericTensor::zeros(
+            shape,
+            expected_view.dtype(),
+            &crate::pool::SystemPool,
+        )
+        .unwrap();
+        for i in 0..expected_view.numel() {
+            t.write_element(i, expected_view.read_element(i));
+        }
+        t
+    };
+
+    TestCase {
+        name: "bf16_layernorm".into(),
+        graph,
+        data_sets: vec![TestDataSet {
+            label: "1x4".into(),
+            inputs: HashMap::from([(ext_x, tensor_bf16_shaped(vec![1, 4], &x_vals))]),
+            expected_outputs: HashMap::from([(out, expected_static)]),
+            tolerance: Tolerance::for_dtype(NumericDType::BF16),
+        }],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// BF16 matmul + bias add: y = x @ W + b
+//
+// MatMul computes products and accumulation in F32 (promoted from BF16),
+// then the result is BF16. The bias add is then BF16 compute on BF16 operands.
+// This tests the full RWKV7-like linear layer pattern in BF16.
+// ---------------------------------------------------------------------------
+
+fn bf16_matmul_add() -> TestCase {
+    use half::bf16;
+
+    let mut rng = rng();
+    let ext_x = GlobalId::new(&mut rng);
+    let (mut graph, imap) = MilliOpGraph::new([ext_x], &mut rng);
+    let x = imap[&ext_x];
+
+    // W [3, 2], b [2] — all BF16
+    let w = bf16_const(
+        &mut graph,
+        vec![
+            bf16::from_f32(0.5),
+            bf16::from_f32(-1.0),
+            bf16::from_f32(1.5),
+            bf16::from_f32(0.25),
+            bf16::from_f32(-0.5),
+            bf16::from_f32(2.0),
+        ],
+        vec![3, 2],
+        &mut rng,
+    );
+    let b = bf16_const(
+        &mut graph,
+        vec![bf16::from_f32(0.125), bf16::from_f32(-0.25)],
+        vec![1, 2],
+        &mut rng,
+    );
+
+    let mm =
+        ops::MatMul::push_new_default_precision(&mut graph, x, w, NumericDType::BF16, &mut rng);
+    let out = ops::SimpleBinary::add(&mut graph, mm, b, &mut rng);
+    graph.set_outputs(vec![out]);
+
+    // x = [[1, 2, 3]] (1x3, BF16)
+    let x_vals: Vec<bf16> = [1.0f32, 2.0, 3.0]
+        .iter()
+        .map(|&v| bf16::from_f32(v))
+        .collect();
+    let input_tensor = tensor_bf16_shaped(vec![1, 3], &x_vals);
+
+    // Run pool_eval as oracle.
+    let input_map: HashMap<GlobalId, _> = HashMap::from([(ext_x, input_tensor.view())]);
+    let input_refs: HashMap<
+        GlobalId,
+        &crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>,
+    > = input_map.iter().map(|(&id, v)| (id, v)).collect();
+    let pool = crate::pool::TrackedPool::new(None);
+    let pool_results = graph
+        .pool_eval(&input_refs, &pool)
+        .expect("pool_eval oracle");
+    let expected_view = pool_results[&out].view();
+    let expected_static = {
+        let shape = expected_view.shape().to_vec();
+        let mut t = crate::numeric_tensor::NumericTensor::zeros(
+            shape,
+            expected_view.dtype(),
+            &crate::pool::SystemPool,
+        )
+        .unwrap();
+        for i in 0..expected_view.numel() {
+            t.write_element(i, expected_view.read_element(i));
+        }
+        t
+    };
+
+    TestCase {
+        name: "bf16_matmul_add".into(),
+        graph,
+        data_sets: vec![TestDataSet {
+            label: "1x3".into(),
+            inputs: HashMap::from([(ext_x, tensor_bf16_shaped(vec![1, 3], &x_vals))]),
+            expected_outputs: HashMap::from([(out, expected_static)]),
+            tolerance: Tolerance::for_dtype(NumericDType::BF16),
         }],
     }
 }

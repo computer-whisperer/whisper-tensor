@@ -582,6 +582,27 @@ fn is_lane_local_access(
                     };
 
                     if first_read == prod_base {
+                        // For Reduce consumers, the InputRef stride gives the
+                        // distance between output bases, but each output also
+                        // reads reduce_count atoms via reduce_stride.  The
+                        // per-lane read span must fit within one producer chunk.
+                        if let ScalarOp::Reduce {
+                            reduce_count,
+                            reduce_stride,
+                            ..
+                        } = &consumer.op
+                        {
+                            let max_chunk =
+                                (consumer.count + num_lanes as u64 - 1) / num_lanes as u64;
+                            let prod_chunk = producer.count / num_lanes as u64;
+                            let reduce_extent = reduce_stride.unsigned_abs() * (*reduce_count - 1);
+                            // Span from first atom of first output to last atom
+                            // of last output in the largest lane fragment.
+                            let span = abs_stride * (max_chunk - 1) + reduce_extent + 1;
+                            if span > prod_chunk {
+                                return false;
+                            }
+                        }
                         // Lane-local with aligned split.
                         continue;
                     }
@@ -3116,5 +3137,82 @@ mod tests {
         g.outputs = vec![g.atom_to_range(output)];
         let phases = plan(&g, num_lanes, &[], &g.outputs.clone());
         verify_plan_full(&phases);
+    }
+
+    // ─── Test: GroupNorm-like reduce needs barrier with non-aligned splits ──
+
+    /// Regression test for the RWKV7 GroupNorm pattern:
+    /// 768 atoms (12 heads × 64 head_dim), ReduceSum with stride=64 and
+    /// reduce_count=64. When split across 8 lanes, the per-lane reduce
+    /// footprint (128 atoms for the 2-output lanes) exceeds the producer
+    /// chunk (96 atoms), requiring a phase barrier.
+    #[test]
+    fn test_groupnorm_reduce_needs_barrier() {
+        let mut g = NanoGraph::new();
+        let num_lanes = 8;
+        let n_heads: u64 = 12;
+        let head_dim: u64 = 64;
+        let total = n_heads * head_dim; // 768
+
+        // Input: 768 elements (simulating GroupNorm input after reshape).
+        let data = g.push_group(
+            total,
+            NumericDType::F32,
+            ScalarOp::Literal(NumericScalar::from_f32(1.0)),
+            vec![],
+            vec![],
+        );
+
+        // Elementwise op on the data (stands in for "x - mean").
+        let processed = g.push_group(
+            total,
+            NumericDType::F32,
+            ScalarOp::Unary {
+                op: ScalarUnaryOp::Neg,
+                compute_dtype: NumericDType::F32,
+            },
+            vec![],
+            vec![InputRef::affine(data, 1)],
+        );
+
+        // ReduceSum: 12 outputs, each summing 64 elements with stride=1.
+        // Input ref: Affine(processed, stride=64) — output k reads
+        // atoms [processed + 64*k .. processed + 64*k + 63].
+        let reduced = g.push_group(
+            n_heads,
+            NumericDType::F32,
+            ScalarOp::Reduce {
+                kind: ReduceKind::Sum,
+                reduce_count: head_dim,
+                reduce_stride: 1,
+                compute_dtype: NumericDType::F32,
+            },
+            vec![],
+            vec![InputRef::affine(processed, head_dim as i64)],
+        );
+
+        // Output uses the reduced values.
+        let output = g.push_group(
+            n_heads,
+            NumericDType::F32,
+            ScalarOp::Unary {
+                op: ScalarUnaryOp::Neg,
+                compute_dtype: NumericDType::F32,
+            },
+            vec![],
+            vec![InputRef::affine(reduced, 1)],
+        );
+
+        g.outputs = vec![g.atom_to_range(output)];
+        let phases = plan(&g, num_lanes, &[], &g.outputs.clone());
+        verify_plan_full(&phases);
+
+        // The reduce reads cross-lane data (128 atoms per 2-output lane,
+        // but only 96 atoms per producer lane chunk). Must have a barrier.
+        assert!(
+            phases.len() >= 2,
+            "GroupNorm reduce pattern needs at least 2 phases, got {}",
+            phases.len(),
+        );
     }
 }
