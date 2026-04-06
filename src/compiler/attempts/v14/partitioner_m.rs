@@ -799,11 +799,17 @@ fn collect_input_atom_ranges(
         }
     }
 
-    // IndirectLoad table
+    // IndirectLoad table — may be a group (inlined LiteralSpan) or an
+    // InputTensor (large constant that wasn't inlined during lowering).
     if let ScalarOp::IndirectLoad { table_base } = &group.op {
         if let Some(tg) = graph.group_of(*table_base) {
             if seen_bases.insert(tg.base_id.0) {
                 ranges.push((tg.base_id, tg.count, tg.output_dtype));
+            }
+        } else if let Some((ti, _)) = graph.find_input_idx(*table_base) {
+            let it = &graph.input_tensors()[ti];
+            if seen_bases.insert(it.base_id.0) {
+                ranges.push((it.base_id, it.count, it.dtype));
             }
         }
     }
@@ -1432,10 +1438,13 @@ fn ensure_inputs_declared(
     }
 
     // IndirectLoad table: need the full table range.
+    // May be a group (inlined) or an InputTensor (not inlined).
     if let ScalarOp::IndirectLoad { table_base } = op {
-        // Look up the full table group.
         if let Some(tg) = graph.group_of(*table_base) {
             ranges_to_cover.push((tg.base_id.0, tg.base_id.0 + tg.count - 1));
+        } else if let Some((ti, _)) = graph.find_input_idx(*table_base) {
+            let it = &graph.input_tensors()[ti];
+            ranges_to_cover.push((it.base_id.0, it.base_id.0 + it.count - 1));
         }
     }
 
