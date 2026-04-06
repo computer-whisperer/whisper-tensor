@@ -75,16 +75,43 @@ pub fn compile_lowered_model(
 
     // Partition the NanoGraph.
     let t0 = std::time::Instant::now();
-    let phases = partitioner_m::plan(
-        graph,
-        8, // lanes
-        graph.input_tensors(),
-        &all_output_atom_ranges,
-    );
+    let num_lanes = std::env::var("JIT_LANES")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(8usize);
+    let phases = if num_lanes == 0 {
+        // Trivial plan (1 phase, 1 span) for debugging — isolates I/O issues
+        // from partitioner issues. Set JIT_LANES=0 to enable.
+        use crate::compiler::attempts::v14::types::{Phase, Span};
+        let span_inputs: Vec<AtomRange> = graph
+            .input_tensors()
+            .iter()
+            .map(|it| AtomRange {
+                base: it.base_id,
+                count: it.count,
+                dtype: it.dtype,
+            })
+            .collect();
+        vec![Phase {
+            spans: vec![Span {
+                graph: graph.clone(),
+                inputs: span_inputs,
+                outputs: all_output_atom_ranges.clone(),
+            }],
+        }]
+    } else {
+        partitioner_m::plan(
+            graph,
+            num_lanes,
+            graph.input_tensors(),
+            &all_output_atom_ranges,
+        )
+    };
     eprintln!(
-        "[compiled_eval] partitioned in {:.0}ms ({} phases)",
+        "[compiled_eval] partitioned in {:.0}ms ({} phases, {} lanes)",
         t0.elapsed().as_secs_f64() * 1e3,
         phases.len(),
+        num_lanes,
     );
 
     // Compile all spans via JIT.
