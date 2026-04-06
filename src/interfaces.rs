@@ -7,7 +7,8 @@ use crate::pool::Pool;
 use crate::super_graph::cache::SuperGraphCache;
 use crate::super_graph::data::{SuperGraphData, SuperGraphImage};
 use crate::super_graph::links::SuperGraphLink;
-use crate::super_graph::{SuperGraph, SuperGraphContext, SuperGraphError};
+use crate::super_graph::observer::SuperGraphObserver;
+use crate::super_graph::{SuperGraph, SuperGraphContext, SuperGraphError, SuperGraphEvalOptions};
 use crate::tensor_rank::DynRank;
 use crate::tokenizer::{AnyTokenizer, Tokenizer};
 use serde::{Deserialize, Serialize};
@@ -87,6 +88,8 @@ impl TextInferenceTokensInLogitOutInterface {
         text_in: String,
         tokenizer_cache: &mut HashMap<TokenizerInfo, Arc<AnyTokenizer>>,
         super_graph_caches: Option<&mut SuperGraphCache>,
+        eval_options: SuperGraphEvalOptions,
+        observer: &mut impl SuperGraphObserver,
         pool: &'p P,
     ) -> Result<String, SuperGraphError> {
         let tokenizer = {
@@ -117,13 +120,12 @@ impl TextInferenceTokensInLogitOutInterface {
             super_graph_data
         };
         let super_graph_output = {
-            let mut observer = ();
             let mut context = SuperGraphContext {
                 pool,
-                observer: &mut observer,
+                observer,
                 caches: super_graph_caches,
                 symbolic_graphs: vec![model.get_symbolic_graph()],
-                eval_options: Default::default(),
+                eval_options,
             };
             self.super_graph.run(super_graph_data, &mut context)?
         };
@@ -189,6 +191,8 @@ impl MultimodalLanguageInterface {
         modal_inputs: HashMap<SuperGraphLink, NumericTensor<'p, DynRank, P>>,
         tokenizer_cache: &mut HashMap<TokenizerInfo, Arc<AnyTokenizer>>,
         super_graph_caches: Option<&mut SuperGraphCache>,
+        eval_options: SuperGraphEvalOptions,
+        observer: &mut impl SuperGraphObserver,
         pool: &'p P,
     ) -> Result<String, SuperGraphError> {
         let tokenizer = {
@@ -220,13 +224,12 @@ impl MultimodalLanguageInterface {
             super_graph_data
         };
         let super_graph_output = {
-            let mut observer = ();
             let mut context = SuperGraphContext {
                 pool,
-                observer: &mut observer,
+                observer,
                 caches: super_graph_caches,
                 symbolic_graphs: vec![model.get_symbolic_graph()],
-                eval_options: Default::default(),
+                eval_options,
             };
             self.super_graph.run(super_graph_data, &mut context)?
         };
@@ -251,6 +254,8 @@ impl MultimodalLanguageInterface {
         text_in: String,
         tokenizer_cache: &mut HashMap<TokenizerInfo, Arc<AnyTokenizer>>,
         super_graph_caches: Option<&mut SuperGraphCache>,
+        eval_options: SuperGraphEvalOptions,
+        observer: &mut impl SuperGraphObserver,
         pool: &'p P,
     ) -> Result<String, SuperGraphError> {
         self.run_string_with_modal_inputs_in_string_out(
@@ -259,6 +264,8 @@ impl MultimodalLanguageInterface {
             HashMap::new(),
             tokenizer_cache,
             super_graph_caches,
+            eval_options,
+            observer,
             pool,
         )
     }
@@ -454,6 +461,9 @@ impl ImageGenerationInterface {
         latent_shape: Vec<usize>,
         num_inference_steps: usize,
         guidance_scale: f32,
+        super_graph_caches: Option<&mut SuperGraphCache>,
+        eval_options: SuperGraphEvalOptions,
+        observer: &mut impl SuperGraphObserver,
         pool: &'p P,
     ) -> Result<SuperGraphImage<'p, P>, SuperGraphError> {
         assert_eq!(
@@ -531,14 +541,13 @@ impl ImageGenerationInterface {
         }
 
         // Run
-        let mut observer = ();
         let symbolic_graphs: Vec<_> = models.iter().map(|m| m.get_symbolic_graph()).collect();
         let mut context = SuperGraphContext {
             pool,
-            observer: &mut observer,
-            caches: None,
+            observer,
+            caches: super_graph_caches,
             symbolic_graphs,
-            eval_options: Default::default(),
+            eval_options,
         };
 
         let mut result = self.super_graph.run(data, &mut context)?;

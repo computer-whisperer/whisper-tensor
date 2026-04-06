@@ -55,6 +55,8 @@ fn main() {
                 context.clone(),
                 &mut tokenizer_cache,
                 Some(&mut super_graph_caches),
+                Default::default(),
+                &mut (),
                 &pool,
             )
             .unwrap();

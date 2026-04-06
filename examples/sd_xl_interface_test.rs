@@ -74,6 +74,9 @@ fn main() {
             vec![1, channels, latent_h, latent_w],
             steps,
             guidance_scale,
+            None,
+            Default::default(),
+            &mut (),
             &pool,
         )
         .expect("Interface run failed");

@@ -1,15 +1,16 @@
-mod dump_tensors;
-
 use clap::Parser;
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::PathBuf;
+use whisper_tensor::graph::GlobalId;
 use whisper_tensor::interfaces::AnyInterface;
 use whisper_tensor::loader::{ConfigValue, ConfigValues, Loader, LoaderOutput};
 use whisper_tensor::numeric_dtype::NumericPrimitive;
-use whisper_tensor::numeric_tensor::NumericTensor;
-use whisper_tensor::pool::{Pool, TrackedPool};
+use whisper_tensor::numeric_tensor::{NumericTensor, NumericTensorView};
+use whisper_tensor::pool::{Pool, SystemPool, TrackedPool};
 use whisper_tensor::super_graph::cache::SuperGraphCache;
+use whisper_tensor::super_graph::observer::SuperGraphObserver;
+use whisper_tensor::super_graph::{ModelEvalMode, SuperGraphEvalOptions};
 use whisper_tensor::tensor_rank::DynRank;
 use whisper_tensor::tokenizer::Tokenizer;
 
@@ -42,6 +43,9 @@ enum Command {
         /// Maximum number of tokens to generate
         #[arg(long, short = 'n', default_value = "100")]
         max_tokens: usize,
+
+        #[command(flatten)]
+        eval: EvalArgs,
     },
 
     /// Generate an image from a diffusion model
@@ -88,6 +92,9 @@ enum Command {
         /// Random seed
         #[arg(long, default_value = "42")]
         seed: u64,
+
+        #[command(flatten)]
+        eval: EvalArgs,
     },
 
     /// Synthesize speech from text
@@ -126,28 +133,9 @@ enum Command {
         /// Transcript of the reference audio (for F5-TTS duration estimation)
         #[arg(long)]
         ref_text: Option<String>,
-    },
 
-    /// Dump intermediate tensors from a model evaluation.
-    ///
-    /// Loads a model, runs it with the given inputs, and writes selected
-    /// intermediate tensors (by ONNX name) to .npy files. Pass no --tensor
-    /// args to list all available tensor names.
-    DumpTensors {
-        /// Path to the model (directory or file)
-        model: PathBuf,
-
-        /// Input tensor: name=path.npy (repeatable)
-        #[arg(long = "input", value_name = "NAME=PATH")]
-        inputs: Vec<String>,
-
-        /// ONNX tensor name to capture (repeatable). Omit to list all names.
-        #[arg(long = "tensor", value_name = "NAME")]
-        tensors: Vec<String>,
-
-        /// Output directory for .npy files
-        #[arg(long, short, default_value = "dump_out")]
-        output: PathBuf,
+        #[command(flatten)]
+        eval: EvalArgs,
     },
 
     /// Transcribe speech to text
@@ -166,6 +154,9 @@ enum Command {
         /// Input audio file (WAV)
         #[arg(long, short)]
         audio: PathBuf,
+
+        #[command(flatten)]
+        eval: EvalArgs,
     },
 }
 
@@ -185,6 +176,143 @@ enum LoaderChoice {
     Piper,
     F5Tts,
     Whisper,
+}
+
+// ============================================================================
+// Common eval/debug options
+// ============================================================================
+
+/// Common eval/debug options shared across all commands.
+#[derive(clap::Args, Clone)]
+struct EvalArgs {
+    /// Model evaluation mode: symbolic, lowered, or compiled
+    #[arg(long, value_enum, default_value = "symbolic")]
+    eval_mode: EvalModeChoice,
+
+    /// Inline constant threshold for lowered/compiled modes
+    #[arg(long, default_value = "1024")]
+    inline_threshold: u64,
+
+    /// Disable the supergraph cache
+    #[arg(long)]
+    disable_cache: bool,
+
+    /// Dump a named tensor to .npy after execution (repeatable)
+    #[arg(long = "dump-tensor", value_name = "NAME")]
+    dump_tensors: Vec<String>,
+
+    /// Output directory for dumped tensors
+    #[arg(long, default_value = "dump_out")]
+    dump_output: PathBuf,
+}
+
+#[derive(Clone, clap::ValueEnum)]
+enum EvalModeChoice {
+    Symbolic,
+    Lowered,
+    Compiled,
+}
+
+impl EvalArgs {
+    fn to_eval_options(&self) -> SuperGraphEvalOptions {
+        let model_eval_mode = match self.eval_mode {
+            EvalModeChoice::Symbolic => ModelEvalMode::SymbolicEval,
+            EvalModeChoice::Lowered => ModelEvalMode::LoweredEval {
+                inline_constant_threshold: self.inline_threshold,
+            },
+            EvalModeChoice::Compiled => ModelEvalMode::CompiledEval {
+                inline_constant_threshold: self.inline_threshold,
+            },
+        };
+        SuperGraphEvalOptions { model_eval_mode }
+    }
+}
+
+// ============================================================================
+// Tensor dump observer
+// ============================================================================
+
+struct TensorDumpObserver {
+    watched_ids: HashMap<GlobalId, String>,
+    captured: HashMap<String, NumericTensor<'static, DynRank, SystemPool>>,
+}
+
+static DUMP_POOL: SystemPool = SystemPool;
+
+impl TensorDumpObserver {
+    fn new(
+        names: &[String],
+        symbolic_graphs: &[&whisper_tensor::symbolic_graph::SymbolicGraph],
+    ) -> Self {
+        let mut watched_ids = HashMap::new();
+        for graph in symbolic_graphs {
+            let by_name = graph.get_tensors_by_name();
+            for name in names {
+                if let Some(&id) = by_name.get(name) {
+                    watched_ids.insert(id, name.clone());
+                }
+            }
+        }
+        if !watched_ids.is_empty() {
+            eprintln!(
+                "[dump] watching {} tensor(s): {:?}",
+                watched_ids.len(),
+                names,
+            );
+        }
+        Self {
+            watched_ids,
+            captured: HashMap::new(),
+        }
+    }
+
+    fn write_outputs(&self, output_dir: &PathBuf) {
+        if self.captured.is_empty() {
+            return;
+        }
+        std::fs::create_dir_all(output_dir).unwrap_or_else(|e| {
+            eprintln!("Failed to create dump dir: {e}");
+        });
+        for (name, tensor) in &self.captured {
+            let safe_name = name.replace('/', "__").replace('.', "_");
+            let path = output_dir.join(format!("{safe_name}.npy"));
+            whisper_tensor::npy::write_npy_file(&path, &tensor.view()).unwrap_or_else(|e| {
+                eprintln!("Failed to write '{}': {e}", path.display());
+            });
+            eprintln!("[dump] wrote {}", path.display());
+        }
+    }
+}
+
+impl SuperGraphObserver for TensorDumpObserver {
+    fn on_node_executed(
+        &mut self,
+        _: &[GlobalId],
+        _: &str,
+        _: std::time::Instant,
+        _: std::time::Instant,
+    ) {
+    }
+    fn on_tensor_assigned(&mut self, path: &[GlobalId], tensor: &NumericTensorView<'_, DynRank>) {
+        if let Some(id) = path.last() {
+            if let Some(name) = self.watched_ids.get(id) {
+                let n = tensor.numel().min(3);
+                let preview: Vec<f64> = (0..n).map(|i| tensor.read_element(i).to_f64()).collect();
+                eprintln!(
+                    "[dump] captured '{}': shape={:?} dtype={:?} first={:.6?}",
+                    name,
+                    tensor.shape(),
+                    tensor.dtype(),
+                    &preview,
+                );
+                if let Ok(owned) = tensor.to_tensor(&DUMP_POOL) {
+                    self.captured.insert(name.clone(), owned);
+                }
+            }
+        }
+    }
+    fn on_loading_weight(&mut self, _: &[GlobalId], _: Option<String>) {}
+    fn on_progress(&mut self, _: &[GlobalId], _: i64, _: f64, _: f64) {}
 }
 
 // ============================================================================
@@ -267,11 +395,12 @@ fn main() {
             configs,
             prompt,
             max_tokens,
+            eval,
         } => {
             let config = build_config(model, &configs);
             eprintln!("Loading model...");
             let output = load_model(&loader, config);
-            cmd_generate(output, prompt, max_tokens);
+            cmd_generate(output, prompt, max_tokens, eval);
         }
         Command::Image {
             model,
@@ -285,6 +414,7 @@ fn main() {
             latent_h,
             latent_w,
             seed,
+            eval,
         } => {
             let config = build_config(model, &configs);
             eprintln!("Loading model...");
@@ -299,6 +429,7 @@ fn main() {
                 latent_h,
                 latent_w,
                 seed,
+                eval,
             );
         }
         Command::Tts {
@@ -311,6 +442,7 @@ fn main() {
             output,
             ref_audio,
             ref_text,
+            eval,
         } => {
             let model_dir = model.clone().unwrap_or_else(|| PathBuf::from("."));
             let config = build_config(model, &configs);
@@ -327,6 +459,7 @@ fn main() {
                     ref_audio,
                     ref_text,
                 },
+                eval,
             );
         }
         Command::Stt {
@@ -334,29 +467,12 @@ fn main() {
             loader,
             configs,
             audio,
+            eval,
         } => {
             let config = build_config(model.clone(), &configs);
             eprintln!("Loading model...");
             let loaded = load_model(&loader, config);
-            cmd_stt(loaded, audio, model);
-        }
-        Command::DumpTensors {
-            model,
-            inputs,
-            tensors,
-            output,
-        } => {
-            let input_npys: Vec<(String, PathBuf)> = inputs
-                .iter()
-                .map(|s| {
-                    let (name, path) = s.split_once('=').unwrap_or_else(|| {
-                        eprintln!("Bad --input '{s}' (expected name=path.npy)");
-                        std::process::exit(1);
-                    });
-                    (name.to_string(), PathBuf::from(path))
-                })
-                .collect();
-            dump_tensors::cmd_dump_tensors(model, input_npys, tensors, output);
+            cmd_stt(loaded, audio, model, eval);
         }
     }
 }
@@ -365,7 +481,7 @@ fn main() {
 // Text generation
 // ============================================================================
 
-fn cmd_generate(output: LoaderOutput, prompt: Option<String>, max_tokens: usize) {
+fn cmd_generate(output: LoaderOutput, prompt: Option<String>, max_tokens: usize, eval: EvalArgs) {
     let prompt = match prompt {
         Some(p) => p,
         None => {
@@ -395,6 +511,9 @@ fn cmd_generate(output: LoaderOutput, prompt: Option<String>, max_tokens: usize)
 
     let mut tokenizer_cache = HashMap::new();
     let mut super_graph_caches = SuperGraphCache::new();
+    let eval_options = eval.to_eval_options();
+    let symbolic_graphs = vec![model.get_symbolic_graph()];
+    let mut observer = TensorDumpObserver::new(&eval.dump_tensors, &symbolic_graphs);
 
     print!("{prompt}");
     std::io::stdout().flush().unwrap();
@@ -402,12 +521,19 @@ fn cmd_generate(output: LoaderOutput, prompt: Option<String>, max_tokens: usize)
     let pool = whisper_tensor::pool::SystemPool;
     let mut context = prompt;
     for _ in 0..max_tokens {
+        let caches = if eval.disable_cache {
+            None
+        } else {
+            Some(&mut super_graph_caches)
+        };
         let token = interface
             .run_string_in_string_out(
                 model,
                 context.clone(),
                 &mut tokenizer_cache,
-                Some(&mut super_graph_caches),
+                caches,
+                eval_options.clone(),
+                &mut observer,
                 &pool,
             )
             .unwrap_or_else(|e| {
@@ -419,6 +545,7 @@ fn cmd_generate(output: LoaderOutput, prompt: Option<String>, max_tokens: usize)
         context.push_str(&token);
     }
     println!();
+    observer.write_outputs(&eval.dump_output);
 }
 
 // ============================================================================
@@ -436,6 +563,7 @@ fn cmd_image(
     latent_h: usize,
     latent_w: usize,
     seed: u64,
+    eval: EvalArgs,
 ) {
     let models: Vec<&_> = output.models.iter().map(|m| m.model.as_ref()).collect();
 
@@ -464,6 +592,10 @@ fn cmd_image(
 
     let pool = TrackedPool::new(None);
     let start = std::time::Instant::now();
+    let eval_options = eval.to_eval_options();
+    let symbolic_graphs: Vec<_> = models.iter().map(|m| m.get_symbolic_graph()).collect();
+    let mut observer = TensorDumpObserver::new(&eval.dump_tensors, &symbolic_graphs);
+    let mut super_graph_caches = SuperGraphCache::new();
 
     let image_tensor = interface
         .run(
@@ -474,6 +606,9 @@ fn cmd_image(
             vec![1, channels, latent_h, latent_w],
             steps,
             guidance_scale,
+            if eval.disable_cache { None } else { Some(&mut super_graph_caches) },
+            eval_options,
+            &mut observer,
             &pool,
         )
         .map(|x| x.tensor)
@@ -486,6 +621,7 @@ fn cmd_image(
 
     save_image_tensor(&image_tensor, &output_path);
     eprintln!("Saved to {}", output_path.display());
+    observer.write_outputs(&eval.dump_output);
 }
 
 // ============================================================================
@@ -502,7 +638,7 @@ struct TtsRunOptions {
     ref_text: Option<String>,
 }
 
-fn cmd_tts(output: LoaderOutput, opts: TtsRunOptions) {
+fn cmd_tts(output: LoaderOutput, opts: TtsRunOptions, eval: EvalArgs) {
     use whisper_tensor::interfaces::TTSInputConfig;
     use whisper_tensor::super_graph::SuperGraphContext;
 
@@ -683,14 +819,16 @@ fn cmd_tts(output: LoaderOutput, opts: TtsRunOptions) {
         .iter()
         .map(|m| m.model.get_symbolic_graph())
         .collect();
+    let eval_options = eval.to_eval_options();
+    let mut observer = TensorDumpObserver::new(&eval.dump_tensors, &symbolic_graphs);
+    let mut super_graph_caches = SuperGraphCache::new();
     let super_graph_output = {
-        let mut observer = ();
         let mut context = SuperGraphContext {
             pool: &pool,
             observer: &mut observer,
-            caches: None,
+            caches: if eval.disable_cache { None } else { Some(&mut super_graph_caches) },
             symbolic_graphs,
-            eval_options: Default::default(),
+            eval_options,
         };
         interface
             .super_graph
@@ -710,6 +848,7 @@ fn cmd_tts(output: LoaderOutput, opts: TtsRunOptions) {
 
     let samples = tensor_to_f32_vec(&audio.samples);
     save_wav(&samples, audio.sample_rate_hz, &output_path);
+    observer.write_outputs(&eval.dump_output);
     eprintln!(
         "Saved {:.1}s of audio to {}",
         samples.len() as f64 / audio.sample_rate_hz as f64,
@@ -775,7 +914,7 @@ fn save_wav(samples: &[f32], sample_rate: u32, path: &std::path::Path) {
 // Speech-to-text (Whisper)
 // ============================================================================
 
-fn cmd_stt(output: LoaderOutput, audio_path: PathBuf, _model_dir: Option<PathBuf>) {
+fn cmd_stt(output: LoaderOutput, audio_path: PathBuf, _model_dir: Option<PathBuf>, eval: EvalArgs) {
     use whisper_tensor::super_graph::SuperGraphContext;
 
     use whisper_tensor::super_graph::data::{SuperGraphAudioClip, SuperGraphData};
@@ -830,21 +969,25 @@ fn cmd_stt(output: LoaderOutput, audio_path: PathBuf, _model_dir: Option<PathBuf
             output.models[0].model.get_symbolic_graph(),
             output.models[1].model.get_symbolic_graph(),
         ];
-        let mut observer = ();
+        let eval_options = eval.to_eval_options();
+        let mut observer = TensorDumpObserver::new(&eval.dump_tensors, &symbolic_graphs);
+        let mut super_graph_caches = SuperGraphCache::new();
         let mut context = SuperGraphContext {
             pool: &pool,
             observer: &mut observer,
-            caches: None,
+            caches: if eval.disable_cache { None } else { Some(&mut super_graph_caches) },
             symbolic_graphs,
-            eval_options: Default::default(),
+            eval_options,
         };
-        interface
+        let result = interface
             .super_graph
             .run(data, &mut context)
             .unwrap_or_else(|e| {
                 eprintln!("STT supergraph error: {e}");
                 std::process::exit(1);
-            })
+            });
+        observer.write_outputs(&eval.dump_output);
+        result
     };
 
     let token_tensor = output_data
