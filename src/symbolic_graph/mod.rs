@@ -629,8 +629,31 @@ impl SymbolicGraph {
         result
     }
 
+    /// Flatten this SymbolicGraph into a single combined MilliOpGraph,
+    /// also returning the mapping from symbolic tensor IDs to milli-internal IDs.
+    pub fn generate_milli_graph_with_id_map(
+        &self,
+        rng: &mut impl Rng,
+    ) -> (
+        crate::milli_graph::MilliOpGraph,
+        HashMap<GlobalId, GlobalId>,
+    ) {
+        let (graph, map) = self.generate_milli_graph_inner(rng);
+        (graph, map)
+    }
+
     /// Flatten this SymbolicGraph into a single combined MilliOpGraph.
     pub fn generate_milli_graph(&self, rng: &mut impl Rng) -> crate::milli_graph::MilliOpGraph {
+        self.generate_milli_graph_inner(rng).0
+    }
+
+    fn generate_milli_graph_inner(
+        &self,
+        rng: &mut impl Rng,
+    ) -> (
+        crate::milli_graph::MilliOpGraph,
+        HashMap<GlobalId, GlobalId>,
+    ) {
         use crate::graph::{Graph, Node};
         use crate::milli_graph::{MilliLoweringContext, MilliOpGraph, MilliOpGroup, MilliOpPhase};
 
@@ -706,7 +729,7 @@ impl SymbolicGraph {
             }
         }
 
-        combined
+        (combined, sym_to_combined)
     }
 
     /// Generate a MilliOpGraph with optional backward pass and optimizer.

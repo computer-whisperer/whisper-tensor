@@ -20,6 +20,29 @@ use std::hash::{Hash, Hasher};
 
 static POOL_S: SystemPool = SystemPool;
 
+/// Resolve a StoredOrNotTensor to a pool tensor.
+fn resolve_stored_tensor(
+    stored_ref: &StoredOrNotTensor,
+    tensor_store: &TensorStore,
+) -> Option<NumericTensor<'static, DynRank, SystemPool>> {
+    match stored_ref {
+        StoredOrNotTensor::Stored(store_id) => tensor_store
+            .get_tensor(*store_id)
+            .and_then(|s| s.to_pool_tensor(&POOL_S)),
+        StoredOrNotTensor::Inline(shared) => {
+            let src = shared.inner();
+            let layout = TensorLayout::<DynRank>::row_major(src.shape().clone(), src.dtype());
+            POOL_S.allocate(layout.buffer_size_bytes()).ok().map(|buf| {
+                let mut tensor = NumericTensor::from_parts(buf, layout);
+                for i in 0..src.numel() {
+                    tensor.write_element(i, src.read_element(i));
+                }
+                tensor
+            })
+        }
+    }
+}
+
 /// Cached result of lowering a symbolic graph to a NanoGraph.
 pub struct CachedLoweredModel {
     /// Hash of the info_inputs used to produce this lowering.
@@ -34,6 +57,9 @@ pub struct CachedLoweredModel {
     pub input_map: HashMap<GlobalId, GlobalId>,
     /// Milli graph output_map: internal ID → external ID.
     pub output_map: HashMap<GlobalId, GlobalId>,
+    /// Symbolic graph tensor ID → milli-internal ID. Used to request
+    /// intermediate tensors as nano graph outputs for observer reporting.
+    pub sym_to_internal: HashMap<GlobalId, GlobalId>,
     /// Milli-graph external IDs for user inputs (tokens, audio, etc.).
     pub user_input_ext_ids: Vec<GlobalId>,
     /// Milli-graph external IDs for weight/constant inputs that were NOT
@@ -125,53 +151,50 @@ pub fn build_info_inputs(
     let mut user_input_ext_ids = Vec::new();
     let mut weight_input_ext_ids = Vec::new();
 
-    // User inputs: shape+dtype only.
+    // Declared model inputs: always shape+dtype only, never inlined.
+    // These are runtime-overridable slots — even if the model provides default
+    // values (Input(Some(stored))), the user may supply different data at eval time.
+    let ordered_input_set: std::collections::HashSet<GlobalId> =
+        sym_graph.get_ordered_inputs().iter().copied().collect();
+
     for &input_id in sym_graph.get_ordered_inputs() {
         if let Some(view) = user_input_views.get(&input_id) {
+            // User provided data — use its shape/dtype.
             let shape: Vec<u64> = view.shape().to_vec();
             let dtype = view.dtype();
-            eprintln!("[lowered_eval] user input {input_id:?}: {dtype:?} {shape:?}",);
             info_inputs.insert(input_id, TensorInfo::from_dtype_and_shape(dtype, &shape));
             user_input_ext_ids.push(input_id);
-        } else {
-            let name = sym_graph
-                .get_tensor_info(input_id)
-                .and_then(|t| t.onnx_name.as_deref())
-                .unwrap_or("?");
-            eprintln!(
-                "[lowered_eval] WARNING: user input {input_id:?} ({name}) has no view — not in info_inputs",
-            );
+        } else if let Some(tensor_meta) = sym_graph.get_tensor_info(input_id) {
+            // No user view — resolve shape/dtype from the model's stored default.
+            // Still shape-only: the default or runtime data will be provided at eval time.
+            if let TensorType::Input(Some(stored_ref)) = &tensor_meta.tensor_type {
+                let resolved = resolve_stored_tensor(stored_ref, tensor_store);
+                if let Some(tensor) = resolved {
+                    let shape: Vec<u64> = tensor.shape().clone();
+                    let dtype = tensor.dtype();
+                    info_inputs.insert(input_id, TensorInfo::from_dtype_and_shape(dtype, &shape));
+                    user_input_ext_ids.push(input_id);
+                }
+            }
         }
     }
 
-    // Constants and initialized inputs: apply threshold policy.
+    // Constants (not declared inputs): apply threshold policy.
     for (&tensor_id, tensor_meta) in sym_graph.get_tensors() {
         let stored_ref = match &tensor_meta.tensor_type {
             TensorType::Constant(s) | TensorType::Input(Some(s)) => s,
             _ => continue,
         };
-        // Skip if already handled as a user input.
+        // Skip declared model inputs — handled above as runtime slots.
+        if ordered_input_set.contains(&tensor_id) {
+            continue;
+        }
+        // Skip if already in info_inputs.
         if info_inputs.contains_key(&tensor_id) {
             continue;
         }
 
-        // Try to resolve the stored tensor.
-        let resolved: Option<NumericTensor<'static, DynRank, SystemPool>> = match stored_ref {
-            StoredOrNotTensor::Stored(store_id) => tensor_store
-                .get_tensor(*store_id)
-                .and_then(|s| s.to_pool_tensor(&POOL_S)),
-            StoredOrNotTensor::Inline(shared) => {
-                let src = shared.inner();
-                let layout = TensorLayout::<DynRank>::row_major(src.shape().clone(), src.dtype());
-                POOL_S.allocate(layout.buffer_size_bytes()).ok().map(|buf| {
-                    let mut tensor = NumericTensor::from_parts(buf, layout);
-                    for i in 0..src.numel() {
-                        tensor.write_element(i, src.read_element(i));
-                    }
-                    tensor
-                })
-            }
-        };
+        let resolved = resolve_stored_tensor(stored_ref, tensor_store);
 
         if let Some(tensor) = resolved {
             let numel = NumericTensor::numel(&tensor) as u64;
@@ -211,11 +234,10 @@ pub fn lower_symbolic_graph(
     weight_input_ext_ids: Vec<GlobalId>,
 ) -> Option<CachedLoweredModel> {
     let mut rng = rand::rng();
-    let milli_graph = sym_graph.generate_milli_graph(&mut rng);
+    let (milli_graph, sym_to_internal) = sym_graph.generate_milli_graph_with_id_map(&mut rng);
 
-    // Remap info_inputs: lower() expects keys that match the milli graph's
-    // external input IDs, which generate_milli_graph preserves from the
-    // symbolic graph tensor IDs.
+    // lower() expects keys matching the milli graph's external input IDs,
+    // which generate_milli_graph preserves from the symbolic graph tensor IDs.
     let lower_result = lower::lower(&milli_graph, info_inputs, &POOL_S).ok()?;
 
     // Report unsupported ops with diagnostics.
@@ -289,6 +311,7 @@ pub fn lower_symbolic_graph(
         tensor_map: lower_result.tensor_map,
         input_map: milli_graph.input_map.clone(),
         output_map,
+        sym_to_internal,
         user_input_ext_ids,
         weight_input_ext_ids,
     })
@@ -298,11 +321,16 @@ pub fn lower_symbolic_graph(
 ///
 /// Loads weight data from the tensor store and combines with user inputs,
 /// then runs pool_eval on the cached NanoGraph.
+///
+/// If `intermediate_sym_ids` is non-empty, those symbolic graph tensor IDs
+/// are also requested as nano graph outputs and returned in the result map
+/// (for observer/debugging purposes).
 pub fn execute_lowered<'p, P: Pool + 'p>(
     cached: &CachedLoweredModel,
     sym_graph: &SymbolicGraph,
     tensor_store: &TensorStore,
     user_input_views: &HashMap<GlobalId, NumericTensorView<'_, DynRank>>,
+    intermediate_sym_ids: &[GlobalId],
     pool: &'p P,
 ) -> Result<HashMap<GlobalId, NumericTensor<'p, DynRank, P>>, super::SuperGraphError> {
     // Build the input pairs for pool_eval: (TAMI, &view) for each external input.
@@ -311,10 +339,23 @@ pub fn execute_lowered<'p, P: Pool + 'p>(
     // 1. User inputs (from super graph data)
     // 2. Weight inputs above threshold (loaded from tensor store)
 
-    // Load weight tensors into SystemPool-backed storage.
+    // Load stored tensors (weights above threshold + user input defaults).
+    // User-provided views override defaults, mirroring the symbolic eval path.
+    let stored_ids: Vec<GlobalId> = cached
+        .weight_input_ext_ids
+        .iter()
+        .chain(
+            // User input slots without a caller-provided view need their stored default.
+            cached
+                .user_input_ext_ids
+                .iter()
+                .filter(|id| !user_input_views.contains_key(id)),
+        )
+        .copied()
+        .collect();
     let mut weight_tensors: Vec<(GlobalId, NumericTensor<'_, DynRank, SystemPool>)> =
-        Vec::with_capacity(cached.weight_input_ext_ids.len());
-    for &ext_id in &cached.weight_input_ext_ids {
+        Vec::with_capacity(stored_ids.len());
+    for &ext_id in &stored_ids {
         let tensor_meta = sym_graph.get_tensor_info(ext_id).ok_or_else(|| {
             super::SuperGraphError::InvalidGraph(format!(
                 "lowered_eval: missing tensor info for weight {ext_id:?}"
@@ -328,30 +369,11 @@ pub fn execute_lowered<'p, P: Pool + 'p>(
                 )));
             }
         };
-        let tensor: NumericTensor<'_, DynRank, SystemPool> = match stored_ref {
-            StoredOrNotTensor::Stored(store_id) => tensor_store
-                .get_tensor(*store_id)
-                .and_then(|s| s.to_pool_tensor(&POOL_S))
-                .ok_or_else(|| {
-                    super::SuperGraphError::InvalidGraph(format!(
-                        "lowered_eval: failed to load weight {ext_id:?} from tensor store"
-                    ))
-                })?,
-            StoredOrNotTensor::Inline(shared) => {
-                let src = shared.inner();
-                let layout = TensorLayout::<DynRank>::row_major(src.shape().clone(), src.dtype());
-                let buf = POOL_S.allocate(layout.buffer_size_bytes()).map_err(|e| {
-                    super::SuperGraphError::InvalidGraph(format!(
-                        "lowered_eval: allocation for weight {ext_id:?}: {e}"
-                    ))
-                })?;
-                let mut tensor = NumericTensor::from_parts(buf, layout);
-                for i in 0..src.numel() {
-                    tensor.write_element(i, src.read_element(i));
-                }
-                tensor
-            }
-        };
+        let tensor = resolve_stored_tensor(stored_ref, tensor_store).ok_or_else(|| {
+            super::SuperGraphError::InvalidGraph(format!(
+                "lowered_eval: failed to load stored tensor {ext_id:?}"
+            ))
+        })?;
         weight_tensors.push((ext_id, tensor));
     }
 
@@ -370,14 +392,26 @@ pub fn execute_lowered<'p, P: Pool + 'p>(
         .chain(weight_views.iter().map(|(id, v)| (*id, v)))
         .collect();
 
+    let mut n_matched = 0usize;
+    let mut n_skipped = 0usize;
     for &(ext_id, view) in &all_views {
         let internal_id = cached.input_map.get(&ext_id).copied().unwrap_or(ext_id);
         if let Some(tami) = cached.tensor_map.get(&internal_id) {
             eval_inputs.push((tami, view));
+            n_matched += 1;
+        } else {
+            n_skipped += 1;
         }
     }
+    eprintln!(
+        "[lowered_eval] inputs: {} matched, {} skipped (no TAMI), {} total in input_map",
+        n_matched,
+        n_skipped,
+        cached.input_map.len(),
+    );
 
-    // Build output TAMIs from the symbolic graph's ordered outputs.
+    // Build output TAMIs from the symbolic graph's ordered outputs
+    // plus any requested intermediate tensors.
     // output_map is internal→external, so build reverse (external→internal).
     let reverse_output: HashMap<GlobalId, GlobalId> = cached
         .output_map
@@ -385,17 +419,39 @@ pub fn execute_lowered<'p, P: Pool + 'p>(
         .map(|(&internal, &external)| (external, internal))
         .collect();
 
-    let output_tamis: Vec<(&GlobalId, &TensorAtomMapInfo)> = sym_graph
+    // Resolve a symbolic tensor ID → milli-internal ID, checking both
+    // the output_map (for graph outputs) and sym_to_internal (for intermediates).
+    let resolve = |sym_id: &GlobalId| -> Option<GlobalId> {
+        reverse_output
+            .get(sym_id)
+            .copied()
+            .or_else(|| cached.sym_to_internal.get(sym_id).copied())
+    };
+
+    let mut output_tamis: Vec<(GlobalId, &TensorAtomMapInfo)> = sym_graph
         .get_ordered_outputs()
         .iter()
         .filter_map(|ext_id| {
-            let internal_id = reverse_output.get(ext_id).copied().unwrap_or(*ext_id);
+            let internal_id = resolve(ext_id).unwrap_or(*ext_id);
             cached
                 .tensor_map
                 .get(&internal_id)
-                .map(|tami| (ext_id, tami))
+                .map(|tami| (*ext_id, tami))
         })
         .collect();
+
+    // Add requested intermediates (skip any already in outputs or missing from tensor_map).
+    let output_sym_ids: std::collections::HashSet<GlobalId> =
+        output_tamis.iter().map(|(id, _)| *id).collect();
+    for sym_id in intermediate_sym_ids {
+        if !output_sym_ids.contains(sym_id) {
+            let internal_id = resolve(sym_id).unwrap_or(*sym_id);
+            if let Some(tami) = cached.tensor_map.get(&internal_id) {
+                output_tamis.push((*sym_id, tami));
+            }
+        }
+    }
+
     let output_tami_refs: Vec<&TensorAtomMapInfo> =
         output_tamis.iter().map(|(_, tami)| *tami).collect();
 
@@ -412,7 +468,7 @@ pub fn execute_lowered<'p, P: Pool + 'p>(
     // Map results to external output IDs.
     let mut outputs: HashMap<GlobalId, NumericTensor<'p, DynRank, P>> = HashMap::new();
     for ((ext_id, _), tensor) in output_tamis.iter().zip(eval_results) {
-        outputs.insert(**ext_id, tensor);
+        outputs.insert(*ext_id, tensor);
     }
 
     Ok(outputs)

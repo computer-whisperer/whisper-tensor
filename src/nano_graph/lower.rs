@@ -504,6 +504,9 @@ pub fn lower<'a, 'p: 'a, P: crate::pool::Pool + 'p>(
 
     // Register all tensors that exist before ops run (graph inputs + inferred
     // constants) and are NOT produced by any op.
+    // Use register_constant so that tensors with concrete data get LiteralSpan
+    // groups (baking values into the graph), while tensors without data fall
+    // through to register_input (creating InputTensor slots for runtime).
     let op_outputs: std::collections::HashSet<GlobalId> = graph
         .op_ordering()
         .iter()
@@ -514,7 +517,7 @@ pub fn lower<'a, 'p: 'a, P: crate::pool::Pool + 'p>(
     let infos_ref = ctx.all_infos;
     for (id, info) in infos_ref {
         if !op_outputs.contains(id) {
-            ctx.register_input(*id, info);
+            ctx.register_constant(*id, info);
         }
     }
 

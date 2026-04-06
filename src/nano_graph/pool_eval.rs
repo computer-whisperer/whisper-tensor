@@ -75,6 +75,19 @@ pub fn pool_eval<'p, P: Pool + 'p>(
     }
 
     // Fill any remaining input stores that weren't provided by the caller.
+    let n_unfilled: usize = input_stores.iter().filter(|s| s.is_none()).count();
+    if n_unfilled > 0 {
+        let unfilled_atoms: u64 = input_stores
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.is_none())
+            .map(|(ti, _)| input_tensors[ti].count)
+            .sum();
+        eprintln!(
+            "[pool_eval] WARNING: {n_unfilled} of {} input tensors unfilled ({unfilled_atoms} atoms) — zero-filling",
+            input_tensors.len(),
+        );
+    }
     let input_stores: Vec<AtomStore<'_, 'p, P>> = input_stores
         .into_iter()
         .enumerate()

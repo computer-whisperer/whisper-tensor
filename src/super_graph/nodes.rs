@@ -431,6 +431,7 @@ impl SuperGraphNode for SuperGraphNodeModelExecution {
             inline_constant_threshold,
         } = &context.eval_options.model_eval_mode
             && let Some(results) = self.try_lowered_eval(
+                node_path,
                 symbolic_graph,
                 tensor_store,
                 &input_views,
@@ -529,6 +530,7 @@ impl SuperGraphNodeModelExecution {
     #[allow(clippy::type_complexity)]
     fn try_lowered_eval<'short, 'model, 'p, P: Pool + 'p, T: SuperGraphObserver>(
         &self,
+        node_path: &[GlobalId],
         symbolic_graph: &crate::symbolic_graph::SymbolicGraph,
         tensor_store: &crate::symbolic_graph::tensor_store::TensorStore,
         input_views: &[(
@@ -586,8 +588,9 @@ impl SuperGraphNodeModelExecution {
             .map(|cached| cached.info_inputs_hash == info_hash)
             .unwrap_or(false);
 
+        // Lower on cache miss, keeping the result alive for execution.
+        let lowered_owned: Option<lowered_eval::CachedLoweredModel>;
         if !cache_hit {
-            // Lower and cache.
             let t0 = Instant::now();
             let cached = match lowered_eval::lower_symbolic_graph(
                 symbolic_graph,
@@ -597,7 +600,7 @@ impl SuperGraphNodeModelExecution {
                 weight_input_ext_ids,
             ) {
                 Some(c) => c,
-                None => return Ok(None), // Lowering declined (unsupported ops).
+                None => return Ok(None),
             };
             let dt = t0.elapsed();
             eprintln!(
@@ -607,36 +610,57 @@ impl SuperGraphNodeModelExecution {
 
             if let Some(caches) = &mut context.caches {
                 caches.lowered_model_cache.insert(sym_graph_id, cached);
+                lowered_owned = None;
             } else {
-                // No cache available — execute directly and return.
-                let results = lowered_eval::execute_lowered(
-                    &cached,
-                    symbolic_graph,
-                    tensor_store,
-                    &user_input_view_map,
-                    context.pool,
-                )?;
-                return Ok(Some(results));
+                lowered_owned = Some(cached);
             }
+        } else {
+            lowered_owned = None;
         }
 
-        // Execute from cache.
-        // Safety: if caches is None, cache_hit is always false (line above),
-        // so we enter the !cache_hit branch and return early. This expect
-        // is only reachable when caches is Some and contains the entry.
-        let cached = context
-            .caches
-            .as_ref()
-            .and_then(|c| c.lowered_model_cache.get(&sym_graph_id))
-            .expect("just inserted or validated cache entry");
+        // Get a reference to the cached model — from the cache store or
+        // from the owned value we just lowered.
+        let cached = if let Some(ref owned) = lowered_owned {
+            owned
+        } else {
+            context
+                .caches
+                .as_ref()
+                .and_then(|c| c.lowered_model_cache.get(&sym_graph_id))
+                .expect("just inserted or validated cache entry")
+        };
+
+        // TODO: collect only subscribed tensor IDs once observer subscriptions
+        // are threaded through. For now, request no intermediates to avoid
+        // liveness conflicts in pool_eval.
+        let intermediate_ids: Vec<GlobalId> = Vec::new();
 
         let results = lowered_eval::execute_lowered(
             cached,
             symbolic_graph,
             tensor_store,
             &user_input_view_map,
+            &intermediate_ids,
             context.pool,
         )?;
+
+        // Feed observer with intermediate tensors, using the same path
+        // format as the symbolic eval path: [model_exec_node_id, tensor_id].
+        let observer_path: Vec<GlobalId> = node_path
+            .iter()
+            .chain(core::iter::once(&self.global_id))
+            .copied()
+            .collect();
+        for (&tensor_id, tensor) in &results {
+            let full_path: Vec<GlobalId> = observer_path
+                .iter()
+                .chain(core::iter::once(&tensor_id))
+                .copied()
+                .collect();
+            context
+                .observer
+                .on_tensor_assigned(&full_path, &tensor.view());
+        }
 
         Ok(Some(results))
     }
