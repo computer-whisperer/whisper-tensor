@@ -6,7 +6,6 @@ pub mod model_server;
 pub mod scheduler;
 
 use std::collections::HashMap;
-use std::fmt::Display;
 use std::time::Duration;
 use whisper_tensor::graph::GlobalId;
 use whisper_tensor::interfaces::AnyInterface;
@@ -35,22 +34,6 @@ pub struct AbbreviatedTensorReportSettings {
     pub do_all: bool,
 }
 
-#[derive(Copy, Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
-pub enum SuperGraphRequestBackendMode {
-    #[default]
-    NDArray,
-    Compiler,
-}
-
-impl Display for SuperGraphRequestBackendMode {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            SuperGraphRequestBackendMode::NDArray => write!(f, "NDArray"),
-            SuperGraphRequestBackendMode::Compiler => write!(f, "Compiler"),
-        }
-    }
-}
-
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SuperGraphAudioInput {
     pub samples: NumericTensor<'static, DynRank, SystemPool>,
@@ -62,7 +45,7 @@ pub struct SuperGraphRequest {
     pub attention_token: Option<u64>,
     pub super_graph: SuperGraph,
     pub use_cache: Option<u64>,
-    pub backend_mode: SuperGraphRequestBackendMode,
+    pub eval_options: whisper_tensor::super_graph::SuperGraphEvalOptions,
     pub string_inputs: HashMap<SuperGraphLink, String>,
     pub hash_inputs: HashMap<SuperGraphLink, SuperGraphHash>,
     pub tensor_inputs: HashMap<SuperGraphLink, NumericTensor<'static, DynRank, SystemPool>>,

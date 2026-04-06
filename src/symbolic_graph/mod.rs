@@ -337,6 +337,14 @@ impl SymbolicGraph {
         &self.tensors
     }
 
+    pub fn get_ordered_inputs(&self) -> &[GlobalId] {
+        &self.ordered_inputs
+    }
+
+    pub fn get_ordered_outputs(&self) -> &[GlobalId] {
+        &self.ordered_outputs
+    }
+
     pub fn get_outputs(&self) -> Vec<GlobalId> {
         let mut results = Vec::new();
         for (id, info) in &self.tensors {

@@ -17,9 +17,7 @@ use whisper_tensor::pool::SystemPool;
 use whisper_tensor::super_graph::links::SuperGraphLink;
 use whisper_tensor::tensor_rank::DynRank;
 use whisper_tensor::tokenizer::Tokenizer;
-use whisper_tensor_server::{
-    SuperGraphAudioInput, SuperGraphRequest, SuperGraphRequestBackendMode,
-};
+use whisper_tensor_server::{SuperGraphAudioInput, SuperGraphRequest};
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub(crate) struct STTExplorerState {}
@@ -323,7 +321,7 @@ impl STTExplorerApp {
             subscribed_tensors: Vec::new(),
             string_inputs: HashMap::new(),
             use_cache: None,
-            backend_mode: SuperGraphRequestBackendMode::NDArray,
+            eval_options: Default::default(),
             symbolic_graph_ids: model_ids.clone(),
             tensor_inputs: HashMap::new(),
             audio_inputs: HashMap::from([(

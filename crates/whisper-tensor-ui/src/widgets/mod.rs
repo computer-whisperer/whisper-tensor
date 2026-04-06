@@ -1,3 +1,4 @@
+pub(crate) mod eval_options;
 pub(crate) mod progress_report;
 pub(crate) mod tensor_view;
 pub(crate) mod toggle;

@@ -693,7 +693,7 @@ impl MilliOp for ClampMin {
     fn infer<'a, 'p, P: Pool + 'p>(
         &self,
         known_inputs: &HashMap<GlobalId, TensorInfo<'a, 'p, P>>,
-        symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
+        _symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
         pool: &'p P,
     ) -> Result<Vec<(GlobalId, TensorInfo<'a, 'p, P>)>, MilliOpGraphError>
     where
@@ -703,12 +703,8 @@ impl MilliOp for ClampMin {
             .get(&self.input)
             .ok_or(MilliOpGraphError::UnableToInfer)?;
 
-        // ClampMin preserves shape and dtype.
-        let out = TensorInfo::new_from_first_element_and_rank(
-            input_info.first_element(),
-            input_info.rank(),
-            symbolic_resolver,
-        );
+        // ClampMin preserves shape and dtype — clone input info.
+        let out = input_info.clone_with_pool(pool);
 
         if let Some(results) = super::constant_fold(
             self,

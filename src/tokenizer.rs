@@ -8,6 +8,9 @@ pub enum TokenizerError {
     TokenizersError(#[from] tokenizers::Error),
     #[error(transparent)]
     Utf8Error(#[from] Utf8Error),
+    #[cfg(feature = "rwkv-tokenizer")]
+    #[error(transparent)]
+    RwkvDecodeError(#[from] rwkv_tokenizer::DecodeError),
 }
 
 #[derive(Debug, Clone)]

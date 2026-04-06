@@ -425,6 +425,25 @@ impl SuperGraphNode for SuperGraphNodeModelExecution {
                 Some((tensor_id, tensor.view()))
             })
             .collect();
+
+        // Try the lowered eval path if configured.
+        if let crate::super_graph::ModelEvalMode::LoweredEval {
+            inline_constant_threshold,
+        } = &context.eval_options.model_eval_mode
+            && let Some(results) = self.try_lowered_eval(
+                symbolic_graph,
+                tensor_store,
+                &input_views,
+                *inline_constant_threshold,
+                context,
+            )?
+        {
+            self.insert_results(results, &tensors_by_name, data)?;
+            return Ok(());
+            // Fall through to symbolic eval if lowered path declined or not configured.
+        }
+
+        // Symbolic eval path (default).
         let view_map: HashMap<
             GlobalId,
             &crate::numeric_tensor::NumericTensorView<'_, crate::tensor_rank::DynRank>,
@@ -444,23 +463,7 @@ impl SuperGraphNode for SuperGraphNodeModelExecution {
             &mut observer,
         )?;
 
-        let tensors_by_id: HashMap<GlobalId, &str> = tensors_by_name
-            .iter()
-            .map(|(name, &id)| (id, name.as_str()))
-            .collect();
-
-        for (id, tensor) in results {
-            if let Some(&name) = tensors_by_id.get(&id) {
-                for (out_name, link) in &self.tensor_outputs {
-                    if out_name == name {
-                        let link = require_node_link(*link, "ModelExecution", "tensor_outputs")?;
-                        data.tensors.insert(link, tensor);
-                        break;
-                    }
-                }
-            }
-        }
-
+        self.insert_results(results, &tensors_by_name, data)?;
         Ok(())
     }
 
@@ -489,6 +492,153 @@ impl SuperGraphNode for SuperGraphNodeModelExecution {
 
     fn global_id(&self) -> GlobalId {
         self.global_id
+    }
+}
+
+impl SuperGraphNodeModelExecution {
+    /// Map eval results back to super graph data links by tensor name.
+    fn insert_results<'p, 'model, P: Pool + 'p>(
+        &self,
+        results: HashMap<GlobalId, crate::numeric_tensor::NumericTensor<'p, DynRank, P>>,
+        tensors_by_name: &HashMap<String, GlobalId>,
+        data: &mut SuperGraphData<'p, 'model, P>,
+    ) -> Result<(), SuperGraphError> {
+        let tensors_by_id: HashMap<GlobalId, &str> = tensors_by_name
+            .iter()
+            .map(|(name, &id)| (id, name.as_str()))
+            .collect();
+
+        for (id, tensor) in results {
+            if let Some(&name) = tensors_by_id.get(&id) {
+                for (out_name, link) in &self.tensor_outputs {
+                    if out_name == name {
+                        let link = require_node_link(*link, "ModelExecution", "tensor_outputs")?;
+                        data.tensors.insert(link, tensor);
+                        break;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Attempt the lowered eval path. Returns:
+    /// - `Ok(Some(results))` if lowered eval succeeded
+    /// - `Ok(None)` if the graph can't be lowered (fall back to symbolic eval)
+    /// - `Err(e)` on hard failure
+    #[allow(clippy::type_complexity)]
+    fn try_lowered_eval<'short, 'model, 'p, P: Pool + 'p, T: SuperGraphObserver>(
+        &self,
+        symbolic_graph: &crate::symbolic_graph::SymbolicGraph,
+        tensor_store: &crate::symbolic_graph::tensor_store::TensorStore,
+        input_views: &[(
+            GlobalId,
+            crate::numeric_tensor::NumericTensorView<'_, DynRank>,
+        )],
+        inline_constant_threshold: u64,
+        context: &mut SuperGraphContext<'short, 'model, 'p, P, T>,
+    ) -> Result<
+        Option<HashMap<GlobalId, crate::numeric_tensor::NumericTensor<'p, DynRank, P>>>,
+        SuperGraphError,
+    > {
+        use crate::super_graph::lowered_eval;
+
+        // Gate: only flat graphs (no Scan/If/LSTM sub-graphs).
+        if !lowered_eval::can_lower_symbolic_graph(symbolic_graph) {
+            return Ok(None);
+        }
+
+        // Build user input view map (symbolic graph tensor ID → view).
+        let user_input_view_map: HashMap<
+            GlobalId,
+            crate::numeric_tensor::NumericTensorView<'_, DynRank>,
+        > = input_views
+            .iter()
+            .map(|(id, v)| {
+                (
+                    *id,
+                    crate::numeric_tensor::NumericTensorView::new(v.data(), v.layout().clone()),
+                )
+            })
+            .collect();
+
+        // Build info_inputs for lowering with the threshold policy.
+        let (info_inputs, user_input_ext_ids, weight_input_ext_ids) =
+            lowered_eval::build_info_inputs(
+                symbolic_graph,
+                tensor_store,
+                &user_input_view_map,
+                inline_constant_threshold,
+            );
+
+        let info_hash = lowered_eval::hash_info_inputs(&info_inputs);
+
+        // Check cache.
+        let sym_graph_id = {
+            use crate::graph::Graph;
+            symbolic_graph.global_id()
+        };
+
+        let cache_hit = context
+            .caches
+            .as_ref()
+            .and_then(|c| c.lowered_model_cache.get(&sym_graph_id))
+            .map(|cached| cached.info_inputs_hash == info_hash)
+            .unwrap_or(false);
+
+        if !cache_hit {
+            // Lower and cache.
+            let t0 = Instant::now();
+            let cached = match lowered_eval::lower_symbolic_graph(
+                symbolic_graph,
+                &info_inputs,
+                info_hash,
+                user_input_ext_ids,
+                weight_input_ext_ids,
+            ) {
+                Some(c) => c,
+                None => return Ok(None), // Lowering declined (unsupported ops).
+            };
+            let dt = t0.elapsed();
+            eprintln!(
+                "[lowered_eval] lowered in {:.0}ms (cache miss)",
+                dt.as_secs_f64() * 1e3,
+            );
+
+            if let Some(caches) = &mut context.caches {
+                caches.lowered_model_cache.insert(sym_graph_id, cached);
+            } else {
+                // No cache available — execute directly and return.
+                let results = lowered_eval::execute_lowered(
+                    &cached,
+                    symbolic_graph,
+                    tensor_store,
+                    &user_input_view_map,
+                    context.pool,
+                )?;
+                return Ok(Some(results));
+            }
+        }
+
+        // Execute from cache.
+        // Safety: if caches is None, cache_hit is always false (line above),
+        // so we enter the !cache_hit branch and return early. This expect
+        // is only reachable when caches is Some and contains the entry.
+        let cached = context
+            .caches
+            .as_ref()
+            .and_then(|c| c.lowered_model_cache.get(&sym_graph_id))
+            .expect("just inserted or validated cache entry");
+
+        let results = lowered_eval::execute_lowered(
+            cached,
+            symbolic_graph,
+            tensor_store,
+            &user_input_view_map,
+            context.pool,
+        )?;
+
+        Ok(Some(results))
     }
 }
 

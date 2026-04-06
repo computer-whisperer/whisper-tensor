@@ -123,6 +123,7 @@ impl TextInferenceTokensInLogitOutInterface {
                 observer: &mut observer,
                 caches: super_graph_caches,
                 symbolic_graphs: vec![model.get_symbolic_graph()],
+                eval_options: Default::default(),
             };
             self.super_graph.run(super_graph_data, &mut context)?
         };
@@ -225,6 +226,7 @@ impl MultimodalLanguageInterface {
                 observer: &mut observer,
                 caches: super_graph_caches,
                 symbolic_graphs: vec![model.get_symbolic_graph()],
+                eval_options: Default::default(),
             };
             self.super_graph.run(super_graph_data, &mut context)?
         };
@@ -536,6 +538,7 @@ impl ImageGenerationInterface {
             observer: &mut observer,
             caches: None,
             symbolic_graphs,
+            eval_options: Default::default(),
         };
 
         let mut result = self.super_graph.run(data, &mut context)?;

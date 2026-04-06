@@ -1,6 +1,7 @@
 pub mod cache;
 pub mod data;
 pub mod links;
+pub mod lowered_eval;
 pub mod nodes;
 pub mod observer;
 
@@ -44,11 +45,36 @@ pub enum SuperGraphError {
 
 pub type SuperGraphHash = u64;
 
+/// Controls how ModelExecution nodes evaluate symbolic graphs.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub enum ModelEvalMode {
+    /// Current behavior: per-op symbolic graph eval.
+    #[default]
+    SymbolicEval,
+    /// Lower symbolic → milli → nano once, cache the NanoGraph, execute via
+    /// pool_eval on subsequent calls. Falls back to SymbolicEval for graphs
+    /// containing sub-graph ops (Scan, If, LSTM).
+    LoweredEval {
+        /// Constants with numel <= this threshold get their full data passed
+        /// to lowering (enables constant folding of shape ops, small lookup
+        /// tables, axis indices, etc.). Larger constants are shape+dtype only
+        /// and flow as inputs at pool_eval time.
+        inline_constant_threshold: u64,
+    },
+}
+
+/// Options controlling super graph evaluation behavior.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct SuperGraphEvalOptions {
+    pub model_eval_mode: ModelEvalMode,
+}
+
 pub struct SuperGraphContext<'short, 'model, 'p, P: crate::pool::Pool + 'p, T: SuperGraphObserver> {
     pub pool: &'p P,
     pub observer: &'short mut T,
     pub caches: Option<&'short mut SuperGraphCache>,
     pub symbolic_graphs: Vec<&'model SymbolicGraph>,
+    pub eval_options: SuperGraphEvalOptions,
 }
 
 impl<'short, 'model, 'p, P: crate::pool::Pool + 'p, T: SuperGraphObserver>
@@ -62,6 +88,7 @@ impl<'short, 'model, 'p, P: crate::pool::Pool + 'p, T: SuperGraphObserver>
             observer,
             caches: None,
             symbolic_graphs: vec![],
+            eval_options: SuperGraphEvalOptions::default(),
         }
     }
 }

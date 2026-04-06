@@ -517,6 +517,7 @@ pub async fn scheduler(
                                     observer: &mut observer,
                                     caches: cache,
                                     symbolic_graphs: symbolic_graph_refs,
+                                    eval_options: req.eval_options.clone(),
                                 };
                                 req.super_graph
                                     .run(super_graph_data, &mut context)

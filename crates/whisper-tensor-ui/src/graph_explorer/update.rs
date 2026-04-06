@@ -858,19 +858,7 @@ impl GraphExplorerApp {
                                                         toggle_ui(ui, &mut text_inference_data.use_cache);
                                                         ui.label("Cache");
                                                     });
-                                                    egui::ComboBox::from_id_salt(121151)
-                                                        .selected_text(text_inference_data.selected_mode.to_string())
-                                                        .show_ui(ui, |ui| {
-                                                            ui.selectable_value(
-                                                                &mut text_inference_data.selected_mode,
-                                                                SuperGraphRequestBackendMode::NDArray,
-                                                                SuperGraphRequestBackendMode::NDArray.to_string());
-
-                                                            ui.selectable_value(
-                                                                &mut text_inference_data.selected_mode,
-                                                                SuperGraphRequestBackendMode::Compiler,
-                                                                SuperGraphRequestBackendMode::Compiler.to_string());
-                                                    });
+                                                    eval_options_ui(ui, &mut text_inference_data.eval_options);
                                                     if ui.button("Run").clicked() {
                                                         let tokens =
                                                             text_inference_data.tokens.clone();
@@ -922,7 +910,7 @@ impl GraphExplorerApp {
                                                                         12u64,
                                                                     )]),
                                                                     use_cache: if text_inference_data.use_cache {Some(100 + interface_id as u64)} else {None},
-                                                                    backend_mode: text_inference_data.selected_mode
+                                                                    eval_options: text_inference_data.eval_options.clone(),
                                                                 },
                                                             );
                                                         text_inference_data.pending_request =
@@ -1135,25 +1123,11 @@ impl GraphExplorerApp {
                                         });
                                     } else {
                                         ui.horizontal(|ui| {
-                                            egui::ComboBox::from_id_salt("sd_backend_mode")
-                                                .selected_text(sd_data.selected_mode.to_string())
-                                                .show_ui(ui, |ui| {
-                                                    ui.selectable_value(
-                                                        &mut sd_data.selected_mode,
-                                                        SuperGraphRequestBackendMode::NDArray,
-                                                        SuperGraphRequestBackendMode::NDArray
-                                                            .to_string(),
-                                                    );
-
-                                                    ui.selectable_value(
-                                                        &mut sd_data.selected_mode,
-                                                        SuperGraphRequestBackendMode::Compiler,
-                                                        SuperGraphRequestBackendMode::Compiler
-                                                            .to_string(),
-                                                    );
-                                                });
                                             toggle_ui(ui, &mut sd_data.use_cache);
                                             ui.label("Cache");
+                                        });
+                                        eval_options_ui(ui, &mut sd_data.eval_options);
+                                        {
                                             if ui.button("Generate").clicked() {
                                                 sd_data.progress_widget_state.clear();
                                                 let mut tensor_inputs = HashMap::new();
@@ -1336,7 +1310,7 @@ impl GraphExplorerApp {
                                                             } else {
                                                                 None
                                                             },
-                                                            backend_mode: sd_data.selected_mode,
+                                                            eval_options: sd_data.eval_options.clone(),
                                                             symbolic_graph_ids,
                                                             tensor_inputs,
                                                             audio_inputs: HashMap::new(),
@@ -1350,7 +1324,7 @@ impl GraphExplorerApp {
                                                 sd_data.status_message =
                                                     Some("Running SD pipeline...".to_string());
                                             }
-                                        });
+                                        }
                                     }
                                 });
                             });
@@ -1594,27 +1568,11 @@ impl GraphExplorerApp {
                                         });
                                     } else {
                                         ui.horizontal(|ui| {
-                                            egui::ComboBox::from_id_salt((
-                                                "tts_backend_mode",
-                                                interface_id,
-                                            ))
-                                            .selected_text(tts_data.selected_mode.to_string())
-                                            .show_ui(ui, |ui| {
-                                                ui.selectable_value(
-                                                    &mut tts_data.selected_mode,
-                                                    SuperGraphRequestBackendMode::NDArray,
-                                                    SuperGraphRequestBackendMode::NDArray.to_string(),
-                                                );
-
-                                                ui.selectable_value(
-                                                    &mut tts_data.selected_mode,
-                                                    SuperGraphRequestBackendMode::Compiler,
-                                                    SuperGraphRequestBackendMode::Compiler
-                                                        .to_string(),
-                                                );
-                                            });
                                             toggle_ui(ui, &mut tts_data.use_cache);
                                             ui.label("Cache");
+                                        });
+                                        eval_options_ui(ui, &mut tts_data.eval_options);
+                                        {
                                             if ui.button("Generate").clicked() {
                                                 tts_data.progress_widget_state.clear();
                                                 let mut tensor_inputs = HashMap::new();
@@ -1769,7 +1727,7 @@ impl GraphExplorerApp {
                                                                 } else {
                                                                     None
                                                                 },
-                                                                backend_mode: tts_data.selected_mode,
+                                                                eval_options: tts_data.eval_options.clone(),
                                                                 symbolic_graph_ids,
                                                                 tensor_inputs,
                                                                 audio_inputs: HashMap::new(),
@@ -1787,7 +1745,7 @@ impl GraphExplorerApp {
                                                         Some("Running TTS pipeline...".to_string());
                                                 }
                                             }
-                                        });
+                                        }
                                     }
                                 });
                             });
@@ -2142,28 +2100,11 @@ impl GraphExplorerApp {
                                             });
                                         } else {
                                             ui.horizontal(|ui| {
-                                                egui::ComboBox::from_id_salt((
-                                                    "stt_backend_mode",
-                                                    interface_id,
-                                                ))
-                                                .selected_text(stt_data.selected_mode.to_string())
-                                                .show_ui(ui, |ui| {
-                                                    ui.selectable_value(
-                                                        &mut stt_data.selected_mode,
-                                                        SuperGraphRequestBackendMode::NDArray,
-                                                        SuperGraphRequestBackendMode::NDArray
-                                                            .to_string(),
-                                                    );
-
-                                                    ui.selectable_value(
-                                                        &mut stt_data.selected_mode,
-                                                        SuperGraphRequestBackendMode::Compiler,
-                                                        SuperGraphRequestBackendMode::Compiler
-                                                            .to_string(),
-                                                    );
-                                                });
                                                 toggle_ui(ui, &mut stt_data.use_cache);
                                                 ui.label("Cache");
+                                            });
+                                            eval_options_ui(ui, &mut stt_data.eval_options);
+                                            {
                                                 if ui.button("Transcribe").clicked() {
                                                     if let Some(audio_bytes) =
                                                         stt_data.selected_audio_bytes.as_ref()
@@ -2246,7 +2187,7 @@ impl GraphExplorerApp {
                                                                                 } else {
                                                                                     None
                                                                                 },
-                                                                                backend_mode: stt_data.selected_mode,
+                                                                                eval_options: stt_data.eval_options.clone(),
                                                                                 symbolic_graph_ids,
                                                                                 tensor_inputs: HashMap::new(),
                                                                                 audio_inputs: HashMap::from([(
@@ -2285,7 +2226,7 @@ impl GraphExplorerApp {
                                                         );
                                                     }
                                                 }
-                                            });
+                                            }
                                         }
                                     });
                                 });

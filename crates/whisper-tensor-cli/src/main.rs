@@ -690,6 +690,7 @@ fn cmd_tts(output: LoaderOutput, opts: TtsRunOptions) {
             observer: &mut observer,
             caches: None,
             symbolic_graphs,
+            eval_options: Default::default(),
         };
         interface
             .super_graph
@@ -835,6 +836,7 @@ fn cmd_stt(output: LoaderOutput, audio_path: PathBuf, _model_dir: Option<PathBuf
             observer: &mut observer,
             caches: None,
             symbolic_graphs,
+            eval_options: Default::default(),
         };
         interface
             .super_graph

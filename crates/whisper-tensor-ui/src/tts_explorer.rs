@@ -15,7 +15,7 @@ use whisper_tensor::numeric_tensor::NumericTensor;
 use whisper_tensor::pool::SystemPool;
 use whisper_tensor::super_graph::links::SuperGraphLink;
 use whisper_tensor::tensor_rank::DynRank;
-use whisper_tensor_server::{SuperGraphRequest, SuperGraphRequestBackendMode};
+use whisper_tensor_server::SuperGraphRequest;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct TTSExplorerState {
@@ -376,7 +376,7 @@ impl TTSExplorerApp {
             subscribed_tensors: Vec::new(),
             string_inputs,
             use_cache: None,
-            backend_mode: SuperGraphRequestBackendMode::NDArray,
+            eval_options: Default::default(),
             symbolic_graph_ids,
             tensor_inputs,
             audio_inputs: HashMap::new(),

@@ -25,6 +25,7 @@ use crate::graph_explorer::inspect_windows::{
 };
 use crate::sd_explorer::{generate_normal_noise, tensor_to_egui_texture};
 use crate::websockets::ServerRequestManager;
+use crate::widgets::eval_options::eval_options_ui;
 use crate::widgets::progress_report::SuperGraphProgressWidgetState;
 use crate::widgets::toggle::toggle_ui;
 use crate::widgets::tokenized_rich_text::TokenizedRichText;
@@ -93,8 +94,7 @@ use whisper_tensor::tensor_rank::DynRank;
 use whisper_tensor::tokenizer::Tokenizer;
 use whisper_tensor_server::{
     AbbreviatedTensorReportSettings, AbbreviatedTensorValue, LoadedModelId, ServerConfigReport,
-    SuperGraphAudioInput, SuperGraphRequest, SuperGraphRequestBackendMode,
-    WebsocketClientServerMessage,
+    SuperGraphAudioInput, SuperGraphRequest, WebsocketClientServerMessage,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -133,7 +133,7 @@ pub(crate) struct TextInferenceData {
     logits: HashMap<Vec<u32>, Vec<(u32, f32)>>,
     pending_request: Option<(u64, SuperGraphLink, Vec<u32>)>,
     use_cache: bool,
-    selected_mode: SuperGraphRequestBackendMode,
+    eval_options: whisper_tensor::super_graph::SuperGraphEvalOptions,
     progress_widget_state: SuperGraphProgressWidgetState,
 }
 
@@ -146,7 +146,7 @@ pub(crate) struct SDInferenceData {
     latent_w: usize,
     seed: u64,
     use_cache: bool,
-    selected_mode: SuperGraphRequestBackendMode,
+    eval_options: whisper_tensor::super_graph::SuperGraphEvalOptions,
     pending_request: Option<(u64, SuperGraphLink)>,
     progress_widget_state: SuperGraphProgressWidgetState,
     generated_image: Option<(TextureHandle, ColorImage)>,
@@ -164,7 +164,7 @@ impl Default for SDInferenceData {
             latent_w: 8,
             seed: 42,
             use_cache: false,
-            selected_mode: SuperGraphRequestBackendMode::NDArray,
+            eval_options: Default::default(),
             pending_request: None,
             progress_widget_state: SuperGraphProgressWidgetState::default(),
             generated_image: None,
@@ -181,7 +181,7 @@ pub(crate) struct TTSInferenceData {
     piper_speaker_id: i64,
     kokoro_voice_name: Option<String>,
     use_cache: bool,
-    selected_mode: SuperGraphRequestBackendMode,
+    eval_options: whisper_tensor::super_graph::SuperGraphEvalOptions,
     pending_request: Option<(u64, SuperGraphLink, u32)>,
     progress_widget_state: SuperGraphProgressWidgetState,
     generated_audio: Option<NumericTensor<'static, DynRank, SystemPool>>,
@@ -197,7 +197,7 @@ impl Default for TTSInferenceData {
             piper_speaker_id: 0,
             kokoro_voice_name: None,
             use_cache: false,
-            selected_mode: SuperGraphRequestBackendMode::NDArray,
+            eval_options: Default::default(),
             pending_request: None,
             progress_widget_state: SuperGraphProgressWidgetState::default(),
             generated_audio: None,
@@ -207,9 +207,10 @@ impl Default for TTSInferenceData {
     }
 }
 
+#[derive(Default)]
 pub(crate) struct STTInferenceData {
     use_cache: bool,
-    selected_mode: SuperGraphRequestBackendMode,
+    eval_options: whisper_tensor::super_graph::SuperGraphEvalOptions,
     pending_request: Option<(u64, SuperGraphLink, u32, TokenizerInfo)>,
     progress_widget_state: SuperGraphProgressWidgetState,
     selected_audio_name: Option<String>,
@@ -219,24 +220,6 @@ pub(crate) struct STTInferenceData {
     status_message: Option<String>,
     #[cfg(target_arch = "wasm32")]
     pending_web_audio_pick: Option<WebAudioFilePickReceiver>,
-}
-
-impl Default for STTInferenceData {
-    fn default() -> Self {
-        Self {
-            use_cache: false,
-            selected_mode: SuperGraphRequestBackendMode::NDArray,
-            pending_request: None,
-            progress_widget_state: SuperGraphProgressWidgetState::default(),
-            selected_audio_name: None,
-            selected_audio_bytes: None,
-            transcription_text: None,
-            transcription_tokens: None,
-            status_message: None,
-            #[cfg(target_arch = "wasm32")]
-            pending_web_audio_pick: None,
-        }
-    }
 }
 
 pub(crate) struct GraphExplorerApp {
