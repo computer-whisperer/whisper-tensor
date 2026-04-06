@@ -4,6 +4,9 @@ use crate::numeric_dtype::FloatType;
 
 /// Compute the floor of a float value.
 pub fn float_floor(raw: u64, ft: &FloatType) -> u64 {
+    if let Some(r) = super::fast::unary_f32(raw, ft, f32::floor) {
+        return r;
+    }
     ft.encode_f64(ft.decode_f64(raw).floor())
 }
 

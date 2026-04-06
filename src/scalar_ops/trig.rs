@@ -2,64 +2,48 @@
 
 use crate::numeric_dtype::FloatType;
 
-/// Sine.
+fn trig_unary(raw: u64, ft: &FloatType, f32_op: fn(f32) -> f32, f64_op: fn(f64) -> f64) -> u64 {
+    if let Some(r) = super::fast::unary_f32(raw, ft, f32_op) {
+        return r;
+    }
+    ft.encode_f64(f64_op(ft.decode_f64(raw)))
+}
+
 pub fn float_sin(raw: u64, ft: &FloatType) -> u64 {
-    ft.encode_f64(ft.decode_f64(raw).sin())
+    trig_unary(raw, ft, f32::sin, f64::sin)
 }
-
-/// Cosine.
 pub fn float_cos(raw: u64, ft: &FloatType) -> u64 {
-    ft.encode_f64(ft.decode_f64(raw).cos())
+    trig_unary(raw, ft, f32::cos, f64::cos)
 }
-
-/// Tangent.
 pub fn float_tan(raw: u64, ft: &FloatType) -> u64 {
-    ft.encode_f64(ft.decode_f64(raw).tan())
+    trig_unary(raw, ft, f32::tan, f64::tan)
 }
-
-/// Arcsine.
 pub fn float_asin(raw: u64, ft: &FloatType) -> u64 {
-    ft.encode_f64(ft.decode_f64(raw).asin())
+    trig_unary(raw, ft, f32::asin, f64::asin)
 }
-
-/// Arccosine.
 pub fn float_acos(raw: u64, ft: &FloatType) -> u64 {
-    ft.encode_f64(ft.decode_f64(raw).acos())
+    trig_unary(raw, ft, f32::acos, f64::acos)
 }
-
-/// Arctangent.
 pub fn float_atan(raw: u64, ft: &FloatType) -> u64 {
-    ft.encode_f64(ft.decode_f64(raw).atan())
+    trig_unary(raw, ft, f32::atan, f64::atan)
 }
-
-/// Hyperbolic sine.
 pub fn float_sinh(raw: u64, ft: &FloatType) -> u64 {
-    ft.encode_f64(ft.decode_f64(raw).sinh())
+    trig_unary(raw, ft, f32::sinh, f64::sinh)
 }
-
-/// Hyperbolic cosine.
 pub fn float_cosh(raw: u64, ft: &FloatType) -> u64 {
-    ft.encode_f64(ft.decode_f64(raw).cosh())
+    trig_unary(raw, ft, f32::cosh, f64::cosh)
 }
-
-/// Hyperbolic tangent.
 pub fn float_tanh(raw: u64, ft: &FloatType) -> u64 {
-    ft.encode_f64(ft.decode_f64(raw).tanh())
+    trig_unary(raw, ft, f32::tanh, f64::tanh)
 }
-
-/// Inverse hyperbolic sine.
 pub fn float_asinh(raw: u64, ft: &FloatType) -> u64 {
-    ft.encode_f64(ft.decode_f64(raw).asinh())
+    trig_unary(raw, ft, f32::asinh, f64::asinh)
 }
-
-/// Inverse hyperbolic cosine.
 pub fn float_acosh(raw: u64, ft: &FloatType) -> u64 {
-    ft.encode_f64(ft.decode_f64(raw).acosh())
+    trig_unary(raw, ft, f32::acosh, f64::acosh)
 }
-
-/// Inverse hyperbolic tangent.
 pub fn float_atanh(raw: u64, ft: &FloatType) -> u64 {
-    ft.encode_f64(ft.decode_f64(raw).atanh())
+    trig_unary(raw, ft, f32::atanh, f64::atanh)
 }
 
 #[cfg(test)]

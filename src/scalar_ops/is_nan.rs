@@ -4,6 +4,9 @@ use crate::numeric_dtype::FloatType;
 
 /// Returns 1 if the float value is NaN, 0 otherwise.
 pub fn float_is_nan(raw: u64, ft: &FloatType) -> u64 {
+    if let Some(v) = super::fast::decode_f32(raw, ft) {
+        return v.is_nan() as u64;
+    }
     ft.decode_f64(raw).is_nan() as u64
 }
 

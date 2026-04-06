@@ -7,22 +7,52 @@ use crate::numeric_dtype::{FloatType, IntType};
 // -- Float comparisons --
 
 pub fn float_equal(a: u64, b: u64, ft: &FloatType) -> u64 {
+    if let (Some(va), Some(vb)) = (
+        super::fast::decode_f32(a, ft),
+        super::fast::decode_f32(b, ft),
+    ) {
+        return (va == vb) as u64;
+    }
     (ft.decode_f64(a) == ft.decode_f64(b)) as u64
 }
 
 pub fn float_greater(a: u64, b: u64, ft: &FloatType) -> u64 {
+    if let (Some(va), Some(vb)) = (
+        super::fast::decode_f32(a, ft),
+        super::fast::decode_f32(b, ft),
+    ) {
+        return (va > vb) as u64;
+    }
     (ft.decode_f64(a) > ft.decode_f64(b)) as u64
 }
 
 pub fn float_greater_or_equal(a: u64, b: u64, ft: &FloatType) -> u64 {
+    if let (Some(va), Some(vb)) = (
+        super::fast::decode_f32(a, ft),
+        super::fast::decode_f32(b, ft),
+    ) {
+        return (va >= vb) as u64;
+    }
     (ft.decode_f64(a) >= ft.decode_f64(b)) as u64
 }
 
 pub fn float_less(a: u64, b: u64, ft: &FloatType) -> u64 {
+    if let (Some(va), Some(vb)) = (
+        super::fast::decode_f32(a, ft),
+        super::fast::decode_f32(b, ft),
+    ) {
+        return (va < vb) as u64;
+    }
     (ft.decode_f64(a) < ft.decode_f64(b)) as u64
 }
 
 pub fn float_less_or_equal(a: u64, b: u64, ft: &FloatType) -> u64 {
+    if let (Some(va), Some(vb)) = (
+        super::fast::decode_f32(a, ft),
+        super::fast::decode_f32(b, ft),
+    ) {
+        return (va <= vb) as u64;
+    }
     (ft.decode_f64(a) <= ft.decode_f64(b)) as u64
 }
 

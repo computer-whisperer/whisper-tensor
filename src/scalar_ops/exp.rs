@@ -4,6 +4,9 @@ use crate::numeric_dtype::FloatType;
 
 /// Compute e^x for a float value.
 pub fn float_exp(raw: u64, ft: &FloatType) -> u64 {
+    if let Some(r) = super::fast::unary_f32(raw, ft, f32::exp) {
+        return r;
+    }
     ft.encode_f64(ft.decode_f64(raw).exp())
 }
 

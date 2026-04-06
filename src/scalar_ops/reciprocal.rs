@@ -4,6 +4,9 @@ use crate::numeric_dtype::FloatType;
 
 /// Compute 1/x for a float value.
 pub fn float_reciprocal(raw: u64, ft: &FloatType) -> u64 {
+    if let Some(r) = super::fast::unary_f32(raw, ft, |x| 1.0f32 / x) {
+        return r;
+    }
     ft.encode_f64(1.0 / ft.decode_f64(raw))
 }
 

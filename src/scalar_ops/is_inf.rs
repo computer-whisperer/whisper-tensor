@@ -5,6 +5,11 @@ use crate::numeric_dtype::FloatType;
 /// Returns 1 if the float value is an infinity matching the requested signs.
 /// `detect_positive`: include +Inf. `detect_negative`: include -Inf.
 pub fn float_is_inf(raw: u64, ft: &FloatType, detect_positive: bool, detect_negative: bool) -> u64 {
+    if let Some(v) = super::fast::decode_f32(raw, ft) {
+        let hit =
+            (detect_positive && v == f32::INFINITY) || (detect_negative && v == f32::NEG_INFINITY);
+        return hit as u64;
+    }
     let v = ft.decode_f64(raw);
     let hit =
         (detect_positive && v == f64::INFINITY) || (detect_negative && v == f64::NEG_INFINITY);

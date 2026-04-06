@@ -2,8 +2,11 @@
 
 use crate::numeric_dtype::{FloatType, IntType};
 
-/// IEEE float power: a^b via f64 powf.
+/// IEEE float power: a^b via powf.
 pub fn float_pow(a: u64, b: u64, ft: &FloatType) -> u64 {
+    if let Some(r) = super::fast::binary_f32(a, b, ft, f32::powf) {
+        return r;
+    }
     ft.encode_f64(ft.decode_f64(a).powf(ft.decode_f64(b)))
 }
 

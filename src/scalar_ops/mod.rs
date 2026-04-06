@@ -58,6 +58,9 @@ pub mod bitwise;
 pub mod is_inf;
 pub mod is_nan;
 
+// Fast-path decode/encode for F32/BF16/F16
+pub mod fast;
+
 use std::fmt;
 
 use crate::numeric_dtype::NumericDType;

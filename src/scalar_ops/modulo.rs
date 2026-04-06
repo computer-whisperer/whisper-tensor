@@ -4,6 +4,9 @@ use crate::numeric_dtype::{FloatType, IntType};
 
 /// IEEE float remainder (Rust `%` on f64).
 pub fn float_mod(a: u64, b: u64, ft: &FloatType) -> u64 {
+    if let Some(r) = super::fast::binary_f32(a, b, ft, std::ops::Rem::rem) {
+        return r;
+    }
     ft.encode_f64(ft.decode_f64(a) % ft.decode_f64(b))
 }
 

@@ -4,6 +4,19 @@ use crate::numeric_dtype::{FloatType, IntType};
 
 /// Float sign: returns -1.0, 0.0, or 1.0 (NaN returns NaN).
 pub fn float_sign(raw: u64, ft: &FloatType) -> u64 {
+    if let Some(r) = super::fast::unary_f32(raw, ft, |v| {
+        if v.is_nan() {
+            f32::NAN
+        } else if v > 0.0 {
+            1.0
+        } else if v < 0.0 {
+            -1.0
+        } else {
+            0.0
+        }
+    }) {
+        return r;
+    }
     let v = ft.decode_f64(raw);
     let s = if v.is_nan() {
         f64::NAN

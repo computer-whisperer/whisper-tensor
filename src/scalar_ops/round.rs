@@ -4,19 +4,36 @@ use crate::numeric_dtype::FloatType;
 
 /// Round a float to the nearest integer, with ties rounding to even.
 pub fn float_round(raw: u64, ft: &FloatType) -> u64 {
+    if let Some(r) = super::fast::unary_f32(raw, ft, round_half_to_even_f32) {
+        return r;
+    }
     let v = ft.decode_f64(raw);
-    ft.encode_f64(round_half_to_even(v))
+    ft.encode_f64(round_half_to_even_f64(v))
 }
 
-/// Round-half-to-even (banker's rounding), matching ONNX Round semantics.
-fn round_half_to_even(v: f64) -> f64 {
+/// Round-half-to-even (banker's rounding) in f64 for the fallback path.
+fn round_half_to_even_f64(v: f64) -> f64 {
     let rounded = v.round();
-    // Check if we're exactly at .5 — the tie case
     let frac = v - v.floor();
     if (frac - 0.5).abs() < 1e-15 {
-        // Round to even
         let floor = v.floor();
         if floor as i64 % 2 == 0 {
+            floor
+        } else {
+            v.ceil()
+        }
+    } else {
+        rounded
+    }
+}
+
+/// Round-half-to-even (banker's rounding) in f32, matching ONNX Round semantics.
+fn round_half_to_even_f32(v: f32) -> f32 {
+    let rounded = v.round();
+    let frac = v - v.floor();
+    if (frac - 0.5).abs() < 1e-6 {
+        let floor = v.floor();
+        if floor as i32 % 2 == 0 {
             floor
         } else {
             v.ceil()

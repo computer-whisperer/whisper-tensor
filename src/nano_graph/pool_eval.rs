@@ -278,9 +278,8 @@ pub fn pool_eval<'p, P: Pool + 'p>(
                     let base_atom = group.inputs[0].resolve(ri);
                     for k in 0..*reduce_count {
                         let src_id = AtomId((base_atom.0 as i64 + k as i64 * reduce_stride) as u64);
-                        let val = lookup_atom_raw(src_id, graph, &group_stores, &input_stores);
-                        let val_dtype =
-                            lookup_atom_dtype(src_id, graph, &group_stores, &input_stores);
+                        let (val, val_dtype) =
+                            lookup_atom_raw_dtype(src_id, graph, &group_stores, &input_stores);
                         let cast_raw = val_dtype.cast_raw(val, *compute_dtype);
 
                         let binop = match kind {
@@ -301,16 +300,14 @@ pub fn pool_eval<'p, P: Pool + 'p>(
                         }
                         ScalarOp::Identity => {
                             let src = group.inputs[0].resolve(ri);
-                            let val = lookup_atom_raw(src, graph, &group_stores, &input_stores);
-                            let val_dtype =
-                                lookup_atom_dtype(src, graph, &group_stores, &input_stores);
+                            let (val, val_dtype) =
+                                lookup_atom_raw_dtype(src, graph, &group_stores, &input_stores);
                             val_dtype.cast_raw(val, output_dtype)
                         }
                         ScalarOp::Cast { saturating } => {
                             let src = group.inputs[0].resolve(ri);
-                            let val = lookup_atom_raw(src, graph, &group_stores, &input_stores);
-                            let val_dtype =
-                                lookup_atom_dtype(src, graph, &group_stores, &input_stores);
+                            let (val, val_dtype) =
+                                lookup_atom_raw_dtype(src, graph, &group_stores, &input_stores);
                             let raw = val_dtype.cast_raw(val, output_dtype);
                             if *saturating {
                                 output_dtype.saturate_inf(raw)
@@ -321,12 +318,10 @@ pub fn pool_eval<'p, P: Pool + 'p>(
                         ScalarOp::Binary { op, compute_dtype } => {
                             let a_src = group.inputs[0].resolve(ri);
                             let b_src = group.inputs[1].resolve(ri);
-                            let a_raw = lookup_atom_raw(a_src, graph, &group_stores, &input_stores);
-                            let b_raw = lookup_atom_raw(b_src, graph, &group_stores, &input_stores);
-                            let a_dtype =
-                                lookup_atom_dtype(a_src, graph, &group_stores, &input_stores);
-                            let b_dtype =
-                                lookup_atom_dtype(b_src, graph, &group_stores, &input_stores);
+                            let (a_raw, a_dtype) =
+                                lookup_atom_raw_dtype(a_src, graph, &group_stores, &input_stores);
+                            let (b_raw, b_dtype) =
+                                lookup_atom_raw_dtype(b_src, graph, &group_stores, &input_stores);
                             let a_cast = a_dtype.cast_raw(a_raw, *compute_dtype);
                             let b_cast = b_dtype.cast_raw(b_raw, *compute_dtype);
                             let result = eval_binop(op, a_cast, b_cast, *compute_dtype);
@@ -334,9 +329,8 @@ pub fn pool_eval<'p, P: Pool + 'p>(
                         }
                         ScalarOp::Unary { op, compute_dtype } => {
                             let src = group.inputs[0].resolve(ri);
-                            let val = lookup_atom_raw(src, graph, &group_stores, &input_stores);
-                            let val_dtype =
-                                lookup_atom_dtype(src, graph, &group_stores, &input_stores);
+                            let (val, val_dtype) =
+                                lookup_atom_raw_dtype(src, graph, &group_stores, &input_stores);
                             let x = val_dtype.cast_raw(val, *compute_dtype);
                             let result = eval_unaryop(op, x, *compute_dtype);
                             compute_dtype.cast_raw(result, output_dtype)
@@ -538,6 +532,29 @@ fn lookup_atom_raw<P: Pool>(
 ) -> u64 {
     let scalar = lookup_atom_scalar(atom_id, graph, group_stores, input_stores);
     scalar.view().read_raw()
+}
+
+/// Read an atom's raw bits and dtype in a single lookup (one binary search).
+fn lookup_atom_raw_dtype<P: Pool>(
+    atom_id: AtomId,
+    graph: &NanoGraph<'_, impl Pool>,
+    group_stores: &[Option<AtomStore<'_, '_, P>>],
+    input_stores: &[AtomStore<'_, '_, P>],
+) -> (u64, NumericDType) {
+    if let Some(gi) = graph.find_group_idx(atom_id) {
+        let store = group_stores[gi]
+            .as_ref()
+            .unwrap_or_else(|| panic!("group {gi} buffer freed when reading atom {atom_id}"));
+        let group = &graph.groups()[gi];
+        let offset = (atom_id.0 - group.base_id.0) as usize;
+        let scalar = store.read_element(offset);
+        return (scalar.view().read_raw(), scalar.dtype());
+    }
+    if let Some((ti, offset)) = graph.find_input_idx(atom_id) {
+        let scalar = input_stores[ti].read_element(offset as usize);
+        return (scalar.view().read_raw(), scalar.dtype());
+    }
+    panic!("atom {atom_id} not found in any group or input");
 }
 
 /// Get the dtype of an atom.

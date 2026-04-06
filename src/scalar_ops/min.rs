@@ -4,6 +4,9 @@ use crate::numeric_dtype::{FloatType, IntType};
 
 /// IEEE float minimum. If either input is NaN, returns NaN.
 pub fn float_min(a: u64, b: u64, ft: &FloatType) -> u64 {
+    if let Some(r) = super::fast::binary_f32(a, b, ft, f32::min) {
+        return r;
+    }
     let va = ft.decode_f64(a);
     let vb = ft.decode_f64(b);
     ft.encode_f64(va.min(vb))
