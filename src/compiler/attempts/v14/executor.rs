@@ -14,36 +14,11 @@ use rayon::prelude::*;
 
 use crate::nano_graph::{AtomId, AtomRange};
 use crate::numeric_dtype::NumericDType;
+use crate::numeric_tensor::{NumericTensor, TensorLayout};
+use crate::pool::Pool;
+use crate::tensor_rank::DynRank;
 
 // ─── Inter-phase data types ─────────────────────────────────────────────────
-
-/// Contiguous typed byte buffer — the universal inter-phase data format.
-///
-/// Zero-overhead for JIT backends (already byte buffers).
-/// Cheap to wrap for interpreter backends (convert NDArray ↔ raw bytes).
-#[derive(Clone)]
-pub struct TypedBuffer {
-    pub data: Vec<u8>,
-    pub dtype: NumericDType,
-    pub count: u64,
-}
-
-impl TypedBuffer {
-    /// Create a zeroed buffer for `count` elements of `dtype`.
-    pub fn zeroed(dtype: NumericDType, count: u64) -> Self {
-        let elem_bytes = dtype_elem_bytes(dtype);
-        TypedBuffer {
-            data: vec![0u8; count as usize * elem_bytes],
-            dtype,
-            count,
-        }
-    }
-
-    /// Byte size per element.
-    pub fn elem_bytes(&self) -> usize {
-        dtype_elem_bytes(self.dtype)
-    }
-}
 
 /// A zero-copy view into a store entry's data.
 ///
@@ -56,6 +31,16 @@ pub struct StoreSlice<'a> {
     pub count: u64,
 }
 
+/// A pre-allocated output buffer that a compiled span writes into.
+///
+/// Borrows the backing `NumericTensor`'s byte buffer. The span fills
+/// this with computed values; the executor owns the actual tensors.
+pub struct SpanOutput<'a> {
+    pub data: &'a mut [u8],
+    pub dtype: NumericDType,
+    pub count: u64,
+}
+
 // ─── Compiled span trait ────────────────────────────────────────────────────
 
 /// A prepared span that can execute given input data.
@@ -63,6 +48,10 @@ pub struct StoreSlice<'a> {
 /// Backend-agnostic: JIT, interpreter, and GPU all implement this.
 /// The executor calls this once per span per phase, passing zero-copy
 /// slices from the store and pre-allocated output buffers.
+///
+/// Pool-agnostic: the trait operates on raw byte buffers. The executor
+/// handles pool-aware allocation and wraps tensors as `SpanOutput`
+/// before calling this.
 pub trait CompiledSpanFn: Send + Sync {
     /// Execute the span.
     ///
@@ -71,10 +60,10 @@ pub trait CompiledSpanFn: Send + Sync {
     /// The slices may not exactly match the span's declared input ranges —
     /// they're the overlapping store entries found by the executor.
     ///
-    /// `outputs` contains pre-allocated TypedBuffers, one per declared
+    /// `outputs` contains pre-allocated byte buffers, one per declared
     /// output range (same order as the span's output declarations).
     /// The implementation fills these with computed values.
-    fn execute(&self, inputs: &[StoreSlice<'_>], outputs: &mut [TypedBuffer]);
+    fn execute(&self, inputs: &[StoreSlice<'_>], outputs: &mut [SpanOutput<'_>]);
 }
 
 // ─── Phase store ────────────────────────────────────────────────────────────
@@ -85,23 +74,23 @@ pub trait CompiledSpanFn: Send + Sync {
 /// The executor builds this once with initial inputs (weights + user data),
 /// then incrementally inserts span outputs after each phase and evicts
 /// entries that no future phase will read.
-pub struct PhaseStore {
-    entries: Vec<StoreEntry>,
+pub struct PhaseStore<'p, P: Pool + 'p> {
+    entries: Vec<StoreEntry<'p, P>>,
 }
 
-struct StoreEntry {
+struct StoreEntry<'p, P: Pool + 'p> {
     base: u64, // AtomId.0
-    buffer: TypedBuffer,
+    tensor: NumericTensor<'p, DynRank, P>,
 }
 
-impl PhaseStore {
+impl<'p, P: Pool + 'p> PhaseStore<'p, P> {
     /// Create a store from initial inputs.
-    pub fn new(inputs: Vec<(AtomId, TypedBuffer)>) -> Self {
-        let mut entries: Vec<StoreEntry> = inputs
+    pub fn new(inputs: Vec<(AtomId, NumericTensor<'p, DynRank, P>)>) -> Self {
+        let mut entries: Vec<StoreEntry<'p, P>> = inputs
             .into_iter()
-            .map(|(base, buffer)| StoreEntry {
+            .map(|(base, tensor)| StoreEntry {
                 base: base.0,
-                buffer,
+                tensor,
             })
             .collect();
         entries.sort_unstable_by_key(|e| e.base);
@@ -113,20 +102,14 @@ impl PhaseStore {
         self.entries.len()
     }
 
-    /// Insert an output buffer. Maintains sorted order.
-    pub fn insert(&mut self, base: AtomId, buffer: TypedBuffer) {
+    /// Insert an output tensor. Maintains sorted order.
+    pub fn insert(&mut self, base: AtomId, tensor: NumericTensor<'p, DynRank, P>) {
         let pos = self.entries.partition_point(|e| e.base < base.0);
         // If an entry at this exact base exists, replace it.
         if pos < self.entries.len() && self.entries[pos].base == base.0 {
-            self.entries[pos].buffer = buffer;
+            self.entries[pos].tensor = tensor;
         } else {
-            self.entries.insert(
-                pos,
-                StoreEntry {
-                    base: base.0,
-                    buffer,
-                },
-            );
+            self.entries.insert(pos, StoreEntry { base: base.0, tensor });
         }
     }
 
@@ -151,7 +134,8 @@ impl PhaseStore {
             if entry.base >= range_hi {
                 break;
             }
-            let entry_hi = entry.base + entry.buffer.count;
+            let entry_count = entry.tensor.numel() as u64;
+            let entry_hi = entry.base + entry_count;
             if entry_hi <= range_lo {
                 continue;
             }
@@ -161,15 +145,16 @@ impl PhaseStore {
             let overlap_hi = entry_hi.min(range_hi);
             let skip = (overlap_lo - entry.base) as usize;
             let overlap_count = (overlap_hi - overlap_lo) as usize;
-            let elem_bytes = entry.buffer.elem_bytes();
+            let elem_bytes = entry.tensor.dtype().bytes_per_element();
             let byte_start = skip * elem_bytes;
             let byte_end = byte_start + overlap_count * elem_bytes;
+            let buf = entry.tensor.buffer();
 
-            if byte_end <= entry.buffer.data.len() {
+            if byte_end <= buf.len() {
                 slices.push(StoreSlice {
                     base: AtomId(overlap_lo),
-                    data: &entry.buffer.data[byte_start..byte_end],
-                    dtype: entry.buffer.dtype,
+                    data: &buf[byte_start..byte_end],
+                    dtype: entry.tensor.dtype(),
                     count: overlap_count as u64,
                 });
             }
@@ -192,24 +177,24 @@ impl PhaseStore {
         });
     }
 
-    /// Extract a value from the store by base AtomId.
-    pub fn get(&self, base: AtomId) -> Option<&TypedBuffer> {
+    /// Extract a tensor from the store by base AtomId.
+    pub fn get(&self, base: AtomId) -> Option<&NumericTensor<'p, DynRank, P>> {
         let pos = self.entries.partition_point(|e| e.base < base.0);
         if pos < self.entries.len() && self.entries[pos].base == base.0 {
-            Some(&self.entries[pos].buffer)
+            Some(&self.entries[pos].tensor)
         } else {
             None
         }
     }
 
     /// Iterate all entries (for output extraction).
-    pub fn iter(&self) -> impl Iterator<Item = (AtomId, &TypedBuffer)> {
-        self.entries.iter().map(|e| (AtomId(e.base), &e.buffer))
+    pub fn iter(&self) -> impl Iterator<Item = (AtomId, &NumericTensor<'p, DynRank, P>)> {
+        self.entries.iter().map(|e| (AtomId(e.base), &e.tensor))
     }
 
     /// Total bytes of data in all store entries.
     pub fn data_bytes(&self) -> usize {
-        self.entries.iter().map(|e| e.buffer.data.len()).sum()
+        self.entries.iter().map(|e| e.tensor.buffer().len()).sum()
     }
 }
 
@@ -331,21 +316,25 @@ impl ExecutablePlanBuilder {
 
 impl ExecutablePlan {
     /// Execute the plan, returning the value store.
-    pub fn execute(&self, initial_inputs: Vec<(AtomId, TypedBuffer)>) -> PhaseStore {
+    pub fn execute<'p, P: Pool + 'p>(
+        &self,
+        initial_inputs: Vec<(AtomId, NumericTensor<'p, DynRank, P>)>,
+        pool: &'p P,
+    ) -> PhaseStore<'p, P> {
         let mut store = PhaseStore::new(initial_inputs);
 
         for (pi, phase) in self.phases.iter().enumerate() {
             // Parallel: each lane gathers inputs, executes, produces outputs.
-            let phase_outputs: Vec<Vec<(AtomId, TypedBuffer)>> = phase
+            let phase_outputs: Vec<Vec<(AtomId, NumericTensor<'p, DynRank, P>)>> = phase
                 .lanes
                 .par_iter()
-                .map(|lane| execute_lane(lane, &store))
+                .map(|lane| execute_lane(lane, &store, pool))
                 .collect();
 
             // Barrier: merge all outputs into store.
             for lane_outputs in phase_outputs {
-                for (base, buffer) in lane_outputs {
-                    store.insert(base, buffer);
+                for (base, tensor) in lane_outputs {
+                    store.insert(base, tensor);
                 }
             }
 
@@ -357,7 +346,11 @@ impl ExecutablePlan {
     }
 
     /// Execute with per-phase timing diagnostics.
-    pub fn execute_timed(&self, initial_inputs: Vec<(AtomId, TypedBuffer)>) -> PhaseStore {
+    pub fn execute_timed<'p, P: Pool + 'p>(
+        &self,
+        initial_inputs: Vec<(AtomId, NumericTensor<'p, DynRank, P>)>,
+        pool: &'p P,
+    ) -> PhaseStore<'p, P> {
         let mut store = PhaseStore::new(initial_inputs);
         let mut total_spans = std::time::Duration::ZERO;
         let mut total_merge = std::time::Duration::ZERO;
@@ -365,10 +358,10 @@ impl ExecutablePlan {
 
         for (pi, phase) in self.phases.iter().enumerate() {
             let t0 = Instant::now();
-            let phase_outputs: Vec<Vec<(AtomId, TypedBuffer)>> = phase
+            let phase_outputs: Vec<Vec<(AtomId, NumericTensor<'p, DynRank, P>)>> = phase
                 .lanes
                 .par_iter()
-                .map(|lane| execute_lane(lane, &store))
+                .map(|lane| execute_lane(lane, &store, pool))
                 .collect();
             let spans_dt = t0.elapsed();
             total_spans += spans_dt;
@@ -377,8 +370,8 @@ impl ExecutablePlan {
             let mut n_outputs = 0usize;
             for lane_outputs in phase_outputs {
                 n_outputs += lane_outputs.len();
-                for (base, buffer) in lane_outputs {
-                    store.insert(base, buffer);
+                for (base, tensor) in lane_outputs {
+                    store.insert(base, tensor);
                 }
             }
             let merge_dt = t0.elapsed();
@@ -426,7 +419,11 @@ impl ExecutablePlan {
 }
 
 /// Execute a single lane: gather inputs, run span, return outputs.
-fn execute_lane(lane: &ExecutableLane, store: &PhaseStore) -> Vec<(AtomId, TypedBuffer)> {
+fn execute_lane<'p, P: Pool + 'p>(
+    lane: &ExecutableLane,
+    store: &PhaseStore<'p, P>,
+    pool: &'p P,
+) -> Vec<(AtomId, NumericTensor<'p, DynRank, P>)> {
     // Gather all input slices for this lane's declared input ranges.
     let input_slices: Vec<StoreSlice<'_>> = lane
         .inputs
@@ -434,21 +431,36 @@ fn execute_lane(lane: &ExecutableLane, store: &PhaseStore) -> Vec<(AtomId, Typed
         .flat_map(|range| store.gather(range.base, range.count))
         .collect();
 
-    // Pre-allocate output buffers.
-    let mut outputs: Vec<TypedBuffer> = lane
+    // Pre-allocate output tensors.
+    let mut output_tensors: Vec<NumericTensor<'p, DynRank, P>> = lane
         .outputs
         .iter()
-        .map(|r| TypedBuffer::zeroed(r.dtype, r.count))
+        .map(|r| {
+            NumericTensor::zeros(vec![r.count], r.dtype, pool)
+                .expect("failed to allocate output tensor")
+        })
         .collect();
 
-    // Execute the span.
-    lane.span.execute(&input_slices, &mut outputs);
+    // Create mutable byte views for the span.
+    {
+        let mut span_outputs: Vec<SpanOutput<'_>> = output_tensors
+            .iter_mut()
+            .zip(lane.outputs.iter())
+            .map(|(t, r)| SpanOutput {
+                data: t.buffer_mut(),
+                dtype: r.dtype,
+                count: r.count,
+            })
+            .collect();
 
-    // Return (base, buffer) pairs.
+        lane.span.execute(&input_slices, &mut span_outputs);
+    }
+
+    // Return (base, tensor) pairs.
     lane.outputs
         .iter()
-        .zip(outputs)
-        .map(|(range, buf)| (range.base, buf))
+        .zip(output_tensors)
+        .map(|(range, tensor)| (range.base, tensor))
         .collect()
 }
 
@@ -461,8 +473,4 @@ fn read_rss_mb() -> f64 {
         .unwrap_or(0) as f64
         * 4096.0
         / (1024.0 * 1024.0)
-}
-
-pub fn dtype_elem_bytes(dtype: NumericDType) -> usize {
-    dtype.bytes_per_element()
 }

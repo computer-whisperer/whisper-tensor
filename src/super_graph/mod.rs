@@ -1,4 +1,6 @@
 pub mod cache;
+#[cfg(feature = "cranelift")]
+pub mod compiled_eval;
 pub mod data;
 pub mod links;
 pub mod lowered_eval;
@@ -59,6 +61,14 @@ pub enum ModelEvalMode {
         /// to lowering (enables constant folding of shape ops, small lookup
         /// tables, axis indices, etc.). Larger constants are shape+dtype only
         /// and flow as inputs at pool_eval time.
+        inline_constant_threshold: u64,
+    },
+    /// Lower + JIT-compile via Cranelift. Partitions the NanoGraph and compiles
+    /// each span into native code. First invocation is slow (compilation), but
+    /// subsequent calls reuse the cached ExecutablePlan.
+    /// Falls back to LoweredEval if compilation fails.
+    /// Requires the `cranelift` feature.
+    CompiledEval {
         inline_constant_threshold: u64,
     },
 }

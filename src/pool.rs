@@ -47,7 +47,7 @@ pub enum AllocationError {
 /// All implementations must be `Send + Sync`.
 pub trait Pool: Send + Sync {
     /// An owned handle to an allocated region. Derefs to `[u8]`.
-    type Buffer<'a>: Deref<Target = [u8]> + DerefMut + Send
+    type Buffer<'a>: Deref<Target = [u8]> + DerefMut + Send + Sync
     where
         Self: 'a;
 

@@ -1053,9 +1053,7 @@ fn main() {
     #[cfg(feature = "cranelift")]
     {
         use whisper_tensor::compiler::attempts::v14::codegen::JitCompiledSpan;
-        use whisper_tensor::compiler::attempts::v14::executor::{
-            ExecutablePlanBuilder, TypedBuffer,
-        };
+        use whisper_tensor::compiler::attempts::v14::executor::ExecutablePlanBuilder;
 
         profiler.phase("jit_compile");
         println!("\n=== JIT Compilation (new executor) ===");
@@ -1128,24 +1126,9 @@ fn main() {
 /// Classifies each tensor as Weight, Input, or Computed by cross-referencing
 /// the milli_graph's input_map with the user-provided input_info.
 
-/// Convert a pool-based tensor to a TypedBuffer (raw bytes).
-fn pool_tensor_to_typed_buffer(
-    tensor: &NumericTensor<'_, DynRank, SystemPool>,
-    dtype: NumericDType,
-) -> whisper_tensor::compiler::attempts::v14::executor::TypedBuffer {
-    use whisper_tensor::compiler::attempts::v14::executor::TypedBuffer;
-    let view = tensor.view();
-    let buf = tensor.buffer();
-    TypedBuffer {
-        data: buf.to_vec(),
-        dtype,
-        count: view.numel() as u64,
-    }
-}
-
 /// Look up a single atom's f64 value in a PhaseStore.
 fn lookup_atom_in_store(
-    store: &whisper_tensor::compiler::attempts::v14::executor::PhaseStore,
+    store: &whisper_tensor::compiler::attempts::v14::executor::PhaseStore<'_, impl whisper_tensor::pool::Pool>,
     atom: u64,
 ) -> Option<f64> {
     use whisper_tensor::nano_graph::AtomId;
@@ -1153,8 +1136,7 @@ fn lookup_atom_in_store(
     for slice in &slices {
         if slice.base.0 <= atom && atom < slice.base.0 + slice.count {
             let offset = (atom - slice.base.0) as usize;
-            let elem_bytes =
-                whisper_tensor::compiler::attempts::v14::executor::dtype_elem_bytes(slice.dtype);
+            let elem_bytes = slice.dtype.bytes_per_element();
             let byte_off = offset * elem_bytes;
             if byte_off + elem_bytes <= slice.data.len() {
                 return Some(match slice.dtype {

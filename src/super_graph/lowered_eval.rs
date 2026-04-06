@@ -21,7 +21,7 @@ use std::hash::{Hash, Hasher};
 static POOL_S: SystemPool = SystemPool;
 
 /// Resolve a StoredOrNotTensor to a pool tensor.
-fn resolve_stored_tensor(
+pub(super) fn resolve_stored_tensor(
     stored_ref: &StoredOrNotTensor,
     tensor_store: &TensorStore,
 ) -> Option<NumericTensor<'static, DynRank, SystemPool>> {

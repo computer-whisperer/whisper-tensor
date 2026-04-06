@@ -764,11 +764,11 @@ impl CompiledSpan {
 
 // ─── JIT backend for executor ────────────────────────────────────────────────
 
-use super::executor::{CompiledSpanFn, StoreSlice, TypedBuffer};
+use super::executor::{CompiledSpanFn, SpanOutput, StoreSlice};
 
 /// JIT-compiled span implementing the executor's `CompiledSpanFn` trait.
 ///
-/// Bridges between the executor's TypedBuffer/StoreSlice interface and the
+/// Bridges between the executor's SpanOutput/StoreSlice interface and the
 /// JIT's flat byte buffer model. Owns the compiled native function, the
 /// buffer layout, and a pre-populated literal template.
 pub struct JitCompiledSpan {
@@ -798,14 +798,17 @@ impl JitCompiledSpan {
         }
 
         let layout = compute_layout(graph, output_ranges);
-        let compiled = if std::env::var("FUSION_VALIDATE").is_ok() {
+        let (compiled, embedded_tables) = if std::env::var("FUSION_VALIDATE").is_ok() {
             compile_span_validated(graph, &layout)?
         } else {
             compile_span(graph, &layout)?
         };
 
-        let mut literal_template = vec![0u8; layout.total_bytes];
+        // Build literal template including embedded lookup tables.
+        let total_buf_bytes = embedded_tables.total_bytes().max(layout.total_bytes);
+        let mut literal_template = vec![0u8; total_buf_bytes];
         layout.populate_literals(graph, &mut literal_template);
+        embedded_tables.populate(&mut literal_template);
 
         Ok(JitCompiledSpan {
             compiled,
@@ -817,7 +820,7 @@ impl JitCompiledSpan {
 }
 
 impl CompiledSpanFn for JitCompiledSpan {
-    fn execute(&self, inputs: &[StoreSlice<'_>], outputs: &mut [TypedBuffer]) {
+    fn execute(&self, inputs: &[StoreSlice<'_>], outputs: &mut [SpanOutput<'_>]) {
         if self.layout.total_bytes == 0 {
             return;
         }
@@ -833,16 +836,16 @@ impl CompiledSpanFn for JitCompiledSpan {
         // Run the JIT function.
         self.compiled.execute(&mut buffer);
 
-        // Extract outputs from buffer into TypedBuffers.
+        // Extract outputs from buffer into SpanOutputs.
         for (range, out) in self.output_ranges.iter().zip(outputs.iter_mut()) {
-            read_buffer_to_typed(range, &self.layout, &buffer, out);
+            read_buffer_to_output(range, &self.layout, &buffer, out);
         }
     }
 }
 
 /// Write a StoreSlice into the buffer at the correct slot positions.
 fn write_store_slice_to_buffer(slice: &StoreSlice<'_>, layout: &BufferLayout, buffer: &mut [u8]) {
-    let elem_bytes = super::executor::dtype_elem_bytes(slice.dtype);
+    let elem_bytes = slice.dtype.bytes_per_element();
     let mut written = 0usize;
     let mut atom = slice.base.0;
     let total = slice.count as usize;
@@ -886,14 +889,14 @@ fn write_store_slice_to_buffer(slice: &StoreSlice<'_>, layout: &BufferLayout, bu
     }
 }
 
-/// Read output range from buffer into a TypedBuffer.
-fn read_buffer_to_typed(
+/// Read output range from buffer into a SpanOutput.
+fn read_buffer_to_output(
     range: &AtomRange,
     layout: &BufferLayout,
     buffer: &[u8],
-    out: &mut TypedBuffer,
+    out: &mut SpanOutput<'_>,
 ) {
-    let elem_bytes = super::executor::dtype_elem_bytes(range.dtype);
+    let elem_bytes = range.dtype.bytes_per_element();
     let mut read = 0usize;
     let mut atom = range.base.0;
     let total = range.count as usize;
@@ -1211,7 +1214,7 @@ fn emit_chain(
     buffer_ptr: Value,
     math: &MathFuncs,
     var_counter: &mut VarCounter,
-    table_counter: &mut usize,
+    tables: &mut EmbeddedTables,
 ) -> Result<(), String> {
     // Single-group chain: delegate to existing emit_group (no change).
     if chain.group_indices.len() == 1 {
@@ -1224,7 +1227,7 @@ fn emit_chain(
             buffer_ptr,
             math,
             var_counter,
-            table_counter,
+            tables,
         );
     }
 
@@ -1250,7 +1253,7 @@ fn emit_chain(
                 atom_offset,
                 math,
                 var_counter,
-                table_counter,
+                tables,
                 &mut forwarded,
             )?;
         }
@@ -1294,7 +1297,7 @@ fn emit_chain(
             0,
             math,
             var_counter,
-            table_counter,
+            tables,
             &mut forwarded,
         )?;
     }
@@ -1326,7 +1329,7 @@ fn emit_group_body_forwarded(
     i_const: u64,
     math: &MathFuncs,
     var_counter: &mut VarCounter,
-    table_counter: &mut usize,
+    tables: &mut EmbeddedTables,
     forwarded: &mut HashMap<u64, (Value, NumericDType)>,
 ) -> Result<(), String> {
     let (out_slot, _) = layout
@@ -1350,7 +1353,7 @@ fn emit_group_body_forwarded(
                 i_val,
                 i_const,
                 group.atom_offset,
-                table_counter,
+                tables,
                 forwarded,
             )?;
             let src_repr =
@@ -1369,7 +1372,7 @@ fn emit_group_body_forwarded(
                 i_val,
                 i_const,
                 group.atom_offset,
-                table_counter,
+                tables,
                 forwarded,
             )?;
             let a_repr =
@@ -1385,7 +1388,7 @@ fn emit_group_body_forwarded(
                 i_val,
                 i_const,
                 group.atom_offset,
-                table_counter,
+                tables,
                 forwarded,
             )?;
             let b_repr =
@@ -1407,7 +1410,7 @@ fn emit_group_body_forwarded(
                 i_val,
                 i_const,
                 group.atom_offset,
-                table_counter,
+                tables,
                 forwarded,
             )?;
             let x_repr =
@@ -1428,7 +1431,7 @@ fn emit_group_body_forwarded(
                 i_val,
                 i_const,
                 group.atom_offset,
-                table_counter,
+                tables,
                 forwarded,
             )?;
             let cond_repr =
@@ -1454,7 +1457,7 @@ fn emit_group_body_forwarded(
                 i_val,
                 i_const,
                 group.atom_offset,
-                table_counter,
+                tables,
                 forwarded,
             )?;
             let x_repr =
@@ -1470,7 +1473,7 @@ fn emit_group_body_forwarded(
                 i_val,
                 i_const,
                 group.atom_offset,
-                table_counter,
+                tables,
                 forwarded,
             )?;
             let y_repr =
@@ -1494,7 +1497,7 @@ fn emit_group_body_forwarded(
                 i_const,
                 math,
                 var_counter,
-                table_counter,
+                tables,
             );
         }
 
@@ -1621,7 +1624,7 @@ fn load_input_forwarded(
     i_val: Option<Value>,
     i_const: u64,
     atom_offset: u64,
-    table_counter: &mut usize,
+    tables: &mut EmbeddedTables,
     forwarded: &HashMap<u64, (Value, NumericDType)>,
 ) -> Result<Value, String> {
     // Check for forwarding: Affine stride=1 with a forwarded producer.
@@ -1651,7 +1654,7 @@ fn load_input_forwarded(
         i_val,
         i_const,
         atom_offset,
-        table_counter,
+        tables,
     )
 }
 
@@ -1661,16 +1664,16 @@ fn load_input_forwarded(
 pub fn compile_span_validated(
     graph: &NanoGraph<'static, crate::pool::SystemPool>,
     layout: &BufferLayout,
-) -> Result<CompiledSpan, String> {
+) -> Result<(CompiledSpan, EmbeddedTables), String> {
     let has_multi = {
         let chains = build_fusion_chains(graph.groups(), layout);
         chains.iter().any(|c| c.group_indices.len() > 1)
     };
 
-    let fused = compile_span(graph, layout)?;
+    let (fused, fused_tables) = compile_span(graph, layout)?;
 
     if !has_multi || std::env::var("FUSION_VALIDATE").is_err() {
-        return Ok(fused);
+        return Ok((fused, fused_tables));
     }
 
     // Also compile without fusion.
@@ -1678,7 +1681,7 @@ pub fn compile_span_validated(
     unsafe {
         std::env::remove_var("FUSION");
     }
-    let unfused = compile_span(graph, layout)?;
+    let (unfused, unfused_tables) = compile_span(graph, layout)?;
     if let Some(val) = saved {
         unsafe {
             std::env::set_var("FUSION", val);
@@ -1686,10 +1689,15 @@ pub fn compile_span_validated(
     }
 
     // Run both on a zero+literals buffer and compare.
-    let mut buf_fused = vec![0u8; layout.total_bytes];
-    let mut buf_unfused = vec![0u8; layout.total_bytes];
+    let fused_total = fused_tables.total_bytes();
+    let unfused_total = unfused_tables.total_bytes();
+    let buf_size = fused_total.max(unfused_total).max(layout.total_bytes);
+    let mut buf_fused = vec![0u8; buf_size];
+    let mut buf_unfused = vec![0u8; buf_size];
     layout.populate_literals(graph, &mut buf_fused);
+    fused_tables.populate(&mut buf_fused);
     layout.populate_literals(graph, &mut buf_unfused);
+    unfused_tables.populate(&mut buf_unfused);
     // Fill input tensor slots with deterministic test data.
     for it in graph.input_tensors() {
         if let Some((slot, _)) = layout.find(it.base_id) {
@@ -1770,14 +1778,17 @@ pub fn compile_span_validated(
         }
     }
 
-    Ok(fused)
+    Ok((fused, fused_tables))
 }
 
 /// Compile a span's NanoGraph into native code using the given buffer layout.
+///
+/// Returns the compiled function and any embedded lookup tables that must
+/// be appended to the literal template buffer.
 pub fn compile_span(
     graph: &NanoGraph<'static, crate::pool::SystemPool>,
     layout: &BufferLayout,
-) -> Result<CompiledSpan, String> {
+) -> Result<(CompiledSpan, EmbeddedTables), String> {
     let mut flag_builder = settings::builder();
     flag_builder.set("opt_level", "speed").unwrap();
     let isa_builder =
@@ -1799,6 +1810,8 @@ pub fn compile_span(
         .declare_function("span_main", Linkage::Local, &ctx.func.signature)
         .map_err(|e| format!("declare: {}", e))?;
 
+    let mut tables = EmbeddedTables::new(layout.total_bytes);
+
     {
         let mut func_ctx = FunctionBuilderContext::new();
         let mut builder = FunctionBuilder::new(&mut ctx.func, &mut func_ctx);
@@ -1809,7 +1822,6 @@ pub fn compile_span(
 
         let buffer_ptr = builder.block_params(entry)[0];
         let mut var_counter = VarCounter::new();
-        let mut table_counter = 0usize;
 
         // Build fusion chains and emit one loop per chain.
         let chains = build_fusion_chains(graph.groups(), layout);
@@ -1823,7 +1835,7 @@ pub fn compile_span(
                 buffer_ptr,
                 &math,
                 &mut var_counter,
-                &mut table_counter,
+                &mut tables,
             )?;
         }
 
@@ -1840,10 +1852,13 @@ pub fn compile_span(
 
     let func_ptr = module.get_finalized_function(func_id);
 
-    Ok(CompiledSpan {
-        func_ptr,
-        _module: module,
-    })
+    Ok((
+        CompiledSpan {
+            func_ptr,
+            _module: module,
+        },
+        tables,
+    ))
 }
 
 // ─── Group emission ─────────────────────────────────────────────────────────
@@ -1858,7 +1873,7 @@ fn emit_group(
     buffer_ptr: Value,
     math: &MathFuncs,
     var_counter: &mut VarCounter,
-    table_counter: &mut usize,
+    tables: &mut EmbeddedTables,
 ) -> Result<(), String> {
     let count = group.count;
     let atom_offset = group.atom_offset;
@@ -1879,7 +1894,7 @@ fn emit_group(
             atom_offset,
             math,
             var_counter,
-            table_counter,
+            tables,
         );
     }
 
@@ -1914,7 +1929,7 @@ fn emit_group(
         0,
         math,
         var_counter,
-        table_counter,
+        tables,
     )?;
 
     let i_next = builder.ins().iadd_imm(i_val, 1);
@@ -1944,7 +1959,7 @@ fn emit_group_body(
     i_const: u64,
     math: &MathFuncs,
     var_counter: &mut VarCounter,
-    table_counter: &mut usize,
+    tables: &mut EmbeddedTables,
 ) -> Result<(), String> {
     let (out_slot, _) = layout
         .find(group.base_id)
@@ -1968,7 +1983,7 @@ fn emit_group_body(
                 i_val,
                 i_const,
                 group.atom_offset,
-                table_counter,
+                tables,
             )?;
             let src_repr = input_slot_dtype(&group.inputs[0], layout, group.atom_offset)
                 .map(repr_of)
@@ -1997,7 +2012,7 @@ fn emit_group_body(
                 i_val,
                 i_const,
                 group.atom_offset,
-                table_counter,
+                tables,
             )?;
             let a_repr = input_slot_dtype(&group.inputs[0], layout, group.atom_offset)
                 .map(repr_of)
@@ -2013,7 +2028,7 @@ fn emit_group_body(
                 i_val,
                 i_const,
                 group.atom_offset,
-                table_counter,
+                tables,
             )?;
             let b_repr = input_slot_dtype(&group.inputs[1], layout, group.atom_offset)
                 .map(repr_of)
@@ -2045,7 +2060,7 @@ fn emit_group_body(
                 i_val,
                 i_const,
                 group.atom_offset,
-                table_counter,
+                tables,
             )?;
             let x_repr = input_slot_dtype(&group.inputs[0], layout, group.atom_offset)
                 .map(repr_of)
@@ -2077,7 +2092,7 @@ fn emit_group_body(
                 i_val,
                 i_const,
                 group.atom_offset,
-                table_counter,
+                tables,
             )?;
             let cond_repr = input_slot_dtype(&group.inputs[0], layout, group.atom_offset)
                 .map(repr_of)
@@ -2104,7 +2119,7 @@ fn emit_group_body(
                 i_val,
                 i_const,
                 group.atom_offset,
-                table_counter,
+                tables,
             )?;
             let x_repr = input_slot_dtype(&group.inputs[1], layout, group.atom_offset)
                 .map(repr_of)
@@ -2120,7 +2135,7 @@ fn emit_group_body(
                 i_val,
                 i_const,
                 group.atom_offset,
-                table_counter,
+                tables,
             )?;
             let y_repr = input_slot_dtype(&group.inputs[2], layout, group.atom_offset)
                 .map(repr_of)
@@ -2155,7 +2170,7 @@ fn emit_group_body(
             i_const,
             math,
             var_counter,
-            table_counter,
+            tables,
             *kind,
             *reduce_count,
             *reduce_stride,
@@ -2174,7 +2189,7 @@ fn emit_group_body(
                 i_val,
                 i_const,
                 group.atom_offset,
-                table_counter,
+                tables,
             )?;
             let idx_repr = input_slot_dtype(&group.inputs[0], layout, group.atom_offset)
                 .map(repr_of)
@@ -2292,6 +2307,61 @@ fn resolve_affine_base(
 ///
 /// Returns a Cranelift Value in the storage dtype's representation kind
 /// (types::F32 for float dtypes, types::I64 for integer dtypes).
+/// Accumulator for explicit lookup tables embedded in the JIT buffer.
+///
+/// Instead of using Cranelift's `declare_data` / `global_value` (which
+/// allocates a separate data section that may be >2GB from the code,
+/// causing `TryFromIntError` on x86 PC-relative relocations), we embed
+/// the table directly in the working buffer alongside slot data.
+pub struct EmbeddedTables {
+    /// Next available byte offset in the buffer (starts at layout.total_bytes).
+    watermark: usize,
+    /// Table entries to append to the literal template.
+    entries: Vec<EmbeddedTableEntry>,
+}
+
+struct EmbeddedTableEntry {
+    byte_offset: usize,
+    data: Vec<u8>,
+}
+
+impl EmbeddedTables {
+    fn new(initial_watermark: usize) -> Self {
+        EmbeddedTables {
+            watermark: initial_watermark,
+            entries: Vec::new(),
+        }
+    }
+
+    /// Allocate space for a table and return its byte offset in the buffer.
+    fn alloc(&mut self, data: Vec<u8>) -> usize {
+        // Align to 8 bytes for i64 entries.
+        let aligned = (self.watermark + 7) & !7;
+        let offset = aligned;
+        self.watermark = aligned + data.len();
+        self.entries.push(EmbeddedTableEntry {
+            byte_offset: offset,
+            data,
+        });
+        offset
+    }
+
+    /// Total buffer size including all embedded tables.
+    fn total_bytes(&self) -> usize {
+        self.watermark
+    }
+
+    /// Write all table data into the buffer.
+    fn populate(&self, buffer: &mut [u8]) {
+        for entry in &self.entries {
+            let end = entry.byte_offset + entry.data.len();
+            if end <= buffer.len() {
+                buffer[entry.byte_offset..end].copy_from_slice(&entry.data);
+            }
+        }
+    }
+}
+
 fn load_input(
     builder: &mut FunctionBuilder,
     module: &mut JITModule,
@@ -2301,7 +2371,7 @@ fn load_input(
     i_val: Option<Value>,
     i_const: u64,
     atom_offset: u64,
-    table_counter: &mut usize,
+    tables: &mut EmbeddedTables,
 ) -> Result<Value, String> {
     match input {
         InputRef::Broadcast(atom_id) => {
@@ -2451,25 +2521,15 @@ fn load_input(
                 })
                 .collect();
 
-            let data_name = format!("explicit_{}", *table_counter);
-            *table_counter += 1;
-
-            let data_id = module
-                .declare_data(&data_name, Linkage::Local, false, false)
-                .map_err(|e| format!("declare explicit table: {}", e))?;
-            let mut data_desc = cranelift_module::DataDescription::new();
-            let bytes: Vec<u8> = byte_offsets
+            // Embed the lookup table in the JIT buffer to avoid Cranelift
+            // data section relocations (which can overflow on x86-64).
+            let table_bytes: Vec<u8> = byte_offsets
                 .iter()
                 .flat_map(|off| off.to_le_bytes())
                 .collect();
-            data_desc.define(bytes.into_boxed_slice());
-            module
-                .define_data(data_id, &data_desc)
-                .map_err(|e| format!("define explicit table: {}", e))?;
+            let table_offset = tables.alloc(table_bytes);
 
-            let gv = module.declare_data_in_func(data_id, builder.func);
-            let table_ptr = builder.ins().global_value(types::I64, gv);
-
+            let table_ptr = addr_const(builder, buffer_ptr, table_offset as i64);
             let i = i_val.unwrap_or_else(|| builder.ins().iconst(types::I64, i_const as i64));
             let idx_byte_off = builder.ins().imul_imm(i, 8); // 8 bytes per i64 entry
             let idx_addr = builder.ins().iadd(table_ptr, idx_byte_off);
@@ -2701,7 +2761,7 @@ fn emit_reduce(
     i_const: u64,
     math: &MathFuncs,
     var_counter: &mut VarCounter,
-    table_counter: &mut usize,
+    tables: &mut EmbeddedTables,
     kind: ReduceKind,
     reduce_count: u64,
     reduce_stride: i64,
@@ -3208,7 +3268,7 @@ mod tests {
             dtype: NumericDType::F32,
         }];
         let layout = compute_layout(&g, &outputs);
-        let compiled = compile_span(&g, &layout).unwrap();
+        let (compiled, embedded_tables) = compile_span(&g, &layout).unwrap();
 
         let mut buffer = vec![0u8; layout.total_bytes];
         layout.populate_literals(&g, &mut buffer);
@@ -3242,7 +3302,7 @@ mod tests {
             dtype: NumericDType::F32,
         }];
         let layout = compute_layout(&g, &outputs);
-        let compiled = compile_span(&g, &layout).unwrap();
+        let (compiled, embedded_tables) = compile_span(&g, &layout).unwrap();
 
         let mut buffer = vec![0u8; layout.total_bytes];
         layout.write_f32_input(inp, &[1.0, -2.5, 3.0], &mut buffer);
@@ -3277,7 +3337,7 @@ mod tests {
             dtype: NumericDType::F32,
         }];
         let layout = compute_layout(&g, &outputs);
-        let compiled = compile_span(&g, &layout).unwrap();
+        let (compiled, embedded_tables) = compile_span(&g, &layout).unwrap();
 
         let mut buffer = vec![0u8; layout.total_bytes];
         layout.write_f32_input(inp, &[1.0, 2.0, 3.0, 4.0], &mut buffer);
@@ -3327,7 +3387,7 @@ mod tests {
             dtype: NumericDType::F32,
         }];
         let layout = compute_layout(&g, &outputs);
-        let compiled = compile_span(&g, &layout).unwrap();
+        let (compiled, embedded_tables) = compile_span(&g, &layout).unwrap();
 
         let mut buffer = vec![0u8; layout.total_bytes];
         layout.populate_literals(&g, &mut buffer);
@@ -3398,7 +3458,7 @@ mod tests {
         );
 
         // Verify correctness: neg(neg(neg(x))) = -x
-        let compiled = compile_span(&g, &layout).unwrap();
+        let (compiled, embedded_tables) = compile_span(&g, &layout).unwrap();
         let mut buffer = vec![0u8; layout.total_bytes];
         let input_data: Vec<f32> = (0..100).map(|i| i as f32).collect();
         layout.write_f32_input(inp, &input_data, &mut buffer);
@@ -3443,7 +3503,7 @@ mod tests {
             dtype: NumericDType::F32,
         }];
         let layout = compute_layout(&g, &outputs);
-        let compiled = compile_span(&g, &layout).unwrap();
+        let (compiled, embedded_tables) = compile_span(&g, &layout).unwrap();
 
         let mut buffer = vec![0u8; layout.total_bytes];
         layout.write_f32_input(cond, &[1.0, 0.0, 5.0], &mut buffer);
@@ -3497,12 +3557,14 @@ mod tests {
             dtype: NumericDType::F32,
         }];
         let layout = compute_layout(&g, &outputs);
-        let compiled = compile_span(&g, &layout).unwrap();
+        let (compiled, embedded_tables) = compile_span(&g, &layout).unwrap();
 
-        let mut buffer = vec![0u8; layout.total_bytes];
+        let buf_size = embedded_tables.total_bytes().max(layout.total_bytes);
+        let mut buffer = vec![0u8; buf_size];
         let input_data: Vec<f32> = (0..16).map(|i| (i + 1) as f32).collect();
         layout.write_f32_input(inp, &input_data, &mut buffer);
         layout.populate_literals(&g, &mut buffer);
+        embedded_tables.populate(&mut buffer);
 
         compiled.execute(&mut buffer);
 
@@ -3554,7 +3616,7 @@ mod tests {
         let errors = validate_layout(&g, &layout);
         assert!(errors.is_empty(), "layout errors: {:?}", errors);
 
-        let compiled = compile_span(&g, &layout).unwrap();
+        let (compiled, embedded_tables) = compile_span(&g, &layout).unwrap();
         let mut buffer = vec![0u8; layout.total_bytes];
         layout.populate_literals(&g, &mut buffer);
         compiled.execute(&mut buffer);
@@ -3663,7 +3725,7 @@ mod tests {
             max_len
         );
 
-        let compiled = compile_span(&g, &layout).unwrap();
+        let (compiled, embedded_tables) = compile_span(&g, &layout).unwrap();
 
         let mut buffer = vec![0u8; layout.total_bytes];
         layout.populate_literals(&g, &mut buffer);
@@ -3777,7 +3839,7 @@ mod tests {
             max_len
         );
 
-        let compiled = compile_span(&g, &layout).unwrap();
+        let (compiled, embedded_tables) = compile_span(&g, &layout).unwrap();
 
         let mut buffer = vec![0u8; layout.total_bytes];
         layout.populate_literals(&g, &mut buffer);
@@ -3877,7 +3939,7 @@ mod tests {
         let max_len = chains.iter().map(|c| c.group_indices.len()).max().unwrap();
         assert!(max_len >= 4, "expected chain of 4+, got {}", max_len);
 
-        let compiled = compile_span(&g, &layout).unwrap();
+        let (compiled, embedded_tables) = compile_span(&g, &layout).unwrap();
 
         let mut buffer = vec![0u8; layout.total_bytes];
         let d1: Vec<f32> = (0..n).map(|i| i as f32).collect();
@@ -4000,7 +4062,7 @@ mod tests {
         );
 
         // Compile with fusion
-        let compiled_fused = compile_span(&g, &layout).unwrap();
+        let (compiled_fused, tables_fused) = compile_span(&g, &layout).unwrap();
         let mut buf_fused = vec![0u8; layout.total_bytes];
         layout.populate_literals(&g, &mut buf_fused);
         let input_data: Vec<f32> = (0..32).map(|i| (i as f32) * 0.1 + 1.0).collect();
@@ -4013,7 +4075,7 @@ mod tests {
         unsafe {
             std::env::set_var("FUSION", "0");
         }
-        let compiled_unfused = compile_span(&g, &layout).unwrap();
+        let (compiled_unfused, tables_unfused) = compile_span(&g, &layout).unwrap();
         let mut buf_unfused = vec![0u8; layout.total_bytes];
         layout.populate_literals(&g, &mut buf_unfused);
         layout.write_f32_input(inp, &input_data, &mut buf_unfused);
@@ -4154,7 +4216,7 @@ mod tests {
         }
 
         // Compile WITH fusion
-        let compiled_fused = compile_span(&g, &layout).unwrap();
+        let (compiled_fused, tables_fused) = compile_span(&g, &layout).unwrap();
         let mut buf_fused = vec![0u8; layout.total_bytes];
         layout.populate_literals(&g, &mut buf_fused);
         let input_data: Vec<f32> = (0..128).map(|i| (i as f32) * 0.1 + 1.0).collect();
@@ -4167,7 +4229,7 @@ mod tests {
         unsafe {
             std::env::set_var("FUSION", "0");
         }
-        let compiled_unfused = compile_span(&g, &layout).unwrap();
+        let (compiled_unfused, tables_unfused) = compile_span(&g, &layout).unwrap();
         let mut buf_unfused = vec![0u8; layout.total_bytes];
         layout.populate_literals(&g, &mut buf_unfused);
         layout.write_f32_input(inp, &input_data, &mut buf_unfused);
@@ -4269,7 +4331,7 @@ mod tests {
         let layout = compute_layout(&g, &outputs);
 
         // Compare fused vs unfused results
-        let compiled_fused = compile_span(&g, &layout).unwrap();
+        let (compiled_fused, tables_fused) = compile_span(&g, &layout).unwrap();
 
         let mut buf_fused = vec![0u8; layout.total_bytes];
         layout.populate_literals(&g, &mut buf_fused);
@@ -4283,7 +4345,7 @@ mod tests {
         unsafe {
             std::env::set_var("FUSION", "0");
         }
-        let compiled_unfused = compile_span(&g, &layout).unwrap();
+        let (compiled_unfused, tables_unfused) = compile_span(&g, &layout).unwrap();
         let mut buf_unfused = vec![0u8; layout.total_bytes];
         layout.populate_literals(&g, &mut buf_unfused);
         layout.write_f32_input(inp, &input_data, &mut buf_unfused);
