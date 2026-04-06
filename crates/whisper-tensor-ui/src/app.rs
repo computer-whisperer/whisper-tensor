@@ -796,7 +796,124 @@ impl WebUIApp {
                                 "Compiled Plan {}  (hash: {:016x})",
                                 plan.graph_id, plan.info_inputs_hash
                             ));
-                            ui.label(format!("Outputs: {}", plan.num_outputs));
+                            let s = &plan.plan_summary;
+                            egui::Grid::new(format!(
+                                "compiled_stats_{}_{}",
+                                entry.cache_key, plan.graph_id
+                            ))
+                            .striped(true)
+                            .show(ui, |ui| {
+                                ui.label("Phases");
+                                ui.label(s.num_phases.to_string());
+                                ui.end_row();
+                                ui.label("Lanes");
+                                ui.label(s.num_lanes.to_string());
+                                ui.end_row();
+                                ui.label("Main graph groups");
+                                ui.label(s.main_graph_groups.to_string());
+                                ui.end_row();
+                                ui.label("Main graph atoms");
+                                ui.label(s.main_graph_atoms.to_string());
+                                ui.end_row();
+                                ui.label("Total compute atoms");
+                                ui.label(s.total_compute_atoms.to_string());
+                                ui.end_row();
+                                ui.label("Total input atoms");
+                                ui.label(s.total_input_atoms.to_string());
+                                ui.end_row();
+                                ui.label("Total output atoms");
+                                ui.label(s.total_output_atoms.to_string());
+                                ui.end_row();
+                                ui.label("Model outputs");
+                                ui.label(plan.num_outputs.to_string());
+                                ui.end_row();
+                            });
+
+                            // Milli op census
+                            if !s.milli_op_census.is_empty() {
+                                ui.collapsing("Milli op census", |ui| {
+                                    egui::Grid::new(format!(
+                                        "compiled_milli_{}_{}",
+                                        entry.cache_key, plan.graph_id
+                                    ))
+                                    .striped(true)
+                                    .show(ui, |ui| {
+                                        ui.strong("Milli Op");
+                                        ui.strong("Groups");
+                                        ui.strong("Atoms");
+                                        ui.end_row();
+                                        for (op, groups, atoms) in &s.milli_op_census {
+                                            ui.label(op);
+                                            ui.label(groups.to_string());
+                                            ui.label(atoms.to_string());
+                                            ui.end_row();
+                                        }
+                                    });
+                                });
+                            }
+
+                            // Per-phase breakdown
+                            ui.collapsing(format!("Phases ({})", s.phases.len()), |ui| {
+                                for (pi, phase) in s.phases.iter().enumerate() {
+                                    ui.collapsing(
+                                        format!(
+                                            "Phase {}: {} groups, {} atoms, balance {:.1}x",
+                                            pi,
+                                            phase.num_groups,
+                                            phase.compute_atoms,
+                                            phase.balance,
+                                        ),
+                                        |ui| {
+                                            egui::Grid::new(format!(
+                                                "phase_{}_{}_{}",
+                                                entry.cache_key, plan.graph_id, pi
+                                            ))
+                                            .striped(true)
+                                            .show(
+                                                ui,
+                                                |ui| {
+                                                    ui.strong("Lane");
+                                                    ui.strong("Groups");
+                                                    ui.strong("Atoms");
+                                                    ui.strong("In");
+                                                    ui.strong("Out");
+                                                    ui.strong("Nano ops");
+                                                    ui.strong("Milli ops");
+                                                    ui.end_row();
+                                                    for (li, lane) in phase.lanes.iter().enumerate()
+                                                    {
+                                                        if lane.num_groups == 0 {
+                                                            continue;
+                                                        }
+                                                        ui.label(li.to_string());
+                                                        ui.label(lane.num_groups.to_string());
+                                                        ui.label(lane.atoms.to_string());
+                                                        ui.label(lane.num_inputs.to_string());
+                                                        ui.label(lane.num_outputs.to_string());
+                                                        let nano: String = lane
+                                                            .nano_ops
+                                                            .iter()
+                                                            .map(|(n, a)| format!("{n}:{a}"))
+                                                            .collect::<Vec<_>>()
+                                                            .join(" ");
+                                                        ui.label(nano);
+                                                        let milli: String = lane
+                                                            .milli_ops
+                                                            .iter()
+                                                            .map(|(k, g, a)| {
+                                                                format!("{k}({g}g/{a}a)")
+                                                            })
+                                                            .collect::<Vec<_>>()
+                                                            .join(", ");
+                                                        ui.label(milli);
+                                                        ui.end_row();
+                                                    }
+                                                },
+                                            );
+                                        },
+                                    );
+                                }
+                            });
                         });
                     }
                 }

@@ -460,6 +460,7 @@ fn build_cache_report(caches: &Arc<Mutex<HashMap<u64, SuperGraphCache>>>) -> Cac
                 graph_id,
                 info_inputs_hash: cached.info_inputs_hash,
                 num_outputs: cached.output_ranges.len() as u64,
+                plan_summary: cached.plan_summary.clone(),
             });
         }
         let _ = &compiled_plans; // suppress unused warning without cranelift

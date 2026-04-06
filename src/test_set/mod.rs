@@ -467,10 +467,11 @@ pub fn run_case_via_compiled_eval(case: &TestCase, num_lanes: usize) -> Result<(
             );
 
         // Compile the NanoGraph.
-        let (executable_plan, _compile_errors) = compiled_eval::compile_nano_graph(
+        let (executable_plan, _plan_summary, _compile_errors) = compiled_eval::compile_nano_graph(
             &lower_result.graph,
             &all_output_atom_ranges,
             num_lanes,
+            Some(&lower_result.group_provenance),
         )
         .map_err(|e| format!("{}[{}]: compile failed: {e}", case.name, ds.label))?;
 

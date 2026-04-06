@@ -440,6 +440,186 @@ pub fn svg_report(
     svg
 }
 
+// ─── Structured summary ────────────────────────────────────────────────────
+
+/// Structured summary of an execution plan, suitable for serialization
+/// and display in the Build Inspector UI.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct PlanSummary {
+    pub num_phases: u64,
+    pub num_lanes: u64,
+    pub main_graph_groups: u64,
+    pub main_graph_atoms: u64,
+    pub total_compute_atoms: u64,
+    pub total_input_atoms: u64,
+    pub total_output_atoms: u64,
+    /// Milli op census: (op_kind, group_count, atom_count), sorted by atoms desc.
+    pub milli_op_census: Vec<(String, u64, u64)>,
+    pub phases: Vec<PhaseSummary>,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct PhaseSummary {
+    pub num_groups: u64,
+    pub compute_atoms: u64,
+    pub input_atoms: u64,
+    pub output_atoms: u64,
+    /// max_lane_atoms / min_lane_atoms ratio.
+    pub balance: f64,
+    pub lanes: Vec<LaneSummary>,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct LaneSummary {
+    pub num_groups: u64,
+    pub atoms: u64,
+    pub num_inputs: u64,
+    pub num_outputs: u64,
+    /// Top nano ops: (name, atom_count), sorted desc, max 5.
+    pub nano_ops: Vec<(String, u64)>,
+    /// Top milli ops: (op_kind, group_count, atom_count), sorted desc, max 4.
+    pub milli_ops: Vec<(String, u64, u64)>,
+}
+
+/// Build a structured summary from partitioned phases + provenance.
+///
+/// `main_graph` is the original NanoGraph; span NanoGraphs share its atom IDs.
+/// Provenance maps main-graph group indices to (milli_op_id, op_kind).
+pub fn summarize_plan(
+    phases: &[Phase],
+    provenance: &GroupProvenance,
+    main_graph: &NanoGraph<'static, crate::pool::SystemPool>,
+) -> PlanSummary {
+    let num_lanes = phases.first().map_or(0, |p| p.spans.len()) as u64;
+
+    // Build base_id → provenance index lookup for mapping span groups
+    // back to provenance entries via the main graph.
+    let base_to_prov: HashMap<AtomId, usize> = main_graph
+        .groups()
+        .iter()
+        .enumerate()
+        .map(|(i, g)| (g.base_id, i))
+        .collect();
+
+    // Milli op census from provenance.
+    let mut milli_census: HashMap<&str, (u64, u64)> = HashMap::new();
+    for (gi, (_, op_kind)) in provenance.iter().enumerate() {
+        let atoms = main_graph.groups().get(gi).map_or(0, |g| g.count);
+        let e = milli_census.entry(op_kind.as_str()).or_default();
+        e.0 += 1;
+        e.1 += atoms;
+    }
+    let mut milli_op_census: Vec<(String, u64, u64)> = milli_census
+        .into_iter()
+        .map(|(k, (g, a))| (k.to_string(), g, a))
+        .collect();
+    milli_op_census.sort_by(|a, b| b.2.cmp(&a.2));
+
+    let mut total_compute_atoms = 0u64;
+    let mut total_input_atoms = 0u64;
+    let mut total_output_atoms = 0u64;
+    let mut phase_summaries = Vec::new();
+
+    for phase in phases {
+        let mut phase_groups = 0u64;
+        let mut phase_compute = 0u64;
+        let mut phase_input = 0u64;
+        let mut phase_output = 0u64;
+        let mut lane_summaries = Vec::new();
+        let mut lane_atoms_vec = Vec::new();
+
+        for span in &phase.spans {
+            let span_groups = span.graph.num_groups() as u64;
+            let span_atoms: u64 = span.graph.groups().iter().map(|g| g.count).sum();
+            let span_in: u64 = span.inputs.iter().map(|r| r.count).sum();
+            let span_out: u64 = span.outputs.iter().map(|r| r.count).sum();
+
+            phase_groups += span_groups;
+            phase_compute += span_atoms;
+            phase_input += span_in;
+            phase_output += span_out;
+            lane_atoms_vec.push(span_atoms);
+
+            // Nano op census for this lane.
+            let mut nano_ops: HashMap<&str, u64> = HashMap::new();
+            for group in span.graph.groups() {
+                *nano_ops.entry(scalar_op_name(&group.op)).or_default() += group.count;
+            }
+            let mut nano_sorted: Vec<(String, u64)> = nano_ops
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v))
+                .collect();
+            nano_sorted.sort_by(|a, b| b.1.cmp(&a.1));
+            nano_sorted.truncate(5);
+
+            // Milli op census for this lane via provenance lookup.
+            let mut span_milli: HashMap<&str, (u64, u64)> = HashMap::new();
+            for group in span.graph.groups() {
+                if let Some(&gi) = base_to_prov.get(&group.base_id) {
+                    if let Some((_, op_kind)) = provenance.get(gi) {
+                        let e = span_milli.entry(op_kind.as_str()).or_default();
+                        e.0 += 1;
+                        e.1 += group.count;
+                    }
+                }
+            }
+            let mut milli_sorted: Vec<(String, u64, u64)> = span_milli
+                .into_iter()
+                .map(|(k, (g, a))| (k.to_string(), g, a))
+                .collect();
+            milli_sorted.sort_by(|a, b| b.2.cmp(&a.2));
+            milli_sorted.truncate(4);
+
+            lane_summaries.push(LaneSummary {
+                num_groups: span_groups,
+                atoms: span_atoms,
+                num_inputs: span.inputs.len() as u64,
+                num_outputs: span.outputs.len() as u64,
+                nano_ops: nano_sorted,
+                milli_ops: milli_sorted,
+            });
+        }
+
+        total_compute_atoms += phase_compute;
+        total_input_atoms += phase_input;
+        total_output_atoms += phase_output;
+
+        let max_lane = *lane_atoms_vec.iter().max().unwrap_or(&0);
+        let min_lane = *lane_atoms_vec
+            .iter()
+            .filter(|&&a| a > 0)
+            .min()
+            .unwrap_or(&1);
+        let balance = if min_lane > 0 {
+            max_lane as f64 / min_lane as f64
+        } else {
+            0.0
+        };
+
+        phase_summaries.push(PhaseSummary {
+            num_groups: phase_groups,
+            compute_atoms: phase_compute,
+            input_atoms: phase_input,
+            output_atoms: phase_output,
+            balance,
+            lanes: lane_summaries,
+        });
+    }
+
+    let main_graph_atoms: u64 = main_graph.groups().iter().map(|g| g.count).sum();
+    PlanSummary {
+        num_phases: phases.len() as u64,
+        num_lanes,
+        main_graph_groups: main_graph.num_groups() as u64,
+        main_graph_atoms,
+        total_compute_atoms,
+        total_input_atoms,
+        total_output_atoms,
+        milli_op_census,
+        phases: phase_summaries,
+    }
+}
+
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 fn scalar_op_name(op: &ScalarOp) -> &'static str {

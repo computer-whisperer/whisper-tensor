@@ -392,6 +392,7 @@ pub struct CompiledPlanReport {
     pub graph_id: GlobalId,
     pub info_inputs_hash: u64,
     pub num_outputs: u64,
+    pub plan_summary: whisper_tensor::compiler::attempts::v14::report::PlanSummary,
 }
 
 /// One cache slot (keyed by the use_cache u64 in SuperGraphRequest).

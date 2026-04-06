@@ -17,6 +17,7 @@ use crate::compiler::attempts::v14::executor::{
     CompiledSpanFn, ExecutablePlan, ExecutablePlanBuilder, PhaseStore, PoolEvalSpan,
 };
 use crate::compiler::attempts::v14::partitioner_m;
+use crate::compiler::attempts::v14::report::{self, PlanSummary};
 use crate::graph::GlobalId;
 use crate::nano_graph::AtomId;
 use crate::nano_graph::lower::TensorAtomMapInfo;
@@ -40,6 +41,8 @@ pub struct CachedCompiledPlan {
     pub output_ranges: Vec<(GlobalId, Vec<AtomRange>)>,
     /// Output tensor shapes for reassembly.
     pub output_shapes: Vec<(GlobalId, Vec<u64>)>,
+    /// Structured summary of the execution plan for Build Inspector reporting.
+    pub plan_summary: PlanSummary,
 }
 
 // ===========================================================================
@@ -84,12 +87,15 @@ pub(crate) fn build_output_ranges(
 /// `num_lanes`: number of parallel lanes for partitioner_m. 0 = trivial
 /// single-phase plan (useful for debugging).
 ///
-/// Returns (ExecutablePlan, compile_error_count).
+/// `provenance`: optional group provenance for building a plan summary.
+///
+/// Returns (ExecutablePlan, PlanSummary, compile_error_count).
 pub(crate) fn compile_nano_graph(
     graph: &NanoGraph<'static, SystemPool>,
     all_output_atom_ranges: &[AtomRange],
     num_lanes: usize,
-) -> Result<(ExecutablePlan, usize), String> {
+    provenance: Option<&report::GroupProvenance>,
+) -> Result<(ExecutablePlan, PlanSummary, usize), String> {
     // Partition the NanoGraph.
     let t0 = std::time::Instant::now();
     let phases = if num_lanes == 0 {
@@ -126,6 +132,11 @@ pub(crate) fn compile_nano_graph(
         phases.len(),
         num_lanes,
     );
+
+    // Extract plan summary before compilation consumes the phases.
+    let empty_prov = Vec::new();
+    let prov = provenance.unwrap_or(&empty_prov);
+    let plan_summary = report::summarize_plan(&phases, prov, graph);
 
     // Validate partitioned spans: check nanograph integrity and cross-lane deps.
     {
@@ -262,7 +273,7 @@ pub(crate) fn compile_nano_graph(
         pool_eval_spans,
     );
 
-    Ok((executable_plan, compile_errors))
+    Ok((executable_plan, plan_summary, compile_errors))
 }
 
 /// Relayout a tensor view to match a TAMI's atom ordering and return as flat 1D.
@@ -479,14 +490,20 @@ pub fn compile_lowered_model(
         .and_then(|s| s.parse().ok())
         .unwrap_or(8usize);
 
-    let (executable_plan, _compile_errors) =
-        compile_nano_graph(graph, &all_output_atom_ranges, num_lanes).ok()?;
+    let provenance = if cached.group_provenance.is_empty() {
+        None
+    } else {
+        Some(&cached.group_provenance)
+    };
+    let (executable_plan, plan_summary, _compile_errors) =
+        compile_nano_graph(graph, &all_output_atom_ranges, num_lanes, provenance).ok()?;
 
     Some(CachedCompiledPlan {
         info_inputs_hash: cached.info_inputs_hash,
         executable_plan,
         output_ranges,
         output_shapes,
+        plan_summary,
     })
 }
 
