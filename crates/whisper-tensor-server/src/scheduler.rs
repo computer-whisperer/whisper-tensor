@@ -1,7 +1,8 @@
 use crate::model_server::ModelServer;
 use crate::{
-    AbbreviatedTensorReportSettings, AbbreviatedTensorValue, LoadedModelId, SuperGraphRequest,
-    SuperGraphResponse, SuperGraphResponseData,
+    AbbreviatedTensorReportSettings, AbbreviatedTensorValue, CacheReport, CacheReportEntry,
+    CompiledPlanReport, LoadedModelId, LoweredModelReport, SuperGraphRequest, SuperGraphResponse,
+    SuperGraphResponseData,
 };
 use crossbeam::queue::ArrayQueue;
 use log::error;
@@ -118,6 +119,9 @@ pub enum SchedulerJob {
     ),
     CompileModelRequest {
         model_id: LoadedModelId,
+    },
+    GetCacheReport {
+        response: tokio::sync::oneshot::Sender<CacheReport>,
     },
 }
 
@@ -412,6 +416,66 @@ fn clear_attention_cancellation(
     }
 }
 
+fn build_cache_report(caches: &Arc<Mutex<HashMap<u64, SuperGraphCache>>>) -> CacheReport {
+    let caches = caches.lock().unwrap();
+    let mut entries = Vec::new();
+    for (&cache_key, cache) in caches.iter() {
+        let mut lowered_models = Vec::new();
+        for (&graph_id, cached) in &cache.lowered_model_cache {
+            let stats = cached.graph.stats();
+            // Build milli-op census from group provenance.
+            // For each provenance entry, tally groups and atoms per milli op kind.
+            let groups = cached.graph.groups();
+            let mut milli_op_census: HashMap<String, (u64, u64)> = HashMap::new();
+            for (group_idx, (_milli_id, op_kind)) in cached.group_provenance.iter().enumerate() {
+                let atom_count = groups.get(group_idx).map(|g| g.count).unwrap_or(0);
+                let entry = milli_op_census.entry(op_kind.clone()).or_insert((0, 0));
+                entry.0 += 1;
+                entry.1 += atom_count;
+            }
+            lowered_models.push(LoweredModelReport {
+                graph_id,
+                info_inputs_hash: cached.info_inputs_hash,
+                num_groups: stats.num_groups,
+                total_atoms: stats.total_atoms,
+                singleton_groups: stats.singleton_groups,
+                symbolic_groups: stats.symbolic_groups,
+                groups_by_op: stats
+                    .groups_by_op
+                    .into_iter()
+                    .map(|(k, v)| (k.to_string(), v))
+                    .collect(),
+                num_tensors: cached.tensor_map.len() as u64,
+                num_inputs: cached.input_map.len() as u64,
+                num_outputs: cached.output_map.len() as u64,
+                milli_op_census,
+                unsupported: cached.unsupported.clone(),
+                unsupported_details: cached.unsupported_details.clone(),
+            });
+        }
+        let mut compiled_plans = Vec::new();
+        #[cfg(feature = "cranelift")]
+        for (&graph_id, cached) in &cache.compiled_plan_cache {
+            compiled_plans.push(CompiledPlanReport {
+                graph_id,
+                info_inputs_hash: cached.info_inputs_hash,
+                num_outputs: cached.output_ranges.len() as u64,
+            });
+        }
+        let _ = &compiled_plans; // suppress unused warning without cranelift
+        entries.push(CacheReportEntry {
+            cache_key,
+            num_rnn_entries: cache.rnn_cache.len() as u64,
+            num_tensor_entries: cache.tensor_cache.len() as u64,
+            num_tensor_pack_entries: cache.tensor_pack_cache.len() as u64,
+            lowered_models,
+            compiled_plans,
+        });
+    }
+    entries.sort_by_key(|e| e.cache_key);
+    CacheReport { entries }
+}
+
 pub async fn scheduler(
     mut input: mpsc::Receiver<SchedulerJob>,
     model_server: Arc<ModelServer>,
@@ -427,6 +491,10 @@ pub async fn scheduler(
                 SchedulerJob::CompileModelRequest { model_id: _ } => {
                     // Compiler stub removed — compilation is a no-op until
                     // the real compiler is wired in.
+                }
+                SchedulerJob::GetCacheReport { response } => {
+                    let report = build_cache_report(&caches);
+                    let _ = response.send(report);
                 }
                 SchedulerJob::SuperGraphRequest((req, resp_sender, reporter)) => {
                     ensure_observer_settings(

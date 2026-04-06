@@ -40,6 +40,7 @@ enum SelectedTab {
     SDExplorer,
     STTExplorer,
     TTSExplorer,
+    BuildInspector,
 }
 
 /// Persisted state for the loader dialog's config field values.
@@ -331,6 +332,7 @@ pub struct WebUIApp {
     server_config_report: Option<ServerConfigReport>,
     loader_registry: Option<LoaderRegistryReport>,
     graph_catalog_status: Option<String>,
+    cache_report: Option<whisper_tensor_server::CacheReport>,
 }
 
 impl WebUIApp {
@@ -372,6 +374,7 @@ impl WebUIApp {
             server_config_report: None,
             loader_registry: None,
             graph_catalog_status: None,
+            cache_report: None,
         }
     }
 
@@ -656,6 +659,150 @@ impl WebUIApp {
             }
         });
     }
+
+    fn render_build_inspector(&mut self, ui: &mut egui::Ui) {
+        ui.vertical(|ui| {
+            if ui.button("Refresh Cache Report").clicked() {
+                self.server_request_manager
+                    .send(WebsocketClientServerMessage::GetCacheReport)
+                    .ok();
+            }
+
+            let Some(report) = &self.cache_report else {
+                ui.label("No cache report yet. Click Refresh to query the server.");
+                return;
+            };
+
+            if report.entries.is_empty() {
+                ui.label("Cache is empty. Run a model with caching enabled to populate.");
+                return;
+            }
+
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                for entry in &report.entries {
+                    ui.separator();
+                    ui.heading(format!("Cache slot {}", entry.cache_key));
+                    ui.horizontal(|ui| {
+                        ui.label(format!(
+                            "RNN: {}  Tensors: {}  Packs: {}",
+                            entry.num_rnn_entries,
+                            entry.num_tensor_entries,
+                            entry.num_tensor_pack_entries,
+                        ));
+                    });
+
+                    for model in &entry.lowered_models {
+                        ui.group(|ui| {
+                            ui.strong(format!(
+                                "Lowered Model {}  (hash: {:016x})",
+                                model.graph_id, model.info_inputs_hash
+                            ));
+
+                            // Stats table
+                            egui::Grid::new(format!(
+                                "lowered_stats_{}_{}",
+                                entry.cache_key, model.graph_id
+                            ))
+                            .striped(true)
+                            .show(ui, |ui| {
+                                ui.label("Groups");
+                                ui.label(model.num_groups.to_string());
+                                ui.end_row();
+                                ui.label("Total atoms");
+                                ui.label(model.total_atoms.to_string());
+                                ui.end_row();
+                                ui.label("Singleton groups");
+                                ui.label(model.singleton_groups.to_string());
+                                ui.end_row();
+                                ui.label("Symbolic groups");
+                                ui.label(model.symbolic_groups.to_string());
+                                ui.end_row();
+                                ui.label("Tensors");
+                                ui.label(model.num_tensors.to_string());
+                                ui.end_row();
+                                ui.label("Inputs");
+                                ui.label(model.num_inputs.to_string());
+                                ui.end_row();
+                                ui.label("Outputs");
+                                ui.label(model.num_outputs.to_string());
+                                ui.end_row();
+                            });
+
+                            // Nano op breakdown
+                            if !model.groups_by_op.is_empty() {
+                                ui.collapsing("Nano op breakdown", |ui| {
+                                    let mut ops: Vec<_> = model.groups_by_op.iter().collect();
+                                    ops.sort_by(|a, b| b.1.cmp(a.1));
+                                    egui::Grid::new(format!(
+                                        "nano_ops_{}_{}",
+                                        entry.cache_key, model.graph_id
+                                    ))
+                                    .striped(true)
+                                    .show(ui, |ui| {
+                                        ui.strong("Op");
+                                        ui.strong("Count");
+                                        ui.end_row();
+                                        for (op, count) in &ops {
+                                            ui.label(*op);
+                                            ui.label(count.to_string());
+                                            ui.end_row();
+                                        }
+                                    });
+                                });
+                            }
+
+                            // Milli op census
+                            if !model.milli_op_census.is_empty() {
+                                ui.collapsing("Milli op census", |ui| {
+                                    let mut ops: Vec<_> = model.milli_op_census.iter().collect();
+                                    ops.sort_by(|a, b| b.1.1.cmp(&a.1.1));
+                                    egui::Grid::new(format!(
+                                        "milli_ops_{}_{}",
+                                        entry.cache_key, model.graph_id
+                                    ))
+                                    .striped(true)
+                                    .show(ui, |ui| {
+                                        ui.strong("Milli Op");
+                                        ui.strong("Groups");
+                                        ui.strong("Atoms");
+                                        ui.end_row();
+                                        for (op, (groups, atoms)) in &ops {
+                                            ui.label(*op);
+                                            ui.label(groups.to_string());
+                                            ui.label(atoms.to_string());
+                                            ui.end_row();
+                                        }
+                                    });
+                                });
+                            }
+
+                            // Unsupported ops
+                            if !model.unsupported.is_empty() {
+                                ui.collapsing(
+                                    format!("Unsupported ops ({})", model.unsupported.len()),
+                                    |ui| {
+                                        for detail in &model.unsupported_details {
+                                            ui.label(detail);
+                                        }
+                                    },
+                                );
+                            }
+                        });
+                    }
+
+                    for plan in &entry.compiled_plans {
+                        ui.group(|ui| {
+                            ui.strong(format!(
+                                "Compiled Plan {}  (hash: {:016x})",
+                                plan.graph_id, plan.info_inputs_hash
+                            ));
+                            ui.label(format!("Outputs: {}", plan.num_outputs));
+                        });
+                    }
+                }
+            });
+        });
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -871,6 +1018,9 @@ impl eframe::App for WebUIApp {
                         WebsocketServerClientMessage::ServerConfigReport(config) => {
                             self.server_config_report = Some(config);
                         }
+                        WebsocketServerClientMessage::CacheReportReturn(report) => {
+                            self.cache_report = Some(report);
+                        }
                         _ => {
                             log::debug!("Unhandled message: {:?}", msg);
                         }
@@ -921,6 +1071,11 @@ impl eframe::App for WebUIApp {
                     &mut self.app_state.selected_tab,
                     SelectedTab::TTSExplorer,
                     "TTS Explorer",
+                );
+                ui.selectable_value(
+                    &mut self.app_state.selected_tab,
+                    SelectedTab::BuildInspector,
+                    "Build Inspector",
                 );
             });
         });
@@ -1286,6 +1441,9 @@ impl eframe::App for WebUIApp {
                         &mut self.server_request_manager,
                         ui,
                     );
+                }
+                SelectedTab::BuildInspector => {
+                    self.render_build_inspector(ui);
                 }
             }
         });

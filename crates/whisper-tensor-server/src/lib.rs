@@ -107,6 +107,7 @@ pub enum WebsocketClientServerMessage {
     UpdateSuperGraphObserverSettings(SuperGraphObserverSettingsUpdate),
     CancelSuperGraphRequest(u64),
     CompileModel(LoadedModelId),
+    GetCacheReport,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -359,6 +360,57 @@ impl CurrentModelsAndInterfacesReport {
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ServerConfigReport {}
 
+// ---------------------------------------------------------------------------
+// Build Inspector: cache report types
+// ---------------------------------------------------------------------------
+
+/// Per-lowered-model report for the Build Inspector.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct LoweredModelReport {
+    pub graph_id: GlobalId,
+    pub info_inputs_hash: u64,
+    pub num_groups: u64,
+    pub total_atoms: u64,
+    pub singleton_groups: u64,
+    pub symbolic_groups: u64,
+    /// Op name → count (String instead of &'static str for serialization).
+    pub groups_by_op: HashMap<String, u64>,
+    pub num_tensors: u64,
+    pub num_inputs: u64,
+    pub num_outputs: u64,
+    /// Milli-op census: op_kind → (group_count, atom_count). Built from group_provenance.
+    pub milli_op_census: HashMap<String, (u64, u64)>,
+    /// Ops that could not be lowered.
+    pub unsupported: Vec<(GlobalId, String)>,
+    /// Human-readable detail for each unsupported op.
+    pub unsupported_details: Vec<String>,
+}
+
+/// Per-compiled-plan report for the Build Inspector.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct CompiledPlanReport {
+    pub graph_id: GlobalId,
+    pub info_inputs_hash: u64,
+    pub num_outputs: u64,
+}
+
+/// One cache slot (keyed by the use_cache u64 in SuperGraphRequest).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct CacheReportEntry {
+    pub cache_key: u64,
+    pub num_rnn_entries: u64,
+    pub num_tensor_entries: u64,
+    pub num_tensor_pack_entries: u64,
+    pub lowered_models: Vec<LoweredModelReport>,
+    pub compiled_plans: Vec<CompiledPlanReport>,
+}
+
+/// Full cache report returned by the scheduler.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct CacheReport {
+    pub entries: Vec<CacheReportEntry>,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum WebsocketServerClientMessage {
     Pong,
@@ -376,4 +428,5 @@ pub enum WebsocketServerClientMessage {
     TokenizerFileReturn(String, Result<Vec<u8>, String>),
     SuperGraphResponse(SuperGraphResponse),
     SuperGraphExecutionReport(SuperGraphExecutionReport),
+    CacheReportReturn(CacheReport),
 }

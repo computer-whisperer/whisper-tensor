@@ -66,6 +66,13 @@ pub struct CachedLoweredModel {
     /// inlined during lowering (above the threshold). These must be loaded
     /// from the TensorStore and passed to pool_eval at runtime.
     pub weight_input_ext_ids: Vec<GlobalId>,
+    /// Provenance: for each nano group index, the (milli_op_id, op_kind)
+    /// that produced it. Used by Build Inspector reporting.
+    pub group_provenance: Vec<(GlobalId, String)>,
+    /// Ops that could not be lowered (treated as opaque boundary).
+    pub unsupported: Vec<(GlobalId, String)>,
+    /// Human-readable detail for each unsupported op (input/output shapes).
+    pub unsupported_details: Vec<String>,
 }
 
 /// Compute a hash over the info_inputs map that captures everything affecting
@@ -314,6 +321,9 @@ pub fn lower_symbolic_graph(
         sym_to_internal,
         user_input_ext_ids,
         weight_input_ext_ids,
+        group_provenance: lower_result.group_provenance,
+        unsupported: lower_result.unsupported,
+        unsupported_details: lower_result.unsupported_details,
     })
 }
 

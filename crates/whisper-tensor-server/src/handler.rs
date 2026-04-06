@@ -301,6 +301,15 @@ pub async fn handle_client_session(
                         let job = SchedulerJob::CompileModelRequest { model_id };
                         scheduler_sender.send(job).await.unwrap();
                     }
+                    WebsocketClientServerMessage::GetCacheReport => {
+                        let (tx, rx) = tokio::sync::oneshot::channel();
+                        let job = SchedulerJob::GetCacheReport { response: tx };
+                        scheduler_sender.send(job).await.unwrap();
+                        if let Ok(report) = rx.await {
+                            server_tx.send(WebsocketServerClientMessage::CacheReportReturn(report)).ok();
+                            on_message_sent();
+                        }
+                    }
                 }
             }
             else => break,

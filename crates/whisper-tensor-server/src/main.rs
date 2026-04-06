@@ -339,6 +339,14 @@ async fn handle_socket(
                                             let job = SchedulerJob::CompileModelRequest{model_id};
                                             scheduler_sender.send(job).await.unwrap();
                                         }
+                                        WebsocketClientServerMessage::GetCacheReport => {
+                                            let (tx, rx) = tokio::sync::oneshot::channel();
+                                            let job = SchedulerJob::GetCacheReport { response: tx };
+                                            scheduler_sender.send(job).await.unwrap();
+                                            if let Ok(report) = rx.await {
+                                                send_message(&mut socket, WebsocketServerClientMessage::CacheReportReturn(report)).await;
+                                            }
+                                        }
                                     }
                                 }
                                 Err(err) => {
