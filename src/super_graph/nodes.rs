@@ -743,7 +743,7 @@ impl SuperGraphNodeModelExecution {
             symbolic_graph.global_id()
         };
 
-        // --- Ensure lowered model is cached ---
+        // --- Ensure lowered model available (cached or owned) ---
         let lower_cache_hit = context
             .caches
             .as_ref()
@@ -751,6 +751,7 @@ impl SuperGraphNodeModelExecution {
             .map(|cached| cached.info_inputs_hash == info_hash)
             .unwrap_or(false);
 
+        let owned_lower: Option<lowered_eval::CachedLoweredModel>;
         if !lower_cache_hit {
             let t0 = Instant::now();
             let cached = match lowered_eval::lower_symbolic_graph(
@@ -771,50 +772,73 @@ impl SuperGraphNodeModelExecution {
 
             if let Some(caches) = &mut context.caches {
                 caches.lowered_model_cache.insert(sym_graph_id, cached);
+                owned_lower = None;
             } else {
-                // No cache store — can't proceed without caching the lowered model.
-                return Ok(None);
+                owned_lower = Some(cached);
             }
+        } else {
+            owned_lower = None;
         }
 
-        // --- Ensure compiled plan is cached ---
-        let compile_cache_hit = context
+        let lower_ref = if let Some(ref owned) = owned_lower {
+            owned
+        } else {
+            context
+                .caches
+                .as_ref()
+                .and_then(|c| c.lowered_model_cache.get(&sym_graph_id))
+                .expect("lowered model available")
+        };
+
+        // --- Ensure compiled plan available (cached or owned) ---
+        //
+        // Compile if needed, then re-borrow both from cache (or owned).
+        // We must drop lower_ref before mutably borrowing the cache.
+        let compile_needed = !context
             .caches
             .as_ref()
             .and_then(|c| c.compiled_plan_cache.get(&sym_graph_id))
             .map(|cached| cached.info_inputs_hash == info_hash)
             .unwrap_or(false);
 
-        if !compile_cache_hit {
-            // Borrow the lowered model to compile it.
-            let cached_lower = context
-                .caches
-                .as_ref()
-                .and_then(|c| c.lowered_model_cache.get(&sym_graph_id))
-                .expect("just inserted lowered model");
-
-            let compiled = match compiled_eval::compile_lowered_model(cached_lower, symbolic_graph) {
+        let owned_compiled: Option<compiled_eval::CachedCompiledPlan>;
+        if compile_needed {
+            let compiled = match compiled_eval::compile_lowered_model(lower_ref, symbolic_graph) {
                 Some(c) => c,
                 None => return Ok(None),
             };
+            // Drop the immutable borrow before mutable insert.
+            let _ = lower_ref;
 
             if let Some(caches) = &mut context.caches {
                 caches.compiled_plan_cache.insert(sym_graph_id, compiled);
+                owned_compiled = None;
+            } else {
+                owned_compiled = Some(compiled);
             }
+        } else {
+            let _ = lower_ref;
+            owned_compiled = None;
         }
 
-        // --- Execute ---
-        let (cached_lower, cached_compiled) = {
-            let caches = context.caches.as_ref().expect("caches required for compiled eval");
-            let lower = caches
-                .lowered_model_cache
-                .get(&sym_graph_id)
-                .expect("lowered model cached");
-            let compiled = caches
-                .compiled_plan_cache
-                .get(&sym_graph_id)
-                .expect("compiled plan cached");
-            (lower, compiled)
+        // Re-borrow both from their final locations.
+        let cached_lower = if let Some(ref owned) = owned_lower {
+            owned
+        } else {
+            context
+                .caches
+                .as_ref()
+                .and_then(|c| c.lowered_model_cache.get(&sym_graph_id))
+                .expect("lowered model available")
+        };
+        let cached_compiled = if let Some(ref owned) = owned_compiled {
+            owned
+        } else {
+            context
+                .caches
+                .as_ref()
+                .and_then(|c| c.compiled_plan_cache.get(&sym_graph_id))
+                .expect("compiled plan available")
         };
 
         let results = compiled_eval::execute_compiled(
