@@ -360,34 +360,18 @@ pub fn compute_layout(
                 dim_strides,
                 dim_shape,
             } => {
-                // Sample all corner positions to find the bounding range.
-                // For the 2D case: inner = i % dim_shape[1], outer = i / dim_shape[1]
-                // offset = dim_strides[0] * outer + dim_strides[1] * inner
-                // For 1D (affine): offset = dim_strides[0] * i
-                let mut lo = i64::MAX;
-                let mut hi = i64::MIN;
-                let first_i = atom_offset;
-                let last_i = atom_offset + count - 1;
-                let nd = dim_strides.len();
-                for &i in &[first_i, last_i] {
-                    let off = if nd == 1 {
-                        dim_strides[0] * i as i64
-                    } else {
-                        let inner = i % dim_shape[1];
-                        let outer = i / dim_shape[1];
-                        dim_strides[1] * inner as i64 + dim_strides[0] * outer as i64
-                    };
-                    lo = lo.min(off);
-                    hi = hi.max(off);
-                    // Also check boundary: when inner wraps, the offset can jump.
-                    if nd >= 2 && dim_shape[1] != u64::MAX && i > 0 {
-                        let inner2 = (dim_shape[1] - 1) % dim_shape[1];
-                        let outer2 = (dim_shape[1] - 1) / dim_shape[1];
-                        let off2 = dim_strides[1] * inner2 as i64 + dim_strides[0] * outer2 as i64;
-                        lo = lo.min(off2);
-                        hi = hi.max(off2);
-                    }
-                }
+                // Use the closed-form bounds helper, then shift by atom_offset's
+                // contribution. Since the inner dims fully cycle for any fragment
+                // count > inner_product, we conservatively bound the access over
+                // [0, atom_offset + count) and clamp by the atom_offset start.
+                let total = atom_offset + count;
+                let (lo_full, hi_full) = strided_offset_bounds(dim_strides, dim_shape, total);
+                let first = strided_resolve_offset(dim_strides, dim_shape, atom_offset);
+                let last = strided_resolve_offset(dim_strides, dim_shape, total - 1);
+                // The fragment touches at least [first, last]; combine with the
+                // conservative full-range hull and use the union.
+                let lo = lo_full.min(first).min(last);
+                let hi = hi_full.max(first).max(last);
                 let a = base.0 as i64 + lo;
                 let b = base.0 as i64 + hi;
                 Some((a as u64, b as u64 + 1))
@@ -1039,9 +1023,12 @@ pub fn validate_layout(
             match ir {
                 InputRef::Strided {
                     base, dim_strides, ..
-                } => {
-                    // Use the innermost (last) stride for validation
-                    let stride = dim_strides.last().copied().unwrap_or(0);
+                // Only validate 1D Affine patterns. N-D Strided InputRefs use
+                // a non-linear address function (per-dim modulus + accumulate)
+                // and `dim_strides.last()` is not the access stride; the layout
+                // construction handles them via `input_ref_range`/strided_offset_bounds.
+                } if dim_strides.len() == 1 => {
+                    let stride = dim_strides[0];
                     if stride != 0 {
                         let first_atom = (base.0 as i64 + stride * group.atom_offset as i64) as u64;
                         let last_atom = (base.0 as i64
@@ -2301,6 +2288,70 @@ fn emit_group_body(
 
 // ─── Input loading ──────────────────────────────────────────────────────────
 
+/// Resolve an N-D `InputRef::Strided` access for a given consumer flat index.
+///
+/// Mirrors `InputRef::resolve` exactly: decomposes `i` into per-dim coords
+/// (innermost first via modulus, outermost last via remainder), then sums
+/// `coord_d * dim_strides[d]`. Returns the producer-relative offset (in atom
+/// units, NOT bytes); the caller adds it to the InputRef's `base`.
+fn strided_resolve_offset(dim_strides: &[i64], dim_shape: &[u64], i: u64) -> i64 {
+    let nd = dim_strides.len();
+    let mut offset = 0i64;
+    let mut remaining = i;
+    for d in (0..nd).rev() {
+        let coord = if d == 0 {
+            remaining
+        } else {
+            let c = remaining % dim_shape[d];
+            remaining /= dim_shape[d];
+            c
+        };
+        offset += coord as i64 * dim_strides[d];
+    }
+    offset
+}
+
+/// Compute conservative offset bounds for an N-D Strided InputRef accessed
+/// over `count` consecutive consumer atoms.
+///
+/// Treats inner dims (`d > 0`) as fully cycled (coord ∈ [0, dim_shape[d])) and
+/// the outermost dim as ranging over `ceil(count / inner_product)` coords. The
+/// resulting `[lo, hi]` is a safe over-estimate of the actual atom-offset
+/// range, which is fine for the buffer-layout slab union — it never under-
+/// counts an access.
+fn strided_offset_bounds(dim_strides: &[i64], dim_shape: &[u64], count: u64) -> (i64, i64) {
+    let nd = dim_strides.len();
+    let mut lo: i64 = 0;
+    let mut hi: i64 = 0;
+    let mut inner_product: u64 = 1;
+    for d in (1..nd).rev() {
+        let s = dim_strides[d];
+        let max_coord = dim_shape[d].saturating_sub(1) as i64;
+        let contrib = s.saturating_mul(max_coord);
+        if contrib > 0 {
+            hi = hi.saturating_add(contrib);
+        } else if contrib < 0 {
+            lo = lo.saturating_add(contrib);
+        }
+        inner_product = inner_product.saturating_mul(dim_shape[d]);
+    }
+    if nd >= 1 {
+        let max_outer = if inner_product == 0 || count == 0 {
+            0
+        } else {
+            count.div_ceil(inner_product).saturating_sub(1)
+        };
+        let s = dim_strides[0];
+        let contrib = s.saturating_mul(max_outer as i64);
+        if contrib > 0 {
+            hi = hi.saturating_add(contrib);
+        } else if contrib < 0 {
+            lo = lo.saturating_add(contrib);
+        }
+    }
+    (lo, hi)
+}
+
 /// Determine the storage dtype that `load_input` will load from for a given InputRef.
 fn input_slot_dtype(
     input: &InputRef,
@@ -2316,14 +2367,7 @@ fn input_slot_dtype(
             dim_strides,
             dim_shape,
         } => try_find(*base).or_else(|| {
-            let nd = dim_strides.len();
-            let first_offset = if nd == 1 {
-                dim_strides[0] * atom_offset as i64
-            } else {
-                let inner = atom_offset % dim_shape[1];
-                let outer = atom_offset / dim_shape[1];
-                dim_strides[1] * inner as i64 + dim_strides[0] * outer as i64
-            };
+            let first_offset = strided_resolve_offset(dim_strides, dim_shape, atom_offset);
             let first = AtomId(base.0.wrapping_add(first_offset as u64));
             try_find(first)
         }),
@@ -2459,26 +2503,25 @@ fn load_input(
         } => {
             // N-dimensional strided access.
             //
-            // 1D (affine):          dim_strides=[s], dim_shape=[MAX] → base + s * i
-            // 2D general:           inner = i % dim_shape[1], outer = i / dim_shape[1]
-            //                       offset = dim_strides[0]*outer + dim_strides[1]*inner
-            //   StridedBroadcast:   dim_strides[1]==0 → base + dim_strides[0] * (i / dim_shape[1])
-            //   Modular:            dim_strides[0]==0 → base + dim_strides[1] * (i % dim_shape[1])
+            // Mirrors `InputRef::Strided::resolve`: decomposes `i` into per-dim
+            // coords (innermost first via modulus, outermost last via the
+            // remainder) then sums `coord[d] * dim_strides[d] * elem_bytes`.
+            //
+            // 1D (affine):     dim_strides=[s], dim_shape=[MAX] → base + s * i
+            // 2D general:      inner = i % dim_shape[1], outer = i / dim_shape[1]
+            //                  offset = dim_strides[1]*inner + dim_strides[0]*outer
+            // N-D general:     same shape, more dims (innermost-first wraparound).
             let nd = dim_strides.len();
-            let is_affine = nd == 1;
-            let modulus = if nd >= 2 { dim_shape[1] } else { u64::MAX };
-            let stride_inner = if nd >= 2 {
-                dim_strides[1]
-            } else {
-                dim_strides[0]
-            };
-            let stride_outer = if nd >= 2 { dim_strides[0] } else { 0 };
+            assert!(nd >= 1, "InputRef::Strided with zero dims at base={}", base);
+            assert_eq!(
+                nd,
+                dim_shape.len(),
+                "dim_strides/dim_shape length mismatch at base={}",
+                base
+            );
 
             // Find the buffer slot by resolving the first accessed atom.
-            let first_inner = atom_offset % modulus;
-            let first_outer = atom_offset / modulus;
-            let first_offset =
-                stride_inner * first_inner as i64 + stride_outer * first_outer as i64;
+            let first_offset = strided_resolve_offset(dim_strides, dim_shape, atom_offset);
             let first_atom = AtomId((base.0 as i64 + first_offset) as u64);
 
             let (slot, elem) = layout
@@ -2503,9 +2546,9 @@ fn load_input(
                 slot_byte - first_offset * elem_bytes
             };
 
-            // ── Affine fast path ──
-            if is_affine {
-                let byte_stride = stride_inner * elem_bytes;
+            // ── 1D affine fast path ──
+            if nd == 1 {
+                let byte_stride = dim_strides[0] * elem_bytes;
                 let addr = match i_val {
                     Some(iv) => {
                         let i_bytes = builder.ins().imul_imm(iv, byte_stride);
@@ -2521,44 +2564,52 @@ fn load_input(
                 return Ok(emit_typed_load(builder, addr, load_dtype));
             }
 
-            // ── General path (handles StridedBroadcast, Modular, and mixed) ──
-            let byte_stride_inner = stride_inner * elem_bytes;
-            let byte_stride_outer = stride_outer * elem_bytes;
-
+            // ── General N-D path ──
+            //
+            // We decompose `i` from the innermost dim outward. For each dim d,
+            // `coord[d] = remaining % dim_shape[d]` (or `remaining` for d == 0,
+            // matching `InputRef::Strided::resolve`'s outermost-no-modulus rule).
+            // Each coord is multiplied by `dim_strides[d] * elem_bytes` and
+            // accumulated into the byte offset.
             let addr = match i_val {
                 Some(iv) => {
-                    // inner = i_eff % modulus, outer = i_eff / modulus
-                    let (inner_val, outer_val) = if modulus.is_power_of_two() {
-                        let shift = modulus.trailing_zeros() as i64;
-                        let mask = modulus as i64 - 1;
-                        let inner = builder.ins().band_imm(iv, mask);
-                        let outer = builder.ins().ushr_imm(iv, shift);
-                        (inner, outer)
-                    } else {
-                        let modval = builder.ins().iconst(types::I64, modulus as i64);
-                        let inner = builder.ins().urem(iv, modval);
-                        let outer = builder.ins().udiv(iv, modval);
-                        (inner, outer)
-                    };
-
-                    // offset = stride_inner * inner + stride_outer * outer
                     let mut off = builder.ins().iconst(types::I64, base_byte);
-                    if byte_stride_inner != 0 {
-                        let inner_bytes = builder.ins().imul_imm(inner_val, byte_stride_inner);
-                        off = builder.ins().iadd(off, inner_bytes);
-                    }
-                    if byte_stride_outer != 0 {
-                        let outer_bytes = builder.ins().imul_imm(outer_val, byte_stride_outer);
-                        off = builder.ins().iadd(off, outer_bytes);
+                    let mut remaining = iv;
+                    for d in (0..nd).rev() {
+                        let stride_bytes = dim_strides[d] * elem_bytes;
+                        if d == 0 {
+                            // Outermost: no modulus — use the remainder directly.
+                            if stride_bytes != 0 {
+                                let coord_bytes = builder.ins().imul_imm(remaining, stride_bytes);
+                                off = builder.ins().iadd(off, coord_bytes);
+                            }
+                        } else {
+                            let modulus = dim_shape[d];
+                            let (coord_val, next_remaining) = if modulus.is_power_of_two() {
+                                let shift = modulus.trailing_zeros() as i64;
+                                let mask = modulus as i64 - 1;
+                                let c = builder.ins().band_imm(remaining, mask);
+                                let r = builder.ins().ushr_imm(remaining, shift);
+                                (c, r)
+                            } else {
+                                let modval = builder.ins().iconst(types::I64, modulus as i64);
+                                let c = builder.ins().urem(remaining, modval);
+                                let r = builder.ins().udiv(remaining, modval);
+                                (c, r)
+                            };
+                            if stride_bytes != 0 {
+                                let coord_bytes = builder.ins().imul_imm(coord_val, stride_bytes);
+                                off = builder.ins().iadd(off, coord_bytes);
+                            }
+                            remaining = next_remaining;
+                        }
                     }
                     builder.ins().iadd(buffer_ptr, off)
                 }
                 None => {
-                    let inner = i_const % modulus;
-                    let outer = i_const / modulus;
-                    let byte_off = base_byte
-                        + byte_stride_inner * inner as i64
-                        + byte_stride_outer * outer as i64;
+                    // Constant index: resolve at compile time.
+                    let off = strided_resolve_offset(dim_strides, dim_shape, i_const);
+                    let byte_off = base_byte + off * elem_bytes;
                     addr_const(builder, buffer_ptr, byte_off)
                 }
             };

@@ -898,8 +898,192 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
             return InputRef::Broadcast(producer.base_id);
         }
 
-        // General broadcast: build Explicit.
+        // Try the analytical N-D Strided builder. Handles broadcast +
+        // non-row-major producer strides directly without enumerating atoms.
+        if let Some(ir) =
+            self.try_build_broadcast_strided(consumer, producer, consumer_info, producer_info)
+        {
+            return ir;
+        }
+
+        // Fallback: build the per-atom Explicit list and run heuristic compress.
         self.build_broadcast_explicit(consumer, producer, consumer_info, producer_info)
+    }
+
+    /// Analytically derive an N-D `InputRef::Strided` for a broadcast access.
+    ///
+    /// Mirrors the per-atom math in `build_broadcast_explicit` but expresses it
+    /// directly as `dim_shape` / `dim_strides` against the producer's physical
+    /// strides. Returns `None` if any precondition is violated; the caller
+    /// falls back to the explicit walk in that case.
+    ///
+    /// Preconditions:
+    ///  - Producer is non-segmented (concat goes through `atom_id_for_element`).
+    ///  - Producer's `known_strides` length matches its `known_dims()`.
+    ///  - Consumer's `known_strides` length matches its `known_dims()`.
+    ///  - Consumer is row-major (because `InputRef::Strided::resolve` decomposes
+    ///    `i` row-major over `dim_shape`). The existing explicit walk has the
+    ///    same latent assumption — it iterates `c_strides` in declaration order,
+    ///    which only correctly inverts row-major layouts. In practice consumers
+    ///    of `compute_input_ref` are always freshly-allocated row-major op
+    ///    outputs, so this is not a real restriction.
+    fn try_build_broadcast_strided(
+        &self,
+        consumer: &TensorAtomMap,
+        producer: &TensorAtomMap,
+        consumer_info: &LowerTensorInfo<'a, 'p, P>,
+        producer_info: &LowerTensorInfo<'a, 'p, P>,
+    ) -> Option<InputRef> {
+        if !producer.segments.is_empty() {
+            return None;
+        }
+
+        let c_known_sizes = consumer.known_dims();
+        let p_known_sizes = producer.known_dims();
+        let c_strides = &consumer.known_strides;
+        let p_strides = &producer.known_strides;
+
+        if c_strides.len() != c_known_sizes.len() {
+            return None;
+        }
+        if p_strides.len() != p_known_sizes.len() {
+            return None;
+        }
+
+        // Bail out for non-row-major consumers — see the doc comment for why.
+        let c_row_major = TensorAtomMap::compute_strides(&c_known_sizes);
+        if c_strides != &c_row_major {
+            return None;
+        }
+
+        let c_rank = consumer_info.rank_if_known().unwrap_or(0);
+        let p_rank = producer_info.rank_if_known().unwrap_or(0);
+
+        // Map original-dim positions to indices in the known-dims arrays.
+        let c_known_indices: Vec<Option<usize>> = {
+            let mut ki = 0;
+            consumer
+                .layout
+                .iter()
+                .map(|d| {
+                    if matches!(d, DimKind::Known(_)) {
+                        let idx = ki;
+                        ki += 1;
+                        Some(idx)
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
+        let p_known_indices: Vec<Option<usize>> = {
+            let mut ki = 0;
+            producer
+                .layout
+                .iter()
+                .map(|d| {
+                    if matches!(d, DimKind::Known(_)) {
+                        let idx = ki;
+                        ki += 1;
+                        Some(idx)
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
+
+        // c_to_p_known[c_ki] = mapped producer known-dim index, if any.
+        // Right-aligned broadcasting per ONNX semantics.
+        let dim_offset = c_rank.saturating_sub(p_rank);
+        let mut c_to_p_known: Vec<Option<usize>> = vec![None; c_known_sizes.len()];
+        for (c_orig, c_known_idx) in c_known_indices.iter().enumerate() {
+            let Some(c_ki) = *c_known_idx else {
+                continue;
+            };
+            if c_orig < dim_offset {
+                continue;
+            }
+            let p_orig = c_orig - dim_offset;
+            if p_orig >= p_rank {
+                continue;
+            }
+            if let Some(p_ki) = p_known_indices[p_orig] {
+                c_to_p_known[c_ki] = Some(p_ki);
+            }
+        }
+
+        // Build dim_shape / dim_strides directly from the consumer's known dims
+        // and the (possibly non-row-major) producer physical strides.
+        let mut dim_shape: Vec<u64> = Vec::with_capacity(c_known_sizes.len());
+        let mut dim_strides: Vec<i64> = Vec::with_capacity(c_known_sizes.len());
+        for (c_ki, &p_ki_opt) in c_to_p_known.iter().enumerate() {
+            dim_shape.push(c_known_sizes[c_ki]);
+            let stride = match p_ki_opt {
+                // Producer dim of size 1 → broadcast → stride 0 (coord forced to 0).
+                Some(p_ki) if p_known_sizes[p_ki] == 1 => 0i64,
+                // Mapped to a real producer dim → use its physical stride verbatim.
+                // This is what naturally handles transposed/sliced producers.
+                Some(p_ki) => p_strides[p_ki] as i64,
+                // Unmapped consumer dim (consumer outranks producer) → broadcast.
+                None => 0i64,
+            };
+            dim_strides.push(stride);
+        }
+
+        // Degenerate consumer with no known dims: nothing meaningful to express.
+        if dim_shape.is_empty() {
+            return None;
+        }
+
+        // Squeeze size-1 dims: their coord is always 0, so they contribute
+        // nothing to the offset *and* nothing to the row-major iteration order.
+        // Removing them reduces nd, helps the codegen take its 1D/2D fast paths,
+        // and exposes simple Affine/Modular/StridedBroadcast patterns to the
+        // partitioner's pattern matchers.
+        let mut sq_shape: Vec<u64> = Vec::with_capacity(dim_shape.len());
+        let mut sq_strides: Vec<i64> = Vec::with_capacity(dim_shape.len());
+        for d in 0..dim_shape.len() {
+            if dim_shape[d] == 1 {
+                continue;
+            }
+            sq_shape.push(dim_shape[d]);
+            sq_strides.push(dim_strides[d]);
+        }
+        // Everything broadcast / scalar producer → fall through to Broadcast.
+        if sq_shape.is_empty() {
+            return Some(InputRef::Broadcast(producer.base_id));
+        }
+
+        // 1D affine fast path: a single non-trivial dim becomes Affine directly.
+        if sq_shape.len() == 1 {
+            return Some(InputRef::affine(producer.base_id, sq_strides[0]));
+        }
+
+        // Recognize a row-major access (`stride[d] = product(shape[d+1..])` and
+        // innermost stride 1) as flat Affine stride 1 over the full count. The
+        // partitioner's reducers care a lot about this: a "row-major view of
+        // self" is just a contiguous read.
+        let mut is_rowmajor_unit = sq_strides[sq_strides.len() - 1] == 1;
+        if is_rowmajor_unit {
+            let mut expected: i64 = 1;
+            for d in (0..sq_shape.len()).rev() {
+                if sq_strides[d] != expected {
+                    is_rowmajor_unit = false;
+                    break;
+                }
+                expected = expected.saturating_mul(sq_shape[d] as i64);
+            }
+        }
+        if is_rowmajor_unit {
+            return Some(InputRef::affine(producer.base_id, 1));
+        }
+
+        Some(InputRef::Strided {
+            base: producer.base_id,
+            dim_strides: sq_strides,
+            dim_shape: sq_shape,
+        })
     }
 
     /// Build an Explicit InputRef for broadcast patterns.
