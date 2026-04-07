@@ -165,12 +165,18 @@ pub async fn handle_client_session(
             model_server.get_loader_registry_report().clone(),
         ))
         .ok();
+    // Mark the watch channel's initial value as seen so the select! arm
+    // doesn't immediately fire with the Default snapshot. If the sampler has
+    // already produced a real sample, forward it; otherwise wait for the next
+    // tick.
     let initial_stats = stats_receiver.borrow_and_update().clone();
-    server_tx
-        .send(WebsocketServerClientMessage::ServerStatsReport(
-            initial_stats,
-        ))
-        .ok();
+    if initial_stats.sample_unix_ms != 0 {
+        server_tx
+            .send(WebsocketServerClientMessage::ServerStatsReport(
+                initial_stats,
+            ))
+            .ok();
+    }
     on_message_sent();
 
     let (finished_tx, mut finished_rx) = mpsc::channel(100);

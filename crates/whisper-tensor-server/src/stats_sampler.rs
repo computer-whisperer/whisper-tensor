@@ -57,7 +57,11 @@ impl StatsSampler {
 
         // Prime CPU sampling: sysinfo computes %CPU as a delta between two
         // refreshes, so the first reading after a single refresh is always 0.
-        sys.refresh_processes_specifics(ProcessesToUpdate::Some(&[pid]), true, refresh_kind);
+        // We pass `ProcessesToUpdate::All` (rather than `Some(&[pid])`) because
+        // sysinfo 0.32 only triggers the global-CPU refresh + per-process delta
+        // math on the `All` path — `Some(...)` leaves cpu_usage() pinned at 0.
+        // Iterating /proc once a second is cheap.
+        sys.refresh_processes_specifics(ProcessesToUpdate::All, true, refresh_kind);
 
         let mut ticker = time::interval(SAMPLE_INTERVAL);
         ticker.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
@@ -65,32 +69,34 @@ impl StatsSampler {
         loop {
             ticker.tick().await;
 
-            sys.refresh_processes_specifics(ProcessesToUpdate::Some(&[pid]), true, refresh_kind);
+            sys.refresh_processes_specifics(ProcessesToUpdate::All, true, refresh_kind);
 
-            let snapshot = if let Some(process) = sys.process(pid) {
-                ServerStatsSnapshot {
+            let in_flight_jobs = self.in_flight_jobs.load(Ordering::Relaxed) as u64;
+            let uptime_secs = self.started_at.elapsed().as_secs();
+            let sample_unix_ms = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+
+            // The fallback (process not found) shouldn't happen — we're inside
+            // the process — but if /proc reads fail for any reason we still
+            // emit a snapshot with a real timestamp so the time series stays
+            // continuous.
+            let snapshot = match sys.process(pid) {
+                Some(process) => ServerStatsSnapshot {
                     process_rss_bytes: process.memory(),
                     process_vsz_bytes: process.virtual_memory(),
                     process_cpu_percent: process.cpu_usage(),
-                    in_flight_jobs: self.in_flight_jobs.load(Ordering::Relaxed) as u64,
-                    uptime_secs: self.started_at.elapsed().as_secs(),
-                    sample_unix_ms: SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .map(|d| d.as_millis() as u64)
-                        .unwrap_or(0),
-                }
-            } else {
-                // Process disappeared? Send a zeroed snapshot rather than
-                // skipping a tick — keeps the time series continuous.
-                ServerStatsSnapshot {
-                    in_flight_jobs: self.in_flight_jobs.load(Ordering::Relaxed) as u64,
-                    uptime_secs: self.started_at.elapsed().as_secs(),
-                    sample_unix_ms: SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .map(|d| d.as_millis() as u64)
-                        .unwrap_or(0),
+                    in_flight_jobs,
+                    uptime_secs,
+                    sample_unix_ms,
+                },
+                None => ServerStatsSnapshot {
+                    in_flight_jobs,
+                    uptime_secs,
+                    sample_unix_ms,
                     ..ServerStatsSnapshot::default()
-                }
+                },
             };
 
             // send_replace ignores the "no receivers" case — we want sampling

@@ -25,6 +25,11 @@ impl ServerStatsHistory {
     }
 
     pub fn push(&mut self, snapshot: ServerStatsSnapshot) {
+        // Guard against the watch channel's Default snapshot leaking through
+        // (would plot at unix epoch 0 = ~56 years ago on the time axis).
+        if snapshot.sample_unix_ms == 0 {
+            return;
+        }
         if self.samples.len() == HISTORY_CAPACITY {
             self.samples.pop_front();
         }
