@@ -16,6 +16,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 use tokio::sync::watch;
 use tokio::time;
+use whisper_tensor::pool::{Pool, TrackedPool};
 
 use crate::ServerStatsSnapshot;
 
@@ -29,16 +30,18 @@ pub struct StatsSampler {
     sender: watch::Sender<ServerStatsSnapshot>,
     receiver: watch::Receiver<ServerStatsSnapshot>,
     in_flight_jobs: Arc<AtomicUsize>,
+    execution_pool: Arc<TrackedPool>,
     started_at: Instant,
 }
 
 impl StatsSampler {
-    pub fn new(in_flight_jobs: Arc<AtomicUsize>) -> Self {
+    pub fn new(in_flight_jobs: Arc<AtomicUsize>, execution_pool: Arc<TrackedPool>) -> Self {
         let (sender, receiver) = watch::channel(ServerStatsSnapshot::default());
         Self {
             sender,
             receiver,
             in_flight_jobs,
+            execution_pool,
             started_at: Instant::now(),
         }
     }
@@ -72,6 +75,7 @@ impl StatsSampler {
             sys.refresh_processes_specifics(ProcessesToUpdate::All, true, refresh_kind);
 
             let in_flight_jobs = self.in_flight_jobs.load(Ordering::Relaxed) as u64;
+            let execution_pool_bytes = self.execution_pool.bytes_in_use() as u64;
             let uptime_secs = self.started_at.elapsed().as_secs();
             let sample_unix_ms = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -88,11 +92,13 @@ impl StatsSampler {
                     process_vsz_bytes: process.virtual_memory(),
                     process_cpu_percent: process.cpu_usage(),
                     in_flight_jobs,
+                    execution_pool_bytes,
                     uptime_secs,
                     sample_unix_ms,
                 },
                 None => ServerStatsSnapshot {
                     in_flight_jobs,
+                    execution_pool_bytes,
                     uptime_secs,
                     sample_unix_ms,
                     ..ServerStatsSnapshot::default()

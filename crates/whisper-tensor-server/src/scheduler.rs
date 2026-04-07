@@ -13,7 +13,7 @@ use std::time::Instant;
 use tokio::sync::{Notify, mpsc};
 use whisper_tensor::graph::GlobalId;
 use whisper_tensor::numeric_tensor::{NumericTensor, NumericTensorView};
-use whisper_tensor::pool::SystemPool;
+use whisper_tensor::pool::{SystemPool, TrackedPool};
 use whisper_tensor::super_graph::SuperGraphContext;
 use whisper_tensor::super_graph::cache::SuperGraphCache;
 use whisper_tensor::super_graph::data::SuperGraphData;
@@ -452,6 +452,7 @@ pub async fn scheduler(
     cancellation_registry: Arc<Mutex<HashSet<u64>>>,
     observer_settings_registry: ObserverSettingsRegistry,
     in_flight_jobs: Arc<AtomicUsize>,
+    execution_pool: Arc<TrackedPool>,
 ) {
     let caches = Arc::new(Mutex::new(HashMap::new()));
     loop {
@@ -503,90 +504,125 @@ pub async fn scheduler(
                         (models, symbolic_graph_models)
                     };
                     // Dispatch tight loop
+                    let execution_pool_for_job = execution_pool.clone();
                     let result = tokio::task::spawn_blocking(move || {
-                        {
-                            let pool = &SystemPool;
-                            let mut super_graph_data = SuperGraphData::new();
-                            for (link, tensor) in req.tensor_inputs {
-                                super_graph_data.tensors.insert(link, tensor);
-                            }
-                            for (link, clip) in req.audio_inputs {
-                                super_graph_data.audio_clips.insert(
-                                    link,
-                                    whisper_tensor::super_graph::data::SuperGraphAudioClip::new(
-                                        clip.samples,
-                                        clip.sample_rate_hz,
-                                    ),
-                                );
-                            }
-
-                            // Populate data with refs
-                            for link in req.model_inputs.keys() {
-                                if let Some(model) = models.get(link) {
-                                    super_graph_data
-                                        .tensor_maps
-                                        .insert(*link, model.get_tensor_store());
-                                }
-                            }
-                            for (link, data) in req.string_inputs {
-                                super_graph_data.strings.insert(link, data);
-                            }
-                            for (link, hash) in req.hash_inputs {
-                                super_graph_data.hashes.insert(link, hash);
-                            }
-                            let mut observer = LocalSuperGraphObserver::new(
-                                req.attention_token,
-                                req.do_node_execution_reports,
-                                req.abbreviated_tensor_report_settings,
-                                reporter,
-                                req.subscribed_tensors.iter().cloned().collect(),
-                                Some(cancellation_registry_for_request.clone()),
-                                Some(observer_settings_registry_for_request.clone()),
-                            );
-                            let mut caches = caches.lock().unwrap();
-                            let res = {
-                                let cache = req
-                                    .use_cache
-                                    .map(|x| caches.entry(x).or_insert_with(SuperGraphCache::new));
-                                let symbolic_graph_refs = symbolic_graph_models
-                                    .iter()
-                                    .map(|x| x.get_symbolic_graph())
-                                    .collect();
-                                let mut context = SuperGraphContext {
-                                    pool,
-                                    observer: &mut observer,
-                                    caches: cache,
-                                    symbolic_graphs: symbolic_graph_refs,
-                                    eval_options: req.eval_options.clone(),
-                                };
-                                req.super_graph
-                                    .run(super_graph_data, &mut context)
-                                    .map_err(|x| x.to_string())?
-                            };
-
-                            let SuperGraphData {
-                                tensors,
-                                images,
-                                audio_clips,
-                                strings,
-                                hashes,
-                                ..
-                            } = res;
-
-                            let mut tensor_outputs: HashMap<_, _> = tensors.into_iter().collect();
-                            for (link, image) in images {
-                                tensor_outputs.insert(link, image.tensor);
-                            }
-                            for (link, clip) in audio_clips {
-                                tensor_outputs.insert(link, clip.samples);
-                            }
-
-                            Ok(SuperGraphResponseData {
-                                tensor_outputs,
-                                string_outputs: strings,
-                                hash_outputs: hashes,
-                            })
+                        // Execution uses the scheduler-shared tracked pool so
+                        // all allocations during supergraph eval (inputs,
+                        // intermediates, outputs) are counted against a
+                        // single atomic byte counter that the stats sampler
+                        // can observe. The Arc is moved into this closure;
+                        // we deref to a &TrackedPool whose lifetime is the
+                        // closure body — plenty long for every allocation.
+                        let pool: &TrackedPool = &execution_pool_for_job;
+                        let mut super_graph_data = SuperGraphData::<'_, '_, TrackedPool>::new();
+                        // Inputs arrive as SystemPool tensors on the wire.
+                        // Copy them into the execution pool so the whole
+                        // SuperGraphData has a single pool type.
+                        for (link, tensor) in req.tensor_inputs {
+                            let copied = tensor.to_tensor(pool).map_err(|e| {
+                                format!("execution pool allocation for input tensor: {e}")
+                            })?;
+                            super_graph_data.tensors.insert(link, copied);
                         }
+                        for (link, clip) in req.audio_inputs {
+                            let samples = clip.samples.to_tensor(pool).map_err(|e| {
+                                format!("execution pool allocation for audio input: {e}")
+                            })?;
+                            super_graph_data.audio_clips.insert(
+                                link,
+                                whisper_tensor::super_graph::data::SuperGraphAudioClip::new(
+                                    samples,
+                                    clip.sample_rate_hz,
+                                ),
+                            );
+                        }
+
+                        // Populate data with refs
+                        for link in req.model_inputs.keys() {
+                            if let Some(model) = models.get(link) {
+                                super_graph_data
+                                    .tensor_maps
+                                    .insert(*link, model.get_tensor_store());
+                            }
+                        }
+                        for (link, data) in req.string_inputs {
+                            super_graph_data.strings.insert(link, data);
+                        }
+                        for (link, hash) in req.hash_inputs {
+                            super_graph_data.hashes.insert(link, hash);
+                        }
+                        let mut observer = LocalSuperGraphObserver::new(
+                            req.attention_token,
+                            req.do_node_execution_reports,
+                            req.abbreviated_tensor_report_settings,
+                            reporter,
+                            req.subscribed_tensors.iter().cloned().collect(),
+                            Some(cancellation_registry_for_request.clone()),
+                            Some(observer_settings_registry_for_request.clone()),
+                        );
+                        let mut caches = caches.lock().unwrap();
+                        let res = {
+                            let cache = req
+                                .use_cache
+                                .map(|x| caches.entry(x).or_insert_with(SuperGraphCache::new));
+                            let symbolic_graph_refs = symbolic_graph_models
+                                .iter()
+                                .map(|x| x.get_symbolic_graph())
+                                .collect();
+                            let mut context = SuperGraphContext {
+                                pool,
+                                observer: &mut observer,
+                                caches: cache,
+                                symbolic_graphs: symbolic_graph_refs,
+                                eval_options: req.eval_options.clone(),
+                            };
+                            req.super_graph
+                                .run(super_graph_data, &mut context)
+                                .map_err(|x| x.to_string())?
+                        };
+
+                        let SuperGraphData {
+                            tensors,
+                            images,
+                            audio_clips,
+                            strings,
+                            hashes,
+                            ..
+                        } = res;
+
+                        // Materialize outputs back to SystemPool so the
+                        // response can leave the tracked pool's lifetime and
+                        // be serialized over the wire. The tracked source
+                        // tensors are dropped here, returning their bytes to
+                        // the execution pool.
+                        let mut tensor_outputs: HashMap<
+                            _,
+                            NumericTensor<'static, DynRank, SystemPool>,
+                        > = HashMap::new();
+                        for (link, tensor) in tensors {
+                            let out = tensor.to_tensor(&SystemPool).map_err(|e| {
+                                format!("SystemPool allocation for output tensor: {e}")
+                            })?;
+                            tensor_outputs.insert(link, out);
+                        }
+                        for (link, image) in images {
+                            let out = image.tensor.to_tensor(&SystemPool).map_err(|e| {
+                                format!("SystemPool allocation for output image: {e}")
+                            })?;
+                            tensor_outputs.insert(link, out);
+                        }
+                        for (link, clip) in audio_clips {
+                            let out = clip.samples.to_tensor(&SystemPool).map_err(|e| {
+                                format!("SystemPool allocation for output audio: {e}")
+                            })?;
+                            tensor_outputs.insert(link, out);
+                        }
+
+                        Ok(SuperGraphResponseData {
+                            tensor_outputs,
+                            string_outputs: strings,
+                            hash_outputs: hashes,
+                        })
                     })
                     .await
                     .unwrap();

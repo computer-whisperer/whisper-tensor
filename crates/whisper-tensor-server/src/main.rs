@@ -28,6 +28,7 @@ use hf_hub::api::tokio::ApiBuilder;
 use hf_hub::{Repo, RepoType};
 use tokenizers::FromPretrainedParameters;
 use whisper_tensor::loader::ConfigValue;
+use whisper_tensor::pool::TrackedPool;
 use whisper_tensor_server::model_server::{ModelServer, default_loaders};
 use whisper_tensor_server::scheduler::{
     ObserverSettingsRegistry, SchedulerJob, SchedulerReport, SchedulerReporter, scheduler,
@@ -424,10 +425,15 @@ async fn main() {
     let cancellation_registry = Arc::new(StdMutex::new(HashSet::<u64>::new()));
     let observer_settings_registry = Arc::new(std::sync::Mutex::new(HashMap::new()));
     let in_flight_jobs = Arc::new(AtomicUsize::new(0));
+    // Shared short-lived pool used for all SuperGraph execution allocations
+    // (inputs copied in from the wire, intermediates, outputs before they're
+    // copied back to SystemPool). Shared so concurrent future requests can
+    // be tracked against a single atomic counter.
+    let execution_pool = Arc::new(TrackedPool::new(None));
 
     let server_config_report = ServerConfigReport {};
 
-    let stats_sampler = StatsSampler::new(in_flight_jobs.clone());
+    let stats_sampler = StatsSampler::new(in_flight_jobs.clone(), execution_pool.clone());
     let stats_receiver = stats_sampler.subscribe();
     tokio::spawn(stats_sampler.run());
 
@@ -437,6 +443,7 @@ async fn main() {
         cancellation_registry.clone(),
         observer_settings_registry.clone(),
         in_flight_jobs.clone(),
+        execution_pool.clone(),
     ));
 
     tokio::spawn(async move {

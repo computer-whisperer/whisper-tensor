@@ -378,6 +378,11 @@ pub struct ServerStatsSnapshot {
     pub process_cpu_percent: f32,
     /// Number of supergraph requests currently in flight in the scheduler.
     pub in_flight_jobs: u64,
+    /// Bytes currently held by the scheduler's shared execution `TrackedPool`.
+    /// Covers all short-lived allocations made during supergraph evaluation
+    /// (intermediates, inputs copied in from the wire, outputs before they're
+    /// copied back out). Returns to ~0 between requests.
+    pub execution_pool_bytes: u64,
     /// Wall-clock seconds since the server started.
     pub uptime_secs: u64,
     /// Sample wall-clock time as Unix milliseconds. Used by the UI to align
