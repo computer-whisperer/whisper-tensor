@@ -224,6 +224,9 @@ impl<'p, P: Pool + 'p> PhaseStore<'p, P> {
     }
 
     /// Insert an output tensor. Maintains sorted order.
+    ///
+    /// O(N) per call due to `Vec::insert` shifting. Prefer `insert_batch`
+    /// when adding many entries at once (e.g. all outputs of a phase).
     pub fn insert(&mut self, base: AtomId, tensor: NumericTensor<'p, DynRank, P>) {
         let pos = self.entries.partition_point(|e| e.base < base.0);
         // If an entry at this exact base exists, replace it.
@@ -238,6 +241,90 @@ impl<'p, P: Pool + 'p> PhaseStore<'p, P> {
                 },
             );
         }
+    }
+
+    /// Insert many output tensors at once.
+    ///
+    /// Sorts the new entries by base, then performs a single linear merge
+    /// against the existing sorted store. O(N + M log M) instead of the
+    /// O(N*M) cost of M repeated `insert` calls (each shifting up to N
+    /// `StoreEntry`s of ~96 bytes apiece).
+    ///
+    /// If multiple new entries share the same base, the **last** one wins,
+    /// matching the per-element `insert` semantics. If a new entry's base
+    /// matches an existing entry, the new entry replaces it.
+    pub fn insert_batch(&mut self, new_entries: Vec<(AtomId, NumericTensor<'p, DynRank, P>)>) {
+        if new_entries.is_empty() {
+            return;
+        }
+
+        // Stable sort so that, when two new entries share a base, the one
+        // produced later in the input order ends up later in the sorted run
+        // — the dedup pass below then keeps it.
+        let mut sorted: Vec<StoreEntry<'p, P>> = new_entries
+            .into_iter()
+            .map(|(base, tensor)| StoreEntry {
+                base: base.0,
+                tensor,
+            })
+            .collect();
+        sorted.sort_by_key(|e| e.base);
+
+        // Collapse adjacent duplicates, keeping the last (latest insert wins).
+        let mut deduped: Vec<StoreEntry<'p, P>> = Vec::with_capacity(sorted.len());
+        for entry in sorted {
+            if let Some(last) = deduped.last_mut() {
+                if last.base == entry.base {
+                    *last = entry;
+                    continue;
+                }
+            }
+            deduped.push(entry);
+        }
+        let sorted = deduped;
+
+        // Linear merge of two sorted runs: existing self.entries and `sorted`.
+        let existing = std::mem::take(&mut self.entries);
+        let mut merged: Vec<StoreEntry<'p, P>> = Vec::with_capacity(existing.len() + sorted.len());
+        let mut e_iter = existing.into_iter();
+        let mut s_iter = sorted.into_iter();
+        let mut e_cur = e_iter.next();
+        let mut s_cur = s_iter.next();
+
+        loop {
+            match (e_cur.as_ref(), s_cur.as_ref()) {
+                (Some(e), Some(s)) => match e.base.cmp(&s.base) {
+                    std::cmp::Ordering::Less => {
+                        merged.push(e_cur.take().unwrap());
+                        e_cur = e_iter.next();
+                    }
+                    std::cmp::Ordering::Greater => {
+                        merged.push(s_cur.take().unwrap());
+                        s_cur = s_iter.next();
+                    }
+                    std::cmp::Ordering::Equal => {
+                        // New replaces old.
+                        let _ = e_cur.take();
+                        merged.push(s_cur.take().unwrap());
+                        e_cur = e_iter.next();
+                        s_cur = s_iter.next();
+                    }
+                },
+                (Some(_), None) => {
+                    merged.push(e_cur.take().unwrap());
+                    merged.extend(e_iter);
+                    break;
+                }
+                (None, Some(_)) => {
+                    merged.push(s_cur.take().unwrap());
+                    merged.extend(s_iter);
+                    break;
+                }
+                (None, None) => break,
+            }
+        }
+
+        self.entries = merged;
     }
 
     /// Find all store entries overlapping [base, base+count).
@@ -500,12 +587,11 @@ impl ExecutablePlan {
                 .map(|lane| execute_lane(lane, &store, pool))
                 .collect();
 
-            // Barrier: merge all outputs into store.
-            for lane_outputs in phase_outputs {
-                for (base, tensor) in lane_outputs {
-                    store.insert(base, tensor);
-                }
-            }
+            // Barrier: merge all outputs into store via a single batched
+            // sort+linear-merge (much cheaper than per-element insert).
+            let flat: Vec<(AtomId, NumericTensor<'p, DynRank, P>)> =
+                phase_outputs.into_iter().flatten().collect();
+            store.insert_batch(flat);
 
             // Evict entries no longer needed by future phases.
             store.evict(pi + 1, &self.output_liveness, &self.pinned_output_atoms);
@@ -536,13 +622,10 @@ impl ExecutablePlan {
             total_spans += spans_dt;
 
             let t0 = Instant::now();
-            let mut n_outputs = 0usize;
-            for lane_outputs in phase_outputs {
-                n_outputs += lane_outputs.len();
-                for (base, tensor) in lane_outputs {
-                    store.insert(base, tensor);
-                }
-            }
+            let flat: Vec<(AtomId, NumericTensor<'p, DynRank, P>)> =
+                phase_outputs.into_iter().flatten().collect();
+            let n_outputs = flat.len();
+            store.insert_batch(flat);
             let merge_dt = t0.elapsed();
             total_merge += merge_dt;
 
