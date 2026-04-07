@@ -21,19 +21,27 @@ use std::hash::{Hash, Hasher};
 
 static POOL_S: SystemPool = SystemPool;
 
-/// Resolve a StoredOrNotTensor to a pool tensor.
-pub(super) fn resolve_stored_tensor(
+/// Resolve a `StoredOrNotTensor` into a pool-backed tensor.
+///
+/// Allocates through the caller-provided pool so every weight-load
+/// allocation is counted against whichever pool the eval path is using
+/// (typically the scheduler's short-lived `TrackedPool`). Previously
+/// this was hardcoded to `SystemPool`, which meant weight materialization
+/// on every `execute_compiled` / `execute_lowered` call fell back to the
+/// global allocator and was invisible to the stats sampler.
+pub(super) fn resolve_stored_tensor<'p, P: Pool>(
     stored_ref: &StoredOrNotTensor,
     tensor_store: &TensorStore,
-) -> Option<NumericTensor<'static, DynRank, SystemPool>> {
+    pool: &'p P,
+) -> Option<NumericTensor<'p, DynRank, P>> {
     match stored_ref {
         StoredOrNotTensor::Stored(store_id) => tensor_store
             .get_tensor(*store_id)
-            .and_then(|s| s.to_pool_tensor(&POOL_S)),
+            .and_then(|s| s.to_pool_tensor(pool)),
         StoredOrNotTensor::Inline(shared) => {
             let src = shared.inner();
             let layout = TensorLayout::<DynRank>::row_major(src.shape().clone(), src.dtype());
-            POOL_S.allocate(layout.buffer_size_bytes()).ok().map(|buf| {
+            pool.allocate(layout.buffer_size_bytes()).ok().map(|buf| {
                 let mut tensor = NumericTensor::from_parts(buf, layout);
                 for i in 0..src.numel() {
                     tensor.write_element(i, src.read_element(i));
@@ -233,8 +241,11 @@ pub fn build_info_inputs(
 
         if numel <= inline_constant_threshold {
             // Small constant: actually load it so the data is available for
-            // constant folding during lowering.
-            if let Some(tensor) = resolve_stored_tensor(stored_ref, tensor_store) {
+            // constant folding during lowering. Lowering is one-time per
+            // model and the resulting TensorInfo is cached in the lowered
+            // model — we keep it on the static `POOL_S` so the cached info
+            // retains its `'static` lifetime.
+            if let Some(tensor) = resolve_stored_tensor(stored_ref, tensor_store, &POOL_S) {
                 info_inputs.insert(tensor_id, TensorInfo::from_view(&tensor.view(), &POOL_S));
             }
         } else {
@@ -391,7 +402,7 @@ pub fn execute_lowered<'p, P: Pool + 'p>(
         )
         .copied()
         .collect();
-    let mut weight_tensors: Vec<(GlobalId, NumericTensor<'_, DynRank, SystemPool>)> =
+    let mut weight_tensors: Vec<(GlobalId, NumericTensor<'p, DynRank, P>)> =
         Vec::with_capacity(stored_ids.len());
     for &ext_id in &stored_ids {
         let tensor_meta = sym_graph.get_tensor_info(ext_id).ok_or_else(|| {
@@ -407,7 +418,7 @@ pub fn execute_lowered<'p, P: Pool + 'p>(
                 )));
             }
         };
-        let tensor = resolve_stored_tensor(stored_ref, tensor_store).ok_or_else(|| {
+        let tensor = resolve_stored_tensor(stored_ref, tensor_store, pool).ok_or_else(|| {
             super::SuperGraphError::InvalidGraph(format!(
                 "lowered_eval: failed to load stored tensor {ext_id:?}"
             ))

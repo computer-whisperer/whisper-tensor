@@ -612,7 +612,7 @@ pub fn execute_compiled<'p, P: Pool + 'p>(
         .copied()
         .collect();
 
-    let mut weight_tensors: Vec<(GlobalId, NumericTensor<'_, DynRank, SystemPool>)> =
+    let mut weight_tensors: Vec<(GlobalId, NumericTensor<'p, DynRank, P>)> =
         Vec::with_capacity(stored_ids.len());
     for &ext_id in &stored_ids {
         let tensor_meta = sym_graph.get_tensor_info(ext_id).ok_or_else(|| {
@@ -628,8 +628,8 @@ pub fn execute_compiled<'p, P: Pool + 'p>(
                 )));
             }
         };
-        let tensor =
-            lowered_eval::resolve_stored_tensor(stored_ref, tensor_store).ok_or_else(|| {
+        let tensor = lowered_eval::resolve_stored_tensor(stored_ref, tensor_store, pool)
+            .ok_or_else(|| {
                 super::SuperGraphError::InvalidGraph(format!(
                     "compiled_eval: failed to load stored tensor {ext_id:?}"
                 ))
