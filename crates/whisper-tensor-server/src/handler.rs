@@ -9,7 +9,7 @@ use crossbeam::queue::ArrayQueue;
 use hf_hub::api::tokio::ApiBuilder;
 use hf_hub::{Repo, RepoType};
 use tokenizers::FromPretrainedParameters;
-use tokio::sync::{Mutex, Notify, mpsc};
+use tokio::sync::{Mutex, Notify, mpsc, watch};
 
 use crate::model_server::ModelServer;
 use crate::scheduler::{
@@ -17,8 +17,8 @@ use crate::scheduler::{
     update_observer_settings,
 };
 use crate::{
-    ServerConfigReport, SuperGraphExecutionReport, WebsocketClientServerMessage,
-    WebsocketServerClientMessage,
+    ServerConfigReport, ServerStatsSnapshot, SuperGraphExecutionReport,
+    WebsocketClientServerMessage, WebsocketServerClientMessage,
 };
 
 async fn hf_from_pretrained<S: AsRef<str>>(
@@ -141,6 +141,7 @@ pub async fn handle_client_session(
     observer_settings_registry: ObserverSettingsRegistry,
     model_server: Arc<ModelServer>,
     server_config_report: ServerConfigReport,
+    mut stats_receiver: watch::Receiver<ServerStatsSnapshot>,
     on_message_sent: impl Fn() + Send + 'static,
 ) {
     let mut receiver = model_server.watch_models_report();
@@ -162,6 +163,12 @@ pub async fn handle_client_session(
     server_tx
         .send(WebsocketServerClientMessage::LoaderRegistryReport(
             model_server.get_loader_registry_report().clone(),
+        ))
+        .ok();
+    let initial_stats = stats_receiver.borrow_and_update().clone();
+    server_tx
+        .send(WebsocketServerClientMessage::ServerStatsReport(
+            initial_stats,
         ))
         .ok();
     on_message_sent();
@@ -186,6 +193,11 @@ pub async fn handle_client_session(
             Ok(_) = receiver.changed() => {
                 let current_value = receiver.borrow_and_update().clone();
                 server_tx.send(WebsocketServerClientMessage::CurrentModelsReport(current_value)).ok();
+                on_message_sent();
+            }
+            Ok(_) = stats_receiver.changed() => {
+                let snapshot = stats_receiver.borrow_and_update().clone();
+                server_tx.send(WebsocketServerClientMessage::ServerStatsReport(snapshot)).ok();
                 on_message_sent();
             }
             _ = report_notify.notified() => {

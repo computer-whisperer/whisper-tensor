@@ -1,6 +1,7 @@
 use crate::graph_explorer::{GraphExplorerApp, GraphExplorerSettings, GraphRootSubjectSelection};
 use crate::llm_explorer::{LLMExplorerApp, LLMExplorerState};
 use crate::sd_explorer::{SDExplorerApp, SDExplorerState};
+use crate::server_stats::{ServerStatsHistory, render_server_stats};
 use crate::stt_explorer::{STTExplorerApp, STTExplorerState};
 use crate::tts_explorer::{TTSExplorerApp, TTSExplorerState};
 use crate::websockets::ServerRequestManager;
@@ -41,6 +42,7 @@ enum SelectedTab {
     STTExplorer,
     TTSExplorer,
     BuildInspector,
+    Resources,
 }
 
 /// Persisted state for the loader dialog's config field values.
@@ -333,6 +335,7 @@ pub struct WebUIApp {
     loader_registry: Option<LoaderRegistryReport>,
     graph_catalog_status: Option<String>,
     cache_report: Option<whisper_tensor_server::CacheReport>,
+    server_stats: ServerStatsHistory,
 }
 
 impl WebUIApp {
@@ -375,6 +378,7 @@ impl WebUIApp {
             loader_registry: None,
             graph_catalog_status: None,
             cache_report: None,
+            server_stats: ServerStatsHistory::new(),
         }
     }
 
@@ -1166,6 +1170,9 @@ impl eframe::App for WebUIApp {
                         WebsocketServerClientMessage::CacheReportReturn(report) => {
                             self.cache_report = Some(report);
                         }
+                        WebsocketServerClientMessage::ServerStatsReport(snapshot) => {
+                            self.server_stats.push(snapshot);
+                        }
                         _ => {
                             log::debug!("Unhandled message: {:?}", msg);
                         }
@@ -1221,6 +1228,11 @@ impl eframe::App for WebUIApp {
                     &mut self.app_state.selected_tab,
                     SelectedTab::BuildInspector,
                     "Build Inspector",
+                );
+                ui.selectable_value(
+                    &mut self.app_state.selected_tab,
+                    SelectedTab::Resources,
+                    "Resources",
                 );
             });
         });
@@ -1589,6 +1601,9 @@ impl eframe::App for WebUIApp {
                 }
                 SelectedTab::BuildInspector => {
                     self.render_build_inspector(ui);
+                }
+                SelectedTab::Resources => {
+                    render_server_stats(ui, &self.server_stats);
                 }
             }
         });

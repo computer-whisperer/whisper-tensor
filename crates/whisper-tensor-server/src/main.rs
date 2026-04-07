@@ -11,10 +11,11 @@ use std::default::Default;
 use std::fs::File;
 use std::io::Read;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time;
 use std::time::{Duration, Instant};
-use tokio::sync::{Mutex, Notify, mpsc};
+use tokio::sync::{Mutex, Notify, mpsc, watch};
 use tokio::time::sleep;
 use tower_http::{
     services::{ServeDir, ServeFile},
@@ -32,9 +33,10 @@ use whisper_tensor_server::scheduler::{
     ObserverSettingsRegistry, SchedulerJob, SchedulerReport, SchedulerReporter, scheduler,
     update_observer_settings,
 };
+use whisper_tensor_server::stats_sampler::StatsSampler;
 use whisper_tensor_server::{
-    ServerConfigReport, SuperGraphExecutionReport, WebsocketClientServerMessage,
-    WebsocketServerClientMessage,
+    ServerConfigReport, ServerStatsSnapshot, SuperGraphExecutionReport,
+    WebsocketClientServerMessage, WebsocketServerClientMessage,
 };
 
 const WEBUI_PKG_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../whisper-tensor-ui/pkg");
@@ -61,6 +63,7 @@ async fn websocket_handler(
     observer_settings_registry: ObserverSettingsRegistry,
     model_server: Arc<ModelServer>,
     server_config_report: ServerConfigReport,
+    stats_receiver: watch::Receiver<ServerStatsSnapshot>,
 ) -> impl IntoResponse {
     ws.on_upgrade(move |socket: WebSocket| {
         handle_socket(
@@ -70,6 +73,7 @@ async fn websocket_handler(
             observer_settings_registry,
             model_server,
             server_config_report.clone(),
+            stats_receiver,
         )
     })
 }
@@ -123,6 +127,7 @@ async fn handle_socket(
     observer_settings_registry: ObserverSettingsRegistry,
     model_server: Arc<ModelServer>,
     server_config_report: ServerConfigReport,
+    mut stats_receiver: watch::Receiver<ServerStatsSnapshot>,
 ) {
     // Send opening state
     let mut receiver = model_server.watch_models_report();
@@ -144,6 +149,12 @@ async fn handle_socket(
         WebsocketServerClientMessage::LoaderRegistryReport(
             model_server.get_loader_registry_report().clone(),
         ),
+    )
+    .await;
+    let initial_stats = stats_receiver.borrow_and_update().clone();
+    send_message(
+        &mut socket,
+        WebsocketServerClientMessage::ServerStatsReport(initial_stats),
     )
     .await;
 
@@ -229,6 +240,10 @@ async fn handle_socket(
             Ok(_) = receiver.changed() => {
                 let current_value = receiver.borrow_and_update().clone();
                 send_message(&mut socket, WebsocketServerClientMessage::CurrentModelsReport(current_value)).await;
+            }
+            Ok(_) = stats_receiver.changed() => {
+                let snapshot = stats_receiver.borrow_and_update().clone();
+                send_message(&mut socket, WebsocketServerClientMessage::ServerStatsReport(snapshot)).await;
             }
             _ = report_notify.notified() => {
                 {
@@ -402,14 +417,20 @@ async fn main() {
     let (scheduler_tx, scheduler_rx) = mpsc::channel(100);
     let cancellation_registry = Arc::new(StdMutex::new(HashSet::<u64>::new()));
     let observer_settings_registry = Arc::new(std::sync::Mutex::new(HashMap::new()));
+    let in_flight_jobs = Arc::new(AtomicUsize::new(0));
 
     let server_config_report = ServerConfigReport {};
+
+    let stats_sampler = StatsSampler::new(in_flight_jobs.clone());
+    let stats_receiver = stats_sampler.subscribe();
+    tokio::spawn(stats_sampler.run());
 
     tokio::spawn(scheduler(
         scheduler_rx,
         model_server.clone(),
         cancellation_registry.clone(),
         observer_settings_registry.clone(),
+        in_flight_jobs.clone(),
     ));
 
     tokio::spawn(async move {
@@ -430,6 +451,7 @@ async fn main() {
                         observer_settings_registry.clone(),
                         model_server.clone(),
                         server_config_report.clone(),
+                        stats_receiver.clone(),
                     )
                 }),
             )

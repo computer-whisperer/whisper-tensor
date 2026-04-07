@@ -4,10 +4,12 @@ fn main() {
     use std::collections::HashSet;
     use std::sync::Arc;
     use std::sync::Mutex as StdMutex;
+    use std::sync::atomic::AtomicUsize;
     use whisper_tensor_server::ServerConfigReport;
     use whisper_tensor_server::handler::handle_client_session;
     use whisper_tensor_server::model_server::{ModelServer, default_loaders};
     use whisper_tensor_server::scheduler::scheduler;
+    use whisper_tensor_server::stats_sampler::StatsSampler;
 
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
@@ -29,14 +31,20 @@ fn main() {
         let (scheduler_tx, scheduler_rx) = tokio::sync::mpsc::channel(100);
         let cancellation_registry = Arc::new(StdMutex::new(HashSet::<u64>::new()));
         let observer_settings_registry = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let in_flight_jobs = Arc::new(AtomicUsize::new(0));
 
         let server_config_report = ServerConfigReport {};
+
+        let stats_sampler = StatsSampler::new(in_flight_jobs.clone());
+        let stats_receiver = stats_sampler.subscribe();
+        tokio::spawn(stats_sampler.run());
 
         tokio::spawn(scheduler(
             scheduler_rx,
             model_server.clone(),
             cancellation_registry.clone(),
             observer_settings_registry.clone(),
+            in_flight_jobs.clone(),
         ));
 
         handle_client_session(
@@ -47,6 +55,7 @@ fn main() {
             observer_settings_registry,
             model_server,
             server_config_report,
+            stats_receiver,
             move || {
                 if let Some(ctx) = ctx_for_handler.lock().unwrap().as_ref() {
                     ctx.request_repaint();

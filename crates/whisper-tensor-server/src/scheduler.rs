@@ -7,6 +7,7 @@ use crossbeam::queue::ArrayQueue;
 use log::error;
 use std::collections::{HashMap, HashSet};
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tokio::sync::{Notify, mpsc};
@@ -415,6 +416,26 @@ fn clear_attention_cancellation(
     }
 }
 
+/// RAII guard that increments an in-flight counter on construction and
+/// decrements it on drop. Used so the counter is decremented across all
+/// scheduler exit paths (cancellation, errors, normal completion).
+struct InFlightGuard {
+    counter: Arc<AtomicUsize>,
+}
+
+impl InFlightGuard {
+    fn new(counter: Arc<AtomicUsize>) -> Self {
+        counter.fetch_add(1, Ordering::Relaxed);
+        Self { counter }
+    }
+}
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        self.counter.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
 fn build_cache_report(caches: &Arc<Mutex<HashMap<u64, SuperGraphCache>>>) -> CacheReport {
     let caches = caches.lock().unwrap();
     let mut entries: Vec<_> = caches
@@ -430,6 +451,7 @@ pub async fn scheduler(
     model_server: Arc<ModelServer>,
     cancellation_registry: Arc<Mutex<HashSet<u64>>>,
     observer_settings_registry: ObserverSettingsRegistry,
+    in_flight_jobs: Arc<AtomicUsize>,
 ) {
     let caches = Arc::new(Mutex::new(HashMap::new()));
     loop {
@@ -446,6 +468,7 @@ pub async fn scheduler(
                     let _ = response.send(report);
                 }
                 SchedulerJob::SuperGraphRequest((req, resp_sender, reporter)) => {
+                    let _in_flight = InFlightGuard::new(in_flight_jobs.clone());
                     ensure_observer_settings(
                         &observer_settings_registry,
                         req.attention_token,

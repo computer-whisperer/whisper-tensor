@@ -4,6 +4,8 @@ pub mod handler;
 pub mod model_server;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod scheduler;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod stats_sampler;
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -360,6 +362,29 @@ impl CurrentModelsAndInterfacesReport {
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ServerConfigReport {}
 
+/// Periodic snapshot of server-wide resource usage. Pushed to clients ~1 Hz
+/// over the websocket so the UI can render time-series plots.
+///
+/// All byte fields are in raw bytes; CPU is process-wide percent (can exceed
+/// 100% on multi-core machines, summed across cores).
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct ServerStatsSnapshot {
+    /// Resident set size of the server process, in bytes.
+    pub process_rss_bytes: u64,
+    /// Virtual memory size of the server process, in bytes.
+    pub process_vsz_bytes: u64,
+    /// Process CPU usage percent since the last sample. May exceed 100% on
+    /// multi-core systems (one core busy = ~100%).
+    pub process_cpu_percent: f32,
+    /// Number of supergraph requests currently in flight in the scheduler.
+    pub in_flight_jobs: u64,
+    /// Wall-clock seconds since the server started.
+    pub uptime_secs: u64,
+    /// Sample wall-clock time as Unix milliseconds. Used by the UI to align
+    /// the time axis when plotting.
+    pub sample_unix_ms: u64,
+}
+
 // ---------------------------------------------------------------------------
 // Build Inspector: cache report types (re-exported from whisper-tensor)
 // ---------------------------------------------------------------------------
@@ -386,4 +411,5 @@ pub enum WebsocketServerClientMessage {
     SuperGraphResponse(SuperGraphResponse),
     SuperGraphExecutionReport(SuperGraphExecutionReport),
     CacheReportReturn(CacheReport),
+    ServerStatsReport(ServerStatsSnapshot),
 }
