@@ -209,6 +209,12 @@ struct EvalArgs {
     /// Most useful with --eval-mode=lowered or --eval-mode=compiled.
     #[arg(long)]
     report: bool,
+
+    /// Aggregate per-stage compiled-eval milestones and print a summary at the
+    /// end (count / total / mean / first / steady-state breakdown). Suppresses
+    /// the per-event milestone log to keep output readable across many tokens.
+    #[arg(long)]
+    profile: bool,
 }
 
 #[derive(Clone, clap::ValueEnum)]
@@ -227,6 +233,7 @@ impl EvalArgs {
             },
             EvalModeChoice::Compiled => ModelEvalMode::CompiledEval {
                 inline_constant_threshold: self.inline_threshold,
+                compile_options: whisper_tensor::compiler::CompileOptions::default(),
             },
         };
         SuperGraphEvalOptions { model_eval_mode }
@@ -253,6 +260,14 @@ fn print_cache_report_if_requested(eval: &EvalArgs, cache: &SuperGraphCache) {
 struct TensorDumpObserver {
     watched_ids: HashMap<GlobalId, String>,
     captured: HashMap<String, NumericTensor<'static, DynRank, SystemPool>>,
+    /// When true: aggregate compiled milestones into `milestone_history` and
+    /// suppress the per-event prints. Summary is dumped via `print_profile_summary`.
+    profile: bool,
+    /// Per-stage durations in invocation order. The first entry of each
+    /// `compiled.exec.*` stage is typically the cold first-token call.
+    milestone_history: HashMap<String, Vec<std::time::Duration>>,
+    /// Stable display order: stages in the order they were first observed.
+    stage_order: Vec<String>,
 }
 
 static DUMP_POOL: SystemPool = SystemPool;
@@ -261,6 +276,7 @@ impl TensorDumpObserver {
     fn new(
         names: &[String],
         symbolic_graphs: &[&whisper_tensor::symbolic_graph::SymbolicGraph],
+        profile: bool,
     ) -> Self {
         let mut watched_ids = HashMap::new();
         for graph in symbolic_graphs {
@@ -281,6 +297,9 @@ impl TensorDumpObserver {
         Self {
             watched_ids,
             captured: HashMap::new(),
+            profile,
+            milestone_history: HashMap::new(),
+            stage_order: Vec::new(),
         }
     }
 
@@ -298,6 +317,47 @@ impl TensorDumpObserver {
                 eprintln!("Failed to write '{}': {e}", path.display());
             });
             eprintln!("[dump] wrote {}", path.display());
+        }
+    }
+
+    /// Print a per-stage breakdown of all collected compiled-eval milestones.
+    ///
+    /// For stages that fired exactly once (e.g. lower / partition / compile),
+    /// the single value is shown. For stages that fired multiple times (the
+    /// `compiled.exec.*` family), shows count, total, mean, the first call's
+    /// duration, and steady-state mean (first call excluded).
+    fn print_profile_summary(&self) {
+        if self.milestone_history.is_empty() {
+            return;
+        }
+        eprintln!();
+        eprintln!("=== Compiled-eval milestone profile ===");
+        eprintln!(
+            "  {:<38}  {:>6}  {:>10}  {:>10}  {:>10}  {:>10}",
+            "stage", "count", "total ms", "mean ms", "first ms", "steady ms"
+        );
+        for stage in &self.stage_order {
+            let Some(durations) = self.milestone_history.get(stage) else {
+                continue;
+            };
+            if durations.is_empty() {
+                continue;
+            }
+            let n = durations.len();
+            let to_ms = |d: std::time::Duration| d.as_secs_f64() * 1e3;
+            let total_ms: f64 = durations.iter().copied().map(to_ms).sum();
+            let mean_ms = total_ms / n as f64;
+            let first_ms = to_ms(durations[0]);
+            let steady_ms = if n > 1 {
+                let rest_total: f64 = durations[1..].iter().copied().map(to_ms).sum();
+                rest_total / (n as f64 - 1.0)
+            } else {
+                f64::NAN
+            };
+            eprintln!(
+                "  {:<38}  {:>6}  {:>10.1}  {:>10.2}  {:>10.2}  {:>10.2}",
+                stage, n, total_ms, mean_ms, first_ms, steady_ms,
+            );
         }
     }
 }
@@ -340,10 +400,22 @@ impl SuperGraphObserver for TensorDumpObserver {
         start: std::time::Instant,
         end: std::time::Instant,
     ) {
-        let dt_ms = end.duration_since(start).as_secs_f64() * 1e3;
-        match iter {
-            Some(i) => eprintln!("  [{stage}] iter={i} {dt_ms:.1}ms"),
-            None => eprintln!("  [{stage}] {dt_ms:.1}ms"),
+        let dt = end.duration_since(start);
+        if self.profile {
+            // Aggregate; suppress per-event prints.
+            if !self.milestone_history.contains_key(stage) {
+                self.stage_order.push(stage.to_string());
+            }
+            self.milestone_history
+                .entry(stage.to_string())
+                .or_default()
+                .push(dt);
+        } else {
+            let dt_ms = dt.as_secs_f64() * 1e3;
+            match iter {
+                Some(i) => eprintln!("  [{stage}] iter={i} {dt_ms:.1}ms"),
+                None => eprintln!("  [{stage}] {dt_ms:.1}ms"),
+            }
         }
     }
 }
@@ -546,19 +618,21 @@ fn cmd_generate(output: LoaderOutput, prompt: Option<String>, max_tokens: usize,
     let mut super_graph_caches = SuperGraphCache::new();
     let eval_options = eval.to_eval_options();
     let symbolic_graphs = vec![model.get_symbolic_graph()];
-    let mut observer = TensorDumpObserver::new(&eval.dump_tensors, &symbolic_graphs);
+    let mut observer = TensorDumpObserver::new(&eval.dump_tensors, &symbolic_graphs, eval.profile);
 
     print!("{prompt}");
     std::io::stdout().flush().unwrap();
 
     let pool = whisper_tensor::pool::SystemPool;
     let mut context = prompt;
+    let mut token_times: Vec<std::time::Duration> = Vec::with_capacity(max_tokens);
     for _ in 0..max_tokens {
         let caches = if eval.disable_cache {
             None
         } else {
             Some(&mut super_graph_caches)
         };
+        let t0 = std::time::Instant::now();
         let token = interface
             .run_string_in_string_out(
                 model,
@@ -573,6 +647,7 @@ fn cmd_generate(output: LoaderOutput, prompt: Option<String>, max_tokens: usize,
                 eprintln!("\nInference error: {e}");
                 std::process::exit(1);
             });
+        token_times.push(t0.elapsed());
         print!("{token}");
         std::io::stdout().flush().unwrap();
         context.push_str(&token);
@@ -580,6 +655,55 @@ fn cmd_generate(output: LoaderOutput, prompt: Option<String>, max_tokens: usize,
     println!();
     observer.write_outputs(&eval.dump_output);
     print_cache_report_if_requested(&eval, &super_graph_caches);
+    if eval.profile {
+        print_token_summary(&token_times);
+        observer.print_profile_summary();
+    }
+}
+
+/// Print per-token wall times: count, total, first vs steady-state mean / min / max.
+fn print_token_summary(token_times: &[std::time::Duration]) {
+    if token_times.is_empty() {
+        return;
+    }
+    let to_ms = |d: std::time::Duration| d.as_secs_f64() * 1e3;
+    let n = token_times.len();
+    let total_ms: f64 = token_times.iter().copied().map(to_ms).sum();
+    let first_ms = to_ms(token_times[0]);
+    let (steady_mean, steady_min, steady_max) = if n > 1 {
+        let rest = &token_times[1..];
+        let total: f64 = rest.iter().copied().map(to_ms).sum();
+        let mean = total / rest.len() as f64;
+        let min = rest
+            .iter()
+            .copied()
+            .map(to_ms)
+            .fold(f64::INFINITY, f64::min);
+        let max = rest
+            .iter()
+            .copied()
+            .map(to_ms)
+            .fold(f64::NEG_INFINITY, f64::max);
+        (mean, min, max)
+    } else {
+        (f64::NAN, f64::NAN, f64::NAN)
+    };
+    eprintln!();
+    eprintln!("=== Per-token wall time ({} tokens) ===", n);
+    eprintln!("  total       : {:>10.1} ms", total_ms);
+    eprintln!(
+        "  first token : {:>10.1} ms (includes lower + compile on first call)",
+        first_ms
+    );
+    if n > 1 {
+        eprintln!(
+            "  steady-state: mean {:>8.1} ms, min {:>8.1} ms, max {:>8.1} ms ({} tokens)",
+            steady_mean,
+            steady_min,
+            steady_max,
+            n - 1,
+        );
+    }
 }
 
 // ============================================================================
@@ -628,7 +752,7 @@ fn cmd_image(
     let start = std::time::Instant::now();
     let eval_options = eval.to_eval_options();
     let symbolic_graphs: Vec<_> = models.iter().map(|m| m.get_symbolic_graph()).collect();
-    let mut observer = TensorDumpObserver::new(&eval.dump_tensors, &symbolic_graphs);
+    let mut observer = TensorDumpObserver::new(&eval.dump_tensors, &symbolic_graphs, eval.profile);
     let mut super_graph_caches = SuperGraphCache::new();
 
     let image_tensor = interface
@@ -859,7 +983,7 @@ fn cmd_tts(output: LoaderOutput, opts: TtsRunOptions, eval: EvalArgs) {
         .map(|m| m.model.get_symbolic_graph())
         .collect();
     let eval_options = eval.to_eval_options();
-    let mut observer = TensorDumpObserver::new(&eval.dump_tensors, &symbolic_graphs);
+    let mut observer = TensorDumpObserver::new(&eval.dump_tensors, &symbolic_graphs, eval.profile);
     let mut super_graph_caches = SuperGraphCache::new();
     let super_graph_output = {
         let mut context = SuperGraphContext {
@@ -1015,7 +1139,8 @@ fn cmd_stt(output: LoaderOutput, audio_path: PathBuf, _model_dir: Option<PathBuf
             output.models[1].model.get_symbolic_graph(),
         ];
         let eval_options = eval.to_eval_options();
-        let mut observer = TensorDumpObserver::new(&eval.dump_tensors, &symbolic_graphs);
+        let mut observer =
+            TensorDumpObserver::new(&eval.dump_tensors, &symbolic_graphs, eval.profile);
         let mut context = SuperGraphContext {
             pool: &pool,
             observer: &mut observer,

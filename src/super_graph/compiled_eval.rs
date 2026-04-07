@@ -19,6 +19,7 @@ use crate::compiler::attempts::v14::executor::{
 };
 use crate::compiler::attempts::v14::partitioner_m;
 use crate::compiler::attempts::v14::report::{self, PlanSummary};
+use crate::compiler::{CodegenKind, CompileOptions, PartitionerKind};
 use crate::graph::GlobalId;
 use crate::nano_graph::AtomId;
 use crate::nano_graph::lower::TensorAtomMapInfo;
@@ -150,10 +151,10 @@ pub(crate) fn build_output_ranges(
     (output_ranges, output_shapes, all_output_atom_ranges)
 }
 
-/// Partition and JIT-compile a NanoGraph into an ExecutablePlan.
+/// Partition and compile a NanoGraph into an ExecutablePlan.
 ///
-/// `num_lanes`: number of parallel lanes for partitioner_m. 0 = trivial
-/// single-phase plan (useful for debugging).
+/// `options`: selects between alternative partitioner / codegen
+/// implementations exposed via `CompileOptions`.
 ///
 /// `provenance`: optional group provenance for building a plan summary.
 ///
@@ -161,39 +162,40 @@ pub(crate) fn build_output_ranges(
 pub(crate) fn compile_nano_graph(
     graph: &NanoGraph<'static, SystemPool>,
     all_output_atom_ranges: &[AtomRange],
-    num_lanes: usize,
+    options: &CompileOptions,
     provenance: Option<&report::GroupProvenance>,
     obs: &mut dyn CompiledEvalObserver,
 ) -> Result<(ExecutablePlan, PlanSummary, usize), String> {
-    // Partition the NanoGraph.
+    // Partition the NanoGraph — dispatch on the selected partitioner.
     let t0 = Instant::now();
-    let phases = if num_lanes == 0 {
-        // Trivial plan (1 phase, 1 span) for debugging — isolates I/O issues
-        // from partitioner issues. Set JIT_LANES=0 to enable.
-        use crate::compiler::attempts::v14::types::{Phase, Span};
-        let span_inputs: Vec<AtomRange> = graph
-            .input_tensors()
-            .iter()
-            .map(|it| AtomRange {
-                base: it.base_id,
-                count: it.count,
-                dtype: it.dtype,
-            })
-            .collect();
-        vec![Phase {
-            spans: vec![Span {
-                graph: graph.clone(),
-                inputs: span_inputs,
-                outputs: all_output_atom_ranges.to_vec(),
-            }],
-        }]
-    } else {
-        partitioner_m::plan(
+    let phases = match &options.partitioner {
+        PartitionerKind::Trivial => {
+            // 1 phase, 1 span containing the whole graph. Debug baseline
+            // that isolates I/O / codegen issues from partitioner issues.
+            use crate::compiler::attempts::v14::types::{Phase, Span};
+            let span_inputs: Vec<AtomRange> = graph
+                .input_tensors()
+                .iter()
+                .map(|it| AtomRange {
+                    base: it.base_id,
+                    count: it.count,
+                    dtype: it.dtype,
+                })
+                .collect();
+            vec![Phase {
+                spans: vec![Span {
+                    graph: graph.clone(),
+                    inputs: span_inputs,
+                    outputs: all_output_atom_ranges.to_vec(),
+                }],
+            }]
+        }
+        PartitionerKind::LaneSplit { num_lanes } => partitioner_m::plan(
             graph,
-            num_lanes,
+            (*num_lanes).max(1),
             graph.input_tensors(),
             all_output_atom_ranges,
-        )
+        ),
     };
     obs.on_milestone("compiled.partition", None, t0, Instant::now());
 
@@ -265,11 +267,15 @@ pub(crate) fn compile_nano_graph(
         }
     }
 
-    // Compile all spans — JIT where possible, pool_eval fallback for opaque ops.
+    // Compile all spans — dispatch on the selected codegen.
+    //
+    // For Jit, opaque-op spans and any compile failures fall back to pool_eval
+    // per-span. For PoolEval, every span uses pool_eval unconditionally.
     let t0 = Instant::now();
     let mut plan_builder = ExecutablePlanBuilder::new();
     plan_builder.pin_outputs(all_output_atom_ranges);
     let mut compile_errors = 0usize;
+    let force_pool_eval = matches!(options.codegen, CodegenKind::PoolEval);
 
     for (pi, phase) in phases.iter().enumerate() {
         let mut lanes = Vec::new();
@@ -280,8 +286,11 @@ pub(crate) fn compile_nano_graph(
                 .iter()
                 .any(|g| matches!(g.op, crate::nano_graph::ops::ScalarOp::OpaqueOutput { .. }));
 
-            if has_opaque || span.graph.groups().is_empty() && !span.graph.opaque_ops().is_empty() {
-                // Span contains opaque ops — use pool_eval fallback.
+            if force_pool_eval
+                || has_opaque
+                || (span.graph.groups().is_empty() && !span.graph.opaque_ops().is_empty())
+            {
+                // Pool_eval path: forced by options, or required by opaque ops.
                 lanes.push((
                     Box::new(PoolEvalSpan::new(
                         span.graph.clone(),
@@ -513,6 +522,7 @@ pub(crate) fn extract_outputs<'p, P: Pool + 'p>(
 pub fn compile_lowered_model(
     cached: &CachedLoweredModel,
     sym_graph: &crate::symbolic_graph::SymbolicGraph,
+    options: &CompileOptions,
     obs: &mut dyn CompiledEvalObserver,
 ) -> Option<CachedCompiledPlan> {
     let graph = &cached.graph;
@@ -541,18 +551,13 @@ pub fn compile_lowered_model(
         );
     }
 
-    let num_lanes = std::env::var("JIT_LANES")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(8usize);
-
     let provenance = if cached.group_provenance.is_empty() {
         None
     } else {
         Some(&cached.group_provenance)
     };
     let (executable_plan, plan_summary, _compile_errors) =
-        compile_nano_graph(graph, &all_output_atom_ranges, num_lanes, provenance, obs).ok()?;
+        compile_nano_graph(graph, &all_output_atom_ranges, options, provenance, obs).ok()?;
 
     Some(CachedCompiledPlan {
         info_inputs_hash: cached.info_inputs_hash,

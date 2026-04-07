@@ -421,14 +421,25 @@ pub fn run_case_via_graph_pool_eval(case: &TestCase) -> Result<(), String> {
 ///
 /// Flow: MilliOpGraph → lower_to_nano → compile_nano_graph → execute → compare
 ///
-/// Tests both the trivial plan (JIT_LANES=0, bit-perfect) and optionally the
-/// partitioned plan to catch partitioner accuracy regressions.
+/// Tests both the trivial plan (bit-perfect) and the partitioned plan to
+/// catch partitioner accuracy regressions.
 #[cfg(feature = "cranelift")]
 pub fn run_case_via_compiled_eval(case: &TestCase, num_lanes: usize) -> Result<(), String> {
+    use crate::compiler::{CompileOptions, PartitionerKind};
     use crate::nano_graph::lower;
     use crate::pool::TrackedPool;
     use crate::super_graph::compiled_eval;
     use crate::tensor_info::TensorInfo;
+
+    // num_lanes == 0 selects the trivial single-span plan.
+    let options = CompileOptions {
+        partitioner: if num_lanes == 0 {
+            PartitionerKind::Trivial
+        } else {
+            PartitionerKind::LaneSplit { num_lanes }
+        },
+        ..CompileOptions::default()
+    };
 
     for ds in &case.data_sets {
         // Build TensorInfo for each input (needed by lower).
@@ -470,7 +481,7 @@ pub fn run_case_via_compiled_eval(case: &TestCase, num_lanes: usize) -> Result<(
         let (executable_plan, _plan_summary, _compile_errors) = compiled_eval::compile_nano_graph(
             &lower_result.graph,
             &all_output_atom_ranges,
-            num_lanes,
+            &options,
             Some(&lower_result.group_provenance),
             &mut (), // tests don't observe milestones
         )

@@ -38,6 +38,7 @@ pub(crate) fn eval_options_ui(ui: &mut egui::Ui, options: &mut SuperGraphEvalOpt
                 if ui.selectable_label(is_compiled, "Compiled").clicked() && !is_compiled {
                     options.model_eval_mode = ModelEvalMode::CompiledEval {
                         inline_constant_threshold: DEFAULT_INLINE_THRESHOLD,
+                        compile_options: whisper_tensor::compiler::CompileOptions::default(),
                     };
                 }
             });
@@ -48,6 +49,7 @@ pub(crate) fn eval_options_ui(ui: &mut egui::Ui, options: &mut SuperGraphEvalOpt
             }
             | ModelEvalMode::CompiledEval {
                 inline_constant_threshold,
+                ..
             } => {
                 ui.label("threshold");
                 ui.add(

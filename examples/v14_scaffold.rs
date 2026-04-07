@@ -538,9 +538,7 @@ fn main() {
     // ── Partitioner tests ──────────────────────────────────────────────────
 
     {
-        use whisper_tensor::compiler::attempts::v14::{
-            partitioner_i, partitioner_j, partitioner_l, partitioner_m,
-        };
+        use whisper_tensor::compiler::attempts::v14::partitioner_m;
         use whisper_tensor::nano_graph::AtomId as AId;
 
         let input_ts = result.graph.input_tensors();
@@ -558,17 +556,12 @@ fn main() {
                 &[whisper_tensor::nano_graph::pattern::AtomRange],
             ) -> Vec<Phase>,
         )> = if std::env::var("RUN_STRUCTURAL").is_ok() {
-            vec![
-                ("I (top-down tiling)", partitioner_i::plan),
-                ("J (critical path)", partitioner_j::plan),
-                ("L (open-ended 1)", partitioner_l::plan),
-                ("M (open-ended 2)", partitioner_m::plan),
-            ]
+            vec![("M (lane-split)", partitioner_m::plan)]
         } else {
             vec![]
         };
 
-        // Filter by PARTITIONER env var if set (e.g. PARTITIONER=B)
+        // Filter by PARTITIONER env var if set (e.g. PARTITIONER=M)
         let filter = std::env::var("PARTITIONER").ok();
 
         println!("\n=== Partitioner Tests ({} lanes) ===", num_lanes);

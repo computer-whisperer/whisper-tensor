@@ -69,7 +69,12 @@ pub enum ModelEvalMode {
     /// subsequent calls reuse the cached ExecutablePlan.
     /// Falls back to LoweredEval if compilation fails.
     /// Requires the `cranelift` feature.
-    CompiledEval { inline_constant_threshold: u64 },
+    CompiledEval {
+        inline_constant_threshold: u64,
+        /// Selects partitioner / codegen implementations and their tunables.
+        /// See `crate::compiler::CompileOptions`.
+        compile_options: crate::compiler::CompileOptions,
+    },
 }
 
 /// Options controlling super graph evaluation behavior.

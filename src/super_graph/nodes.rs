@@ -447,13 +447,16 @@ impl SuperGraphNode for SuperGraphNodeModelExecution {
             #[cfg(feature = "cranelift")]
             crate::super_graph::ModelEvalMode::CompiledEval {
                 inline_constant_threshold,
+                compile_options,
             } => {
+                let compile_options = compile_options.clone();
                 if let Some(results) = self.try_compiled_eval(
                     node_path,
                     symbolic_graph,
                     tensor_store,
                     &input_views,
                     *inline_constant_threshold,
+                    &compile_options,
                     context,
                 )? {
                     self.insert_results(results, &tensors_by_name, data)?;
@@ -690,7 +693,7 @@ impl SuperGraphNodeModelExecution {
     /// - `Ok(None)` if the graph can't be lowered/compiled (fall back)
     /// - `Err(e)` on hard failure
     #[cfg(feature = "cranelift")]
-    #[allow(clippy::type_complexity)]
+    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
     fn try_compiled_eval<'short, 'model, 'p, P: Pool + 'p, T: SuperGraphObserver>(
         &self,
         node_path: &[GlobalId],
@@ -701,6 +704,7 @@ impl SuperGraphNodeModelExecution {
             crate::numeric_tensor::NumericTensorView<'_, DynRank>,
         )],
         inline_constant_threshold: u64,
+        compile_options: &crate::compiler::CompileOptions,
         context: &mut SuperGraphContext<'short, 'model, 'p, P, T>,
     ) -> Result<
         Option<HashMap<GlobalId, crate::numeric_tensor::NumericTensor<'p, DynRank, P>>>,
@@ -829,8 +833,12 @@ impl SuperGraphNodeModelExecution {
                     observer_path.clone(),
                     None,
                 );
-                match compiled_eval::compile_lowered_model(lower_ref, symbolic_graph, &mut wrapper)
-                {
+                match compiled_eval::compile_lowered_model(
+                    lower_ref,
+                    symbolic_graph,
+                    compile_options,
+                    &mut wrapper,
+                ) {
                     Some(c) => c,
                     None => return Ok(None),
                 }
