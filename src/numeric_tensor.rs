@@ -778,6 +778,48 @@ impl<'a, R: Rank> NumericTensorView<'a, R> {
         }
     }
 
+    /// Materialize this view into a `'static`-parameterized tensor backed by
+    /// an [`ArcTrackedPool`](crate::pool::ArcTrackedPool).
+    ///
+    /// This is a specialized variant of [`to_tensor`](Self::to_tensor) for
+    /// caches: because `ArcTrackedPool::Buffer` owns an `Arc<TrackedPool>`
+    /// internally (no borrow), the resulting tensor does not tie its
+    /// lifetime to any `&pool` reference and can sit in a long-lived
+    /// container (like `SuperGraphCache`) for as long as any clone of the
+    /// pool — or of this tensor's own buffer — is alive.
+    pub fn to_arc_tracked_static(
+        &self,
+        pool: &crate::pool::ArcTrackedPool,
+    ) -> Result<NumericTensor<'static, R, crate::pool::ArcTrackedPool>, crate::pool::AllocationError>
+    {
+        if self.layout.is_contiguous() {
+            let size = self.layout.buffer_size_bytes();
+            let mut buffer = pool.allocate(size)?;
+            buffer[..size].copy_from_slice(&self.data[..size]);
+            Ok(
+                NumericTensor::<'static, R, crate::pool::ArcTrackedPool>::from_parts(
+                    buffer,
+                    self.layout.clone(),
+                ),
+            )
+        } else {
+            let shape = self.layout.shape().clone();
+            let dtype = self.layout.element_dtype();
+            let out_layout = TensorLayout::row_major(shape, dtype);
+            let mut buffer = pool.allocate(out_layout.buffer_size_bytes())?;
+            let numel = self.layout.numel();
+            for i in 0..numel {
+                let scalar = self.layout.read_element(self.data, i);
+                out_layout.write_element(&mut buffer, i, scalar);
+            }
+            Ok(
+                NumericTensor::<'static, R, crate::pool::ArcTrackedPool>::from_parts(
+                    buffer, out_layout,
+                ),
+            )
+        }
+    }
+
     /// Convert this view to match a target layout, borrowing if the byte layout
     /// already matches or copying into a new pool-allocated buffer if it doesn't.
     ///
@@ -1156,6 +1198,18 @@ impl<'a, R: Rank, P: Pool + 'a> NumericTensor<'a, R, P> {
         pool: &'p P2,
     ) -> Result<NumericTensor<'p, R, P2>, crate::pool::AllocationError> {
         self.view().to_tensor(pool)
+    }
+
+    /// Clone this tensor into a `'static`-parameterized tensor backed by
+    /// an [`ArcTrackedPool`](crate::pool::ArcTrackedPool).
+    ///
+    /// See [`NumericTensorView::to_arc_tracked_static`] for details.
+    pub fn to_arc_tracked_static(
+        &self,
+        pool: &crate::pool::ArcTrackedPool,
+    ) -> Result<NumericTensor<'static, R, crate::pool::ArcTrackedPool>, crate::pool::AllocationError>
+    {
+        self.view().to_arc_tracked_static(pool)
     }
 
     /// Read all elements as i64 values. Useful for extracting shape/axes parameters.

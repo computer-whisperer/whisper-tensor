@@ -7,7 +7,7 @@ use whisper_tensor::interfaces::AnyInterface;
 use whisper_tensor::loader::{ConfigValue, ConfigValues, Loader, LoaderOutput};
 use whisper_tensor::numeric_dtype::NumericPrimitive;
 use whisper_tensor::numeric_tensor::{NumericTensor, NumericTensorView};
-use whisper_tensor::pool::{Pool, SystemPool, TrackedPool};
+use whisper_tensor::pool::{ArcTrackedPool, Pool, SystemPool, TrackedPool};
 use whisper_tensor::super_graph::cache::SuperGraphCache;
 use whisper_tensor::super_graph::observer::SuperGraphObserver;
 use whisper_tensor::super_graph::{ModelEvalMode, SuperGraphEvalOptions};
@@ -615,7 +615,7 @@ fn cmd_generate(output: LoaderOutput, prompt: Option<String>, max_tokens: usize,
     eprintln!("Model loaded. Generating...\n");
 
     let mut tokenizer_cache = HashMap::new();
-    let mut super_graph_caches = SuperGraphCache::new();
+    let mut super_graph_caches = SuperGraphCache::new(ArcTrackedPool::new(None));
     let eval_options = eval.to_eval_options();
     let symbolic_graphs = vec![model.get_symbolic_graph()];
     let mut observer = TensorDumpObserver::new(&eval.dump_tensors, &symbolic_graphs, eval.profile);
@@ -753,7 +753,7 @@ fn cmd_image(
     let eval_options = eval.to_eval_options();
     let symbolic_graphs: Vec<_> = models.iter().map(|m| m.get_symbolic_graph()).collect();
     let mut observer = TensorDumpObserver::new(&eval.dump_tensors, &symbolic_graphs, eval.profile);
-    let mut super_graph_caches = SuperGraphCache::new();
+    let mut super_graph_caches = SuperGraphCache::new(ArcTrackedPool::new(None));
 
     let image_tensor = interface
         .run(
@@ -984,7 +984,7 @@ fn cmd_tts(output: LoaderOutput, opts: TtsRunOptions, eval: EvalArgs) {
         .collect();
     let eval_options = eval.to_eval_options();
     let mut observer = TensorDumpObserver::new(&eval.dump_tensors, &symbolic_graphs, eval.profile);
-    let mut super_graph_caches = SuperGraphCache::new();
+    let mut super_graph_caches = SuperGraphCache::new(ArcTrackedPool::new(None));
     let super_graph_output = {
         let mut context = SuperGraphContext {
             pool: &pool,
@@ -1119,7 +1119,7 @@ fn cmd_stt(output: LoaderOutput, audio_path: PathBuf, _model_dir: Option<PathBuf
     eprintln!("Running STT supergraph...");
     let start = std::time::Instant::now();
 
-    let mut super_graph_caches = SuperGraphCache::new();
+    let mut super_graph_caches = SuperGraphCache::new(ArcTrackedPool::new(None));
     let output_data = {
         let mut data = SuperGraphData::new();
         data.audio_clips.insert(

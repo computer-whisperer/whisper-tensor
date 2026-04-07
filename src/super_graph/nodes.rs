@@ -3268,10 +3268,12 @@ impl SuperGraphNode for SuperGraphNodeRNNCacheWrite {
             let tokens_vec: Vec<u32> = (0..tokens_input.numel())
                 .map(|i| tokens_input.read_element(i).to_i64() as u32)
                 .collect();
-            // Cache stores SystemPool tensors
+            // Cache stores tensors in the slot's ArcTrackedPool so every
+            // cached byte is counted against the aggregate cache counter.
+            let cache_pool = caches.pool.clone();
             let state_inputs: HashMap<
                 String,
-                crate::numeric_tensor::NumericTensor<'static, DynRank, crate::pool::SystemPool>,
+                crate::numeric_tensor::NumericTensor<'static, DynRank, crate::pool::ArcTrackedPool>,
             > = self
                 .state_inputs
                 .iter()
@@ -3281,7 +3283,7 @@ impl SuperGraphNode for SuperGraphNodeRNNCacheWrite {
                         .tensors
                         .get(&link)
                         .ok_or(SuperGraphError::MissingLinkError(String::new()))?;
-                    let cached = tensor.to_tensor(&crate::pool::SystemPool).map_err(|e| {
+                    let cached = tensor.to_arc_tracked_static(&cache_pool).map_err(|e| {
                         SuperGraphError::InvalidInputError(format!("allocation: {e}"))
                     })?;
                     Ok((k.clone(), cached))
@@ -3479,12 +3481,13 @@ impl SuperGraphNode for SuperGraphNodeTensorCacheWrite {
                 .hashes
                 .get(&key_input_link)
                 .ok_or(SuperGraphError::MissingLinkError(String::new()))?;
+            let cache_pool = caches.pool.clone();
             let value_input = data
                 .tensors
                 .get(&value_input_link)
                 .ok_or(SuperGraphError::MissingLinkError(String::new()))?;
             let cached = value_input
-                .to_tensor(&crate::pool::SystemPool)
+                .to_arc_tracked_static(&cache_pool)
                 .map_err(|e| SuperGraphError::InvalidInputError(format!("allocation: {e}")))?;
             caches.tensor_cache.insert(key_input, cached);
         }
@@ -3709,6 +3712,7 @@ impl SuperGraphNode for SuperGraphNodeTensorPackCacheWrite {
                 .hashes
                 .get(&key_input_link)
                 .ok_or(SuperGraphError::MissingLinkError(String::new()))?;
+            let cache_pool = caches.pool.clone();
             let values = self
                 .value_inputs
                 .iter()
@@ -3719,7 +3723,7 @@ impl SuperGraphNode for SuperGraphNodeTensorPackCacheWrite {
                         .tensors
                         .get(&input_link)
                         .ok_or(SuperGraphError::MissingLinkError(String::new()))?;
-                    let cached = tensor.to_tensor(&crate::pool::SystemPool).map_err(|e| {
+                    let cached = tensor.to_arc_tracked_static(&cache_pool).map_err(|e| {
                         SuperGraphError::InvalidInputError(format!("allocation: {e}"))
                     })?;
                     Ok((name.clone(), cached))
@@ -3730,7 +3734,7 @@ impl SuperGraphNode for SuperGraphNodeTensorPackCacheWrite {
                         crate::numeric_tensor::NumericTensor<
                             'static,
                             DynRank,
-                            crate::pool::SystemPool,
+                            crate::pool::ArcTrackedPool,
                         >,
                     >,
                     SuperGraphError,

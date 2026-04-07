@@ -9,6 +9,7 @@
 
 use std::alloc::Layout;
 use std::ops::{Deref, DerefMut};
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -333,6 +334,162 @@ impl std::fmt::Debug for TrackedBuffer<'_> {
 }
 
 // ---------------------------------------------------------------------------
+// ArcTrackedPool
+// ---------------------------------------------------------------------------
+
+/// A [`TrackedPool`] behind an [`Arc`] whose buffers each hold their own
+/// `Arc<TrackedPool>` clone.
+///
+/// Because the buffer carries a live `Arc` reference to the pool for its
+/// entire lifetime, the [`Pool::Buffer`] GAT type doesn't borrow the outer
+/// `&self` — buffers can live for `'static` and still safely decrement the
+/// pool's byte counter in `Drop`. This is what lets cached tensors sit in
+/// long-lived data structures (like [`SuperGraphCache`](crate::super_graph::cache::SuperGraphCache))
+/// without tying the cache's lifetime to a stack-allocated pool.
+///
+/// Clone is cheap (Arc bump). All clones share the same byte counter and
+/// budget, so summing across clones is never needed — query any one of
+/// them to get the aggregate.
+#[derive(Clone, Debug)]
+pub struct ArcTrackedPool {
+    inner: Arc<TrackedPool>,
+}
+
+impl ArcTrackedPool {
+    /// Create a new pool. Pass `Some(n)` to enforce a byte budget,
+    /// or `None` for unlimited.
+    pub fn new(budget: Option<usize>) -> Self {
+        Self {
+            inner: Arc::new(TrackedPool::new(budget)),
+        }
+    }
+
+    /// Wrap an existing `Arc<TrackedPool>`. Useful when the same underlying
+    /// pool is already shared elsewhere (e.g. with a stats sampler).
+    pub fn from_arc(inner: Arc<TrackedPool>) -> Self {
+        Self { inner }
+    }
+
+    /// Borrow the underlying `Arc<TrackedPool>` (for sampling, etc.).
+    pub fn inner(&self) -> &Arc<TrackedPool> {
+        &self.inner
+    }
+}
+
+/// Buffer allocated by [`ArcTrackedPool`]. Owns an `Arc<TrackedPool>`
+/// clone — the pool stays alive as long as the buffer exists, so the
+/// buffer has no borrow lifetime and is `'static`-safe.
+pub struct ArcTrackedBuffer {
+    ptr: *mut u8,
+    len: usize,
+    /// Keeps the pool alive so `Drop` can decrement its counter.
+    pool: Arc<TrackedPool>,
+}
+
+// Safety: `ArcTrackedBuffer` exclusively owns its allocation. The
+// `Arc<TrackedPool>` is itself `Send + Sync`.
+unsafe impl Send for ArcTrackedBuffer {}
+unsafe impl Sync for ArcTrackedBuffer {}
+
+impl Pool for ArcTrackedPool {
+    type Buffer<'a>
+        = ArcTrackedBuffer
+    where
+        Self: 'a;
+
+    fn allocate(&self, size: usize) -> Result<ArcTrackedBuffer, AllocationError> {
+        if size == 0 {
+            return Ok(ArcTrackedBuffer {
+                ptr: std::ptr::NonNull::dangling().as_ptr(),
+                len: 0,
+                pool: self.inner.clone(),
+            });
+        }
+
+        // Same budget-check + alloc dance as `TrackedPool::allocate`; we
+        // duplicate it here rather than calling through because the
+        // returned buffer needs to own an `Arc` clone, not a borrow.
+        let _guard = self
+            .inner
+            .alloc_lock
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        let current = self.inner.bytes_in_use.load(Ordering::Relaxed);
+        if let Some(budget) = self.inner.budget
+            && current.checked_add(size).is_none_or(|total| total > budget)
+        {
+            return Err(AllocationError::BudgetExceeded {
+                requested: size,
+                budget,
+                in_use: current,
+            });
+        }
+
+        let ptr = unsafe { alloc_aligned_zeroed(size) };
+        if ptr.is_null() {
+            return Err(AllocationError::SystemAllocFailed {
+                size,
+                align: POOL_ALIGNMENT,
+            });
+        }
+
+        self.inner.bytes_in_use.fetch_add(size, Ordering::Relaxed);
+        Ok(ArcTrackedBuffer {
+            ptr,
+            len: size,
+            pool: self.inner.clone(),
+        })
+    }
+
+    fn bytes_in_use(&self) -> usize {
+        self.inner.bytes_in_use()
+    }
+
+    fn budget(&self) -> Option<usize> {
+        self.inner.budget()
+    }
+}
+
+impl Deref for ArcTrackedBuffer {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        if self.len == 0 {
+            return &[];
+        }
+        unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
+    }
+}
+
+impl DerefMut for ArcTrackedBuffer {
+    fn deref_mut(&mut self) -> &mut [u8] {
+        if self.len == 0 {
+            return &mut [];
+        }
+        unsafe { std::slice::from_raw_parts_mut(self.ptr, self.len) }
+    }
+}
+
+impl Drop for ArcTrackedBuffer {
+    fn drop(&mut self) {
+        if self.len > 0 {
+            self.pool
+                .bytes_in_use
+                .fetch_sub(self.len, Ordering::Relaxed);
+            unsafe { dealloc_aligned(self.ptr, self.len) }
+        }
+    }
+}
+
+impl std::fmt::Debug for ArcTrackedBuffer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ArcTrackedBuffer")
+            .field("len", &self.len)
+            .finish()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -556,6 +713,94 @@ mod tests {
         let sum_sys = allocate_and_sum(&SystemPool, 256);
         let tracked = TrackedPool::new(None);
         let sum_tracked = allocate_and_sum(&tracked, 256);
+        let arc_tracked = ArcTrackedPool::new(None);
+        let sum_arc = allocate_and_sum(&arc_tracked, 256);
         assert_eq!(sum_sys, sum_tracked);
+        assert_eq!(sum_sys, sum_arc);
+    }
+
+    // -- ArcTrackedPool --
+
+    #[test]
+    fn arc_tracked_pool_basic_tracking() {
+        let pool = ArcTrackedPool::new(None);
+        assert_eq!(pool.bytes_in_use(), 0);
+
+        let buf1 = pool.allocate(100).unwrap();
+        assert_eq!(pool.bytes_in_use(), 100);
+
+        let buf2 = pool.allocate(200).unwrap();
+        assert_eq!(pool.bytes_in_use(), 300);
+
+        drop(buf1);
+        assert_eq!(pool.bytes_in_use(), 200);
+
+        drop(buf2);
+        assert_eq!(pool.bytes_in_use(), 0);
+    }
+
+    #[test]
+    fn arc_tracked_pool_clones_share_counter() {
+        let pool = ArcTrackedPool::new(None);
+        let pool_clone = pool.clone();
+
+        let _buf1 = pool.allocate(100).unwrap();
+        // Counter is visible through any clone.
+        assert_eq!(pool_clone.bytes_in_use(), 100);
+
+        let _buf2 = pool_clone.allocate(50).unwrap();
+        assert_eq!(pool.bytes_in_use(), 150);
+    }
+
+    #[test]
+    fn arc_tracked_pool_buffer_outlives_pool_handle() {
+        // The whole point of ArcTrackedPool: a buffer keeps the pool
+        // alive by itself, so dropping the originating handle is fine.
+        let pool = ArcTrackedPool::new(None);
+        let buf = pool.allocate(64).unwrap();
+        assert_eq!(pool.bytes_in_use(), 64);
+        drop(pool);
+        // `buf` still holds the only live Arc — counter can no longer
+        // be observed from outside, but dropping the buffer frees
+        // memory cleanly without use-after-free.
+        drop(buf);
+    }
+
+    #[test]
+    fn arc_tracked_pool_budget_enforcement() {
+        let pool = ArcTrackedPool::new(Some(256));
+        assert_eq!(pool.budget(), Some(256));
+
+        let buf1 = pool.allocate(200).unwrap();
+        assert_eq!(pool.bytes_in_use(), 200);
+
+        let err = pool.allocate(100).unwrap_err();
+        assert!(matches!(err, AllocationError::BudgetExceeded { .. }));
+        assert_eq!(pool.bytes_in_use(), 200);
+
+        drop(buf1);
+        let _buf2 = pool.allocate(100).unwrap();
+        assert_eq!(pool.bytes_in_use(), 100);
+    }
+
+    #[test]
+    fn arc_tracked_pool_readwrite() {
+        let pool = ArcTrackedPool::new(None);
+        let mut buf = pool.allocate(16).unwrap();
+        assert!(buf.iter().all(|&b| b == 0));
+        buf[0] = 0xAB;
+        buf[15] = 0xCD;
+        assert_eq!(buf[0], 0xAB);
+        assert_eq!(buf[15], 0xCD);
+    }
+
+    #[test]
+    fn arc_tracked_pool_zero_size() {
+        let pool = ArcTrackedPool::new(None);
+        let buf = pool.allocate(0).unwrap();
+        assert_eq!(buf.len(), 0);
+        assert_eq!(pool.bytes_in_use(), 0);
+        drop(buf);
+        assert_eq!(pool.bytes_in_use(), 0);
     }
 }

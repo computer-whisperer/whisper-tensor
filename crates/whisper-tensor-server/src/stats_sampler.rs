@@ -16,7 +16,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 use tokio::sync::watch;
 use tokio::time;
-use whisper_tensor::pool::{Pool, TrackedPool};
+use whisper_tensor::pool::{ArcTrackedPool, Pool, TrackedPool};
 
 use crate::ServerStatsSnapshot;
 
@@ -31,17 +31,23 @@ pub struct StatsSampler {
     receiver: watch::Receiver<ServerStatsSnapshot>,
     in_flight_jobs: Arc<AtomicUsize>,
     execution_pool: Arc<TrackedPool>,
+    cache_pool: ArcTrackedPool,
     started_at: Instant,
 }
 
 impl StatsSampler {
-    pub fn new(in_flight_jobs: Arc<AtomicUsize>, execution_pool: Arc<TrackedPool>) -> Self {
+    pub fn new(
+        in_flight_jobs: Arc<AtomicUsize>,
+        execution_pool: Arc<TrackedPool>,
+        cache_pool: ArcTrackedPool,
+    ) -> Self {
         let (sender, receiver) = watch::channel(ServerStatsSnapshot::default());
         Self {
             sender,
             receiver,
             in_flight_jobs,
             execution_pool,
+            cache_pool,
             started_at: Instant::now(),
         }
     }
@@ -76,6 +82,7 @@ impl StatsSampler {
 
             let in_flight_jobs = self.in_flight_jobs.load(Ordering::Relaxed) as u64;
             let execution_pool_bytes = self.execution_pool.bytes_in_use() as u64;
+            let cache_pool_bytes = self.cache_pool.bytes_in_use() as u64;
             let uptime_secs = self.started_at.elapsed().as_secs();
             let sample_unix_ms = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -93,12 +100,14 @@ impl StatsSampler {
                     process_cpu_percent: process.cpu_usage(),
                     in_flight_jobs,
                     execution_pool_bytes,
+                    cache_pool_bytes,
                     uptime_secs,
                     sample_unix_ms,
                 },
                 None => ServerStatsSnapshot {
                     in_flight_jobs,
                     execution_pool_bytes,
+                    cache_pool_bytes,
                     uptime_secs,
                     sample_unix_ms,
                     ..ServerStatsSnapshot::default()

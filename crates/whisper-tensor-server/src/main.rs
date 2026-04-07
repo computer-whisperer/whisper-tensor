@@ -28,7 +28,7 @@ use hf_hub::api::tokio::ApiBuilder;
 use hf_hub::{Repo, RepoType};
 use tokenizers::FromPretrainedParameters;
 use whisper_tensor::loader::ConfigValue;
-use whisper_tensor::pool::TrackedPool;
+use whisper_tensor::pool::{ArcTrackedPool, TrackedPool};
 use whisper_tensor_server::model_server::{ModelServer, default_loaders};
 use whisper_tensor_server::scheduler::{
     ObserverSettingsRegistry, SchedulerJob, SchedulerReport, SchedulerReporter, scheduler,
@@ -430,10 +430,18 @@ async fn main() {
     // copied back to SystemPool). Shared so concurrent future requests can
     // be tracked against a single atomic counter.
     let execution_pool = Arc::new(TrackedPool::new(None));
+    // Aggregate long-lived pool shared by every SuperGraphCache slot for
+    // tensor-cache allocations (RNN state, tensor cache, tensor pack cache).
+    // A single atomic counter covers all slots.
+    let cache_pool = ArcTrackedPool::new(None);
 
     let server_config_report = ServerConfigReport {};
 
-    let stats_sampler = StatsSampler::new(in_flight_jobs.clone(), execution_pool.clone());
+    let stats_sampler = StatsSampler::new(
+        in_flight_jobs.clone(),
+        execution_pool.clone(),
+        cache_pool.clone(),
+    );
     let stats_receiver = stats_sampler.subscribe();
     tokio::spawn(stats_sampler.run());
 
@@ -444,6 +452,7 @@ async fn main() {
         observer_settings_registry.clone(),
         in_flight_jobs.clone(),
         execution_pool.clone(),
+        cache_pool.clone(),
     ));
 
     tokio::spawn(async move {

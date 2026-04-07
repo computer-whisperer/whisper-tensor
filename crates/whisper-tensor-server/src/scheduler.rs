@@ -13,7 +13,7 @@ use std::time::Instant;
 use tokio::sync::{Notify, mpsc};
 use whisper_tensor::graph::GlobalId;
 use whisper_tensor::numeric_tensor::{NumericTensor, NumericTensorView};
-use whisper_tensor::pool::{SystemPool, TrackedPool};
+use whisper_tensor::pool::{ArcTrackedPool, SystemPool, TrackedPool};
 use whisper_tensor::super_graph::SuperGraphContext;
 use whisper_tensor::super_graph::cache::SuperGraphCache;
 use whisper_tensor::super_graph::data::SuperGraphData;
@@ -453,6 +453,7 @@ pub async fn scheduler(
     observer_settings_registry: ObserverSettingsRegistry,
     in_flight_jobs: Arc<AtomicUsize>,
     execution_pool: Arc<TrackedPool>,
+    cache_pool: ArcTrackedPool,
 ) {
     let caches = Arc::new(Mutex::new(HashMap::new()));
     loop {
@@ -505,6 +506,7 @@ pub async fn scheduler(
                     };
                     // Dispatch tight loop
                     let execution_pool_for_job = execution_pool.clone();
+                    let cache_pool_for_job = cache_pool.clone();
                     let result = tokio::task::spawn_blocking(move || {
                         // Execution uses the scheduler-shared tracked pool so
                         // all allocations during supergraph eval (inputs,
@@ -562,9 +564,11 @@ pub async fn scheduler(
                         );
                         let mut caches = caches.lock().unwrap();
                         let res = {
-                            let cache = req
-                                .use_cache
-                                .map(|x| caches.entry(x).or_insert_with(SuperGraphCache::new));
+                            let cache = req.use_cache.map(|x| {
+                                caches.entry(x).or_insert_with(|| {
+                                    SuperGraphCache::new(cache_pool_for_job.clone())
+                                })
+                            });
                             let symbolic_graph_refs = symbolic_graph_models
                                 .iter()
                                 .map(|x| x.get_symbolic_graph())

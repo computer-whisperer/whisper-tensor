@@ -31,7 +31,7 @@ use whisper_tensor::milli_graph::{
 use whisper_tensor::numeric_dtype::{NumericDType, ONNXDType};
 use whisper_tensor::numeric_scalar::NumericScalar;
 use whisper_tensor::numeric_tensor::NumericTensor;
-use whisper_tensor::pool::{Pool, SystemPool};
+use whisper_tensor::pool::{ArcTrackedPool, Pool, SystemPool};
 use whisper_tensor::scalar_info::ScalarInfoTyped;
 use whisper_tensor::super_graph::cache::SuperGraphCache;
 use whisper_tensor::super_graph::data::SuperGraphData;
@@ -664,7 +664,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         let mut observer = ();
-        let mut caches = SuperGraphCache::new();
+        let mut caches = SuperGraphCache::new(ArcTrackedPool::new(None));
         let mut context = SuperGraphContext::new(&POOL, &mut observer);
         context.caches = Some(&mut caches);
 

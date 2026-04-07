@@ -115,6 +115,9 @@ pub fn render_server_stats(ui: &mut egui::Ui, history: &ServerStatsHistory) {
             ui.label("Execution pool");
             ui.label(format_bytes(latest.execution_pool_bytes));
             ui.end_row();
+            ui.label("Cache pool");
+            ui.label(format_bytes(latest.cache_pool_bytes));
+            ui.end_row();
             ui.label("In-flight jobs");
             ui.label(latest.in_flight_jobs.to_string());
             ui.end_row();
@@ -131,7 +134,7 @@ pub fn render_server_stats(ui: &mut egui::Ui, history: &ServerStatsHistory) {
     ui.add_space(8.0);
 
     egui::ScrollArea::vertical().show(ui, |ui| {
-        // Memory plot — RSS, VSZ, and execution pool bytes in MiB.
+        // Memory plot — RSS, VSZ, execution pool, and cache pool in MiB.
         ui.label("Memory (MiB)");
         Plot::new("plot_memory")
             .height(180.0)
@@ -148,6 +151,10 @@ pub fn render_server_stats(ui: &mut egui::Ui, history: &ServerStatsHistory) {
                 plot_ui.line(Line::new(
                     "Exec pool",
                     history.points(|s| s.execution_pool_bytes as f64 / (1024.0 * 1024.0)),
+                ));
+                plot_ui.line(Line::new(
+                    "Cache pool",
+                    history.points(|s| s.cache_pool_bytes as f64 / (1024.0 * 1024.0)),
                 ));
             });
 

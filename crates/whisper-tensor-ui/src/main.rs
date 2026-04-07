@@ -5,7 +5,7 @@ fn main() {
     use std::sync::Arc;
     use std::sync::Mutex as StdMutex;
     use std::sync::atomic::AtomicUsize;
-    use whisper_tensor::pool::TrackedPool;
+    use whisper_tensor::pool::{ArcTrackedPool, TrackedPool};
     use whisper_tensor_server::ServerConfigReport;
     use whisper_tensor_server::handler::handle_client_session;
     use whisper_tensor_server::model_server::{ModelServer, default_loaders};
@@ -35,10 +35,16 @@ fn main() {
         let in_flight_jobs = Arc::new(AtomicUsize::new(0));
         // Shared short-lived pool for SuperGraph execution allocations.
         let execution_pool = Arc::new(TrackedPool::new(None));
+        // Shared long-lived pool for cache-side tensor allocations.
+        let cache_pool = ArcTrackedPool::new(None);
 
         let server_config_report = ServerConfigReport {};
 
-        let stats_sampler = StatsSampler::new(in_flight_jobs.clone(), execution_pool.clone());
+        let stats_sampler = StatsSampler::new(
+            in_flight_jobs.clone(),
+            execution_pool.clone(),
+            cache_pool.clone(),
+        );
         let stats_receiver = stats_sampler.subscribe();
         tokio::spawn(stats_sampler.run());
 
@@ -49,6 +55,7 @@ fn main() {
             observer_settings_registry.clone(),
             in_flight_jobs.clone(),
             execution_pool.clone(),
+            cache_pool.clone(),
         ));
 
         handle_client_session(

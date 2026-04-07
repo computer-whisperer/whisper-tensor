@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use whisper_tensor::loader::{ConfigValue, ConfigValues, Loader};
 use whisper_tensor::metadata::TokenizerInfo;
-use whisper_tensor::pool::SystemPool;
+use whisper_tensor::pool::{ArcTrackedPool, SystemPool};
 use whisper_tensor::super_graph::cache::SuperGraphCache;
 use whisper_tensor::tokenizer::AnyTokenizer;
 use whisper_tensor_import::loaders::TransformersLoader;
@@ -41,7 +41,7 @@ fn main() {
 
     let pool = SystemPool;
     let mut tokenizer_cache: HashMap<TokenizerInfo, Arc<AnyTokenizer>> = HashMap::new();
-    let mut super_graph_caches = SuperGraphCache::new();
+    let mut super_graph_caches = SuperGraphCache::new(ArcTrackedPool::new(None));
 
     let prompt = "The capital of France is".to_string();
     print!("{prompt}");

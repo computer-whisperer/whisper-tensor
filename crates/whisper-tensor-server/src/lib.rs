@@ -383,6 +383,13 @@ pub struct ServerStatsSnapshot {
     /// (intermediates, inputs copied in from the wire, outputs before they're
     /// copied back out). Returns to ~0 between requests.
     pub execution_pool_bytes: u64,
+    /// Bytes currently held by the aggregate cache `ArcTrackedPool`, summed
+    /// across every `SuperGraphCache` slot. Covers the three per-slot
+    /// tensor caches (RNN state, tensor cache, tensor pack cache). Grows
+    /// as inference populates state caches; shrinks on cache eviction or
+    /// slot teardown. Does **not** yet cover the lowered-model cache's
+    /// baked constants — those still live in `SystemPool`.
+    pub cache_pool_bytes: u64,
     /// Wall-clock seconds since the server started.
     pub uptime_secs: u64,
     /// Sample wall-clock time as Unix milliseconds. Used by the UI to align
