@@ -844,15 +844,60 @@ impl PthTensors {
     }
 
     pub fn get_raw_bytes(&self, name: &str) -> Result<Option<Vec<u8>>> {
+        // Thin wrapper around [`read_raw_bytes_into`] that owns its own
+        // scratch buffer. Kept for callers that want a `Vec<u8>` (e.g. the
+        // importer); hot paths should prefer reading directly into a
+        // pool-allocated destination.
+        let Some(byte_len) = self.byte_len(name) else {
+            return Ok(None);
+        };
+        let mut buf = vec![0u8; byte_len];
+        if self.read_raw_bytes_into(name, &mut buf)? {
+            Ok(Some(buf))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Return the on-disk byte length for a tensor, or `None` if unknown.
+    pub fn byte_len(&self, name: &str) -> Option<usize> {
+        let info = self.tensor_infos.get(name)?;
+        let elem_size = info.dtype.bytes_per_element();
+        Some(info.layout.num_elements().saturating_mul(elem_size))
+    }
+
+    /// Read the raw tensor bytes directly into a caller-provided buffer.
+    ///
+    /// `dst.len()` must equal `byte_len(name)`. The contiguous path — which
+    /// covers every typical weight load — does a single `read_exact` into
+    /// `dst`, avoiding the intermediate `Vec<u8>` that `get_raw_bytes`
+    /// formerly allocated. For the rare fortran-contiguous case we still
+    /// need a scratch buffer to hold the on-disk bytes before transposing
+    /// into `dst`.
+    ///
+    /// Returns `Ok(true)` if the tensor was found and read, `Ok(false)` if
+    /// the name is unknown.
+    pub fn read_raw_bytes_into(&self, name: &str, dst: &mut [u8]) -> Result<bool> {
         let tensor_info = match self.tensor_infos.get(name) {
             Some(info) => info,
-            None => return Ok(None),
+            None => return Ok(false),
         };
 
         if !tensor_info.layout.is_contiguous() && !tensor_info.layout.is_fortran_contiguous() {
             return Err(invalid_pickle(format!(
                 "cannot retrieve non-contiguous tensor {}",
                 tensor_info.name
+            )));
+        }
+
+        let elem_size = tensor_info.dtype.bytes_per_element();
+        let numel = tensor_info.layout.num_elements();
+        let byte_len = numel.saturating_mul(elem_size);
+        if dst.len() != byte_len {
+            return Err(invalid_pickle(format!(
+                "read_raw_bytes_into: dst length {} does not match expected {}",
+                dst.len(),
+                byte_len
             )));
         }
 
@@ -868,18 +913,16 @@ impl PthTensors {
             )?;
         }
 
-        let elem_size = tensor_info.dtype.bytes_per_element();
-        let numel = tensor_info.layout.num_elements();
-        let byte_len = numel.saturating_mul(elem_size);
-
-        let mut raw = vec![0u8; byte_len];
-        reader.read_exact(&mut raw)?;
-
         if tensor_info.layout.rank() > 1 && tensor_info.layout.is_fortran_contiguous() {
-            raw = fortran_to_c_bytes(&raw, tensor_info.layout.shape(), elem_size);
+            // Rare path: read bytes in fortran order, then transpose into dst.
+            let mut src = vec![0u8; byte_len];
+            reader.read_exact(&mut src)?;
+            fortran_to_c_bytes_into(&src, dst, tensor_info.layout.shape(), elem_size);
+        } else {
+            reader.read_exact(dst)?;
         }
 
-        Ok(Some(raw))
+        Ok(true)
     }
 }
 
@@ -890,14 +933,16 @@ impl PthTensors {
 static PTH_METADATA_CACHE: LazyLock<Mutex<HashMap<PathBuf, Arc<PthTensors>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-fn fortran_to_c_bytes(src: &[u8], shape: &[usize], elem_size: usize) -> Vec<u8> {
+/// Transpose fortran-ordered `src` bytes into c-ordered `dst` bytes.
+/// `dst` must be the same length as `src`.
+fn fortran_to_c_bytes_into(src: &[u8], dst: &mut [u8], shape: &[usize], elem_size: usize) {
     if shape.is_empty() || shape.contains(&0) {
-        return vec![];
+        return;
     }
+    debug_assert_eq!(src.len(), dst.len());
 
     let rank = shape.len();
     let numel: usize = shape.iter().product();
-    let mut out = vec![0u8; src.len()];
     let mut coords = vec![0usize; rank];
 
     for out_idx in 0..numel {
@@ -917,9 +962,7 @@ fn fortran_to_c_bytes(src: &[u8], shape: &[usize], elem_size: usize) -> Vec<u8> 
 
         let src_start = in_idx * elem_size;
         let dst_start = out_idx * elem_size;
-        out[dst_start..dst_start + elem_size]
+        dst[dst_start..dst_start + elem_size]
             .copy_from_slice(&src[src_start..src_start + elem_size]);
     }
-
-    out
 }

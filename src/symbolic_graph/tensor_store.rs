@@ -78,31 +78,62 @@ impl StoredTensor {
         }
     }
 
-    /// Read raw bytes from disk for this stored tensor.
-    fn load_raw_bytes(&self) -> Option<Vec<u8>> {
+    /// Load raw file bytes directly into a pool-backed tensor.
+    ///
+    /// Allocates the pool buffer first, then streams file bytes straight
+    /// into it. For `ExternalBinary`/`ExternalGGUF` this is a single
+    /// `read_exact`; for `ExternalPth` we delegate to
+    /// [`PthTensors::read_raw_bytes_into`]; for `ExternalSafetensors` we
+    /// `copy_from_slice` off the mmap view. No intermediate `Vec<u8>`
+    /// lives on the heap during a weight load — every byte goes directly
+    /// from the kernel (or mmap page) into the pool's accounting.
+    fn load_raw_to_pool<'p, P: crate::pool::Pool + 'p>(
+        &self,
+        format: TensorFormat,
+        shape: &[u64],
+        pool: &'p P,
+    ) -> Option<crate::numeric_tensor::NumericTensor<'p, DynRank, P>> {
+        use crate::numeric_tensor::NumericTensor as NewTensor;
         use std::io::{Read, Seek, SeekFrom};
+
+        let layout = format.to_layout(shape.to_vec());
+        let buf_size = layout.buffer_size_bytes();
+        let mut buf = pool.allocate(buf_size).ok()?;
+        let dst = &mut buf.as_mut()[..buf_size];
+
         match self {
             StoredTensor::ExternalBinary {
                 path,
                 offset,
                 length,
                 ..
+            }
+            | StoredTensor::ExternalGGUF {
+                path,
+                offset,
+                length,
+                ..
             } => {
+                if *length < buf_size {
+                    return None;
+                }
                 let mut file = std::fs::File::open(path).ok()?;
                 file.seek(SeekFrom::Start(*offset as u64)).ok()?;
-                let mut buf = vec![0u8; *length];
-                file.read_exact(&mut buf).ok()?;
-                Some(buf)
+                file.read_exact(dst).ok()?;
             }
             StoredTensor::ExternalPth {
                 path, tensor_name, ..
             } => {
-                // Use the metadata cache: parsing the pickle stream is the
-                // dominant cost when resolving stored tensors during compiled
-                // execution (hundreds of small constants per scan iter).
+                // The metadata cache is what makes repeated weight loads
+                // cheap — parsing the pickle stream is the dominant cost
+                // when resolving hundreds of small constants per iter.
                 let pth_path = std::path::Path::new(path);
                 let tensors = crate::pth::PthTensors::cached(pth_path).ok()?;
-                tensors.get_raw_bytes(tensor_name).ok()?
+                let byte_len = tensors.byte_len(tensor_name)?;
+                if byte_len != buf_size {
+                    return None;
+                }
+                tensors.read_raw_bytes_into(tensor_name, dst).ok()?;
             }
             StoredTensor::ExternalSafetensors {
                 path, tensor_name, ..
@@ -115,52 +146,21 @@ impl StoredTensor {
                     let mmap = unsafe { Mmap::map(&file) }.ok()?;
                     let st = SafeTensors::deserialize(&mmap).ok()?;
                     let view = st.tensor(tensor_name).ok()?;
-                    Some(view.data().to_vec())
+                    let src = view.data();
+                    if src.len() < buf_size {
+                        return None;
+                    }
+                    dst.copy_from_slice(&src[..buf_size]);
                 }
                 #[cfg(not(feature = "safetensors"))]
                 {
                     let _ = (path, tensor_name);
-                    None
+                    return None;
                 }
             }
-            StoredTensor::ExternalGGUF {
-                path,
-                offset,
-                length,
-                ..
-            } => {
-                let mut file = std::fs::File::open(path).ok()?;
-                file.seek(SeekFrom::Start(*offset as u64)).ok()?;
-                let mut buf = vec![0u8; *length];
-                file.read_exact(&mut buf).ok()?;
-                Some(buf)
-            }
-            _ => None,
+            StoredTensor::Inline(_) => return None,
         }
-    }
 
-    /// Load raw file bytes directly into a pool-backed tensor.
-    /// The raw bytes are copied directly into the appropriate layout —
-    /// no legacy intermediate. Handles both element-strided and quantized formats.
-    fn load_raw_to_pool<'p, P: crate::pool::Pool + 'p>(
-        &self,
-        format: TensorFormat,
-        shape: &[u64],
-        pool: &'p P,
-    ) -> Option<crate::numeric_tensor::NumericTensor<'p, DynRank, P>> {
-        use crate::numeric_tensor::NumericTensor as NewTensor;
-
-        let raw = self.load_raw_bytes()?;
-        let layout = format.to_layout(shape.to_vec());
-        let buf_size = layout.buffer_size_bytes();
-
-        // For all formats, the raw file bytes ARE the buffer contents
-        // (little-endian, matching the layout's expected byte packing).
-        if raw.len() < buf_size {
-            return None;
-        }
-        let mut buf = pool.allocate(buf_size).ok()?;
-        buf.as_mut()[..buf_size].copy_from_slice(&raw[..buf_size]);
         Some(NewTensor::from_parts(buf, layout))
     }
 
