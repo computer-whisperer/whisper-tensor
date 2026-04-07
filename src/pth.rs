@@ -2,6 +2,7 @@ use crate::numeric_dtype::NumericDType;
 use std::collections::HashMap;
 use std::io::{BufRead, Read};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, LazyLock, Mutex};
 
 #[derive(Debug, thiserror::Error)]
 pub enum PthError {
@@ -812,6 +813,32 @@ impl PthTensors {
         })
     }
 
+    /// Return a shared, cached `PthTensors` for `path` (default key only).
+    ///
+    /// The expensive part of `PthTensors::new` is walking the pickle stream
+    /// to build the tensor metadata map. During compiled execution we resolve
+    /// hundreds of stored tensors per step, and without this cache each one
+    /// re-parsed the same `.pth`. The cached instance only holds metadata
+    /// (tensor_infos map + path) — not tensor bytes — so it is cheap to keep
+    /// around indefinitely. Keyed by canonical path so different relative
+    /// paths to the same file share an entry.
+    pub fn cached(path: &Path) -> Result<Arc<PthTensors>> {
+        let key: PathBuf = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        {
+            let cache = PTH_METADATA_CACHE.lock().unwrap();
+            if let Some(existing) = cache.get(&key) {
+                return Ok(Arc::clone(existing));
+            }
+        }
+        // Parse outside the lock so concurrent first-loads of different
+        // files don't serialize on the cache mutex.
+        let pt = Arc::new(Self::new(path, None)?);
+        let mut cache = PTH_METADATA_CACHE.lock().unwrap();
+        // If another thread raced us, keep the earlier entry so callers
+        // observe a single shared instance per path.
+        Ok(Arc::clone(cache.entry(key).or_insert(pt)))
+    }
+
     pub fn tensor_infos(&self) -> &HashMap<String, TensorInfo> {
         &self.tensor_infos
     }
@@ -855,6 +882,13 @@ impl PthTensors {
         Ok(Some(raw))
     }
 }
+
+/// Process-wide cache of parsed `.pth` metadata. Holds only the tensor
+/// info map (not tensor data), so memory cost is bounded by the number of
+/// distinct `.pth` files opened during the process lifetime, not by their
+/// sizes.
+static PTH_METADATA_CACHE: LazyLock<Mutex<HashMap<PathBuf, Arc<PthTensors>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 fn fortran_to_c_bytes(src: &[u8], shape: &[usize], elem_size: usize) -> Vec<u8> {
     if shape.is_empty() || shape.contains(&0) {

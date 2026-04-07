@@ -97,8 +97,11 @@ impl StoredTensor {
             StoredTensor::ExternalPth {
                 path, tensor_name, ..
             } => {
+                // Use the metadata cache: parsing the pickle stream is the
+                // dominant cost when resolving stored tensors during compiled
+                // execution (hundreds of small constants per scan iter).
                 let pth_path = std::path::Path::new(path);
-                let tensors = crate::pth::PthTensors::new(pth_path, None).ok()?;
+                let tensors = crate::pth::PthTensors::cached(pth_path).ok()?;
                 tensors.get_raw_bytes(tensor_name).ok()?
             }
             StoredTensor::ExternalSafetensors {
