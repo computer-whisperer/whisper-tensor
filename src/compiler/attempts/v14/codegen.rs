@@ -75,6 +75,15 @@ pub struct BufferLayout {
     /// are dead — their slots may be reused, so the JIT must NOT emit code
     /// for them (their writes would corrupt the new slot occupant).
     pub group_use_counts: Vec<u32>,
+    /// Per-group: true if this group's expression should be inlined into its
+    /// (single) consumer's loop body instead of being emitted as a standalone
+    /// loop. Inlinable groups have NO slot allocated and NO loop emitted —
+    /// their consumer is responsible for evaluating their body inline.
+    pub inlinable: Vec<bool>,
+    /// Per-group: if this group is a Reduce that consumes an inlinable
+    /// producer, this is `Some(producer_index)`. The producer's expression is
+    /// evaluated in the reduce's inner k-loop instead of loaded from memory.
+    pub inlines_producer: Vec<Option<usize>>,
 }
 
 impl BufferLayout {
@@ -486,11 +495,25 @@ pub fn compute_layout(
 
     let mut use_counts = vec![0u32; n];
     let mut producer_lists: Vec<Vec<usize>> = Vec::with_capacity(n);
+    // unique_consumer[pi] = Some(ci) if pi has exactly one intra-span consumer ci.
+    // Set to None if 0 consumers, or as soon as a 2nd distinct consumer is seen.
+    let mut unique_consumer: Vec<Option<usize>> = vec![None; n];
+    let mut multi_consumer = vec![false; n];
     for (gi, group) in groups.iter().enumerate() {
         let mut producers = HashSet::new();
         graph.collect_all_producer_indices(group, gi, &mut producers);
         for &pi in &producers {
             use_counts[pi] += 1;
+            if !multi_consumer[pi] {
+                match unique_consumer[pi] {
+                    None => unique_consumer[pi] = Some(gi),
+                    Some(prev) if prev == gi => {}
+                    Some(_) => {
+                        multi_consumer[pi] = true;
+                        unique_consumer[pi] = None;
+                    }
+                }
+            }
         }
         producer_lists.push(producers.into_iter().collect());
     }
@@ -504,6 +527,121 @@ pub fn compute_layout(
         let group_end = group.base_id.0 + group.count;
         if (group.base_id.0..group_end).any(|a| output_atoms.contains(&a)) {
             use_counts[gi] += 1;
+        }
+    }
+
+    // ── Step 3b: Identify inlinable groups (reduce-fold inlining) ──
+    //
+    // A group is inlinable iff its expression can be folded directly into its
+    // single consumer's loop body, eliminating the materialized intermediate.
+    // Stage 1 only inlines pure-scalar producers into Reduce consumers where
+    // the consumer reads the producer via a stride-K affine InputRef and
+    // K matches the consumer's reduce_count (so each producer atom is read
+    // exactly once). The resulting loop is the textbook "reduction in
+    // registers" form: no buffer roundtrip for the intermediate.
+    //
+    // Stage 1 restriction: the producer's own inputs must NOT reference other
+    // inlinable groups (no recursive inlining yet — handled in a follow-up).
+    let inline_disabled = std::env::var("INLINE").as_deref() == Ok("0");
+    let mut inlinable = vec![false; n];
+    let mut inlines_producer: Vec<Option<usize>> = vec![None; n];
+    if !inline_disabled {
+        for (gi, group) in groups.iter().enumerate() {
+            // Single intra-span consumer, not output-pinned.
+            if use_counts[gi] != 1 {
+                continue;
+            }
+            let Some(ci) = unique_consumer[gi] else {
+                continue;
+            };
+
+            // Producer must be pure scalar (no Reduce, IndirectLoad, Literal,
+            // OpaqueOutput) — its body must be a closed-form expression we can
+            // re-emit at any iteration index.
+            if !matches!(
+                &group.op,
+                ScalarOp::Binary { .. }
+                    | ScalarOp::Unary { .. }
+                    | ScalarOp::Select
+                    | ScalarOp::Identity
+                    | ScalarOp::Cast { .. }
+            ) {
+                continue;
+            }
+
+            // Consumer must be a Reduce with reduce_stride == 1 (the relayouted
+            // matmul shape and other "natural" reductions over a contiguous
+            // producer range).
+            let consumer = &groups[ci];
+            let (k_count, _kind) = match &consumer.op {
+                ScalarOp::Reduce {
+                    reduce_count,
+                    reduce_stride,
+                    kind,
+                    ..
+                } if *reduce_stride == 1 && *reduce_count > 0 => (*reduce_count, *kind),
+                _ => continue,
+            };
+
+            // Consumer's reduce input must be a 1D Strided ref into this
+            // producer with dim_strides=[k_count] (each consumer output reads
+            // a contiguous K-block of producer atoms).
+            if consumer.inputs.len() != 1 {
+                continue;
+            }
+            let InputRef::Strided {
+                base,
+                dim_strides,
+                dim_shape,
+            } = &consumer.inputs[0]
+            else {
+                continue;
+            };
+            if *base != group.base_id {
+                continue;
+            }
+            if dim_strides.len() != 1 || dim_strides[0] != k_count as i64 {
+                continue;
+            }
+            if dim_shape.len() != 1 || dim_shape[0] != u64::MAX {
+                continue;
+            }
+
+            // Producer's atom range must be exactly K * consumer's range.
+            if group.count != k_count * consumer.count {
+                continue;
+            }
+            if group.atom_offset != k_count * consumer.atom_offset {
+                continue;
+            }
+
+            // Stage 1 restriction: producer's inputs must not reference any
+            // other inlinable group. Because we process groups in topological
+            // order, all upstream inlinables have already been marked.
+            let mut all_buffer_inputs = true;
+            'inputs: for inp in &group.inputs {
+                let bases: &[AtomId] = match inp {
+                    InputRef::Broadcast(a) => std::slice::from_ref(a),
+                    InputRef::Strided { base, .. } => std::slice::from_ref(base),
+                    InputRef::Explicit(ids) => ids.as_slice(),
+                };
+                for b in bases {
+                    // Look up which group (if any) contains this base atom.
+                    // O(n) scan is fine — n is small per span.
+                    for (qi, q) in groups.iter().enumerate() {
+                        if b.0 >= q.base_id.0 && b.0 < q.base_id.0 + q.count && inlinable[qi] {
+                            all_buffer_inputs = false;
+                            break 'inputs;
+                        }
+                    }
+                }
+            }
+            if !all_buffer_inputs {
+                continue;
+            }
+
+            inlinable[gi] = true;
+            inlines_producer[ci] = Some(gi);
         }
     }
 
@@ -564,6 +702,13 @@ pub fn compute_layout(
     let mut remaining = use_counts.clone();
 
     for (gi, group) in groups.iter().enumerate() {
+        // Inlinable groups have no slot — their value lives in registers
+        // inside the consumer's loop body. Skip allocation entirely.
+        if inlinable[gi] {
+            group_slot_indices[gi] = usize::MAX;
+            continue;
+        }
+
         let elem_bytes = dtype_elem_bytes(group.output_dtype);
         let item_idx = num_inputs + gi;
         let slot_idx = all_slots.len();
@@ -619,6 +764,8 @@ pub fn compute_layout(
         total_bytes: allocator.watermark,
         slots: all_slots,
         group_use_counts: use_counts,
+        inlinable,
+        inlines_producer,
     }
 }
 
@@ -845,6 +992,8 @@ impl JitCompiledSpan {
                     slots: vec![],
                     total_bytes: 0,
                     group_use_counts: vec![],
+                    inlinable: vec![],
+                    inlines_producer: vec![],
                 },
                 literal_template: vec![],
                 output_ranges: output_ranges.to_vec(),
@@ -1143,6 +1292,7 @@ fn build_fusion_chains(
             .filter(|(gi, g)| {
                 !matches!(&g.op, ScalarOp::Literal(_) | ScalarOp::LiteralSpan(_))
                     && !(*gi < layout.group_use_counts.len() && layout.group_use_counts[*gi] == 0)
+                    && !(*gi < layout.inlinable.len() && layout.inlinable[*gi])
                     && g.count > 0
             })
             .map(|(gi, g)| FusionChain {
@@ -1165,6 +1315,11 @@ fn build_fusion_chains(
             continue;
         }
         if gi < layout.group_use_counts.len() && layout.group_use_counts[gi] == 0 {
+            continue;
+        }
+        // Skip inlinable groups — their bodies get folded into a consumer's
+        // loop and they have no slot to write to.
+        if gi < layout.inlinable.len() && layout.inlinable[gi] {
             continue;
         }
 
@@ -1280,6 +1435,8 @@ fn emit_chain(
             builder,
             module,
             &groups[gi],
+            gi,
+            groups,
             layout,
             buffer_ptr,
             math,
@@ -1304,6 +1461,8 @@ fn emit_chain(
                 builder,
                 module,
                 group,
+                gi,
+                groups,
                 layout,
                 buffer_ptr,
                 None,
@@ -1348,6 +1507,8 @@ fn emit_chain(
             builder,
             module,
             group,
+            gi,
+            groups,
             layout,
             buffer_ptr,
             Some(i_val),
@@ -1380,6 +1541,8 @@ fn emit_group_body_forwarded(
     builder: &mut FunctionBuilder,
     module: &mut JITModule,
     group: &AtomGroup<'static, crate::pool::SystemPool>,
+    gi: usize,
+    groups: &[AtomGroup<'static, crate::pool::SystemPool>],
     layout: &BufferLayout,
     buffer_ptr: Value,
     i_val: Option<Value>,
@@ -1548,6 +1711,8 @@ fn emit_group_body_forwarded(
                 builder,
                 module,
                 group,
+                gi,
+                groups,
                 layout,
                 buffer_ptr,
                 i_val,
@@ -1717,10 +1882,17 @@ fn load_input_forwarded(
 /// Compile a span, but validate by also compiling without fusion and
 /// comparing the output byte-for-byte on a zero-initialized buffer.
 /// Only active when FUSION_VALIDATE env var is set.
+///
+/// Note: when reduce-fold inlining is active in the layout, FUSION_VALIDATE
+/// is bypassed — the inline-aware layout has slots stripped for inlinable
+/// groups, so the "unfused" comparison branch can't be compiled against the
+/// same layout. To validate inlining itself, set `INLINE=0` to disable
+/// inlining for both branches.
 pub fn compile_span_validated(
     graph: &NanoGraph<'static, crate::pool::SystemPool>,
     layout: &BufferLayout,
 ) -> Result<(CompiledSpan, EmbeddedTables), String> {
+    let has_inlining = layout.inlinable.iter().any(|&b| b);
     let has_multi = {
         let chains = build_fusion_chains(graph.groups(), layout);
         chains.iter().any(|c| c.group_indices.len() > 1)
@@ -1728,7 +1900,7 @@ pub fn compile_span_validated(
 
     let (fused, fused_tables) = compile_span(graph, layout)?;
 
-    if !has_multi || std::env::var("FUSION_VALIDATE").is_err() {
+    if !has_multi || has_inlining || std::env::var("FUSION_VALIDATE").is_err() {
         return Ok((fused, fused_tables));
     }
 
@@ -1925,6 +2097,8 @@ fn emit_group(
     builder: &mut FunctionBuilder,
     module: &mut JITModule,
     group: &AtomGroup<'static, crate::pool::SystemPool>,
+    gi: usize,
+    groups: &[AtomGroup<'static, crate::pool::SystemPool>],
     layout: &BufferLayout,
     buffer_ptr: Value,
     math: &MathFuncs,
@@ -1944,6 +2118,8 @@ fn emit_group(
             builder,
             module,
             group,
+            gi,
+            groups,
             layout,
             buffer_ptr,
             None,
@@ -1979,6 +2155,8 @@ fn emit_group(
         builder,
         module,
         group,
+        gi,
+        groups,
         layout,
         buffer_ptr,
         Some(i_val),
@@ -2009,6 +2187,8 @@ fn emit_group_body(
     builder: &mut FunctionBuilder,
     module: &mut JITModule,
     group: &AtomGroup<'static, crate::pool::SystemPool>,
+    gi: usize,
+    groups: &[AtomGroup<'static, crate::pool::SystemPool>],
     layout: &BufferLayout,
     buffer_ptr: Value,
     i_val: Option<Value>,
@@ -2216,23 +2396,32 @@ fn emit_group_body(
             reduce_count,
             reduce_stride,
             compute_dtype,
-        } => emit_reduce(
-            builder,
-            module,
-            group,
-            layout,
-            buffer_ptr,
-            i_val,
-            i_const,
-            math,
-            var_counter,
-            tables,
-            *kind,
-            *reduce_count,
-            *reduce_stride,
-            *compute_dtype,
-            &out_slot,
-        ),
+        } => {
+            // Look up an inlinable producer (reduce-fold inlining).
+            let inlined_producer = layout
+                .inlines_producer
+                .get(gi)
+                .and_then(|opt| *opt)
+                .map(|pi| &groups[pi]);
+            emit_reduce(
+                builder,
+                module,
+                group,
+                layout,
+                buffer_ptr,
+                i_val,
+                i_const,
+                math,
+                var_counter,
+                tables,
+                *kind,
+                *reduce_count,
+                *reduce_stride,
+                *compute_dtype,
+                &out_slot,
+                inlined_producer,
+            )
+        }
 
         ScalarOp::IndirectLoad { table_base } => {
             // Index: load as integer regardless of source dtype.
@@ -2670,6 +2859,170 @@ fn addr_const(builder: &mut FunctionBuilder, buffer_ptr: Value, byte_off: i64) -
     }
 }
 
+/// Decomposed iteration index for inlined producer evaluation.
+///
+/// Reduce-fold inlining synthesizes the producer's iteration index as
+/// `i_p = inline_k * outer + inner` where `outer` is the consumer's per-output
+/// iv (in absolute producer coords) and `inner` is the reduce k-loop variable
+/// (`0..inline_k`). When the producer's input has a 2D Strided pattern with
+/// `dim_shape[1] == inline_k`, the modular decomposition collapses to
+/// `coord_outer = i_p / k = outer` and `coord_inner = i_p % k = inner` —
+/// avoiding the urem/udiv that the generic flat-index path would emit.
+#[derive(Clone, Copy)]
+struct InlineIdx {
+    /// Outermost iteration variable (the consumer's `iv`, absolute coord).
+    outer: Value,
+    /// Inner reduce-loop variable (`0..k`).
+    inner: Value,
+    /// Compile-time k = consumer's reduce_count.
+    k: u64,
+}
+
+/// Coordinate-aware version of `load_input` for the inlined-into-reduce path.
+///
+/// Recognizes the canonical 2D Strided pattern with `dim_shape[1] == idx.k`
+/// and substitutes `outer`/`inner` directly, eliminating urem/udiv. Falls
+/// back to materializing `i_p = idx.k * outer + inner` for any pattern that
+/// doesn't match the fast structure.
+#[allow(clippy::too_many_arguments)]
+fn load_input_inlined(
+    builder: &mut FunctionBuilder,
+    module: &mut JITModule,
+    input: &InputRef,
+    layout: &BufferLayout,
+    buffer_ptr: Value,
+    idx: InlineIdx,
+    atom_offset: u64,
+    tables: &mut EmbeddedTables,
+) -> Result<Value, String> {
+    // Materialize the flat index lazily — only used by the fall-back path.
+    let materialize_flat = |builder: &mut FunctionBuilder| -> Value {
+        if idx.k == 1 {
+            // i_p == outer (degenerate; shouldn't normally happen with reduces).
+            return idx.outer;
+        }
+        let scaled = builder.ins().imul_imm(idx.outer, idx.k as i64);
+        builder.ins().iadd(scaled, idx.inner)
+    };
+
+    match input {
+        // Broadcast doesn't depend on i_p — same fast path as load_input.
+        InputRef::Broadcast(_) => load_input(
+            builder,
+            module,
+            input,
+            layout,
+            buffer_ptr,
+            None,
+            0,
+            atom_offset,
+            tables,
+        ),
+
+        InputRef::Strided {
+            base,
+            dim_strides,
+            dim_shape,
+        } => {
+            let nd = dim_strides.len();
+            assert!(nd >= 1);
+            assert_eq!(nd, dim_shape.len());
+
+            // Find the buffer slot (same logic as load_input).
+            let first_offset = strided_resolve_offset(dim_strides, dim_shape, atom_offset);
+            let first_atom = AtomId((base.0 as i64 + first_offset) as u64);
+            let (slot, elem) = layout
+                .find(*base)
+                .or_else(|| layout.find(first_atom))
+                .ok_or_else(|| {
+                    format!(
+                        "no slot for Strided base={} (inlined load, atom_offset={})",
+                        base, atom_offset
+                    )
+                })?;
+            let elem_bytes = slot.elem_bytes as i64;
+            let load_dtype = slot.dtype;
+            let slot_byte = slot.byte_offset as i64 + elem as i64 * elem_bytes;
+            let base_byte = if layout.find(*base).is_some() {
+                slot_byte
+            } else {
+                slot_byte - first_offset * elem_bytes
+            };
+
+            // ── Fast path: 2D with dim_shape[1] == idx.k ──
+            // The producer's input was deliberately laid out so that the inner
+            // dim cycles every k atoms. With i_p = k*outer + inner, we get
+            // coord_outer = outer and coord_inner = inner directly.
+            if nd == 2 && dim_shape[1] == idx.k {
+                let stride0_bytes = dim_strides[0] * elem_bytes;
+                let stride1_bytes = dim_strides[1] * elem_bytes;
+
+                let mut off = builder.ins().iconst(types::I64, base_byte);
+                if stride0_bytes != 0 {
+                    let outer_bytes = builder.ins().imul_imm(idx.outer, stride0_bytes);
+                    off = builder.ins().iadd(off, outer_bytes);
+                }
+                if stride1_bytes != 0 {
+                    let inner_bytes = builder.ins().imul_imm(idx.inner, stride1_bytes);
+                    off = builder.ins().iadd(off, inner_bytes);
+                }
+                let addr = builder.ins().iadd(buffer_ptr, off);
+                return Ok(emit_typed_load(builder, addr, load_dtype));
+            }
+
+            // ── 1D affine fast path ──
+            // i_p = k*outer + inner; offset = stride * i_p =
+            //   k*stride*outer + stride*inner. Compute without flat materialization.
+            if nd == 1 {
+                let stride = dim_strides[0];
+                let byte_stride = stride * elem_bytes;
+                let mut off = builder.ins().iconst(types::I64, base_byte);
+                let outer_bytes_per_step = stride * idx.k as i64 * elem_bytes;
+                if outer_bytes_per_step != 0 {
+                    let outer_bytes = builder.ins().imul_imm(idx.outer, outer_bytes_per_step);
+                    off = builder.ins().iadd(off, outer_bytes);
+                }
+                if byte_stride != 0 {
+                    let inner_bytes = builder.ins().imul_imm(idx.inner, byte_stride);
+                    off = builder.ins().iadd(off, inner_bytes);
+                }
+                let addr = builder.ins().iadd(buffer_ptr, off);
+                return Ok(emit_typed_load(builder, addr, load_dtype));
+            }
+
+            // ── Fall-back: materialize flat i_p, defer to load_input ──
+            let i_p = materialize_flat(builder);
+            load_input(
+                builder,
+                module,
+                input,
+                layout,
+                buffer_ptr,
+                Some(i_p),
+                0,
+                atom_offset,
+                tables,
+            )
+        }
+
+        InputRef::Explicit(_) => {
+            // Explicit lookups need the flat index for table indexing.
+            let i_p = materialize_flat(builder);
+            load_input(
+                builder,
+                module,
+                input,
+                layout,
+                buffer_ptr,
+                Some(i_p),
+                0,
+                atom_offset,
+                tables,
+            )
+        }
+    }
+}
+
 // ─── Representation kinds ───────────────────────────────────────────────────
 
 /// Cranelift compute representation for a value.
@@ -2916,8 +3269,186 @@ fn store_result(
     emit_typed_store(builder, addr, val, slot.dtype);
 }
 
+// ─── Inlined producer evaluation ────────────────────────────────────────────
+
+/// Evaluate a pure-scalar group's body at a decomposed iteration index,
+/// returning the resulting Cranelift value in the format an `emit_typed_load`
+/// from the group's slot would have produced.
+///
+/// Used by reduce-fold inlining: instead of materializing the producer's
+/// output to memory and loading it back inside the reducer's k-loop, we
+/// re-emit the producer's expression with `idx.outer*k + idx.inner` as the
+/// (synthetic) iteration index. The producer's inputs are loaded via
+/// `load_input_inlined`, which substitutes `outer`/`inner` directly when the
+/// access pattern's modulus matches `idx.k` — eliminating the urem/udiv that
+/// the flat-index path would emit.
+///
+/// Restricted to pure scalar ops (Binary/Unary/Cast/Identity/Select).
+#[allow(clippy::too_many_arguments)]
+fn eval_group_value(
+    builder: &mut FunctionBuilder,
+    module: &mut JITModule,
+    group: &AtomGroup<'static, crate::pool::SystemPool>,
+    layout: &BufferLayout,
+    buffer_ptr: Value,
+    idx: InlineIdx,
+    math: &MathFuncs,
+    _var_counter: &mut VarCounter,
+    tables: &mut EmbeddedTables,
+) -> Result<Value, String> {
+    let output_dtype = group.output_dtype;
+    let atom_offset = group.atom_offset;
+
+    let result_val = match &group.op {
+        ScalarOp::Identity | ScalarOp::Cast { .. } => {
+            let src = load_input_inlined(
+                builder,
+                module,
+                &group.inputs[0],
+                layout,
+                buffer_ptr,
+                idx,
+                atom_offset,
+                tables,
+            )?;
+            let src_repr = input_slot_dtype(&group.inputs[0], layout, atom_offset)
+                .map(repr_of)
+                .unwrap_or(ReprKind::F32);
+            emit_cast_to_output(builder, src, src_repr, output_dtype)
+        }
+
+        ScalarOp::Binary { op, compute_dtype } => {
+            let compute_repr = repr_of(*compute_dtype);
+            let a_raw = load_input_inlined(
+                builder,
+                module,
+                &group.inputs[0],
+                layout,
+                buffer_ptr,
+                idx,
+                atom_offset,
+                tables,
+            )?;
+            let a_repr = input_slot_dtype(&group.inputs[0], layout, atom_offset)
+                .map(repr_of)
+                .unwrap_or(compute_repr);
+            let a = emit_repr_cast(builder, a_raw, a_repr, compute_repr);
+
+            let b_raw = load_input_inlined(
+                builder,
+                module,
+                &group.inputs[1],
+                layout,
+                buffer_ptr,
+                idx,
+                atom_offset,
+                tables,
+            )?;
+            let b_repr = input_slot_dtype(&group.inputs[1], layout, atom_offset)
+                .map(repr_of)
+                .unwrap_or(compute_repr);
+            let b = emit_repr_cast(builder, b_raw, b_repr, compute_repr);
+
+            let result = emit_binop(builder, module, math, *op, a, b, compute_repr)?;
+            emit_cast_to_output(builder, result, compute_repr, output_dtype)
+        }
+
+        ScalarOp::Unary { op, compute_dtype } => {
+            let compute_repr = repr_of(*compute_dtype);
+            let x_raw = load_input_inlined(
+                builder,
+                module,
+                &group.inputs[0],
+                layout,
+                buffer_ptr,
+                idx,
+                atom_offset,
+                tables,
+            )?;
+            let x_repr = input_slot_dtype(&group.inputs[0], layout, atom_offset)
+                .map(repr_of)
+                .unwrap_or(compute_repr);
+            let x = emit_repr_cast(builder, x_raw, x_repr, compute_repr);
+
+            let result = emit_unop(builder, module, math, *op, x, compute_repr)?;
+            emit_cast_to_output(builder, result, compute_repr, output_dtype)
+        }
+
+        ScalarOp::Select => {
+            let cond = load_input_inlined(
+                builder,
+                module,
+                &group.inputs[0],
+                layout,
+                buffer_ptr,
+                idx,
+                atom_offset,
+                tables,
+            )?;
+            let cond_repr = input_slot_dtype(&group.inputs[0], layout, atom_offset)
+                .map(repr_of)
+                .unwrap_or(ReprKind::F32);
+
+            let is_nonzero = match cond_repr {
+                ReprKind::F32 | ReprKind::F64 => {
+                    let zero = emit_float_zero(builder, cond_repr);
+                    builder.ins().fcmp(FloatCC::NotEqual, cond, zero)
+                }
+                ReprKind::Int => {
+                    let zero = builder.ins().iconst(types::I64, 0);
+                    builder.ins().icmp(IntCC::NotEqual, cond, zero)
+                }
+            };
+
+            let x_raw = load_input_inlined(
+                builder,
+                module,
+                &group.inputs[1],
+                layout,
+                buffer_ptr,
+                idx,
+                atom_offset,
+                tables,
+            )?;
+            let x_repr = input_slot_dtype(&group.inputs[1], layout, atom_offset)
+                .map(repr_of)
+                .unwrap_or(repr_of(output_dtype));
+            let x = emit_cast_to_output(builder, x_raw, x_repr, output_dtype);
+
+            let y_raw = load_input_inlined(
+                builder,
+                module,
+                &group.inputs[2],
+                layout,
+                buffer_ptr,
+                idx,
+                atom_offset,
+                tables,
+            )?;
+            let y_repr = input_slot_dtype(&group.inputs[2], layout, atom_offset)
+                .map(repr_of)
+                .unwrap_or(repr_of(output_dtype));
+            let y = emit_cast_to_output(builder, y_raw, y_repr, output_dtype);
+
+            builder.ins().select(is_nonzero, x, y)
+        }
+
+        _ => {
+            return Err(format!(
+                "eval_group_value: op {:?} not supported for inlining",
+                op_name_short(&group.op)
+            ));
+        }
+    };
+
+    // Match memory load semantics — preserves dtype truncation contracts
+    // (BF16 round-to-nearest-even, integer narrowing, etc.).
+    Ok(emit_store_load_roundtrip(builder, result_val, output_dtype))
+}
+
 // ─── Reduce emission ────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 fn emit_reduce(
     builder: &mut FunctionBuilder,
     module: &mut JITModule,
@@ -2934,31 +3465,47 @@ fn emit_reduce(
     reduce_stride: i64,
     compute_dtype: NumericDType,
     out_slot: &SlotInfo,
+    inlined_producer: Option<&AtomGroup<'static, crate::pool::SystemPool>>,
 ) -> Result<(), String> {
     let is_sum = matches!(kind, ReduceKind::Sum);
     let compute_repr = repr_of(compute_dtype);
     let output_dtype = group.output_dtype;
 
-    // Resolve the source slot. Reduce input must be Affine.
-    let (base_byte, input_byte_stride, reduce_byte_stride, src_dtype) = match &group.inputs[0] {
-        InputRef::Strided {
-            base, dim_strides, ..
-        } => {
-            // Use the innermost (last) stride for reduce input
-            let stride = dim_strides.last().copied().unwrap_or(0);
-            let (base_byte, elem_bytes, src_dtype) =
-                resolve_affine_base(layout, *base, stride, group.atom_offset, "reduce input")?;
-            let byte_stride = stride * elem_bytes as i64;
-            let red_stride = reduce_stride * elem_bytes as i64;
-            (base_byte, byte_stride, red_stride, src_dtype)
-        }
+    // Atom-stride from the reduce's InputRef — used by both paths to compute
+    // the synthetic producer atom index (inline path) and to convert into
+    // byte stride (buffer path).
+    let stride_atoms = match &group.inputs[0] {
+        InputRef::Strided { dim_strides, .. } => dim_strides.last().copied().unwrap_or(0),
         other => {
             return Err(format!(
-                "Reduce input must be Affine, got {:?}",
+                "Reduce input must be Strided, got {:?}",
                 std::mem::discriminant(other)
             ));
         }
     };
+
+    // Resolve the source slot for the buffer path. For the inlined path the
+    // producer's slot doesn't exist; we use the producer's output_dtype as
+    // src_dtype so the compute_repr cast and store→load round-trip stay
+    // consistent with what a memory load would have produced.
+    let (base_byte, input_byte_stride, reduce_byte_stride, src_dtype) =
+        if let Some(producer) = inlined_producer {
+            (0i64, 0i64, 0i64, producer.output_dtype)
+        } else {
+            let InputRef::Strided { base, .. } = &group.inputs[0] else {
+                unreachable!("checked above")
+            };
+            let (base_byte, elem_bytes, src_dtype) = resolve_affine_base(
+                layout,
+                *base,
+                stride_atoms,
+                group.atom_offset,
+                "reduce input",
+            )?;
+            let byte_stride = stride_atoms * elem_bytes as i64;
+            let red_stride = reduce_stride * elem_bytes as i64;
+            (base_byte, byte_stride, red_stride, src_dtype)
+        };
     let src_repr = repr_of(src_dtype);
 
     // Accumulator variable — type depends on compute_repr.
@@ -2976,16 +3523,42 @@ fn emit_reduce(
     builder.def_var(acc_var, init);
 
     // Base address for this iteration's reduce input at k=0.
-    let base_addr_off = match i_val {
-        Some(iv) => {
-            let i_bytes = builder.ins().imul_imm(iv, input_byte_stride);
-            let base_val = builder.ins().iconst(types::I64, base_byte);
-            builder.ins().iadd(base_val, i_bytes)
-        }
-        None => {
-            let off = base_byte + input_byte_stride * i_const as i64;
-            builder.ins().iconst(types::I64, off)
-        }
+    // Buffer path only — the inline path computes a synthetic atom index
+    // inside the inner loop instead.
+    let base_addr_off = if inlined_producer.is_none() {
+        Some(match i_val {
+            Some(iv) => {
+                let i_bytes = builder.ins().imul_imm(iv, input_byte_stride);
+                let base_val = builder.ins().iconst(types::I64, base_byte);
+                builder.ins().iadd(base_val, i_bytes)
+            }
+            None => {
+                let off = base_byte + input_byte_stride * i_const as i64;
+                builder.ins().iconst(types::I64, off)
+            }
+        })
+    } else {
+        None
+    };
+
+    // For the inline path, pre-compute the consumer's iv as a Cranelift Value.
+    // We pass it as `InlineIdx::outer` along with the inner k-loop variable.
+    // The decomposed (outer, inner, k) is consumed by load_input_inlined to
+    // skip urem/udiv on producer access patterns whose modulus matches `k`.
+    let inline_outer = if inlined_producer.is_some() {
+        // Stage 1 only inlines when stride_atoms == reduce_count, i.e. each
+        // output reads K consecutive producer atoms aligned at iv*K. Sanity-
+        // check: stride_atoms must equal reduce_count.
+        debug_assert_eq!(
+            stride_atoms as u64, reduce_count,
+            "inlining requires stride_atoms == reduce_count"
+        );
+        Some(match i_val {
+            Some(iv) => iv,
+            None => builder.ins().iconst(types::I64, i_const as i64),
+        })
+    } else {
+        None
     };
 
     // Inner loop: for k in 0..reduce_count
@@ -3006,13 +3579,34 @@ fn emit_reduce(
     let k_cmp = builder.ins().icmp(IntCC::SignedLessThan, k_val, bound);
     builder.ins().brif(k_cmp, red_body, &[], red_exit, &[]);
 
-    // Body: load from base_addr_off + k * reduce_byte_stride, accumulate.
+    // Body: load (or evaluate inlined producer), accumulate.
     builder.switch_to_block(red_body);
     let k_val = builder.use_var(k_var);
-    let k_offset = builder.ins().imul_imm(k_val, reduce_byte_stride);
-    let src_off = builder.ins().iadd(base_addr_off, k_offset);
-    let src_addr = builder.ins().iadd(buffer_ptr, src_off);
-    let loaded = emit_typed_load(builder, src_addr, src_dtype);
+    let loaded = if let Some(producer) = inlined_producer {
+        let outer = inline_outer.expect("inline_outer set when inlining");
+        let idx = InlineIdx {
+            outer,
+            inner: k_val,
+            k: reduce_count,
+        };
+        eval_group_value(
+            builder,
+            module,
+            producer,
+            layout,
+            buffer_ptr,
+            idx,
+            math,
+            var_counter,
+            tables,
+        )?
+    } else {
+        let base_addr_off = base_addr_off.expect("base_addr_off set on buffer path");
+        let k_offset = builder.ins().imul_imm(k_val, reduce_byte_stride);
+        let src_off = builder.ins().iadd(base_addr_off, k_offset);
+        let src_addr = builder.ins().iadd(buffer_ptr, src_off);
+        emit_typed_load(builder, src_addr, src_dtype)
+    };
     // Cast loaded value to compute repr.
     let src_val = emit_repr_cast(builder, loaded, src_repr, compute_repr);
 
