@@ -1,4 +1,5 @@
 pub mod cache;
+pub mod cache_report;
 #[cfg(feature = "cranelift")]
 pub mod compiled_eval;
 pub mod data;

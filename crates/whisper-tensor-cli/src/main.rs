@@ -204,6 +204,11 @@ struct EvalArgs {
     /// Output directory for dumped tensors
     #[arg(long, default_value = "dump_out")]
     dump_output: PathBuf,
+
+    /// Print a Build Inspector report of the supergraph cache after execution.
+    /// Most useful with --eval-mode=lowered or --eval-mode=compiled.
+    #[arg(long)]
+    report: bool,
 }
 
 #[derive(Clone, clap::ValueEnum)]
@@ -226,6 +231,19 @@ impl EvalArgs {
         };
         SuperGraphEvalOptions { model_eval_mode }
     }
+}
+
+/// Print a Build Inspector cache report if `--report` was set.
+fn print_cache_report_if_requested(eval: &EvalArgs, cache: &SuperGraphCache) {
+    if !eval.report {
+        return;
+    }
+    use whisper_tensor::super_graph::cache_report::{CacheReport, format_cache_report_text};
+    let report = CacheReport {
+        entries: vec![cache.to_report_entry(0)],
+    };
+    eprintln!();
+    eprint!("{}", format_cache_report_text(&report));
 }
 
 // ============================================================================
@@ -546,6 +564,7 @@ fn cmd_generate(output: LoaderOutput, prompt: Option<String>, max_tokens: usize,
     }
     println!();
     observer.write_outputs(&eval.dump_output);
+    print_cache_report_if_requested(&eval, &super_graph_caches);
 }
 
 // ============================================================================
@@ -626,6 +645,7 @@ fn cmd_image(
     save_image_tensor(&image_tensor, &output_path);
     eprintln!("Saved to {}", output_path.display());
     observer.write_outputs(&eval.dump_output);
+    print_cache_report_if_requested(&eval, &super_graph_caches);
 }
 
 // ============================================================================
@@ -862,6 +882,7 @@ fn cmd_tts(output: LoaderOutput, opts: TtsRunOptions, eval: EvalArgs) {
         samples.len() as f64 / audio.sample_rate_hz as f64,
         output_path.display()
     );
+    print_cache_report_if_requested(&eval, &super_graph_caches);
 }
 
 /// Load a voice style vector from a .bin file (Kokoro format), indexed by token count.
@@ -959,6 +980,7 @@ fn cmd_stt(output: LoaderOutput, audio_path: PathBuf, _model_dir: Option<PathBuf
     eprintln!("Running STT supergraph...");
     let start = std::time::Instant::now();
 
+    let mut super_graph_caches = SuperGraphCache::new();
     let output_data = {
         let mut data = SuperGraphData::new();
         data.audio_clips.insert(
@@ -979,7 +1001,6 @@ fn cmd_stt(output: LoaderOutput, audio_path: PathBuf, _model_dir: Option<PathBuf
         ];
         let eval_options = eval.to_eval_options();
         let mut observer = TensorDumpObserver::new(&eval.dump_tensors, &symbolic_graphs);
-        let mut super_graph_caches = SuperGraphCache::new();
         let mut context = SuperGraphContext {
             pool: &pool,
             observer: &mut observer,
@@ -1023,6 +1044,7 @@ fn cmd_stt(output: LoaderOutput, audio_path: PathBuf, _model_dir: Option<PathBuf
 
     eprintln!("Total: {:.2?}", start.elapsed());
     println!("{text}");
+    print_cache_report_if_requested(&eval, &super_graph_caches);
 }
 
 /// Load a WAV file as f32 samples, resampled to target_sr.
