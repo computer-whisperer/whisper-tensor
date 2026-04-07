@@ -9,6 +9,7 @@ use crate::graph::GlobalId;
 use crate::nano_graph::lower::{self, TensorAtomMapInfo};
 use crate::nano_graph::pattern::NanoGraph;
 use crate::nano_graph::pool_eval;
+use crate::numeric_dtype::NumericDType;
 use crate::numeric_tensor::{NumericTensor, NumericTensorView, TensorLayout};
 use crate::pool::{Pool, SystemPool};
 use crate::symbolic_graph::tensor_store::TensorStore;
@@ -39,6 +40,30 @@ pub(super) fn resolve_stored_tensor(
                 }
                 tensor
             })
+        }
+    }
+}
+
+/// Read shape and (post-dequant) element dtype from a `StoredOrNotTensor`
+/// without materializing the tensor data.
+///
+/// For quantized formats this returns the dequantized element dtype (F32),
+/// matching what `tensor.dtype()` reports on a tensor produced by
+/// `resolve_stored_tensor` / `to_pool_tensor`.
+///
+/// Returns `None` only if the store id is missing — never reads the file.
+pub(super) fn cheap_shape_dtype(
+    stored_ref: &StoredOrNotTensor,
+    tensor_store: &TensorStore,
+) -> Option<(Vec<u64>, NumericDType)> {
+    match stored_ref {
+        StoredOrNotTensor::Stored(id) => {
+            let st = tensor_store.get_tensor(*id)?;
+            Some((st.shape(), st.format().element_dtype()))
+        }
+        StoredOrNotTensor::Inline(shared) => {
+            let inner = shared.inner();
+            Some((inner.shape().clone(), inner.dtype()))
         }
     }
 }
@@ -172,16 +197,14 @@ pub fn build_info_inputs(
             info_inputs.insert(input_id, TensorInfo::from_dtype_and_shape(dtype, &shape));
             user_input_ext_ids.push(input_id);
         } else if let Some(tensor_meta) = sym_graph.get_tensor_info(input_id) {
-            // No user view — resolve shape/dtype from the model's stored default.
-            // Still shape-only: the default or runtime data will be provided at eval time.
-            if let TensorType::Input(Some(stored_ref)) = &tensor_meta.tensor_type {
-                let resolved = resolve_stored_tensor(stored_ref, tensor_store);
-                if let Some(tensor) = resolved {
-                    let shape: Vec<u64> = tensor.shape().clone();
-                    let dtype = tensor.dtype();
-                    info_inputs.insert(input_id, TensorInfo::from_dtype_and_shape(dtype, &shape));
-                    user_input_ext_ids.push(input_id);
-                }
+            // No user view — read shape/dtype from the model's stored default
+            // without materializing it. We never need its data here: the default
+            // or runtime data will be loaded at eval time.
+            if let TensorType::Input(Some(stored_ref)) = &tensor_meta.tensor_type
+                && let Some((shape, dtype)) = cheap_shape_dtype(stored_ref, tensor_store)
+            {
+                info_inputs.insert(input_id, TensorInfo::from_dtype_and_shape(dtype, &shape));
+                user_input_ext_ids.push(input_id);
             }
         }
     }
@@ -201,20 +224,25 @@ pub fn build_info_inputs(
             continue;
         }
 
-        let resolved = resolve_stored_tensor(stored_ref, tensor_store);
+        // Cheap shape/dtype lookup first — avoids materializing every weight
+        // (~1.3 s/iter on RWKV-0.1B) just to check the threshold.
+        let Some((shape, dtype)) = cheap_shape_dtype(stored_ref, tensor_store) else {
+            continue;
+        };
+        let numel: u64 = shape.iter().product();
 
-        if let Some(tensor) = resolved {
-            let numel = NumericTensor::numel(&tensor) as u64;
-            if numel <= inline_constant_threshold {
-                // Small constant: full data for constant folding.
+        if numel <= inline_constant_threshold {
+            // Small constant: actually load it so the data is available for
+            // constant folding during lowering.
+            if let Some(tensor) = resolve_stored_tensor(stored_ref, tensor_store) {
                 info_inputs.insert(tensor_id, TensorInfo::from_view(&tensor.view(), &POOL_S));
-            } else {
-                // Large constant (weight): shape+dtype only, will be a runtime input.
-                let shape: Vec<u64> = tensor.shape().clone();
-                let dtype = tensor.dtype();
-                info_inputs.insert(tensor_id, TensorInfo::from_dtype_and_shape(dtype, &shape));
-                weight_input_ext_ids.push(tensor_id);
             }
+        } else {
+            // Large constant (weight): shape+dtype only — will be supplied as a
+            // runtime input by `execute_compiled` (which loads the actual bytes
+            // via `resolve_stored_tensor` at that point).
+            info_inputs.insert(tensor_id, TensorInfo::from_dtype_and_shape(dtype, &shape));
+            weight_input_ext_ids.push(tensor_id);
         }
     }
 
