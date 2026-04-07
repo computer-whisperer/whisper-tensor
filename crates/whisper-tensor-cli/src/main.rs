@@ -331,6 +331,21 @@ impl SuperGraphObserver for TensorDumpObserver {
     }
     fn on_loading_weight(&mut self, _: &[GlobalId], _: Option<String>) {}
     fn on_progress(&mut self, _: &[GlobalId], _: i64, _: f64, _: f64) {}
+
+    fn on_compiled_milestone(
+        &mut self,
+        _path: &[GlobalId],
+        stage: &str,
+        iter: Option<u64>,
+        start: std::time::Instant,
+        end: std::time::Instant,
+    ) {
+        let dt_ms = end.duration_since(start).as_secs_f64() * 1e3;
+        match iter {
+            Some(i) => eprintln!("  [{stage}] iter={i} {dt_ms:.1}ms"),
+            None => eprintln!("  [{stage}] {dt_ms:.1}ms"),
+        }
+    }
 }
 
 // ============================================================================

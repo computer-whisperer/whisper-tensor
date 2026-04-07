@@ -713,6 +713,15 @@ impl SuperGraphNodeModelExecution {
             return Ok(None);
         }
 
+        // Path used for all milestone events emitted by this ModelExecution
+        // call. Built once and shared between direct observer calls and the
+        // CompiledEvalObserverWrapper passed into compiled_eval.
+        let observer_path: Vec<GlobalId> = node_path
+            .iter()
+            .chain(core::iter::once(&self.global_id))
+            .copied()
+            .collect();
+
         // Build user input view map.
         let user_input_view_map: HashMap<
             GlobalId,
@@ -727,7 +736,9 @@ impl SuperGraphNodeModelExecution {
             })
             .collect();
 
-        // Build info_inputs for lowering.
+        // Build info_inputs for lowering. Walks every symbolic-graph tensor;
+        // expensive on every call (see compiled.exec.info_inputs_build).
+        let t_info = Instant::now();
         let (info_inputs, user_input_ext_ids, weight_input_ext_ids) =
             lowered_eval::build_info_inputs(
                 symbolic_graph,
@@ -735,6 +746,13 @@ impl SuperGraphNodeModelExecution {
                 &user_input_view_map,
                 inline_constant_threshold,
             );
+        context.observer.on_compiled_milestone(
+            &observer_path,
+            "compiled.exec.info_inputs_build",
+            None,
+            t_info,
+            Instant::now(),
+        );
 
         let info_hash = lowered_eval::hash_info_inputs(&info_inputs);
 
@@ -764,8 +782,13 @@ impl SuperGraphNodeModelExecution {
                 Some(c) => c,
                 None => return Ok(None),
             };
-            let dt = t0.elapsed();
-            eprintln!("[compiled_eval] lowered in {:.0}ms", dt.as_secs_f64() * 1e3,);
+            context.observer.on_compiled_milestone(
+                &observer_path,
+                "compiled.lower",
+                None,
+                t0,
+                Instant::now(),
+            );
 
             if let Some(caches) = &mut context.caches {
                 caches.lowered_model_cache.insert(sym_graph_id, cached);
@@ -800,9 +823,17 @@ impl SuperGraphNodeModelExecution {
 
         let owned_compiled: Option<compiled_eval::CachedCompiledPlan>;
         if compile_needed {
-            let compiled = match compiled_eval::compile_lowered_model(lower_ref, symbolic_graph) {
-                Some(c) => c,
-                None => return Ok(None),
+            let compiled = {
+                let mut wrapper = compiled_eval::CompiledEvalObserverWrapper::new(
+                    context.observer,
+                    observer_path.clone(),
+                    None,
+                );
+                match compiled_eval::compile_lowered_model(lower_ref, symbolic_graph, &mut wrapper)
+                {
+                    Some(c) => c,
+                    None => return Ok(None),
+                }
             };
             // Drop the immutable borrow before mutable insert.
             let _ = lower_ref;
@@ -838,21 +869,24 @@ impl SuperGraphNodeModelExecution {
                 .expect("compiled plan available")
         };
 
-        let results = compiled_eval::execute_compiled(
-            cached_compiled,
-            cached_lower,
-            symbolic_graph,
-            tensor_store,
-            &user_input_view_map,
-            context.pool,
-        )?;
+        let results = {
+            let mut wrapper = compiled_eval::CompiledEvalObserverWrapper::new(
+                context.observer,
+                observer_path.clone(),
+                None,
+            );
+            compiled_eval::execute_compiled(
+                cached_compiled,
+                cached_lower,
+                symbolic_graph,
+                tensor_store,
+                &user_input_view_map,
+                context.pool,
+                &mut wrapper,
+            )?
+        };
 
         // Feed observer.
-        let observer_path: Vec<GlobalId> = node_path
-            .iter()
-            .chain(core::iter::once(&self.global_id))
-            .copied()
-            .collect();
         for (&tensor_id, tensor) in &results {
             let full_path: Vec<GlobalId> = observer_path
                 .iter()

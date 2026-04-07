@@ -472,6 +472,7 @@ pub fn run_case_via_compiled_eval(case: &TestCase, num_lanes: usize) -> Result<(
             &all_output_atom_ranges,
             num_lanes,
             Some(&lower_result.group_provenance),
+            &mut (), // tests don't observe milestones
         )
         .map_err(|e| format!("{}[{}]: compile failed: {e}", case.name, ds.label))?;
 

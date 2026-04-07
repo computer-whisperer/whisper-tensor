@@ -11,6 +11,7 @@
 //! so that test_set can reuse them without supergraph dependencies.
 
 use std::collections::HashMap;
+use std::time::Instant;
 
 use crate::compiler::attempts::v14::codegen::JitCompiledSpan;
 use crate::compiler::attempts::v14::executor::{
@@ -29,6 +30,73 @@ use crate::symbolic_graph::tensor_store::TensorStore;
 use crate::tensor_rank::DynRank;
 
 use super::lowered_eval::{self, CachedLoweredModel};
+use super::observer::SuperGraphObserver;
+
+// ===========================================================================
+// Compiled-eval observer
+// ===========================================================================
+
+/// Observer for tagged milestones inside the compiled execution path.
+///
+/// Mirrors the per-graph-layer observer pattern (SymbolicGraphObserver,
+/// MilliOpGraphObserver). Compiled execution emits stage events here so that
+/// consumers can build a per-stage timing breakdown without forcing the
+/// compiled path to know about super graph types.
+///
+/// Stage labels are dot-separated, e.g. `compiled.exec.weight_load`,
+/// `compiled.exec.jit`, `compiled.lower`. The `iter` field carries a scan
+/// iteration index when available; it's `None` outside scan loops.
+///
+/// At the super graph boundary, `CompiledEvalObserverWrapper` bridges these
+/// events into `SuperGraphObserver::on_compiled_milestone`.
+pub trait CompiledEvalObserver {
+    fn on_milestone(&mut self, stage: &str, iter: Option<u64>, start: Instant, end: Instant);
+}
+
+impl CompiledEvalObserver for () {
+    fn on_milestone(&mut self, _stage: &str, _iter: Option<u64>, _start: Instant, _end: Instant) {}
+}
+
+/// Bridge a `SuperGraphObserver` into the `CompiledEvalObserver` interface
+/// expected by the compiled execution path. The wrapper carries the owning
+/// super graph node path and an optional scan iteration index, both of which
+/// are forwarded with each milestone event.
+pub struct CompiledEvalObserverWrapper<'a, T: SuperGraphObserver + ?Sized> {
+    inner: &'a mut T,
+    path: Vec<GlobalId>,
+    iter: Option<u64>,
+}
+
+impl<'a, T: SuperGraphObserver + ?Sized> CompiledEvalObserverWrapper<'a, T> {
+    pub fn new(inner: &'a mut T, path: Vec<GlobalId>, iter: Option<u64>) -> Self {
+        Self { inner, path, iter }
+    }
+}
+
+impl<T: SuperGraphObserver + ?Sized> CompiledEvalObserver for CompiledEvalObserverWrapper<'_, T> {
+    fn on_milestone(&mut self, stage: &str, iter: Option<u64>, start: Instant, end: Instant) {
+        // Per-call iter (e.g. inside an inner loop) wins over the wrapper's
+        // default iter (e.g. the scan iteration the wrapper was constructed
+        // with).
+        let iter = iter.or(self.iter);
+        self.inner
+            .on_compiled_milestone(&self.path, stage, iter, start, end);
+    }
+}
+
+/// Helper: time a closure and emit a milestone with the given stage label.
+#[inline]
+pub fn record_stage<R>(
+    obs: &mut dyn CompiledEvalObserver,
+    stage: &str,
+    iter: Option<u64>,
+    f: impl FnOnce() -> R,
+) -> R {
+    let t0 = Instant::now();
+    let result = f();
+    obs.on_milestone(stage, iter, t0, Instant::now());
+    result
+}
 
 /// Cached compiled execution plan for a model.
 pub struct CachedCompiledPlan {
@@ -95,9 +163,10 @@ pub(crate) fn compile_nano_graph(
     all_output_atom_ranges: &[AtomRange],
     num_lanes: usize,
     provenance: Option<&report::GroupProvenance>,
+    obs: &mut dyn CompiledEvalObserver,
 ) -> Result<(ExecutablePlan, PlanSummary, usize), String> {
     // Partition the NanoGraph.
-    let t0 = std::time::Instant::now();
+    let t0 = Instant::now();
     let phases = if num_lanes == 0 {
         // Trivial plan (1 phase, 1 span) for debugging — isolates I/O issues
         // from partitioner issues. Set JIT_LANES=0 to enable.
@@ -126,12 +195,7 @@ pub(crate) fn compile_nano_graph(
             all_output_atom_ranges,
         )
     };
-    eprintln!(
-        "[compiled_eval] partitioned in {:.0}ms ({} phases, {} lanes)",
-        t0.elapsed().as_secs_f64() * 1e3,
-        phases.len(),
-        num_lanes,
-    );
+    obs.on_milestone("compiled.partition", None, t0, Instant::now());
 
     // Extract plan summary before compilation consumes the phases.
     let empty_prov = Vec::new();
@@ -202,11 +266,10 @@ pub(crate) fn compile_nano_graph(
     }
 
     // Compile all spans — JIT where possible, pool_eval fallback for opaque ops.
-    let t0 = std::time::Instant::now();
+    let t0 = Instant::now();
     let mut plan_builder = ExecutablePlanBuilder::new();
     plan_builder.pin_outputs(all_output_atom_ranges);
     let mut compile_errors = 0usize;
-    let mut pool_eval_spans = 0usize;
 
     for (pi, phase) in phases.iter().enumerate() {
         let mut lanes = Vec::new();
@@ -219,7 +282,6 @@ pub(crate) fn compile_nano_graph(
 
             if has_opaque || span.graph.groups().is_empty() && !span.graph.opaque_ops().is_empty() {
                 // Span contains opaque ops — use pool_eval fallback.
-                pool_eval_spans += 1;
                 lanes.push((
                     Box::new(PoolEvalSpan::new(
                         span.graph.clone(),
@@ -264,14 +326,7 @@ pub(crate) fn compile_nano_graph(
     }
 
     let executable_plan = plan_builder.build();
-    let dt = t0.elapsed();
-    eprintln!(
-        "[compiled_eval] compiled {} phases in {:.1}s ({} errors, {} pool_eval fallbacks)",
-        executable_plan.num_phases(),
-        dt.as_secs_f64(),
-        compile_errors,
-        pool_eval_spans,
-    );
+    obs.on_milestone("compiled.compile_phases", None, t0, Instant::now());
 
     Ok((executable_plan, plan_summary, compile_errors))
 }
@@ -458,6 +513,7 @@ pub(crate) fn extract_outputs<'p, P: Pool + 'p>(
 pub fn compile_lowered_model(
     cached: &CachedLoweredModel,
     sym_graph: &crate::symbolic_graph::SymbolicGraph,
+    obs: &mut dyn CompiledEvalObserver,
 ) -> Option<CachedCompiledPlan> {
     let graph = &cached.graph;
 
@@ -496,7 +552,7 @@ pub fn compile_lowered_model(
         Some(&cached.group_provenance)
     };
     let (executable_plan, plan_summary, _compile_errors) =
-        compile_nano_graph(graph, &all_output_atom_ranges, num_lanes, provenance).ok()?;
+        compile_nano_graph(graph, &all_output_atom_ranges, num_lanes, provenance, obs).ok()?;
 
     Some(CachedCompiledPlan {
         info_inputs_hash: cached.info_inputs_hash,
@@ -518,8 +574,11 @@ pub fn execute_compiled<'p, P: Pool + 'p>(
     tensor_store: &TensorStore,
     user_input_views: &HashMap<GlobalId, NumericTensorView<'_, DynRank>>,
     pool: &'p P,
+    obs: &mut dyn CompiledEvalObserver,
 ) -> Result<HashMap<GlobalId, NumericTensor<'p, DynRank, P>>, super::SuperGraphError> {
-    // Load weight tensors from store.
+    // --- Weight load: resolve every stored tensor for inputs not provided by
+    //     the user this iter (constants + weights). Steady-state hot path. ---
+    let t_load = Instant::now();
     let stored_ids: Vec<GlobalId> = cached_lower
         .weight_input_ext_ids
         .iter()
@@ -561,8 +620,10 @@ pub fn execute_compiled<'p, P: Pool + 'p>(
         .iter()
         .map(|(id, t)| (*id, t.view()))
         .collect();
+    obs.on_milestone("compiled.exec.weight_load", None, t_load, Instant::now());
 
-    // Build all views for the shared prepare function.
+    // --- Input prep: relayout each input/weight view to TAMI strides. ---
+    let t_prep = Instant::now();
     let all_views: Vec<(GlobalId, &NumericTensorView<'_, DynRank>)> = user_input_views
         .iter()
         .map(|(&id, v)| (id, v))
@@ -576,27 +637,27 @@ pub fn execute_compiled<'p, P: Pool + 'p>(
         pool,
     )
     .map_err(|e| super::SuperGraphError::InvalidGraph(format!("compiled_eval: {e}")))?;
+    obs.on_milestone("compiled.exec.input_prep", None, t_prep, Instant::now());
 
-    eprintln!(
-        "[compiled_eval] {} initial inputs loaded",
-        initial_inputs.len(),
-    );
-
-    // --- Execute ---
-    let t0 = std::time::Instant::now();
+    // --- JIT execute ---
+    let t_jit = Instant::now();
     let store = compiled.executable_plan.execute_timed(initial_inputs, pool);
-    let dt = t0.elapsed();
-    eprintln!(
-        "[compiled_eval] executed in {:.0}ms",
-        dt.as_secs_f64() * 1e3,
-    );
+    obs.on_milestone("compiled.exec.jit", None, t_jit, Instant::now());
 
     // --- Extract outputs ---
-    extract_outputs(
+    let t_extract = Instant::now();
+    let result = extract_outputs(
         &compiled.output_ranges,
         &compiled.output_shapes,
         &store,
         pool,
     )
-    .map_err(|e| super::SuperGraphError::InvalidGraph(format!("compiled_eval: {e}")))
+    .map_err(|e| super::SuperGraphError::InvalidGraph(format!("compiled_eval: {e}")));
+    obs.on_milestone(
+        "compiled.exec.output_extract",
+        None,
+        t_extract,
+        Instant::now(),
+    );
+    result
 }
