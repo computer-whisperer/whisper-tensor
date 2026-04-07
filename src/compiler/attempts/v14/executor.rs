@@ -14,7 +14,7 @@ use rayon::prelude::*;
 
 use crate::nano_graph::{AtomId, AtomRange};
 use crate::numeric_dtype::NumericDType;
-use crate::numeric_tensor::{NumericTensor, TensorLayout};
+use crate::numeric_tensor::{NumericTensor, NumericTensorCOW, TensorLayout};
 use crate::pool::Pool;
 use crate::tensor_rank::DynRank;
 
@@ -195,19 +195,26 @@ impl CompiledSpanFn for PoolEvalSpan {
 /// The executor builds this once with initial inputs (weights + user data),
 /// then incrementally inserts span outputs after each phase and evicts
 /// entries that no future phase will read.
-pub struct PhaseStore<'p, P: Pool + 'p> {
-    entries: Vec<StoreEntry<'p, P>>,
+///
+/// Entries hold `NumericTensorCOW` rather than owned tensors so that initial
+/// inputs (weights, user data) can flow through as zero-copy borrows from
+/// caller-owned source tensors. Span outputs are always wrapped as
+/// `Cow::Owned`. The `'a` lifetime parameter is the borrow lifetime for any
+/// `Cow::Borrowed` entries; the `'p, P` parameters are the pool lifetime
+/// and pool type for `Cow::Owned` entries.
+pub struct PhaseStore<'a, 'p, P: Pool + 'p> {
+    entries: Vec<StoreEntry<'a, 'p, P>>,
 }
 
-struct StoreEntry<'p, P: Pool + 'p> {
+struct StoreEntry<'a, 'p, P: Pool + 'p> {
     base: u64, // AtomId.0
-    tensor: NumericTensor<'p, DynRank, P>,
+    tensor: NumericTensorCOW<'a, 'p, DynRank, P>,
 }
 
-impl<'p, P: Pool + 'p> PhaseStore<'p, P> {
+impl<'a, 'p, P: Pool + 'p> PhaseStore<'a, 'p, P> {
     /// Create a store from initial inputs.
-    pub fn new(inputs: Vec<(AtomId, NumericTensor<'p, DynRank, P>)>) -> Self {
-        let mut entries: Vec<StoreEntry<'p, P>> = inputs
+    pub fn new(inputs: Vec<(AtomId, NumericTensorCOW<'a, 'p, DynRank, P>)>) -> Self {
+        let mut entries: Vec<StoreEntry<'a, 'p, P>> = inputs
             .into_iter()
             .map(|(base, tensor)| StoreEntry {
                 base: base.0,
@@ -227,7 +234,7 @@ impl<'p, P: Pool + 'p> PhaseStore<'p, P> {
     ///
     /// O(N) per call due to `Vec::insert` shifting. Prefer `insert_batch`
     /// when adding many entries at once (e.g. all outputs of a phase).
-    pub fn insert(&mut self, base: AtomId, tensor: NumericTensor<'p, DynRank, P>) {
+    pub fn insert(&mut self, base: AtomId, tensor: NumericTensorCOW<'a, 'p, DynRank, P>) {
         let pos = self.entries.partition_point(|e| e.base < base.0);
         // If an entry at this exact base exists, replace it.
         if pos < self.entries.len() && self.entries[pos].base == base.0 {
@@ -253,7 +260,10 @@ impl<'p, P: Pool + 'p> PhaseStore<'p, P> {
     /// If multiple new entries share the same base, the **last** one wins,
     /// matching the per-element `insert` semantics. If a new entry's base
     /// matches an existing entry, the new entry replaces it.
-    pub fn insert_batch(&mut self, new_entries: Vec<(AtomId, NumericTensor<'p, DynRank, P>)>) {
+    pub fn insert_batch(
+        &mut self,
+        new_entries: Vec<(AtomId, NumericTensorCOW<'a, 'p, DynRank, P>)>,
+    ) {
         if new_entries.is_empty() {
             return;
         }
@@ -261,7 +271,7 @@ impl<'p, P: Pool + 'p> PhaseStore<'p, P> {
         // Stable sort so that, when two new entries share a base, the one
         // produced later in the input order ends up later in the sorted run
         // — the dedup pass below then keeps it.
-        let mut sorted: Vec<StoreEntry<'p, P>> = new_entries
+        let mut sorted: Vec<StoreEntry<'a, 'p, P>> = new_entries
             .into_iter()
             .map(|(base, tensor)| StoreEntry {
                 base: base.0,
@@ -271,7 +281,7 @@ impl<'p, P: Pool + 'p> PhaseStore<'p, P> {
         sorted.sort_by_key(|e| e.base);
 
         // Collapse adjacent duplicates, keeping the last (latest insert wins).
-        let mut deduped: Vec<StoreEntry<'p, P>> = Vec::with_capacity(sorted.len());
+        let mut deduped: Vec<StoreEntry<'a, 'p, P>> = Vec::with_capacity(sorted.len());
         for entry in sorted {
             if let Some(last) = deduped.last_mut() {
                 if last.base == entry.base {
@@ -285,7 +295,8 @@ impl<'p, P: Pool + 'p> PhaseStore<'p, P> {
 
         // Linear merge of two sorted runs: existing self.entries and `sorted`.
         let existing = std::mem::take(&mut self.entries);
-        let mut merged: Vec<StoreEntry<'p, P>> = Vec::with_capacity(existing.len() + sorted.len());
+        let mut merged: Vec<StoreEntry<'a, 'p, P>> =
+            Vec::with_capacity(existing.len() + sorted.len());
         let mut e_iter = existing.into_iter();
         let mut s_iter = sorted.into_iter();
         let mut e_cur = e_iter.next();
@@ -411,7 +422,7 @@ impl<'p, P: Pool + 'p> PhaseStore<'p, P> {
     }
 
     /// Extract a tensor from the store by base AtomId.
-    pub fn get(&self, base: AtomId) -> Option<&NumericTensor<'p, DynRank, P>> {
+    pub fn get(&self, base: AtomId) -> Option<&NumericTensorCOW<'a, 'p, DynRank, P>> {
         let pos = self.entries.partition_point(|e| e.base < base.0);
         if pos < self.entries.len() && self.entries[pos].base == base.0 {
             Some(&self.entries[pos].tensor)
@@ -421,7 +432,7 @@ impl<'p, P: Pool + 'p> PhaseStore<'p, P> {
     }
 
     /// Iterate all entries (for output extraction).
-    pub fn iter(&self) -> impl Iterator<Item = (AtomId, &NumericTensor<'p, DynRank, P>)> {
+    pub fn iter(&self) -> impl Iterator<Item = (AtomId, &NumericTensorCOW<'a, 'p, DynRank, P>)> {
         self.entries.iter().map(|e| (AtomId(e.base), &e.tensor))
     }
 
@@ -572,11 +583,11 @@ impl ExecutablePlanBuilder {
 
 impl ExecutablePlan {
     /// Execute the plan, returning the value store.
-    pub fn execute<'p, P: Pool + 'p>(
+    pub fn execute<'a, 'p, P: Pool + 'p>(
         &self,
-        initial_inputs: Vec<(AtomId, NumericTensor<'p, DynRank, P>)>,
+        initial_inputs: Vec<(AtomId, NumericTensorCOW<'a, 'p, DynRank, P>)>,
         pool: &'p P,
-    ) -> PhaseStore<'p, P> {
+    ) -> PhaseStore<'a, 'p, P> {
         let mut store = PhaseStore::new(initial_inputs);
 
         for (pi, phase) in self.phases.iter().enumerate() {
@@ -588,9 +599,13 @@ impl ExecutablePlan {
                 .collect();
 
             // Barrier: merge all outputs into store via a single batched
-            // sort+linear-merge (much cheaper than per-element insert).
-            let flat: Vec<(AtomId, NumericTensor<'p, DynRank, P>)> =
-                phase_outputs.into_iter().flatten().collect();
+            // sort+linear-merge (much cheaper than per-element insert). Phase
+            // outputs are JIT-allocated, owned tensors → wrap as Cow::Owned.
+            let flat: Vec<(AtomId, NumericTensorCOW<'a, 'p, DynRank, P>)> = phase_outputs
+                .into_iter()
+                .flatten()
+                .map(|(id, t)| (id, NumericTensorCOW::Owned(t)))
+                .collect();
             store.insert_batch(flat);
 
             // Evict entries no longer needed by future phases.
@@ -601,11 +616,11 @@ impl ExecutablePlan {
     }
 
     /// Execute with per-phase timing diagnostics.
-    pub fn execute_timed<'p, P: Pool + 'p>(
+    pub fn execute_timed<'a, 'p, P: Pool + 'p>(
         &self,
-        initial_inputs: Vec<(AtomId, NumericTensor<'p, DynRank, P>)>,
+        initial_inputs: Vec<(AtomId, NumericTensorCOW<'a, 'p, DynRank, P>)>,
         pool: &'p P,
-    ) -> PhaseStore<'p, P> {
+    ) -> PhaseStore<'a, 'p, P> {
         let mut store = PhaseStore::new(initial_inputs);
         let mut total_spans = std::time::Duration::ZERO;
         let mut total_merge = std::time::Duration::ZERO;
@@ -622,8 +637,11 @@ impl ExecutablePlan {
             total_spans += spans_dt;
 
             let t0 = Instant::now();
-            let flat: Vec<(AtomId, NumericTensor<'p, DynRank, P>)> =
-                phase_outputs.into_iter().flatten().collect();
+            let flat: Vec<(AtomId, NumericTensorCOW<'a, 'p, DynRank, P>)> = phase_outputs
+                .into_iter()
+                .flatten()
+                .map(|(id, t)| (id, NumericTensorCOW::Owned(t)))
+                .collect();
             let n_outputs = flat.len();
             store.insert_batch(flat);
             let merge_dt = t0.elapsed();
@@ -671,9 +689,9 @@ impl ExecutablePlan {
 }
 
 /// Execute a single lane: gather inputs, run span, return outputs.
-fn execute_lane<'p, P: Pool + 'p>(
+fn execute_lane<'a, 'p, P: Pool + 'p>(
     lane: &ExecutableLane,
-    store: &PhaseStore<'p, P>,
+    store: &PhaseStore<'a, 'p, P>,
     pool: &'p P,
 ) -> Vec<(AtomId, NumericTensor<'p, DynRank, P>)> {
     // Gather all input slices for this lane's declared input ranges.

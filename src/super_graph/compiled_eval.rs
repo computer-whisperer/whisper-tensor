@@ -24,7 +24,7 @@ use crate::graph::GlobalId;
 use crate::nano_graph::AtomId;
 use crate::nano_graph::lower::TensorAtomMapInfo;
 use crate::nano_graph::pattern::{AtomRange, NanoGraph};
-use crate::numeric_tensor::{NumericTensor, NumericTensorView, TensorLayout};
+use crate::numeric_tensor::{NumericTensor, NumericTensorCOW, NumericTensorView, TensorLayout};
 use crate::pool::{Pool, SystemPool};
 use crate::symbolic_graph::TensorType;
 use crate::symbolic_graph::tensor_store::TensorStore;
@@ -340,12 +340,21 @@ pub(crate) fn compile_nano_graph(
     Ok((executable_plan, plan_summary, compile_errors))
 }
 
-/// Relayout a tensor view to match a TAMI's atom ordering and return as flat 1D.
-pub(crate) fn relayout_to_flat<'p, P: Pool + 'p>(
+/// Relayout a tensor view to match a TAMI's atom ordering and return as a
+/// flat 1D Cow.
+///
+/// On the matched-layout fast path (the common case for unrearranged
+/// weights), the returned Cow is `Borrowed` — no allocation, no copy. The
+/// borrow lifetime `'a` matches the input view's data lifetime, so callers
+/// must keep the source view alive for at least as long as the Cow.
+///
+/// On the rearrange path, the returned Cow is `Owned` and carries a fresh
+/// pool-allocated buffer with the rearranged bytes.
+pub(crate) fn relayout_to_flat<'a, 'p, P: Pool + 'p>(
     tami: &TensorAtomMapInfo,
-    view: &NumericTensorView<'_, DynRank>,
+    view: &NumericTensorView<'a, DynRank>,
     pool: &'p P,
-) -> Result<NumericTensor<'p, DynRank, P>, String> {
+) -> Result<NumericTensorCOW<'a, 'p, DynRank, P>, String> {
     let element_bits = tami.dtype.total_bits() as u64;
     let strides_bits: Vec<u64> = tami
         .known_strides
@@ -359,28 +368,27 @@ pub(crate) fn relayout_to_flat<'p, P: Pool + 'p>(
         offset_bits: 0,
     };
 
+    // `relayout` returns Borrowed when the source view's bytes are already
+    // in target order — that's the no-rearrange fast path. Either way, the
+    // result is wrapped as flat 1D for the executor's atom-keyed store.
     let cow = view
         .relayout(target, pool)
         .map_err(|e| format!("relayout failed: {e}"))?;
 
-    // The relayouted buffer's bytes are in atom order. Wrap as flat 1D.
     let flat_layout = TensorLayout::<DynRank>::row_major(vec![tami.count], tami.dtype);
     match cow {
-        crate::numeric_tensor::NumericTensorCOW::Borrowed(borrow_view) => {
-            // Need to copy since we need an owned tensor.
-            let buf = pool
-                .allocate(flat_layout.buffer_size_bytes())
-                .map_err(|e| format!("alloc failed: {e}"))?;
-            let mut tensor = NumericTensor::from_parts(buf, flat_layout);
-            let src = borrow_view.data();
-            let dst = tensor.buffer_mut();
-            let len = src.len().min(dst.len());
-            dst[..len].copy_from_slice(&src[..len]);
-            Ok(tensor)
+        NumericTensorCOW::Borrowed(borrow_view) => {
+            // Zero-copy: reinterpret the borrow's data as flat 1D and pass
+            // it through. The byte slice is unchanged; only the layout
+            // descriptor is replaced.
+            Ok(NumericTensorCOW::Borrowed(NumericTensorView::new(
+                borrow_view.data(),
+                flat_layout,
+            )))
         }
-        crate::numeric_tensor::NumericTensorCOW::Owned(owned) => {
+        NumericTensorCOW::Owned(owned) => {
             // Already owned — reinterpret as flat 1D (zero-cost layout change).
-            Ok(owned.into_layout(flat_layout))
+            Ok(NumericTensorCOW::Owned(owned.into_layout(flat_layout)))
         }
     }
 }
@@ -389,15 +397,17 @@ pub(crate) fn relayout_to_flat<'p, P: Pool + 'p>(
 ///
 /// For each (ext_id, view) pair, resolves the external ID to a TAMI via
 /// `input_map` + `tensor_map`, relayouts the view to match TAMI strides,
-/// and returns flat 1D tensors keyed by base AtomId.
+/// and returns flat 1D Cow tensors keyed by base AtomId. The Cow propagates
+/// the borrow when the source view's layout already matches the target,
+/// avoiding the wasted alloc+copy that happened when this returned owned.
 #[allow(clippy::type_complexity)]
-pub(crate) fn prepare_compiled_inputs<'p, P: Pool + 'p>(
-    all_views: &[(GlobalId, &NumericTensorView<'_, DynRank>)],
+pub(crate) fn prepare_compiled_inputs<'a, 'p, P: Pool + 'p>(
+    all_views: &[(GlobalId, &NumericTensorView<'a, DynRank>)],
     input_map: &HashMap<GlobalId, GlobalId>,
     tensor_map: &HashMap<GlobalId, TensorAtomMapInfo>,
     pool: &'p P,
-) -> Result<Vec<(AtomId, NumericTensor<'p, DynRank, P>)>, String> {
-    let mut initial_inputs: Vec<(AtomId, NumericTensor<'p, DynRank, P>)> = Vec::new();
+) -> Result<Vec<(AtomId, NumericTensorCOW<'a, 'p, DynRank, P>)>, String> {
+    let mut initial_inputs: Vec<(AtomId, NumericTensorCOW<'a, 'p, DynRank, P>)> = Vec::new();
 
     for &(ext_id, view) in all_views {
         let internal_id = input_map.get(&ext_id).copied().unwrap_or(ext_id);
@@ -442,6 +452,12 @@ pub(crate) fn prepare_compiled_inputs<'p, P: Pool + 'p>(
                     known_dims: seg_dims,
                     segments: vec![],
                 };
+                // `sliced` is a stack-local NumericTensorView whose data
+                // borrow lifetime matches `view`'s `'a`. relayout_to_flat
+                // either returns Borrowed (with that same `'a` data ptr) or
+                // Owned (allocated in pool). For the segmented Borrowed
+                // case the resulting Cow's `'a` is `view`'s `'a` — sliced
+                // itself is dropped but its underlying bytes belong to `view`.
                 let flat = relayout_to_flat(&seg_tami, &sliced, pool)?;
                 initial_inputs.push((seg_base, flat));
             }
@@ -452,10 +468,10 @@ pub(crate) fn prepare_compiled_inputs<'p, P: Pool + 'p>(
 }
 
 /// Extract output tensors from the PhaseStore after execution.
-pub(crate) fn extract_outputs<'p, P: Pool + 'p>(
+pub(crate) fn extract_outputs<'a, 'p, P: Pool + 'p>(
     output_ranges: &[(GlobalId, Vec<AtomRange>)],
     output_shapes: &[(GlobalId, Vec<u64>)],
-    store: &PhaseStore<'p, P>,
+    store: &PhaseStore<'a, 'p, P>,
     pool: &'p P,
 ) -> Result<HashMap<GlobalId, NumericTensor<'p, DynRank, P>>, String> {
     let mut results: HashMap<GlobalId, NumericTensor<'p, DynRank, P>> = HashMap::new();

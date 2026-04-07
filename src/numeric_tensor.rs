@@ -571,7 +571,7 @@ impl<'a, R: Rank> NumericTensorView<'a, R> {
         &self.layout
     }
 
-    pub fn data(&self) -> &[u8] {
+    pub fn data(&self) -> &'a [u8] {
         self.data
     }
 

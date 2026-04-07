@@ -1123,6 +1123,7 @@ fn main() {
 fn lookup_atom_in_store(
     store: &whisper_tensor::compiler::attempts::v14::executor::PhaseStore<
         '_,
+        '_,
         impl whisper_tensor::pool::Pool,
     >,
     atom: u64,
