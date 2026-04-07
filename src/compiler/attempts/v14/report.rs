@@ -95,10 +95,12 @@ pub fn text_report(
             .iter()
             .map(|s| s.graph.groups().iter().map(|g| g.count).sum())
             .collect();
+        // Imbalance: max lane vs perfectly even split across all lanes.
+        // 1.0 = balanced; num_lanes = all work on one lane.
         let max_lane = *lane_atoms.iter().max().unwrap_or(&0);
-        let min_lane = *lane_atoms.iter().filter(|&&a| a > 0).min().unwrap_or(&1);
-        let imbalance = if min_lane > 0 {
-            max_lane as f64 / min_lane as f64
+        let num_lanes_total = lane_atoms.len() as u64;
+        let imbalance = if phase_compute_atoms > 0 && num_lanes_total > 0 {
+            (max_lane as f64 * num_lanes_total as f64) / phase_compute_atoms as f64
         } else {
             0.0
         };
@@ -464,7 +466,9 @@ pub struct PhaseSummary {
     pub compute_atoms: u64,
     pub input_atoms: u64,
     pub output_atoms: u64,
-    /// max_lane_atoms / min_lane_atoms ratio.
+    /// Imbalance ratio: max_lane_atoms / (compute_atoms / num_lanes).
+    /// 1.0 = perfectly balanced across all lanes.
+    /// num_lanes = all work parked on a single lane.
     pub balance: f64,
     pub lanes: Vec<LaneSummary>,
 }
@@ -584,14 +588,14 @@ pub fn summarize_plan(
         total_input_atoms += phase_input;
         total_output_atoms += phase_output;
 
+        // Imbalance metric: ratio of busiest lane to a perfectly even split
+        // across ALL lanes (including idle ones). 1.0 = perfectly balanced;
+        // num_lanes = all work on one lane. This catches single-lane phases
+        // that the old max/min-nonzero formula misreported as 1.0x.
         let max_lane = *lane_atoms_vec.iter().max().unwrap_or(&0);
-        let min_lane = *lane_atoms_vec
-            .iter()
-            .filter(|&&a| a > 0)
-            .min()
-            .unwrap_or(&1);
-        let balance = if min_lane > 0 {
-            max_lane as f64 / min_lane as f64
+        let num_lanes_total = lane_atoms_vec.len() as u64;
+        let balance = if phase_compute > 0 && num_lanes_total > 0 {
+            (max_lane as f64 * num_lanes_total as f64) / phase_compute as f64
         } else {
             0.0
         };
