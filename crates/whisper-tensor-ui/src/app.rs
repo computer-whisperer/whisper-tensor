@@ -730,62 +730,78 @@ impl WebUIApp {
 
                             // Nano op breakdown
                             if !model.groups_by_op.is_empty() {
-                                ui.collapsing("Nano op breakdown", |ui| {
-                                    let mut ops: Vec<_> = model.groups_by_op.iter().collect();
-                                    ops.sort_by(|a, b| b.1.cmp(a.1));
-                                    egui::Grid::new(format!(
-                                        "nano_ops_{}_{}",
+                                egui::CollapsingHeader::new("Nano op breakdown")
+                                    .id_salt(format!(
+                                        "lowered_nano_{}_{}",
                                         entry.cache_key, model.graph_id
                                     ))
-                                    .striped(true)
                                     .show(ui, |ui| {
-                                        ui.strong("Op");
-                                        ui.strong("Count");
-                                        ui.end_row();
-                                        for (op, count) in &ops {
-                                            ui.label(*op);
-                                            ui.label(count.to_string());
+                                        let mut ops: Vec<_> = model.groups_by_op.iter().collect();
+                                        ops.sort_by(|a, b| b.1.cmp(a.1));
+                                        egui::Grid::new(format!(
+                                            "nano_ops_{}_{}",
+                                            entry.cache_key, model.graph_id
+                                        ))
+                                        .striped(true)
+                                        .show(ui, |ui| {
+                                            ui.strong("Op");
+                                            ui.strong("Count");
                                             ui.end_row();
-                                        }
+                                            for (op, count) in &ops {
+                                                ui.label(*op);
+                                                ui.label(count.to_string());
+                                                ui.end_row();
+                                            }
+                                        });
                                     });
-                                });
                             }
 
                             // Milli op census
                             if !model.milli_op_census.is_empty() {
-                                ui.collapsing("Milli op census", |ui| {
-                                    let mut ops: Vec<_> = model.milli_op_census.iter().collect();
-                                    ops.sort_by(|a, b| b.1.1.cmp(&a.1.1));
-                                    egui::Grid::new(format!(
-                                        "milli_ops_{}_{}",
+                                egui::CollapsingHeader::new("Milli op census")
+                                    .id_salt(format!(
+                                        "lowered_milli_{}_{}",
                                         entry.cache_key, model.graph_id
                                     ))
-                                    .striped(true)
                                     .show(ui, |ui| {
-                                        ui.strong("Milli Op");
-                                        ui.strong("Groups");
-                                        ui.strong("Atoms");
-                                        ui.end_row();
-                                        for (op, (groups, atoms)) in &ops {
-                                            ui.label(*op);
-                                            ui.label(groups.to_string());
-                                            ui.label(atoms.to_string());
+                                        let mut ops: Vec<_> =
+                                            model.milli_op_census.iter().collect();
+                                        ops.sort_by(|a, b| b.1.1.cmp(&a.1.1));
+                                        egui::Grid::new(format!(
+                                            "milli_ops_{}_{}",
+                                            entry.cache_key, model.graph_id
+                                        ))
+                                        .striped(true)
+                                        .show(ui, |ui| {
+                                            ui.strong("Milli Op");
+                                            ui.strong("Groups");
+                                            ui.strong("Atoms");
                                             ui.end_row();
-                                        }
+                                            for (op, (groups, atoms)) in &ops {
+                                                ui.label(*op);
+                                                ui.label(groups.to_string());
+                                                ui.label(atoms.to_string());
+                                                ui.end_row();
+                                            }
+                                        });
                                     });
-                                });
                             }
 
                             // Unsupported ops
                             if !model.unsupported.is_empty() {
-                                ui.collapsing(
-                                    format!("Unsupported ops ({})", model.unsupported.len()),
-                                    |ui| {
-                                        for detail in &model.unsupported_details {
-                                            ui.label(detail);
-                                        }
-                                    },
-                                );
+                                egui::CollapsingHeader::new(format!(
+                                    "Unsupported ops ({})",
+                                    model.unsupported.len()
+                                ))
+                                .id_salt(format!(
+                                    "lowered_unsup_{}_{}",
+                                    entry.cache_key, model.graph_id
+                                ))
+                                .show(ui, |ui| {
+                                    for detail in &model.unsupported_details {
+                                        ui.label(detail);
+                                    }
+                                });
                             }
                         });
                     }
@@ -831,39 +847,52 @@ impl WebUIApp {
 
                             // Milli op census
                             if !s.milli_op_census.is_empty() {
-                                ui.collapsing("Milli op census", |ui| {
-                                    egui::Grid::new(format!(
+                                egui::CollapsingHeader::new("Milli op census")
+                                    .id_salt(format!(
                                         "compiled_milli_{}_{}",
                                         entry.cache_key, plan.graph_id
                                     ))
-                                    .striped(true)
                                     .show(ui, |ui| {
-                                        ui.strong("Milli Op");
-                                        ui.strong("Groups");
-                                        ui.strong("Atoms");
-                                        ui.end_row();
-                                        for (op, groups, atoms) in &s.milli_op_census {
-                                            ui.label(op);
-                                            ui.label(groups.to_string());
-                                            ui.label(atoms.to_string());
+                                        egui::Grid::new(format!(
+                                            "compiled_milli_grid_{}_{}",
+                                            entry.cache_key, plan.graph_id
+                                        ))
+                                        .striped(true)
+                                        .show(ui, |ui| {
+                                            ui.strong("Milli Op");
+                                            ui.strong("Groups");
+                                            ui.strong("Atoms");
                                             ui.end_row();
-                                        }
+                                            for (op, groups, atoms) in &s.milli_op_census {
+                                                ui.label(op);
+                                                ui.label(groups.to_string());
+                                                ui.label(atoms.to_string());
+                                                ui.end_row();
+                                            }
+                                        });
                                     });
-                                });
                             }
 
                             // Per-phase breakdown
-                            ui.collapsing(format!("Phases ({})", s.phases.len()), |ui| {
-                                for (pi, phase) in s.phases.iter().enumerate() {
-                                    ui.collapsing(
-                                        format!(
+                            egui::CollapsingHeader::new(format!("Phases ({})", s.phases.len()))
+                                .id_salt(format!(
+                                    "compiled_phases_{}_{}",
+                                    entry.cache_key, plan.graph_id
+                                ))
+                                .show(ui, |ui| {
+                                    for (pi, phase) in s.phases.iter().enumerate() {
+                                        egui::CollapsingHeader::new(format!(
                                             "Phase {}: {} groups, {} atoms, balance {:.1}x",
                                             pi,
                                             phase.num_groups,
                                             phase.compute_atoms,
                                             phase.balance,
-                                        ),
-                                        |ui| {
+                                        ))
+                                        .id_salt(format!(
+                                            "compiled_phase_{}_{}_{}",
+                                            entry.cache_key, plan.graph_id, pi
+                                        ))
+                                        .show(ui, |ui| {
                                             egui::Grid::new(format!(
                                                 "phase_{}_{}_{}",
                                                 entry.cache_key, plan.graph_id, pi
@@ -910,10 +939,9 @@ impl WebUIApp {
                                                     }
                                                 },
                                             );
-                                        },
-                                    );
-                                }
-                            });
+                                        });
+                                    }
+                                });
                         });
                     }
                 }
