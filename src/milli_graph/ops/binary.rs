@@ -1344,24 +1344,24 @@ impl MatMul {
             // Input 1: B elements for all K*N positions in the merged group.
             // Atom j reads B[k=j/N, n=j%N].
             // With physical strides: offset = k * b_k_stride + n * b_n_stride.
-            // If B is row-major (b_k_stride=N, b_n_stride=1), this simplifies to Affine{stride:1}.
             let b_k_known_idx = b_known_dims.len() - 2;
             let b_n_known_idx = b_known_dims.len() - 1;
             let b_k_stride = b_strides[b_k_known_idx];
             let b_n_stride = b_strides[b_n_known_idx];
             let input_b = if b_k_stride == n_u64 && b_n_stride == 1 {
-                // Row-major B: simple affine.
+                // Row-major B: 1D affine. Kept as a special case so the
+                // partitioner's matmul relayout pattern still matches.
                 InputRef::affine(b_base, 1)
             } else {
-                // Non-row-major B: build explicit mapping.
-                let mut ids = Vec::with_capacity(merged_mul_count as usize);
-                for j in 0..merged_mul_count {
-                    let k_idx = j / n_u64;
-                    let n_idx = j % n_u64;
-                    let offset = k_idx * b_k_stride + n_idx * b_n_stride;
-                    ids.push(b_base.offset(offset));
+                // Non-row-major B (e.g. transposed): use 2D Strided so the
+                // partitioner can still split the Mul group across lanes.
+                // Atom j = k*N + n decomposes as: outer = k = j/N (stride
+                // b_k_stride), inner = n = j%N (stride b_n_stride).
+                InputRef::Strided {
+                    base: b_base,
+                    dim_strides: vec![b_k_stride as i64, b_n_stride as i64],
+                    dim_shape: vec![u64::MAX, n_u64],
                 }
-                crate::nano_graph::NanoLoweringContext::<'_, '_, P>::compress_explicit(ids)
             };
 
             let base = ctx.nano.push_group(
