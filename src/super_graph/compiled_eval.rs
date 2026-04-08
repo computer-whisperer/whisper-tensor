@@ -285,6 +285,12 @@ pub(crate) fn compile_nano_graph(
     }
     let mut span_records: Vec<CompileSpanRecord> = Vec::new();
 
+    // X86_JIT span coverage stats: only enabled when X86_JIT is set, and the
+    // summary is printed at the end of compile_phases.
+    if std::env::var("X86_JIT").is_ok() {
+        x86_jit_stats::enable();
+    }
+
     for (pi, phase) in phases.iter().enumerate() {
         let mut lanes = Vec::new();
         for (si, span) in phase.spans.iter().enumerate() {
@@ -364,6 +370,10 @@ pub(crate) fn compile_nano_graph(
         print_compile_profile(&span_records);
     }
 
+    if std::env::var("X86_JIT").is_ok() {
+        x86_jit_stats::print_summary();
+    }
+
     Ok((executable_plan, plan_summary, compile_errors))
 }
 
@@ -385,8 +395,12 @@ fn compile_one_span_native(
     {
         if std::env::var("X86_JIT").is_ok() {
             match crate::compiler::attempts::v14::x86_jit::X86JitSpan::compile(graph, outputs) {
-                Ok(s) => return Ok(Box::new(s) as Box<dyn CompiledSpanFn>),
+                Ok(s) => {
+                    x86_jit_stats::record_accept();
+                    return Ok(Box::new(s) as Box<dyn CompiledSpanFn>);
+                }
                 Err(e) => {
+                    x86_jit_stats::record_fallback(&e);
                     if std::env::var("X86_JIT_STRICT").is_ok() {
                         return Err(format!("X86_JIT_STRICT: {e}"));
                     }
@@ -396,6 +410,85 @@ fn compile_one_span_native(
         }
     }
     JitCompiledSpan::compile(graph, outputs).map(|s| Box::new(s) as Box<dyn CompiledSpanFn>)
+}
+
+/// Per-process counters of which backend handled each span. Reset per
+/// `compile_nano_graph` call (the printer prints + resets at the end of the
+/// model compile).
+#[cfg(feature = "x86_compile")]
+mod x86_jit_stats {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    static STATE: Mutex<Option<State>> = Mutex::new(None);
+
+    struct State {
+        accepted: usize,
+        fallback: usize,
+        /// First-line of the err message → count, for grouping common
+        /// reject reasons.
+        reasons: HashMap<String, usize>,
+    }
+
+    pub(super) fn enable() {
+        let mut g = STATE.lock().unwrap();
+        *g = Some(State {
+            accepted: 0,
+            fallback: 0,
+            reasons: HashMap::new(),
+        });
+    }
+
+    pub(super) fn record_accept() {
+        if let Some(st) = STATE.lock().unwrap().as_mut() {
+            st.accepted += 1;
+        }
+    }
+
+    pub(super) fn record_fallback(err: &str) {
+        if let Some(st) = STATE.lock().unwrap().as_mut() {
+            st.fallback += 1;
+            // Strip the leading "x86_jit: group N " prefix so spans with
+            // different group indices but the same reason group together.
+            let key = err
+                .strip_prefix("x86_jit: ")
+                .unwrap_or(err)
+                .splitn(3, ' ')
+                .nth(2)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| err.to_string());
+            *st.reasons.entry(key).or_insert(0) += 1;
+        }
+    }
+
+    pub(super) fn print_summary() {
+        let mut g = STATE.lock().unwrap();
+        if let Some(st) = g.take() {
+            let total = st.accepted + st.fallback;
+            if total == 0 {
+                return;
+            }
+            eprintln!();
+            eprintln!(
+                "=== X86_JIT span coverage: {}/{} ({:.1}%) accepted, {} fallback ===",
+                st.accepted,
+                total,
+                100.0 * st.accepted as f64 / total as f64,
+                st.fallback,
+            );
+            let mut reasons: Vec<_> = st.reasons.into_iter().collect();
+            reasons.sort_by_key(|(_, c)| std::cmp::Reverse(*c));
+            for (reason, count) in reasons.into_iter().take(10) {
+                eprintln!("  {count:>6}  {reason}");
+            }
+        }
+    }
+}
+
+#[cfg(not(feature = "x86_compile"))]
+mod x86_jit_stats {
+    pub(super) fn enable() {}
+    pub(super) fn print_summary() {}
 }
 
 #[derive(Clone)]

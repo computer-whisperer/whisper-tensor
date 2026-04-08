@@ -225,6 +225,25 @@ fn libm_erf(x: f64) -> f64 {
     sign * y
 }
 
+// F16 conversion trampolines.
+//
+// We don't try to inline F16 expand/narrow — IEEE 754 half-precision has
+// enough special-case handling (denormal subnormals, infinities, NaN
+// propagation, RTNE rounding on the way down) that the inline path runs
+// to ~25 instructions per direction. The half crate is already a workspace
+// dependency, so we delegate.
+//
+// `from_bits` takes a u16 — under System V the u16 lives in `di`, with the
+// upper bytes of edi implementation-defined. half::f16::from_bits ignores
+// them, so callers can pass any zero/one-extended value.
+extern "C" fn jit_f16_to_f32(bits: u16) -> f32 {
+    half::f16::from_bits(bits).to_f32()
+}
+
+extern "C" fn jit_f32_to_f16(x: f32) -> u16 {
+    half::f16::from_f32(x).to_bits()
+}
+
 // ─── Compute representation ─────────────────────────────────────────────────
 
 /// How a group's value lives in registers during compute.
@@ -589,13 +608,16 @@ fn check_supported(
 
 /// Native storage dtypes the x86_jit backend can load and store.
 ///
-/// BF16/F16 are deferred to P3. Sub-byte ints (I4/U4) are deferred. The full
-/// integer width matrix (I64/I32/I16/I8/U64/U32/U16/U8 + Bool) is supported.
+/// BF16 expands inline (3 ins load, 7 ins store with RTNE). F16 goes through
+/// an extern trampoline using the `half` crate (P3 software path; F16C
+/// inline fast path is a follow-up). Sub-byte ints (I4/U4) remain deferred.
 fn is_supported_storage_dtype(dtype: NumericDType) -> bool {
     matches!(
         dtype,
         NumericDType::F32
             | NumericDType::F64
+            | NumericDType::BF16
+            | NumericDType::F16
             | NumericDType::I64
             | NumericDType::U64
             | NumericDType::I32
@@ -763,14 +785,18 @@ fn emit_native(
 
 /// System V AMD64 function prologue.
 ///
-/// Stack layout after prologue:
+/// Stack layout after prologue (relative to the new rsp):
 /// ```text
-///   [rbp+0]   saved rbp
-///   [rbp-8]   saved r12 (we use r12 for buffer pointer)
-///   [rbp-16]  saved r13 (we use r13 for loop variable)
-///   [rbp-24]  saved r14 (we use r14 for loop end constant)
-///   [rsp+0..7]   8 bytes pad to keep rsp 16-aligned for calls
+///   [rsp+ 0..7]   IMod fmod scratch (saved divisor across the libm call)
+///   [rsp+ 8..11]  F16-load xmm0 spill slot
+///   [rsp+12..15]  F16-load xmm1 spill slot
+///   [rsp+16..19]  F16-load xmm2 spill slot
+///   [rsp+20..23]  padding (rounds the frame to a 16-byte multiple)
 /// ```
+///
+/// Saved callee-saved regs (rbp/r12/r13/r14) sit above [rsp+24]. The frame
+/// ends 16-byte aligned so any `call` we issue inside the body lands the
+/// caller's return address at +8 mod 16.
 fn emit_prologue(ops: &mut Assembler) {
     dynasm!(ops
         ; .arch x64
@@ -779,7 +805,7 @@ fn emit_prologue(ops: &mut Assembler) {
         ; push r12
         ; push r13
         ; push r14
-        ; sub rsp, BYTE 8       // align rsp to 16 (entry was +8 mod 16)
+        ; sub rsp, BYTE 24      // 4 pushes + return addr = 40 bytes; 40+24 = 64 ≡ 0 mod 16
         ; mov r12, rdi          // r12 = buffer pointer
     );
 }
@@ -787,13 +813,42 @@ fn emit_prologue(ops: &mut Assembler) {
 fn emit_epilogue(ops: &mut Assembler) {
     dynasm!(ops
         ; .arch x64
-        ; add rsp, BYTE 8
+        ; add rsp, BYTE 24
         ; pop r14
         ; pop r13
         ; pop r12
         ; pop rbp
         ; ret
     );
+}
+
+/// Stack offsets for the F16-load spill slots. Each holds an f32 (4 bytes).
+/// Used by emit_group_body_f32 to preserve xmm0/xmm1 across F16 extern-call
+/// loads that would otherwise clobber them.
+const F16_SPILL_XMM0: i32 = 8;
+const F16_SPILL_XMM1: i32 = 12;
+const F16_SPILL_XMM2: i32 = 16;
+
+/// Returns true if loading this input requires an extern call (currently
+/// only F16, which goes through `jit_f16_to_f32`). Used by binop/select
+/// emission to decide whether prior xmm values need spilling.
+fn input_load_clobbers_xmm(input: &InputRef, layout: &BufferLayout, atom_offset: u64) -> bool {
+    let dtype = match input {
+        InputRef::Broadcast(atom) => layout.find(*atom).map(|(s, _)| s.dtype),
+        InputRef::Strided {
+            base, dim_strides, ..
+        } => {
+            let stride = dim_strides[0];
+            let first_offset = stride * atom_offset as i64;
+            let first_atom = AtomId((base.0 as i64 + first_offset) as u64);
+            layout
+                .find(*base)
+                .or_else(|| layout.find(first_atom))
+                .map(|(s, _)| s.dtype)
+        }
+        InputRef::Explicit(_) => None,
+    };
+    matches!(dtype, Some(NumericDType::F16))
 }
 
 /// Emit one group as either a counted loop (count > 1) or inline body (count == 1).
@@ -1012,6 +1067,10 @@ fn emit_group_body_f32(
 
         ScalarOp::Binary { op, .. } => {
             // a → xmm0, b → xmm1, op(xmm0, xmm1) → xmm0, store xmm0.
+            //
+            // F16 loads go through an extern call which clobbers xmm0. If
+            // input[1] is F16, save a to a stack spill slot before the b
+            // load and restore it afterwards.
             emit_load_f32(
                 ops,
                 &group.inputs[0],
@@ -1021,6 +1080,10 @@ fn emit_group_body_f32(
                 group.atom_offset,
                 0,
             )?;
+            let needs_spill = input_load_clobbers_xmm(&group.inputs[1], layout, group.atom_offset);
+            if needs_spill {
+                dynasm!(ops ; .arch x64 ; movss DWORD [rsp + F16_SPILL_XMM0], xmm0);
+            }
             emit_load_f32(
                 ops,
                 &group.inputs[1],
@@ -1030,6 +1093,9 @@ fn emit_group_body_f32(
                 group.atom_offset,
                 1,
             )?;
+            if needs_spill {
+                dynasm!(ops ; .arch x64 ; movss xmm0, DWORD [rsp + F16_SPILL_XMM0]);
+            }
             emit_binop_f32(ops, *op);
             emit_store_f32(ops, &out_slot, in_loop, i_const, group.atom_offset, 0);
         }
@@ -1052,7 +1118,9 @@ fn emit_group_body_f32(
         ScalarOp::Select => {
             // cond → xmm0, x → xmm1, y → xmm2.
             // result = (cond != 0) ? x : y.
-            // Emit as: cmp xmm0 vs 0; if nonzero, xmm1 → xmm0; else xmm2 → xmm0.
+            //
+            // Each subsequent load may clobber prior xmm registers if it's
+            // an F16 extern call. Spill what we need to preserve.
             emit_load_f32(
                 ops,
                 &group.inputs[0],
@@ -1062,6 +1130,11 @@ fn emit_group_body_f32(
                 group.atom_offset,
                 0,
             )?;
+            let x_clobbers = input_load_clobbers_xmm(&group.inputs[1], layout, group.atom_offset);
+            let y_clobbers = input_load_clobbers_xmm(&group.inputs[2], layout, group.atom_offset);
+            if x_clobbers || y_clobbers {
+                dynasm!(ops ; .arch x64 ; movss DWORD [rsp + F16_SPILL_XMM0], xmm0);
+            }
             emit_load_f32(
                 ops,
                 &group.inputs[1],
@@ -1071,6 +1144,9 @@ fn emit_group_body_f32(
                 group.atom_offset,
                 1,
             )?;
+            if y_clobbers {
+                dynasm!(ops ; .arch x64 ; movss DWORD [rsp + F16_SPILL_XMM1], xmm1);
+            }
             emit_load_f32(
                 ops,
                 &group.inputs[2],
@@ -1080,6 +1156,12 @@ fn emit_group_body_f32(
                 group.atom_offset,
                 2,
             )?;
+            if y_clobbers {
+                dynasm!(ops ; .arch x64 ; movss xmm1, DWORD [rsp + F16_SPILL_XMM1]);
+            }
+            if x_clobbers || y_clobbers {
+                dynasm!(ops ; .arch x64 ; movss xmm0, DWORD [rsp + F16_SPILL_XMM0]);
+            }
 
             // xmm3 = 0; ucomiss xmm0, xmm3 sets ZF if xmm0 == 0 (and PF on NaN).
             // For NaN cond we treat as nonzero (matches FloatCC::NotEqual).
@@ -1146,9 +1228,10 @@ fn resolve_strided_addr(
 
 // ─── F32 load / store ───────────────────────────────────────────────────────
 
-/// Emit `movss <xmm{dst}>, [r12 + addr]` for an InputRef.
-///
-/// `dst_xmm` selects the destination register (0..=2 in P1).
+/// Emit a load that produces an f32 value in `xmm{dst_xmm}`, regardless of
+/// the underlying slot's storage dtype. Slots holding F32 use `movss`,
+/// BF16 expand inline (`shl 16` into the high half), F16 go through an
+/// extern call to `jit_f16_to_f32`.
 fn emit_load_f32(
     ops: &mut Assembler,
     input: &InputRef,
@@ -1158,13 +1241,59 @@ fn emit_load_f32(
     atom_offset: u64,
     dst_xmm: u8,
 ) -> Result<(), String> {
+    let (slot_dtype, addr) = resolve_input_load_addr(input, layout, in_loop, i_const, atom_offset)?;
+    match slot_dtype {
+        NumericDType::F32 => match addr {
+            LoadAddr::Disp(d) => emit_load_f32_disp(ops, dst_xmm, d),
+            LoadAddr::Indexed { base, stride } => emit_load_f32_indexed(ops, dst_xmm, base, stride),
+        },
+        NumericDType::BF16 => match addr {
+            LoadAddr::Disp(d) => emit_load_bf16_disp(ops, dst_xmm, d),
+            LoadAddr::Indexed { base, stride } => {
+                emit_load_bf16_indexed(ops, dst_xmm, base, stride)
+            }
+        },
+        NumericDType::F16 => match addr {
+            LoadAddr::Disp(d) => emit_load_f16_disp(ops, dst_xmm, d),
+            LoadAddr::Indexed { base, stride } => emit_load_f16_indexed(ops, dst_xmm, base, stride),
+        },
+        other => {
+            return Err(format!(
+                "x86_jit emit_load_f32: unexpected slot dtype {other:?}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Resolved address for an InputRef load, plus the slot's storage dtype.
+#[derive(Debug, Clone, Copy)]
+enum LoadAddr {
+    /// Constant displacement: `[r12 + disp]`.
+    Disp(i64),
+    /// Indexed by r13: `[r12 + r13*scale + base_byte]`.
+    Indexed { base: i64, stride: i64 },
+}
+
+/// Resolve an InputRef to its load address and slot storage dtype.
+///
+/// Centralizes the slot lookup and disp/indexed selection used by every
+/// repr-specific load helper. Mirrors the resolution that previously lived
+/// inside `emit_load_f32`.
+fn resolve_input_load_addr(
+    input: &InputRef,
+    layout: &BufferLayout,
+    in_loop: bool,
+    i_const: u64,
+    atom_offset: u64,
+) -> Result<(NumericDType, LoadAddr), String> {
     match input {
         InputRef::Broadcast(atom) => {
             let (slot, elem_idx) = layout
                 .find(*atom)
                 .ok_or_else(|| format!("x86_jit: no slot for Broadcast atom={atom}"))?;
             let byte_off = slot.byte_offset as i64 + elem_idx as i64 * slot.elem_bytes as i64;
-            emit_load_f32_disp(ops, dst_xmm, byte_off);
+            Ok((slot.dtype, LoadAddr::Disp(byte_off)))
         }
         InputRef::Strided {
             base, dim_strides, ..
@@ -1173,20 +1302,27 @@ fn emit_load_f32(
             let stride = dim_strides[0];
             let (base_byte, byte_stride) =
                 resolve_strided_addr(*base, stride, atom_offset, layout)?;
+            // Look up the slot dtype.
+            let first_offset = stride * atom_offset as i64;
+            let first_atom = AtomId((base.0 as i64 + first_offset) as u64);
+            let (slot, _) = layout
+                .find(*base)
+                .or_else(|| layout.find(first_atom))
+                .ok_or_else(|| format!("x86_jit: no slot for Strided base={base}"))?;
+            let dtype = slot.dtype;
 
-            if in_loop {
-                // addr = r12 + base_byte + r13 * byte_stride
-                emit_load_f32_indexed(ops, dst_xmm, base_byte, byte_stride);
+            let addr = if in_loop {
+                LoadAddr::Indexed {
+                    base: base_byte,
+                    stride: byte_stride,
+                }
             } else {
-                let byte_off = base_byte + byte_stride * i_const as i64;
-                emit_load_f32_disp(ops, dst_xmm, byte_off);
-            }
+                LoadAddr::Disp(base_byte + byte_stride * i_const as i64)
+            };
+            Ok((dtype, addr))
         }
-        InputRef::Explicit(_) => {
-            return Err("x86_jit: Explicit inputref in emission (filter bug)".into());
-        }
+        InputRef::Explicit(_) => Err("x86_jit: Explicit inputref in emission (filter bug)".into()),
     }
-    Ok(())
 }
 
 /// Emit `movss xmm{dst_xmm}, DWORD [r12 + disp]`.
@@ -1260,7 +1396,8 @@ fn emit_load_f32_indexed(ops: &mut Assembler, dst_xmm: u8, base_byte: i64, byte_
     }
 }
 
-/// Emit `movss DWORD [...], xmm{src_xmm}` for an output slot.
+/// Emit a store from `xmm{src_xmm}` (holding an f32) into the output slot,
+/// converting to BF16 / F16 if the slot's storage dtype requires it.
 fn emit_store_f32(
     ops: &mut Assembler,
     slot: &SlotInfo,
@@ -1271,26 +1408,255 @@ fn emit_store_f32(
 ) {
     // store_base = slot.byte_offset - atom_offset * elem_bytes
     let store_base = slot.byte_offset as i64 - atom_offset as i64 * slot.elem_bytes as i64;
-
-    if in_loop {
-        // addr = r12 + r13 * elem_bytes + store_base
-        let bb = store_base as i32;
-        debug_assert_eq!(store_base, bb as i64, "store_base out of i32 range");
-        match src_xmm {
-            0 => dynasm!(ops ; .arch x64 ; movss DWORD [r12 + r13 * 4 + bb], xmm0),
-            1 => dynasm!(ops ; .arch x64 ; movss DWORD [r12 + r13 * 4 + bb], xmm1),
-            2 => dynasm!(ops ; .arch x64 ; movss DWORD [r12 + r13 * 4 + bb], xmm2),
-            _ => unreachable!(),
+    let addr = if in_loop {
+        StoreAddr::Indexed {
+            base: store_base,
+            elem_bytes: slot.elem_bytes as i64,
         }
     } else {
         let byte_off = store_base + i_const as i64 * slot.elem_bytes as i64;
-        let bb = byte_off as i32;
-        debug_assert_eq!(byte_off, bb as i64, "byte_off out of i32 range");
-        match src_xmm {
-            0 => dynasm!(ops ; .arch x64 ; movss DWORD [r12 + bb], xmm0),
-            1 => dynasm!(ops ; .arch x64 ; movss DWORD [r12 + bb], xmm1),
-            2 => dynasm!(ops ; .arch x64 ; movss DWORD [r12 + bb], xmm2),
+        StoreAddr::Disp(byte_off)
+    };
+
+    match slot.dtype {
+        NumericDType::F32 => emit_store_f32_at(ops, src_xmm, addr),
+        NumericDType::BF16 => emit_store_bf16_at(ops, src_xmm, addr),
+        NumericDType::F16 => emit_store_f16_at(ops, src_xmm, addr),
+        other => panic!("emit_store_f32: unexpected slot dtype {other:?}"),
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum StoreAddr {
+    /// Constant displacement: `[r12 + disp]`.
+    Disp(i64),
+    /// Indexed by r13: `[r12 + r13 * elem_bytes + base]`.
+    Indexed { base: i64, elem_bytes: i64 },
+}
+
+/// Emit `movss [...], xmm{src_xmm}`.
+fn emit_store_f32_at(ops: &mut Assembler, src_xmm: u8, addr: StoreAddr) {
+    match addr {
+        StoreAddr::Indexed { base, elem_bytes } => {
+            let bb = base as i32;
+            debug_assert_eq!(base, bb as i64, "store base out of i32 range");
+            debug_assert_eq!(elem_bytes, 4);
+            match src_xmm {
+                0 => dynasm!(ops ; .arch x64 ; movss DWORD [r12 + r13 * 4 + bb], xmm0),
+                1 => dynasm!(ops ; .arch x64 ; movss DWORD [r12 + r13 * 4 + bb], xmm1),
+                2 => dynasm!(ops ; .arch x64 ; movss DWORD [r12 + r13 * 4 + bb], xmm2),
+                _ => unreachable!(),
+            }
+        }
+        StoreAddr::Disp(disp) => {
+            let bb = disp as i32;
+            debug_assert_eq!(disp, bb as i64, "store disp out of i32 range");
+            match src_xmm {
+                0 => dynasm!(ops ; .arch x64 ; movss DWORD [r12 + bb], xmm0),
+                1 => dynasm!(ops ; .arch x64 ; movss DWORD [r12 + bb], xmm1),
+                2 => dynasm!(ops ; .arch x64 ; movss DWORD [r12 + bb], xmm2),
+                _ => unreachable!(),
+            }
+        }
+    }
+}
+
+// ─── BF16 expand / narrow ───────────────────────────────────────────────────
+//
+// BF16 storage is just the high half of an f32: same sign bit, same 8-bit
+// exponent, and the top 7 bits of the mantissa. Expand is a 3-instruction
+// sequence (load 16 bits, shift left by 16, move to xmm). Narrow rounds to
+// nearest even by adding `0x7fff + ((bits >> 16) & 1)` and shifting.
+
+/// Emit a BF16 → F32 expand load: f32 in `xmm{dst}` from `[r12 + disp]`.
+fn emit_load_bf16_disp(ops: &mut Assembler, dst_xmm: u8, disp: i64) {
+    let d = disp as i32;
+    debug_assert_eq!(disp, d as i64, "displacement out of i32 range: {disp}");
+    dynasm!(ops
+        ; .arch x64
+        ; movzx eax, WORD [r12 + d]
+        ; shl eax, 16
+    );
+    match dst_xmm {
+        0 => dynasm!(ops ; .arch x64 ; movd xmm0, eax),
+        1 => dynasm!(ops ; .arch x64 ; movd xmm1, eax),
+        2 => dynasm!(ops ; .arch x64 ; movd xmm2, eax),
+        _ => unreachable!(),
+    }
+}
+
+/// Indexed BF16 → F32 expand load.
+fn emit_load_bf16_indexed(ops: &mut Assembler, dst_xmm: u8, base_byte: i64, byte_stride: i64) {
+    let bb = base_byte as i32;
+    debug_assert_eq!(base_byte, bb as i64, "base_byte out of i32 range");
+    if byte_stride == 0 {
+        emit_load_bf16_disp(ops, dst_xmm, base_byte);
+        return;
+    }
+    if byte_stride == 2 {
+        dynasm!(ops ; .arch x64 ; movzx eax, WORD [r12 + r13 * 2 + bb]);
+    } else if byte_stride == 4 {
+        dynasm!(ops ; .arch x64 ; movzx eax, WORD [r12 + r13 * 4 + bb]);
+    } else if byte_stride == 8 {
+        dynasm!(ops ; .arch x64 ; movzx eax, WORD [r12 + r13 * 8 + bb]);
+    } else if byte_stride == 1 {
+        dynasm!(ops ; .arch x64 ; movzx eax, WORD [r12 + r13 + bb]);
+    } else {
+        // Materialize r13 * stride in rcx so rax stays free for the load result.
+        let stride = byte_stride;
+        dynasm!(ops
+            ; .arch x64
+            ; mov rcx, r13
+            ; imul rcx, rcx, stride as i32
+            ; movzx eax, WORD [r12 + rcx + bb]
+        );
+    }
+    dynasm!(ops ; .arch x64 ; shl eax, 16);
+    match dst_xmm {
+        0 => dynasm!(ops ; .arch x64 ; movd xmm0, eax),
+        1 => dynasm!(ops ; .arch x64 ; movd xmm1, eax),
+        2 => dynasm!(ops ; .arch x64 ; movd xmm2, eax),
+        _ => unreachable!(),
+    }
+}
+
+/// Emit an F32 → BF16 narrow store: round-to-nearest-even, take top 16 bits.
+///
+/// Mirrors cranelift's emit_typed_store BF16 path:
+///   bits = bitcast(val to i32)
+///   bias = 0x7fff + ((bits >> 16) & 1)
+///   rounded = bits + bias
+///   bf16 = (rounded >> 16) as u16
+fn emit_store_bf16_at(ops: &mut Assembler, src_xmm: u8, addr: StoreAddr) {
+    // bits → eax
+    match src_xmm {
+        0 => dynasm!(ops ; .arch x64 ; movd eax, xmm0),
+        1 => dynasm!(ops ; .arch x64 ; movd eax, xmm1),
+        2 => dynasm!(ops ; .arch x64 ; movd eax, xmm2),
+        _ => unreachable!(),
+    }
+    // bias = 0x7fff + ((bits >> 16) & 1)
+    dynasm!(ops
+        ; .arch x64
+        ; mov ecx, eax
+        ; shr ecx, 16
+        ; and ecx, 1
+        ; add ecx, 0x7fff
+        ; add eax, ecx
+        ; shr eax, 16
+    );
+    // store low 16 bits of eax = ax
+    match addr {
+        StoreAddr::Indexed { base, elem_bytes } => {
+            let bb = base as i32;
+            debug_assert_eq!(base, bb as i64, "store base out of i32 range");
+            debug_assert_eq!(elem_bytes, 2, "BF16 elem_bytes != 2");
+            dynasm!(ops ; .arch x64 ; mov WORD [r12 + r13 * 2 + bb], ax);
+        }
+        StoreAddr::Disp(disp) => {
+            let bb = disp as i32;
+            debug_assert_eq!(disp, bb as i64, "store disp out of i32 range");
+            dynasm!(ops ; .arch x64 ; mov WORD [r12 + bb], ax);
+        }
+    }
+}
+
+// ─── F16 expand / narrow (software path via extern call) ───────────────────
+//
+// IEEE 754 half-precision has enough special-case handling (denormal
+// subnormals, RTNE rounding on the way down, infinity/NaN propagation) that
+// the inline path runs to ~25 instructions per direction. We delegate to
+// `half::f16` via extern trampolines instead. F16C inline fast path is a
+// follow-up.
+//
+// Calling convention: the load helper sets up `edi` (System V int arg 0)
+// with the f16 bits, calls `jit_f16_to_f32`, and the result lands in xmm0.
+// If the destination wasn't xmm0, we then move it to the right register.
+// The store helper moves xmm{src} → xmm0 if needed, calls jit_f32_to_f16,
+// and stores the resulting u16 from `ax`.
+
+fn emit_load_f16_disp(ops: &mut Assembler, dst_xmm: u8, disp: i64) {
+    let d = disp as i32;
+    debug_assert_eq!(disp, d as i64, "displacement out of i32 range: {disp}");
+    dynasm!(ops
+        ; .arch x64
+        ; movzx edi, WORD [r12 + d]
+        ; mov rax, QWORD jit_f16_to_f32 as *const u8 as i64
+        ; call rax
+    );
+    if dst_xmm != 0 {
+        match dst_xmm {
+            1 => dynasm!(ops ; .arch x64 ; movaps xmm1, xmm0),
+            2 => dynasm!(ops ; .arch x64 ; movaps xmm2, xmm0),
             _ => unreachable!(),
+        }
+    }
+}
+
+fn emit_load_f16_indexed(ops: &mut Assembler, dst_xmm: u8, base_byte: i64, byte_stride: i64) {
+    let bb = base_byte as i32;
+    debug_assert_eq!(base_byte, bb as i64, "base_byte out of i32 range");
+    if byte_stride == 0 {
+        emit_load_f16_disp(ops, dst_xmm, base_byte);
+        return;
+    }
+    if byte_stride == 2 {
+        dynasm!(ops ; .arch x64 ; movzx edi, WORD [r12 + r13 * 2 + bb]);
+    } else if byte_stride == 4 {
+        dynasm!(ops ; .arch x64 ; movzx edi, WORD [r12 + r13 * 4 + bb]);
+    } else if byte_stride == 8 {
+        dynasm!(ops ; .arch x64 ; movzx edi, WORD [r12 + r13 * 8 + bb]);
+    } else if byte_stride == 1 {
+        dynasm!(ops ; .arch x64 ; movzx edi, WORD [r12 + r13 + bb]);
+    } else {
+        let stride = byte_stride;
+        dynasm!(ops
+            ; .arch x64
+            ; mov rcx, r13
+            ; imul rcx, rcx, stride as i32
+            ; movzx edi, WORD [r12 + rcx + bb]
+        );
+    }
+    dynasm!(ops
+        ; .arch x64
+        ; mov rax, QWORD jit_f16_to_f32 as *const u8 as i64
+        ; call rax
+    );
+    if dst_xmm != 0 {
+        match dst_xmm {
+            1 => dynasm!(ops ; .arch x64 ; movaps xmm1, xmm0),
+            2 => dynasm!(ops ; .arch x64 ; movaps xmm2, xmm0),
+            _ => unreachable!(),
+        }
+    }
+}
+
+fn emit_store_f16_at(ops: &mut Assembler, src_xmm: u8, addr: StoreAddr) {
+    // Move source to xmm0 if needed.
+    if src_xmm != 0 {
+        match src_xmm {
+            1 => dynasm!(ops ; .arch x64 ; movaps xmm0, xmm1),
+            2 => dynasm!(ops ; .arch x64 ; movaps xmm0, xmm2),
+            _ => unreachable!(),
+        }
+    }
+    dynasm!(ops
+        ; .arch x64
+        ; mov rax, QWORD jit_f32_to_f16 as *const u8 as i64
+        ; call rax
+    );
+    // Result is u16 in ax (or rax low 16).
+    match addr {
+        StoreAddr::Indexed { base, elem_bytes } => {
+            let bb = base as i32;
+            debug_assert_eq!(base, bb as i64, "store base out of i32 range");
+            debug_assert_eq!(elem_bytes, 2, "F16 elem_bytes != 2");
+            dynasm!(ops ; .arch x64 ; mov WORD [r12 + r13 * 2 + bb], ax);
+        }
+        StoreAddr::Disp(disp) => {
+            let bb = disp as i32;
+            debug_assert_eq!(disp, bb as i64, "store disp out of i32 range");
+            dynasm!(ops ; .arch x64 ; mov WORD [r12 + bb], ax);
         }
     }
 }
@@ -3471,30 +3837,6 @@ mod tests {
         assert!(err.contains("Reduce"), "unexpected err: {err}");
     }
 
-    /// BF16 storage dtype should reject.
-    #[test]
-    fn bf16_unsupported() {
-        let mut g = NanoGraph::new();
-        let inp = g.add_input_tensor(GlobalId(0), 4, NumericDType::BF16);
-        let id = g.push_group(
-            4,
-            NumericDType::BF16,
-            ScalarOp::Identity,
-            vec![],
-            vec![InputRef::affine(inp, 1)],
-        );
-        let outputs = vec![AtomRange {
-            base: id,
-            count: 4,
-            dtype: NumericDType::BF16,
-        }];
-        let err = match X86JitSpan::compile(&g, &outputs) {
-            Ok(_) => panic!("should reject BF16"),
-            Err(e) => e,
-        };
-        assert!(err.contains("not yet supported"), "unexpected err: {err}");
-    }
-
     // ─── Binary op A/B coverage ─────────────────────────────────────────────
 
     // A representative input set with positives, negatives, large/small,
@@ -4906,6 +5248,376 @@ mod tests {
             vec![1, 0, 1, 0, 1, 0, 1, 0],
             8,
         );
+    }
+
+    // ─── BF16 / F16 storage with F32 compute ────────────────────────────────
+
+    fn bf16_bytes(v: &[f32]) -> Vec<u8> {
+        v.iter()
+            .flat_map(|f| half::bf16::from_f32(*f).to_bits().to_le_bytes())
+            .collect()
+    }
+    fn f16_bytes(v: &[f32]) -> Vec<u8> {
+        v.iter()
+            .flat_map(|f| half::f16::from_f32(*f).to_bits().to_le_bytes())
+            .collect()
+    }
+
+    /// BF16 Identity (load + store, no compute) — A/B against cranelift.
+    #[test]
+    fn identity_bf16_ab() {
+        let xs: &[f32] = &[1.0, -2.5, 3.5, 0.0, 5.0, -7.25, 8.0, 16.0];
+        let mut g = NanoGraph::new();
+        let inp = g.add_input_tensor(GlobalId(0), 8, NumericDType::BF16);
+        let id = g.push_group(
+            8,
+            NumericDType::BF16,
+            ScalarOp::Identity,
+            vec![],
+            vec![InputRef::affine(inp, 1)],
+        );
+        let outputs = vec![AtomRange {
+            base: id,
+            count: 8,
+            dtype: NumericDType::BF16,
+        }];
+        ab_test_bytes(&g, &[(inp, NumericDType::BF16, bf16_bytes(xs))], &outputs);
+    }
+
+    /// BF16 storage with F32 compute — Add of two BF16 inputs into a BF16
+    /// output.
+    #[test]
+    fn bf16_add_ab() {
+        let a: &[f32] = &[1.0, -2.5, 3.5, 0.0, 5.0, -7.25, 8.0, 16.0];
+        let b: &[f32] = &[2.0, 4.0, -1.5, 1.0, -5.0, 3.0, 2.5, -4.0];
+        let mut g = NanoGraph::new();
+        let a_id = g.add_input_tensor(GlobalId(0), 8, NumericDType::BF16);
+        let b_id = g.add_input_tensor(GlobalId(1), 8, NumericDType::BF16);
+        let out = g.push_group(
+            8,
+            NumericDType::BF16,
+            ScalarOp::Binary {
+                op: ScalarBinOp::Add,
+                compute_dtype: NumericDType::F32,
+            },
+            vec![],
+            vec![InputRef::affine(a_id, 1), InputRef::affine(b_id, 1)],
+        );
+        let outputs = vec![AtomRange {
+            base: out,
+            count: 8,
+            dtype: NumericDType::BF16,
+        }];
+        ab_test_bytes(
+            &g,
+            &[
+                (a_id, NumericDType::BF16, bf16_bytes(a)),
+                (b_id, NumericDType::BF16, bf16_bytes(b)),
+            ],
+            &outputs,
+        );
+    }
+
+    /// BF16 storage, F32 compute, multi-op chain (mul-then-exp).
+    #[test]
+    fn bf16_mul_exp_ab() {
+        let xs: &[f32] = &[0.0, 1.0, -1.0, 2.0, 0.5, -0.5, 3.0, -3.0];
+        let mut g = NanoGraph::new();
+        let inp = g.add_input_tensor(GlobalId(0), 8, NumericDType::BF16);
+        let lit3 = g.push_group(
+            1,
+            NumericDType::BF16,
+            ScalarOp::Literal(NumericScalar::from_f32(3.0)),
+            vec![],
+            vec![],
+        );
+        let mul = g.push_group(
+            8,
+            NumericDType::BF16,
+            ScalarOp::Binary {
+                op: ScalarBinOp::Mul,
+                compute_dtype: NumericDType::F32,
+            },
+            vec![],
+            vec![InputRef::affine(inp, 1), InputRef::Broadcast(lit3)],
+        );
+        let exp = g.push_group(
+            8,
+            NumericDType::BF16,
+            ScalarOp::Unary {
+                op: ScalarUnaryOp::Exp,
+                compute_dtype: NumericDType::F32,
+            },
+            vec![],
+            vec![InputRef::affine(mul, 1)],
+        );
+        let outputs = vec![AtomRange {
+            base: exp,
+            count: 8,
+            dtype: NumericDType::BF16,
+        }];
+        ab_test_bytes(&g, &[(inp, NumericDType::BF16, bf16_bytes(xs))], &outputs);
+    }
+
+    /// Cast F32 → BF16 (narrow) — A/B.
+    #[test]
+    fn cast_f32_to_bf16_ab() {
+        let xs: &[f32] = &[1.0, -2.5, 3.5, 0.0, 5.0, -7.25, 8.0, 16.0];
+        let mut g = NanoGraph::new();
+        let inp = g.add_input_tensor(GlobalId(0), 8, NumericDType::F32);
+        let out = g.push_group(
+            8,
+            NumericDType::BF16,
+            ScalarOp::Identity,
+            vec![],
+            vec![InputRef::affine(inp, 1)],
+        );
+        let outputs = vec![AtomRange {
+            base: out,
+            count: 8,
+            dtype: NumericDType::BF16,
+        }];
+        ab_test_bytes(&g, &[(inp, NumericDType::F32, f32_bytes(xs))], &outputs);
+    }
+
+    /// Cast BF16 → F32 (expand) — A/B.
+    #[test]
+    fn cast_bf16_to_f32_ab() {
+        let xs: &[f32] = &[1.0, -2.5, 3.5, 0.0, 5.0, -7.25, 8.0, 16.0];
+        let mut g = NanoGraph::new();
+        let inp = g.add_input_tensor(GlobalId(0), 8, NumericDType::BF16);
+        let out = g.push_group(
+            8,
+            NumericDType::F32,
+            ScalarOp::Identity,
+            vec![],
+            vec![InputRef::affine(inp, 1)],
+        );
+        let outputs = vec![AtomRange {
+            base: out,
+            count: 8,
+            dtype: NumericDType::F32,
+        }];
+        ab_test_bytes(&g, &[(inp, NumericDType::BF16, bf16_bytes(xs))], &outputs);
+    }
+
+    /// 1024-element BF16 add — exercises the loop scaffold + bulk expand/narrow.
+    #[test]
+    fn mid_sized_loop_bf16_ab() {
+        let n = 1024usize;
+        let a_data: Vec<f32> = (0..n).map(|i| i as f32 * 0.5).collect();
+        let b_data: Vec<f32> = (0..n).map(|i| (n - i) as f32 * 0.25).collect();
+        let mut g = NanoGraph::new();
+        let a = g.add_input_tensor(GlobalId(0), n as u64, NumericDType::BF16);
+        let b = g.add_input_tensor(GlobalId(1), n as u64, NumericDType::BF16);
+        let out = g.push_group(
+            n as u64,
+            NumericDType::BF16,
+            ScalarOp::Binary {
+                op: ScalarBinOp::Add,
+                compute_dtype: NumericDType::F32,
+            },
+            vec![],
+            vec![InputRef::affine(a, 1), InputRef::affine(b, 1)],
+        );
+        let outputs = vec![AtomRange {
+            base: out,
+            count: n as u64,
+            dtype: NumericDType::BF16,
+        }];
+        ab_test_bytes(
+            &g,
+            &[
+                (a, NumericDType::BF16, bf16_bytes(&a_data)),
+                (b, NumericDType::BF16, bf16_bytes(&b_data)),
+            ],
+            &outputs,
+        );
+    }
+
+    /// F16 round-trip Identity. Cranelift's emit_typed_load doesn't have an
+    /// F16 case (falls through to F32 fallback) so we can't A/B against it —
+    /// instead we run our backend and check the output bytes match what
+    /// `half::f16` produces directly.
+    #[test]
+    fn identity_f16_value_check() {
+        let xs: &[f32] = &[1.0, -2.5, 3.5, 0.0, 5.0, -7.25, 8.0, 16.0];
+        let mut g = NanoGraph::new();
+        let inp = g.add_input_tensor(GlobalId(0), 8, NumericDType::F16);
+        let id = g.push_group(
+            8,
+            NumericDType::F16,
+            ScalarOp::Identity,
+            vec![],
+            vec![InputRef::affine(inp, 1)],
+        );
+        let outputs = vec![AtomRange {
+            base: id,
+            count: 8,
+            dtype: NumericDType::F16,
+        }];
+        let span = X86JitSpan::compile(&g, &outputs).expect("compile");
+        let mut buffer = span.literal_template.clone();
+        let raw = f16_bytes(xs);
+        let store_slice = StoreSlice {
+            base: inp,
+            data: raw.as_slice(),
+            dtype: NumericDType::F16,
+            count: 8,
+        };
+        write_store_slice_to_buffer(&store_slice, &span.layout, &mut buffer);
+        let f = span.entry_fn();
+        unsafe { f(buffer.as_mut_ptr()) };
+        let mut out_buf = vec![0u8; 8 * 2];
+        let mut span_out = SpanOutput {
+            data: out_buf.as_mut_slice(),
+            dtype: NumericDType::F16,
+            count: 8,
+        };
+        read_buffer_to_output(&outputs[0], &span.layout, &buffer, &mut span_out);
+        // Identity round-trips through f32, so the output bytes should match
+        // what `half::f16::from_f32(half::f16::to_f32(input))` produces.
+        for i in 0..8 {
+            let in_bits = u16::from_le_bytes([raw[i * 2], raw[i * 2 + 1]]);
+            let out_bits = u16::from_le_bytes([out_buf[i * 2], out_buf[i * 2 + 1]]);
+            let want = half::f16::from_f32(half::f16::from_bits(in_bits).to_f32()).to_bits();
+            assert_eq!(out_bits, want, "elem {i}");
+        }
+    }
+
+    /// F16 add via F32 compute — value check using half::f16 as the oracle.
+    #[test]
+    fn f16_add_value_check() {
+        let a: &[f32] = &[1.0, -2.5, 3.5, 0.0, 5.0, -7.25, 8.0, 16.0];
+        let b: &[f32] = &[2.0, 4.0, -1.5, 1.0, -5.0, 3.0, 2.5, -4.0];
+        let mut g = NanoGraph::new();
+        let a_id = g.add_input_tensor(GlobalId(0), 8, NumericDType::F16);
+        let b_id = g.add_input_tensor(GlobalId(1), 8, NumericDType::F16);
+        let out = g.push_group(
+            8,
+            NumericDType::F16,
+            ScalarOp::Binary {
+                op: ScalarBinOp::Add,
+                compute_dtype: NumericDType::F32,
+            },
+            vec![],
+            vec![InputRef::affine(a_id, 1), InputRef::affine(b_id, 1)],
+        );
+        let outputs = vec![AtomRange {
+            base: out,
+            count: 8,
+            dtype: NumericDType::F16,
+        }];
+        let span = X86JitSpan::compile(&g, &outputs).expect("compile");
+        let mut buffer = span.literal_template.clone();
+        let a_raw = f16_bytes(a);
+        let b_raw = f16_bytes(b);
+        write_store_slice_to_buffer(
+            &StoreSlice {
+                base: a_id,
+                data: a_raw.as_slice(),
+                dtype: NumericDType::F16,
+                count: 8,
+            },
+            &span.layout,
+            &mut buffer,
+        );
+        write_store_slice_to_buffer(
+            &StoreSlice {
+                base: b_id,
+                data: b_raw.as_slice(),
+                dtype: NumericDType::F16,
+                count: 8,
+            },
+            &span.layout,
+            &mut buffer,
+        );
+        let f = span.entry_fn();
+        unsafe { f(buffer.as_mut_ptr()) };
+        let mut out_buf = vec![0u8; 8 * 2];
+        let mut span_out = SpanOutput {
+            data: out_buf.as_mut_slice(),
+            dtype: NumericDType::F16,
+            count: 8,
+        };
+        read_buffer_to_output(&outputs[0], &span.layout, &buffer, &mut span_out);
+        for i in 0..8 {
+            let a_bits = u16::from_le_bytes([a_raw[i * 2], a_raw[i * 2 + 1]]);
+            let b_bits = u16::from_le_bytes([b_raw[i * 2], b_raw[i * 2 + 1]]);
+            let out_bits = u16::from_le_bytes([out_buf[i * 2], out_buf[i * 2 + 1]]);
+            let af = half::f16::from_bits(a_bits).to_f32();
+            let bf = half::f16::from_bits(b_bits).to_f32();
+            let want = half::f16::from_f32(af + bf).to_bits();
+            assert_eq!(out_bits, want, "elem {i}: a={af} b={bf}");
+        }
+    }
+
+    /// 1024-element F16 loop — exercises the bulk extern-call path.
+    #[test]
+    fn mid_sized_loop_f16_value_check() {
+        let n = 1024usize;
+        let a_data: Vec<f32> = (0..n).map(|i| i as f32 * 0.5).collect();
+        let b_data: Vec<f32> = (0..n).map(|i| (n - i) as f32 * 0.25).collect();
+        let mut g = NanoGraph::new();
+        let a = g.add_input_tensor(GlobalId(0), n as u64, NumericDType::F16);
+        let b = g.add_input_tensor(GlobalId(1), n as u64, NumericDType::F16);
+        let out = g.push_group(
+            n as u64,
+            NumericDType::F16,
+            ScalarOp::Binary {
+                op: ScalarBinOp::Add,
+                compute_dtype: NumericDType::F32,
+            },
+            vec![],
+            vec![InputRef::affine(a, 1), InputRef::affine(b, 1)],
+        );
+        let outputs = vec![AtomRange {
+            base: out,
+            count: n as u64,
+            dtype: NumericDType::F16,
+        }];
+        let span = X86JitSpan::compile(&g, &outputs).expect("compile");
+        let mut buffer = span.literal_template.clone();
+        let a_raw = f16_bytes(&a_data);
+        let b_raw = f16_bytes(&b_data);
+        write_store_slice_to_buffer(
+            &StoreSlice {
+                base: a,
+                data: a_raw.as_slice(),
+                dtype: NumericDType::F16,
+                count: n as u64,
+            },
+            &span.layout,
+            &mut buffer,
+        );
+        write_store_slice_to_buffer(
+            &StoreSlice {
+                base: b,
+                data: b_raw.as_slice(),
+                dtype: NumericDType::F16,
+                count: n as u64,
+            },
+            &span.layout,
+            &mut buffer,
+        );
+        let f = span.entry_fn();
+        unsafe { f(buffer.as_mut_ptr()) };
+        let mut out_buf = vec![0u8; n * 2];
+        let mut span_out = SpanOutput {
+            data: out_buf.as_mut_slice(),
+            dtype: NumericDType::F16,
+            count: n as u64,
+        };
+        read_buffer_to_output(&outputs[0], &span.layout, &buffer, &mut span_out);
+        for i in 0..n {
+            let a_bits = u16::from_le_bytes([a_raw[i * 2], a_raw[i * 2 + 1]]);
+            let b_bits = u16::from_le_bytes([b_raw[i * 2], b_raw[i * 2 + 1]]);
+            let out_bits = u16::from_le_bytes([out_buf[i * 2], out_buf[i * 2 + 1]]);
+            let af = half::f16::from_bits(a_bits).to_f32();
+            let bf = half::f16::from_bits(b_bits).to_f32();
+            let want = half::f16::from_f32(af + bf).to_bits();
+            assert_eq!(out_bits, want, "elem {i}");
+        }
     }
 
     /// 1024-element F64 add to exercise the loop scaffold.
