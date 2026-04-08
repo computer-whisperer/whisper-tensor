@@ -35,7 +35,7 @@ use super::codegen::{
     write_store_slice_to_buffer,
 };
 use super::executor::{CompiledSpanFn, SpanOutput, StoreSlice};
-use crate::nano_graph::ops::{ScalarBinOp, ScalarOp, ScalarUnaryOp};
+use crate::nano_graph::ops::{ReduceKind, ScalarBinOp, ScalarOp, ScalarUnaryOp};
 use crate::nano_graph::pattern::{AtomGroup, AtomId, AtomRange, InputRef, NanoGraph};
 use crate::numeric_dtype::NumericDType;
 use crate::pool::SystemPool;
@@ -331,11 +331,12 @@ impl X86JitSpan {
         let layout = compute_layout(graph, output_ranges);
         check_supported(graph, &layout)?;
 
-        let (code, entry) = emit_native(graph, &layout)?;
+        // P4: tables are now created BEFORE emit_native because IndirectLoad
+        // and Explicit InputRefs allocate embedded lookup tables whose byte
+        // offsets need to be baked into the emitted code.
+        let mut tables = EmbeddedTables::new(layout.total_bytes);
+        let (code, entry) = emit_native(graph, &layout, &mut tables)?;
 
-        // Build literal template — same as JitCompiledSpan::compile but with
-        // an empty EmbeddedTables (P1 has no IndirectLoad / Explicit lookups).
-        let tables = EmbeddedTables::new(layout.total_bytes);
         let total_buf_bytes = tables.total_bytes().max(layout.total_bytes);
         let mut literal_template = vec![0u8; total_buf_bytes];
         layout.populate_literals(graph, &mut literal_template);
@@ -418,15 +419,17 @@ impl CompiledSpanFn for X86JitSpan {
 
 /// Check whether a span is within the current x86_jit envelope.
 ///
-/// As of P2: F32-only, F64-only, or Int-only groups. Each group's slots
-/// must all live in the same repr family — F32 (storage F32), F64 (storage
-/// F64), or Int (storage I64/I32/I16/I8/U64/U32/U16/U8/Bool — all extended
-/// to i64 for compute). BF16/F16 land in P3. Cross-repr Cast lands later.
+/// As of P4: native fast paths for F32, F64, and Int groups, plus BF16/F16
+/// half-width float storage going through F32 compute. Cross-repr Cast,
+/// Reduce (Sum/Max/Min/Prod), IndirectLoad, and Explicit InputRef are all
+/// supported.
 ///
-/// Op variants: Identity, Cast (same-repr only), Binary, Unary, Select,
+/// Op variants: Identity, Cast, Binary, Unary, Select, Reduce, IndirectLoad,
 /// Literal, LiteralSpan.
-/// InputRef variants: Broadcast, 1D affine Strided.
-/// No reduce-fold inlining.
+/// InputRef variants: Broadcast, 1D affine Strided, 2D Strided
+/// (modular / strided_broadcast / general nd=2), and Explicit.
+/// Still unsupported: reduce-fold inlining, N-D Strided with nd >= 3,
+/// arbitrary FloatType (F8 / F4 / F6 / etc).
 fn check_supported(
     graph: &NanoGraph<'static, SystemPool>,
     layout: &BufferLayout,
@@ -488,11 +491,38 @@ fn check_supported(
                 }
             }
             ScalarOp::Select => {}
-            ScalarOp::Reduce { .. } => {
-                return Err(format!("x86_jit: group {gi} Reduce (unsupported)"));
+            ScalarOp::Reduce { compute_dtype, .. } => {
+                if Repr::from_dtype(*compute_dtype) != group_repr {
+                    return Err(format!(
+                        "x86_jit: group {gi} Reduce compute_dtype {:?} doesn't match group repr {group_repr:?}",
+                        compute_dtype
+                    ));
+                }
+                if !is_supported_storage_dtype(*compute_dtype) {
+                    return Err(format!(
+                        "x86_jit: group {gi} Reduce compute_dtype {:?} not yet supported",
+                        compute_dtype
+                    ));
+                }
+                // Reduce input must be Strided 1D affine — matches the
+                // lowering's affine path. Explicit Reduce inputs are rare
+                // and would need a separate code path.
+                if !matches!(
+                    group.inputs.first(),
+                    Some(InputRef::Strided { dim_strides, .. }) if dim_strides.len() == 1
+                ) {
+                    return Err(format!(
+                        "x86_jit: group {gi} Reduce input must be 1D affine Strided"
+                    ));
+                }
             }
             ScalarOp::IndirectLoad { .. } => {
-                return Err(format!("x86_jit: group {gi} IndirectLoad (unsupported)"));
+                if group.inputs.len() != 1 {
+                    return Err(format!(
+                        "x86_jit: group {gi} IndirectLoad expects 1 input, got {}",
+                        group.inputs.len()
+                    ));
+                }
             }
             ScalarOp::OpaqueOutput { .. } => {
                 return Err(format!("x86_jit: group {gi} OpaqueOutput (unsupported)"));
@@ -500,9 +530,15 @@ fn check_supported(
             ScalarOp::Literal(_) | ScalarOp::LiteralSpan(_) => unreachable!(),
         }
 
-        // Verify InputRef variants and (for non-cast ops) that all referenced
-        // slots match the group's repr. Cast / Identity are allowed to bridge
-        // reprs and are validated separately.
+        // IndirectLoad's input[0] is the index (any int dtype, doesn't need
+        // to match the output repr). Reduce + Cast / Identity are allowed to
+        // bridge reprs.
+        let bridge_repr = is_cast_op
+            || matches!(
+                &group.op,
+                ScalarOp::IndirectLoad { .. } | ScalarOp::Reduce { .. }
+            );
+
         for (ii, ir) in group.inputs.iter().enumerate() {
             let slot = match ir {
                 InputRef::Broadcast(atom) => {
@@ -515,16 +551,24 @@ fn check_supported(
                     dim_strides,
                     dim_shape,
                 } => {
-                    if dim_strides.len() != 1 {
+                    let nd = dim_strides.len();
+                    if nd != dim_shape.len() {
                         return Err(format!(
-                            "x86_jit: group {gi} input {ii} Strided nd={} (only nd=1 supported)",
-                            dim_strides.len()
+                            "x86_jit: group {gi} input {ii} dim_strides/dim_shape length mismatch"
                         ));
                     }
-                    let stride = dim_strides[0];
-                    let first_offset = stride * group.atom_offset as i64;
+                    if !(1..=2).contains(&nd) {
+                        return Err(format!(
+                            "x86_jit: group {gi} input {ii} Strided nd={nd} (only nd=1 and nd=2 supported)"
+                        ));
+                    }
+                    // Resolve the slot via base or the first accessed atom
+                    // (split-group fallback). For nd=2 we must compute the
+                    // first-atom offset using the full ND decomposition, not
+                    // just `stride * atom_offset`.
+                    let first_offset =
+                        strided_offset_atoms(dim_strides, dim_shape, group.atom_offset);
                     let first_atom = AtomId((base.0 as i64 + first_offset) as u64);
-                    let _ = dim_shape;
                     layout
                         .find(*base)
                         .or_else(|| layout.find(first_atom))
@@ -533,10 +577,13 @@ fn check_supported(
                             format!("x86_jit: group {gi} input {ii} Strided base={base} no slot")
                         })?
                 }
-                InputRef::Explicit(_) => {
-                    return Err(format!(
-                        "x86_jit: group {gi} input {ii} Explicit (unsupported)"
-                    ));
+                InputRef::Explicit(ids) => {
+                    let id = ids.first().ok_or_else(|| {
+                        format!("x86_jit: group {gi} input {ii} Explicit empty list")
+                    })?;
+                    layout.find(*id).map(|(s, _)| s).ok_or_else(|| {
+                        format!("x86_jit: group {gi} input {ii} Explicit atom={id} no slot")
+                    })?
                 }
             };
             if !is_supported_storage_dtype(slot.dtype) {
@@ -545,7 +592,7 @@ fn check_supported(
                     slot.dtype
                 ));
             }
-            if !is_cast_op && Repr::from_dtype(slot.dtype) != group_repr {
+            if !bridge_repr && Repr::from_dtype(slot.dtype) != group_repr {
                 return Err(format!(
                     "x86_jit: group {gi} input {ii} slot dtype {:?} doesn't match group repr {group_repr:?}",
                     slot.dtype
@@ -752,6 +799,7 @@ const ELEM_BYTES: i32 = 4; // F32 only in P1
 fn emit_native(
     graph: &NanoGraph<'static, SystemPool>,
     layout: &BufferLayout,
+    tables: &mut EmbeddedTables,
 ) -> Result<(ExecutableBuffer, AssemblyOffset), String> {
     let mut ops = Assembler::new().map_err(|e| format!("x86_jit: assembler init: {e}"))?;
     let entry = ops.offset();
@@ -772,7 +820,7 @@ fn emit_native(
         if group.count == 0 {
             continue;
         }
-        emit_group(&mut ops, group, layout)?;
+        emit_group(&mut ops, group, layout, tables)?;
     }
 
     emit_epilogue(&mut ops);
@@ -791,12 +839,15 @@ fn emit_native(
 ///   [rsp+ 8..11]  F16-load xmm0 spill slot
 ///   [rsp+12..15]  F16-load xmm1 spill slot
 ///   [rsp+16..19]  F16-load xmm2 spill slot
-///   [rsp+20..23]  padding (rounds the frame to a 16-byte multiple)
+///   [rsp+20..31]  padding / scratch (rounds the frame to a 16-byte multiple)
 /// ```
 ///
-/// Saved callee-saved regs (rbp/r12/r13/r14) sit above [rsp+24]. The frame
-/// ends 16-byte aligned so any `call` we issue inside the body lands the
-/// caller's return address at +8 mod 16.
+/// Saved callee-saved regs (rbp/r12/r13/r14/r15) sit above [rsp+32]. The
+/// frame ends 16-byte aligned so any `call` we issue inside the body lands
+/// the caller's return address at +8 mod 16.
+///
+/// `r15` was added in P4 so the Reduce inner-k loop has its own counter
+/// without colliding with the outer r13/r14 loop variables.
 fn emit_prologue(ops: &mut Assembler) {
     dynasm!(ops
         ; .arch x64
@@ -805,7 +856,8 @@ fn emit_prologue(ops: &mut Assembler) {
         ; push r12
         ; push r13
         ; push r14
-        ; sub rsp, BYTE 24      // 4 pushes + return addr = 40 bytes; 40+24 = 64 ≡ 0 mod 16
+        ; push r15
+        ; sub rsp, BYTE 32      // 5 pushes + return addr = 48 bytes; 48+32 = 80 ≡ 0 mod 16
         ; mov r12, rdi          // r12 = buffer pointer
     );
 }
@@ -813,7 +865,8 @@ fn emit_prologue(ops: &mut Assembler) {
 fn emit_epilogue(ops: &mut Assembler) {
     dynasm!(ops
         ; .arch x64
-        ; add rsp, BYTE 24
+        ; add rsp, BYTE 32
+        ; pop r15
         ; pop r14
         ; pop r13
         ; pop r12
@@ -828,6 +881,10 @@ fn emit_epilogue(ops: &mut Assembler) {
 const F16_SPILL_XMM0: i32 = 8;
 const F16_SPILL_XMM1: i32 = 12;
 const F16_SPILL_XMM2: i32 = 16;
+/// Spill slot for the inner Reduce k-loop counter (r11) across F16 extern
+/// calls. r11 is caller-saved per System V so the call clobbers it; reduce
+/// body iterations save it here and reload after the call.
+const K_SPILL: i32 = 24;
 
 /// Returns true if loading this input requires an extern call (currently
 /// only F16, which goes through `jit_f16_to_f32`). Used by binop/select
@@ -856,13 +913,21 @@ fn emit_group(
     ops: &mut Assembler,
     group: &AtomGroup<'static, SystemPool>,
     layout: &BufferLayout,
+    tables: &mut EmbeddedTables,
 ) -> Result<(), String> {
     let count = group.count;
     let atom_offset = group.atom_offset;
 
     if count == 1 {
         // Inline path: i_const = atom_offset, no loop.
-        emit_group_body(ops, group, layout, /* in_loop */ false, atom_offset)?;
+        emit_group_body(
+            ops,
+            group,
+            layout,
+            tables,
+            /* in_loop */ false,
+            atom_offset,
+        )?;
         return Ok(());
     }
 
@@ -888,7 +953,7 @@ fn emit_group(
         ; jge =>loop_done
     );
 
-    emit_group_body(ops, group, layout, /* in_loop */ true, 0)?;
+    emit_group_body(ops, group, layout, tables, /* in_loop */ true, 0)?;
 
     dynasm!(ops
         ; .arch x64
@@ -909,17 +974,49 @@ fn emit_group_body(
     ops: &mut Assembler,
     group: &AtomGroup<'static, SystemPool>,
     layout: &BufferLayout,
+    tables: &mut EmbeddedTables,
     in_loop: bool,
     i_const: u64,
 ) -> Result<(), String> {
     if matches!(&group.op, ScalarOp::Identity | ScalarOp::Cast { .. }) {
-        return emit_group_body_cast(ops, group, layout, in_loop, i_const);
+        return emit_group_body_cast(ops, group, layout, tables, in_loop, i_const);
+    }
+    if let ScalarOp::IndirectLoad { table_base } = &group.op {
+        return emit_group_body_indirect_load(
+            ops,
+            group,
+            layout,
+            tables,
+            in_loop,
+            i_const,
+            *table_base,
+        );
+    }
+    if let ScalarOp::Reduce {
+        kind,
+        reduce_count,
+        reduce_stride,
+        compute_dtype,
+    } = &group.op
+    {
+        return emit_group_body_reduce(
+            ops,
+            group,
+            layout,
+            tables,
+            in_loop,
+            i_const,
+            *kind,
+            *reduce_count,
+            *reduce_stride,
+            *compute_dtype,
+        );
     }
     let repr = group_compute_repr(group);
     match repr {
-        Repr::F32 => emit_group_body_f32(ops, group, layout, in_loop, i_const),
-        Repr::F64 => emit_group_body_f64(ops, group, layout, in_loop, i_const),
-        Repr::Int => emit_group_body_int(ops, group, layout, in_loop, i_const),
+        Repr::F32 => emit_group_body_f32(ops, group, layout, tables, in_loop, i_const),
+        Repr::F64 => emit_group_body_f64(ops, group, layout, tables, in_loop, i_const),
+        Repr::Int => emit_group_body_int(ops, group, layout, tables, in_loop, i_const),
     }
 }
 
@@ -934,6 +1031,7 @@ fn emit_group_body_cast(
     ops: &mut Assembler,
     group: &AtomGroup<'static, SystemPool>,
     layout: &BufferLayout,
+    tables: &mut EmbeddedTables,
     in_loop: bool,
     i_const: u64,
 ) -> Result<(), String> {
@@ -950,10 +1048,11 @@ fn emit_group_body_cast(
             .map(|(s, _)| s.dtype)
             .ok_or_else(|| format!("x86_jit cast: no slot for Broadcast atom={atom}"))?,
         InputRef::Strided {
-            base, dim_strides, ..
+            base,
+            dim_strides,
+            dim_shape,
         } => {
-            let stride = dim_strides[0];
-            let first_offset = stride * group.atom_offset as i64;
+            let first_offset = strided_offset_atoms(dim_strides, dim_shape, group.atom_offset);
             let first_atom = AtomId((base.0 as i64 + first_offset) as u64);
             layout
                 .find(*base)
@@ -961,8 +1060,14 @@ fn emit_group_body_cast(
                 .map(|(s, _)| s.dtype)
                 .ok_or_else(|| format!("x86_jit cast: no slot for Strided base={base}"))?
         }
-        InputRef::Explicit(_) => {
-            return Err("x86_jit cast: Explicit inputref unsupported".into());
+        InputRef::Explicit(ids) => {
+            let id = ids
+                .first()
+                .ok_or_else(|| "x86_jit cast: Explicit InputRef with empty list".to_string())?;
+            layout
+                .find(*id)
+                .map(|(s, _)| s.dtype)
+                .ok_or_else(|| format!("x86_jit cast: no slot for Explicit atom={id}"))?
         }
     };
 
@@ -971,12 +1076,31 @@ fn emit_group_body_cast(
 
     // Load into the natural repr's slot 0 register.
     match in_repr {
-        Repr::F32 => emit_load_f32(ops, input, layout, in_loop, i_const, group.atom_offset, 0)?,
-        Repr::F64 => emit_load_f64(ops, input, layout, in_loop, i_const, group.atom_offset, 0)?,
+        Repr::F32 => emit_load_f32(
+            ops,
+            input,
+            layout,
+            tables,
+            in_loop,
+            i_const,
+            group.atom_offset,
+            0,
+        )?,
+        Repr::F64 => emit_load_f64(
+            ops,
+            input,
+            layout,
+            tables,
+            in_loop,
+            i_const,
+            group.atom_offset,
+            0,
+        )?,
         Repr::Int => emit_load_int(
             ops,
             input,
             layout,
+            tables,
             in_loop,
             i_const,
             group.atom_offset,
@@ -1042,6 +1166,7 @@ fn emit_group_body_f32(
     ops: &mut Assembler,
     group: &AtomGroup<'static, SystemPool>,
     layout: &BufferLayout,
+    tables: &mut EmbeddedTables,
     in_loop: bool,
     i_const: u64,
 ) -> Result<(), String> {
@@ -1057,6 +1182,7 @@ fn emit_group_body_f32(
                 ops,
                 &group.inputs[0],
                 layout,
+                tables,
                 in_loop,
                 i_const,
                 group.atom_offset,
@@ -1075,6 +1201,7 @@ fn emit_group_body_f32(
                 ops,
                 &group.inputs[0],
                 layout,
+                tables,
                 in_loop,
                 i_const,
                 group.atom_offset,
@@ -1088,6 +1215,7 @@ fn emit_group_body_f32(
                 ops,
                 &group.inputs[1],
                 layout,
+                tables,
                 in_loop,
                 i_const,
                 group.atom_offset,
@@ -1106,6 +1234,7 @@ fn emit_group_body_f32(
                 ops,
                 &group.inputs[0],
                 layout,
+                tables,
                 in_loop,
                 i_const,
                 group.atom_offset,
@@ -1125,6 +1254,7 @@ fn emit_group_body_f32(
                 ops,
                 &group.inputs[0],
                 layout,
+                tables,
                 in_loop,
                 i_const,
                 group.atom_offset,
@@ -1139,6 +1269,7 @@ fn emit_group_body_f32(
                 ops,
                 &group.inputs[1],
                 layout,
+                tables,
                 in_loop,
                 i_const,
                 group.atom_offset,
@@ -1151,6 +1282,7 @@ fn emit_group_body_f32(
                 ops,
                 &group.inputs[2],
                 layout,
+                tables,
                 in_loop,
                 i_const,
                 group.atom_offset,
@@ -1236,26 +1368,31 @@ fn emit_load_f32(
     ops: &mut Assembler,
     input: &InputRef,
     layout: &BufferLayout,
+    tables: &mut EmbeddedTables,
     in_loop: bool,
     i_const: u64,
     atom_offset: u64,
     dst_xmm: u8,
 ) -> Result<(), String> {
-    let (slot_dtype, addr) = resolve_input_load_addr(input, layout, in_loop, i_const, atom_offset)?;
+    let (slot_dtype, addr) =
+        resolve_input_load_addr(ops, input, layout, tables, in_loop, i_const, atom_offset)?;
     match slot_dtype {
         NumericDType::F32 => match addr {
             LoadAddr::Disp(d) => emit_load_f32_disp(ops, dst_xmm, d),
             LoadAddr::Indexed { base, stride } => emit_load_f32_indexed(ops, dst_xmm, base, stride),
+            LoadAddr::RaxIndexed { base } => emit_load_f32_rax(ops, dst_xmm, base),
         },
         NumericDType::BF16 => match addr {
             LoadAddr::Disp(d) => emit_load_bf16_disp(ops, dst_xmm, d),
             LoadAddr::Indexed { base, stride } => {
                 emit_load_bf16_indexed(ops, dst_xmm, base, stride)
             }
+            LoadAddr::RaxIndexed { base } => emit_load_bf16_rax(ops, dst_xmm, base),
         },
         NumericDType::F16 => match addr {
             LoadAddr::Disp(d) => emit_load_f16_disp(ops, dst_xmm, d),
             LoadAddr::Indexed { base, stride } => emit_load_f16_indexed(ops, dst_xmm, base, stride),
+            LoadAddr::RaxIndexed { base } => emit_load_f16_rax(ops, dst_xmm, base),
         },
         other => {
             return Err(format!(
@@ -1273,16 +1410,27 @@ enum LoadAddr {
     Disp(i64),
     /// Indexed by r13: `[r12 + r13*scale + base_byte]`.
     Indexed { base: i64, stride: i64 },
+    /// Byte offset is materialized in `rax` already; address is
+    /// `[r12 + rax + base_byte]`. Used by 2D Strided InputRefs and by
+    /// multi-entry `Explicit` InputRefs which both compute their per-iteration
+    /// byte offset via additional instructions emitted before the load.
+    RaxIndexed { base: i64 },
 }
 
 /// Resolve an InputRef to its load address and slot storage dtype.
 ///
-/// Centralizes the slot lookup and disp/indexed selection used by every
-/// repr-specific load helper. Mirrors the resolution that previously lived
-/// inside `emit_load_f32`.
+/// May emit address-compute instructions before the load (into `rax`) for
+/// 2D Strided / Explicit InputRefs whose per-iteration byte offset isn't
+/// expressible as a constant displacement or a single SIB scale.
+///
+/// **Caller contract**: rax must be free at the call site. The returned
+/// `LoadAddr::RaxIndexed` variant means the load helper should use
+/// `[r12 + rax + base]`. The 1D affine and Broadcast cases don't touch rax.
 fn resolve_input_load_addr(
+    ops: &mut Assembler,
     input: &InputRef,
     layout: &BufferLayout,
+    tables: &mut EmbeddedTables,
     in_loop: bool,
     i_const: u64,
     atom_offset: u64,
@@ -1296,33 +1444,295 @@ fn resolve_input_load_addr(
             Ok((slot.dtype, LoadAddr::Disp(byte_off)))
         }
         InputRef::Strided {
-            base, dim_strides, ..
+            base,
+            dim_strides,
+            dim_shape,
         } => {
-            assert_eq!(dim_strides.len(), 1, "check_supported guarantees 1D");
-            let stride = dim_strides[0];
-            let (base_byte, byte_stride) =
-                resolve_strided_addr(*base, stride, atom_offset, layout)?;
-            // Look up the slot dtype.
-            let first_offset = stride * atom_offset as i64;
+            let nd = dim_strides.len();
+            assert!(nd >= 1, "check_supported guarantees nd >= 1");
+            assert_eq!(nd, dim_shape.len(), "dim_strides/dim_shape length mismatch");
+
+            // Find the slot via base or the first accessed atom (split-group fallback).
+            let first_offset = strided_offset_atoms(dim_strides, dim_shape, atom_offset);
             let first_atom = AtomId((base.0 as i64 + first_offset) as u64);
-            let (slot, _) = layout
+            let (slot, elem) = layout
                 .find(*base)
                 .or_else(|| layout.find(first_atom))
                 .ok_or_else(|| format!("x86_jit: no slot for Strided base={base}"))?;
+            let elem_bytes = slot.elem_bytes as i64;
             let dtype = slot.dtype;
 
-            let addr = if in_loop {
-                LoadAddr::Indexed {
-                    base: base_byte,
-                    stride: byte_stride,
-                }
+            // Compute base_byte: byte offset of the logical `base` atom.
+            let slot_byte = slot.byte_offset as i64 + elem as i64 * elem_bytes;
+            let base_byte = if layout.find(*base).is_some() {
+                slot_byte
             } else {
-                LoadAddr::Disp(base_byte + byte_stride * i_const as i64)
+                slot_byte - first_offset * elem_bytes
             };
-            Ok((dtype, addr))
+
+            if nd == 1 {
+                // 1D affine fast path.
+                let byte_stride = dim_strides[0] * elem_bytes;
+                let addr = if in_loop {
+                    LoadAddr::Indexed {
+                        base: base_byte,
+                        stride: byte_stride,
+                    }
+                } else {
+                    LoadAddr::Disp(base_byte + byte_stride * i_const as i64)
+                };
+                return Ok((dtype, addr));
+            }
+
+            // 2D / N-D path. For !in_loop this resolves to a constant Disp.
+            if !in_loop {
+                let off_atoms = strided_offset_atoms(dim_strides, dim_shape, i_const);
+                let byte_off = base_byte + off_atoms * elem_bytes;
+                return Ok((dtype, LoadAddr::Disp(byte_off)));
+            }
+
+            // 2D in_loop: emit address compute into rax.
+            // Cranelift's general N-D path: decompose i (in r13) from
+            // innermost dim outward, where coord[d] = remaining % shape[d]
+            // for d > 0 and coord[0] = remaining (no modulus on outermost).
+            // Sum coord[d] * stride[d] * elem_bytes.
+            //
+            // For nd == 2 (the only case we currently support), this is:
+            //   inner = r13 % shape[1]   (or shr/and if power of 2)
+            //   outer = r13 / shape[1]
+            //   rax   = outer * stride[0]_bytes + inner * stride[1]_bytes
+            //
+            // Special cases:
+            //   - dim_strides[0] == 0 (modular): only inner contributes.
+            //   - dim_strides[1] == 0 (strided_broadcast): only outer contributes.
+            if nd != 2 {
+                return Err(format!(
+                    "x86_jit: Strided nd={} (only nd=1 and nd=2 supported)",
+                    nd
+                ));
+            }
+            emit_strided_2d_offset_into_rax(ops, dim_strides, dim_shape, elem_bytes)?;
+            Ok((dtype, LoadAddr::RaxIndexed { base: base_byte }))
         }
-        InputRef::Explicit(_) => Err("x86_jit: Explicit inputref in emission (filter bug)".into()),
+        InputRef::Explicit(ids) => {
+            if ids.is_empty() {
+                return Err("x86_jit: Explicit InputRef with empty list".into());
+            }
+            // Single-entry: every iteration loads the same atom — use Disp.
+            if ids.len() == 1 {
+                let (slot, elem_idx) = layout
+                    .find(ids[0])
+                    .ok_or_else(|| format!("x86_jit: no slot for Explicit[0] atom={}", ids[0]))?;
+                let byte_off = slot.byte_offset as i64 + elem_idx as i64 * slot.elem_bytes as i64;
+                return Ok((slot.dtype, LoadAddr::Disp(byte_off)));
+            }
+            // Multi-entry: build a u64 byte-offset table at compile time and
+            // do a runtime lookup keyed by r13 (or i_const for !in_loop).
+            let (first_slot, _) = layout
+                .find(ids[0])
+                .ok_or_else(|| format!("x86_jit: no slot for Explicit[0] atom={}", ids[0]))?;
+            let load_dtype = first_slot.dtype;
+
+            let byte_offsets: Vec<i64> = ids
+                .iter()
+                .map(|id| {
+                    layout
+                        .find(*id)
+                        .map(|(slot, elem_idx)| {
+                            slot.byte_offset as i64 + elem_idx as i64 * slot.elem_bytes as i64
+                        })
+                        .ok_or_else(|| format!("x86_jit: no slot for Explicit atom={}", id))
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+
+            let table_bytes: Vec<u8> = byte_offsets
+                .iter()
+                .flat_map(|off| off.to_le_bytes())
+                .collect();
+            let table_offset = tables.alloc(table_bytes);
+            let table_off_i32 = i32::try_from(table_offset)
+                .map_err(|_| "x86_jit: Explicit table offset overflows i32".to_string())?;
+
+            if !in_loop {
+                // Compile-time-known index: bake the byte offset into Disp.
+                let idx = i_const as usize;
+                if idx >= byte_offsets.len() {
+                    return Err(format!(
+                        "x86_jit: Explicit i_const={idx} out of range (len={})",
+                        byte_offsets.len()
+                    ));
+                }
+                return Ok((load_dtype, LoadAddr::Disp(byte_offsets[idx])));
+            }
+
+            // Runtime lookup:
+            //   mov rax, r13              ; index
+            //   mov rax, QWORD [r12 + rax*8 + table_off]  ; load i64 byte offset
+            // → load uses [r12 + rax] (base = 0).
+            dynasm!(ops
+                ; .arch x64
+                ; mov rax, r13
+                ; mov rax, QWORD [r12 + rax * 8 + table_off_i32]
+            );
+            Ok((load_dtype, LoadAddr::RaxIndexed { base: 0 }))
+        }
     }
+}
+
+/// Atom-relative offset computed at compile-time for an N-D Strided InputRef
+/// at flat consumer index `i`. Mirrors `InputRef::resolve` exactly.
+fn strided_offset_atoms(dim_strides: &[i64], dim_shape: &[u64], i: u64) -> i64 {
+    let nd = dim_strides.len();
+    let mut offset = 0i64;
+    let mut remaining = i;
+    for d in (0..nd).rev() {
+        let coord = if d == 0 {
+            remaining
+        } else {
+            let c = remaining % dim_shape[d];
+            remaining /= dim_shape[d];
+            c
+        };
+        offset += coord as i64 * dim_strides[d];
+    }
+    offset
+}
+
+/// Emit instructions that compute the per-iteration byte offset for a 2D
+/// Strided InputRef into `rax`, given the loop variable in `r13`.
+///
+/// Layout for nd=2 (matching cranelift / `InputRef::resolve`):
+///   inner = r13 % dim_shape[1]
+///   outer = r13 / dim_shape[1]    (no modulus on the outermost dim)
+///   rax   = outer * dim_strides[0] * elem_bytes + inner * dim_strides[1] * elem_bytes
+///
+/// Special cases:
+///   - dim_strides[0] == 0  → only the inner term contributes (modular)
+///   - dim_strides[1] == 0  → only the outer term contributes (strided_broadcast)
+///   - dim_shape[1] is power of 2 → use shift/mask instead of div/mod
+///
+/// Clobbers `rax`, `rcx`, `rdx`, and `r10` (rcx for divisor / inner; rdx
+/// for the high half of div; r10 for the constant divisor in the
+/// non-power-of-2 path). The caller must not have live values in these
+/// registers at the call site.
+fn emit_strided_2d_offset_into_rax(
+    ops: &mut Assembler,
+    dim_strides: &[i64],
+    dim_shape: &[u64],
+    elem_bytes: i64,
+) -> Result<(), String> {
+    debug_assert_eq!(dim_strides.len(), 2);
+    debug_assert_eq!(dim_shape.len(), 2);
+    let s0 = dim_strides[0];
+    let s1 = dim_strides[1];
+    let m = dim_shape[1];
+    let s0_bytes = s0 * elem_bytes;
+    let s1_bytes = s1 * elem_bytes;
+
+    // Modular only: rax = (r13 % m) * s1_bytes
+    if s0 == 0 {
+        emit_2d_inner_into_rax(ops, m, s1_bytes)?;
+        return Ok(());
+    }
+    // Strided-broadcast only: rax = (r13 / m) * s0_bytes
+    if s1 == 0 {
+        emit_2d_outer_into_rax(ops, m, s0_bytes)?;
+        return Ok(());
+    }
+
+    // General 2D: both contribute. Compute outer*s0_bytes in rax, then add
+    // inner*s1_bytes from a scratch register.
+    //
+    // Power-of-2 modulus path: use shift/mask, both terms drop out of one
+    // r13 read.
+    if m.is_power_of_two() {
+        let shift = m.trailing_zeros() as i8;
+        let mask = (m as i64 - 1) as i32;
+        let s0_imm = i32::try_from(s0_bytes)
+            .map_err(|_| "x86_jit: strided 2D s0_bytes too large for i32".to_string())?;
+        let s1_imm = i32::try_from(s1_bytes)
+            .map_err(|_| "x86_jit: strided 2D s1_bytes too large for i32".to_string())?;
+        dynasm!(ops
+            ; .arch x64
+            ; mov rcx, r13
+            ; and rcx, mask          // rcx = inner = r13 & (m-1)
+            ; mov rax, r13
+            ; shr rax, BYTE shift    // rax = outer = r13 >> shift
+            ; imul rax, rax, s0_imm  // rax = outer * s0_bytes
+            ; imul rcx, rcx, s1_imm  // rcx = inner * s1_bytes
+            ; add rax, rcx
+        );
+        return Ok(());
+    }
+
+    // Non-power-of-2: use div. r10 holds the divisor.
+    let s0_imm = i32::try_from(s0_bytes)
+        .map_err(|_| "x86_jit: strided 2D s0_bytes too large for i32".to_string())?;
+    let s1_imm = i32::try_from(s1_bytes)
+        .map_err(|_| "x86_jit: strided 2D s1_bytes too large for i32".to_string())?;
+    dynasm!(ops
+        ; .arch x64
+        ; mov rax, r13
+        ; xor rdx, rdx
+        ; mov r10, QWORD m as i64
+        ; div r10                    // rax = outer, rdx = inner
+        ; mov rcx, rdx               // rcx = inner
+        ; imul rax, rax, s0_imm      // rax = outer * s0_bytes
+        ; imul rcx, rcx, s1_imm      // rcx = inner * s1_bytes
+        ; add rax, rcx
+    );
+    Ok(())
+}
+
+/// Emit `rax = (r13 % m) * stride_bytes` for the modular-only case.
+fn emit_2d_inner_into_rax(ops: &mut Assembler, m: u64, stride_bytes: i64) -> Result<(), String> {
+    let stride_imm = i32::try_from(stride_bytes)
+        .map_err(|_| "x86_jit: strided 2D stride too large for i32".to_string())?;
+    if m.is_power_of_two() {
+        let mask = (m as i64 - 1) as i32;
+        dynasm!(ops
+            ; .arch x64
+            ; mov rax, r13
+            ; and rax, mask
+            ; imul rax, rax, stride_imm
+        );
+    } else {
+        dynasm!(ops
+            ; .arch x64
+            ; mov rax, r13
+            ; xor rdx, rdx
+            ; mov r10, QWORD m as i64
+            ; div r10                // rdx = inner = r13 % m
+            ; mov rax, rdx
+            ; imul rax, rax, stride_imm
+        );
+    }
+    Ok(())
+}
+
+/// Emit `rax = (r13 / m) * stride_bytes` for the strided_broadcast-only case.
+fn emit_2d_outer_into_rax(ops: &mut Assembler, m: u64, stride_bytes: i64) -> Result<(), String> {
+    let stride_imm = i32::try_from(stride_bytes)
+        .map_err(|_| "x86_jit: strided 2D stride too large for i32".to_string())?;
+    if m.is_power_of_two() {
+        let shift = m.trailing_zeros() as i8;
+        dynasm!(ops
+            ; .arch x64
+            ; mov rax, r13
+            ; shr rax, BYTE shift
+            ; imul rax, rax, stride_imm
+        );
+    } else {
+        dynasm!(ops
+            ; .arch x64
+            ; mov rax, r13
+            ; xor rdx, rdx
+            ; mov r10, QWORD m as i64
+            ; div r10                // rax = outer = r13 / m
+            ; imul rax, rax, stride_imm
+        );
+    }
+    Ok(())
 }
 
 /// Emit `movss xmm{dst_xmm}, DWORD [r12 + disp]`.
@@ -1393,6 +1803,20 @@ fn emit_load_f32_indexed(ops: &mut Assembler, dst_xmm: u8, base_byte: i64, byte_
             2 => dynasm!(ops ; .arch x64 ; movss xmm2, DWORD [r12 + rax + bb]),
             _ => unreachable!(),
         }
+    }
+}
+
+/// Emit `movss xmm{dst_xmm}, DWORD [r12 + rax + base]` for the case where
+/// the per-iteration byte offset has already been materialized in `rax` by
+/// `resolve_input_load_addr` (2D Strided / multi-entry Explicit).
+fn emit_load_f32_rax(ops: &mut Assembler, dst_xmm: u8, base: i64) {
+    let bb = base as i32;
+    debug_assert_eq!(base, bb as i64, "rax-indexed F32 base out of i32 range");
+    match dst_xmm {
+        0 => dynasm!(ops ; .arch x64 ; movss xmm0, DWORD [r12 + rax + bb]),
+        1 => dynasm!(ops ; .arch x64 ; movss xmm1, DWORD [r12 + rax + bb]),
+        2 => dynasm!(ops ; .arch x64 ; movss xmm2, DWORD [r12 + rax + bb]),
+        _ => unreachable!(),
     }
 }
 
@@ -1520,6 +1944,23 @@ fn emit_load_bf16_indexed(ops: &mut Assembler, dst_xmm: u8, base_byte: i64, byte
     }
 }
 
+/// BF16 → F32 expand load with byte offset already in `rax`.
+fn emit_load_bf16_rax(ops: &mut Assembler, dst_xmm: u8, base: i64) {
+    let bb = base as i32;
+    debug_assert_eq!(base, bb as i64, "rax-indexed BF16 base out of i32 range");
+    dynasm!(ops
+        ; .arch x64
+        ; movzx ecx, WORD [r12 + rax + bb]
+        ; shl ecx, 16
+    );
+    match dst_xmm {
+        0 => dynasm!(ops ; .arch x64 ; movd xmm0, ecx),
+        1 => dynasm!(ops ; .arch x64 ; movd xmm1, ecx),
+        2 => dynasm!(ops ; .arch x64 ; movd xmm2, ecx),
+        _ => unreachable!(),
+    }
+}
+
 /// Emit an F32 → BF16 narrow store: round-to-nearest-even, take top 16 bits.
 ///
 /// Mirrors cranelift's emit_typed_store BF16 path:
@@ -1619,6 +2060,25 @@ fn emit_load_f16_indexed(ops: &mut Assembler, dst_xmm: u8, base_byte: i64, byte_
     }
     dynasm!(ops
         ; .arch x64
+        ; mov rax, QWORD jit_f16_to_f32 as *const u8 as i64
+        ; call rax
+    );
+    if dst_xmm != 0 {
+        match dst_xmm {
+            1 => dynasm!(ops ; .arch x64 ; movaps xmm1, xmm0),
+            2 => dynasm!(ops ; .arch x64 ; movaps xmm2, xmm0),
+            _ => unreachable!(),
+        }
+    }
+}
+
+/// F16 → F32 software path with byte offset already in `rax`.
+fn emit_load_f16_rax(ops: &mut Assembler, dst_xmm: u8, base: i64) {
+    let bb = base as i32;
+    debug_assert_eq!(base, bb as i64, "rax-indexed F16 base out of i32 range");
+    dynasm!(ops
+        ; .arch x64
+        ; movzx edi, WORD [r12 + rax + bb]
         ; mov rax, QWORD jit_f16_to_f32 as *const u8 as i64
         ; call rax
     );
@@ -2018,6 +2478,7 @@ fn emit_group_body_f64(
     ops: &mut Assembler,
     group: &AtomGroup<'static, SystemPool>,
     layout: &BufferLayout,
+    tables: &mut EmbeddedTables,
     in_loop: bool,
     i_const: u64,
 ) -> Result<(), String> {
@@ -2032,6 +2493,7 @@ fn emit_group_body_f64(
                 ops,
                 &group.inputs[0],
                 layout,
+                tables,
                 in_loop,
                 i_const,
                 group.atom_offset,
@@ -2045,6 +2507,7 @@ fn emit_group_body_f64(
                 ops,
                 &group.inputs[0],
                 layout,
+                tables,
                 in_loop,
                 i_const,
                 group.atom_offset,
@@ -2054,6 +2517,7 @@ fn emit_group_body_f64(
                 ops,
                 &group.inputs[1],
                 layout,
+                tables,
                 in_loop,
                 i_const,
                 group.atom_offset,
@@ -2068,6 +2532,7 @@ fn emit_group_body_f64(
                 ops,
                 &group.inputs[0],
                 layout,
+                tables,
                 in_loop,
                 i_const,
                 group.atom_offset,
@@ -2082,6 +2547,7 @@ fn emit_group_body_f64(
                 ops,
                 &group.inputs[0],
                 layout,
+                tables,
                 in_loop,
                 i_const,
                 group.atom_offset,
@@ -2091,6 +2557,7 @@ fn emit_group_body_f64(
                 ops,
                 &group.inputs[1],
                 layout,
+                tables,
                 in_loop,
                 i_const,
                 group.atom_offset,
@@ -2100,6 +2567,7 @@ fn emit_group_body_f64(
                 ops,
                 &group.inputs[2],
                 layout,
+                tables,
                 in_loop,
                 i_const,
                 group.atom_offset,
@@ -2133,44 +2601,42 @@ fn emit_group_body_f64(
     Ok(())
 }
 
-/// Emit `movsd <xmm{dst}>, [r12 + addr]` for an InputRef.
+/// Emit `movsd <xmm{dst}>, [r12 + addr]` for an InputRef. F64 storage only.
 fn emit_load_f64(
     ops: &mut Assembler,
     input: &InputRef,
     layout: &BufferLayout,
+    tables: &mut EmbeddedTables,
     in_loop: bool,
     i_const: u64,
     atom_offset: u64,
     dst_xmm: u8,
 ) -> Result<(), String> {
-    match input {
-        InputRef::Broadcast(atom) => {
-            let (slot, elem_idx) = layout
-                .find(*atom)
-                .ok_or_else(|| format!("x86_jit: no slot for Broadcast atom={atom}"))?;
-            let byte_off = slot.byte_offset as i64 + elem_idx as i64 * slot.elem_bytes as i64;
-            emit_load_f64_disp(ops, dst_xmm, byte_off);
-        }
-        InputRef::Strided {
-            base, dim_strides, ..
-        } => {
-            assert_eq!(dim_strides.len(), 1, "check_supported guarantees 1D");
-            let stride = dim_strides[0];
-            let (base_byte, byte_stride) =
-                resolve_strided_addr(*base, stride, atom_offset, layout)?;
-
-            if in_loop {
-                emit_load_f64_indexed(ops, dst_xmm, base_byte, byte_stride);
-            } else {
-                let byte_off = base_byte + byte_stride * i_const as i64;
-                emit_load_f64_disp(ops, dst_xmm, byte_off);
-            }
-        }
-        InputRef::Explicit(_) => {
-            return Err("x86_jit: Explicit inputref in emission (filter bug)".into());
-        }
+    let (slot_dtype, addr) =
+        resolve_input_load_addr(ops, input, layout, tables, in_loop, i_const, atom_offset)?;
+    if slot_dtype != NumericDType::F64 {
+        return Err(format!(
+            "x86_jit emit_load_f64: unexpected slot dtype {slot_dtype:?}"
+        ));
+    }
+    match addr {
+        LoadAddr::Disp(d) => emit_load_f64_disp(ops, dst_xmm, d),
+        LoadAddr::Indexed { base, stride } => emit_load_f64_indexed(ops, dst_xmm, base, stride),
+        LoadAddr::RaxIndexed { base } => emit_load_f64_rax(ops, dst_xmm, base),
     }
     Ok(())
+}
+
+/// Emit `movsd xmm{dst_xmm}, QWORD [r12 + rax + base]`.
+fn emit_load_f64_rax(ops: &mut Assembler, dst_xmm: u8, base: i64) {
+    let bb = base as i32;
+    debug_assert_eq!(base, bb as i64, "rax-indexed F64 base out of i32 range");
+    match dst_xmm {
+        0 => dynasm!(ops ; .arch x64 ; movsd xmm0, QWORD [r12 + rax + bb]),
+        1 => dynasm!(ops ; .arch x64 ; movsd xmm1, QWORD [r12 + rax + bb]),
+        2 => dynasm!(ops ; .arch x64 ; movsd xmm2, QWORD [r12 + rax + bb]),
+        _ => unreachable!(),
+    }
 }
 
 fn emit_load_f64_disp(ops: &mut Assembler, dst_xmm: u8, disp: i64) {
@@ -2556,6 +3022,7 @@ fn emit_group_body_int(
     ops: &mut Assembler,
     group: &AtomGroup<'static, SystemPool>,
     layout: &BufferLayout,
+    tables: &mut EmbeddedTables,
     in_loop: bool,
     i_const: u64,
 ) -> Result<(), String> {
@@ -2570,6 +3037,7 @@ fn emit_group_body_int(
                 ops,
                 &group.inputs[0],
                 layout,
+                tables,
                 in_loop,
                 i_const,
                 group.atom_offset,
@@ -2592,6 +3060,7 @@ fn emit_group_body_int(
                 ops,
                 &group.inputs[1],
                 layout,
+                tables,
                 in_loop,
                 i_const,
                 group.atom_offset,
@@ -2601,6 +3070,7 @@ fn emit_group_body_int(
                 ops,
                 &group.inputs[0],
                 layout,
+                tables,
                 in_loop,
                 i_const,
                 group.atom_offset,
@@ -2622,6 +3092,7 @@ fn emit_group_body_int(
                 ops,
                 &group.inputs[0],
                 layout,
+                tables,
                 in_loop,
                 i_const,
                 group.atom_offset,
@@ -2645,6 +3116,7 @@ fn emit_group_body_int(
                 ops,
                 &group.inputs[2],
                 layout,
+                tables,
                 in_loop,
                 i_const,
                 group.atom_offset,
@@ -2654,6 +3126,7 @@ fn emit_group_body_int(
                 ops,
                 &group.inputs[1],
                 layout,
+                tables,
                 in_loop,
                 i_const,
                 group.atom_offset,
@@ -2663,6 +3136,7 @@ fn emit_group_body_int(
                 ops,
                 &group.inputs[0],
                 layout,
+                tables,
                 in_loop,
                 i_const,
                 group.atom_offset,
@@ -2703,44 +3177,29 @@ fn emit_load_int(
     ops: &mut Assembler,
     input: &InputRef,
     layout: &BufferLayout,
+    tables: &mut EmbeddedTables,
     in_loop: bool,
     i_const: u64,
     atom_offset: u64,
     dst: IntReg,
 ) -> Result<(), String> {
-    match input {
-        InputRef::Broadcast(atom) => {
-            let (slot, elem_idx) = layout
-                .find(*atom)
-                .ok_or_else(|| format!("x86_jit: no slot for Broadcast atom={atom}"))?;
-            let byte_off = slot.byte_offset as i64 + elem_idx as i64 * slot.elem_bytes as i64;
-            emit_load_int_disp(ops, slot.dtype, dst, byte_off);
+    let (slot_dtype, addr) =
+        resolve_input_load_addr(ops, input, layout, tables, in_loop, i_const, atom_offset)?;
+    match addr {
+        LoadAddr::Disp(d) => emit_load_int_disp(ops, slot_dtype, dst, d),
+        LoadAddr::Indexed { base, stride } => {
+            emit_load_int_indexed(ops, slot_dtype, dst, base, stride)
         }
-        InputRef::Strided {
-            base, dim_strides, ..
-        } => {
-            assert_eq!(dim_strides.len(), 1, "check_supported guarantees 1D");
-            let stride = dim_strides[0];
-            let (base_byte, byte_stride) =
-                resolve_strided_addr(*base, stride, atom_offset, layout)?;
-            // Look up the slot dtype again for the load instruction selection.
-            let first_offset = stride * atom_offset as i64;
-            let first_atom = AtomId((base.0 as i64 + first_offset) as u64);
-            let (slot, _) = layout
-                .find(*base)
-                .or_else(|| layout.find(first_atom))
-                .ok_or_else(|| format!("x86_jit: no slot for Strided base={base}"))?;
-            let slot_dtype = slot.dtype;
-
-            if in_loop {
-                emit_load_int_indexed(ops, slot_dtype, dst, base_byte, byte_stride);
-            } else {
-                let byte_off = base_byte + byte_stride * i_const as i64;
-                emit_load_int_disp(ops, slot_dtype, dst, byte_off);
+        LoadAddr::RaxIndexed { base } => {
+            // The byte offset is in rax; reuse the same `[r12 + rax + bb]`
+            // helper that emit_load_int_indexed uses for non-power-of-2
+            // strides. Add `base` to rax first if non-zero.
+            if base != 0 {
+                let bb_imm = i32::try_from(base)
+                    .map_err(|_| "x86_jit: int rax-indexed base too large for i32".to_string())?;
+                dynasm!(ops ; .arch x64 ; add rax, bb_imm);
             }
-        }
-        InputRef::Explicit(_) => {
-            return Err("x86_jit: Explicit inputref in emission (filter bug)".into());
+            emit_load_int_indexed_rax(ops, slot_dtype, dst, 0);
         }
     }
     Ok(())
@@ -3366,6 +3825,711 @@ fn emit_unop_int(ops: &mut Assembler, op: ScalarUnaryOp) {
     }
 }
 
+// ─── IndirectLoad emission ─────────────────────────────────────────────────
+//
+// `IndirectLoad { table_base }` evaluates: `table_base[input[0]]` where the
+// index is loaded from `input[0]` (cast to i64), the table lives in the
+// buffer at `table_base`'s slot, and the result is cast to `output_dtype`
+// before storing.
+//
+// Codegen sequence:
+//   1. emit_load_int(input[0], rax)            ← index → rax
+//   2. imul rax, rax, table.elem_bytes         ← byte offset within table
+//   3. add  rax, table.byte_offset             ← absolute byte offset
+//   4. typed load from [r12 + rax] in the table dtype's repr
+//   5. cast to output dtype's repr
+//   6. typed store into output slot
+
+fn emit_group_body_indirect_load(
+    ops: &mut Assembler,
+    group: &AtomGroup<'static, SystemPool>,
+    layout: &BufferLayout,
+    tables: &mut EmbeddedTables,
+    in_loop: bool,
+    i_const: u64,
+    table_base: AtomId,
+) -> Result<(), String> {
+    let (out_slot, _) = layout
+        .find(group.base_id)
+        .ok_or_else(|| format!("x86_jit: no slot for group base={}", group.base_id))?;
+    let out_slot = out_slot.clone();
+
+    let (table_slot, _) = layout
+        .find(table_base)
+        .ok_or_else(|| format!("x86_jit: no slot for IndirectLoad table_base={table_base}"))?;
+    let table_byte_off = table_slot.byte_offset as i64;
+    let table_elem_bytes = table_slot.elem_bytes as i64;
+    let table_dtype = table_slot.dtype;
+
+    // Step 1: load index → rax. The index can come from any int dtype slot,
+    // or a float dtype that we cast to int (matching cranelift's repr_cast).
+    // We support int sources here; float-indexed gather is rare.
+    let index_input = &group.inputs[0];
+    let index_slot_dtype = input_slot_dtype(index_input, layout, group.atom_offset)
+        .ok_or_else(|| "x86_jit: no slot for IndirectLoad index input".to_string())?;
+    if Repr::from_dtype(index_slot_dtype) != Repr::Int {
+        return Err(format!(
+            "x86_jit: IndirectLoad index dtype {index_slot_dtype:?} (only int supported)"
+        ));
+    }
+    emit_load_int(
+        ops,
+        index_input,
+        layout,
+        tables,
+        in_loop,
+        i_const,
+        group.atom_offset,
+        IntReg::Rax,
+    )?;
+
+    // Step 2 + 3: rax = rax * table_elem_bytes + table_byte_off.
+    if table_elem_bytes != 1 {
+        let imm = i32::try_from(table_elem_bytes)
+            .map_err(|_| "x86_jit: IndirectLoad table_elem_bytes too large".to_string())?;
+        dynasm!(ops ; .arch x64 ; imul rax, rax, imm);
+    }
+    if table_byte_off != 0 {
+        // Handle large table offsets: small ones via add imm, large via mov+add.
+        if let Ok(imm) = i32::try_from(table_byte_off) {
+            dynasm!(ops ; .arch x64 ; add rax, imm);
+        } else {
+            dynasm!(ops
+                ; .arch x64
+                ; mov rcx, QWORD table_byte_off
+                ; add rax, rcx
+            );
+        }
+    }
+
+    // Step 4: typed load from [r12 + rax]. Repurpose the int / float
+    // RaxIndexed paths.
+    let table_repr = Repr::from_dtype(table_dtype);
+    let out_repr = Repr::from_dtype(group.output_dtype);
+
+    match table_repr {
+        Repr::F32 => match table_dtype {
+            NumericDType::F32 => emit_load_f32_rax(ops, 0, 0),
+            NumericDType::BF16 => emit_load_bf16_rax(ops, 0, 0),
+            NumericDType::F16 => emit_load_f16_rax(ops, 0, 0),
+            _ => unreachable!(),
+        },
+        Repr::F64 => {
+            emit_load_f64_rax(ops, 0, 0);
+        }
+        Repr::Int => {
+            emit_load_int_indexed_rax(ops, table_dtype, IntReg::Rax, 0);
+        }
+    }
+
+    // Step 5: cross-repr cast. Same logic as emit_group_body_cast.
+    match (table_repr, out_repr) {
+        (Repr::F32, Repr::F32) | (Repr::F64, Repr::F64) | (Repr::Int, Repr::Int) => {}
+        (Repr::F32, Repr::F64) => dynasm!(ops ; .arch x64 ; cvtss2sd xmm0, xmm0),
+        (Repr::F64, Repr::F32) => dynasm!(ops ; .arch x64 ; cvtsd2ss xmm0, xmm0),
+        (Repr::F32, Repr::Int) => dynasm!(ops ; .arch x64 ; cvttss2si rax, xmm0),
+        (Repr::F64, Repr::Int) => dynasm!(ops ; .arch x64 ; cvttsd2si rax, xmm0),
+        (Repr::Int, Repr::F32) => dynasm!(ops ; .arch x64 ; cvtsi2ss xmm0, rax),
+        (Repr::Int, Repr::F64) => dynasm!(ops ; .arch x64 ; cvtsi2sd xmm0, rax),
+    }
+
+    // Step 6: store.
+    match out_repr {
+        Repr::F32 => emit_store_f32(ops, &out_slot, in_loop, i_const, group.atom_offset, 0),
+        Repr::F64 => emit_store_f64(ops, &out_slot, in_loop, i_const, group.atom_offset, 0),
+        Repr::Int => emit_store_int(
+            ops,
+            &out_slot,
+            in_loop,
+            i_const,
+            group.atom_offset,
+            IntReg::Rax,
+        ),
+    }
+
+    Ok(())
+}
+
+/// Look up the storage dtype an InputRef will load from. Mirrors cranelift's
+/// `input_slot_dtype` helper.
+fn input_slot_dtype(
+    input: &InputRef,
+    layout: &BufferLayout,
+    atom_offset: u64,
+) -> Option<NumericDType> {
+    match input {
+        InputRef::Broadcast(atom) => layout.find(*atom).map(|(s, _)| s.dtype),
+        InputRef::Strided {
+            base,
+            dim_strides,
+            dim_shape,
+        } => layout.find(*base).map(|(s, _)| s.dtype).or_else(|| {
+            let off = strided_offset_atoms(dim_strides, dim_shape, atom_offset);
+            let first = AtomId((base.0 as i64 + off) as u64);
+            layout.find(first).map(|(s, _)| s.dtype)
+        }),
+        InputRef::Explicit(ids) => ids
+            .first()
+            .and_then(|id| layout.find(*id).map(|(s, _)| s.dtype)),
+    }
+}
+
+// ─── Reduce emission ───────────────────────────────────────────────────────
+//
+// `Reduce { kind, reduce_count, reduce_stride, compute_dtype }` performs an
+// affine k-loop over `reduce_count` source atoms accessed via the input's
+// 1D affine Strided pattern. The accumulator initializes per-kind:
+//
+//   Sum  → 0       Prod → 1
+//   Max  → -inf    Min  → +inf      (for ints: i64::MIN / i64::MAX)
+//
+// Each iteration: load src[k], cast-up to compute repr if narrower, fold
+// into the accumulator, k++. After the inner loop, cast-to-output and store.
+//
+// We use **r15** as the inner k-loop variable so it doesn't conflict with
+// r13 (outer atom index when count > 1) or r14 (outer end constant).
+
+fn emit_group_body_reduce(
+    ops: &mut Assembler,
+    group: &AtomGroup<'static, SystemPool>,
+    layout: &BufferLayout,
+    _tables: &mut EmbeddedTables,
+    in_loop: bool,
+    i_const: u64,
+    kind: ReduceKind,
+    reduce_count: u64,
+    reduce_stride: i64,
+    compute_dtype: NumericDType,
+) -> Result<(), String> {
+    let (out_slot, _) = layout
+        .find(group.base_id)
+        .ok_or_else(|| format!("x86_jit: no slot for group base={}", group.base_id))?;
+    let out_slot = out_slot.clone();
+    let compute_repr = Repr::from_dtype(compute_dtype);
+    let out_repr = Repr::from_dtype(group.output_dtype);
+
+    // Reduce input is 1D affine Strided (checked by check_supported).
+    let (input_base, input_stride_atoms) = match &group.inputs[0] {
+        InputRef::Strided {
+            base, dim_strides, ..
+        } => (*base, dim_strides[0]),
+        _ => unreachable!("check_supported guarantees 1D Strided"),
+    };
+
+    // Resolve the source slot. Treat it as a 1D affine resolution.
+    let (base_byte, byte_stride, src_dtype) =
+        resolve_reduce_input_addr(input_base, input_stride_atoms, group.atom_offset, layout)?;
+    let reduce_byte_stride = reduce_stride * (src_dtype.bytes_per_element() as i64);
+    let src_repr = Repr::from_dtype(src_dtype);
+
+    // Per-iteration outer base address — depends on whether we're in the
+    // outer atom loop (r13) or compiling a constant-i body.
+    //
+    // For in_loop:  outer_base = base_byte + r13 * byte_stride
+    // For !in_loop: outer_base = base_byte + i_const * byte_stride (constant)
+    //
+    // We materialize this into r15 (so the inner k-loop can derive
+    // [r12 + r15 + k*reduce_byte_stride] without re-doing the outer multiply).
+    if in_loop {
+        // r15 = base_byte + r13 * byte_stride
+        if byte_stride == 0 {
+            dynasm!(ops ; .arch x64 ; mov r15, QWORD base_byte);
+        } else {
+            let bs_imm = i32::try_from(byte_stride)
+                .map_err(|_| "x86_jit: reduce input byte_stride too large for i32".to_string())?;
+            dynasm!(ops
+                ; .arch x64
+                ; mov r15, r13
+                ; imul r15, r15, bs_imm
+            );
+            if base_byte != 0 {
+                if let Ok(bb_imm) = i32::try_from(base_byte) {
+                    dynasm!(ops ; .arch x64 ; add r15, bb_imm);
+                } else {
+                    dynasm!(ops
+                        ; .arch x64
+                        ; mov rax, QWORD base_byte
+                        ; add r15, rax
+                    );
+                }
+            }
+        }
+    } else {
+        let outer_byte_off = base_byte + byte_stride * i_const as i64;
+        dynasm!(ops ; .arch x64 ; mov r15, QWORD outer_byte_off);
+    }
+
+    // Initialize the accumulator in xmm0 / xmm0 / rax depending on compute repr.
+    emit_reduce_init(ops, kind, compute_repr);
+
+    // Inner k loop: rcx counts down from reduce_count to 0. We choose rcx
+    // (caller-saved) instead of r13 because r13 is the outer loop var.
+    // Body: load src at [r12 + r15 + k_offset], accumulate.
+    //
+    // For the very common reduce_count == 1 case, we can unroll: just one
+    // iteration, no loop overhead.
+    if reduce_count == 0 {
+        // Empty reduction — accumulator stays at init. (Lowering already
+        // refuses extent-0 reductions, so this is defensive.)
+    } else if reduce_count == 1 {
+        emit_reduce_body_iter(
+            ops,
+            kind,
+            compute_repr,
+            src_repr,
+            src_dtype,
+            /*k_disp=*/ 0,
+        )?;
+    } else {
+        // Counted loop: r11 = 0..reduce_count.
+        //
+        // Register choices:
+        //   r11    — inner k counter (caller-saved; spilled across F16 calls)
+        //   rdx    — int loaded-value scratch (fold reads it)
+        //   rcx    — bf16 expand scratch (load uses ecx; clobbered each iter)
+        //   xmm1   — float loaded-value scratch
+        //   r10    — address scratch (for non-power-of-2 stride)
+        //
+        // We embed `reduce_count` as an i32 immediate in the cmp; counts above
+        // 2^31 are not expected for any practical tensor and would have been
+        // rejected by check_supported earlier (TODO: explicit check).
+        let end_imm = i32::try_from(reduce_count)
+            .map_err(|_| "x86_jit: reduce_count exceeds i32::MAX (unsupported)".to_string())?;
+        let k_top = ops.new_dynamic_label();
+        let k_done = ops.new_dynamic_label();
+        dynasm!(ops
+            ; .arch x64
+            ; xor r11d, r11d            // k = 0
+            ; =>k_top
+            ; cmp r11, end_imm
+            ; jge =>k_done
+        );
+        emit_reduce_body_loop_iter(
+            ops,
+            kind,
+            compute_repr,
+            src_repr,
+            src_dtype,
+            reduce_byte_stride,
+        )?;
+        dynasm!(ops
+            ; .arch x64
+            ; inc r11
+            ; jmp =>k_top
+            ; =>k_done
+        );
+    }
+
+    // Cross-repr cast to output and store.
+    match (compute_repr, out_repr) {
+        (Repr::F32, Repr::F32) | (Repr::F64, Repr::F64) | (Repr::Int, Repr::Int) => {}
+        (Repr::F32, Repr::F64) => dynasm!(ops ; .arch x64 ; cvtss2sd xmm0, xmm0),
+        (Repr::F64, Repr::F32) => dynasm!(ops ; .arch x64 ; cvtsd2ss xmm0, xmm0),
+        (Repr::F32, Repr::Int) => dynasm!(ops ; .arch x64 ; cvttss2si rax, xmm0),
+        (Repr::F64, Repr::Int) => dynasm!(ops ; .arch x64 ; cvttsd2si rax, xmm0),
+        (Repr::Int, Repr::F32) => dynasm!(ops ; .arch x64 ; cvtsi2ss xmm0, rax),
+        (Repr::Int, Repr::F64) => dynasm!(ops ; .arch x64 ; cvtsi2sd xmm0, rax),
+    }
+
+    match out_repr {
+        Repr::F32 => emit_store_f32(ops, &out_slot, in_loop, i_const, group.atom_offset, 0),
+        Repr::F64 => emit_store_f64(ops, &out_slot, in_loop, i_const, group.atom_offset, 0),
+        Repr::Int => emit_store_int(
+            ops,
+            &out_slot,
+            in_loop,
+            i_const,
+            group.atom_offset,
+            IntReg::Rax,
+        ),
+    }
+
+    Ok(())
+}
+
+/// Resolve a 1D affine Reduce input to its (base_byte, byte_stride, dtype).
+fn resolve_reduce_input_addr(
+    base: AtomId,
+    stride_atoms: i64,
+    atom_offset: u64,
+    layout: &BufferLayout,
+) -> Result<(i64, i64, NumericDType), String> {
+    let first_offset = stride_atoms * atom_offset as i64;
+    let first_atom = AtomId((base.0 as i64 + first_offset) as u64);
+    let (slot, elem) = layout
+        .find(base)
+        .or_else(|| layout.find(first_atom))
+        .ok_or_else(|| format!("x86_jit: no slot for Reduce input base={base}"))?;
+    let elem_bytes = slot.elem_bytes as i64;
+    let slot_byte = slot.byte_offset as i64 + elem as i64 * elem_bytes;
+    let base_byte = if layout.find(base).is_some() {
+        slot_byte
+    } else {
+        slot_byte - first_offset * elem_bytes
+    };
+    Ok((base_byte, stride_atoms * elem_bytes, slot.dtype))
+}
+
+/// Initialize the reduce accumulator (xmm0 for F32/F64, rax for Int) per kind.
+fn emit_reduce_init(ops: &mut Assembler, kind: ReduceKind, compute_repr: Repr) {
+    match (kind, compute_repr) {
+        (ReduceKind::Sum, Repr::F32) => {
+            dynasm!(ops ; .arch x64 ; xorps xmm0, xmm0);
+        }
+        (ReduceKind::Sum, Repr::F64) => {
+            dynasm!(ops ; .arch x64 ; xorpd xmm0, xmm0);
+        }
+        (ReduceKind::Sum, Repr::Int) => {
+            dynasm!(ops ; .arch x64 ; xor eax, eax);
+        }
+        (ReduceKind::Prod, Repr::F32) => {
+            let one = 1.0f32.to_bits() as i32;
+            dynasm!(ops
+                ; .arch x64
+                ; mov eax, DWORD one
+                ; movd xmm0, eax
+            );
+        }
+        (ReduceKind::Prod, Repr::F64) => {
+            let one = 1.0f64.to_bits() as i64;
+            dynasm!(ops
+                ; .arch x64
+                ; mov rax, QWORD one
+                ; movq xmm0, rax
+            );
+        }
+        (ReduceKind::Prod, Repr::Int) => {
+            dynasm!(ops ; .arch x64 ; mov eax, 1);
+        }
+        (ReduceKind::Max, Repr::F32) => {
+            let neg_inf = f32::NEG_INFINITY.to_bits() as i32;
+            dynasm!(ops
+                ; .arch x64
+                ; mov eax, DWORD neg_inf
+                ; movd xmm0, eax
+            );
+        }
+        (ReduceKind::Max, Repr::F64) => {
+            let neg_inf = f64::NEG_INFINITY.to_bits() as i64;
+            dynasm!(ops
+                ; .arch x64
+                ; mov rax, QWORD neg_inf
+                ; movq xmm0, rax
+            );
+        }
+        (ReduceKind::Max, Repr::Int) => {
+            let min = i64::MIN;
+            dynasm!(ops ; .arch x64 ; mov rax, QWORD min);
+        }
+        (ReduceKind::Min, Repr::F32) => {
+            let pos_inf = f32::INFINITY.to_bits() as i32;
+            dynasm!(ops
+                ; .arch x64
+                ; mov eax, DWORD pos_inf
+                ; movd xmm0, eax
+            );
+        }
+        (ReduceKind::Min, Repr::F64) => {
+            let pos_inf = f64::INFINITY.to_bits() as i64;
+            dynasm!(ops
+                ; .arch x64
+                ; mov rax, QWORD pos_inf
+                ; movq xmm0, rax
+            );
+        }
+        (ReduceKind::Min, Repr::Int) => {
+            let max = i64::MAX;
+            dynasm!(ops ; .arch x64 ; mov rax, QWORD max);
+        }
+    }
+}
+
+/// Emit one reduce body iteration where the address is `[r12 + r15 + k_disp]`.
+/// Used for the unrolled `reduce_count == 1` case.
+fn emit_reduce_body_iter(
+    ops: &mut Assembler,
+    kind: ReduceKind,
+    compute_repr: Repr,
+    src_repr: Repr,
+    src_dtype: NumericDType,
+    k_disp: i64,
+) -> Result<(), String> {
+    let bb = i32::try_from(k_disp)
+        .map_err(|_| "x86_jit: reduce k_disp too large for i32".to_string())?;
+    // Load src[k_disp] from [r12 + r15 + bb] into xmm1 (float) or rdx (int).
+    emit_reduce_load_into_scratch(ops, src_dtype, src_repr, compute_repr, bb)?;
+    // Fold scratch into acc.
+    emit_reduce_fold(ops, kind, compute_repr);
+    Ok(())
+}
+
+/// Emit one reduce body iteration where the inner k variable is in `r11`.
+/// We compute address = `[r12 + r15 + r11*reduce_byte_stride]` for the SIB
+/// scales we natively support, or materialize the byte offset into r10 for
+/// everything else.
+fn emit_reduce_body_loop_iter(
+    ops: &mut Assembler,
+    kind: ReduceKind,
+    compute_repr: Repr,
+    src_repr: Repr,
+    src_dtype: NumericDType,
+    reduce_byte_stride: i64,
+) -> Result<(), String> {
+    if matches!(reduce_byte_stride, 1 | 2 | 4 | 8) {
+        emit_reduce_load_via_sib(ops, src_dtype, src_repr, compute_repr, reduce_byte_stride)?;
+    } else {
+        let stride_imm = i32::try_from(reduce_byte_stride)
+            .map_err(|_| "x86_jit: reduce stride too large for i32".to_string())?;
+        dynasm!(ops
+            ; .arch x64
+            ; mov r10, r11
+            ; imul r10, r10, stride_imm
+        );
+        emit_reduce_load_via_r10(ops, src_dtype, src_repr, compute_repr)?;
+    }
+    emit_reduce_fold(ops, kind, compute_repr);
+    Ok(())
+}
+
+/// Load `src` from `[r12 + r15 + bb]`, expand-cast to compute_repr, leave
+/// result in xmm1 (float compute) or rdx (int compute).
+fn emit_reduce_load_into_scratch(
+    ops: &mut Assembler,
+    src_dtype: NumericDType,
+    src_repr: Repr,
+    compute_repr: Repr,
+    bb: i32,
+) -> Result<(), String> {
+    match src_dtype {
+        NumericDType::F32 => {
+            dynasm!(ops ; .arch x64 ; movss xmm1, DWORD [r12 + r15 + bb]);
+        }
+        NumericDType::F64 => {
+            dynasm!(ops ; .arch x64 ; movsd xmm1, QWORD [r12 + r15 + bb]);
+        }
+        NumericDType::BF16 => {
+            dynasm!(ops
+                ; .arch x64
+                ; movzx ecx, WORD [r12 + r15 + bb]
+                ; shl ecx, 16
+                ; movd xmm1, ecx
+            );
+        }
+        NumericDType::F16 => {
+            // F16 reduce iteration calls jit_f16_to_f32. xmm0 (acc) and r11
+            // (k counter) are both caller-saved and must be spilled.
+            dynasm!(ops
+                ; .arch x64
+                ; movss DWORD [rsp + F16_SPILL_XMM0], xmm0
+                ; mov QWORD [rsp + K_SPILL], r11
+                ; movzx edi, WORD [r12 + r15 + bb]
+                ; mov rax, QWORD jit_f16_to_f32 as *const u8 as i64
+                ; call rax
+                ; movaps xmm1, xmm0
+                ; movss xmm0, DWORD [rsp + F16_SPILL_XMM0]
+                ; mov r11, QWORD [rsp + K_SPILL]
+            );
+        }
+        NumericDType::I64 | NumericDType::U64 => {
+            dynasm!(ops ; .arch x64 ; mov rdx, QWORD [r12 + r15 + bb]);
+        }
+        NumericDType::I32 => {
+            dynasm!(ops ; .arch x64 ; movsxd rdx, DWORD [r12 + r15 + bb]);
+        }
+        NumericDType::U32 => {
+            dynasm!(ops ; .arch x64 ; mov edx, DWORD [r12 + r15 + bb]);
+        }
+        NumericDType::I16 => {
+            dynasm!(ops ; .arch x64 ; movsx rdx, WORD [r12 + r15 + bb]);
+        }
+        NumericDType::U16 => {
+            dynasm!(ops ; .arch x64 ; movzx rdx, WORD [r12 + r15 + bb]);
+        }
+        NumericDType::I8 => {
+            dynasm!(ops ; .arch x64 ; movsx rdx, BYTE [r12 + r15 + bb]);
+        }
+        NumericDType::U8 | NumericDType::BOOL => {
+            dynasm!(ops ; .arch x64 ; movzx rdx, BYTE [r12 + r15 + bb]);
+        }
+        _ => {
+            return Err(format!(
+                "x86_jit: reduce src dtype {src_dtype:?} unsupported"
+            ));
+        }
+    }
+
+    // Cross-repr cast (only F32 ↔ F64 used in practice; src→compute always
+    // narrows or stays the same since BF16/F16 → F32, integers → i64).
+    match (src_repr, compute_repr) {
+        (Repr::F32, Repr::F64) => dynasm!(ops ; .arch x64 ; cvtss2sd xmm1, xmm1),
+        (Repr::F64, Repr::F32) => dynasm!(ops ; .arch x64 ; cvtsd2ss xmm1, xmm1),
+        _ => {} // same repr or int→int (already i64)
+    }
+    Ok(())
+}
+
+/// Variant that uses the SIB addressing mode `[r12 + r15 + r11*scale]`.
+/// Only valid for `scale ∈ {1, 2, 4, 8}`.
+fn emit_reduce_load_via_sib(
+    ops: &mut Assembler,
+    src_dtype: NumericDType,
+    src_repr: Repr,
+    compute_repr: Repr,
+    scale: i64,
+) -> Result<(), String> {
+    // x86 SIB only allows two index registers per address mode (base + index*scale),
+    // not three (r15 + r11*scale + r12). So we have to materialize r15+r11*scale
+    // into a temp, then load via [r12 + temp].
+    //
+    // Materialize: r10 = r15 + r11 * scale.
+    match scale {
+        1 => dynasm!(ops ; .arch x64 ; lea r10, [r15 + r11]),
+        2 => dynasm!(ops ; .arch x64 ; lea r10, [r15 + r11 * 2]),
+        4 => dynasm!(ops ; .arch x64 ; lea r10, [r15 + r11 * 4]),
+        8 => dynasm!(ops ; .arch x64 ; lea r10, [r15 + r11 * 8]),
+        _ => unreachable!(),
+    }
+    emit_reduce_load_via_r10(ops, src_dtype, src_repr, compute_repr)
+}
+
+/// Load `src` from `[r12 + r10]`, expand-cast to compute_repr, leave
+/// result in xmm1 (float compute) or rdx (int compute).
+fn emit_reduce_load_via_r10(
+    ops: &mut Assembler,
+    src_dtype: NumericDType,
+    src_repr: Repr,
+    compute_repr: Repr,
+) -> Result<(), String> {
+    match src_dtype {
+        NumericDType::F32 => dynasm!(ops ; .arch x64 ; movss xmm1, DWORD [r12 + r10]),
+        NumericDType::F64 => dynasm!(ops ; .arch x64 ; movsd xmm1, QWORD [r12 + r10]),
+        NumericDType::BF16 => dynasm!(ops
+            ; .arch x64
+            ; movzx ecx, WORD [r12 + r10]
+            ; shl ecx, 16
+            ; movd xmm1, ecx
+        ),
+        NumericDType::F16 => dynasm!(ops
+            ; .arch x64
+            ; movss DWORD [rsp + F16_SPILL_XMM0], xmm0
+            ; mov QWORD [rsp + K_SPILL], r11
+            ; movzx edi, WORD [r12 + r10]
+            ; mov rax, QWORD jit_f16_to_f32 as *const u8 as i64
+            ; call rax
+            ; movaps xmm1, xmm0
+            ; movss xmm0, DWORD [rsp + F16_SPILL_XMM0]
+            ; mov r11, QWORD [rsp + K_SPILL]
+        ),
+        NumericDType::I64 | NumericDType::U64 => {
+            dynasm!(ops ; .arch x64 ; mov rdx, QWORD [r12 + r10])
+        }
+        NumericDType::I32 => dynasm!(ops ; .arch x64 ; movsxd rdx, DWORD [r12 + r10]),
+        NumericDType::U32 => dynasm!(ops ; .arch x64 ; mov edx, DWORD [r12 + r10]),
+        NumericDType::I16 => dynasm!(ops ; .arch x64 ; movsx rdx, WORD [r12 + r10]),
+        NumericDType::U16 => dynasm!(ops ; .arch x64 ; movzx rdx, WORD [r12 + r10]),
+        NumericDType::I8 => dynasm!(ops ; .arch x64 ; movsx rdx, BYTE [r12 + r10]),
+        NumericDType::U8 | NumericDType::BOOL => {
+            dynasm!(ops ; .arch x64 ; movzx rdx, BYTE [r12 + r10])
+        }
+        _ => {
+            return Err(format!(
+                "x86_jit: reduce src dtype {src_dtype:?} unsupported"
+            ));
+        }
+    }
+    match (src_repr, compute_repr) {
+        (Repr::F32, Repr::F64) => dynasm!(ops ; .arch x64 ; cvtss2sd xmm1, xmm1),
+        (Repr::F64, Repr::F32) => dynasm!(ops ; .arch x64 ; cvtsd2ss xmm1, xmm1),
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Fold the per-iteration value (xmm1 for float compute, rdx for int) into
+/// the accumulator (xmm0 / rax) per the reduction kind.
+fn emit_reduce_fold(ops: &mut Assembler, kind: ReduceKind, compute_repr: Repr) {
+    match (kind, compute_repr) {
+        (ReduceKind::Sum, Repr::F32) => dynasm!(ops ; .arch x64 ; addss xmm0, xmm1),
+        (ReduceKind::Sum, Repr::F64) => dynasm!(ops ; .arch x64 ; addsd xmm0, xmm1),
+        (ReduceKind::Sum, Repr::Int) => dynasm!(ops ; .arch x64 ; add rax, rdx),
+        (ReduceKind::Prod, Repr::F32) => dynasm!(ops ; .arch x64 ; mulss xmm0, xmm1),
+        (ReduceKind::Prod, Repr::F64) => dynasm!(ops ; .arch x64 ; mulsd xmm0, xmm1),
+        (ReduceKind::Prod, Repr::Int) => dynasm!(ops ; .arch x64 ; imul rax, rdx),
+        (ReduceKind::Max, Repr::F32) => {
+            // acc = (src > acc) ? src : acc. Cranelift uses GreaterThan with
+            // src on the left, which makes NaN sources fall through to acc.
+            // Match that behaviour: use cmpss + masked select.
+            dynasm!(ops
+                ; .arch x64
+                ; movaps xmm2, xmm1     // xmm2 = src
+                ; cmpss xmm2, xmm0, 1   // xmm2 = (src < acc) mask, but we want src>acc
+                                          // → cmpss imm 1 is "lt", and the mask is set
+                                          // when src < acc. We invert below.
+                // Actually: easier path — emulate select(src>acc, src, acc):
+                //   cmpss src, acc, NLE (6) → mask = (src > acc), ordered
+                //   res = (src & mask) | (acc & !mask)
+                ; movaps xmm2, xmm1
+                ; cmpss xmm2, xmm0, 6   // xmm2 = (src > acc) mask, ordered
+                ; movaps xmm3, xmm2
+                ; andps xmm1, xmm2      // src & mask
+                ; andnps xmm3, xmm0     // acc & !mask
+                ; orps xmm1, xmm3
+                ; movaps xmm0, xmm1
+            );
+        }
+        (ReduceKind::Max, Repr::F64) => {
+            dynasm!(ops
+                ; .arch x64
+                ; movapd xmm2, xmm1
+                ; cmpsd xmm2, xmm0, 6   // (src > acc) ordered
+                ; movapd xmm3, xmm2
+                ; andpd xmm1, xmm2
+                ; andnpd xmm3, xmm0
+                ; orpd xmm1, xmm3
+                ; movapd xmm0, xmm1
+            );
+        }
+        (ReduceKind::Max, Repr::Int) => {
+            dynasm!(ops
+                ; .arch x64
+                ; cmp rdx, rax
+                ; cmovg rax, rdx
+            );
+        }
+        (ReduceKind::Min, Repr::F32) => {
+            dynasm!(ops
+                ; .arch x64
+                ; movaps xmm2, xmm1
+                ; cmpss xmm2, xmm0, 1   // (src < acc) ordered
+                ; movaps xmm3, xmm2
+                ; andps xmm1, xmm2
+                ; andnps xmm3, xmm0
+                ; orps xmm1, xmm3
+                ; movaps xmm0, xmm1
+            );
+        }
+        (ReduceKind::Min, Repr::F64) => {
+            dynasm!(ops
+                ; .arch x64
+                ; movapd xmm2, xmm1
+                ; cmpsd xmm2, xmm0, 1
+                ; movapd xmm3, xmm2
+                ; andpd xmm1, xmm2
+                ; andnpd xmm3, xmm0
+                ; orpd xmm1, xmm3
+                ; movapd xmm0, xmm1
+            );
+        }
+        (ReduceKind::Min, Repr::Int) => {
+            dynasm!(ops
+                ; .arch x64
+                ; cmp rdx, rax
+                ; cmovl rax, rdx
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3805,36 +4969,6 @@ mod tests {
         unsafe { f(buffer.as_mut_ptr()) };
         let result = span.layout.read_f32_output(&outputs[0], &buffer);
         assert_eq!(result, vec![10.0, 200.0, 30.0]);
-    }
-
-    /// Reduce ops should reject and return Err so callers fall back to cranelift.
-    #[test]
-    fn reduce_unsupported() {
-        use crate::nano_graph::ops::ReduceKind;
-        let mut g = NanoGraph::new();
-        let inp = g.add_input_tensor(GlobalId(0), 4, NumericDType::F32);
-        let sum = g.push_group(
-            1,
-            NumericDType::F32,
-            ScalarOp::Reduce {
-                kind: ReduceKind::Sum,
-                reduce_count: 4,
-                reduce_stride: 1,
-                compute_dtype: NumericDType::F32,
-            },
-            vec![],
-            vec![InputRef::affine(inp, 1)],
-        );
-        let outputs = vec![AtomRange {
-            base: sum,
-            count: 1,
-            dtype: NumericDType::F32,
-        }];
-        let err = match X86JitSpan::compile(&g, &outputs) {
-            Ok(_) => panic!("should reject Reduce"),
-            Err(e) => e,
-        };
-        assert!(err.contains("Reduce"), "unexpected err: {err}");
     }
 
     // ─── Binary op A/B coverage ─────────────────────────────────────────────
@@ -5696,5 +6830,480 @@ mod tests {
             dtype: NumericDType::F32,
         }];
         ab_test_f32(&g, &[(inp, F32_X)], &outputs);
+    }
+
+    // ─── P4: 2D Strided InputRef A/B coverage ───────────────────────────────
+
+    /// Modular 2D Strided: each output reads `inp[i % m]`. Used for repeated
+    /// broadcast across an outer dim (e.g. RoPE indexing into a small table).
+    #[test]
+    fn modular_2d_f32_ab() {
+        let m = 4u64;
+        let n = 12u64; // 3 modular cycles
+        let mut g = NanoGraph::new();
+        let inp = g.add_input_tensor(GlobalId(0), m, NumericDType::F32);
+        let out = g.push_group(
+            n,
+            NumericDType::F32,
+            ScalarOp::Unary {
+                op: ScalarUnaryOp::Neg,
+                compute_dtype: NumericDType::F32,
+            },
+            vec![],
+            vec![InputRef::modular(inp, 1, m)],
+        );
+        let outputs = vec![AtomRange {
+            base: out,
+            count: n,
+            dtype: NumericDType::F32,
+        }];
+        let data: Vec<f32> = (0..m as usize).map(|i| i as f32 + 0.25).collect();
+        ab_test_f32(&g, &[(inp, &data)], &outputs);
+    }
+
+    /// Strided-broadcast 2D: each output reads `inp[i / repeat]`. Used for
+    /// row-by-row broadcast where each input row gets repeated `repeat` times.
+    #[test]
+    fn strided_broadcast_2d_f32_ab() {
+        let r = 3u64;
+        let outer = 5u64;
+        let n = outer * r;
+        let mut g = NanoGraph::new();
+        let inp = g.add_input_tensor(GlobalId(0), outer, NumericDType::F32);
+        let out = g.push_group(
+            n,
+            NumericDType::F32,
+            ScalarOp::Unary {
+                op: ScalarUnaryOp::Neg,
+                compute_dtype: NumericDType::F32,
+            },
+            vec![],
+            vec![InputRef::strided_broadcast(inp, 1, r)],
+        );
+        let outputs = vec![AtomRange {
+            base: out,
+            count: n,
+            dtype: NumericDType::F32,
+        }];
+        let data: Vec<f32> = (0..outer as usize).map(|i| i as f32 - 1.5).collect();
+        ab_test_f32(&g, &[(inp, &data)], &outputs);
+    }
+
+    /// Power-of-2 modulus path: m = 8 → uses shift/mask instead of div.
+    #[test]
+    fn modular_pow2_f32_ab() {
+        let m = 8u64;
+        let n = 24u64;
+        let mut g = NanoGraph::new();
+        let inp = g.add_input_tensor(GlobalId(0), m, NumericDType::F32);
+        let out = g.push_group(
+            n,
+            NumericDType::F32,
+            ScalarOp::Unary {
+                op: ScalarUnaryOp::Abs,
+                compute_dtype: NumericDType::F32,
+            },
+            vec![],
+            vec![InputRef::modular(inp, 1, m)],
+        );
+        let outputs = vec![AtomRange {
+            base: out,
+            count: n,
+            dtype: NumericDType::F32,
+        }];
+        let data: Vec<f32> = (0..m as usize).map(|i| (i as f32) * 1.5 - 4.0).collect();
+        ab_test_f32(&g, &[(inp, &data)], &outputs);
+    }
+
+    /// 2D Strided as part of a Binary op: input[0] is affine, input[1] is
+    /// modular. Exercises the address-compute-into-rax path while another
+    /// input is also being loaded.
+    #[test]
+    fn binop_with_modular_input_f32_ab() {
+        let n = 12u64;
+        let m = 4u64;
+        let mut g = NanoGraph::new();
+        let a = g.add_input_tensor(GlobalId(0), n, NumericDType::F32);
+        let b = g.add_input_tensor(GlobalId(1), m, NumericDType::F32);
+        let out = g.push_group(
+            n,
+            NumericDType::F32,
+            ScalarOp::Binary {
+                op: ScalarBinOp::Add,
+                compute_dtype: NumericDType::F32,
+            },
+            vec![],
+            vec![InputRef::affine(a, 1), InputRef::modular(b, 1, m)],
+        );
+        let outputs = vec![AtomRange {
+            base: out,
+            count: n,
+            dtype: NumericDType::F32,
+        }];
+        let a_data: Vec<f32> = (0..n as usize).map(|i| i as f32 * 0.5).collect();
+        let b_data: Vec<f32> = (0..m as usize).map(|i| i as f32 - 1.0).collect();
+        ab_test_f32(&g, &[(a, &a_data), (b, &b_data)], &outputs);
+    }
+
+    /// 2D Strided with I64 compute repr — checks the int load path's
+    /// rax-indexed branch.
+    #[test]
+    fn modular_2d_i64_ab() {
+        let m = 5u64; // non-power-of-2 → exercises div path
+        let n = 15u64;
+        let mut g = NanoGraph::new();
+        let inp = g.add_input_tensor(GlobalId(0), m, NumericDType::I64);
+        let out = g.push_group(
+            n,
+            NumericDType::I64,
+            ScalarOp::Unary {
+                op: ScalarUnaryOp::Neg,
+                compute_dtype: NumericDType::I64,
+            },
+            vec![],
+            vec![InputRef::modular(inp, 1, m)],
+        );
+        let outputs = vec![AtomRange {
+            base: out,
+            count: n,
+            dtype: NumericDType::I64,
+        }];
+        let data: Vec<i64> = (0..m as i64).collect();
+        ab_test_i64(&g, &[(inp, &data)], &outputs);
+    }
+
+    // ─── P4: Reduce A/B coverage ────────────────────────────────────────────
+
+    /// Helper: build a graph that reduces a 1D tensor to a scalar via the
+    /// given kind / dtype, then A/B against cranelift.
+    fn run_reduce_to_scalar_f32_ab(kind: ReduceKind, data: &[f32]) {
+        let n = data.len() as u64;
+        let mut g = NanoGraph::new();
+        let inp = g.add_input_tensor(GlobalId(0), n, NumericDType::F32);
+        let red = g.push_group(
+            1,
+            NumericDType::F32,
+            ScalarOp::Reduce {
+                kind,
+                reduce_count: n,
+                reduce_stride: 1,
+                compute_dtype: NumericDType::F32,
+            },
+            vec![],
+            vec![InputRef::affine(inp, 1)],
+        );
+        let outputs = vec![AtomRange {
+            base: red,
+            count: 1,
+            dtype: NumericDType::F32,
+        }];
+        ab_test_f32(&g, &[(inp, data)], &outputs);
+    }
+
+    fn run_reduce_to_scalar_f64_ab(kind: ReduceKind, data: &[f64]) {
+        let n = data.len() as u64;
+        let mut g = NanoGraph::new();
+        let inp = g.add_input_tensor(GlobalId(0), n, NumericDType::F64);
+        let red = g.push_group(
+            1,
+            NumericDType::F64,
+            ScalarOp::Reduce {
+                kind,
+                reduce_count: n,
+                reduce_stride: 1,
+                compute_dtype: NumericDType::F64,
+            },
+            vec![],
+            vec![InputRef::affine(inp, 1)],
+        );
+        let outputs = vec![AtomRange {
+            base: red,
+            count: 1,
+            dtype: NumericDType::F64,
+        }];
+        ab_test_f64(&g, &[(inp, data)], &outputs);
+    }
+
+    fn run_reduce_to_scalar_i64_ab(kind: ReduceKind, data: &[i64]) {
+        let n = data.len() as u64;
+        let mut g = NanoGraph::new();
+        let inp = g.add_input_tensor(GlobalId(0), n, NumericDType::I64);
+        let red = g.push_group(
+            1,
+            NumericDType::I64,
+            ScalarOp::Reduce {
+                kind,
+                reduce_count: n,
+                reduce_stride: 1,
+                compute_dtype: NumericDType::I64,
+            },
+            vec![],
+            vec![InputRef::affine(inp, 1)],
+        );
+        let outputs = vec![AtomRange {
+            base: red,
+            count: 1,
+            dtype: NumericDType::I64,
+        }];
+        ab_test_i64(&g, &[(inp, data)], &outputs);
+    }
+
+    #[test]
+    fn reduce_sum_f32_ab() {
+        run_reduce_to_scalar_f32_ab(ReduceKind::Sum, &[1.0, 2.5, -3.0, 4.0, 0.5, -2.0, 7.0, 1.5]);
+    }
+    #[test]
+    fn reduce_max_f32_ab() {
+        run_reduce_to_scalar_f32_ab(ReduceKind::Max, &[1.0, 2.5, -3.0, 4.0, 0.5, -2.0, 7.0, 1.5]);
+    }
+    #[test]
+    fn reduce_min_f32_ab() {
+        run_reduce_to_scalar_f32_ab(ReduceKind::Min, &[1.0, 2.5, -3.0, 4.0, 0.5, -2.0, 7.0, 1.5]);
+    }
+    #[test]
+    fn reduce_prod_f32_ab() {
+        run_reduce_to_scalar_f32_ab(
+            ReduceKind::Prod,
+            &[1.0, 2.0, -1.5, 1.0, 0.5, -2.0, 1.0, 0.25],
+        );
+    }
+    #[test]
+    fn reduce_sum_f64_ab() {
+        run_reduce_to_scalar_f64_ab(ReduceKind::Sum, &[1.0, 2.5, -3.0, 4.0, 0.5, -2.0, 7.0, 1.5]);
+    }
+    #[test]
+    fn reduce_max_f64_ab() {
+        run_reduce_to_scalar_f64_ab(ReduceKind::Max, &[1.0, 2.5, -3.0, 4.0, 0.5, -2.0, 7.0, 1.5]);
+    }
+    #[test]
+    fn reduce_min_f64_ab() {
+        run_reduce_to_scalar_f64_ab(ReduceKind::Min, &[1.0, 2.5, -3.0, 4.0, 0.5, -2.0, 7.0, 1.5]);
+    }
+    #[test]
+    fn reduce_prod_f64_ab() {
+        run_reduce_to_scalar_f64_ab(
+            ReduceKind::Prod,
+            &[1.0, 2.0, -1.5, 1.0, 0.5, -2.0, 1.0, 0.25],
+        );
+    }
+    #[test]
+    fn reduce_sum_i64_ab() {
+        run_reduce_to_scalar_i64_ab(ReduceKind::Sum, &[1, 2, -3, 4, 5, -7, 8, 16]);
+    }
+    #[test]
+    fn reduce_max_i64_ab() {
+        run_reduce_to_scalar_i64_ab(ReduceKind::Max, &[1, 2, -3, 4, 5, -7, 8, 16]);
+    }
+    #[test]
+    fn reduce_min_i64_ab() {
+        run_reduce_to_scalar_i64_ab(ReduceKind::Min, &[1, 2, -3, 4, 5, -7, 8, 16]);
+    }
+    #[test]
+    fn reduce_prod_i64_ab() {
+        run_reduce_to_scalar_i64_ab(ReduceKind::Prod, &[1, 2, -1, 1, 3, -2, 1, 1]);
+    }
+
+    /// Reduce with outer count > 1: a [N, K] → [N] reduction. Exercises the
+    /// outer r13 loop + inner k counted loop interaction.
+    #[test]
+    fn reduce_per_row_sum_f32_ab() {
+        let outer = 4u64;
+        let k = 5u64;
+        let total = outer * k;
+        let mut g = NanoGraph::new();
+        let inp = g.add_input_tensor(GlobalId(0), total, NumericDType::F32);
+        // For each output i, reads inp[i*k .. i*k+k]; that's a 1D affine of
+        // stride k, where each Reduce iteration walks k consecutive atoms.
+        let red = g.push_group(
+            outer,
+            NumericDType::F32,
+            ScalarOp::Reduce {
+                kind: ReduceKind::Sum,
+                reduce_count: k,
+                reduce_stride: 1,
+                compute_dtype: NumericDType::F32,
+            },
+            vec![],
+            vec![InputRef::affine(inp, k as i64)],
+        );
+        let outputs = vec![AtomRange {
+            base: red,
+            count: outer,
+            dtype: NumericDType::F32,
+        }];
+        let data: Vec<f32> = (0..total as usize).map(|i| i as f32 * 0.5 - 1.0).collect();
+        ab_test_f32(&g, &[(inp, &data)], &outputs);
+    }
+
+    /// Reduce with non-power-of-2 reduce_count to exercise the loop path
+    /// (vs the unrolled count==1 path).
+    #[test]
+    fn reduce_count7_max_f32_ab() {
+        let n = 7u64;
+        let mut g = NanoGraph::new();
+        let inp = g.add_input_tensor(GlobalId(0), n, NumericDType::F32);
+        let red = g.push_group(
+            1,
+            NumericDType::F32,
+            ScalarOp::Reduce {
+                kind: ReduceKind::Max,
+                reduce_count: n,
+                reduce_stride: 1,
+                compute_dtype: NumericDType::F32,
+            },
+            vec![],
+            vec![InputRef::affine(inp, 1)],
+        );
+        let outputs = vec![AtomRange {
+            base: red,
+            count: 1,
+            dtype: NumericDType::F32,
+        }];
+        ab_test_f32(&g, &[(inp, &[3.0, 1.0, 4.0, 1.0, 5.0, 9.0, 2.0])], &outputs);
+    }
+
+    // ─── P4: IndirectLoad A/B coverage ──────────────────────────────────────
+
+    /// Embedding-style gather: 1D F32 table indexed by I64 indices.
+    #[test]
+    fn indirect_load_f32_table_ab() {
+        let table_n = 8u64;
+        let n_indices = 6u64;
+        let mut g = NanoGraph::new();
+        let table = g.add_input_tensor(GlobalId(0), table_n, NumericDType::F32);
+        let idx = g.add_input_tensor(GlobalId(1), n_indices, NumericDType::I64);
+        let gather = g.push_group(
+            n_indices,
+            NumericDType::F32,
+            ScalarOp::IndirectLoad { table_base: table },
+            vec![],
+            vec![InputRef::affine(idx, 1)],
+        );
+        let outputs = vec![AtomRange {
+            base: gather,
+            count: n_indices,
+            dtype: NumericDType::F32,
+        }];
+        let table_data: Vec<f32> = (0..table_n as usize).map(|i| i as f32 + 100.0).collect();
+        let idx_data: Vec<i64> = vec![3, 0, 7, 1, 5, 2];
+        let table_bytes: Vec<u8> = table_data.iter().flat_map(|f| f.to_le_bytes()).collect();
+        let idx_bytes: Vec<u8> = idx_data.iter().flat_map(|i| i.to_le_bytes()).collect();
+        ab_test_bytes(
+            &g,
+            &[
+                (table, NumericDType::F32, table_bytes),
+                (idx, NumericDType::I64, idx_bytes),
+            ],
+            &outputs,
+        );
+    }
+
+    /// IndirectLoad with I32 indices into an I64 table.
+    #[test]
+    fn indirect_load_i64_table_i32_idx_ab() {
+        let table_n = 6u64;
+        let n_indices = 5u64;
+        let mut g = NanoGraph::new();
+        let table = g.add_input_tensor(GlobalId(0), table_n, NumericDType::I64);
+        let idx = g.add_input_tensor(GlobalId(1), n_indices, NumericDType::I32);
+        let gather = g.push_group(
+            n_indices,
+            NumericDType::I64,
+            ScalarOp::IndirectLoad { table_base: table },
+            vec![],
+            vec![InputRef::affine(idx, 1)],
+        );
+        let outputs = vec![AtomRange {
+            base: gather,
+            count: n_indices,
+            dtype: NumericDType::I64,
+        }];
+        let table_data: Vec<i64> = (0..table_n as i64).map(|i| i * 1000 + 7).collect();
+        let idx_data: Vec<i32> = vec![5, 0, 4, 1, 2];
+        let table_bytes: Vec<u8> = table_data.iter().flat_map(|i| i.to_le_bytes()).collect();
+        let idx_bytes: Vec<u8> = idx_data.iter().flat_map(|i| i.to_le_bytes()).collect();
+        ab_test_bytes(
+            &g,
+            &[
+                (table, NumericDType::I64, table_bytes),
+                (idx, NumericDType::I32, idx_bytes),
+            ],
+            &outputs,
+        );
+    }
+
+    // ─── P4: Explicit InputRef A/B coverage ─────────────────────────────────
+
+    /// Single-entry Explicit (most common case): one atom referenced by
+    /// every iteration. The compile-time fast path turns this into a Disp.
+    #[test]
+    fn explicit_single_atom_f32_ab() {
+        let n = 4u64;
+        let mut g = NanoGraph::new();
+        // Two literal scalars at different IDs.
+        let a = g.push_group(
+            1,
+            NumericDType::F32,
+            ScalarOp::Literal(NumericScalar::from_f32(2.0)),
+            vec![],
+            vec![],
+        );
+        let inp = g.add_input_tensor(GlobalId(0), n, NumericDType::F32);
+        let out = g.push_group(
+            n,
+            NumericDType::F32,
+            ScalarOp::Binary {
+                op: ScalarBinOp::Mul,
+                compute_dtype: NumericDType::F32,
+            },
+            vec![],
+            // input[0] = inp via 1D affine; input[1] = single-entry Explicit
+            // referencing the literal scalar.
+            vec![InputRef::affine(inp, 1), InputRef::Explicit(vec![a])],
+        );
+        let outputs = vec![AtomRange {
+            base: out,
+            count: n,
+            dtype: NumericDType::F32,
+        }];
+        ab_test_f32(&g, &[(inp, &[1.0, 2.0, 3.0, 4.0])], &outputs);
+    }
+
+    /// Multi-entry Explicit: builds an embedded byte-offset table. Tests the
+    /// runtime lookup path with `r13 * 8 + table_off` indirection.
+    #[test]
+    fn explicit_multi_entry_f32_ab() {
+        let n = 6u64;
+        let mut g = NanoGraph::new();
+        // 6 distinct input atoms; the Explicit list permutes them.
+        let inp = g.add_input_tensor(GlobalId(0), n, NumericDType::F32);
+        let permuted: Vec<AtomId> = vec![
+            AtomId(inp.0 + 5),
+            AtomId(inp.0 + 3),
+            AtomId(inp.0 + 0),
+            AtomId(inp.0 + 4),
+            AtomId(inp.0 + 1),
+            AtomId(inp.0 + 2),
+        ];
+        let out = g.push_group(
+            n,
+            NumericDType::F32,
+            ScalarOp::Unary {
+                op: ScalarUnaryOp::Neg,
+                compute_dtype: NumericDType::F32,
+            },
+            vec![],
+            vec![InputRef::Explicit(permuted)],
+        );
+        let outputs = vec![AtomRange {
+            base: out,
+            count: n,
+            dtype: NumericDType::F32,
+        }];
+        ab_test_f32(
+            &g,
+            &[(inp, &[10.0, 20.0, 30.0, 40.0, 50.0, 60.0])],
+            &outputs,
+        );
     }
 }

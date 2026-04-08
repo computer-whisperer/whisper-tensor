@@ -2786,7 +2786,7 @@ impl EmbeddedTables {
     }
 
     /// Allocate space for a table and return its byte offset in the buffer.
-    fn alloc(&mut self, data: Vec<u8>) -> usize {
+    pub(crate) fn alloc(&mut self, data: Vec<u8>) -> usize {
         // Align to 8 bytes for i64 entries.
         let aligned = (self.watermark + 7) & !7;
         let offset = aligned;
@@ -3635,7 +3635,6 @@ fn emit_reduce(
     out_slot: &SlotInfo,
     inlined_producer: Option<&AtomGroup<'static, crate::pool::SystemPool>>,
 ) -> Result<(), String> {
-    let is_sum = matches!(kind, ReduceKind::Sum);
     let compute_repr = repr_of(compute_dtype);
     let output_dtype = group.output_dtype;
 
@@ -3680,13 +3679,19 @@ fn emit_reduce(
     let acc_var = var_counter.next();
     let acc_cl_type = compute_repr.cranelift_type();
     builder.declare_var(acc_var, acc_cl_type);
-    let init = match (is_sum, compute_repr) {
-        (true, ReprKind::F32) => builder.ins().f32const(0.0),
-        (true, ReprKind::F64) => builder.ins().f64const(0.0),
-        (false, ReprKind::F32) => builder.ins().f32const(f32::NEG_INFINITY),
-        (false, ReprKind::F64) => builder.ins().f64const(f64::NEG_INFINITY),
-        (true, ReprKind::Int) => builder.ins().iconst(types::I64, 0),
-        (false, ReprKind::Int) => builder.ins().iconst(types::I64, i64::MIN),
+    let init = match (kind, compute_repr) {
+        (ReduceKind::Sum, ReprKind::F32) => builder.ins().f32const(0.0),
+        (ReduceKind::Sum, ReprKind::F64) => builder.ins().f64const(0.0),
+        (ReduceKind::Sum, ReprKind::Int) => builder.ins().iconst(types::I64, 0),
+        (ReduceKind::Prod, ReprKind::F32) => builder.ins().f32const(1.0),
+        (ReduceKind::Prod, ReprKind::F64) => builder.ins().f64const(1.0),
+        (ReduceKind::Prod, ReprKind::Int) => builder.ins().iconst(types::I64, 1),
+        (ReduceKind::Max, ReprKind::F32) => builder.ins().f32const(f32::NEG_INFINITY),
+        (ReduceKind::Max, ReprKind::F64) => builder.ins().f64const(f64::NEG_INFINITY),
+        (ReduceKind::Max, ReprKind::Int) => builder.ins().iconst(types::I64, i64::MIN),
+        (ReduceKind::Min, ReprKind::F32) => builder.ins().f32const(f32::INFINITY),
+        (ReduceKind::Min, ReprKind::F64) => builder.ins().f64const(f64::INFINITY),
+        (ReduceKind::Min, ReprKind::Int) => builder.ins().iconst(types::I64, i64::MAX),
     };
     builder.def_var(acc_var, init);
 
@@ -3779,15 +3784,25 @@ fn emit_reduce(
     let src_val = emit_repr_cast(builder, loaded, src_repr, compute_repr);
 
     let acc = builder.use_var(acc_var);
-    let new_acc = match (is_sum, compute_repr) {
-        (true, ReprKind::F32 | ReprKind::F64) => builder.ins().fadd(acc, src_val),
-        (false, ReprKind::F32 | ReprKind::F64) => {
+    let new_acc = match (kind, compute_repr) {
+        (ReduceKind::Sum, ReprKind::F32 | ReprKind::F64) => builder.ins().fadd(acc, src_val),
+        (ReduceKind::Sum, ReprKind::Int) => builder.ins().iadd(acc, src_val),
+        (ReduceKind::Prod, ReprKind::F32 | ReprKind::F64) => builder.ins().fmul(acc, src_val),
+        (ReduceKind::Prod, ReprKind::Int) => builder.ins().imul(acc, src_val),
+        (ReduceKind::Max, ReprKind::F32 | ReprKind::F64) => {
             let cmp = builder.ins().fcmp(FloatCC::GreaterThan, src_val, acc);
             builder.ins().select(cmp, src_val, acc)
         }
-        (true, ReprKind::Int) => builder.ins().iadd(acc, src_val),
-        (false, ReprKind::Int) => {
+        (ReduceKind::Max, ReprKind::Int) => {
             let cmp = builder.ins().icmp(IntCC::SignedGreaterThan, src_val, acc);
+            builder.ins().select(cmp, src_val, acc)
+        }
+        (ReduceKind::Min, ReprKind::F32 | ReprKind::F64) => {
+            let cmp = builder.ins().fcmp(FloatCC::LessThan, src_val, acc);
+            builder.ins().select(cmp, src_val, acc)
+        }
+        (ReduceKind::Min, ReprKind::Int) => {
+            let cmp = builder.ins().icmp(IntCC::SignedLessThan, src_val, acc);
             builder.ins().select(cmp, src_val, acc)
         }
     };
