@@ -518,15 +518,22 @@ pub fn compute_layout(
         producer_lists.push(producers.into_iter().collect());
     }
 
-    // Pin output groups.
-    let output_atoms: HashSet<u64> = output_ranges
-        .iter()
-        .flat_map(|r| r.base.0..r.base.0 + r.count)
-        .collect();
+    // Pin output groups: bump use_count for any group whose atom range overlaps
+    // an output range. The previous implementation built a HashSet of every
+    // individual output atom and looked up each group atom — O(N_atoms) per
+    // span. For phase 233 (LM-head Mul, 6.3M atoms × 8 lanes) that was the
+    // dominant cost in compile_phases. Range overlap is O(groups × output_ranges)
+    // which is tiny by comparison.
     for (gi, group) in groups.iter().enumerate() {
-        let group_end = group.base_id.0 + group.count;
-        if (group.base_id.0..group_end).any(|a| output_atoms.contains(&a)) {
-            use_counts[gi] += 1;
+        let g_lo = group.base_id.0;
+        let g_hi = g_lo + group.count;
+        for r in output_ranges {
+            let r_lo = r.base.0;
+            let r_hi = r_lo + r.count;
+            if g_lo < r_hi && r_lo < g_hi {
+                use_counts[gi] += 1;
+                break;
+            }
         }
     }
 
@@ -1000,18 +1007,27 @@ impl JitCompiledSpan {
             });
         }
 
+        let t_layout = std::time::Instant::now();
         let layout = compute_layout(graph, output_ranges);
+        let dt_layout = t_layout.elapsed();
+
         let (compiled, embedded_tables) = if std::env::var("FUSION_VALIDATE").is_ok() {
             compile_span_validated(graph, &layout)?
         } else {
             compile_span(graph, &layout)?
         };
 
+        let t_lit = std::time::Instant::now();
         // Build literal template including embedded lookup tables.
         let total_buf_bytes = embedded_tables.total_bytes().max(layout.total_bytes);
         let mut literal_template = vec![0u8; total_buf_bytes];
         layout.populate_literals(graph, &mut literal_template);
         embedded_tables.populate(&mut literal_template);
+        let dt_lit = t_lit.elapsed();
+
+        // Add compute_layout + literal-template times to the most recent
+        // span profile record (the one that compile_span just appended).
+        profile::amend_layout_lit(dt_layout, dt_lit);
 
         Ok(JitCompiledSpan {
             compiled,
@@ -2009,6 +2025,27 @@ pub fn compile_span_validated(
     Ok((fused, fused_tables))
 }
 
+/// Build a Cranelift settings::Flags configuration for compile_span.
+///
+/// `COMPILE_FAST=1` enables the cheap fast-compile knobs:
+/// - opt_level=none (skip GVN, LICM, etc.)
+/// - enable_verifier=false (skip IR verification)
+/// - regalloc_algorithm=single_pass (linear regalloc instead of backtracking)
+/// - enable_alias_analysis=false (we have no aliasing — the buffer pointer is
+///   the only memory we touch and our load/store offsets are explicit)
+fn build_cranelift_flags() -> settings::Flags {
+    let mut flag_builder = settings::builder();
+    if std::env::var("COMPILE_FAST").is_ok() {
+        flag_builder.set("opt_level", "none").unwrap();
+        flag_builder.set("enable_verifier", "false").unwrap();
+        flag_builder.set("regalloc_algorithm", "single_pass").unwrap();
+        flag_builder.set("enable_alias_analysis", "false").unwrap();
+    } else {
+        flag_builder.set("opt_level", "speed").unwrap();
+    }
+    settings::Flags::new(flag_builder)
+}
+
 /// Compile a span's NanoGraph into native code using the given buffer layout.
 ///
 /// Returns the compiled function and any embedded lookup tables that must
@@ -2017,12 +2054,11 @@ pub fn compile_span(
     graph: &NanoGraph<'static, crate::pool::SystemPool>,
     layout: &BufferLayout,
 ) -> Result<(CompiledSpan, EmbeddedTables), String> {
-    let mut flag_builder = settings::builder();
-    flag_builder.set("opt_level", "speed").unwrap();
+    let t_setup = std::time::Instant::now();
     let isa_builder =
         cranelift_native::builder().map_err(|e| format!("cranelift native ISA: {}", e))?;
     let isa = isa_builder
-        .finish(settings::Flags::new(flag_builder))
+        .finish(build_cranelift_flags())
         .map_err(|e| format!("ISA finish: {}", e))?;
 
     let mut jit_builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
@@ -2039,7 +2075,9 @@ pub fn compile_span(
         .map_err(|e| format!("declare: {}", e))?;
 
     let mut tables = EmbeddedTables::new(layout.total_bytes);
+    let dt_setup = t_setup.elapsed();
 
+    let t_ir = std::time::Instant::now();
     {
         let mut func_ctx = FunctionBuilderContext::new();
         let mut builder = FunctionBuilder::new(&mut ctx.func, &mut func_ctx);
@@ -2070,15 +2108,30 @@ pub fn compile_span(
         builder.ins().return_(&[]);
         builder.finalize();
     }
+    let dt_ir = t_ir.elapsed();
 
+    let t_define = std::time::Instant::now();
     module
         .define_function(func_id, &mut ctx)
         .map_err(|e| format!("define: {}", e))?;
+    let dt_define = t_define.elapsed();
+
+    let t_finalize = std::time::Instant::now();
     module
         .finalize_definitions()
         .map_err(|e| format!("finalize: {}", e))?;
+    let dt_finalize = t_finalize.elapsed();
 
     let func_ptr = module.get_finalized_function(func_id);
+
+    profile::record(profile::SpanStageTimes {
+        layout: std::time::Duration::ZERO,
+        setup: dt_setup,
+        ir_build: dt_ir,
+        cl_define: dt_define,
+        cl_finalize: dt_finalize,
+        literal_template: std::time::Duration::ZERO,
+    });
 
     Ok((
         CompiledSpan {
@@ -2087,6 +2140,86 @@ pub fn compile_span(
         },
         tables,
     ))
+}
+
+/// Per-span compile-time profiling. Gated on the `COMPILE_PROFILE=1` env var:
+/// when unset, `record` is a no-op and there's zero overhead beyond the timer
+/// reads in `compile_span` (a few hundred ns per span).
+pub mod profile {
+    use std::cell::RefCell;
+    use std::time::Duration;
+
+    #[derive(Clone, Copy, Default)]
+    pub struct SpanStageTimes {
+        pub layout: Duration,
+        pub setup: Duration,
+        pub ir_build: Duration,
+        pub cl_define: Duration,
+        pub cl_finalize: Duration,
+        pub literal_template: Duration,
+    }
+
+    impl SpanStageTimes {
+        pub fn total(&self) -> Duration {
+            self.layout
+                + self.setup
+                + self.ir_build
+                + self.cl_define
+                + self.cl_finalize
+                + self.literal_template
+        }
+    }
+
+    thread_local! {
+        static SINK: RefCell<Option<Vec<SpanStageTimes>>> = const { RefCell::new(None) };
+    }
+
+    /// Enable per-span recording on the current thread. Subsequent compile_span
+    /// calls will append timing rows. `take()` returns and clears the buffer.
+    pub fn enable() {
+        SINK.with(|s| {
+            *s.borrow_mut() = Some(Vec::new());
+        });
+    }
+
+    pub fn disable() {
+        SINK.with(|s| {
+            *s.borrow_mut() = None;
+        });
+    }
+
+    /// Drain accumulated span timings without disabling the sink. Subsequent
+    /// `record` calls will continue to append to a fresh buffer.
+    pub fn take() -> Vec<SpanStageTimes> {
+        SINK.with(|s| {
+            let mut borrow = s.borrow_mut();
+            match borrow.as_mut() {
+                Some(buf) => std::mem::take(buf),
+                None => Vec::new(),
+            }
+        })
+    }
+
+    pub(crate) fn record(times: SpanStageTimes) {
+        SINK.with(|s| {
+            if let Some(buf) = s.borrow_mut().as_mut() {
+                buf.push(times);
+            }
+        });
+    }
+
+    /// Patch the most-recently-recorded span with layout/literal-template times
+    /// measured outside `compile_span`. Caller is `JitCompiledSpan::compile`.
+    pub(crate) fn amend_layout_lit(layout: Duration, literal_template: Duration) {
+        SINK.with(|s| {
+            if let Some(buf) = s.borrow_mut().as_mut() {
+                if let Some(last) = buf.last_mut() {
+                    last.layout = layout;
+                    last.literal_template = literal_template;
+                }
+            }
+        });
+    }
 }
 
 // ─── Group emission ─────────────────────────────────────────────────────────
@@ -3961,12 +4094,10 @@ fn op_name_short(op: &ScalarOp) -> &'static str {
 
 /// Compile an empty span (no groups). Returns a no-op CompiledSpan.
 fn compile_empty_span() -> Result<CompiledSpan, String> {
-    let mut flag_builder = settings::builder();
-    flag_builder.set("opt_level", "speed").unwrap();
     let isa_builder =
         cranelift_native::builder().map_err(|e| format!("cranelift native ISA: {}", e))?;
     let isa = isa_builder
-        .finish(settings::Flags::new(flag_builder))
+        .finish(build_cranelift_flags())
         .map_err(|e| format!("ISA finish: {}", e))?;
     let mut jit_builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
     register_math_symbols(&mut jit_builder);

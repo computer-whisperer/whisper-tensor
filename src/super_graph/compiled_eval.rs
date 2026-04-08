@@ -277,6 +277,14 @@ pub(crate) fn compile_nano_graph(
     let mut compile_errors = 0usize;
     let force_pool_eval = matches!(options.codegen, CodegenKind::PoolEval);
 
+    // COMPILE_PROFILE=1 — record per-span macro-stage timings and per-span totals
+    // for a post-loop breakdown.
+    let profile_compile = std::env::var("COMPILE_PROFILE").is_ok();
+    if profile_compile {
+        crate::compiler::attempts::v14::codegen::profile::enable();
+    }
+    let mut span_records: Vec<CompileSpanRecord> = Vec::new();
+
     for (pi, phase) in phases.iter().enumerate() {
         let mut lanes = Vec::new();
         for (si, span) in phase.spans.iter().enumerate() {
@@ -301,7 +309,26 @@ pub(crate) fn compile_nano_graph(
                     span.outputs.clone(),
                 ));
             } else {
-                match JitCompiledSpan::compile(&span.graph, &span.outputs) {
+                let t_span = Instant::now();
+                let result = JitCompiledSpan::compile(&span.graph, &span.outputs);
+                let dt_span = t_span.elapsed();
+                if profile_compile {
+                    let stages =
+                        crate::compiler::attempts::v14::codegen::profile::take()
+                            .pop()
+                            .unwrap_or_default();
+                    let num_groups = span.graph.num_groups();
+                    let num_atoms: u64 = span.graph.groups().iter().map(|g| g.count).sum();
+                    span_records.push(CompileSpanRecord {
+                        phase: pi,
+                        lane: si,
+                        num_groups,
+                        num_atoms,
+                        total: dt_span,
+                        stages,
+                    });
+                }
+                match result {
                     Ok(jit_span) => {
                         lanes.push((
                             Box::new(jit_span) as Box<dyn CompiledSpanFn>,
@@ -337,7 +364,98 @@ pub(crate) fn compile_nano_graph(
     let executable_plan = plan_builder.build();
     obs.on_milestone("compiled.compile_phases", None, t0, Instant::now());
 
+    if profile_compile {
+        crate::compiler::attempts::v14::codegen::profile::disable();
+        print_compile_profile(&span_records);
+    }
+
     Ok((executable_plan, plan_summary, compile_errors))
+}
+
+#[derive(Clone)]
+struct CompileSpanRecord {
+    phase: usize,
+    lane: usize,
+    num_groups: usize,
+    num_atoms: u64,
+    total: std::time::Duration,
+    stages: crate::compiler::attempts::v14::codegen::profile::SpanStageTimes,
+}
+
+fn print_compile_profile(records: &[CompileSpanRecord]) {
+    if records.is_empty() {
+        return;
+    }
+    let to_ms = |d: std::time::Duration| d.as_secs_f64() * 1e3;
+    let n = records.len();
+    let total_ms: f64 = records.iter().map(|r| to_ms(r.total)).sum();
+    let layout_ms: f64 = records.iter().map(|r| to_ms(r.stages.layout)).sum();
+    let setup_ms: f64 = records.iter().map(|r| to_ms(r.stages.setup)).sum();
+    let ir_ms: f64 = records.iter().map(|r| to_ms(r.stages.ir_build)).sum();
+    let define_ms: f64 = records.iter().map(|r| to_ms(r.stages.cl_define)).sum();
+    let finalize_ms: f64 = records.iter().map(|r| to_ms(r.stages.cl_finalize)).sum();
+    let lit_ms: f64 = records.iter().map(|r| to_ms(r.stages.literal_template)).sum();
+    let accounted = layout_ms + setup_ms + ir_ms + define_ms + finalize_ms + lit_ms;
+    let other_ms = total_ms - accounted;
+
+    let pct = |v: f64| v / total_ms * 100.0;
+
+    eprintln!();
+    eprintln!("=== Compile-phase per-span profile ({} spans) ===", n);
+    eprintln!("  total {:>8.0}ms  ({:.1}s)", total_ms, total_ms / 1000.0);
+    eprintln!("    compute_layout  {:>8.0}ms  ({:.1}%)", layout_ms, pct(layout_ms));
+    eprintln!("    setup           {:>8.0}ms  ({:.1}%)", setup_ms, pct(setup_ms));
+    eprintln!("    ir_build        {:>8.0}ms  ({:.1}%)", ir_ms, pct(ir_ms));
+    eprintln!("    cranelift_def   {:>8.0}ms  ({:.1}%)", define_ms, pct(define_ms));
+    eprintln!("    cranelift_fin   {:>8.0}ms  ({:.1}%)", finalize_ms, pct(finalize_ms));
+    eprintln!("    literal_tmpl    {:>8.0}ms  ({:.1}%)", lit_ms, pct(lit_ms));
+    eprintln!("    other           {:>8.0}ms  ({:.1}%)", other_ms, pct(other_ms));
+
+    // Histogram by total span time.
+    let mut buckets = [0usize; 8];
+    let edges_ms = [0.5, 1.0, 5.0, 20.0, 50.0, 100.0, 500.0, f64::MAX];
+    for r in records {
+        let t = to_ms(r.total);
+        for (i, &e) in edges_ms.iter().enumerate() {
+            if t < e {
+                buckets[i] += 1;
+                break;
+            }
+        }
+    }
+    eprintln!("  span time histogram:");
+    let labels = [
+        "<0.5ms", "<1ms", "<5ms", "<20ms", "<50ms", "<100ms", "<500ms", ">=500ms",
+    ];
+    for (label, count) in labels.iter().zip(buckets.iter()) {
+        if *count > 0 {
+            eprintln!("    {:<10} {:>5}", label, count);
+        }
+    }
+
+    // Top hot spans.
+    let mut sorted: Vec<&CompileSpanRecord> = records.iter().collect();
+    sorted.sort_by(|a, b| b.total.cmp(&a.total));
+    eprintln!("  top 20 hot spans:");
+    eprintln!(
+        "    {:>4}/{:<5} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>6} {:>10}",
+        "ph", "lane", "total", "layout", "ir", "cl_def", "cl_fin", "lit", "grps", "atoms"
+    );
+    for r in sorted.iter().take(20) {
+        eprintln!(
+            "    {:>4}/{:<5} {:>8.1} {:>8.1} {:>8.1} {:>8.1} {:>8.1} {:>8.1} {:>6} {:>10}",
+            r.phase,
+            r.lane,
+            to_ms(r.total),
+            to_ms(r.stages.layout),
+            to_ms(r.stages.ir_build),
+            to_ms(r.stages.cl_define),
+            to_ms(r.stages.cl_finalize),
+            to_ms(r.stages.literal_template),
+            r.num_groups,
+            r.num_atoms,
+        );
+    }
 }
 
 /// Relayout a tensor view to match a TAMI's atom ordering and return as a
