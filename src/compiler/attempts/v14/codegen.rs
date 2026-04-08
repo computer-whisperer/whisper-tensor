@@ -3290,6 +3290,10 @@ fn emit_cast_to_output(
             // Already Int repr (i64), narrow to i8.
             builder.ins().ireduce(types::I8, val)
         }
+        NumericDType::U16 | NumericDType::I16 => {
+            // Already Int repr (i64), narrow to i16.
+            builder.ins().ireduce(types::I16, val)
+        }
         NumericDType::I32 | NumericDType::U32 => {
             // Already Int repr (i64), narrow to i32.
             builder.ins().ireduce(types::I32, val)
@@ -3316,13 +3320,23 @@ fn emit_typed_load(builder: &mut FunctionBuilder, addr: Value, dtype: NumericDTy
             builder.ins().bitcast(types::F32, MemFlags::new(), shifted)
         }
         NumericDType::F64 => builder.ins().load(types::F64, MemFlags::trusted(), addr, 0),
-        NumericDType::I64 => builder.ins().load(types::I64, MemFlags::trusted(), addr, 0),
+        NumericDType::I64 | NumericDType::U64 => {
+            builder.ins().load(types::I64, MemFlags::trusted(), addr, 0)
+        }
         NumericDType::I32 => {
             let raw = builder.ins().load(types::I32, MemFlags::trusted(), addr, 0);
             builder.ins().sextend(types::I64, raw)
         }
         NumericDType::U32 => {
             let raw = builder.ins().load(types::I32, MemFlags::trusted(), addr, 0);
+            builder.ins().uextend(types::I64, raw)
+        }
+        NumericDType::I16 => {
+            let raw = builder.ins().load(types::I16, MemFlags::trusted(), addr, 0);
+            builder.ins().sextend(types::I64, raw)
+        }
+        NumericDType::U16 => {
+            let raw = builder.ins().load(types::I16, MemFlags::trusted(), addr, 0);
             builder.ins().uextend(types::I64, raw)
         }
         NumericDType::BOOL | NumericDType::U8 => {
@@ -3370,13 +3384,17 @@ fn emit_typed_store(builder: &mut FunctionBuilder, addr: Value, val: Value, dtyp
         NumericDType::I32 | NumericDType::U32 => {
             builder.ins().store(MemFlags::trusted(), val, addr, 0); // val is i32
         }
+        NumericDType::I16 | NumericDType::U16 => {
+            builder.ins().store(MemFlags::trusted(), val, addr, 0); // val is i16 (narrowed in emit_cast_to_output)
+        }
         NumericDType::BOOL | NumericDType::U8 | NumericDType::I8 => {
             builder.ins().store(MemFlags::trusted(), val, addr, 0); // val is i8
         }
         NumericDType::F64 => {
-            // val is f32 (JIT internal repr); promote to f64 for 8-byte store.
-            let wide = builder.ins().fpromote(types::F64, val);
-            builder.ins().store(MemFlags::trusted(), wide, addr, 0);
+            // After emit_cast_to_output the value is already in F64 repr
+            // (emit_repr_cast(F32→F64) → fpromote) so we store it directly.
+            // Re-promoting an F64 value trips the verifier with a type error.
+            builder.ins().store(MemFlags::trusted(), val, addr, 0);
         }
         _ => {
             builder.ins().store(MemFlags::trusted(), val, addr, 0);
