@@ -10,6 +10,9 @@
 //!   tests land in their own modules as the corresponding phases ship.
 
 pub mod ab_harness;
+pub mod jit_harness;
 
 #[cfg(test)]
 mod ab_harness_smoke;
+#[cfg(test)]
+mod codec_bit_io;

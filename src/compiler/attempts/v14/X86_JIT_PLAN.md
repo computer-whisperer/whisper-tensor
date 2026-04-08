@@ -706,3 +706,36 @@ block phase 0.
 
 These resolve naturally as the code is written; none require
 upfront design decisions.
+
+## 11. Deferred bugs / known issues
+
+Issues discovered during the rewrite that are known-broken but not
+blocking the current phase. Each one needs follow-up before the
+phase that actually exercises it.
+
+1. **`encode_intermediate` Bool / NaN bug** (`docs/dtype_contract.md`
+   §8 item 7). The intermediate-encoding helper doesn't handle Bool
+   correctly when the source value is NaN — Bool's truthiness rule
+   is "non-zero AND non-NaN → true" but `encode_intermediate`
+   currently routes NaN through the integer path and produces 1.
+   Surfaced while auditing the contract gaps for phase 0; left in
+   place because no current test exercises NaN→Bool through the
+   intermediate path. **Fix before:** any phase that emits Bool
+   casts from a float source via the codec (phase 2). The codec's
+   own `emit_encode` for Bool must implement the contract directly,
+   so the bug only matters if pool_eval is used as the reference
+   for that path — confirm before phase 2's A/B harness lights up
+   float→Bool cases.
+
+2. **`executor::gather()` non-contiguous higher-rank inputs.** The
+   gather path in `PhaseStore::gather()` assumes contiguous storage
+   for any rank-≥2 input; non-contiguous higher-rank `TensorLayout`
+   inputs are silently mishandled (preserved-as-broken from before
+   the phase 1 bit-aware refactor). The phase 1.B rewrite added
+   bit-strided source handling for the rank-1 / contiguous case
+   but did not extend it to non-contiguous N-D layouts. **Fix
+   before:** any test that wires a transposed or otherwise non-
+   contiguous higher-rank tensor through `PoolEvalSpan`. The A/B
+   harness in phase 2 only exercises contiguous inputs for the
+   codec matrix, so this is safe to defer past phase 2 unless a
+   `test_set` case happens to hit it.
