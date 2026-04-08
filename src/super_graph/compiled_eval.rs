@@ -26,7 +26,7 @@ use crate::nano_graph::lower::TensorAtomMapInfo;
 use crate::nano_graph::pattern::{AtomRange, NanoGraph};
 use crate::numeric_tensor::{NumericTensor, NumericTensorCOW, NumericTensorView, TensorLayout};
 use crate::pool::{Pool, SystemPool};
-use crate::symbolic_graph::TensorType;
+use crate::super_graph::cache::LoadedTensorCache;
 use crate::symbolic_graph::tensor_store::TensorStore;
 use crate::tensor_rank::DynRank;
 
@@ -588,6 +588,7 @@ pub fn compile_lowered_model(
 ///
 /// Converts input tensors to flat (AtomId, NumericTensor) pairs for the
 /// executor's PhaseStore, runs the plan, then extracts output tensors.
+#[allow(clippy::too_many_arguments)]
 pub fn execute_compiled<'p, P: Pool + 'p>(
     compiled: &CachedCompiledPlan,
     cached_lower: &CachedLoweredModel,
@@ -595,10 +596,13 @@ pub fn execute_compiled<'p, P: Pool + 'p>(
     tensor_store: &TensorStore,
     user_input_views: &HashMap<GlobalId, NumericTensorView<'_, DynRank>>,
     pool: &'p P,
+    loaded_tensor_cache: Option<&mut LoadedTensorCache>,
     obs: &mut dyn CompiledEvalObserver,
 ) -> Result<HashMap<GlobalId, NumericTensor<'p, DynRank, P>>, super::SuperGraphError> {
     // --- Weight load: resolve every stored tensor for inputs not provided by
-    //     the user this iter (constants + weights). Steady-state hot path. ---
+    //     the user this iter (constants + weights). Steady-state hot path.
+    //     Goes through `prepare_weights` so cache hits skip the disk and the
+    //     cross-pool copy. ---
     let t_load = Instant::now();
     let stored_ids: Vec<GlobalId> = cached_lower
         .weight_input_ext_ids
@@ -612,35 +616,14 @@ pub fn execute_compiled<'p, P: Pool + 'p>(
         .copied()
         .collect();
 
-    let mut weight_tensors: Vec<(GlobalId, NumericTensor<'p, DynRank, P>)> =
-        Vec::with_capacity(stored_ids.len());
-    for &ext_id in &stored_ids {
-        let tensor_meta = sym_graph.get_tensor_info(ext_id).ok_or_else(|| {
-            super::SuperGraphError::InvalidGraph(format!(
-                "compiled_eval: missing tensor info for weight {ext_id:?}"
-            ))
-        })?;
-        let stored_ref = match &tensor_meta.tensor_type {
-            TensorType::Constant(s) | TensorType::Input(Some(s)) => s,
-            _ => {
-                return Err(super::SuperGraphError::InvalidGraph(format!(
-                    "compiled_eval: weight {ext_id:?} is not a constant/initialized input"
-                )));
-            }
-        };
-        let tensor = lowered_eval::resolve_stored_tensor(stored_ref, tensor_store, pool)
-            .ok_or_else(|| {
-                super::SuperGraphError::InvalidGraph(format!(
-                    "compiled_eval: failed to load stored tensor {ext_id:?}"
-                ))
-            })?;
-        weight_tensors.push((ext_id, tensor));
-    }
-
-    let weight_views: Vec<(GlobalId, NumericTensorView<'_, DynRank>)> = weight_tensors
-        .iter()
-        .map(|(id, t)| (*id, t.view()))
-        .collect();
+    let prepared = lowered_eval::prepare_weights(
+        &stored_ids,
+        sym_graph,
+        tensor_store,
+        pool,
+        loaded_tensor_cache,
+    )?;
+    let weight_views = prepared.views();
     obs.on_milestone("compiled.exec.weight_load", None, t_load, Instant::now());
 
     // --- Input prep: relayout each input/weight view to TAMI strides. ---

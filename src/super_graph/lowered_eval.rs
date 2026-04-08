@@ -12,6 +12,7 @@ use crate::nano_graph::pool_eval;
 use crate::numeric_dtype::NumericDType;
 use crate::numeric_tensor::{NumericTensor, NumericTensorView, TensorLayout};
 use crate::pool::{Pool, SystemPool};
+use crate::super_graph::cache::{CachedTensor, LoadedTensorCache};
 use crate::symbolic_graph::tensor_store::TensorStore;
 use crate::symbolic_graph::{StoredOrNotTensor, SymbolicGraph, TensorType};
 use crate::tensor_info::TensorInfo;
@@ -366,6 +367,129 @@ pub fn lower_symbolic_graph(
     })
 }
 
+/// Holding pen for resolved weight tensors. Each entry's view borrows from
+/// either the long-lived `LoadedTensorCache` (cache hit) or from a transient
+/// pool tensor stored in the `transients` vec (cache miss with no cache, or
+/// `Inline` variant). The lifetime parameter `'a` is the shorter of the
+/// cache borrow and the local stack frame.
+pub(crate) struct PreparedWeights<'a, 'p, P: Pool + 'p> {
+    /// Transient pool-allocated weights — held to keep their views alive
+    /// for the duration of the eval call. Index-aligned with `slots` entries
+    /// that have `transient_idx = Some(_)`.
+    transients: Vec<NumericTensor<'p, DynRank, P>>,
+    /// One entry per stored id, in input order, telling us where to find
+    /// the view: either index into `transients` or borrow from the cache.
+    slots: Vec<PreparedSlot<'a>>,
+}
+
+enum PreparedSlot<'a> {
+    Transient {
+        ext_id: GlobalId,
+        idx: usize,
+    },
+    Cached {
+        ext_id: GlobalId,
+        tensor: &'a CachedTensor,
+    },
+}
+
+impl<'a, 'p, P: Pool + 'p> PreparedWeights<'a, 'p, P> {
+    pub(crate) fn views(&self) -> Vec<(GlobalId, NumericTensorView<'_, DynRank>)> {
+        self.slots
+            .iter()
+            .map(|slot| match slot {
+                PreparedSlot::Transient { ext_id, idx } => (*ext_id, self.transients[*idx].view()),
+                PreparedSlot::Cached { ext_id, tensor } => (*ext_id, tensor.view()),
+            })
+            .collect()
+    }
+}
+
+/// Resolve every external id in `stored_ids` to a weight tensor, using the
+/// `loaded_tensor_cache` when available.
+///
+/// Behavior per id:
+/// - If the symbolic graph's `StoredOrNotTensor` is `Stored(store_id)` and a
+///   cache is present, ensure the cache has the entry (loading from disk on
+///   miss into the cache pool) and borrow a view of it.
+/// - Otherwise (no cache, or `Inline` variant), allocate a transient in the
+///   execution `pool` via `resolve_stored_tensor`. The transient is held in
+///   the returned `PreparedWeights` so its view stays valid for the duration
+///   of the eval call.
+pub(crate) fn prepare_weights<'a, 'p, P: Pool + 'p>(
+    stored_ids: &[GlobalId],
+    sym_graph: &SymbolicGraph,
+    tensor_store: &TensorStore,
+    pool: &'p P,
+    mut loaded_tensor_cache: Option<&'a mut LoadedTensorCache>,
+) -> Result<PreparedWeights<'a, 'p, P>, super::SuperGraphError> {
+    // Walk the symbolic graph once to collect refs to each StoredOrNotTensor.
+    let mut refs: Vec<(GlobalId, &StoredOrNotTensor)> = Vec::with_capacity(stored_ids.len());
+    for &ext_id in stored_ids {
+        let tensor_meta = sym_graph.get_tensor_info(ext_id).ok_or_else(|| {
+            super::SuperGraphError::InvalidGraph(format!(
+                "lowered_eval: missing tensor info for weight {ext_id:?}"
+            ))
+        })?;
+        let stored_ref = match &tensor_meta.tensor_type {
+            TensorType::Constant(s) | TensorType::Input(Some(s)) => s,
+            _ => {
+                return Err(super::SuperGraphError::InvalidGraph(format!(
+                    "lowered_eval: weight {ext_id:?} is not a constant/initialized input"
+                )));
+            }
+        };
+        refs.push((ext_id, stored_ref));
+    }
+
+    // Phase 1: mutate the cache to ensure all `Stored(id)` entries are
+    // populated. We do this through a temporary `&mut` reborrow so that
+    // we can later downgrade the original `&'a mut` to a `&'a` while
+    // preserving the original lifetime.
+    if let Some(cache) = loaded_tensor_cache.as_deref_mut() {
+        for (_ext_id, stored_ref) in &refs {
+            if let StoredOrNotTensor::Stored(store_id) = stored_ref {
+                // ensure_loaded is idempotent and cheap on hit.
+                let _ = cache.ensure_loaded(*store_id, tensor_store);
+            }
+        }
+    }
+
+    // Phase 2: downgrade the `Option<&'a mut LoadedTensorCache>` to
+    // `Option<&'a LoadedTensorCache>`. The match form lets the compiler
+    // coerce `&'a mut T` → `&'a T` while preserving the lifetime — `as_deref`
+    // would shorten it to the local borrow and break PreparedSlot::Cached.
+    let cache_ref: Option<&'a LoadedTensorCache> = match loaded_tensor_cache {
+        Some(c) => Some(c),
+        None => None,
+    };
+
+    let mut transients: Vec<NumericTensor<'p, DynRank, P>> = Vec::new();
+    let mut slots: Vec<PreparedSlot<'a>> = Vec::with_capacity(refs.len());
+
+    for (ext_id, stored_ref) in refs {
+        let cached_view: Option<&CachedTensor> = match (cache_ref, stored_ref) {
+            (Some(c), StoredOrNotTensor::Stored(id)) => c.get(id),
+            _ => None,
+        };
+        if let Some(tensor) = cached_view {
+            slots.push(PreparedSlot::Cached { ext_id, tensor });
+        } else {
+            let tensor =
+                resolve_stored_tensor(stored_ref, tensor_store, pool).ok_or_else(|| {
+                    super::SuperGraphError::InvalidGraph(format!(
+                        "lowered_eval: failed to load stored tensor {ext_id:?}"
+                    ))
+                })?;
+            let idx = transients.len();
+            transients.push(tensor);
+            slots.push(PreparedSlot::Transient { ext_id, idx });
+        }
+    }
+
+    Ok(PreparedWeights { transients, slots })
+}
+
 /// Execute a cached lowered model with the given inputs.
 ///
 /// Loads weight data from the tensor store and combines with user inputs,
@@ -381,20 +505,15 @@ pub fn execute_lowered<'p, P: Pool + 'p>(
     user_input_views: &HashMap<GlobalId, NumericTensorView<'_, DynRank>>,
     intermediate_sym_ids: &[GlobalId],
     pool: &'p P,
+    loaded_tensor_cache: Option<&mut LoadedTensorCache>,
 ) -> Result<HashMap<GlobalId, NumericTensor<'p, DynRank, P>>, super::SuperGraphError> {
-    // Build the input pairs for pool_eval: (TAMI, &view) for each external input.
-    //
-    // We need to provide views for:
-    // 1. User inputs (from super graph data)
-    // 2. Weight inputs above threshold (loaded from tensor store)
-
-    // Load stored tensors (weights above threshold + user input defaults).
-    // User-provided views override defaults, mirroring the symbolic eval path.
+    // Resolve weights via `prepare_weights`. Cache hits give zero-copy views;
+    // misses are loaded into the cache (or kept as transients in the
+    // execution pool when no cache is available).
     let stored_ids: Vec<GlobalId> = cached
         .weight_input_ext_ids
         .iter()
         .chain(
-            // User input slots without a caller-provided view need their stored default.
             cached
                 .user_input_ext_ids
                 .iter()
@@ -402,34 +521,15 @@ pub fn execute_lowered<'p, P: Pool + 'p>(
         )
         .copied()
         .collect();
-    let mut weight_tensors: Vec<(GlobalId, NumericTensor<'p, DynRank, P>)> =
-        Vec::with_capacity(stored_ids.len());
-    for &ext_id in &stored_ids {
-        let tensor_meta = sym_graph.get_tensor_info(ext_id).ok_or_else(|| {
-            super::SuperGraphError::InvalidGraph(format!(
-                "lowered_eval: missing tensor info for weight {ext_id:?}"
-            ))
-        })?;
-        let stored_ref = match &tensor_meta.tensor_type {
-            TensorType::Constant(s) | TensorType::Input(Some(s)) => s,
-            _ => {
-                return Err(super::SuperGraphError::InvalidGraph(format!(
-                    "lowered_eval: weight {ext_id:?} is not a constant/initialized input"
-                )));
-            }
-        };
-        let tensor = resolve_stored_tensor(stored_ref, tensor_store, pool).ok_or_else(|| {
-            super::SuperGraphError::InvalidGraph(format!(
-                "lowered_eval: failed to load stored tensor {ext_id:?}"
-            ))
-        })?;
-        weight_tensors.push((ext_id, tensor));
-    }
 
-    let weight_views: Vec<(GlobalId, NumericTensorView<'_, DynRank>)> = weight_tensors
-        .iter()
-        .map(|(id, t)| (*id, t.view()))
-        .collect();
+    let prepared = prepare_weights(
+        &stored_ids,
+        sym_graph,
+        tensor_store,
+        pool,
+        loaded_tensor_cache,
+    )?;
+    let weight_views = prepared.views();
 
     // Collect all input pairs: (TAMI, view).
     // tensor_map uses milli-internal IDs, so translate ext→internal via input_map.

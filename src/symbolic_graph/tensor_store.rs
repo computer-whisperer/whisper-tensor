@@ -43,6 +43,127 @@ pub enum StoredTensor {
 }
 
 impl StoredTensor {
+    /// Load this tensor into a long-lived cache slot backed by an
+    /// [`ArcTrackedPool`](crate::pool::ArcTrackedPool).
+    ///
+    /// Specialization of [`to_pool_tensor`](Self::to_pool_tensor) that returns
+    /// a `'static`-parameterized tensor. Possible because
+    /// `ArcTrackedPool::Buffer` doesn't actually borrow from the pool — every
+    /// buffer carries its own `Arc<TrackedPool>` clone — so the result can sit
+    /// in a long-lived `HashMap` without tying its lifetime to the borrow used
+    /// to allocate it.
+    ///
+    /// Used by `SuperGraphCache::loaded_tensor_cache` to avoid re-streaming
+    /// weight bytes from disk on every supergraph iteration.
+    pub fn load_into_cache_pool(
+        &self,
+        pool: &crate::pool::ArcTrackedPool,
+    ) -> Option<crate::numeric_tensor::NumericTensor<'static, DynRank, crate::pool::ArcTrackedPool>>
+    {
+        use crate::numeric_tensor::{NumericTensor as NewTensor, TensorLayout};
+        use crate::pool::Pool;
+
+        match self {
+            StoredTensor::Inline(src) => {
+                // Copy from SystemPool tensor into the cache pool. Element-wise
+                // because dtypes/strides may not match a raw byte copy in
+                // future inline variants.
+                let ndt = src.dtype();
+                let shape = src.shape().clone();
+                let layout = TensorLayout::<DynRank>::row_major(shape, ndt);
+                let buf = pool.allocate(layout.buffer_size_bytes()).ok()?;
+                let mut tensor = NewTensor::<'static, DynRank, _>::from_parts(buf, layout);
+                for i in 0..src.numel() {
+                    tensor.write_element(i, src.read_element(i));
+                }
+                Some(tensor)
+            }
+            StoredTensor::ExternalBinary { format, shape, .. }
+            | StoredTensor::ExternalPth { format, shape, .. }
+            | StoredTensor::ExternalSafetensors { format, shape, .. }
+            | StoredTensor::ExternalGGUF { format, shape, .. } => {
+                self.load_raw_to_cache_pool(*format, shape, pool)
+            }
+        }
+    }
+
+    /// Cache-pool variant of `load_raw_to_pool`. See [`load_into_cache_pool`].
+    fn load_raw_to_cache_pool(
+        &self,
+        format: TensorFormat,
+        shape: &[u64],
+        pool: &crate::pool::ArcTrackedPool,
+    ) -> Option<crate::numeric_tensor::NumericTensor<'static, DynRank, crate::pool::ArcTrackedPool>>
+    {
+        use crate::numeric_tensor::NumericTensor as NewTensor;
+        use crate::pool::Pool;
+        use std::io::{Read, Seek, SeekFrom};
+
+        let layout = format.to_layout(shape.to_vec());
+        let buf_size = layout.buffer_size_bytes();
+        let mut buf = pool.allocate(buf_size).ok()?;
+        let dst = &mut buf.as_mut()[..buf_size];
+
+        match self {
+            StoredTensor::ExternalBinary {
+                path,
+                offset,
+                length,
+                ..
+            }
+            | StoredTensor::ExternalGGUF {
+                path,
+                offset,
+                length,
+                ..
+            } => {
+                if *length < buf_size {
+                    return None;
+                }
+                let mut file = std::fs::File::open(path).ok()?;
+                file.seek(SeekFrom::Start(*offset as u64)).ok()?;
+                file.read_exact(dst).ok()?;
+            }
+            StoredTensor::ExternalPth {
+                path, tensor_name, ..
+            } => {
+                let pth_path = std::path::Path::new(path);
+                let tensors = crate::pth::PthTensors::cached(pth_path).ok()?;
+                let byte_len = tensors.byte_len(tensor_name)?;
+                if byte_len != buf_size {
+                    return None;
+                }
+                tensors.read_raw_bytes_into(tensor_name, dst).ok()?;
+            }
+            StoredTensor::ExternalSafetensors {
+                path, tensor_name, ..
+            } => {
+                #[cfg(feature = "safetensors")]
+                {
+                    use memmap2::Mmap;
+                    use safetensors::SafeTensors;
+                    let file = std::fs::File::open(path).ok()?;
+                    let mmap = unsafe { Mmap::map(&file) }.ok()?;
+                    let st = SafeTensors::deserialize(&mmap).ok()?;
+                    let view = st.tensor(tensor_name).ok()?;
+                    let src = view.data();
+                    if src.len() < buf_size {
+                        return None;
+                    }
+                    dst.copy_from_slice(&src[..buf_size]);
+                }
+                #[cfg(not(feature = "safetensors"))]
+                {
+                    let _ = (path, tensor_name);
+                    return None;
+                }
+            }
+            StoredTensor::Inline(_) => return None,
+        }
+
+        Some(NewTensor::<'static, DynRank, _>::from_parts(buf, layout))
+    }
+
     /// Load this tensor into a pool-backed new-type NumericTensor.
     ///
     /// For external file formats, reads bytes and copies directly into the pool

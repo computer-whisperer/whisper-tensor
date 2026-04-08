@@ -372,20 +372,20 @@ impl SuperGraphObserver for TensorDumpObserver {
     ) {
     }
     fn on_tensor_assigned(&mut self, path: &[GlobalId], tensor: &NumericTensorView<'_, DynRank>) {
-        if let Some(id) = path.last() {
-            if let Some(name) = self.watched_ids.get(id) {
-                let n = tensor.numel().min(3);
-                let preview: Vec<f64> = (0..n).map(|i| tensor.read_element(i).to_f64()).collect();
-                eprintln!(
-                    "[dump] captured '{}': shape={:?} dtype={:?} first={:.6?}",
-                    name,
-                    tensor.shape(),
-                    tensor.dtype(),
-                    &preview,
-                );
-                if let Ok(owned) = tensor.to_tensor(&DUMP_POOL) {
-                    self.captured.insert(name.clone(), owned);
-                }
+        if let Some(id) = path.last()
+            && let Some(name) = self.watched_ids.get(id)
+        {
+            let n = tensor.numel().min(3);
+            let preview: Vec<f64> = (0..n).map(|i| tensor.read_element(i).to_f64()).collect();
+            eprintln!(
+                "[dump] captured '{}': shape={:?} dtype={:?} first={:.6?}",
+                name,
+                tensor.shape(),
+                tensor.dtype(),
+                &preview,
+            );
+            if let Ok(owned) = tensor.to_tensor(&DUMP_POOL) {
+                self.captured.insert(name.clone(), owned);
             }
         }
     }

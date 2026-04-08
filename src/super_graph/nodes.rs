@@ -641,16 +641,26 @@ impl SuperGraphNodeModelExecution {
             lowered_owned = None;
         }
 
-        // Get a reference to the cached model — from the cache store or
-        // from the owned value we just lowered.
-        let cached = if let Some(ref owned) = lowered_owned {
-            owned
-        } else {
-            context
-                .caches
-                .as_ref()
-                .and_then(|c| c.lowered_model_cache.get(&sym_graph_id))
-                .expect("just inserted or validated cache entry")
+        // Borrow the cached lowered model and the loaded-tensor-cache slot in
+        // a single split borrow so both can coexist for the eval call. The
+        // `cached` ref borrows from `lowered_model_cache`; the `loaded_cache`
+        // mut ref borrows from the disjoint `loaded_tensor_cache` field.
+        use crate::super_graph::cache::LoadedTensorCache;
+        let (cached, loaded_cache): (
+            &lowered_eval::CachedLoweredModel,
+            Option<&mut LoadedTensorCache>,
+        ) = match (&lowered_owned, context.caches.as_deref_mut()) {
+            (Some(owned), Some(caches)) => (owned, Some(&mut caches.loaded_tensor_cache)),
+            (Some(owned), None) => (owned, None),
+            (None, Some(caches)) => {
+                let cached = caches
+                    .lowered_model_cache
+                    .get(&sym_graph_id)
+                    .expect("just inserted or validated cache entry");
+                let loaded = &mut caches.loaded_tensor_cache;
+                (cached, Some(loaded))
+            }
+            (None, None) => unreachable!("lowered_owned must be Some when no caches are available"),
         };
 
         // TODO: collect only subscribed tensor IDs once observer subscriptions
@@ -665,6 +675,7 @@ impl SuperGraphNodeModelExecution {
             &user_input_view_map,
             &intermediate_ids,
             context.pool,
+            loaded_cache,
         )?;
 
         // Feed observer with intermediate tensors, using the same path
@@ -857,24 +868,46 @@ impl SuperGraphNodeModelExecution {
             owned_compiled = None;
         }
 
-        // Re-borrow both from their final locations.
-        let cached_lower = if let Some(ref owned) = owned_lower {
-            owned
-        } else {
-            context
-                .caches
-                .as_ref()
-                .and_then(|c| c.lowered_model_cache.get(&sym_graph_id))
-                .expect("lowered model available")
-        };
-        let cached_compiled = if let Some(ref owned) = owned_compiled {
-            owned
-        } else {
-            context
-                .caches
-                .as_ref()
-                .and_then(|c| c.compiled_plan_cache.get(&sym_graph_id))
-                .expect("compiled plan available")
+        // Re-borrow lowered, compiled, and loaded-tensor-cache from their
+        // final locations in a single split borrow so all three coexist for
+        // the eval call. Disjoint fields on the same SuperGraphCache.
+        use crate::super_graph::cache::LoadedTensorCache;
+        let (cached_lower, cached_compiled, loaded_cache): (
+            &lowered_eval::CachedLoweredModel,
+            &compiled_eval::CachedCompiledPlan,
+            Option<&mut LoadedTensorCache>,
+        ) = match (&owned_lower, &owned_compiled, context.caches.as_deref_mut()) {
+            (Some(ol), Some(oc), Some(caches)) => (ol, oc, Some(&mut caches.loaded_tensor_cache)),
+            (Some(ol), Some(oc), None) => (ol, oc, None),
+            (Some(ol), None, Some(caches)) => {
+                let cc = caches
+                    .compiled_plan_cache
+                    .get(&sym_graph_id)
+                    .expect("compiled plan available");
+                let loaded = &mut caches.loaded_tensor_cache;
+                (ol, cc, Some(loaded))
+            }
+            (None, Some(oc), Some(caches)) => {
+                let cl = caches
+                    .lowered_model_cache
+                    .get(&sym_graph_id)
+                    .expect("lowered model available");
+                let loaded = &mut caches.loaded_tensor_cache;
+                (cl, oc, Some(loaded))
+            }
+            (None, None, Some(caches)) => {
+                let cl = caches
+                    .lowered_model_cache
+                    .get(&sym_graph_id)
+                    .expect("lowered model available");
+                let cc = caches
+                    .compiled_plan_cache
+                    .get(&sym_graph_id)
+                    .expect("compiled plan available");
+                let loaded = &mut caches.loaded_tensor_cache;
+                (cl, cc, Some(loaded))
+            }
+            _ => unreachable!("owned values must be Some when no caches are available"),
         };
 
         let results = {
@@ -890,6 +923,7 @@ impl SuperGraphNodeModelExecution {
                 tensor_store,
                 &user_input_view_map,
                 context.pool,
+                loaded_cache,
                 &mut wrapper,
             )?
         };
