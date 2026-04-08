@@ -2,7 +2,9 @@
 
 use crate::numeric_dtype::{FloatType, IntType};
 
-/// IEEE float maximum. If either input is NaN, returns NaN.
+/// IEEE 754-2008 maxNum: NaN-skipping maximum. If exactly one operand is
+/// NaN, returns the non-NaN operand. If both are NaN, returns NaN. This
+/// matches Rust's `f32::max` / `f64::max` and the dtype contract §5.3.
 pub fn float_max(a: u64, b: u64, ft: &FloatType) -> u64 {
     if let Some(r) = super::fast::binary_f32(a, b, ft, f32::max) {
         return r;
@@ -54,7 +56,27 @@ mod tests {
         let nan = ft.encode_f64(f64::NAN);
         let one = ft.encode_f64(1.0);
         // f64::max follows IEEE 754-2008 maxNum: max(NaN, x) = x
+        // Symmetric for both argument positions.
         assert_eq!(ft.decode_f64(float_max(nan, one, &ft)), 1.0);
+        assert_eq!(ft.decode_f64(float_max(one, nan, &ft)), 1.0);
+    }
+
+    #[test]
+    fn float_max_both_nan() {
+        // max(NaN, NaN) = NaN.
+        let ft = FloatType::F64;
+        let nan = ft.encode_f64(f64::NAN);
+        assert!(ft.decode_f64(float_max(nan, nan, &ft)).is_nan());
+    }
+
+    #[test]
+    fn float_max_nan_bf16() {
+        // Verify the fast-path covers BF16 too.
+        let ft = FloatType::BF16;
+        let nan = ft.encode_f64(f64::NAN);
+        let one = ft.encode_f64(1.0);
+        assert_eq!(ft.decode_f64(float_max(nan, one, &ft)), 1.0);
+        assert_eq!(ft.decode_f64(float_max(one, nan, &ft)), 1.0);
     }
 
     #[test]

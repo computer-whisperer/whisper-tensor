@@ -626,7 +626,11 @@ fn eval_binop(op: &ScalarBinOp, a: u64, b: u64, dtype: NumericDType) -> u64 {
             ScalarBinOp::Div => crate::scalar_ops::div::float_div(a, b, &ft),
             ScalarBinOp::Max => crate::scalar_ops::max::float_max(a, b, &ft),
             ScalarBinOp::Min => crate::scalar_ops::min::float_min(a, b, &ft),
-            ScalarBinOp::Mod | ScalarBinOp::IMod => crate::scalar_ops::modulo::float_mod(a, b, &ft),
+            // Per docs/dtype_contract.md §5.4: Mod is C-style truncated
+            // (sign matches dividend), IMod is Euclidean (sign matches
+            // divisor) for both floats and integers.
+            ScalarBinOp::Mod => crate::scalar_ops::modulo::float_mod(a, b, &ft),
+            ScalarBinOp::IMod => crate::scalar_ops::modulo::float_imod(a, b, &ft),
             ScalarBinOp::Pow => crate::scalar_ops::pow::float_pow(a, b, &ft),
             ScalarBinOp::Equal => {
                 bool_to_dtype_raw(crate::scalar_ops::cmp::float_equal(a, b, &ft), dtype)
@@ -645,14 +649,16 @@ fn eval_binop(op: &ScalarBinOp, a: u64, b: u64, dtype: NumericDType) -> u64 {
                 crate::scalar_ops::cmp::float_less_or_equal(a, b, &ft),
                 dtype,
             ),
+            // Logical ops use dtype-aware truthiness (handles -0.0 and NaN
+            // correctly). See docs/dtype_contract.md §5.7.
             ScalarBinOp::And => {
-                bool_to_dtype_raw(crate::scalar_ops::logical::logical_and(a, b), dtype)
+                bool_to_dtype_raw((is_truthy(a, dtype) && is_truthy(b, dtype)) as u64, dtype)
             }
             ScalarBinOp::Or => {
-                bool_to_dtype_raw(crate::scalar_ops::logical::logical_or(a, b), dtype)
+                bool_to_dtype_raw((is_truthy(a, dtype) || is_truthy(b, dtype)) as u64, dtype)
             }
             ScalarBinOp::Xor => {
-                bool_to_dtype_raw(crate::scalar_ops::logical::logical_xor(a, b), dtype)
+                bool_to_dtype_raw((is_truthy(a, dtype) ^ is_truthy(b, dtype)) as u64, dtype)
             }
             ScalarBinOp::BitwiseAnd
             | ScalarBinOp::BitwiseOr
@@ -689,20 +695,25 @@ fn eval_binop(op: &ScalarBinOp, a: u64, b: u64, dtype: NumericDType) -> u64 {
                 crate::scalar_ops::cmp::signed_less_or_equal(a, b, &it),
                 dtype,
             ),
+            // Logical ops use dtype-aware truthiness. For ints this is
+            // equivalent to `raw != 0` (no sign-bit ambiguity), but we
+            // route through is_truthy for consistency with the float arm.
             ScalarBinOp::And => {
-                bool_to_dtype_raw(crate::scalar_ops::logical::logical_and(a, b), dtype)
+                bool_to_dtype_raw((is_truthy(a, dtype) && is_truthy(b, dtype)) as u64, dtype)
             }
             ScalarBinOp::Or => {
-                bool_to_dtype_raw(crate::scalar_ops::logical::logical_or(a, b), dtype)
+                bool_to_dtype_raw((is_truthy(a, dtype) || is_truthy(b, dtype)) as u64, dtype)
             }
             ScalarBinOp::Xor => {
-                bool_to_dtype_raw(crate::scalar_ops::logical::logical_xor(a, b), dtype)
+                bool_to_dtype_raw((is_truthy(a, dtype) ^ is_truthy(b, dtype)) as u64, dtype)
             }
             ScalarBinOp::BitwiseAnd => bitwise_op_int(a, b, &it, |x, y| x & y),
             ScalarBinOp::BitwiseOr => bitwise_op_int(a, b, &it, |x, y| x | y),
             ScalarBinOp::BitwiseXor => bitwise_op_int(a, b, &it, |x, y| x ^ y),
-            ScalarBinOp::BitShiftLeft => bitwise_op_int(a, b, &it, |x, y| x << y),
-            ScalarBinOp::BitShiftRight => bitwise_op_int(a, b, &it, |x, y| x >> y),
+            ScalarBinOp::BitShiftLeft => crate::scalar_ops::bitwise::shift_left(a, b, &it),
+            // Signed BitShiftRight is *arithmetic* (sign-extends from the
+            // left). Per docs/dtype_contract.md §5.8.
+            ScalarBinOp::BitShiftRight => crate::scalar_ops::bitwise::signed_shift_right(a, b, &it),
         },
         NumericDType::UnsignedInt(it) => match op {
             ScalarBinOp::Add => crate::scalar_ops::add::unsigned_add_wrapping(a, b, &it),
@@ -732,39 +743,41 @@ fn eval_binop(op: &ScalarBinOp, a: u64, b: u64, dtype: NumericDType) -> u64 {
                 crate::scalar_ops::cmp::unsigned_less_or_equal(a, b, &it),
                 dtype,
             ),
+            // Logical ops use dtype-aware truthiness (consistent with the
+            // float and signed-int arms).
             ScalarBinOp::And => {
-                bool_to_dtype_raw(crate::scalar_ops::logical::logical_and(a, b), dtype)
+                bool_to_dtype_raw((is_truthy(a, dtype) && is_truthy(b, dtype)) as u64, dtype)
             }
             ScalarBinOp::Or => {
-                bool_to_dtype_raw(crate::scalar_ops::logical::logical_or(a, b), dtype)
+                bool_to_dtype_raw((is_truthy(a, dtype) || is_truthy(b, dtype)) as u64, dtype)
             }
             ScalarBinOp::Xor => {
-                bool_to_dtype_raw(crate::scalar_ops::logical::logical_xor(a, b), dtype)
+                bool_to_dtype_raw((is_truthy(a, dtype) ^ is_truthy(b, dtype)) as u64, dtype)
             }
             ScalarBinOp::BitwiseAnd => bitwise_op_int(a, b, &it, |x, y| x & y),
             ScalarBinOp::BitwiseOr => bitwise_op_int(a, b, &it, |x, y| x | y),
             ScalarBinOp::BitwiseXor => bitwise_op_int(a, b, &it, |x, y| x ^ y),
-            ScalarBinOp::BitShiftLeft => bitwise_op_int(a, b, &it, |x, y| x << y),
-            ScalarBinOp::BitShiftRight => bitwise_op_int(a, b, &it, |x, y| x >> y),
+            ScalarBinOp::BitShiftLeft => crate::scalar_ops::bitwise::shift_left(a, b, &it),
+            // Unsigned BitShiftRight is *logical* (zero-fill).
+            ScalarBinOp::BitShiftRight => {
+                crate::scalar_ops::bitwise::unsigned_shift_right(a, b, &it)
+            }
         },
         NumericDType::Bool => {
-            // Comparisons and logical ops on Bool
+            // Comparisons, logical, and bitwise ops on Bool. For Bool the
+            // raw bits ARE the truthiness (0 = false, 1 = true), so the
+            // raw-bits and decoded-truthiness paths agree. Logical and
+            // bitwise variants are equivalent for Bool.
             match op {
                 ScalarBinOp::Equal => bool_to_dtype_raw(if a == b { 1 } else { 0 }, dtype),
-                ScalarBinOp::And => {
-                    bool_to_dtype_raw(crate::scalar_ops::logical::logical_and(a, b), dtype)
+                ScalarBinOp::And | ScalarBinOp::BitwiseAnd => {
+                    bool_to_dtype_raw((is_truthy(a, dtype) && is_truthy(b, dtype)) as u64, dtype)
                 }
-                ScalarBinOp::Or => {
-                    bool_to_dtype_raw(crate::scalar_ops::logical::logical_or(a, b), dtype)
+                ScalarBinOp::Or | ScalarBinOp::BitwiseOr => {
+                    bool_to_dtype_raw((is_truthy(a, dtype) || is_truthy(b, dtype)) as u64, dtype)
                 }
                 ScalarBinOp::Xor | ScalarBinOp::BitwiseXor => {
-                    bool_to_dtype_raw(crate::scalar_ops::logical::logical_xor(a, b), dtype)
-                }
-                ScalarBinOp::BitwiseAnd => {
-                    bool_to_dtype_raw(crate::scalar_ops::logical::logical_and(a, b), dtype)
-                }
-                ScalarBinOp::BitwiseOr => {
-                    bool_to_dtype_raw(crate::scalar_ops::logical::logical_or(a, b), dtype)
+                    bool_to_dtype_raw((is_truthy(a, dtype) ^ is_truthy(b, dtype)) as u64, dtype)
                 }
                 _ => panic!("unsupported binop {op:?} for Bool"),
             }
@@ -790,12 +803,11 @@ fn eval_unaryop(op: &ScalarUnaryOp, x: u64, dtype: NumericDType) -> u64 {
             ScalarUnaryOp::Sin => crate::scalar_ops::trig::float_sin(x, &ft),
             ScalarUnaryOp::Cos => crate::scalar_ops::trig::float_cos(x, &ft),
             ScalarUnaryOp::Not => {
-                let val = ft.decode_f64(x);
-                ft.encode_f64(if val != 0.0 && !val.is_nan() {
-                    0.0
-                } else {
-                    1.0
-                })
+                // Per docs/dtype_contract.md §5.7: NaN is truthy (NaN != 0
+                // is true), -0.0 is falsy (-0.0 == 0.0). Both fall out of
+                // `decode_f64(x) != 0.0` correctly.
+                let truthy = ft.decode_f64(x) != 0.0;
+                ft.encode_f64(if truthy { 0.0 } else { 1.0 })
             }
             ScalarUnaryOp::IsNan => {
                 let val = ft.decode_f64(x);
@@ -858,4 +870,14 @@ fn eval_unaryop(op: &ScalarUnaryOp, x: u64, dtype: NumericDType) -> u64 {
 fn bool_to_dtype_raw(val: u64, dtype: NumericDType) -> u64 {
     let f = if val != 0 { 1.0 } else { 0.0 };
     dtype.encode_from_f64(f)
+}
+
+/// Truthiness of `raw` interpreted as `dtype`, per
+/// `docs/dtype_contract.md` §5.7. A float is truthy iff its decoded
+/// real value is not exactly `0.0` — `-0.0` is falsy because
+/// `-0.0 == 0.0`, NaN is truthy because `NaN != 0.0`. Integers and
+/// Bool are truthy iff nonzero. Implemented via `decode_to_f64`
+/// because that helper already handles every dtype correctly.
+fn is_truthy(raw: u64, dtype: NumericDType) -> bool {
+    dtype.decode_to_f64(raw) != 0.0
 }

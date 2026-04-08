@@ -270,14 +270,11 @@ impl SimpleBinary {
                 compute_dtype: compute_dt,
             },
             WhichSimpleBinaryOp::Modulo(fmod) => {
-                // Float types always use fmod (C remainder). For integers,
-                // fmod=0 (default) means mathematical modulo (IMod).
-                let is_float = compute_dt.is_float();
-                let use_fmod = if is_float {
-                    true
-                } else {
-                    fmod.unwrap_or(false)
-                };
+                // ONNX Mod attribute: fmod=1 → C-style truncated (sign matches
+                // dividend); fmod=0 (default) → Euclidean (sign matches divisor).
+                // The same convention applies to both float and integer operands
+                // per docs/dtype_contract.md §5.4. Defaults to Euclidean.
+                let use_fmod = fmod.unwrap_or(false);
                 ScalarOp::Binary {
                     op: if use_fmod {
                         ScalarBinOp::Mod
@@ -560,12 +557,12 @@ impl MilliOp for SimpleBinary {
                 WhichSimpleBinaryOp::Max => av.max(bv),
                 WhichSimpleBinaryOp::Min => av.min(bv),
                 WhichSimpleBinaryOp::Modulo(fmod) => {
+                    // ONNX Mod attribute: fmod=1 → C-style truncated (sign
+                    // matches dividend); fmod=0 (default) → Euclidean (sign
+                    // matches divisor). Same convention for floats and ints
+                    // per docs/dtype_contract.md §5.4. Defaults to Euclidean.
                     let is_float = a_dtype.is_float();
-                    let use_fmod = if is_float {
-                        true
-                    } else {
-                        fmod.unwrap_or(false)
-                    };
+                    let use_fmod = fmod.unwrap_or(false);
                     let af = av.to_f64();
                     let bf = bv.to_f64();
                     if bf == 0.0 {

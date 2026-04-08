@@ -479,3 +479,102 @@ fn frexp_f64(value: f64) -> (f64, i32) {
     let frac_bits = 0x3FE0_0000_0000_0000u64 | mantissa_bits;
     (f64::from_bits(frac_bits), exp)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::numeric_dtype::{FloatType, NumericDType};
+
+    /// Per dtype contract §4.3 / §8 item 6: when the target dtype has
+    /// `has_infinity = false`, the `Cast { saturating }` flag is a no-op
+    /// because `cast_raw` already saturates overflow to ±max_finite via
+    /// `encode_overflow`. Verify across all named FN-like types and a
+    /// custom (e_bits, m_bits) configuration.
+    #[test]
+    fn cast_saturating_is_noop_for_fn_targets() {
+        // Sources: include values that would overflow into inf for normal
+        // (has_infinity=true) targets. We use F64 inputs so we can drive
+        // any magnitude.
+        let src = NumericDType::F64;
+        let huge = src.cast_raw(f64::MAX.to_bits(), src);
+        let huge_neg = src.cast_raw((-f64::MAX).to_bits(), src);
+        let small = src.cast_raw(1.5_f64.to_bits(), src);
+        let zero = 0u64;
+        let nan = src.cast_raw(f64::NAN.to_bits(), src);
+
+        let fn_targets: &[(NumericDType, &str)] = &[
+            (NumericDType::F8E4M3FN, "F8E4M3FN"),
+            (NumericDType::Float(FloatType::F4E2M1), "F4E2M1"),
+            (NumericDType::Float(FloatType::F6E3M2), "F6E3M2"),
+            (NumericDType::Float(FloatType::F6E2M3), "F6E2M3"),
+            // Custom (e=4, m=2, no_inf, no_nan): also FN-shaped.
+            (
+                NumericDType::Float(FloatType {
+                    exponent_bits: 4,
+                    mantissa_bits: 2,
+                    has_infinity: false,
+                    has_nan: false,
+                }),
+                "Custom (e4,m2)",
+            ),
+        ];
+
+        for (dst, name) in fn_targets {
+            for input in [huge, huge_neg, small, zero, nan] {
+                let raw = src.cast_raw(input, *dst);
+                let saturated = dst.saturate_inf(raw);
+                assert_eq!(
+                    raw, saturated,
+                    "saturate_inf changed bits for {name} on input {input:#x} \
+                     (raw={raw:#x}, saturated={saturated:#x}); FN encode \
+                     should never produce inf",
+                );
+            }
+        }
+    }
+
+    /// Stronger property: for an FN target, no input value can ever
+    /// decode to ±∞ after cast_raw, because encode_overflow takes the
+    /// max_finite branch.
+    #[test]
+    fn cast_to_fn_never_decodes_to_infinity() {
+        let src = NumericDType::F64;
+        let fn_targets = [
+            NumericDType::F8E4M3FN,
+            NumericDType::Float(FloatType::F4E2M1),
+            NumericDType::Float(FloatType::F6E3M2),
+            NumericDType::Float(FloatType::F6E2M3),
+        ];
+
+        // Drive a range of magnitudes that would saturate.
+        let inputs: Vec<u64> = [
+            0.0_f64,
+            1.0,
+            -1.0,
+            1e30,
+            -1e30,
+            f64::MAX,
+            -f64::MAX,
+            f64::MIN_POSITIVE,
+            -f64::MIN_POSITIVE,
+        ]
+        .into_iter()
+        .map(|f| f.to_bits())
+        .collect();
+
+        for dst in fn_targets {
+            let NumericDType::Float(ft) = dst else {
+                unreachable!()
+            };
+            for input in &inputs {
+                let raw = src.cast_raw(*input, dst);
+                let decoded = ft.decode_f64(raw);
+                assert!(
+                    !decoded.is_infinite(),
+                    "cast_raw to FN target {ft:?} produced inf for input \
+                     {input:#x} (raw={raw:#x}, decoded={decoded})",
+                );
+            }
+        }
+    }
+}

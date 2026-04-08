@@ -2,7 +2,9 @@
 
 use crate::numeric_dtype::{FloatType, IntType};
 
-/// IEEE float minimum. If either input is NaN, returns NaN.
+/// IEEE 754-2008 minNum: NaN-skipping minimum. If exactly one operand is
+/// NaN, returns the non-NaN operand. If both are NaN, returns NaN. This
+/// matches Rust's `f32::min` / `f64::min` and the dtype contract §5.3.
 pub fn float_min(a: u64, b: u64, ft: &FloatType) -> u64 {
     if let Some(r) = super::fast::binary_f32(a, b, ft, f32::min) {
         return r;
@@ -54,7 +56,27 @@ mod tests {
         let nan = ft.encode_f64(f64::NAN);
         let one = ft.encode_f64(1.0);
         // f64::min follows IEEE 754-2008 minNum: min(NaN, x) = x
+        // Symmetric for both argument positions.
         assert_eq!(ft.decode_f64(float_min(nan, one, &ft)), 1.0);
+        assert_eq!(ft.decode_f64(float_min(one, nan, &ft)), 1.0);
+    }
+
+    #[test]
+    fn float_min_both_nan() {
+        // min(NaN, NaN) = NaN.
+        let ft = FloatType::F64;
+        let nan = ft.encode_f64(f64::NAN);
+        assert!(ft.decode_f64(float_min(nan, nan, &ft)).is_nan());
+    }
+
+    #[test]
+    fn float_min_nan_bf16() {
+        // Verify the fast-path covers BF16 too.
+        let ft = FloatType::BF16;
+        let nan = ft.encode_f64(f64::NAN);
+        let one = ft.encode_f64(1.0);
+        assert_eq!(ft.decode_f64(float_min(nan, one, &ft)), 1.0);
+        assert_eq!(ft.decode_f64(float_min(one, nan, &ft)), 1.0);
     }
 
     #[test]
