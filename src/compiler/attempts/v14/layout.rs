@@ -23,19 +23,83 @@ use crate::numeric_dtype::NumericDType;
 
 // ─── Buffer layout types ────────────────────────────────────────────────────
 
-/// A typed region in the working buffer.
+/// A typed region in the working buffer, addressed at bit granularity.
+///
+/// Phase 1.B switched the address fields from byte-based to bit-based so
+/// that future phases can pack sub-byte values without changing the API.
+/// The byte-based helpers ([`SlotInfo::byte_offset`], [`SlotInfo::elem_bytes`])
+/// remain available for backends that only handle byte-aligned slots; they
+/// debug-assert that the slot actually is byte-aligned.
+///
+/// Phase 1 invariants (relaxed in phase 6 with bit-packing):
+/// - `bit_offset` is a multiple of 8 (slot starts on a byte).
+/// - `bit_stride` is a multiple of 8 (sub-byte elements are byte-padded
+///   inside a slot, matching the pre-rewrite memory layout exactly).
+/// - `elem_bits = dtype.total_bits()` is the *semantic* element width;
+///   for sub-byte dtypes (e.g. Bool = 1, I4 = 4) it is **less than**
+///   `bit_stride` because phase 1 still pads to a byte boundary.
 #[derive(Debug, Clone)]
 pub struct SlotInfo {
     /// First AtomId mapped to this slot.
     pub atom_base: AtomId,
     /// Number of elements.
     pub count: u64,
-    /// Byte offset in the buffer.
-    pub byte_offset: usize,
-    /// Bytes per element (derived from dtype).
-    pub elem_bytes: usize,
+    /// Bit offset of the first element from the start of the buffer.
+    /// Always a multiple of 8 in phase 1 (byte-aligned slot starts).
+    pub bit_offset: u64,
+    /// Bits between consecutive elements.
+    /// In phase 1, equals `dtype.bytes_per_element() * 8` — sub-byte
+    /// types are byte-padded. Phase 6 may pack sub-byte elements by
+    /// setting `bit_stride = elem_bits`.
+    pub bit_stride: u64,
+    /// Semantic element width in bits = `dtype.total_bits()`.
+    /// For sub-byte dtypes this is less than `bit_stride` in phase 1.
+    pub elem_bits: u64,
     /// Storage dtype.
     pub dtype: NumericDType,
+}
+
+impl SlotInfo {
+    /// Whether the slot's start AND stride are both byte-multiples.
+    /// Phase 1 always returns `true`; phase 6 may return `false` for
+    /// bit-packed sub-byte slots.
+    #[inline]
+    pub fn is_byte_aligned(&self) -> bool {
+        self.bit_offset.is_multiple_of(8) && self.bit_stride.is_multiple_of(8)
+    }
+
+    /// Byte offset of the first element. Debug-asserts byte alignment.
+    /// Backends that don't yet handle bit-packed slots use this and
+    /// fail loudly if the invariant breaks.
+    #[inline]
+    pub fn byte_offset(&self) -> usize {
+        debug_assert!(
+            self.bit_offset.is_multiple_of(8),
+            "SlotInfo::byte_offset called on non-byte-aligned slot \
+             (bit_offset={})",
+            self.bit_offset
+        );
+        (self.bit_offset / 8) as usize
+    }
+
+    /// Bytes between consecutive elements. Debug-asserts that
+    /// `bit_stride` is a multiple of 8.
+    #[inline]
+    pub fn elem_bytes(&self) -> usize {
+        debug_assert!(
+            self.bit_stride.is_multiple_of(8),
+            "SlotInfo::elem_bytes called with non-byte-multiple bit_stride={}",
+            self.bit_stride
+        );
+        (self.bit_stride / 8) as usize
+    }
+
+    /// Bit position of the first element within its starting byte.
+    /// Returns 0 for byte-aligned slots (the only kind in phase 1).
+    #[inline]
+    pub fn bit_in_byte(&self) -> u8 {
+        (self.bit_offset % 8) as u8
+    }
 }
 
 /// Memory layout for a compiled span.
@@ -94,7 +158,7 @@ impl BufferLayout {
     /// Byte offset for a specific atom.
     pub fn byte_offset_of(&self, atom: AtomId) -> Option<usize> {
         self.find(atom)
-            .map(|(slot, idx)| slot.byte_offset + idx as usize * slot.elem_bytes)
+            .map(|(slot, idx)| slot.byte_offset() + idx as usize * slot.elem_bytes())
     }
 
     /// Write literal group values into the buffer.
@@ -111,7 +175,7 @@ impl BufferLayout {
                         // Cast the literal to the slot's storage dtype, then write raw bytes.
                         let stored = scalar.cast_to(slot.dtype);
                         for i in 0..group.count {
-                            let off = slot.byte_offset + i as usize * slot.elem_bytes;
+                            let off = slot.byte_offset() + i as usize * slot.elem_bytes();
                             write_scalar(buffer, off, &stored);
                         }
                     }
@@ -121,7 +185,7 @@ impl BufferLayout {
                         for i in 0..group.count {
                             let scalar = tensor.read_element(i as usize);
                             let stored = scalar.cast_to(slot.dtype);
-                            let off = slot.byte_offset + i as usize * slot.elem_bytes;
+                            let off = slot.byte_offset() + i as usize * slot.elem_bytes();
                             write_scalar(buffer, off, &stored);
                         }
                     }
@@ -142,8 +206,8 @@ impl BufferLayout {
                 let available = (slot.count - elem_start) as usize;
                 let to_write = available.min(data.len() - written);
                 for i in 0..to_write {
-                    let off = slot.byte_offset + (elem_start as usize + i) * slot.elem_bytes;
-                    if off + slot.elem_bytes <= buffer.len() {
+                    let off = slot.byte_offset() + (elem_start as usize + i) * slot.elem_bytes();
+                    if off + slot.elem_bytes() <= buffer.len() {
                         let scalar = NumericScalar::from_f32(data[written + i]).cast_to(slot.dtype);
                         write_scalar(buffer, off, &scalar);
                     }
@@ -169,8 +233,8 @@ impl BufferLayout {
                 let available = slot.count - elem_start;
                 let to_read = remaining.min(available);
                 for i in 0..to_read {
-                    let off = slot.byte_offset + (elem_start + i) as usize * slot.elem_bytes;
-                    if off + slot.elem_bytes <= buffer.len() {
+                    let off = slot.byte_offset() + (elem_start + i) as usize * slot.elem_bytes();
+                    if off + slot.elem_bytes() <= buffer.len() {
                         let scalar = read_scalar(buffer, off, slot.dtype);
                         result.push(scalar.to_f64() as f32);
                     } else {
@@ -669,13 +733,15 @@ pub fn compute_layout(
     // Input tensor slots.
     for (ii, it) in graph.input_tensors().iter().enumerate() {
         let elem_bytes = dtype_elem_bytes(it.dtype);
+        let elem_bits_semantic = it.dtype.total_bits() as u64;
         if let Some((slab_idx, off_in_slab)) = slab_assignment[ii] {
             let slab_base = ensure_slab(&mut slabs, &mut slab_allocated, &mut allocator, slab_idx);
             all_slots.push(SlotInfo {
                 atom_base: it.base_id,
                 count: it.count,
-                byte_offset: slab_base + off_in_slab,
-                elem_bytes: slabs[slab_idx].elem_bytes,
+                bit_offset: ((slab_base + off_in_slab) as u64) * 8,
+                bit_stride: (slabs[slab_idx].elem_bytes as u64) * 8,
+                elem_bits: elem_bits_semantic,
                 dtype: it.dtype,
             });
         } else {
@@ -684,8 +750,9 @@ pub fn compute_layout(
             all_slots.push(SlotInfo {
                 atom_base: it.base_id,
                 count: it.count,
-                byte_offset: offset,
-                elem_bytes,
+                bit_offset: (offset as u64) * 8,
+                bit_stride: (elem_bytes as u64) * 8,
+                elem_bits: elem_bits_semantic,
                 dtype: it.dtype,
             });
         }
@@ -704,6 +771,7 @@ pub fn compute_layout(
         }
 
         let elem_bytes = dtype_elem_bytes(group.output_dtype);
+        let elem_bits_semantic = group.output_dtype.total_bits() as u64;
         let item_idx = num_inputs + gi;
         let slot_idx = all_slots.len();
 
@@ -712,8 +780,9 @@ pub fn compute_layout(
             all_slots.push(SlotInfo {
                 atom_base: group.base_id,
                 count: group.count,
-                byte_offset: slab_base + off_in_slab,
-                elem_bytes: slabs[slab_idx].elem_bytes,
+                bit_offset: ((slab_base + off_in_slab) as u64) * 8,
+                bit_stride: (slabs[slab_idx].elem_bytes as u64) * 8,
+                elem_bits: elem_bits_semantic,
                 dtype: group.output_dtype,
             });
         } else {
@@ -722,8 +791,9 @@ pub fn compute_layout(
             all_slots.push(SlotInfo {
                 atom_base: group.base_id,
                 count: group.count,
-                byte_offset: offset,
-                elem_bytes,
+                bit_offset: (offset as u64) * 8,
+                bit_stride: (elem_bytes as u64) * 8,
+                elem_bits: elem_bits_semantic,
                 dtype: group.output_dtype,
             });
         }
@@ -732,15 +802,15 @@ pub fn compute_layout(
 
         if let Some(tb) = trace_byte {
             let s = &all_slots[slot_idx];
-            let end = s.byte_offset + s.count as usize * s.elem_bytes;
-            if s.byte_offset <= tb && end > tb {
+            let end = s.byte_offset() + s.count as usize * s.elem_bytes();
+            if s.byte_offset() <= tb && end > tb {
                 eprintln!(
                     "  ALLOC group {} base={} at [{}-{}) eb={} dtype={:?} op={:?}",
                     gi,
                     group.base_id,
-                    s.byte_offset,
+                    s.byte_offset(),
                     end,
-                    s.elem_bytes,
+                    s.elem_bytes(),
                     s.dtype,
                     op_name_short(&group.op)
                 );
@@ -786,8 +856,8 @@ pub(crate) fn write_store_slice_to_buffer(
 
         if slot.dtype == slice.dtype && src_end <= slice.data.len() {
             // Fast path: dtypes match, direct memcpy.
-            let dst_start = slot.byte_offset + elem_start as usize * slot.elem_bytes;
-            let dst_end = dst_start + to_write * slot.elem_bytes;
+            let dst_start = slot.byte_offset() + elem_start as usize * slot.elem_bytes();
+            let dst_end = dst_start + to_write * slot.elem_bytes();
             if dst_end <= buffer.len() {
                 buffer[dst_start..dst_end].copy_from_slice(&slice.data[src_start..src_end]);
             }
@@ -795,9 +865,9 @@ pub(crate) fn write_store_slice_to_buffer(
             // Slow path: per-element with dtype conversion.
             for i in 0..to_write {
                 let src_off = (written + i) * elem_bytes;
-                let dst_off = slot.byte_offset + (elem_start as usize + i) * slot.elem_bytes;
+                let dst_off = slot.byte_offset() + (elem_start as usize + i) * slot.elem_bytes();
                 if src_off + elem_bytes <= slice.data.len()
-                    && dst_off + slot.elem_bytes <= buffer.len()
+                    && dst_off + slot.elem_bytes() <= buffer.len()
                 {
                     let scalar = read_scalar_raw(&slice.data[src_off..], slice.dtype);
                     let converted = scalar.cast_to(slot.dtype);
@@ -842,8 +912,8 @@ pub(crate) fn read_buffer_to_output(
 
         if slot.dtype == range.dtype {
             // Fast path: direct memcpy.
-            let src_start = slot.byte_offset + elem_start as usize * slot.elem_bytes;
-            let src_end = src_start + to_read * slot.elem_bytes;
+            let src_start = slot.byte_offset() + elem_start as usize * slot.elem_bytes();
+            let src_end = src_start + to_read * slot.elem_bytes();
             let dst_start = read * elem_bytes;
             let dst_end = dst_start + to_read * elem_bytes;
             if src_end <= buffer.len() && dst_end <= out.data.len() {
@@ -852,9 +922,9 @@ pub(crate) fn read_buffer_to_output(
         } else {
             // Slow path: per-element dtype conversion.
             for i in 0..to_read {
-                let src_off = slot.byte_offset + (elem_start as usize + i) * slot.elem_bytes;
+                let src_off = slot.byte_offset() + (elem_start as usize + i) * slot.elem_bytes();
                 let dst_off = (read + i) * elem_bytes;
-                if src_off + slot.elem_bytes <= buffer.len()
+                if src_off + slot.elem_bytes() <= buffer.len()
                     && dst_off + elem_bytes <= out.data.len()
                 {
                     let scalar = read_scalar(buffer, src_off, slot.dtype);
@@ -903,13 +973,13 @@ pub fn validate_layout(
                             (layout.find(AtomId(lo)), layout.find(AtomId(hi)))
                         {
                             if slot_lo.atom_base != slot_hi.atom_base
-                                && slot_lo.elem_bytes == slot_hi.elem_bytes
+                                && slot_lo.elem_bytes() == slot_hi.elem_bytes()
                             {
                                 let atom_delta =
                                     slot_hi.atom_base.0 as i64 - slot_lo.atom_base.0 as i64;
                                 let byte_delta =
-                                    slot_hi.byte_offset as i64 - slot_lo.byte_offset as i64;
-                                let expected_byte_delta = atom_delta * slot_lo.elem_bytes as i64;
+                                    slot_hi.byte_offset() as i64 - slot_lo.byte_offset() as i64;
+                                let expected_byte_delta = atom_delta * slot_lo.elem_bytes() as i64;
                                 if byte_delta != expected_byte_delta {
                                     errors.push(format!(
                                         "group {} input {} Affine(base={},stride={},count={},off={}): atoms {}..{} slots {} and {} byte_delta={} expected={}",
@@ -955,13 +1025,13 @@ pub fn validate_layout(
                             (layout.find(AtomId(lo)), layout.find(AtomId(hi)))
                         {
                             if slot_lo.atom_base != slot_hi.atom_base
-                                && slot_lo.elem_bytes == slot_hi.elem_bytes
+                                && slot_lo.elem_bytes() == slot_hi.elem_bytes()
                             {
                                 let atom_delta =
                                     slot_hi.atom_base.0 as i64 - slot_lo.atom_base.0 as i64;
                                 let byte_delta =
-                                    slot_hi.byte_offset as i64 - slot_lo.byte_offset as i64;
-                                let expected = atom_delta * slot_lo.elem_bytes as i64;
+                                    slot_hi.byte_offset() as i64 - slot_lo.byte_offset() as i64;
+                                let expected = atom_delta * slot_lo.elem_bytes() as i64;
                                 if byte_delta != expected {
                                     errors.push(format!(
                                         "group {} Reduce stride: atoms {}..{} slots {} and {} byte_delta={} expected={}",

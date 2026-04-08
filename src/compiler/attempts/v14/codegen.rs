@@ -1004,8 +1004,8 @@ pub fn compile_span_validated(
     // Fill input tensor slots with deterministic test data.
     for it in graph.input_tensors() {
         if let Some((slot, _)) = layout.find(it.base_id) {
-            let start = slot.byte_offset;
-            let end = start + it.count as usize * slot.elem_bytes;
+            let start = slot.byte_offset();
+            let end = start + it.count as usize * slot.elem_bytes();
             if end <= buf_fused.len() {
                 for (i, b) in buf_fused[start..end].iter_mut().enumerate() {
                     *b = ((i * 7 + 13) % 256) as u8;
@@ -1041,10 +1041,10 @@ pub fn compile_span_validated(
         if let Some(off) = first_mismatch {
             for (gi, group) in graph.groups().iter().enumerate() {
                 if let Some((slot, _)) = layout.find(group.base_id) {
-                    let start = slot.byte_offset;
-                    let end = start + slot.count as usize * slot.elem_bytes;
+                    let start = slot.byte_offset();
+                    let end = start + slot.count as usize * slot.elem_bytes();
                     if off >= start && off < end {
-                        let elem_off = (off - start) / slot.elem_bytes;
+                        let elem_off = (off - start) / slot.elem_bytes();
                         eprintln!(
                             "    first mismatch in group[{}] base={} {:?} dtype={:?} atom_offset={} count={} slot_byte={} elem_offset={}",
                             gi,
@@ -1639,13 +1639,13 @@ fn emit_group_body(
                 .find(*table_base)
                 .ok_or_else(|| format!("no slot for IndirectLoad table_base={}", table_base))?;
 
-            // address = buffer_ptr + table_slot.byte_offset + idx * elem_bytes
+            // address = buffer_ptr + table_slot.byte_offset() + idx * elem_bytes
             let base = builder
                 .ins()
-                .iconst(types::I64, table_slot.byte_offset as i64);
+                .iconst(types::I64, table_slot.byte_offset() as i64);
             let idx_bytes = builder
                 .ins()
-                .imul_imm(idx_i64, table_slot.elem_bytes as i64);
+                .imul_imm(idx_i64, table_slot.elem_bytes() as i64);
             let offset = builder.ins().iadd(base, idx_bytes);
             let addr = builder.ins().iadd(buffer_ptr, offset);
             let loaded = emit_typed_load(builder, addr, table_slot.dtype);
@@ -1724,8 +1724,8 @@ fn resolve_affine_base(
 ) -> Result<(i64, usize, NumericDType), String> {
     // Fast path: base is in the layout (unsplit or atom_offset == 0).
     if let Some((slot, elem)) = layout.find(base) {
-        let base_byte = slot.byte_offset as i64 + elem as i64 * slot.elem_bytes as i64;
-        return Ok((base_byte, slot.elem_bytes, slot.dtype));
+        let base_byte = slot.byte_offset() as i64 + elem as i64 * slot.elem_bytes() as i64;
+        return Ok((base_byte, slot.elem_bytes(), slot.dtype));
     }
 
     // Split path: look up the first atom this fragment accesses.
@@ -1736,10 +1736,10 @@ fn resolve_affine_base(
             label, base, first_atom, atom_offset
         )
     })?;
-    // base_byte + stride * elem_bytes * atom_offset = slot.byte_offset + elem * elem_bytes
-    let first_byte = slot.byte_offset as i64 + elem as i64 * slot.elem_bytes as i64;
-    let base_byte = first_byte - stride * atom_offset as i64 * slot.elem_bytes as i64;
-    Ok((base_byte, slot.elem_bytes, slot.dtype))
+    // base_byte + stride * elem_bytes * atom_offset = slot.byte_offset() + elem * elem_bytes
+    let first_byte = slot.byte_offset() as i64 + elem as i64 * slot.elem_bytes() as i64;
+    let base_byte = first_byte - stride * atom_offset as i64 * slot.elem_bytes() as i64;
+    Ok((base_byte, slot.elem_bytes(), slot.dtype))
 }
 
 /// Load a value from an InputRef, resolving to a buffer byte address.
@@ -1769,7 +1769,7 @@ fn load_input(
             let (slot, elem_idx) = layout
                 .find(*atom_id)
                 .ok_or_else(|| format!("no slot for Broadcast atom={}", atom_id))?;
-            let byte_off = slot.byte_offset as i64 + elem_idx as i64 * slot.elem_bytes as i64;
+            let byte_off = slot.byte_offset() as i64 + elem_idx as i64 * slot.elem_bytes() as i64;
             let addr = addr_const(builder, buffer_ptr, byte_off);
             Ok(emit_typed_load(builder, addr, slot.dtype))
         }
@@ -1812,11 +1812,11 @@ fn load_input(
                     )
                 })?;
 
-            let elem_bytes = slot.elem_bytes as i64;
+            let elem_bytes = slot.elem_bytes() as i64;
             let load_dtype = slot.dtype;
 
             // Compute base_byte: byte offset of the logical `base` atom in the buffer.
-            let slot_byte = slot.byte_offset as i64 + elem as i64 * elem_bytes;
+            let slot_byte = slot.byte_offset() as i64 + elem as i64 * elem_bytes;
             let base_byte = if layout.find(*base).is_some() {
                 slot_byte
             } else {
@@ -1899,7 +1899,8 @@ fn load_input(
                 let (slot, elem_idx) = layout
                     .find(ids[0])
                     .ok_or_else(|| format!("no slot for Explicit[0] atom={}", ids[0]))?;
-                let byte_off = slot.byte_offset as i64 + elem_idx as i64 * slot.elem_bytes as i64;
+                let byte_off =
+                    slot.byte_offset() as i64 + elem_idx as i64 * slot.elem_bytes() as i64;
                 let addr = addr_const(builder, buffer_ptr, byte_off);
                 return Ok(emit_typed_load(builder, addr, slot.dtype));
             }
@@ -1915,7 +1916,7 @@ fn load_input(
                 .iter()
                 .map(|id| {
                     let (slot, elem_idx) = layout.find(*id).expect("Explicit atom not in layout");
-                    slot.byte_offset as i64 + elem_idx as i64 * slot.elem_bytes as i64
+                    slot.byte_offset() as i64 + elem_idx as i64 * slot.elem_bytes() as i64
                 })
                 .collect();
 
@@ -2029,9 +2030,9 @@ fn load_input_inlined(
                         base, atom_offset
                     )
                 })?;
-            let elem_bytes = slot.elem_bytes as i64;
+            let elem_bytes = slot.elem_bytes() as i64;
             let load_dtype = slot.dtype;
-            let slot_byte = slot.byte_offset as i64 + elem as i64 * elem_bytes;
+            let slot_byte = slot.byte_offset() as i64 + elem as i64 * elem_bytes;
             let base_byte = if layout.find(*base).is_some() {
                 slot_byte
             } else {
@@ -2356,19 +2357,19 @@ fn store_result(
     i_const: u64,
     val: Value,
 ) {
-    // store_base = slot.byte_offset - atom_offset * elem_bytes
+    // store_base = slot.byte_offset() - atom_offset * elem_bytes
     // addr = buffer_ptr + store_base + i * elem_bytes
-    let store_base = slot.byte_offset as i64 - atom_offset as i64 * slot.elem_bytes as i64;
+    let store_base = slot.byte_offset() as i64 - atom_offset as i64 * slot.elem_bytes() as i64;
 
     let addr = match i_val {
         Some(iv) => {
-            let i_bytes = builder.ins().imul_imm(iv, slot.elem_bytes as i64);
+            let i_bytes = builder.ins().imul_imm(iv, slot.elem_bytes() as i64);
             let base_val = builder.ins().iconst(types::I64, store_base);
             let off = builder.ins().iadd(base_val, i_bytes);
             builder.ins().iadd(buffer_ptr, off)
         }
         None => {
-            let byte_off = store_base + i_const as i64 * slot.elem_bytes as i64;
+            let byte_off = store_base + i_const as i64 * slot.elem_bytes() as i64;
             addr_const(builder, buffer_ptr, byte_off)
         }
     };
