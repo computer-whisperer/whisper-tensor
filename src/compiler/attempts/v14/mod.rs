@@ -3,6 +3,8 @@
 #[cfg(feature = "cranelift")]
 pub mod codegen;
 pub mod executor;
+#[cfg(feature = "cranelift")]
+pub mod layout;
 pub mod partitioner_m;
 pub mod plan;
 pub mod report;
