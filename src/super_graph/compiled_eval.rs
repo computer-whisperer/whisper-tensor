@@ -313,10 +313,9 @@ pub(crate) fn compile_nano_graph(
                 let result = compile_one_span_native(&span.graph, &span.outputs);
                 let dt_span = t_span.elapsed();
                 if profile_compile {
-                    let stages =
-                        crate::compiler::attempts::v14::codegen::profile::take()
-                            .pop()
-                            .unwrap_or_default();
+                    let stages = crate::compiler::attempts::v14::codegen::profile::take()
+                        .pop()
+                        .unwrap_or_default();
                     let num_groups = span.graph.num_groups();
                     let num_atoms: u64 = span.graph.groups().iter().map(|g| g.count).sum();
                     span_records.push(CompileSpanRecord {
@@ -421,7 +420,10 @@ fn print_compile_profile(records: &[CompileSpanRecord]) {
     let ir_ms: f64 = records.iter().map(|r| to_ms(r.stages.ir_build)).sum();
     let define_ms: f64 = records.iter().map(|r| to_ms(r.stages.cl_define)).sum();
     let finalize_ms: f64 = records.iter().map(|r| to_ms(r.stages.cl_finalize)).sum();
-    let lit_ms: f64 = records.iter().map(|r| to_ms(r.stages.literal_template)).sum();
+    let lit_ms: f64 = records
+        .iter()
+        .map(|r| to_ms(r.stages.literal_template))
+        .sum();
     let accounted = layout_ms + setup_ms + ir_ms + define_ms + finalize_ms + lit_ms;
     let other_ms = total_ms - accounted;
 
@@ -430,13 +432,37 @@ fn print_compile_profile(records: &[CompileSpanRecord]) {
     eprintln!();
     eprintln!("=== Compile-phase per-span profile ({} spans) ===", n);
     eprintln!("  total {:>8.0}ms  ({:.1}s)", total_ms, total_ms / 1000.0);
-    eprintln!("    compute_layout  {:>8.0}ms  ({:.1}%)", layout_ms, pct(layout_ms));
-    eprintln!("    setup           {:>8.0}ms  ({:.1}%)", setup_ms, pct(setup_ms));
+    eprintln!(
+        "    compute_layout  {:>8.0}ms  ({:.1}%)",
+        layout_ms,
+        pct(layout_ms)
+    );
+    eprintln!(
+        "    setup           {:>8.0}ms  ({:.1}%)",
+        setup_ms,
+        pct(setup_ms)
+    );
     eprintln!("    ir_build        {:>8.0}ms  ({:.1}%)", ir_ms, pct(ir_ms));
-    eprintln!("    cranelift_def   {:>8.0}ms  ({:.1}%)", define_ms, pct(define_ms));
-    eprintln!("    cranelift_fin   {:>8.0}ms  ({:.1}%)", finalize_ms, pct(finalize_ms));
-    eprintln!("    literal_tmpl    {:>8.0}ms  ({:.1}%)", lit_ms, pct(lit_ms));
-    eprintln!("    other           {:>8.0}ms  ({:.1}%)", other_ms, pct(other_ms));
+    eprintln!(
+        "    cranelift_def   {:>8.0}ms  ({:.1}%)",
+        define_ms,
+        pct(define_ms)
+    );
+    eprintln!(
+        "    cranelift_fin   {:>8.0}ms  ({:.1}%)",
+        finalize_ms,
+        pct(finalize_ms)
+    );
+    eprintln!(
+        "    literal_tmpl    {:>8.0}ms  ({:.1}%)",
+        lit_ms,
+        pct(lit_ms)
+    );
+    eprintln!(
+        "    other           {:>8.0}ms  ({:.1}%)",
+        other_ms,
+        pct(other_ms)
+    );
 
     // Histogram by total span time.
     let mut buckets = [0usize; 8];

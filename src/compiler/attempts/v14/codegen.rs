@@ -87,6 +87,17 @@ pub struct BufferLayout {
 }
 
 impl BufferLayout {
+    /// Empty layout placeholder for spans with no compute (no groups).
+    pub(crate) fn empty() -> Self {
+        BufferLayout {
+            slots: Vec::new(),
+            total_bytes: 0,
+            group_use_counts: Vec::new(),
+            inlinable: Vec::new(),
+            inlines_producer: Vec::new(),
+        }
+    }
+
     /// Find the slot containing `atom`.
     ///
     /// Returns `(slot, element_index_within_slot)`.
@@ -1063,7 +1074,11 @@ impl CompiledSpanFn for JitCompiledSpan {
 }
 
 /// Write a StoreSlice into the buffer at the correct slot positions.
-fn write_store_slice_to_buffer(slice: &StoreSlice<'_>, layout: &BufferLayout, buffer: &mut [u8]) {
+pub(crate) fn write_store_slice_to_buffer(
+    slice: &StoreSlice<'_>,
+    layout: &BufferLayout,
+    buffer: &mut [u8],
+) {
     let elem_bytes = slice.dtype.bytes_per_element();
     let mut written = 0usize;
     let mut atom = slice.base.0;
@@ -1109,7 +1124,7 @@ fn write_store_slice_to_buffer(slice: &StoreSlice<'_>, layout: &BufferLayout, bu
 }
 
 /// Read output range from buffer into a SpanOutput.
-fn read_buffer_to_output(
+pub(crate) fn read_buffer_to_output(
     range: &AtomRange,
     layout: &BufferLayout,
     buffer: &[u8],
@@ -2038,7 +2053,9 @@ fn build_cranelift_flags() -> settings::Flags {
     if std::env::var("COMPILE_FAST").is_ok() {
         flag_builder.set("opt_level", "none").unwrap();
         flag_builder.set("enable_verifier", "false").unwrap();
-        flag_builder.set("regalloc_algorithm", "single_pass").unwrap();
+        flag_builder
+            .set("regalloc_algorithm", "single_pass")
+            .unwrap();
         flag_builder.set("enable_alias_analysis", "false").unwrap();
     } else {
         flag_builder.set("opt_level", "speed").unwrap();
@@ -2761,7 +2778,7 @@ struct EmbeddedTableEntry {
 }
 
 impl EmbeddedTables {
-    fn new(initial_watermark: usize) -> Self {
+    pub(crate) fn new(initial_watermark: usize) -> Self {
         EmbeddedTables {
             watermark: initial_watermark,
             entries: Vec::new(),
@@ -2782,12 +2799,12 @@ impl EmbeddedTables {
     }
 
     /// Total buffer size including all embedded tables.
-    fn total_bytes(&self) -> usize {
+    pub(crate) fn total_bytes(&self) -> usize {
         self.watermark
     }
 
     /// Write all table data into the buffer.
-    fn populate(&self, buffer: &mut [u8]) {
+    pub(crate) fn populate(&self, buffer: &mut [u8]) {
         for entry in &self.entries {
             let end = entry.byte_offset + entry.data.len();
             if end <= buffer.len() {
