@@ -24,11 +24,55 @@ use crate::tensor_rank::DynRank;
 ///
 /// Spans receive these for their declared input ranges. The data pointer
 /// is valid for the duration of the phase (store is immutably borrowed).
+///
+/// # Bit-aware source addressing
+///
+/// `data` may be bit-strided (sub-byte dtypes, non-byte-aligned offsets,
+/// arbitrary `TensorLayout::ElementStrided` strides). `src_bit_offset` is
+/// the bit position within `data` of element 0 (the atom at `base`), and
+/// `src_bit_stride` is the bit distance between consecutive elements.
+///
+/// For the conventional contiguous byte-aligned case, `src_bit_offset` is
+/// `0` (because `gather()` pre-slices `data` to start at element 0's byte)
+/// and `src_bit_stride` is `dtype.bytes_per_element() * 8` (one byte per
+/// Bool, four bytes per F32, etc). The marshalling functions detect that
+/// case and use a fast `memcpy` path.
+///
+/// For bit-strided sources (sub-byte dtype like Bool packed at 1 bit per
+/// element, or `offset_bits != 0`), `data` is the **full source buffer**
+/// (no pre-slicing), `src_bit_offset` includes the source-tensor offset
+/// plus any per-skip contribution, and `src_bit_stride` is the source's
+/// per-element bit stride. Marshalling reads each element via
+/// `NumericScalarView::to_owned_scalar`.
 pub struct StoreSlice<'a> {
     pub base: AtomId,
     pub data: &'a [u8],
     pub dtype: NumericDType,
     pub count: u64,
+    /// Bit position of element 0 within `data`.
+    pub src_bit_offset: u64,
+    /// Bits between consecutive elements within `data`.
+    pub src_bit_stride: u64,
+}
+
+impl<'a> StoreSlice<'a> {
+    /// Whether this slice's source is byte-natural — `src_bit_offset` is a
+    /// multiple of 8 and `src_bit_stride` matches the dtype's
+    /// `bytes_per_element() * 8`. The marshalling fast path uses byte
+    /// arithmetic when this is true.
+    #[inline]
+    pub fn is_byte_natural(&self) -> bool {
+        self.src_bit_offset.is_multiple_of(8)
+            && self.src_bit_stride == (self.dtype.bytes_per_element() as u64) * 8
+    }
+
+    /// Byte offset of element 0 within `data`. Only valid when
+    /// `src_bit_offset` is a multiple of 8.
+    #[inline]
+    pub fn src_byte_offset(&self) -> usize {
+        debug_assert!(self.src_bit_offset.is_multiple_of(8));
+        (self.src_bit_offset / 8) as usize
+    }
 }
 
 /// A pre-allocated output buffer that a compiled span writes into.
@@ -340,7 +384,21 @@ impl<'a, 'p, P: Pool + 'p> PhaseStore<'a, 'p, P> {
 
     /// Find all store entries overlapping [base, base+count).
     /// Returns zero-copy slices into the store's buffers.
+    ///
+    /// For byte-natural sources (the conventional case: contiguous
+    /// `TensorLayout::ElementStrided` with `offset_bits == 0` and a dtype
+    /// whose elements live on byte boundaries), the returned slice's
+    /// `data` is **pre-sliced** to start at element 0's byte, and
+    /// `src_bit_offset` is `0`. This preserves the cheap memcpy path.
+    ///
+    /// For bit-strided sources (sub-byte dtype, `offset_bits != 0`, or
+    /// any `TensorLayout` whose per-element stride isn't byte-natural),
+    /// `data` is the **full source buffer** and `src_bit_offset` is
+    /// the absolute bit position of element 0. The marshalling code uses
+    /// `NumericScalarView` for per-element bit-aware reads.
     pub fn gather(&self, base: AtomId, count: u64) -> Vec<StoreSlice<'_>> {
+        use crate::numeric_tensor::TensorLayout;
+
         let range_lo = base.0;
         let range_hi = range_lo + count;
 
@@ -368,19 +426,56 @@ impl<'a, 'p, P: Pool + 'p> PhaseStore<'a, 'p, P> {
             // Compute overlap.
             let overlap_lo = entry.base.max(range_lo);
             let overlap_hi = entry_hi.min(range_hi);
-            let skip = (overlap_lo - entry.base) as usize;
-            let overlap_count = (overlap_hi - overlap_lo) as usize;
-            let elem_bytes = entry.tensor.dtype().bytes_per_element();
-            let byte_start = skip * elem_bytes;
-            let byte_end = byte_start + overlap_count * elem_bytes;
+            let skip = (overlap_lo - entry.base) as u64;
+            let overlap_count = (overlap_hi - overlap_lo) as u64;
+            let dtype = entry.tensor.dtype();
+            let elem_bits = dtype.total_bits() as u64;
+            let elem_bytes = dtype.bytes_per_element();
             let buf = entry.tensor.buffer();
 
-            if byte_end <= buf.len() {
+            // Detect the byte-natural fast path: contiguous ElementStrided
+            // with `offset_bits == 0`. Sub-byte dtypes (Bool, I4, ...) are
+            // byte-padded in this case (one element per byte), matching the
+            // pre-bit-rewrite memory layout.
+            let is_byte_natural = match entry.tensor.layout() {
+                TensorLayout::ElementStrided { offset_bits, .. } => {
+                    *offset_bits == 0 && entry.tensor.layout().is_contiguous()
+                }
+                _ => true, // quantized formats are byte-aligned by construction
+            };
+
+            if is_byte_natural {
+                // Pre-slice the buffer to element 0's byte; the marshalling
+                // fast path then memcpy's directly.
+                let byte_start = (skip as usize) * elem_bytes;
+                let byte_end = byte_start + (overlap_count as usize) * elem_bytes;
+                if byte_end <= buf.len() {
+                    slices.push(StoreSlice {
+                        base: AtomId(overlap_lo),
+                        data: &buf[byte_start..byte_end],
+                        dtype,
+                        count: overlap_count,
+                        src_bit_offset: 0,
+                        src_bit_stride: (elem_bytes as u64) * 8,
+                    });
+                }
+            } else {
+                // Bit-strided source: pass the full buffer, use bit math.
+                // We assume the source's per-flat-element stride is `elem_bits`
+                // (true for any 1D-equivalent ElementStrided layout). Multi-dim
+                // non-contiguous layouts would need a richer representation;
+                // they're not exercised today.
+                let layout_offset_bits = match entry.tensor.layout() {
+                    TensorLayout::ElementStrided { offset_bits, .. } => *offset_bits,
+                    _ => 0,
+                };
                 slices.push(StoreSlice {
                     base: AtomId(overlap_lo),
-                    data: &buf[byte_start..byte_end],
-                    dtype: entry.tensor.dtype(),
-                    count: overlap_count as u64,
+                    data: buf,
+                    dtype,
+                    count: overlap_count,
+                    src_bit_offset: layout_offset_bits + skip * elem_bits,
+                    src_bit_stride: elem_bits,
                 });
             }
         }

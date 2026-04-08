@@ -40,6 +40,8 @@ pub fn ab_test_bytes(
             data: bytes.as_slice(),
             dtype: *dtype,
             count: (bytes.len() / dtype.bytes_per_element()) as u64,
+            src_bit_offset: 0,
+            src_bit_stride: (dtype.bytes_per_element() as u64) * 8,
         })
         .collect();
 

@@ -20,6 +20,7 @@ use std::collections::{HashMap, HashSet};
 use super::executor::{SpanOutput, StoreSlice};
 use crate::nano_graph::{AtomGroup, AtomId, AtomRange, InputRef, NanoGraph, ScalarOp};
 use crate::numeric_dtype::NumericDType;
+use crate::numeric_scalar::{NumericScalarView, NumericScalarViewMut};
 
 // ─── Buffer layout types ────────────────────────────────────────────────────
 
@@ -837,10 +838,9 @@ pub(crate) fn write_store_slice_to_buffer(
     layout: &BufferLayout,
     buffer: &mut [u8],
 ) {
-    let elem_bytes = slice.dtype.bytes_per_element();
-    let mut written = 0usize;
+    let mut written: u64 = 0;
     let mut atom = slice.base.0;
-    let total = slice.count as usize;
+    let total = slice.count;
 
     while written < total {
         let Some((slot, elem_start)) = layout.find(AtomId(atom)) else {
@@ -848,36 +848,63 @@ pub(crate) fn write_store_slice_to_buffer(
             atom += 1;
             continue;
         };
-        let available = (slot.count - elem_start) as usize;
+        let available = slot.count - elem_start;
         let to_write = available.min(total - written);
 
-        let src_start = written * elem_bytes;
-        let src_end = src_start + to_write * elem_bytes;
-
-        if slot.dtype == slice.dtype && src_end <= slice.data.len() {
-            // Fast path: dtypes match, direct memcpy.
-            let dst_start = slot.byte_offset() + elem_start as usize * slot.elem_bytes();
-            let dst_end = dst_start + to_write * slot.elem_bytes();
-            if dst_end <= buffer.len() {
-                buffer[dst_start..dst_end].copy_from_slice(&slice.data[src_start..src_end]);
+        // Fast path: byte-natural source AND byte-aligned destination AND
+        // matching dtype → direct memcpy. Phase 1 destinations are always
+        // byte-aligned and most sources are byte-natural, so this fires
+        // for the conventional case.
+        let elem_bytes = slice.dtype.bytes_per_element();
+        if slot.dtype == slice.dtype && slice.is_byte_natural() && slot.is_byte_aligned() {
+            let src_byte_start = slice.src_byte_offset() + (written as usize) * elem_bytes;
+            let src_byte_end = src_byte_start + (to_write as usize) * elem_bytes;
+            let dst_byte_start = slot.byte_offset() + (elem_start as usize) * slot.elem_bytes();
+            let dst_byte_end = dst_byte_start + (to_write as usize) * slot.elem_bytes();
+            if src_byte_end <= slice.data.len() && dst_byte_end <= buffer.len() {
+                buffer[dst_byte_start..dst_byte_end]
+                    .copy_from_slice(&slice.data[src_byte_start..src_byte_end]);
             }
-        } else if src_end <= slice.data.len() {
-            // Slow path: per-element with dtype conversion.
+        } else {
+            // General path: per-element via NumericScalarView. Handles
+            // bit-strided sources (sub-byte dtype, non-zero offset_bits)
+            // and dtype conversion.
             for i in 0..to_write {
-                let src_off = (written + i) * elem_bytes;
-                let dst_off = slot.byte_offset() + (elem_start as usize + i) * slot.elem_bytes();
-                if src_off + elem_bytes <= slice.data.len()
-                    && dst_off + slot.elem_bytes() <= buffer.len()
-                {
-                    let scalar = read_scalar_raw(&slice.data[src_off..], slice.dtype);
-                    let converted = scalar.cast_to(slot.dtype);
-                    write_scalar(buffer, dst_off, &converted);
+                let src_bit = slice.src_bit_offset + (written + i) * slice.src_bit_stride;
+                let src_view = NumericScalarView {
+                    data: slice.data,
+                    bit_offset: src_bit as usize,
+                    dtype: slice.dtype,
+                };
+                let scalar = src_view.to_owned_scalar();
+                let converted = if slot.dtype == slice.dtype {
+                    scalar
+                } else {
+                    scalar.cast_to(slot.dtype)
+                };
+
+                let dst_bit = slot.bit_offset + (elem_start + i) * slot.bit_stride;
+                if slot.is_byte_aligned() {
+                    let dst_off = (dst_bit / 8) as usize;
+                    if dst_off + slot.elem_bytes() <= buffer.len() {
+                        write_scalar(buffer, dst_off, &converted);
+                    }
+                } else {
+                    // Bit-aligned destination (phase 6); use the bit-aware
+                    // write path. Caller bears the responsibility of
+                    // ensuring the buffer is large enough.
+                    let mut view = NumericScalarViewMut {
+                        data: buffer,
+                        bit_offset: dst_bit as usize,
+                        dtype: slot.dtype,
+                    };
+                    view.write_scalar(&converted);
                 }
             }
         }
 
         written += to_write;
-        atom += to_write as u64;
+        atom += to_write;
     }
 }
 
@@ -889,14 +916,14 @@ pub(crate) fn read_buffer_to_output(
     out: &mut SpanOutput<'_>,
 ) {
     let elem_bytes = range.dtype.bytes_per_element();
-    let mut read = 0usize;
+    let mut read: u64 = 0;
     let mut atom = range.base.0;
-    let total = range.count as usize;
+    let total = range.count;
 
     while read < total {
         let Some((slot, elem_start)) = layout.find(AtomId(atom)) else {
             // Gap: write zeros.
-            let dst_off = read * elem_bytes;
+            let dst_off = (read as usize) * elem_bytes;
             if dst_off + elem_bytes <= out.data.len() {
                 for b in &mut out.data[dst_off..dst_off + elem_bytes] {
                     *b = 0;
@@ -907,35 +934,45 @@ pub(crate) fn read_buffer_to_output(
             continue;
         };
 
-        let available = (slot.count - elem_start) as usize;
+        let available = slot.count - elem_start;
         let to_read = available.min(total - read);
 
-        if slot.dtype == range.dtype {
-            // Fast path: direct memcpy.
-            let src_start = slot.byte_offset() + elem_start as usize * slot.elem_bytes();
-            let src_end = src_start + to_read * slot.elem_bytes();
-            let dst_start = read * elem_bytes;
-            let dst_end = dst_start + to_read * elem_bytes;
-            if src_end <= buffer.len() && dst_end <= out.data.len() {
-                out.data[dst_start..dst_end].copy_from_slice(&buffer[src_start..src_end]);
+        // Fast path: matching dtype AND byte-aligned slot AND
+        // byte-natural slot stride → direct memcpy. SpanOutput is always
+        // byte-natural by construction.
+        if slot.dtype == range.dtype && slot.is_byte_aligned() {
+            let src_byte_start = slot.byte_offset() + (elem_start as usize) * slot.elem_bytes();
+            let src_byte_end = src_byte_start + (to_read as usize) * slot.elem_bytes();
+            let dst_byte_start = (read as usize) * elem_bytes;
+            let dst_byte_end = dst_byte_start + (to_read as usize) * elem_bytes;
+            if src_byte_end <= buffer.len() && dst_byte_end <= out.data.len() {
+                out.data[dst_byte_start..dst_byte_end]
+                    .copy_from_slice(&buffer[src_byte_start..src_byte_end]);
             }
         } else {
-            // Slow path: per-element dtype conversion.
+            // General path: per-element via NumericScalarView.
             for i in 0..to_read {
-                let src_off = slot.byte_offset() + (elem_start as usize + i) * slot.elem_bytes();
-                let dst_off = (read + i) * elem_bytes;
-                if src_off + slot.elem_bytes() <= buffer.len()
-                    && dst_off + elem_bytes <= out.data.len()
-                {
-                    let scalar = read_scalar(buffer, src_off, slot.dtype);
-                    let converted = scalar.cast_to(range.dtype);
+                let src_bit = slot.bit_offset + (elem_start + i) * slot.bit_stride;
+                let src_view = NumericScalarView {
+                    data: buffer,
+                    bit_offset: src_bit as usize,
+                    dtype: slot.dtype,
+                };
+                let scalar = src_view.to_owned_scalar();
+                let converted = if slot.dtype == range.dtype {
+                    scalar
+                } else {
+                    scalar.cast_to(range.dtype)
+                };
+                let dst_off = ((read + i) as usize) * elem_bytes;
+                if dst_off + elem_bytes <= out.data.len() {
                     write_scalar(&mut out.data[..], dst_off, &converted);
                 }
             }
         }
 
         read += to_read;
-        atom += to_read as u64;
+        atom += to_read;
     }
 }
 
@@ -1163,5 +1200,350 @@ pub(crate) fn op_name_short(op: &ScalarOp) -> &'static str {
         ScalarOp::IndirectLoad { .. } => "Ind",
         ScalarOp::OpaqueOutput { .. } => "Opq",
         ScalarOp::LiteralSpan(_) => "LitS",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::graph::GlobalId;
+    use crate::nano_graph::ops::ScalarOp;
+    use crate::numeric_scalar::NumericScalar;
+
+    // ─── SlotInfo helper invariants ─────────────────────────────────────────
+
+    #[test]
+    fn slot_info_helpers_byte_aligned_native_dtypes() {
+        // Phase 1 invariant: every slot compute_layout produces is
+        // byte-aligned and the helpers return the byte view directly.
+        for dtype in [
+            NumericDType::F32,
+            NumericDType::F64,
+            NumericDType::I32,
+            NumericDType::I64,
+            NumericDType::U8,
+            NumericDType::BF16,
+            NumericDType::F16,
+            NumericDType::BOOL, // 1-bit semantic, byte-padded
+        ] {
+            let slot = SlotInfo {
+                atom_base: AtomId(0),
+                count: 4,
+                bit_offset: 16,
+                bit_stride: (dtype.bytes_per_element() as u64) * 8,
+                elem_bits: dtype.total_bits() as u64,
+                dtype,
+            };
+            assert!(slot.is_byte_aligned(), "{dtype:?}");
+            assert_eq!(slot.byte_offset(), 2);
+            assert_eq!(slot.elem_bytes(), dtype.bytes_per_element());
+            assert_eq!(slot.bit_in_byte(), 0);
+        }
+    }
+
+    #[test]
+    fn slot_info_bool_semantic_vs_padded_widths() {
+        // Bool: elem_bits=1 (semantic) but bit_stride=8 (phase 1 byte-padded).
+        let slot = SlotInfo {
+            atom_base: AtomId(7),
+            count: 3,
+            bit_offset: 24,
+            bit_stride: 8,
+            elem_bits: 1,
+            dtype: NumericDType::BOOL,
+        };
+        assert!(slot.is_byte_aligned());
+        assert_eq!(slot.byte_offset(), 3);
+        assert_eq!(slot.elem_bytes(), 1);
+        assert_eq!(slot.elem_bits, 1);
+        assert_eq!(slot.bit_stride, 8);
+    }
+
+    #[test]
+    fn slot_info_bit_packed_phase6_shape() {
+        // Phase 6 will allow bit-packed slots: bit_stride == elem_bits.
+        // is_byte_aligned() returns false because the stride isn't a
+        // multiple of 8. Phase 1 doesn't produce these but the helper
+        // shape is forward-compatible.
+        let slot = SlotInfo {
+            atom_base: AtomId(0),
+            count: 16,
+            bit_offset: 0,
+            bit_stride: 1,
+            elem_bits: 1,
+            dtype: NumericDType::BOOL,
+        };
+        assert!(!slot.is_byte_aligned());
+    }
+
+    // ─── compute_layout shape with Bool input ───────────────────────────────
+
+    #[test]
+    fn compute_layout_bool_input_slot_shape() {
+        // A graph with a Bool input + an Identity group consuming it.
+        // Phase 1 produces byte-padded Bool slots:
+        //   bit_stride = 8, elem_bits = 1.
+        let mut g = NanoGraph::new();
+        let bool_input = g.add_input_tensor(GlobalId(0), 5, NumericDType::BOOL);
+        let identity = g.push_group(
+            5,
+            NumericDType::BOOL,
+            ScalarOp::Identity,
+            vec![],
+            vec![InputRef::affine(bool_input, 1)],
+        );
+        let outputs = vec![AtomRange {
+            base: identity,
+            count: 5,
+            dtype: NumericDType::BOOL,
+        }];
+        let layout = compute_layout(&g, &outputs);
+
+        let (input_slot, _) = layout.find(bool_input).expect("bool input slot present");
+        assert_eq!(input_slot.dtype, NumericDType::BOOL);
+        assert_eq!(input_slot.elem_bits, 1, "Bool semantic width is 1 bit");
+        assert_eq!(input_slot.bit_stride, 8, "phase 1 pads sub-byte to a byte");
+        assert!(input_slot.is_byte_aligned());
+
+        let (out_slot, _) = layout.find(identity).expect("identity slot present");
+        assert_eq!(out_slot.dtype, NumericDType::BOOL);
+        assert_eq!(out_slot.elem_bits, 1);
+        assert_eq!(out_slot.bit_stride, 8);
+    }
+
+    // ─── populate_literals for a sub-byte dtype ─────────────────────────────
+
+    #[test]
+    fn populate_literals_bool_writes_byte_padded() {
+        // A graph with a Bool literal scalar — populate_literals should
+        // write a single 0x01 byte at the slot's byte offset.
+        let mut g = NanoGraph::new();
+        let lit = g.push_group(
+            1,
+            NumericDType::BOOL,
+            ScalarOp::Literal(NumericScalar::from_bool(true)),
+            vec![],
+            vec![],
+        );
+        let outputs = vec![AtomRange {
+            base: lit,
+            count: 1,
+            dtype: NumericDType::BOOL,
+        }];
+        let layout = compute_layout(&g, &outputs);
+
+        let mut buffer = vec![0u8; layout.total_bytes];
+        layout.populate_literals(&g, &mut buffer);
+
+        let (slot, _) = layout.find(lit).expect("literal slot present");
+        assert_eq!(slot.elem_bytes(), 1);
+        let byte = buffer[slot.byte_offset()];
+        assert_eq!(byte, 1, "Bool true literal stored as 0x01");
+
+        // Round-trip via read_buffer_to_output: extract back into a
+        // SpanOutput and confirm we read 1 byte = 1 (true).
+        let mut out_data = vec![0u8; 1];
+        let mut out = SpanOutput {
+            data: &mut out_data,
+            dtype: NumericDType::BOOL,
+            count: 1,
+        };
+        read_buffer_to_output(&outputs[0], &layout, &buffer, &mut out);
+        assert_eq!(out_data[0], 1);
+    }
+
+    // ─── Bit-strided source round-trip via marshalling ──────────────────────
+
+    /// Drive a `StoreSlice` whose `data` is a bit-packed source buffer
+    /// (1-bit Bool elements at consecutive bit positions, no byte padding)
+    /// through `write_store_slice_to_buffer`, then read it back via
+    /// `read_buffer_to_output`. The destination slot is byte-padded as
+    /// always in phase 1, so the round-trip exercises the bit-aware read
+    /// path on the source side.
+    #[test]
+    fn bit_strided_source_round_trip_bool_packed() {
+        let mut g = NanoGraph::new();
+        let inp = g.add_input_tensor(GlobalId(0), 9, NumericDType::BOOL);
+        // Identity group so the input has a slot in the layout.
+        let out = g.push_group(
+            9,
+            NumericDType::BOOL,
+            ScalarOp::Identity,
+            vec![],
+            vec![InputRef::affine(inp, 1)],
+        );
+        let outputs = vec![AtomRange {
+            base: out,
+            count: 9,
+            dtype: NumericDType::BOOL,
+        }];
+        let layout = compute_layout(&g, &outputs);
+
+        // Source: 9 Bool values packed at 1 bit per element starting at
+        // bit offset 3 (so element 0 lives at bit position 3 within byte 0).
+        // Pattern: 1, 0, 1, 0, 1, 1, 0, 0, 1
+        let src_pattern: [bool; 9] = [true, false, true, false, true, true, false, false, true];
+        // Encode the pattern starting at bit_offset=3 in a 3-byte buffer.
+        let mut packed = vec![0u8; 3];
+        for (i, &bit) in src_pattern.iter().enumerate() {
+            if bit {
+                let bit_pos = 3 + i;
+                let byte = bit_pos / 8;
+                let in_byte = bit_pos % 8;
+                packed[byte] |= 1 << in_byte;
+            }
+        }
+
+        let slice = StoreSlice {
+            base: inp,
+            data: &packed,
+            dtype: NumericDType::BOOL,
+            count: 9,
+            src_bit_offset: 3,
+            src_bit_stride: 1, // bit-packed, no byte padding
+        };
+        assert!(
+            !slice.is_byte_natural(),
+            "bit-packed source must take the slow path"
+        );
+
+        let mut buffer = vec![0u8; layout.total_bytes];
+        write_store_slice_to_buffer(&slice, &layout, &mut buffer);
+
+        // Now extract the input slot's bytes — phase 1 pads Bool to one
+        // byte per element, so we should see 0x00 / 0x01 per element in
+        // the layout's byte-padded format.
+        let (input_slot, _) = layout.find(inp).expect("bool input slot");
+        for (i, &expected) in src_pattern.iter().enumerate() {
+            let off = input_slot.byte_offset() + i * input_slot.elem_bytes();
+            let got = buffer[off];
+            assert_eq!(
+                got, expected as u8,
+                "element {i}: byte-padded bool expected {expected}, got 0x{got:02x}"
+            );
+        }
+
+        // Round-trip out via the identity group's output range. The
+        // identity copy is a no-op layout-wise (input == output) so the
+        // output bytes should match the input bytes.
+        //
+        // We can't actually run the JIT here (no compiler in this test),
+        // but we can directly read the input slot via read_buffer_to_output
+        // pointed at the input range. That exercises the byte-fast path
+        // on the read side and confirms the round-trip is bit-equal.
+        let input_range = AtomRange {
+            base: inp,
+            count: 9,
+            dtype: NumericDType::BOOL,
+        };
+        let mut out_data = vec![0u8; 9];
+        let mut out = SpanOutput {
+            data: &mut out_data,
+            dtype: NumericDType::BOOL,
+            count: 9,
+        };
+        read_buffer_to_output(&input_range, &layout, &buffer, &mut out);
+        for (i, &expected) in src_pattern.iter().enumerate() {
+            assert_eq!(out_data[i], expected as u8, "round-trip element {i}");
+        }
+    }
+
+    /// Bit-strided source with a non-zero `src_bit_offset` and a
+    /// byte-natural stride (= 8 for Bool). This is the "offset_bits != 0"
+    /// case from `TensorLayout::ElementStrided`. The source byte buffer
+    /// has 3 unrelated bytes of padding before element 0.
+    #[test]
+    fn bit_strided_source_offset_bits_byte_stride() {
+        let mut g = NanoGraph::new();
+        let inp = g.add_input_tensor(GlobalId(0), 4, NumericDType::U8);
+        let _ident = g.push_group(
+            4,
+            NumericDType::U8,
+            ScalarOp::Identity,
+            vec![],
+            vec![InputRef::affine(inp, 1)],
+        );
+        let outputs = vec![AtomRange {
+            base: inp,
+            count: 4,
+            dtype: NumericDType::U8,
+        }];
+        let layout = compute_layout(&g, &outputs);
+
+        // Source data: 3 bytes of padding (0xff each), then the actual U8
+        // values [10, 20, 30, 40]. src_bit_offset = 24 (3 bytes).
+        let src_data: Vec<u8> = vec![0xff, 0xff, 0xff, 10, 20, 30, 40];
+        let slice = StoreSlice {
+            base: inp,
+            data: &src_data,
+            dtype: NumericDType::U8,
+            count: 4,
+            src_bit_offset: 24, // byte-aligned but non-zero
+            src_bit_stride: 8,  // U8 byte-natural
+        };
+        // Both fields are byte-multiples, so the source IS byte-natural and
+        // the fast path memcpy handles the offset via `src_byte_offset()`.
+        // This test exercises the offset arithmetic on the fast path.
+        assert!(slice.is_byte_natural());
+        assert_eq!(slice.src_byte_offset(), 3);
+
+        let mut buffer = vec![0u8; layout.total_bytes];
+        write_store_slice_to_buffer(&slice, &layout, &mut buffer);
+
+        let (input_slot, _) = layout.find(inp).expect("u8 input slot");
+        for (i, &expected) in [10u8, 20, 30, 40].iter().enumerate() {
+            let off = input_slot.byte_offset() + i * input_slot.elem_bytes();
+            assert_eq!(buffer[off], expected, "element {i}");
+        }
+    }
+
+    /// Symmetric case: byte-natural source (the conventional executor
+    /// gather output) takes the memcpy fast path. This is what every
+    /// existing test exercises and serves as a baseline.
+    #[test]
+    fn byte_natural_source_round_trip_f32() {
+        let mut g = NanoGraph::new();
+        let inp = g.add_input_tensor(GlobalId(0), 4, NumericDType::F32);
+        let _ident = g.push_group(
+            4,
+            NumericDType::F32,
+            ScalarOp::Identity,
+            vec![],
+            vec![InputRef::affine(inp, 1)],
+        );
+        let outputs = vec![AtomRange {
+            base: inp,
+            count: 4,
+            dtype: NumericDType::F32,
+        }];
+        let layout = compute_layout(&g, &outputs);
+
+        let values = [1.5f32, -2.5, 3.0, 4.25];
+        let bytes: Vec<u8> = values.iter().flat_map(|f| f.to_le_bytes()).collect();
+        let slice = StoreSlice {
+            base: inp,
+            data: &bytes,
+            dtype: NumericDType::F32,
+            count: 4,
+            src_bit_offset: 0,
+            src_bit_stride: 32,
+        };
+        assert!(slice.is_byte_natural());
+
+        let mut buffer = vec![0u8; layout.total_bytes];
+        write_store_slice_to_buffer(&slice, &layout, &mut buffer);
+
+        let mut out_data = vec![0u8; 16];
+        let mut out = SpanOutput {
+            data: &mut out_data,
+            dtype: NumericDType::F32,
+            count: 4,
+        };
+        read_buffer_to_output(&outputs[0], &layout, &buffer, &mut out);
+        let recovered: Vec<f32> = out_data
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+        assert_eq!(recovered, values);
     }
 }
