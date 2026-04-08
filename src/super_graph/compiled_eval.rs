@@ -310,7 +310,7 @@ pub(crate) fn compile_nano_graph(
                 ));
             } else {
                 let t_span = Instant::now();
-                let result = JitCompiledSpan::compile(&span.graph, &span.outputs);
+                let result = compile_one_span_native(&span.graph, &span.outputs);
                 let dt_span = t_span.elapsed();
                 if profile_compile {
                     let stages =
@@ -329,12 +329,8 @@ pub(crate) fn compile_nano_graph(
                     });
                 }
                 match result {
-                    Ok(jit_span) => {
-                        lanes.push((
-                            Box::new(jit_span) as Box<dyn CompiledSpanFn>,
-                            span.inputs.clone(),
-                            span.outputs.clone(),
-                        ));
+                    Ok(boxed) => {
+                        lanes.push((boxed, span.inputs.clone(), span.outputs.clone()));
                     }
                     Err(e) => {
                         compile_errors += 1;
@@ -370,6 +366,37 @@ pub(crate) fn compile_nano_graph(
     }
 
     Ok((executable_plan, plan_summary, compile_errors))
+}
+
+/// Compile a single span into a boxed `CompiledSpanFn`, dispatching across
+/// available native backends.
+///
+/// On a build with `x86_compile` enabled, `X86_JIT=1` selects the dynasm-rs
+/// backend first; on `Err` it falls back to Cranelift unless `X86_JIT_STRICT=1`
+/// is set, in which case the error propagates and the caller routes the span
+/// through `PoolEvalSpan` instead.
+///
+/// On a build without `x86_compile`, this is just `JitCompiledSpan::compile`
+/// wrapped in `Box`.
+fn compile_one_span_native(
+    graph: &NanoGraph<'static, SystemPool>,
+    outputs: &[AtomRange],
+) -> Result<Box<dyn CompiledSpanFn>, String> {
+    #[cfg(feature = "x86_compile")]
+    {
+        if std::env::var("X86_JIT").is_ok() {
+            match crate::compiler::attempts::v14::x86_jit::X86JitSpan::compile(graph, outputs) {
+                Ok(s) => return Ok(Box::new(s) as Box<dyn CompiledSpanFn>),
+                Err(e) => {
+                    if std::env::var("X86_JIT_STRICT").is_ok() {
+                        return Err(format!("X86_JIT_STRICT: {e}"));
+                    }
+                    // Fall through to Cranelift fallback during rollout.
+                }
+            }
+        }
+    }
+    JitCompiledSpan::compile(graph, outputs).map(|s| Box::new(s) as Box<dyn CompiledSpanFn>)
 }
 
 #[derive(Clone)]

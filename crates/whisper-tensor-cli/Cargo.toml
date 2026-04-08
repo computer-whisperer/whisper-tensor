@@ -9,6 +9,7 @@ path = "src/main.rs"
 
 [features]
 cranelift = ["whisper-tensor/cranelift"]
+x86_compile = ["whisper-tensor/x86_compile", "cranelift"]
 
 [dependencies]
 whisper-tensor = { workspace = true, features = ["tokenizers", "rwkv-tokenizer", "http", "safetensors"] }
