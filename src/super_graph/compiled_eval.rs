@@ -278,7 +278,8 @@ pub(crate) fn compile_nano_graph(
     let force_pool_eval = matches!(options.codegen, CodegenKind::PoolEval);
 
     // COMPILE_PROFILE=1 — record per-span macro-stage timings and per-span totals
-    // for a post-loop breakdown.
+    // for a post-loop breakdown. Profiling uses thread-local state in the
+    // cranelift codegen module, so it is only available in sequential mode.
     let profile_compile = std::env::var("COMPILE_PROFILE").is_ok();
     if profile_compile {
         crate::compiler::attempts::v14::codegen::profile::enable();
@@ -291,74 +292,23 @@ pub(crate) fn compile_nano_graph(
         x86_jit_stats::enable();
     }
 
-    for (pi, phase) in phases.iter().enumerate() {
-        let mut lanes = Vec::new();
-        for (si, span) in phase.spans.iter().enumerate() {
-            let has_opaque = span
-                .graph
-                .groups()
-                .iter()
-                .any(|g| matches!(g.op, crate::nano_graph::ops::ScalarOp::OpaqueOutput { .. }));
+    // Use parallel span compilation when profiling is off and there are
+    // enough spans to justify the thread-pool overhead.
+    let use_parallel = !profile_compile && !force_pool_eval;
 
-            if force_pool_eval
-                || has_opaque
-                || (span.graph.groups().is_empty() && !span.graph.opaque_ops().is_empty())
-            {
-                // Pool_eval path: forced by options, or required by opaque ops.
-                lanes.push((
-                    Box::new(PoolEvalSpan::new(
-                        span.graph.clone(),
-                        span.inputs.clone(),
-                        span.outputs.clone(),
-                    )) as Box<dyn CompiledSpanFn>,
-                    span.inputs.clone(),
-                    span.outputs.clone(),
-                ));
-            } else {
-                let t_span = Instant::now();
-                let result = compile_one_span_native(&span.graph, &span.outputs);
-                let dt_span = t_span.elapsed();
-                if profile_compile {
-                    let stages = crate::compiler::attempts::v14::codegen::profile::take()
-                        .pop()
-                        .unwrap_or_default();
-                    let num_groups = span.graph.num_groups();
-                    let num_atoms: u64 = span.graph.groups().iter().map(|g| g.count).sum();
-                    span_records.push(CompileSpanRecord {
-                        phase: pi,
-                        lane: si,
-                        num_groups,
-                        num_atoms,
-                        total: dt_span,
-                        stages,
-                    });
-                }
-                match result {
-                    Ok(boxed) => {
-                        lanes.push((boxed, span.inputs.clone(), span.outputs.clone()));
-                    }
-                    Err(e) => {
-                        compile_errors += 1;
-                        if compile_errors <= 5 {
-                            eprintln!(
-                                "[compiled_eval] compile error phase {} span {}: {}",
-                                pi, si, e
-                            );
-                        }
-                        // Fall back to pool_eval for this span.
-                        lanes.push((
-                            Box::new(PoolEvalSpan::new(
-                                span.graph.clone(),
-                                span.inputs.clone(),
-                                span.outputs.clone(),
-                            )) as Box<dyn CompiledSpanFn>,
-                            span.inputs.clone(),
-                            span.outputs.clone(),
-                        ));
-                    }
-                }
-            }
-        }
+    for (pi, phase) in phases.iter().enumerate() {
+        let lanes = if use_parallel {
+            compile_phase_parallel(pi, &phase.spans, &mut compile_errors)
+        } else {
+            compile_phase_sequential(
+                pi,
+                &phase.spans,
+                force_pool_eval,
+                profile_compile,
+                &mut span_records,
+                &mut compile_errors,
+            )
+        };
         plan_builder.add_phase(lanes);
     }
 
@@ -375,6 +325,144 @@ pub(crate) fn compile_nano_graph(
     }
 
     Ok((executable_plan, plan_summary, compile_errors))
+}
+
+type LaneTuple = (Box<dyn CompiledSpanFn>, Vec<AtomRange>, Vec<AtomRange>);
+
+/// Compile one phase's spans in parallel using rayon.
+fn compile_phase_parallel(
+    pi: usize,
+    spans: &[crate::compiler::attempts::v14::types::Span],
+    compile_errors: &mut usize,
+) -> Vec<LaneTuple> {
+    use rayon::prelude::*;
+
+    let results: Vec<_> = spans
+        .par_iter()
+        .map(|span| {
+            let has_opaque = span
+                .graph
+                .groups()
+                .iter()
+                .any(|g| matches!(g.op, crate::nano_graph::ops::ScalarOp::OpaqueOutput { .. }));
+
+            if has_opaque
+                || (span.graph.groups().is_empty() && !span.graph.opaque_ops().is_empty())
+            {
+                Ok(Box::new(PoolEvalSpan::new(
+                    span.graph.clone(),
+                    span.inputs.clone(),
+                    span.outputs.clone(),
+                )) as Box<dyn CompiledSpanFn>)
+            } else {
+                compile_one_span_native(&span.graph, &span.outputs)
+            }
+        })
+        .collect();
+
+    results
+        .into_iter()
+        .enumerate()
+        .map(|(si, result)| match result {
+            Ok(boxed) => (boxed, spans[si].inputs.clone(), spans[si].outputs.clone()),
+            Err(e) => {
+                *compile_errors += 1;
+                if *compile_errors <= 5 {
+                    eprintln!(
+                        "[compiled_eval] compile error phase {} span {}: {}",
+                        pi, si, e
+                    );
+                }
+                (
+                    Box::new(PoolEvalSpan::new(
+                        spans[si].graph.clone(),
+                        spans[si].inputs.clone(),
+                        spans[si].outputs.clone(),
+                    )) as Box<dyn CompiledSpanFn>,
+                    spans[si].inputs.clone(),
+                    spans[si].outputs.clone(),
+                )
+            }
+        })
+        .collect()
+}
+
+/// Compile one phase's spans sequentially (used when profiling is enabled).
+#[allow(clippy::too_many_arguments)]
+fn compile_phase_sequential(
+    pi: usize,
+    spans: &[crate::compiler::attempts::v14::types::Span],
+    force_pool_eval: bool,
+    profile_compile: bool,
+    span_records: &mut Vec<CompileSpanRecord>,
+    compile_errors: &mut usize,
+) -> Vec<LaneTuple> {
+    let mut lanes = Vec::new();
+    for (si, span) in spans.iter().enumerate() {
+        let has_opaque = span
+            .graph
+            .groups()
+            .iter()
+            .any(|g| matches!(g.op, crate::nano_graph::ops::ScalarOp::OpaqueOutput { .. }));
+
+        if force_pool_eval
+            || has_opaque
+            || (span.graph.groups().is_empty() && !span.graph.opaque_ops().is_empty())
+        {
+            lanes.push((
+                Box::new(PoolEvalSpan::new(
+                    span.graph.clone(),
+                    span.inputs.clone(),
+                    span.outputs.clone(),
+                )) as Box<dyn CompiledSpanFn>,
+                span.inputs.clone(),
+                span.outputs.clone(),
+            ));
+        } else {
+            let t_span = Instant::now();
+            let result = compile_one_span_native(&span.graph, &span.outputs);
+            let dt_span = t_span.elapsed();
+            if profile_compile {
+                let stages = crate::compiler::attempts::v14::codegen::profile::take()
+                    .pop()
+                    .unwrap_or_default();
+                let num_groups = span.graph.num_groups();
+                let num_atoms: u64 = span.graph.groups().iter().map(|g| g.count).sum();
+                span_records.push(CompileSpanRecord {
+                    phase: pi,
+                    lane: si,
+                    num_groups,
+                    num_atoms,
+                    total: dt_span,
+                    stages,
+                });
+            }
+            match result {
+                Ok(boxed) => {
+                    lanes.push((boxed, span.inputs.clone(), span.outputs.clone()));
+                }
+                Err(e) => {
+                    *compile_errors += 1;
+                    if *compile_errors <= 5 {
+                        eprintln!(
+                            "[compiled_eval] compile error phase {} span {}: {}",
+                            pi, si, e
+                        );
+                    }
+                    lanes.push((
+                        Box::new(PoolEvalSpan::new(
+                            span.graph.clone(),
+                            span.inputs.clone(),
+                            span.outputs.clone(),
+                        )) as Box<dyn CompiledSpanFn>,
+                        span.inputs.clone(),
+                        span.outputs.clone(),
+                    ));
+                }
+            }
+        }
+    }
+    lanes
 }
 
 /// Compile a single span into a boxed `CompiledSpanFn`, dispatching across

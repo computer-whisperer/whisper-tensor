@@ -278,7 +278,7 @@ impl JitCompiledSpan {
         }
 
         let t_layout = std::time::Instant::now();
-        let layout = compute_layout(graph, output_ranges);
+        let layout = compute_layout(graph, output_ranges, true);
         let dt_layout = t_layout.elapsed();
 
         let (compiled, embedded_tables) = if std::env::var("FUSION_VALIDATE").is_ok() {
@@ -3145,7 +3145,7 @@ mod tests {
             count: 4,
             dtype: NumericDType::F32,
         }];
-        let layout = compute_layout(&g, &outputs);
+        let layout = compute_layout(&g, &outputs, true);
         let (compiled, embedded_tables) = compile_span(&g, &layout).unwrap();
 
         let mut buffer = vec![0u8; layout.total_bytes];
@@ -3179,7 +3179,7 @@ mod tests {
             count: 3,
             dtype: NumericDType::F32,
         }];
-        let layout = compute_layout(&g, &outputs);
+        let layout = compute_layout(&g, &outputs, true);
         let (compiled, embedded_tables) = compile_span(&g, &layout).unwrap();
 
         let mut buffer = vec![0u8; layout.total_bytes];
@@ -3214,7 +3214,7 @@ mod tests {
             count: 1,
             dtype: NumericDType::F32,
         }];
-        let layout = compute_layout(&g, &outputs);
+        let layout = compute_layout(&g, &outputs, true);
         let (compiled, embedded_tables) = compile_span(&g, &layout).unwrap();
 
         let mut buffer = vec![0u8; layout.total_bytes];
@@ -3264,7 +3264,7 @@ mod tests {
             count: 2,
             dtype: NumericDType::F32,
         }];
-        let layout = compute_layout(&g, &outputs);
+        let layout = compute_layout(&g, &outputs, true);
         let (compiled, embedded_tables) = compile_span(&g, &layout).unwrap();
 
         let mut buffer = vec![0u8; layout.total_bytes];
@@ -3322,7 +3322,7 @@ mod tests {
             count: 100,
             dtype: NumericDType::F32,
         }];
-        let layout = compute_layout(&g, &outputs);
+        let layout = compute_layout(&g, &outputs, true);
 
         // With slot reuse: input(400) + A(400) are allocated. When B is
         // allocated, A's slot is freed (only consumer B is done). B reuses A's
@@ -3380,7 +3380,7 @@ mod tests {
             count: 3,
             dtype: NumericDType::F32,
         }];
-        let layout = compute_layout(&g, &outputs);
+        let layout = compute_layout(&g, &outputs, true);
         let (compiled, embedded_tables) = compile_span(&g, &layout).unwrap();
 
         let mut buffer = vec![0u8; layout.total_bytes];
@@ -3434,7 +3434,7 @@ mod tests {
             count: 16,
             dtype: NumericDType::F32,
         }];
-        let layout = compute_layout(&g, &outputs);
+        let layout = compute_layout(&g, &outputs, true);
         let (compiled, embedded_tables) = compile_span(&g, &layout).unwrap();
 
         let buf_size = embedded_tables.total_bytes().max(layout.total_bytes);
@@ -3488,7 +3488,7 @@ mod tests {
             count: 6,
             dtype: NumericDType::F32,
         }];
-        let layout = compute_layout(&g, &outputs);
+        let layout = compute_layout(&g, &outputs, true);
 
         // Validate no cross-slot errors.
         let errors = validate_layout(&g, &layout);
@@ -3590,7 +3590,7 @@ mod tests {
             count: n,
             dtype: NumericDType::F32,
         }];
-        let layout = compute_layout(&g, &outputs);
+        let layout = compute_layout(&g, &outputs, true);
 
         // Verify chain was built (should be 1 chain of 5 groups)
         let chains = build_fusion_chains(g.groups(), &layout);
@@ -3707,7 +3707,7 @@ mod tests {
             count: n,
             dtype: NumericDType::F32,
         }];
-        let layout = compute_layout(&g, &outputs);
+        let layout = compute_layout(&g, &outputs, true);
 
         let chains = build_fusion_chains(g.groups(), &layout);
         let max_len = chains.iter().map(|c| c.group_indices.len()).max().unwrap();
@@ -3811,7 +3811,7 @@ mod tests {
             count: n,
             dtype: NumericDType::F32,
         }];
-        let layout = compute_layout(&g, &outputs);
+        let layout = compute_layout(&g, &outputs, true);
 
         let chains = build_fusion_chains(g.groups(), &layout);
         let max_len = chains.iter().map(|c| c.group_indices.len()).max().unwrap();
@@ -3928,7 +3928,7 @@ mod tests {
             count: 4,
             dtype: NumericDType::F32,
         }];
-        let layout = compute_layout(&g, &outputs);
+        let layout = compute_layout(&g, &outputs, true);
 
         // Check that fusion creates a chain of 4+ groups
         let chains = build_fusion_chains(g.groups(), &layout);
@@ -4078,7 +4078,7 @@ mod tests {
             count: split_count,
             dtype: NumericDType::F32,
         }];
-        let layout = compute_layout(&g, &outputs);
+        let layout = compute_layout(&g, &outputs, true);
 
         // Check fusion chains
         let chains = build_fusion_chains(g.groups(), &layout);
@@ -4206,7 +4206,7 @@ mod tests {
             count: n,
             dtype: NumericDType::F32,
         }];
-        let layout = compute_layout(&g, &outputs);
+        let layout = compute_layout(&g, &outputs, true);
 
         // Compare fused vs unfused results
         let (compiled_fused, tables_fused) = compile_span(&g, &layout).unwrap();

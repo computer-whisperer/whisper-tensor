@@ -354,6 +354,7 @@ fn align_up(v: usize, align: usize) -> usize {
 pub fn compute_layout(
     graph: &NanoGraph<'static, crate::pool::SystemPool>,
     output_ranges: &[AtomRange],
+    allow_inline: bool,
 ) -> BufferLayout {
     let groups = graph.groups();
     let n = groups.len();
@@ -601,7 +602,7 @@ pub fn compute_layout(
     //
     // Stage 1 restriction: the producer's own inputs must NOT reference other
     // inlinable groups (no recursive inlining yet — handled in a follow-up).
-    let inline_disabled = std::env::var("INLINE").as_deref() == Ok("0");
+    let inline_disabled = !allow_inline;
     let mut inlinable = vec![false; n];
     let mut inlines_producer: Vec<Option<usize>> = vec![None; n];
     if !inline_disabled {
@@ -1297,7 +1298,7 @@ mod tests {
             count: 5,
             dtype: NumericDType::BOOL,
         }];
-        let layout = compute_layout(&g, &outputs);
+        let layout = compute_layout(&g, &outputs, true);
 
         let (input_slot, _) = layout.find(bool_input).expect("bool input slot present");
         assert_eq!(input_slot.dtype, NumericDType::BOOL);
@@ -1330,7 +1331,7 @@ mod tests {
             count: 1,
             dtype: NumericDType::BOOL,
         }];
-        let layout = compute_layout(&g, &outputs);
+        let layout = compute_layout(&g, &outputs, true);
 
         let mut buffer = vec![0u8; layout.total_bytes];
         layout.populate_literals(&g, &mut buffer);
@@ -1377,7 +1378,7 @@ mod tests {
             count: 9,
             dtype: NumericDType::BOOL,
         }];
-        let layout = compute_layout(&g, &outputs);
+        let layout = compute_layout(&g, &outputs, true);
 
         // Source: 9 Bool values packed at 1 bit per element starting at
         // bit offset 3 (so element 0 lives at bit position 3 within byte 0).
@@ -1468,7 +1469,7 @@ mod tests {
             count: 4,
             dtype: NumericDType::U8,
         }];
-        let layout = compute_layout(&g, &outputs);
+        let layout = compute_layout(&g, &outputs, true);
 
         // Source data: 3 bytes of padding (0xff each), then the actual U8
         // values [10, 20, 30, 40]. src_bit_offset = 24 (3 bytes).
@@ -1516,7 +1517,7 @@ mod tests {
             count: 4,
             dtype: NumericDType::F32,
         }];
-        let layout = compute_layout(&g, &outputs);
+        let layout = compute_layout(&g, &outputs, true);
 
         let values = [1.5f32, -2.5, 3.0, 4.25];
         let bytes: Vec<u8> = values.iter().flat_map(|f| f.to_le_bytes()).collect();

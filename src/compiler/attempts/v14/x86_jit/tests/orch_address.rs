@@ -50,7 +50,7 @@ fn flat_layout(count: u64, dtype: NumericDType) -> (BufferLayout, AtomId, AtomId
         count,
         dtype,
     };
-    let layout = compute_layout(&g, std::slice::from_ref(&out));
+    let layout = compute_layout(&g, std::slice::from_ref(&out), false);
     (layout, inp, ident, out)
 }
 
@@ -326,7 +326,7 @@ fn modular_layout(
         count,
         dtype,
     };
-    let layout = compute_layout(&g, std::slice::from_ref(&out));
+    let layout = compute_layout(&g, std::slice::from_ref(&out), false);
     (layout, inp, ident, out)
 }
 
@@ -446,7 +446,7 @@ fn strided_2d_broadcast_reg() {
         count: 16,
         dtype: NumericDType::F32,
     };
-    let layout = compute_layout(&g, std::slice::from_ref(&out));
+    let layout = compute_layout(&g, std::slice::from_ref(&out), false);
     let (slot, _) = layout.find(inp).expect("input slot");
     let base_bit = slot.bit_offset;
     let bit_stride = slot.bit_stride;
