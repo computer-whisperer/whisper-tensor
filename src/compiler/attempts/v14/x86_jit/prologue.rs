@@ -33,12 +33,19 @@
 //! - `rdi`, `rsi`, `r8`, `r9`, `r10`, `r11` are caller-saved general
 //!   scratch — codec primitives may use these freely without saving.
 //!
-//! Phase 2.A status: this file currently exposes only the register
-//! constants used by the codec and tests. The actual prologue / epilogue
-//! emission for the executor ABI lands in phase 2.B once the first
-//! group needs compiling.
+//! # Stack frame
+//!
+//! At function entry, System V guarantees `rsp % 16 == 8` (the call
+//! pushed an 8-byte return address onto a 16-byte aligned stack). The
+//! prologue pushes three callee-saved registers (`r12`, `r13`, `r14`),
+//! growing the stack by 24 bytes. Combined with the return address,
+//! that leaves `rsp` at `rsp_entry - 24`, i.e. 16-byte aligned again —
+//! ready for any libm-style call the body may issue.
 
 #![allow(dead_code)]
+
+use dynasmrt::x64::Assembler;
+use dynasmrt::{DynasmApi, dynasm};
 
 /// Register codes for the System V x64 ABI argument registers.
 ///
@@ -74,3 +81,47 @@ pub const FLT_SLOT_C: u8 = 2;
 /// reserves `rcx` for this purpose; callers that need a live value in
 /// `rcx` across a codec call must spill it.
 pub const RCX_REG: u8 = 1;
+
+/// Buffer pointer register code (`r12`). The prologue copies the
+/// `*mut u8` buffer argument from `rdi` here so it survives any libm
+/// trampoline (`r12`–`r15` are callee-saved under System V).
+pub const BUFFER_REG: u8 = 12;
+
+/// Loop induction variable register code (`r13`). Used by `emit_group`
+/// when emitting `count > 1` loops.
+pub const LOOP_VAR_REG: u8 = 13;
+
+/// Loop end register code (`r14`). Holds the exclusive upper bound the
+/// loop checks against `r13`.
+pub const LOOP_END_REG: u8 = 14;
+
+/// Emit the function prologue.
+///
+/// Saves the callee-saved scratch registers we use (`r12`, `r13`,
+/// `r14`) and copies the buffer pointer from the System V argument
+/// register (`rdi`) into `r12`. After this returns, the stack is
+/// 16-byte aligned (see the §Stack frame doc-comment above) and any
+/// emit_group code can call into libm without further alignment work.
+pub fn emit_prologue(asm: &mut Assembler) {
+    dynasm!(asm
+        ; .arch x64
+        ; push r12
+        ; push r13
+        ; push r14
+        ; mov r12, rdi
+    );
+}
+
+/// Emit the function epilogue.
+///
+/// Restores the callee-saved registers the prologue pushed and
+/// returns. Must be paired one-for-one with [`emit_prologue`].
+pub fn emit_epilogue(asm: &mut Assembler) {
+    dynasm!(asm
+        ; .arch x64
+        ; pop r14
+        ; pop r13
+        ; pop r12
+        ; ret
+    );
+}

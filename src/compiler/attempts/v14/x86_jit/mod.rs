@@ -19,11 +19,13 @@
 //!   the prologue/epilogue. The only layer that knows about
 //!   `BufferLayout` and the executor ABI.
 //!
-//! # Phase 0 status
+//! # Phase 2.B.1 status
 //!
-//! Only empty spans (`graph.num_groups() == 0`) compile. Everything
-//! else returns `Err("x86_jit: rewrite in progress")` and the caller
-//! falls back to the cranelift backend.
+//! The full executor pipeline is wired (compute_layout, literal
+//! template, prologue/epilogue, marshalling) but no group bodies are
+//! emitted yet — `support::check_supported` still rejects every
+//! non-empty graph. Empty graphs compile via the new pipeline and
+//! pass `empty_span_*` end-to-end.
 
 pub mod codec;
 pub mod ops;
@@ -35,11 +37,16 @@ pub mod support;
 pub(crate) mod tests;
 
 use dynasmrt::x64::Assembler;
-use dynasmrt::{AssemblyOffset, DynasmApi, ExecutableBuffer, dynasm};
+use dynasmrt::{AssemblyOffset, DynasmApi, ExecutableBuffer};
 
 use super::executor::{CompiledSpanFn, SpanOutput, StoreSlice};
+use super::layout::{
+    BufferLayout, compute_layout, read_buffer_to_output, write_store_slice_to_buffer,
+};
 use crate::nano_graph::pattern::{AtomRange, NanoGraph};
 use crate::pool::SystemPool;
+
+use codec::format::CodecTables;
 
 /// A span compiled to native x86-64 machine code.
 ///
@@ -52,17 +59,28 @@ pub struct X86JitSpan {
     code: ExecutableBuffer,
     /// Offset of the entry point inside `code`.
     entry: AssemblyOffset,
+    /// Buffer layout describing where each atom lives. Empty for
+    /// zero-group graphs.
+    layout: BufferLayout,
+    /// Pre-populated working buffer template — literals and lookup
+    /// tables already baked in. `execute` clones this, marshals
+    /// inputs over it, runs the JIT, then reads outputs back.
+    literal_template: Vec<u8>,
     /// Output ranges declared by this span — used by `execute` to
     /// wire span outputs back into the executor.
     output_ranges: Vec<AtomRange>,
-    /// Set when the span has zero groups. `execute` short-circuits in
-    /// that case to skip even the function call.
-    is_empty: bool,
+    /// Codec lookup tables held alive for the lifetime of the JIT.
+    /// The compiled code embeds raw pointers into these slabs, so
+    /// they must not be dropped or relocated until `code` is.
+    _tables: CodecTables,
 }
 
 // SAFETY: ExecutableBuffer is Send+Sync, the entry offset is a plain
-// usize, and the function we transmute it to has no captured state.
-// The compiled code only touches its `*mut u8` argument and CPU state.
+// usize, and the function we transmute it to has no captured state
+// beyond the buffer pointer it receives as `rdi`. The compiled code
+// reads/writes only the buffer it's handed plus its callee-saved
+// stack slots, and the embedded codec tables (which are pinned by
+// _tables for the JIT's lifetime). All fields are themselves Send/Sync.
 unsafe impl Send for X86JitSpan {}
 unsafe impl Sync for X86JitSpan {}
 
@@ -70,63 +88,81 @@ impl X86JitSpan {
     /// Compile a span's NanoGraph into a native function ready for the
     /// executor.
     ///
-    /// Phase 0: only zero-group graphs compile. Anything else returns
-    /// `Err("x86_jit: rewrite in progress")` so the caller falls back
-    /// to cranelift.
+    /// Phase 2.B.1: only zero-group graphs make it past
+    /// [`support::check_supported`]. The pipeline (layout, literal
+    /// template, prologue / epilogue) runs unconditionally so the
+    /// machinery is exercised end-to-end before group emission lands
+    /// in P2.B.3.
     pub fn compile(
         graph: &NanoGraph<'static, SystemPool>,
         output_ranges: &[AtomRange],
     ) -> Result<Self, String> {
-        if graph.num_groups() == 0 {
-            return Self::compile_empty(output_ranges);
-        }
-        Err("x86_jit: rewrite in progress".to_string())
-    }
+        // Reject anything we can't (yet) handle. Caller falls back to
+        // the cranelift backend for the Err case.
+        support::check_supported(graph)?;
 
-    /// Build a no-op compiled span for graphs with zero groups.
-    ///
-    /// Anchors the ABI plumbing end-to-end: the compiled function is
-    /// just `ret`, and `execute` is short-circuited so we don't even
-    /// call it. Validates that the executable-memory + fn-ptr
-    /// transmute path is wired correctly.
-    fn compile_empty(output_ranges: &[AtomRange]) -> Result<Self, String> {
-        let mut ops = Assembler::new().map_err(|e| format!("x86_jit: assembler init: {e}"))?;
-        let entry = ops.offset();
-        dynasm!(ops
-            ; .arch x64
-            ; ret
-        );
-        let code = ops
+        // Layout is computed even for empty graphs — `compute_layout`
+        // returns a zero-byte layout in that case, but going through
+        // the same code path anchors the marshalling pipeline.
+        let layout = compute_layout(graph, output_ranges);
+
+        // Pre-populate the working-buffer template with literals.
+        // P2.B.1 has no group bodies and no embedded tables yet, so
+        // the template is just `layout.total_bytes` of literal-filled
+        // bytes.
+        let mut literal_template = vec![0u8; layout.total_bytes];
+        layout.populate_literals(graph, &mut literal_template);
+
+        // Build the JIT. Empty graphs still go through the prologue
+        // and epilogue so the function shape matches what later
+        // phases will produce.
+        let tables = CodecTables::new();
+        let mut asm = Assembler::new().map_err(|e| format!("x86_jit: assembler init: {e}"))?;
+        let entry = asm.offset();
+        prologue::emit_prologue(&mut asm);
+        // P2.B.1: no group bodies yet — empty graphs only.
+        prologue::emit_epilogue(&mut asm);
+        let code = asm
             .finalize()
             .map_err(|_| "x86_jit: assembler finalize failed".to_string())?;
 
         Ok(Self {
             code,
             entry,
+            layout,
+            literal_template,
             output_ranges: output_ranges.to_vec(),
-            is_empty: true,
+            _tables: tables,
         })
-    }
-
-    /// Type alias for the compiled function signature.
-    #[inline]
-    fn entry_fn(&self) -> unsafe extern "C" fn(*mut u8) {
-        // SAFETY: bytes at `self.code.ptr(self.entry)` were emitted as a
-        // System V AMD64 function taking a single `*mut u8` and returning
-        // nothing. The buffer outlives this borrow because it lives in
-        // `self.code`.
-        unsafe { std::mem::transmute(self.code.ptr(self.entry)) }
     }
 }
 
 impl CompiledSpanFn for X86JitSpan {
-    fn execute(&self, _inputs: &[StoreSlice<'_>], _outputs: &mut [SpanOutput<'_>]) {
-        if self.is_empty {
+    fn execute(&self, inputs: &[StoreSlice<'_>], outputs: &mut [SpanOutput<'_>]) {
+        // Empty layout → nothing to compute, nothing to marshal.
+        // Skip the buffer alloc + JIT call entirely (matches what
+        // `JitCompiledSpan::execute` does for the empty-graph case).
+        if self.layout.total_bytes == 0 {
             return;
         }
-        // Phase 0 returns Err for any non-empty span, so we never
-        // construct an X86JitSpan with `is_empty = false`. This branch
-        // exists for symmetry only.
-        unreachable!("x86_jit: non-empty span execute reached in phase 0");
+
+        // Working buffer = literal template + marshalled inputs.
+        let mut buffer = self.literal_template.clone();
+        for slice in inputs {
+            write_store_slice_to_buffer(slice, &self.layout, &mut buffer);
+        }
+
+        // Run the JIT.
+        // SAFETY: bytes at `self.code.ptr(self.entry)` were emitted
+        // as a System V AMD64 function taking a single `*mut u8` and
+        // returning nothing. The buffer outlives this call.
+        let func: unsafe extern "C" fn(*mut u8) =
+            unsafe { std::mem::transmute(self.code.ptr(self.entry)) };
+        unsafe { func(buffer.as_mut_ptr()) };
+
+        // Marshal declared outputs back into SpanOutputs.
+        for (range, out) in self.output_ranges.iter().zip(outputs.iter_mut()) {
+            read_buffer_to_output(range, &self.layout, &buffer, out);
+        }
     }
 }
