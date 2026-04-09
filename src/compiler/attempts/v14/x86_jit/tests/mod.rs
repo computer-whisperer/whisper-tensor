@@ -16,3 +16,5 @@ pub mod jit_harness;
 mod ab_harness_smoke;
 #[cfg(test)]
 mod codec_bit_io;
+#[cfg(test)]
+mod codec_format;
