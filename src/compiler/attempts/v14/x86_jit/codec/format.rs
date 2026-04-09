@@ -217,19 +217,29 @@ pub fn emit_decode(
 /// # Register usage
 /// - `slot`: must match `ComputeRepr::for_dtype(dtype)`.
 /// - `raw_reg`: GP receiving the raw bits. **Written.**
-/// - `scratch_gp`: free GP register, **clobbered.** Used by some paths
-///   (e.g., BF16 RTNE rounding) as a temporary.
+/// - `scratch_gp1`, `scratch_gp2`: free GP registers, **clobbered.**
+///   `scratch_gp1` alone is sufficient for native and BF16/F16 paths.
+///   The sub-F16 inline encode (P2.A.3.b) needs both. Callers that
+///   only emit native dtypes can pass any caller-saved GP for
+///   `scratch_gp2`.
 /// - `scratch_xmm`: free XMM register, **clobbered.** Used by F16C
 ///   conversions.
 ///
+/// `rcx` and `rdx` are implicitly clobbered: `rcx` is the shift count
+/// register for variable-shift sequences, and `rdx` is used as a
+/// hardcoded scratch by the sub-F16 inline encode for the round-bias
+/// computation. All caller-supplied registers must be pairwise
+/// distinct from `rcx`, `rdx`, and from each other.
+///
 /// # Errors
-/// Returns `Err` for dtypes outside the P2.A.2 scope.
+/// Returns `Err` for an unsupported dtype or a mismatched slot variant.
 pub fn emit_encode(
     asm: &mut Assembler,
     dtype: NumericDType,
     slot: CodecSlot,
     raw_reg: u8,
-    scratch_gp: u8,
+    scratch_gp1: u8,
+    scratch_gp2: u8,
     scratch_xmm: u8,
 ) -> Result<(), String> {
     let expected_repr = ComputeRepr::for_dtype(dtype);
@@ -244,9 +254,15 @@ pub fn emit_encode(
     }
 
     match dtype {
-        NumericDType::Float(ft) => {
-            emit_float_encode(asm, ft, slot, raw_reg, scratch_gp, scratch_xmm)
-        }
+        NumericDType::Float(ft) => emit_float_encode(
+            asm,
+            ft,
+            slot,
+            raw_reg,
+            scratch_gp1,
+            scratch_gp2,
+            scratch_xmm,
+        ),
         NumericDType::SignedInt(it) => {
             emit_int_encode(asm, slot, raw_reg, it.bits, true);
             Ok(())
@@ -395,6 +411,7 @@ fn emit_float_encode(
     slot: CodecSlot,
     raw_reg: u8,
     scratch_gp: u8,
+    scratch_gp2: u8,
     scratch_xmm: u8,
 ) -> Result<(), String> {
     let xmm_src = match slot {
@@ -483,9 +500,246 @@ fn emit_float_encode(
         return Ok(());
     }
 
+    // Sub-F16 floats: inline encode parameterized on FloatType
+    // properties. P2.A.3.b — handles every named sub-F16 dtype
+    // (F8E5M2, F8E4M3FN, F4E2M1, F6E3M2, F6E2M3) and any custom
+    // FloatType with `total_bits ≤ 16` AND `mantissa_bits ≤ 23` AND
+    // `exponent_bits ≤ 8`.
+    if ft.total_bits() <= 16 && ft.mantissa_bits <= 23 && ft.exponent_bits <= 8 {
+        emit_subf16_float_encode(asm, ft, xmm_src, raw_reg, scratch_gp, scratch_gp2);
+        return Ok(());
+    }
+
     Err(format!(
-        "emit_encode: float type {ft} not in P2.A.2 scope (sub-byte / sub-F16 floats land in P2.A.3)"
+        "emit_encode: float type {ft} not supported (compute repr selection mismatch)"
     ))
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Sub-F16 float inline encode
+// ─────────────────────────────────────────────────────────────────────
+
+/// Inline F32 → arbitrary small-FloatType encode, parameterized on
+/// `(e_bits, m_bits, has_inf, has_nan)`. Used for the named sub-F16
+/// dtypes (F8E5M2, F8E4M3FN, F4E2M1, F6E3M2, F6E2M3) and any custom
+/// FloatType that fits in F32 compute repr.
+///
+/// Algorithm summary:
+///   1. Pull F32 raw bits, save sign, take magnitude.
+///   2. Branch on special values: NaN, ±inf, zero / F32 subnormal.
+///   3. Normal F32: re-bias exponent. Check overflow / underflow.
+///   4. **Target normal range** — RTNE round F32 mantissa from 23 bits
+///      down to `m_bits`, handling carry into the exponent.
+///   5. **Target subnormal range** — variable-shift the full F32
+///      mantissa (with implicit leading 1) right by
+///      `(151 - bias - m_bits) - f32_biased_exp` bits, with RTNE; if
+///      the rounded mantissa overflows `mant_mask`, promote to the
+///      smallest normal.
+///   6. Pack `(sign, exp, mant)` into `raw_reg`.
+///
+/// Register usage: `raw_reg` is the working register and the output;
+/// `scr_sign`, `scr_exp` are scratch GPs; `rcx` is implicitly used
+/// as the shift count register. The subnormal path additionally
+/// clobbers `rdx` as a temporary for the round-bias computation —
+/// callers must ensure `rdx` is not aliased with any input.
+fn emit_subf16_float_encode(
+    asm: &mut Assembler,
+    ft: FloatType,
+    xmm_src: u8,
+    raw_reg: u8,
+    scr_sign: u8,
+    scr_exp: u8,
+) {
+    let m_bits = ft.mantissa_bits as u32;
+    let e_bits = ft.exponent_bits as u32;
+    let bias = ft.bias();
+    let max_e = ft.max_biased_exponent();
+    let max_usable_e: i32 = if ft.has_infinity {
+        (max_e - 1) as i32
+    } else {
+        max_e as i32
+    };
+    let mant_mask = (1u32 << m_bits) - 1;
+    let exp_offset: i32 = 127 - bias;
+    let drop_bits = 23 - m_bits;
+
+    // Canonical NaN bits per `FloatType::encode_nan` — sign is NOT
+    // applied to NaN encodings (per the reference impl).
+    let nan_bits: u32 = if ft.has_nan {
+        if ft.has_infinity {
+            (max_e << m_bits) | (1u32 << (m_bits - 1))
+        } else {
+            // FN: NaN at all-ones mantissa with max exp
+            (max_e << m_bits) | mant_mask
+        }
+    } else {
+        0
+    };
+    // Max-finite (or ±inf) magnitude for the saturate / inf path.
+    let max_finite_bits = ft.encode_max_finite(0) as u32;
+    let inf_or_max_mag: u32 = if ft.has_infinity {
+        max_e << m_bits
+    } else {
+        max_finite_bits
+    };
+
+    // Subnormal-shift constant: shift = (151 - bias - m_bits) - f32_biased_exp.
+    // Derived from full_mant * 2^(f32_true_exp - 24 + bias + m_bits) = target_mant.
+    let const_subshift: i32 = 151 - bias - m_bits as i32;
+
+    let nan_label = asm.new_dynamic_label();
+    let inf_label = asm.new_dynamic_label();
+    let zero_label = asm.new_dynamic_label();
+    let overflow_label = asm.new_dynamic_label();
+    let subnormal_label = asm.new_dynamic_label();
+    let subnormal_pack_path = asm.new_dynamic_label();
+    let underflow_zero_label = asm.new_dynamic_label();
+    let pack_normal_label = asm.new_dynamic_label();
+    let pack_with_sign_label = asm.new_dynamic_label();
+    let done_label = asm.new_dynamic_label();
+
+    let sign_shift = (m_bits + e_bits) as i8;
+
+    dynasm!(asm
+        ; .arch x64
+        // Step 1: pull F32 raw bits
+        ; movd Rd(raw_reg), Rx(xmm_src)
+
+        // Step 2: save sign in scr_sign
+        ; mov Rd(scr_sign), Rd(raw_reg)
+        ; shr Rd(scr_sign), 31
+
+        // Step 3: get magnitude
+        ; and Rd(raw_reg), 0x7fffffff_u32 as i32
+
+        // Step 4: special-value branches
+        ; cmp Rd(raw_reg), DWORD 0x7f800000_u32 as i32
+        ; ja =>nan_label
+        ; je =>inf_label
+        ; test Rd(raw_reg), Rd(raw_reg)
+        ; jz =>zero_label
+        ; cmp Rd(raw_reg), DWORD 0x800000_u32 as i32
+        ; jb =>zero_label
+
+        // Step 5: extract f32 biased exp into scr_exp
+        ; mov Rd(scr_exp), Rd(raw_reg)
+        ; shr Rd(scr_exp), 23
+
+        // Step 6: keep f32 mantissa in raw_reg
+        ; and Rd(raw_reg), DWORD 0x7fffff_u32 as i32
+
+        // Step 7: re-bias to target
+        ; sub Rd(scr_exp), exp_offset
+
+        // Step 8: check overflow
+        ; cmp Rd(scr_exp), max_usable_e
+        ; jg =>overflow_label
+
+        // Step 9: check underflow (target subnormal range)
+        ; test Rd(scr_exp), Rd(scr_exp)
+        ; jle =>subnormal_label
+
+        // ─── Target normal range: RTNE round mantissa ───
+        ; mov ecx, Rd(raw_reg)
+        ; shr ecx, drop_bits as i8
+        ; and ecx, 1
+        ; add ecx, ((1u32 << (drop_bits - 1)) - 1) as i32
+        ; add Rd(raw_reg), ecx
+        ; shr Rd(raw_reg), drop_bits as i8
+
+        // Carry check: did mantissa overflow into the exponent?
+        ; mov ecx, Rd(raw_reg)
+        ; shr ecx, m_bits as i8
+        ; add Rd(scr_exp), ecx
+        ; and Rd(raw_reg), DWORD mant_mask as i32
+
+        // Re-check overflow after carry
+        ; cmp Rd(scr_exp), max_usable_e
+        ; jg =>overflow_label
+
+        // Pack: raw_reg = mant; scr_exp = exp; scr_sign = sign
+        ; =>pack_normal_label
+        ; shl Rd(scr_exp), m_bits as i8
+        ; or Rd(raw_reg), Rd(scr_exp)
+        ; =>pack_with_sign_label
+        ; shl Rd(scr_sign), sign_shift
+        ; or Rd(raw_reg), Rd(scr_sign)
+        ; jmp =>done_label
+
+        // ─── Target subnormal range ───
+        ; =>subnormal_label
+        // raw_reg holds f32 mantissa (low 23 bits). Add the implicit
+        // leading 1: full_mant = (1 << 23) | f32_mant.
+        ; or Rd(raw_reg), DWORD 0x800000_u32 as i32
+
+        // shift = const_subshift - f32_biased_exp
+        //       = const_subshift - (scr_exp + exp_offset)
+        //       = (const_subshift - exp_offset) - scr_exp
+        ; mov ecx, (const_subshift - exp_offset)
+        ; sub ecx, Rd(scr_exp)
+
+        // If shift > 24, the value rounds to ±0.
+        ; cmp ecx, 24
+        ; jg =>underflow_zero_label
+
+        // RTNE shift right by `cl` bits.
+        // We need: bias_const = (1 << (cl - 1)) - 1, lsb_kept, then
+        // raw_reg += (bias_const + lsb_kept), then raw_reg >>= cl.
+        //
+        // Reuse scr_exp to hold lsb_kept (we no longer need the
+        // target_biased_exp; we'll set it to 0 or 1 after the round).
+        ; mov Rd(scr_exp), Rd(raw_reg)
+        ; shr Rd(scr_exp), cl
+        ; and Rd(scr_exp), 1
+        // Compute bias_const in rdx (implicitly clobbered scratch).
+        ; mov edx, 1
+        ; shl edx, cl
+        ; shr edx, 1
+        ; sub edx, 1
+        ; add edx, Rd(scr_exp)
+        ; add Rd(raw_reg), edx
+        ; shr Rd(raw_reg), cl
+
+        // Promotion check: if raw_reg > mant_mask, the round bumped us
+        // into the smallest normal (exp=1, mant=0).
+        ; cmp Rd(raw_reg), DWORD mant_mask as i32
+        ; jbe =>subnormal_pack_path
+        ; xor Rd(raw_reg), Rd(raw_reg)
+        ; mov Rd(scr_exp), 1
+        ; jmp =>pack_normal_label
+        ; =>subnormal_pack_path
+        ; xor Rd(scr_exp), Rd(scr_exp)
+        ; jmp =>pack_normal_label
+
+        // ─── Underflow → ±0 ───
+        ; =>underflow_zero_label
+        ; xor Rd(raw_reg), Rd(raw_reg)
+        ; jmp =>pack_with_sign_label
+
+        // ─── Overflow → ±inf or ±max_finite ───
+        ; =>overflow_label
+        ; mov Rd(raw_reg), DWORD inf_or_max_mag as i32
+        ; jmp =>pack_with_sign_label
+
+        // ─── Input was ±inf ───
+        ; =>inf_label
+        ; mov Rd(raw_reg), DWORD inf_or_max_mag as i32
+        ; jmp =>pack_with_sign_label
+
+        // ─── Input was ±0 / F32 subnormal ───
+        ; =>zero_label
+        ; xor Rd(raw_reg), Rd(raw_reg)
+        ; jmp =>pack_with_sign_label
+
+        // ─── Input was NaN ───
+        // encode_nan() does not set the sign bit, so we skip the sign
+        // pack. For !has_nan dtypes, NaN encodes to +0 (also unsigned).
+        ; =>nan_label
+        ; mov Rd(raw_reg), DWORD nan_bits as i32
+        ; jmp =>done_label
+
+        ; =>done_label
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────

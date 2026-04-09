@@ -23,8 +23,12 @@ use crate::numeric_dtype::{FloatType, IntType, NumericDType};
 
 const RAW_IN: u8 = 7; // rdi (arg 0)
 const RAW_OUT: u8 = 0; // rax (return)
-const SCRATCH_GP: u8 = 1; // rcx — caller-saved scratch
-const SCRATCH_GP2: u8 = 2; // rdx — second caller-saved scratch
+// Caller-saved GPs we use as codec scratches. We deliberately avoid
+// rcx (1) and rdx (2) because the codec implicitly clobbers them
+// (rcx as shift count, rdx as round-bias scratch in the sub-F16
+// inline encode). r8/r9 are caller-saved and unused by our test ABI.
+const SCRATCH_GP: u8 = 8; // r8
+const SCRATCH_GP2: u8 = 9; // r9
 const FLT_SLOT: u8 = 0; // xmm0
 const FLT_SCRATCH: u8 = 1; // xmm1
 
@@ -62,6 +66,7 @@ fn build_roundtrip(dtype: NumericDType) -> Option<JitWithTables> {
                 CodecSlot::Xmm(FLT_SLOT),
                 RAW_OUT,
                 SCRATCH_GP,
+                SCRATCH_GP2,
                 FLT_SCRATCH,
             )
             .expect("encode emit");
@@ -83,6 +88,7 @@ fn build_roundtrip(dtype: NumericDType) -> Option<JitWithTables> {
                 CodecSlot::Gp(RAW_OUT),
                 RAW_OUT,
                 SCRATCH_GP,
+                SCRATCH_GP2,
                 FLT_SCRATCH,
             )
             .expect("encode emit");
@@ -289,6 +295,41 @@ fn roundtrip_f16_exhaustive() {
     assert_roundtrip(dtype, samples);
 }
 
+#[test]
+fn roundtrip_f8e5m2_exhaustive() {
+    let dtype = NumericDType::F8E5M2;
+    let samples: Vec<u64> = (0..(1u64 << 8)).collect();
+    assert_roundtrip(dtype, samples);
+}
+
+#[test]
+fn roundtrip_f8e4m3fn_exhaustive() {
+    let dtype = NumericDType::F8E4M3FN;
+    let samples: Vec<u64> = (0..(1u64 << 8)).collect();
+    assert_roundtrip(dtype, samples);
+}
+
+#[test]
+fn roundtrip_f4e2m1_exhaustive() {
+    let dtype = NumericDType::F4E2M1;
+    let samples: Vec<u64> = (0..(1u64 << 4)).collect();
+    assert_roundtrip(dtype, samples);
+}
+
+#[test]
+fn roundtrip_f6e3m2_exhaustive() {
+    let dtype = NumericDType::F6E3M2;
+    let samples: Vec<u64> = (0..(1u64 << 6)).collect();
+    assert_roundtrip(dtype, samples);
+}
+
+#[test]
+fn roundtrip_f6e2m3_exhaustive() {
+    let dtype = NumericDType::F6E2M3;
+    let samples: Vec<u64> = (0..(1u64 << 6)).collect();
+    assert_roundtrip(dtype, samples);
+}
+
 // ─────────────────────────────────────────────────────────────────────
 // Integer tests
 // ─────────────────────────────────────────────────────────────────────
@@ -414,6 +455,7 @@ fn build_cast(src: NumericDType, dst: NumericDType) -> Option<JitWithTables> {
                 CodecSlot::Xmm(FLT_SLOT),
                 RAW_OUT,
                 SCRATCH_GP,
+                SCRATCH_GP2,
                 FLT_SCRATCH,
             )
             .unwrap();
@@ -435,6 +477,7 @@ fn build_cast(src: NumericDType, dst: NumericDType) -> Option<JitWithTables> {
                 CodecSlot::Gp(RAW_OUT),
                 RAW_OUT,
                 SCRATCH_GP,
+                SCRATCH_GP2,
                 FLT_SCRATCH,
             )
             .unwrap();
