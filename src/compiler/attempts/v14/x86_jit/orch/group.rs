@@ -285,12 +285,8 @@ fn emit_identity_loop(
 
 // ─── Cast emission ──────────────────────────────────────────────────
 
-/// Emit a Cast group: load raw bits, decode via src dtype, encode via
-/// dst dtype, store raw bits.
-///
-/// Currently handles same-compute-repr casts (float↔float, int↔int).
-/// Cross-repr casts (float↔int) return `Err` and fall back to
-/// cranelift.
+/// Emit a Cast group: load raw bits, decode via src dtype, optionally
+/// convert between compute reprs, encode via dst dtype, store raw bits.
 fn emit_cast_group(
     asm: &mut Assembler,
     layout: &BufferLayout,
@@ -307,15 +303,6 @@ fn emit_cast_group(
 
     let src_dtype = lookup_input_dtype(layout, &group.inputs[0], group.atom_offset)?;
     let dst_dtype = group.output_dtype;
-    let src_repr = ComputeRepr::for_dtype(src_dtype);
-    let dst_repr = ComputeRepr::for_dtype(dst_dtype);
-
-    if src_repr != dst_repr {
-        return Err(format!(
-            "x86_jit Cast: cross-repr {src_dtype} ({src_repr:?}) → \
-             {dst_dtype} ({dst_repr:?}) not yet supported (P2.B.6)"
-        ));
-    }
 
     let output_ref = InputRef::affine(group.base_id, 1);
 
@@ -386,9 +373,9 @@ fn emit_cast_iter(
         ADDR_SCRATCH,
     );
 
-    // 3. Decode raw bits to compute repr.
-    let compute_repr = ComputeRepr::for_dtype(src_dtype);
-    let slot = match compute_repr {
+    // 3. Decode raw bits to src compute repr.
+    let src_repr = ComputeRepr::for_dtype(src_dtype);
+    let src_slot = match src_repr {
         ComputeRepr::F32 | ComputeRepr::F64 => CodecSlot::Xmm(FLT_SLOT),
         ComputeRepr::Int => CodecSlot::Gp(RAW_REG),
     };
@@ -396,17 +383,27 @@ fn emit_cast_iter(
         asm,
         src_dtype,
         RAW_REG,
-        slot,
+        src_slot,
         BIT_IO_TMP1,  // scratch_gp
         FLT_SCRATCH,   // scratch_xmm
         codec_tables,
     )?;
 
-    // 4. Encode from compute repr to dst raw bits → rax.
+    // 3b. If src and dst compute reprs differ, convert.
+    let dst_repr = ComputeRepr::for_dtype(dst_dtype);
+    let dst_slot = match dst_repr {
+        ComputeRepr::F32 | ComputeRepr::F64 => CodecSlot::Xmm(FLT_SLOT),
+        ComputeRepr::Int => CodecSlot::Gp(RAW_REG),
+    };
+    if src_repr != dst_repr {
+        emit_repr_convert(asm, src_repr, dst_repr)?;
+    }
+
+    // 4. Encode from dst compute repr to dst raw bits → rax.
     emit_encode(
         asm,
         dst_dtype,
-        slot,
+        dst_slot,
         RAW_REG,
         BIT_IO_TMP1,  // scratch_gp1
         BIT_IO_TMP2,  // scratch_gp2
@@ -496,6 +493,100 @@ fn emit_cast_loop(
 
 /// Look up the storage dtype the codec will read for an `InputRef`.
 /// Used by `emit_identity_group` to enforce the
+// ─── Cross-repr conversion ──────────────────────────────────────────
+
+/// Emit the conversion between compute representations.
+///
+/// After decoding the source value into `src_repr`, this function
+/// converts it to `dst_repr` so the subsequent encode can operate
+/// on the correct slot type. The conversion matches `cast_raw`
+/// semantics (which goes through f64 intermediate).
+///
+/// Register contract:
+/// - Float→Int: reads xmm0 (FLT_SLOT), writes rax (RAW_REG).
+///   Clobbers xmm1 (FLT_SCRATCH), r8 (BIT_IO_TMP1).
+/// - Int→Float: reads rax (RAW_REG), writes xmm0 (FLT_SLOT).
+fn emit_repr_convert(
+    asm: &mut Assembler,
+    src: ComputeRepr,
+    dst: ComputeRepr,
+) -> Result<(), String> {
+    match (src, dst) {
+        // Float (F32 in xmm0) → Int (i64 in rax)
+        //
+        // cast_raw goes through f64: decode → f64 → encode.
+        // cvttss2si truncates toward zero and returns 0x8000..00
+        // for NaN, ±inf, and out-of-range values. We fix up:
+        // - NaN → 0 (matching IntType::encode_f64 for NaN)
+        // - The int encode's saturation handles overflow.
+        (ComputeRepr::F32, ComputeRepr::Int) => {
+            dynasm!(asm
+                ; .arch x64
+                // Check for NaN: ucomiss sets PF on unordered (NaN).
+                ; ucomiss Rx(FLT_SLOT), Rx(FLT_SLOT)
+                ; cvttss2si Rq(RAW_REG), Rx(FLT_SLOT)
+                // If NaN (PF set), zero out rax.
+                ; mov Rq(BIT_IO_TMP1), 0
+                ; cmovp Rq(RAW_REG), Rq(BIT_IO_TMP1)
+            );
+            Ok(())
+        }
+
+        // Float (F64 in xmm0) → Int (i64 in rax)
+        (ComputeRepr::F64, ComputeRepr::Int) => {
+            dynasm!(asm
+                ; .arch x64
+                ; ucomisd Rx(FLT_SLOT), Rx(FLT_SLOT)
+                ; cvttsd2si Rq(RAW_REG), Rx(FLT_SLOT)
+                ; mov Rq(BIT_IO_TMP1), 0
+                ; cmovp Rq(RAW_REG), Rq(BIT_IO_TMP1)
+            );
+            Ok(())
+        }
+
+        // Int (i64 in rax) → Float (F32 in xmm0)
+        //
+        // cvtsi2ss converts signed i64 to F32. For large i64 values
+        // (> 2^24) there's precision loss, which matches cast_raw's
+        // f64 intermediate (f64 → F32 rounds the same way).
+        (ComputeRepr::Int, ComputeRepr::F32) => {
+            dynasm!(asm
+                ; .arch x64
+                ; cvtsi2ss Rx(FLT_SLOT), Rq(RAW_REG)
+            );
+            Ok(())
+        }
+
+        // Int (i64 in rax) → Float (F64 in xmm0)
+        (ComputeRepr::Int, ComputeRepr::F64) => {
+            dynasm!(asm
+                ; .arch x64
+                ; cvtsi2sd Rx(FLT_SLOT), Rq(RAW_REG)
+            );
+            Ok(())
+        }
+
+        // F32 ↔ F64: widen or narrow the float.
+        (ComputeRepr::F32, ComputeRepr::F64) => {
+            dynasm!(asm
+                ; .arch x64
+                ; cvtss2sd Rx(FLT_SLOT), Rx(FLT_SLOT)
+            );
+            Ok(())
+        }
+        (ComputeRepr::F64, ComputeRepr::F32) => {
+            dynasm!(asm
+                ; .arch x64
+                ; cvtsd2ss Rx(FLT_SLOT), Rx(FLT_SLOT)
+            );
+            Ok(())
+        }
+
+        // Same repr — should not be called.
+        _ => Ok(()),
+    }
+}
+
 /// "src dtype == output dtype" precondition before emitting any code.
 ///
 /// Mirrors the slot-resolution logic in

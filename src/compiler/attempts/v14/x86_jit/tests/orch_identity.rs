@@ -543,3 +543,58 @@ fn literal_f32_group() {
     let expected = f32_input_bytes(&[42.0]);
     assert_eq!(outs[0], expected, "Literal F32 42.0");
 }
+
+// ─── Cross-repr Cast tests ──────────────────────────────────────────
+
+#[test]
+fn cast_f32_to_i32() {
+    // F32 → I32: float-to-int truncation with NaN → 0.
+    let mut g = NanoGraph::new();
+    let inp = g.add_input_tensor(GlobalId(0), 6, NumericDType::F32);
+    let out = g.push_group(
+        6,
+        NumericDType::I32,
+        ScalarOp::Cast { saturating: false },
+        vec![],
+        vec![InputRef::affine(inp, 1)],
+    );
+    let src = [1.5_f32, -2.7, 0.0, 127.9, -128.1, f32::NAN];
+    let bytes = f32_input_bytes(&src);
+    let outs = ab_test_bytes(
+        &g,
+        &[(inp, NumericDType::F32, bytes)],
+        &[AtomRange {
+            base: out,
+            count: 6,
+            dtype: NumericDType::I32,
+        }],
+    );
+    assert_eq!(outs[0].len(), 24, "I32 output = 6 * 4 bytes");
+}
+
+#[test]
+fn cast_i32_to_f32() {
+    // I32 → F32: int-to-float conversion.
+    let mut g = NanoGraph::new();
+    let inp = g.add_input_tensor(GlobalId(0), 4, NumericDType::I32);
+    let out = g.push_group(
+        4,
+        NumericDType::F32,
+        ScalarOp::Cast { saturating: false },
+        vec![],
+        vec![InputRef::affine(inp, 1)],
+    );
+    let values: [i32; 4] = [0, 1, -1, 42];
+    let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+    let outs = ab_test_bytes(
+        &g,
+        &[(inp, NumericDType::I32, bytes)],
+        &[AtomRange {
+            base: out,
+            count: 4,
+            dtype: NumericDType::F32,
+        }],
+    );
+    let expected = f32_input_bytes(&[0.0, 1.0, -1.0, 42.0]);
+    assert_eq!(outs[0], expected, "I32→F32 cast");
+}
