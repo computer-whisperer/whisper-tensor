@@ -120,17 +120,21 @@ fn run_roundtrip(jit: &JitWithTables, raw_in: u64) -> u64 {
 ///   identity) because that path skips the canonicalization the JIT
 ///   necessarily applies.
 ///
-/// - **Ints / Bool (Int compute repr)**: compare against the
-///   same-dtype identity `cast_raw(raw, dtype, dtype) == raw`. Int
-///   decode is just zero/sign extension and encode is just masking,
-///   so the JIT round-trip is bit-for-bit identical to the input. We
-///   *can't* chain through I64 or U64 here, because U64 → I64 (or
-///   I64 → U64) saturates over half the value range — and the JIT
-///   doesn't saturate, it just keeps the bits.
+/// - **Ints / Bool (Int compute repr)**: compare against the JIT's
+///   own chain semantics, simulated in software. The codec interprets
+///   the slot bits with the **target's** signedness — `encode_signed`
+///   treats the slot as i64 and clamps to `[min, max]`;
+///   `encode_unsigned` treats the slot as i64, clamps negatives to 0,
+///   and clamps above `max_unsigned`. This is *not* the same as the
+///   `cast_raw` short-circuit for same-dtype casts: an unsigned source
+///   with the high bit set looks negative in the i64 view of the slot,
+///   so `encode_unsigned` clamps it to 0 — losing the original bits.
+///   Cross-signedness 64-bit casts are handled by the orchestration's
+///   future Cast op (P2.B), not by the codec primitive in isolation.
 ///
-/// Same-dtype Identity in real ops (the case that preserves NaN bits
-/// for floats) is implemented in Phase 2.B as a memcpy, not via the
-/// codec.
+/// Same-dtype Identity in real ops (the case that preserves bits
+/// regardless of signedness) is implemented in Phase 2.B as a memcpy,
+/// not via the codec.
 fn assert_roundtrip(dtype: NumericDType, inputs: impl IntoIterator<Item = u64>) {
     let jit = build_roundtrip(dtype).expect("dtype is in supported set");
     let mask: u64 = if dtype.total_bits() == 64 {
@@ -141,7 +145,7 @@ fn assert_roundtrip(dtype: NumericDType, inputs: impl IntoIterator<Item = u64>) 
     let compute_repr_for_chain = match ComputeRepr::for_dtype(dtype) {
         ComputeRepr::F32 => Some(NumericDType::F32),
         ComputeRepr::F64 => Some(NumericDType::F64),
-        ComputeRepr::Int => None, // ints round-trip as identity; no chain
+        ComputeRepr::Int => None,
     };
     for raw_in in inputs {
         let raw_in_masked = raw_in & mask;
@@ -150,13 +154,77 @@ fn assert_roundtrip(dtype: NumericDType, inputs: impl IntoIterator<Item = u64>) 
                 let through = dtype.cast_raw(raw_in_masked, crd);
                 crd.cast_raw(through, dtype)
             }
-            None => raw_in_masked,
+            None => simulate_int_roundtrip(dtype, raw_in_masked),
         };
         let got = run_roundtrip(&jit, raw_in_masked);
         assert_eq!(
             got, want,
             "roundtrip {dtype}: input 0x{raw_in_masked:x} → got 0x{got:x} want 0x{want:x}"
         );
+    }
+}
+
+/// Software simulation of the JIT's int decode → encode chain. The
+/// JIT round-trip JIT returns the encoded bits directly (slot register
+/// is the return register rax), so we mirror exactly that: decode
+/// (sign/zero-extend), then encode (saturating-as-target then mask),
+/// then return the encoded bits.
+fn simulate_int_roundtrip(dtype: NumericDType, raw_in: u64) -> u64 {
+    let bits = dtype.total_bits() as u32;
+    let mask: u64 = if bits == 64 {
+        u64::MAX
+    } else {
+        (1u64 << bits) - 1
+    };
+    // Decode: sign-extend (signed) or zero-extend (unsigned/Bool).
+    let masked = raw_in & mask;
+    let after_decode: i64 = match dtype {
+        NumericDType::SignedInt(_) if bits < 64 => {
+            let sign_bit = 1u64 << (bits - 1);
+            if masked & sign_bit != 0 {
+                (masked | !mask) as i64
+            } else {
+                masked as i64
+            }
+        }
+        NumericDType::SignedInt(_) => masked as i64,
+        NumericDType::UnsignedInt(_) => masked as i64,
+        NumericDType::Bool => (masked & 1) as i64,
+        _ => unreachable!("not an int dtype"),
+    };
+    // Encode: saturate-as-target then mask. This matches what the JIT
+    // writes back to the return register.
+    match dtype {
+        NumericDType::SignedInt(it) => {
+            let b = it.bits as u32;
+            if b == 64 {
+                after_decode as u64
+            } else {
+                let max = (1i64 << (b - 1)) - 1;
+                let min = -(1i64 << (b - 1));
+                let clamped = after_decode.clamp(min, max);
+                (clamped as u64) & ((1u64 << b) - 1)
+            }
+        }
+        NumericDType::UnsignedInt(it) => {
+            let b = it.bits as u32;
+            let after_neg = if after_decode < 0 { 0 } else { after_decode };
+            if b == 64 {
+                after_neg as u64
+            } else {
+                let max = (1i64 << b) - 1;
+                let clamped = after_neg.min(max);
+                (clamped as u64) & ((1u64 << b) - 1)
+            }
+        }
+        NumericDType::Bool => {
+            if after_decode != 0 {
+                1
+            } else {
+                0
+            }
+        }
+        _ => unreachable!("not an int dtype"),
     }
 }
 
@@ -646,22 +714,32 @@ fn decode_f6e2m3_exhaustive() {
 }
 
 #[test]
-fn cast_int_narrowing_in_range_only() {
-    // The codec layer does not saturate on narrowing — encoding
-    // truncates (masks) the high bits. Saturation lives in the future
-    // narrow_to / Cast op layer (P2.A.4 and P2.B). For the codec
-    // unit test we restrict the inputs to values that fit in the
-    // target dtype's range, where the bit-mask result agrees with
-    // `cast_raw`'s saturating behaviour.
+fn cast_int_narrowing_saturating() {
+    // The codec encode now saturates per the target's signedness
+    // (P2.A.4). Cross-dtype int casts where source and target share a
+    // signedness sign agree with `cast_raw` for every input value,
+    // including out-of-range values that saturate.
     let jit = build_cast(NumericDType::I32, NumericDType::I8).expect("i32→i8");
-    for raw in [0i32, 1, -1, 127, -128, 42, -42] {
+    for raw in [
+        0i32,
+        1,
+        -1,
+        127,
+        128,
+        255,
+        256,
+        -128,
+        -129,
+        i32::MAX,
+        i32::MIN,
+    ] {
         let raw_u = raw as u32 as u64;
         let want = NumericDType::I32.cast_raw(raw_u, NumericDType::I8);
         let f: extern "C" fn(u64) -> u64 = unsafe { std::mem::transmute(jit.jit.ptr()) };
         let got = f(raw_u);
         assert_eq!(
             got, want,
-            "i32→i8 (in-range) input {raw} (0x{raw_u:x}): got 0x{got:x} want 0x{want:x}"
+            "i32→i8 input {raw} (0x{raw_u:x}): got 0x{got:x} want 0x{want:x}"
         );
     }
 }

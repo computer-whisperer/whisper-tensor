@@ -18,3 +18,5 @@ mod ab_harness_smoke;
 mod codec_bit_io;
 #[cfg(test)]
 mod codec_format;
+#[cfg(test)]
+mod codec_precision;

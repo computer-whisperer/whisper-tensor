@@ -264,11 +264,11 @@ pub fn emit_encode(
             scratch_xmm,
         ),
         NumericDType::SignedInt(it) => {
-            emit_int_encode(asm, slot, raw_reg, it.bits, true);
+            emit_int_encode(asm, slot, raw_reg, scratch_gp1, it.bits, true);
             Ok(())
         }
         NumericDType::UnsignedInt(it) => {
-            emit_int_encode(asm, slot, raw_reg, it.bits, false);
+            emit_int_encode(asm, slot, raw_reg, scratch_gp1, it.bits, false);
             Ok(())
         }
         NumericDType::Bool => {
@@ -806,31 +806,104 @@ fn emit_int_decode(asm: &mut Assembler, raw_reg: u8, slot: CodecSlot, bits: u8, 
 }
 
 /// Encode a 64-bit (sign- or zero-extended) value in the source slot
-/// into the low `bits` of `raw_reg`. The high (64 - bits) bits of
-/// `raw_reg` are zeroed so the bit_io layer can store directly.
-fn emit_int_encode(asm: &mut Assembler, slot: CodecSlot, raw_reg: u8, bits: u8, _signed: bool) {
+/// into the low `bits` of `raw_reg`, **saturating** to the target's
+/// representable range per `dtype_contract.md` (matching the
+/// `IntType::clamp_signed` / `clamp_unsigned` behaviour that
+/// `cast_raw` uses).
+///
+/// For `bits == 64` this is a no-op (the i64 value is already in
+/// range and the slot is the same width as `raw_reg`).
+///
+/// For `bits < 64` (signed): clamp to `[-2^(bits-1), 2^(bits-1) - 1]`,
+/// then mask to the low `bits`. Two `cmp` + `cmov` pairs.
+///
+/// For `bits < 64` (unsigned): treat the i64 as signed, clamp
+/// negatives to 0 and clamp above `2^bits - 1`, then mask.
+///
+/// `scratch_gp` holds the bound constants in turn during the clamps.
+/// **Clobbered.** Must be distinct from `src`, `raw_reg`, and any
+/// register the caller cares about.
+fn emit_int_encode(
+    asm: &mut Assembler,
+    slot: CodecSlot,
+    raw_reg: u8,
+    scratch_gp: u8,
+    bits: u8,
+    signed: bool,
+) {
     let src = match slot {
         CodecSlot::Gp(g) => g,
         CodecSlot::Xmm(_) => unreachable!("validated by caller"),
     };
+    // Copy slot value into raw_reg; we'll clamp + mask in place.
     if src != raw_reg {
         dynasm!(asm; .arch x64; mov Rq(raw_reg), Rq(src));
     }
-    // Mask the high bits regardless of signed/unsigned: bit_io stores
-    // a fixed-width slot and trusts the codec to put zero in the
-    // top (64 - bits).
     if bits == 64 {
+        // For signed I64: no clamping needed; any i64 fits, and the
+        // slot is already 64 bits.
+        // For unsigned U64: still need to clamp negatives to 0
+        // (per `IntType::clamp_unsigned` / `cast_raw` semantics —
+        // negative i64s become +0 when interpreted as u64). No
+        // upper-bound clamp because every non-negative i64 fits in
+        // u64. No mask because the slot is 64 bits.
+        if !signed {
+            dynasm!(asm
+                ; .arch x64
+                ; xor Rq(scratch_gp), Rq(scratch_gp)
+                ; test Rq(raw_reg), Rq(raw_reg)
+                ; cmovs Rq(raw_reg), Rq(scratch_gp)
+            );
+        }
         return;
     }
+    if signed {
+        let max_signed: i64 = (1i64 << (bits - 1)) - 1;
+        let min_signed: i64 = -(1i64 << (bits - 1));
+        // Clamp above max_signed.
+        dynasm!(asm
+            ; .arch x64
+            ; mov Rq(scratch_gp), QWORD max_signed
+            ; cmp Rq(raw_reg), Rq(scratch_gp)
+            ; cmovg Rq(raw_reg), Rq(scratch_gp)
+        );
+        // Clamp below min_signed.
+        dynasm!(asm
+            ; .arch x64
+            ; mov Rq(scratch_gp), QWORD min_signed
+            ; cmp Rq(raw_reg), Rq(scratch_gp)
+            ; cmovl Rq(raw_reg), Rq(scratch_gp)
+        );
+    } else {
+        // Unsigned: clamp negatives to 0 first.
+        dynasm!(asm
+            ; .arch x64
+            ; xor Rq(scratch_gp), Rq(scratch_gp)
+            ; test Rq(raw_reg), Rq(raw_reg)
+            ; cmovs Rq(raw_reg), Rq(scratch_gp)
+        );
+        // Then clamp above max_unsigned. For bits < 64, max_unsigned
+        // fits in a positive i64.
+        let max_unsigned: i64 = (1i64 << bits) - 1;
+        dynasm!(asm
+            ; .arch x64
+            ; mov Rq(scratch_gp), QWORD max_unsigned
+            ; cmp Rq(raw_reg), Rq(scratch_gp)
+            ; cmova Rq(raw_reg), Rq(scratch_gp)
+        );
+    }
+    // Mask to keep only the low `bits`. Saturation already guaranteed
+    // the high bits are sign-extension or zero, but for negative
+    // signed values the high bits are 1s and we need them gone so
+    // bit_io can store the low `bits` directly.
     let mask: u64 = (1u64 << bits) - 1;
     if mask <= u32::MAX as u64 {
-        // 32-bit AND auto-zeroes the high half via the 32-bit reg form.
         dynasm!(asm; .arch x64; and Rd(raw_reg), DWORD mask as i32);
     } else {
         dynasm!(asm
             ; .arch x64
-            ; mov rax, QWORD mask as i64
-            ; and Rq(raw_reg), rax
+            ; mov Rq(scratch_gp), QWORD mask as i64
+            ; and Rq(raw_reg), Rq(scratch_gp)
         );
     }
 }
