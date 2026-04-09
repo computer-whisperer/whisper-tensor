@@ -102,7 +102,7 @@ pub fn emit_reduce_group(
             group.base_id, group.atom_offset,
             kind, reduce_count, k_bit_stride, compute_dtype, group.output_dtype,
             repr, n_bits, src_info.src_dtype,
-            IterVar::Reg(LOOP_VAR_REG), 0,
+            IterVar::Reg(LOOP_VAR_REG), group.atom_offset,
             addr_tables, codec_tables,
         )?;
 

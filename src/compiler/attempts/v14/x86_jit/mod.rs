@@ -115,7 +115,18 @@ impl X86JitSpan {
         // Layout is computed even for empty graphs — `compute_layout`
         // returns a zero-byte layout in that case, but going through
         // the same code path anchors the marshalling pipeline.
+        // Disable reduce-fold inlining — the x86_jit doesn't implement
+        // inlined producer re-evaluation. Setting INLINE=0 makes
+        // compute_layout allocate slots for all groups so they can be
+        // loaded from memory normally.
+        let prev_inline = std::env::var("INLINE").ok();
+        // SAFETY: single-threaded JIT compilation — no concurrent env reads.
+        unsafe { std::env::set_var("INLINE", "0") };
         let layout = compute_layout(graph, output_ranges);
+        match prev_inline {
+            Some(v) => unsafe { std::env::set_var("INLINE", v) },
+            None => unsafe { std::env::remove_var("INLINE") },
+        }
 
         // Pre-populate the working-buffer template with literals.
         // For empty / Identity-only graphs there are no embedded
@@ -142,6 +153,12 @@ impl X86JitSpan {
                 .find_group_idx(group.base_id)
                 .expect("group must be present");
             if layout.group_use_counts[gi] == 0 {
+                continue;
+            }
+            // Skip inlinable groups — their expressions are folded into
+            // their consumer's loop by the cranelift backend's reduce-fold
+            // optimization. The layout deallocates their slots.
+            if gi < layout.inlinable.len() && layout.inlinable[gi] {
                 continue;
             }
             emit_group(&mut asm, &layout, group, &mut addr_tables, &mut tables)?;

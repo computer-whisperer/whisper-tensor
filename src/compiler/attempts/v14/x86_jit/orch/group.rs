@@ -247,7 +247,7 @@ fn emit_identity_loop(
     emit_identity_iter(
         asm, layout, src_input,
         output_base, output_atom_offset,
-        IterVar::Reg(LOOP_VAR_REG), 0, tables,
+        IterVar::Reg(LOOP_VAR_REG), atom_offset, tables,
     )?;
 
     dynasm!(asm
@@ -668,7 +668,7 @@ fn emit_binary_loop(
         asm, layout, input_a, input_b,
         output_base, output_atom_offset,
         op, compute_dtype, output_dtype,
-        IterVar::Reg(LOOP_VAR_REG), 0,
+        IterVar::Reg(LOOP_VAR_REG), atom_offset,
         addr_tables, codec_tables,
     )?;
 
@@ -825,7 +825,7 @@ fn emit_unary_loop(
         asm, layout, input,
         output_base, output_atom_offset,
         op, compute_dtype, output_dtype,
-        IterVar::Reg(LOOP_VAR_REG), 0,
+        IterVar::Reg(LOOP_VAR_REG), atom_offset,
         addr_tables, codec_tables,
     )?;
 
@@ -1135,7 +1135,7 @@ fn emit_select_loop(
     emit_select_iter(
         asm, layout, group,
         output_base, output_atom_offset,
-        IterVar::Reg(LOOP_VAR_REG), 0,
+        IterVar::Reg(LOOP_VAR_REG), atom_offset,
         addr_tables, codec_tables,
     )?;
     dynasm!(asm; add Rq(LOOP_VAR_REG), 1; jmp =>loop_top; =>loop_exit);
@@ -1196,7 +1196,7 @@ fn emit_indirect_load_group(
             group.base_id, group.atom_offset,
             table_bit_offset, table_bit_stride, table_n_bits, table_dtype,
             group.output_dtype,
-            IterVar::Reg(LOOP_VAR_REG), 0,
+            IterVar::Reg(LOOP_VAR_REG), group.atom_offset,
             addr_tables, codec_tables,
         )?;
 
