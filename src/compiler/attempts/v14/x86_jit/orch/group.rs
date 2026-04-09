@@ -607,9 +607,11 @@ fn emit_binary_iter(
         ComputeRepr::F32 => emit_binop_f32(asm, op, BIT_IO_TMP1)?,
         ComputeRepr::F64 => emit_binop_f64(asm, op, BIT_IO_TMP1)?,
         ComputeRepr::Int => {
-            return Err(format!(
-                "x86_jit Binary int op {op:?} not yet implemented (P3.C)"
-            ));
+            use super::super::ops::int::emit_binop_int;
+            let (signed, bits) = int_dtype_info(compute_dtype)?;
+            emit_binop_int(asm, op, signed, bits, BIT_IO_TMP1)?;
+            // Apply wrapping: mask to compute width + sign-extend.
+            emit_int_wrap(asm, bits, signed, super::super::prologue::INT_SLOT_C);
         }
     }
 
@@ -960,6 +962,54 @@ fn emit_repr_convert(
 
         // Same repr — should not be called.
         _ => Ok(()),
+    }
+}
+
+// ─── Int wrapping helpers ────────────────────────────────────────────
+
+/// Extract (signed, bits) from a NumericDType for the int op layer.
+fn int_dtype_info(dtype: NumericDType) -> Result<(bool, u8), String> {
+    match dtype {
+        NumericDType::SignedInt(it) => Ok((true, it.bits)),
+        NumericDType::UnsignedInt(it) => Ok((false, it.bits)),
+        NumericDType::Bool => Ok((false, 1)),
+        _ => Err(format!("int_dtype_info: {dtype} is not an integer type")),
+    }
+}
+
+/// Emit the wrapping mask + sign-extension for integer ops.
+///
+/// After a 64-bit op, this reduces the result to `bits` width:
+/// - Mask to keep only the low `bits` bits
+/// - For signed: sign-extend from `bits` back to 64
+///
+/// No-op for 64-bit types.
+fn emit_int_wrap(asm: &mut Assembler, bits: u8, signed: bool, reg: u8) {
+    if bits >= 64 {
+        return;
+    }
+    let mask = if bits < 32 {
+        (1u64 << bits) - 1
+    } else {
+        (1u64 << bits) - 1
+    };
+    if mask <= i32::MAX as u64 {
+        dynasm!(asm; .arch x64; and Rq(reg), DWORD mask as i32);
+    } else {
+        // bits 33..63: need a wide mask. Use a scratch (r8).
+        dynasm!(asm
+            ; .arch x64
+            ; mov Rq(BIT_IO_TMP1), QWORD mask as i64
+            ; and Rq(reg), Rq(BIT_IO_TMP1)
+        );
+    }
+    if signed {
+        let shift = 64 - bits;
+        dynasm!(asm
+            ; .arch x64
+            ; shl Rq(reg), BYTE shift as i8
+            ; sar Rq(reg), BYTE shift as i8
+        );
     }
 }
 
