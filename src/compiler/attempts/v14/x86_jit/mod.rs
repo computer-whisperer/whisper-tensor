@@ -161,7 +161,10 @@ impl X86JitSpan {
             if gi < layout.inlinable.len() && layout.inlinable[gi] {
                 continue;
             }
-            emit_group(&mut asm, &layout, group, &mut addr_tables, &mut tables)?;
+            emit_group(&mut asm, &layout, group, &mut addr_tables, &mut tables)
+                .map_err(|e| format!("group[{gi}] base={} op={:?} count={} offset={}: {e}",
+                    group.base_id, crate::compiler::attempts::v14::layout::op_name_short(&group.op),
+                    group.count, group.atom_offset))?;
         }
         prologue::emit_epilogue(&mut asm);
         let code = asm

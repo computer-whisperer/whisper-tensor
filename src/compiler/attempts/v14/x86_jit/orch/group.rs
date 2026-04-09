@@ -243,7 +243,7 @@ fn emit_identity_loop(
     );
 
     // Inside the loop, the iter register IS the absolute intra-slab
-    // index — pass `atom_offset = 0` so address.rs doesn't double-shift.
+    // index — pass atom_offset so address.rs can resolve split-group slots.
     emit_identity_iter(
         asm, layout, src_input,
         output_base, output_atom_offset,
@@ -447,7 +447,7 @@ fn emit_cast_loop(
         src_dtype,
         dst_dtype,
         IterVar::Reg(LOOP_VAR_REG),
-        0,
+        atom_offset,
         addr_tables,
         codec_tables,
     )?;
