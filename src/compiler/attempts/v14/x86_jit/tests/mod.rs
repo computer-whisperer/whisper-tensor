@@ -20,3 +20,5 @@ mod codec_bit_io;
 mod codec_format;
 #[cfg(test)]
 mod codec_precision;
+#[cfg(test)]
+mod orch_address;
