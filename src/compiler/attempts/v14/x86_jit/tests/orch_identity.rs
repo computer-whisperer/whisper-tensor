@@ -1032,3 +1032,118 @@ fn unary_i32_bitwise_not() {
     );
     assert_eq!(outs[0].len(), 12, "I32 BitwiseNot output size");
 }
+
+// ─── Reduce tests ───────────────────────────────────────────────────
+
+use crate::nano_graph::ops::ReduceKind;
+
+#[test]
+fn reduce_sum_f32() {
+    // ReduceSum: 4 inputs → 1 output.
+    let mut g = NanoGraph::new();
+    let inp = g.add_input_tensor(GlobalId(0), 4, NumericDType::F32);
+    let out = g.push_group(
+        1,
+        NumericDType::F32,
+        ScalarOp::Reduce {
+            kind: ReduceKind::Sum,
+            reduce_count: 4,
+            reduce_stride: 1,
+            compute_dtype: NumericDType::F32,
+        },
+        vec![],
+        vec![InputRef::affine(inp, 1)],
+    );
+    let bytes = f32_input_bytes(&[1.0, 2.0, 3.0, 4.0]);
+    let outs = ab_test_bytes(
+        &g,
+        &[(inp, NumericDType::F32, bytes)],
+        &[AtomRange { base: out, count: 1, dtype: NumericDType::F32 }],
+    );
+    let expected = f32_input_bytes(&[10.0]);
+    assert_eq!(outs[0], expected, "ReduceSum F32 [1,2,3,4] = 10");
+}
+
+#[test]
+fn reduce_max_f32_with_nan() {
+    // ReduceMax: NaN should be ignored per minNum/maxNum semantics.
+    let mut g = NanoGraph::new();
+    let inp = g.add_input_tensor(GlobalId(0), 4, NumericDType::F32);
+    let out = g.push_group(
+        1,
+        NumericDType::F32,
+        ScalarOp::Reduce {
+            kind: ReduceKind::Max,
+            reduce_count: 4,
+            reduce_stride: 1,
+            compute_dtype: NumericDType::F32,
+        },
+        vec![],
+        vec![InputRef::affine(inp, 1)],
+    );
+    let bytes = f32_input_bytes(&[1.0, f32::NAN, 3.0, 2.0]);
+    let outs = ab_test_bytes(
+        &g,
+        &[(inp, NumericDType::F32, bytes)],
+        &[AtomRange { base: out, count: 1, dtype: NumericDType::F32 }],
+    );
+    assert_eq!(outs[0].len(), 4, "ReduceMax F32 output size");
+}
+
+#[test]
+fn reduce_sum_f32_multiple_outputs() {
+    // 2 output atoms, each reducing 3 input atoms with stride=1.
+    // Input: [a0, a1, a2, a3, a4, a5]
+    // Output[0] = a0+a1+a2, Output[1] = a1+a2+a3
+    // Using modular input to map output i → input base i.
+    let mut g = NanoGraph::new();
+    let inp = g.add_input_tensor(GlobalId(0), 6, NumericDType::F32);
+    let out = g.push_group(
+        2,
+        NumericDType::F32,
+        ScalarOp::Reduce {
+            kind: ReduceKind::Sum,
+            reduce_count: 3,
+            reduce_stride: 1,
+            compute_dtype: NumericDType::F32,
+        },
+        vec![],
+        vec![InputRef::affine(inp, 1)],
+    );
+    let bytes = f32_input_bytes(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    let outs = ab_test_bytes(
+        &g,
+        &[(inp, NumericDType::F32, bytes)],
+        &[AtomRange { base: out, count: 2, dtype: NumericDType::F32 }],
+    );
+    // out[0] = inp[0]+inp[1]+inp[2] = 6.0
+    // out[1] = inp[1]+inp[2]+inp[3] = 9.0
+    let expected = f32_input_bytes(&[6.0, 9.0]);
+    assert_eq!(outs[0], expected, "ReduceSum F32 multi-output");
+}
+
+#[test]
+fn reduce_prod_f32() {
+    let mut g = NanoGraph::new();
+    let inp = g.add_input_tensor(GlobalId(0), 4, NumericDType::F32);
+    let out = g.push_group(
+        1,
+        NumericDType::F32,
+        ScalarOp::Reduce {
+            kind: ReduceKind::Prod,
+            reduce_count: 4,
+            reduce_stride: 1,
+            compute_dtype: NumericDType::F32,
+        },
+        vec![],
+        vec![InputRef::affine(inp, 1)],
+    );
+    let bytes = f32_input_bytes(&[1.0, 2.0, 3.0, 4.0]);
+    let outs = ab_test_bytes(
+        &g,
+        &[(inp, NumericDType::F32, bytes)],
+        &[AtomRange { base: out, count: 1, dtype: NumericDType::F32 }],
+    );
+    let expected = f32_input_bytes(&[24.0]);
+    assert_eq!(outs[0], expected, "ReduceProd F32 [1,2,3,4] = 24");
+}

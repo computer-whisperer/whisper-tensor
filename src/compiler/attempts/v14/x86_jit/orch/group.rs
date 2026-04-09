@@ -100,6 +100,15 @@ pub fn emit_group(
         ScalarOp::Select => {
             emit_select_group(asm, layout, group, addr_tables, codec_tables)
         }
+        ScalarOp::Reduce {
+            kind,
+            reduce_count,
+            reduce_stride,
+            compute_dtype,
+        } => super::reduce::emit_reduce_group(
+            asm, layout, group, *kind, *reduce_count, *reduce_stride, *compute_dtype,
+            addr_tables, codec_tables,
+        ),
         op => Err(format!(
             "x86_jit emit_group: unsupported op {op:?} not yet supported"
         )),
