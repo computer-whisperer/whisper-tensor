@@ -61,9 +61,7 @@ pub fn emit_binop_int(
         ScalarBinOp::Div => emit_int_div(asm, signed, bits, scratch_gp),
         ScalarBinOp::Mod => emit_int_mod(asm, signed, bits, scratch_gp),
         ScalarBinOp::IMod => emit_int_imod(asm, signed, bits, scratch_gp),
-        ScalarBinOp::Pow => {
-            return Err("x86_jit int Pow not yet implemented (P3.C+)".to_string());
-        }
+        ScalarBinOp::Pow => emit_int_pow(asm, signed, bits),
 
         // ── Min / Max ───────────────────────────────────────────
         ScalarBinOp::Max => {
@@ -396,6 +394,98 @@ pub fn emit_unop_int(
         }
     }
     Ok(())
+}
+
+// ─── Pow via trampoline ─────────────────────────────────────────────
+
+/// Emit integer Pow via a call to a Rust trampoline function.
+///
+/// Pow uses **saturating** semantics (not wrapping) per dtype contract
+/// §5.5: the mathematical result is computed in i128/u128 and clamped
+/// to the target type's range. Negative exponents return 0 (signed).
+///
+/// The trampoline takes (a: i64, b: i64, bits: u32) and returns i64.
+/// System V ABI: rdi=a, rsi=b, rdx=bits. Return in rax.
+fn emit_int_pow(asm: &mut Assembler, signed: bool, bits: u8) {
+    let fn_ptr = if signed {
+        jit_signed_pow as *const ()
+    } else {
+        jit_unsigned_pow as *const ()
+    };
+    dynasm!(asm
+        ; .arch x64
+        ; mov rdi, Rq(INT_SLOT_A)        // a → first arg
+        ; mov rsi, Rq(INT_SLOT_B)        // b → second arg
+        ; mov edx, bits as i32            // bits → third arg
+        ; mov rax, QWORD fn_ptr as i64
+        ; call rax
+        ; mov Rq(INT_SLOT_C), rax         // result → slot C
+    );
+}
+
+/// Signed integer power: saturating, negative exponent → 0.
+unsafe extern "C" fn jit_signed_pow(a: i64, b: i64, bits: u32) -> i64 {
+    if b < 0 {
+        return 0;
+    }
+    if b == 0 {
+        return 1;
+    }
+    let exp = (b as u64).min(u32::MAX as u64) as u32;
+    let mut result: i128 = 1;
+    let mut base: i128 = a as i128;
+    let mut e = exp;
+    loop {
+        if e & 1 == 1 {
+            result = result.saturating_mul(base);
+        }
+        e >>= 1;
+        if e == 0 {
+            break;
+        }
+        base = base.saturating_mul(base);
+    }
+    // Clamp to signed range.
+    let max = if bits >= 64 {
+        i64::MAX as i128
+    } else {
+        (1i128 << (bits - 1)) - 1
+    };
+    let min = if bits >= 64 {
+        i64::MIN as i128
+    } else {
+        -(1i128 << (bits - 1))
+    };
+    result.clamp(min, max) as i64
+}
+
+/// Unsigned integer power: saturating, no negative exponent case.
+unsafe extern "C" fn jit_unsigned_pow(a: i64, b: i64, bits: u32) -> i64 {
+    let a = a as u64;
+    let b = b as u64;
+    if b == 0 {
+        return 1;
+    }
+    let exp = b.min(u32::MAX as u64) as u32;
+    let mut result: u128 = 1;
+    let mut base: u128 = a as u128;
+    let mut e = exp;
+    loop {
+        if e & 1 == 1 {
+            result = result.saturating_mul(base);
+        }
+        e >>= 1;
+        if e == 0 {
+            break;
+        }
+        base = base.saturating_mul(base);
+    }
+    let max: u128 = if bits >= 64 {
+        u64::MAX as u128
+    } else {
+        (1u128 << bits) - 1
+    };
+    result.min(max) as i64
 }
 
 /// Emit Euclidean modulo (IMod): result sign matches divisor.

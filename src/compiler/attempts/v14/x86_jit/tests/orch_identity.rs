@@ -911,6 +911,22 @@ fn binary_i32_greater() {
     assert_eq!(outs[0].len(), 16, "I32 Greater output size");
 }
 
+#[test]
+fn binary_i32_pow() {
+    // Pow: saturating semantics. Includes negative exponent → 0.
+    let outs = binary_i32_test(
+        ScalarBinOp::Pow,
+        &[2, 3, 10, 2],
+        &[10, 3, 3, -1],
+    );
+    // 2^10 = 1024, 3^3 = 27, 10^3 = 1000, 2^(-1) = 0
+    let expected: Vec<u8> = [1024i32, 27, 1000, 0]
+        .iter()
+        .flat_map(|v| v.to_le_bytes())
+        .collect();
+    assert_eq!(outs[0], expected, "I32 Pow");
+}
+
 // ─── Select tests ───────────────────────────────────────────────────
 
 #[test]
