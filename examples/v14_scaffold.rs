@@ -1041,75 +1041,9 @@ fn main() {
         eprintln!("RUN_INTERP check not yet migrated (NDArrayNumericTensor removed)");
     } // end RUN_INTERP
 
-    // ── Step 13: Compiled execution via new executor ────────────────────────
-
-    #[cfg(feature = "cranelift")]
-    {
-        use whisper_tensor::compiler::attempts::v14::codegen::JitCompiledSpan;
-        use whisper_tensor::compiler::attempts::v14::executor::ExecutablePlanBuilder;
-
-        profiler.phase("jit_compile");
-        println!("\n=== JIT Compilation (new executor) ===");
-        let t0 = Instant::now();
-
-        // Compile all spans sequentially. Cranelift's JITModule has
-        // thread-safety issues that prevent parallel compilation.
-        let mut plan_builder = ExecutablePlanBuilder::new();
-        let mut compile_errors = Vec::new();
-
-        for (pi, phase) in b_exec_plan.phases.iter().enumerate() {
-            let mut lanes = Vec::new();
-            for (si, span) in phase.spans.iter().enumerate() {
-                match JitCompiledSpan::compile(&span.graph, &span.outputs) {
-                    Ok(jit_span) => {
-                        lanes.push((
-                            Box::new(jit_span)
-                                as Box<dyn whisper_tensor::compiler::attempts::v14::executor::CompiledSpanFn>,
-                            span.inputs.clone(),
-                            span.outputs.clone(),
-                        ));
-                    }
-                    Err(e) => {
-                        compile_errors.push(format!("phase {} span {}: {}", pi, si, e));
-                        let noop = JitCompiledSpan::compile(
-                            &whisper_tensor::nano_graph::NanoGraph::new(),
-                            &[],
-                        )
-                        .unwrap();
-                        lanes.push((
-                            Box::new(noop)
-                                as Box<dyn whisper_tensor::compiler::attempts::v14::executor::CompiledSpanFn>,
-                            vec![],
-                            vec![],
-                        ));
-                    }
-                }
-            }
-            plan_builder.add_phase(lanes);
-        }
-
-        let exec_plan = plan_builder.build();
-        println!(
-            "  Compiled {} phases in {:.3}s ({} errors)",
-            exec_plan.num_phases(),
-            t0.elapsed().as_secs_f64(),
-            compile_errors.len(),
-        );
-        if !compile_errors.is_empty() {
-            for e in compile_errors.iter().take(5) {
-                eprintln!("  COMPILE ERROR: {}", e);
-            }
-            if compile_errors.len() > 5 {
-                eprintln!("  ... and {} more", compile_errors.len() - 5);
-            }
-        }
-
-        // TODO: JIT input conversion and comparison require nano_inputs which
-        // depended on NDArrayNumericTensor. Skipping JIT execution and comparison
-        // until pool-based input conversion is implemented.
-        let _ = &exec_plan; // suppress unused warning
-        eprintln!("JIT execution/comparison skipped (nano_inputs not yet migrated to pool)");
-    }
+    // Step 13 (JIT compilation via Cranelift) was removed when the cranelift
+    // backend was deleted. The compiled eval path now uses x86_jit (dynasm)
+    // exclusively — exercised via the CLI and test_set, not this scaffold.
 
     profiler.finish();
 }

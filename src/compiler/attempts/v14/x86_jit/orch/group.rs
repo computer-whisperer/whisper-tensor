@@ -91,15 +91,25 @@ pub fn emit_group(
             // `BufferLayout::populate_literals`. No code emission.
             Ok(())
         }
-        ScalarOp::Binary { op, compute_dtype } => {
-            emit_binary_group(asm, layout, group, *op, *compute_dtype, addr_tables, codec_tables)
-        }
-        ScalarOp::Unary { op, compute_dtype } => {
-            emit_unary_group(asm, layout, group, *op, *compute_dtype, addr_tables, codec_tables)
-        }
-        ScalarOp::Select => {
-            emit_select_group(asm, layout, group, addr_tables, codec_tables)
-        }
+        ScalarOp::Binary { op, compute_dtype } => emit_binary_group(
+            asm,
+            layout,
+            group,
+            *op,
+            *compute_dtype,
+            addr_tables,
+            codec_tables,
+        ),
+        ScalarOp::Unary { op, compute_dtype } => emit_unary_group(
+            asm,
+            layout,
+            group,
+            *op,
+            *compute_dtype,
+            addr_tables,
+            codec_tables,
+        ),
+        ScalarOp::Select => emit_select_group(asm, layout, group, addr_tables, codec_tables),
         ScalarOp::IndirectLoad { table_base } => {
             emit_indirect_load_group(asm, layout, group, *table_base, addr_tables, codec_tables)
         }
@@ -109,8 +119,15 @@ pub fn emit_group(
             reduce_stride,
             compute_dtype,
         } => super::reduce::emit_reduce_group(
-            asm, layout, group, *kind, *reduce_count, *reduce_stride, *compute_dtype,
-            addr_tables, codec_tables,
+            asm,
+            layout,
+            group,
+            *kind,
+            *reduce_count,
+            *reduce_stride,
+            *compute_dtype,
+            addr_tables,
+            codec_tables,
         ),
         op => Err(format!(
             "x86_jit emit_group: unsupported op {op:?} not yet supported"
@@ -143,15 +160,25 @@ fn emit_identity_group(
 
     if group.count == 1 {
         emit_identity_iter(
-            asm, layout, &group.inputs[0],
-            group.base_id, group.atom_offset,
-            IterVar::Const(group.atom_offset), group.atom_offset, tables,
+            asm,
+            layout,
+            &group.inputs[0],
+            group.base_id,
+            group.atom_offset,
+            IterVar::Const(group.atom_offset),
+            group.atom_offset,
+            tables,
         )
     } else {
         emit_identity_loop(
-            asm, layout, &group.inputs[0],
-            group.base_id, group.atom_offset,
-            group.atom_offset, group.count, tables,
+            asm,
+            layout,
+            &group.inputs[0],
+            group.base_id,
+            group.atom_offset,
+            group.atom_offset,
+            group.count,
+            tables,
         )
     }
 }
@@ -170,17 +197,35 @@ fn emit_identity_iter(
 ) -> Result<(), String> {
     // 1. Compute src bit offset → r10.
     let src_info = emit_compute_bit_offset(
-        asm, layout, src_input, iter, atom_offset,
-        BIT_OFF_REG, ADDR_SCRATCH, tables,
+        asm,
+        layout,
+        src_input,
+        iter,
+        atom_offset,
+        BIT_OFF_REG,
+        ADDR_SCRATCH,
+        tables,
     )?;
 
     // 2. Load src bits → rax.
-    emit_load_bits(asm, BUFFER_REG, BIT_OFF_REG, src_info.n_bits, RAW_REG, ADDR_SCRATCH);
+    emit_load_bits(
+        asm,
+        BUFFER_REG,
+        BIT_OFF_REG,
+        src_info.n_bits,
+        RAW_REG,
+        ADDR_SCRATCH,
+    );
 
     // 3. Compute dst bit offset → r10 with atom_offset compensation.
     let dst_info = emit_output_bit_offset(
-        asm, layout, output_base, output_atom_offset, iter,
-        BIT_OFF_REG, ADDR_SCRATCH,
+        asm,
+        layout,
+        output_base,
+        output_atom_offset,
+        iter,
+        BIT_OFF_REG,
+        ADDR_SCRATCH,
     )?;
 
     if src_info.n_bits != dst_info.n_bits {
@@ -192,8 +237,14 @@ fn emit_identity_iter(
 
     // 4. Store rax at dst bit offset.
     emit_store_bits(
-        asm, BUFFER_REG, BIT_OFF_REG, dst_info.n_bits, RAW_REG,
-        BIT_IO_TMP1, BIT_IO_TMP2, ADDR_SCRATCH,
+        asm,
+        BUFFER_REG,
+        BIT_OFF_REG,
+        dst_info.n_bits,
+        RAW_REG,
+        BIT_IO_TMP1,
+        BIT_IO_TMP2,
+        ADDR_SCRATCH,
     );
 
     Ok(())
@@ -245,9 +296,14 @@ fn emit_identity_loop(
     // Inside the loop, the iter register IS the absolute intra-slab
     // index — pass atom_offset so address.rs can resolve split-group slots.
     emit_identity_iter(
-        asm, layout, src_input,
-        output_base, output_atom_offset,
-        IterVar::Reg(LOOP_VAR_REG), atom_offset, tables,
+        asm,
+        layout,
+        src_input,
+        output_base,
+        output_atom_offset,
+        IterVar::Reg(LOOP_VAR_REG),
+        atom_offset,
+        tables,
     )?;
 
     dynasm!(asm
@@ -285,7 +341,8 @@ fn emit_cast_group(
             asm,
             layout,
             &group.inputs[0],
-            group.base_id, group.atom_offset,
+            group.base_id,
+            group.atom_offset,
             src_dtype,
             dst_dtype,
             IterVar::Const(group.atom_offset),
@@ -298,7 +355,8 @@ fn emit_cast_group(
             asm,
             layout,
             &group.inputs[0],
-            group.base_id, group.atom_offset,
+            group.base_id,
+            group.atom_offset,
             src_dtype,
             dst_dtype,
             group.atom_offset,
@@ -359,8 +417,8 @@ fn emit_cast_iter(
         src_dtype,
         RAW_REG,
         src_slot,
-        BIT_IO_TMP1,  // scratch_gp
-        FLT_SCRATCH,   // scratch_xmm
+        BIT_IO_TMP1, // scratch_gp
+        FLT_SCRATCH, // scratch_xmm
         codec_tables,
     )?;
 
@@ -380,15 +438,20 @@ fn emit_cast_iter(
         dst_dtype,
         dst_slot,
         RAW_REG,
-        BIT_IO_TMP1,  // scratch_gp1
-        BIT_IO_TMP2,  // scratch_gp2
-        FLT_SCRATCH,   // scratch_xmm
+        BIT_IO_TMP1, // scratch_gp1
+        BIT_IO_TMP2, // scratch_gp2
+        FLT_SCRATCH, // scratch_xmm
     )?;
 
     // 5. Compute dst bit offset → r10.
     let dst_info = emit_output_bit_offset(
-        asm, layout, output_base, output_atom_offset, iter,
-        BIT_OFF_REG, ADDR_SCRATCH,
+        asm,
+        layout,
+        output_base,
+        output_atom_offset,
+        iter,
+        BIT_OFF_REG,
+        ADDR_SCRATCH,
     )?;
 
     // 6. Store raw bits.
@@ -443,7 +506,8 @@ fn emit_cast_loop(
         asm,
         layout,
         src_input,
-        output_base, output_atom_offset,
+        output_base,
+        output_atom_offset,
         src_dtype,
         dst_dtype,
         IterVar::Reg(LOOP_VAR_REG),
@@ -482,19 +546,35 @@ fn emit_binary_group(
     }
     if group.count == 1 {
         emit_binary_iter(
-            asm, layout, &group.inputs[0], &group.inputs[1],
-            group.base_id, group.atom_offset,
-            op, compute_dtype, group.output_dtype,
-            IterVar::Const(group.atom_offset), group.atom_offset,
-            addr_tables, codec_tables,
+            asm,
+            layout,
+            &group.inputs[0],
+            &group.inputs[1],
+            group.base_id,
+            group.atom_offset,
+            op,
+            compute_dtype,
+            group.output_dtype,
+            IterVar::Const(group.atom_offset),
+            group.atom_offset,
+            addr_tables,
+            codec_tables,
         )
     } else {
         emit_binary_loop(
-            asm, layout, &group.inputs[0], &group.inputs[1],
-            group.base_id, group.atom_offset,
-            op, compute_dtype, group.output_dtype,
-            group.atom_offset, group.count,
-            addr_tables, codec_tables,
+            asm,
+            layout,
+            &group.inputs[0],
+            &group.inputs[1],
+            group.base_id,
+            group.atom_offset,
+            op,
+            compute_dtype,
+            group.output_dtype,
+            group.atom_offset,
+            group.count,
+            addr_tables,
+            codec_tables,
         )
     }
 }
@@ -537,8 +617,13 @@ fn emit_binary_iter(
 
     // ── Load + decode input A ──
     let _a_info = emit_load_decode_input(
-        asm, layout, input_a, iter, atom_offset,
-        addr_tables, codec_tables,
+        asm,
+        layout,
+        input_a,
+        iter,
+        atom_offset,
+        addr_tables,
+        codec_tables,
         match repr {
             ComputeRepr::F32 | ComputeRepr::F64 => CodecSlot::Xmm(FLT_SLOT_A),
             ComputeRepr::Int => CodecSlot::Gp(INT_SLOT_A),
@@ -556,8 +641,14 @@ fn emit_binary_iter(
         ComputeRepr::Int => CodecSlot::Gp(INT_SLOT_B),
     };
     let _b_info = emit_load_decode_input(
-        asm, layout, input_b, iter, atom_offset,
-        addr_tables, codec_tables, b_slot,
+        asm,
+        layout,
+        input_b,
+        iter,
+        atom_offset,
+        addr_tables,
+        codec_tables,
+        b_slot,
     )?;
 
     // For int ops: restore A from xmm stash.
@@ -580,24 +671,38 @@ fn emit_binary_iter(
 
     // ── Encode result + store ──
     let result_slot = match repr {
-        ComputeRepr::F32 | ComputeRepr::F64 => {
-            CodecSlot::Xmm(super::super::prologue::FLT_SLOT_C)
-        }
+        ComputeRepr::F32 | ComputeRepr::F64 => CodecSlot::Xmm(super::super::prologue::FLT_SLOT_C),
         ComputeRepr::Int => CodecSlot::Gp(super::super::prologue::INT_SLOT_C),
     };
     emit_encode(
-        asm, output_dtype, result_slot, RAW_REG,
-        BIT_IO_TMP1, BIT_IO_TMP2, FLT_SCRATCH,
+        asm,
+        output_dtype,
+        result_slot,
+        RAW_REG,
+        BIT_IO_TMP1,
+        BIT_IO_TMP2,
+        FLT_SCRATCH,
     )?;
 
     let dst_info = emit_output_bit_offset(
-        asm, layout, output_base, output_atom_offset, iter,
-        BIT_OFF_REG, ADDR_SCRATCH,
+        asm,
+        layout,
+        output_base,
+        output_atom_offset,
+        iter,
+        BIT_OFF_REG,
+        ADDR_SCRATCH,
     )?;
 
     emit_store_bits(
-        asm, BUFFER_REG, BIT_OFF_REG, dst_info.n_bits, RAW_REG,
-        BIT_IO_TMP1, BIT_IO_TMP2, ADDR_SCRATCH,
+        asm,
+        BUFFER_REG,
+        BIT_OFF_REG,
+        dst_info.n_bits,
+        RAW_REG,
+        BIT_IO_TMP1,
+        BIT_IO_TMP2,
+        ADDR_SCRATCH,
     );
 
     Ok(())
@@ -621,11 +726,32 @@ fn emit_load_decode_input(
     slot: CodecSlot,
 ) -> Result<AddressInfo, String> {
     let info = emit_compute_bit_offset(
-        asm, layout, input, iter, atom_offset,
-        BIT_OFF_REG, ADDR_SCRATCH, addr_tables,
+        asm,
+        layout,
+        input,
+        iter,
+        atom_offset,
+        BIT_OFF_REG,
+        ADDR_SCRATCH,
+        addr_tables,
     )?;
-    emit_load_bits(asm, BUFFER_REG, BIT_OFF_REG, info.n_bits, RAW_REG, ADDR_SCRATCH);
-    emit_decode(asm, info.dtype, RAW_REG, slot, BIT_IO_TMP1, FLT_SCRATCH, codec_tables)?;
+    emit_load_bits(
+        asm,
+        BUFFER_REG,
+        BIT_OFF_REG,
+        info.n_bits,
+        RAW_REG,
+        ADDR_SCRATCH,
+    );
+    emit_decode(
+        asm,
+        info.dtype,
+        RAW_REG,
+        slot,
+        BIT_IO_TMP1,
+        FLT_SCRATCH,
+        codec_tables,
+    )?;
     Ok(info)
 }
 
@@ -665,11 +791,19 @@ fn emit_binary_loop(
     );
 
     emit_binary_iter(
-        asm, layout, input_a, input_b,
-        output_base, output_atom_offset,
-        op, compute_dtype, output_dtype,
-        IterVar::Reg(LOOP_VAR_REG), atom_offset,
-        addr_tables, codec_tables,
+        asm,
+        layout,
+        input_a,
+        input_b,
+        output_base,
+        output_atom_offset,
+        op,
+        compute_dtype,
+        output_dtype,
+        IterVar::Reg(LOOP_VAR_REG),
+        atom_offset,
+        addr_tables,
+        codec_tables,
     )?;
 
     dynasm!(asm
@@ -702,19 +836,33 @@ fn emit_unary_group(
     }
     if group.count == 1 {
         emit_unary_iter(
-            asm, layout, &group.inputs[0],
-            group.base_id, group.atom_offset,
-            op, compute_dtype, group.output_dtype,
-            IterVar::Const(group.atom_offset), group.atom_offset,
-            addr_tables, codec_tables,
+            asm,
+            layout,
+            &group.inputs[0],
+            group.base_id,
+            group.atom_offset,
+            op,
+            compute_dtype,
+            group.output_dtype,
+            IterVar::Const(group.atom_offset),
+            group.atom_offset,
+            addr_tables,
+            codec_tables,
         )
     } else {
         emit_unary_loop(
-            asm, layout, &group.inputs[0],
-            group.base_id, group.atom_offset,
-            op, compute_dtype, group.output_dtype,
-            group.atom_offset, group.count,
-            addr_tables, codec_tables,
+            asm,
+            layout,
+            &group.inputs[0],
+            group.base_id,
+            group.atom_offset,
+            op,
+            compute_dtype,
+            group.output_dtype,
+            group.atom_offset,
+            group.count,
+            addr_tables,
+            codec_tables,
         )
     }
 }
@@ -742,8 +890,13 @@ fn emit_unary_iter(
 
     // Load + decode input → slot A.
     let _info = emit_load_decode_input(
-        asm, layout, input, iter, atom_offset,
-        addr_tables, codec_tables,
+        asm,
+        layout,
+        input,
+        iter,
+        atom_offset,
+        addr_tables,
+        codec_tables,
         match repr {
             ComputeRepr::F32 | ComputeRepr::F64 => CodecSlot::Xmm(FLT_SLOT_A),
             ComputeRepr::Int => CodecSlot::Gp(super::super::prologue::INT_SLOT_A),
@@ -764,24 +917,38 @@ fn emit_unary_iter(
 
     // Encode result + store.
     let result_slot = match repr {
-        ComputeRepr::F32 | ComputeRepr::F64 => {
-            CodecSlot::Xmm(super::super::prologue::FLT_SLOT_C)
-        }
+        ComputeRepr::F32 | ComputeRepr::F64 => CodecSlot::Xmm(super::super::prologue::FLT_SLOT_C),
         ComputeRepr::Int => CodecSlot::Gp(super::super::prologue::INT_SLOT_C),
     };
     emit_encode(
-        asm, output_dtype, result_slot, RAW_REG,
-        BIT_IO_TMP1, BIT_IO_TMP2, FLT_SCRATCH,
+        asm,
+        output_dtype,
+        result_slot,
+        RAW_REG,
+        BIT_IO_TMP1,
+        BIT_IO_TMP2,
+        FLT_SCRATCH,
     )?;
 
     let dst_info = emit_output_bit_offset(
-        asm, layout, output_base, output_atom_offset, iter,
-        BIT_OFF_REG, ADDR_SCRATCH,
+        asm,
+        layout,
+        output_base,
+        output_atom_offset,
+        iter,
+        BIT_OFF_REG,
+        ADDR_SCRATCH,
     )?;
 
     emit_store_bits(
-        asm, BUFFER_REG, BIT_OFF_REG, dst_info.n_bits, RAW_REG,
-        BIT_IO_TMP1, BIT_IO_TMP2, ADDR_SCRATCH,
+        asm,
+        BUFFER_REG,
+        BIT_OFF_REG,
+        dst_info.n_bits,
+        RAW_REG,
+        BIT_IO_TMP1,
+        BIT_IO_TMP2,
+        ADDR_SCRATCH,
     );
 
     Ok(())
@@ -822,11 +989,18 @@ fn emit_unary_loop(
     );
 
     emit_unary_iter(
-        asm, layout, input,
-        output_base, output_atom_offset,
-        op, compute_dtype, output_dtype,
-        IterVar::Reg(LOOP_VAR_REG), atom_offset,
-        addr_tables, codec_tables,
+        asm,
+        layout,
+        input,
+        output_base,
+        output_atom_offset,
+        op,
+        compute_dtype,
+        output_dtype,
+        IterVar::Reg(LOOP_VAR_REG),
+        atom_offset,
+        addr_tables,
+        codec_tables,
     )?;
 
     dynasm!(asm
@@ -955,17 +1129,27 @@ fn emit_select_group(
     }
     if group.count == 1 {
         emit_select_iter(
-            asm, layout, group,
-            group.base_id, group.atom_offset,
-            IterVar::Const(group.atom_offset), group.atom_offset,
-            addr_tables, codec_tables,
+            asm,
+            layout,
+            group,
+            group.base_id,
+            group.atom_offset,
+            IterVar::Const(group.atom_offset),
+            group.atom_offset,
+            addr_tables,
+            codec_tables,
         )
     } else {
         emit_select_loop(
-            asm, layout, group,
-            group.base_id, group.atom_offset,
-            group.atom_offset, group.count,
-            addr_tables, codec_tables,
+            asm,
+            layout,
+            group,
+            group.base_id,
+            group.atom_offset,
+            group.atom_offset,
+            group.count,
+            addr_tables,
+            codec_tables,
         )
     }
 }
@@ -989,16 +1173,37 @@ fn emit_select_iter(
 
     // 1. Load condition, test truthiness → COND_REG (r9).
     let cond_info = emit_compute_bit_offset(
-        asm, layout, &group.inputs[0], iter, atom_offset,
-        BIT_OFF_REG, ADDR_SCRATCH, addr_tables,
+        asm,
+        layout,
+        &group.inputs[0],
+        iter,
+        atom_offset,
+        BIT_OFF_REG,
+        ADDR_SCRATCH,
+        addr_tables,
     )?;
-    emit_load_bits(asm, BUFFER_REG, BIT_OFF_REG, cond_info.n_bits, RAW_REG, ADDR_SCRATCH);
+    emit_load_bits(
+        asm,
+        BUFFER_REG,
+        BIT_OFF_REG,
+        cond_info.n_bits,
+        RAW_REG,
+        ADDR_SCRATCH,
+    );
     let cond_repr = ComputeRepr::for_dtype(cond_info.dtype);
     let cond_slot = match cond_repr {
         ComputeRepr::F32 | ComputeRepr::F64 => CodecSlot::Xmm(FLT_SLOT_A),
         ComputeRepr::Int => CodecSlot::Gp(RAW_REG),
     };
-    emit_decode(asm, cond_info.dtype, RAW_REG, cond_slot, BIT_IO_TMP1, FLT_SCRATCH, codec_tables)?;
+    emit_decode(
+        asm,
+        cond_info.dtype,
+        RAW_REG,
+        cond_slot,
+        BIT_IO_TMP1,
+        FLT_SCRATCH,
+        codec_tables,
+    )?;
 
     // Extract truthiness to COND_REG: nonzero → 1, zero → 0.
     match cond_repr {
@@ -1037,8 +1242,13 @@ fn emit_select_iter(
 
     // 2. Load x (true branch) → slot A.
     let _x_info = emit_load_decode_input(
-        asm, layout, &group.inputs[1], iter, atom_offset,
-        addr_tables, codec_tables,
+        asm,
+        layout,
+        &group.inputs[1],
+        iter,
+        atom_offset,
+        addr_tables,
+        codec_tables,
         match out_repr {
             ComputeRepr::F32 | ComputeRepr::F64 => CodecSlot::Xmm(FLT_SLOT_A),
             ComputeRepr::Int => CodecSlot::Gp(INT_SLOT_A),
@@ -1052,8 +1262,13 @@ fn emit_select_iter(
 
     // 3. Load y (false branch) → slot B.
     let _y_info = emit_load_decode_input(
-        asm, layout, &group.inputs[2], iter, atom_offset,
-        addr_tables, codec_tables,
+        asm,
+        layout,
+        &group.inputs[2],
+        iter,
+        atom_offset,
+        addr_tables,
+        codec_tables,
         match out_repr {
             ComputeRepr::F32 | ComputeRepr::F64 => CodecSlot::Xmm(FLT_SLOT_B),
             ComputeRepr::Int => CodecSlot::Gp(INT_SLOT_B),
@@ -1096,16 +1311,32 @@ fn emit_select_iter(
         ComputeRepr::Int => CodecSlot::Gp(super::super::prologue::INT_SLOT_C),
     };
     emit_encode(
-        asm, output_dtype, result_slot, RAW_REG,
-        BIT_IO_TMP1, BIT_IO_TMP2, FLT_SCRATCH,
+        asm,
+        output_dtype,
+        result_slot,
+        RAW_REG,
+        BIT_IO_TMP1,
+        BIT_IO_TMP2,
+        FLT_SCRATCH,
     )?;
     let dst_info = emit_output_bit_offset(
-        asm, layout, output_base, output_atom_offset, iter,
-        BIT_OFF_REG, ADDR_SCRATCH,
+        asm,
+        layout,
+        output_base,
+        output_atom_offset,
+        iter,
+        BIT_OFF_REG,
+        ADDR_SCRATCH,
     )?;
     emit_store_bits(
-        asm, BUFFER_REG, BIT_OFF_REG, dst_info.n_bits, RAW_REG,
-        BIT_IO_TMP1, BIT_IO_TMP2, ADDR_SCRATCH,
+        asm,
+        BUFFER_REG,
+        BIT_OFF_REG,
+        dst_info.n_bits,
+        RAW_REG,
+        BIT_IO_TMP1,
+        BIT_IO_TMP2,
+        ADDR_SCRATCH,
     );
     Ok(())
 }
@@ -1133,10 +1364,15 @@ fn emit_select_loop(
     let loop_exit = asm.new_dynamic_label();
     dynasm!(asm; =>loop_top; cmp Rq(LOOP_VAR_REG), Rq(LOOP_END_REG); jge =>loop_exit);
     emit_select_iter(
-        asm, layout, group,
-        output_base, output_atom_offset,
-        IterVar::Reg(LOOP_VAR_REG), atom_offset,
-        addr_tables, codec_tables,
+        asm,
+        layout,
+        group,
+        output_base,
+        output_atom_offset,
+        IterVar::Reg(LOOP_VAR_REG),
+        atom_offset,
+        addr_tables,
+        codec_tables,
     )?;
     dynasm!(asm; add Rq(LOOP_VAR_REG), 1; jmp =>loop_top; =>loop_exit);
     Ok(())
@@ -1172,12 +1408,20 @@ fn emit_indirect_load_group(
 
     if group.count == 1 {
         emit_indirect_load_iter(
-            asm, layout, &group.inputs[0],
-            group.base_id, group.atom_offset,
-            table_bit_offset, table_bit_stride, table_n_bits, table_dtype,
+            asm,
+            layout,
+            &group.inputs[0],
+            group.base_id,
+            group.atom_offset,
+            table_bit_offset,
+            table_bit_stride,
+            table_n_bits,
+            table_dtype,
             group.output_dtype,
-            IterVar::Const(group.atom_offset), group.atom_offset,
-            addr_tables, codec_tables,
+            IterVar::Const(group.atom_offset),
+            group.atom_offset,
+            addr_tables,
+            codec_tables,
         )
     } else {
         let start = group.atom_offset as i64;
@@ -1192,12 +1436,20 @@ fn emit_indirect_load_group(
         dynasm!(asm; =>loop_top; cmp Rq(LOOP_VAR_REG), Rq(LOOP_END_REG); jge =>loop_exit);
 
         emit_indirect_load_iter(
-            asm, layout, &group.inputs[0],
-            group.base_id, group.atom_offset,
-            table_bit_offset, table_bit_stride, table_n_bits, table_dtype,
+            asm,
+            layout,
+            &group.inputs[0],
+            group.base_id,
+            group.atom_offset,
+            table_bit_offset,
+            table_bit_stride,
+            table_n_bits,
+            table_dtype,
             group.output_dtype,
-            IterVar::Reg(LOOP_VAR_REG), group.atom_offset,
-            addr_tables, codec_tables,
+            IterVar::Reg(LOOP_VAR_REG),
+            group.atom_offset,
+            addr_tables,
+            codec_tables,
         )?;
 
         dynasm!(asm; add Rq(LOOP_VAR_REG), 1; jmp =>loop_top; =>loop_exit);
@@ -1225,33 +1477,61 @@ fn emit_indirect_load_iter(
 ) -> Result<(), String> {
     // 1. Load the index value.
     let idx_info = emit_compute_bit_offset(
-        asm, layout, index_input, iter, atom_offset,
-        BIT_OFF_REG, ADDR_SCRATCH, addr_tables,
+        asm,
+        layout,
+        index_input,
+        iter,
+        atom_offset,
+        BIT_OFF_REG,
+        ADDR_SCRATCH,
+        addr_tables,
     )?;
-    emit_load_bits(asm, BUFFER_REG, BIT_OFF_REG, idx_info.n_bits, RAW_REG, ADDR_SCRATCH);
+    emit_load_bits(
+        asm,
+        BUFFER_REG,
+        BIT_OFF_REG,
+        idx_info.n_bits,
+        RAW_REG,
+        ADDR_SCRATCH,
+    );
 
     // 2. Decode index to its compute repr, then extract as u64.
     let idx_repr = ComputeRepr::for_dtype(idx_info.dtype);
     match idx_repr {
         ComputeRepr::F32 => {
             emit_decode(
-                asm, idx_info.dtype, RAW_REG,
-                CodecSlot::Xmm(FLT_SLOT), BIT_IO_TMP1, FLT_SCRATCH, codec_tables,
+                asm,
+                idx_info.dtype,
+                RAW_REG,
+                CodecSlot::Xmm(FLT_SLOT),
+                BIT_IO_TMP1,
+                FLT_SCRATCH,
+                codec_tables,
             )?;
             // Convert F32 → u64 (truncate).
             dynasm!(asm; .arch x64; vcvttss2si Rq(RAW_REG), Rx(FLT_SLOT));
         }
         ComputeRepr::F64 => {
             emit_decode(
-                asm, idx_info.dtype, RAW_REG,
-                CodecSlot::Xmm(FLT_SLOT), BIT_IO_TMP1, FLT_SCRATCH, codec_tables,
+                asm,
+                idx_info.dtype,
+                RAW_REG,
+                CodecSlot::Xmm(FLT_SLOT),
+                BIT_IO_TMP1,
+                FLT_SCRATCH,
+                codec_tables,
             )?;
             dynasm!(asm; .arch x64; vcvttsd2si Rq(RAW_REG), Rx(FLT_SLOT));
         }
         ComputeRepr::Int => {
             emit_decode(
-                asm, idx_info.dtype, RAW_REG,
-                CodecSlot::Gp(RAW_REG), BIT_IO_TMP1, FLT_SCRATCH, codec_tables,
+                asm,
+                idx_info.dtype,
+                RAW_REG,
+                CodecSlot::Gp(RAW_REG),
+                BIT_IO_TMP1,
+                FLT_SCRATCH,
+                codec_tables,
             )?;
             // Value already in rax as i64. Treat as u64.
         }
@@ -1280,7 +1560,14 @@ fn emit_indirect_load_iter(
     }
 
     // 4. Load table value → rax.
-    emit_load_bits(asm, BUFFER_REG, BIT_OFF_REG, table_n_bits, RAW_REG, ADDR_SCRATCH);
+    emit_load_bits(
+        asm,
+        BUFFER_REG,
+        BIT_OFF_REG,
+        table_n_bits,
+        RAW_REG,
+        ADDR_SCRATCH,
+    );
 
     // 5. Decode table value, encode to output dtype.
     let out_repr = ComputeRepr::for_dtype(output_dtype);
@@ -1288,7 +1575,15 @@ fn emit_indirect_load_iter(
         ComputeRepr::F32 | ComputeRepr::F64 => CodecSlot::Xmm(FLT_SLOT),
         ComputeRepr::Int => CodecSlot::Gp(RAW_REG),
     };
-    emit_decode(asm, table_dtype, RAW_REG, val_slot, BIT_IO_TMP1, FLT_SCRATCH, codec_tables)?;
+    emit_decode(
+        asm,
+        table_dtype,
+        RAW_REG,
+        val_slot,
+        BIT_IO_TMP1,
+        FLT_SCRATCH,
+        codec_tables,
+    )?;
 
     // If table_dtype's repr != output_dtype's repr, convert.
     let table_repr = ComputeRepr::for_dtype(table_dtype);
@@ -1301,18 +1596,34 @@ fn emit_indirect_load_iter(
         ComputeRepr::Int => CodecSlot::Gp(RAW_REG),
     };
     emit_encode(
-        asm, output_dtype, encode_slot, RAW_REG,
-        BIT_IO_TMP1, BIT_IO_TMP2, FLT_SCRATCH,
+        asm,
+        output_dtype,
+        encode_slot,
+        RAW_REG,
+        BIT_IO_TMP1,
+        BIT_IO_TMP2,
+        FLT_SCRATCH,
     )?;
 
     // 6. Compute output address + store.
     let dst_info = emit_output_bit_offset(
-        asm, layout, output_base, output_atom_offset, iter,
-        BIT_OFF_REG, ADDR_SCRATCH,
+        asm,
+        layout,
+        output_base,
+        output_atom_offset,
+        iter,
+        BIT_OFF_REG,
+        ADDR_SCRATCH,
     )?;
     emit_store_bits(
-        asm, BUFFER_REG, BIT_OFF_REG, dst_info.n_bits, RAW_REG,
-        BIT_IO_TMP1, BIT_IO_TMP2, ADDR_SCRATCH,
+        asm,
+        BUFFER_REG,
+        BIT_OFF_REG,
+        dst_info.n_bits,
+        RAW_REG,
+        BIT_IO_TMP1,
+        BIT_IO_TMP2,
+        ADDR_SCRATCH,
     );
 
     Ok(())
@@ -1464,18 +1775,17 @@ fn lookup_input_dtype(
                 return Ok(slot.dtype);
             }
             // Split group fallback: resolve the first accessed atom.
-            let first_offset =
-                crate::compiler::attempts::v14::layout::strided_resolve_offset(
-                    dim_strides, dim_shape, atom_offset,
-                );
+            let first_offset = crate::compiler::attempts::v14::layout::strided_resolve_offset(
+                dim_strides,
+                dim_shape,
+                atom_offset,
+            );
             let first_atom = AtomId(((base.0 as i64) + first_offset) as u64);
             layout
                 .find(first_atom)
                 .map(|(slot, _)| slot.dtype)
                 .ok_or_else(|| {
-                    format!(
-                        "emit_group: no slot for Strided base={base} first={first_atom}"
-                    )
+                    format!("emit_group: no slot for Strided base={base} first={first_atom}")
                 })
         }
 

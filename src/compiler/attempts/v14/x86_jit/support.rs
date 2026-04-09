@@ -78,9 +78,7 @@ pub fn check_supported(graph: &NanoGraph<'static, SystemPool>) -> Result<(), Str
             }
             ScalarOp::Literal(_) | ScalarOp::LiteralSpan(_) => {}
             op => {
-                return Err(format!(
-                    "x86_jit: group {gi} op {op:?} not yet supported"
-                ));
+                return Err(format!("x86_jit: group {gi} op {op:?} not yet supported"));
             }
         }
     }

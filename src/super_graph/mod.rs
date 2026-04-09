@@ -1,6 +1,6 @@
 pub mod cache;
 pub mod cache_report;
-#[cfg(feature = "cranelift")]
+#[cfg(feature = "x86_compile")]
 pub mod compiled_eval;
 pub mod data;
 pub mod links;
@@ -64,11 +64,11 @@ pub enum ModelEvalMode {
         /// and flow as inputs at pool_eval time.
         inline_constant_threshold: u64,
     },
-    /// Lower + JIT-compile via Cranelift. Partitions the NanoGraph and compiles
-    /// each span into native code. First invocation is slow (compilation), but
-    /// subsequent calls reuse the cached ExecutablePlan.
+    /// Lower + JIT-compile via x86_jit (dynasm). Partitions the NanoGraph and
+    /// compiles each span into native code. First invocation is slow
+    /// (compilation), but subsequent calls reuse the cached ExecutablePlan.
     /// Falls back to LoweredEval if compilation fails.
-    /// Requires the `cranelift` feature.
+    /// Requires the `x86_compile` feature.
     CompiledEval {
         inline_constant_threshold: u64,
         /// Selects partitioner / codegen implementations and their tunables.

@@ -1,9 +1,7 @@
 #![allow(clippy::all, dead_code, unreachable_patterns)]
 
-#[cfg(feature = "cranelift")]
-pub mod codegen;
 pub mod executor;
-#[cfg(feature = "cranelift")]
+#[cfg(feature = "x86_compile")]
 pub mod layout;
 pub mod partitioner_m;
 pub mod plan;

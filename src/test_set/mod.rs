@@ -423,7 +423,7 @@ pub fn run_case_via_graph_pool_eval(case: &TestCase) -> Result<(), String> {
 ///
 /// Tests both the trivial plan (bit-perfect) and the partitioned plan to
 /// catch partitioner accuracy regressions.
-#[cfg(feature = "cranelift")]
+#[cfg(feature = "x86_compile")]
 pub fn run_case_via_compiled_eval(case: &TestCase, num_lanes: usize) -> Result<(), String> {
     use crate::compiler::{CompileOptions, PartitionerKind};
     use crate::nano_graph::lower;
@@ -565,7 +565,7 @@ mod tests {
     /// JIT compiled eval with trivial plan (1 phase, no partitioning).
     /// Should be bit-perfect vs pool_eval.
     #[test]
-    #[cfg(feature = "cranelift")]
+    #[cfg(feature = "x86_compile")]
     fn test_all_cases_via_compiled_eval_trivial() {
         let cases = build_test_set();
         assert!(!cases.is_empty(), "test set should not be empty");
@@ -596,7 +596,7 @@ mod tests {
     /// JIT compiled eval with partitioned plan (8 lanes).
     /// Tests partitioner correctness — should match within dtype tolerance.
     #[test]
-    #[cfg(feature = "cranelift")]
+    #[cfg(feature = "x86_compile")]
     fn test_all_cases_via_compiled_eval_partitioned() {
         let cases = build_test_set();
         assert!(!cases.is_empty(), "test set should not be empty");
@@ -625,7 +625,7 @@ mod tests {
     }
 
     /// Per-category partitioned tests for isolating x86_jit crashes.
-    #[cfg(feature = "cranelift")]
+    #[cfg(feature = "x86_compile")]
     mod partitioned_by_category {
         use super::super::*;
 
@@ -636,15 +636,45 @@ mod tests {
             }
         }
 
-        #[test] fn elementwise() { run_category(super::super::elementwise::build_cases()); }
-        #[test] fn matmul() { run_category(super::super::matmul::build_cases()); }
-        #[test] fn cast() { run_category(super::super::cast::build_cases()); }
-        #[test] fn reduce() { run_category(super::super::reduce::build_cases()); }
-        #[test] fn composite() { run_category(super::super::composite::build_cases()); }
-        #[test] fn conv() { run_category(super::super::conv::build_cases()); }
-        #[test] fn pad() { run_category(super::super::pad::build_cases()); }
-        #[test] fn structural() { run_category(super::super::structural::build_cases()); }
-        #[test] fn opaque_ops() { run_category(super::super::opaque_ops::build_cases()); }
-        #[test] fn dtype_discipline() { run_category(super::super::dtype_discipline::build_cases()); }
+        #[test]
+        fn elementwise() {
+            run_category(super::super::elementwise::build_cases());
+        }
+        #[test]
+        fn matmul() {
+            run_category(super::super::matmul::build_cases());
+        }
+        #[test]
+        fn cast() {
+            run_category(super::super::cast::build_cases());
+        }
+        #[test]
+        fn reduce() {
+            run_category(super::super::reduce::build_cases());
+        }
+        #[test]
+        fn composite() {
+            run_category(super::super::composite::build_cases());
+        }
+        #[test]
+        fn conv() {
+            run_category(super::super::conv::build_cases());
+        }
+        #[test]
+        fn pad() {
+            run_category(super::super::pad::build_cases());
+        }
+        #[test]
+        fn structural() {
+            run_category(super::super::structural::build_cases());
+        }
+        #[test]
+        fn opaque_ops() {
+            run_category(super::super::opaque_ops::build_cases());
+        }
+        #[test]
+        fn dtype_discipline() {
+            run_category(super::super::dtype_discipline::build_cases());
+        }
     }
 }

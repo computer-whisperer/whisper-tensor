@@ -108,7 +108,7 @@ pub struct SuperGraphCache {
     /// Cached lowered NanoGraphs keyed by the symbolic graph's GlobalId.
     pub lowered_model_cache: HashMap<GlobalId, CachedLoweredModel>,
     /// Cached JIT-compiled execution plans keyed by the symbolic graph's GlobalId.
-    #[cfg(feature = "cranelift")]
+    #[cfg(feature = "x86_compile")]
     pub compiled_plan_cache:
         HashMap<GlobalId, crate::super_graph::compiled_eval::CachedCompiledPlan>,
 }
@@ -124,7 +124,7 @@ impl SuperGraphCache {
             tensor_pack_cache: HashMap::new(),
             loaded_tensor_cache,
             lowered_model_cache: HashMap::new(),
-            #[cfg(feature = "cranelift")]
+            #[cfg(feature = "x86_compile")]
             compiled_plan_cache: HashMap::new(),
         }
     }

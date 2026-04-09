@@ -7,12 +7,8 @@ edition = "2024"
 name = "wt"
 path = "src/main.rs"
 
-[features]
-cranelift = ["whisper-tensor/cranelift"]
-x86_compile = ["whisper-tensor/x86_compile", "cranelift"]
-
 [dependencies]
-whisper-tensor = { workspace = true, features = ["tokenizers", "rwkv-tokenizer", "http", "safetensors"] }
+whisper-tensor = { workspace = true, features = ["tokenizers", "rwkv-tokenizer", "http", "safetensors", "x86_compile"] }
 whisper-tensor-import = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }

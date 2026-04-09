@@ -4,7 +4,7 @@
 //! this module partitions and JIT-compiles the NanoGraph into an ExecutablePlan
 //! that runs via the v14 executor. The compiled plan is cached for reuse.
 //!
-//! Requires the `cranelift` feature.
+//! Requires the `x86_compile` feature.
 //!
 //! The core compile+execute logic lives in standalone `pub(crate)` functions
 //! (compile_nano_graph, prepare_compiled_inputs, relayout_to_flat, extract_outputs)
@@ -13,7 +13,6 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
-use crate::compiler::attempts::v14::codegen::JitCompiledSpan;
 use crate::compiler::attempts::v14::executor::{
     CompiledSpanFn, ExecutablePlan, ExecutablePlanBuilder, PhaseStore, PoolEvalSpan,
 };
@@ -277,37 +276,16 @@ pub(crate) fn compile_nano_graph(
     let mut compile_errors = 0usize;
     let force_pool_eval = matches!(options.codegen, CodegenKind::PoolEval);
 
-    // COMPILE_PROFILE=1 — record per-span macro-stage timings and per-span totals
-    // for a post-loop breakdown. Profiling uses thread-local state in the
-    // cranelift codegen module, so it is only available in sequential mode.
-    let profile_compile = std::env::var("COMPILE_PROFILE").is_ok();
-    if profile_compile {
-        crate::compiler::attempts::v14::codegen::profile::enable();
-    }
-    let mut span_records: Vec<CompileSpanRecord> = Vec::new();
+    x86_jit_stats::enable();
 
-    // X86_JIT span coverage stats: only enabled when X86_JIT is set, and the
-    // summary is printed at the end of compile_phases.
-    if std::env::var("X86_JIT").is_ok() {
-        x86_jit_stats::enable();
-    }
-
-    // Use parallel span compilation when profiling is off and there are
-    // enough spans to justify the thread-pool overhead.
-    let use_parallel = !profile_compile && !force_pool_eval;
+    // Use parallel span compilation unless force_pool_eval is set.
+    let use_parallel = !force_pool_eval;
 
     for (pi, phase) in phases.iter().enumerate() {
         let lanes = if use_parallel {
             compile_phase_parallel(pi, &phase.spans, &mut compile_errors)
         } else {
-            compile_phase_sequential(
-                pi,
-                &phase.spans,
-                force_pool_eval,
-                profile_compile,
-                &mut span_records,
-                &mut compile_errors,
-            )
+            compile_phase_pool_eval(&phase.spans)
         };
         plan_builder.add_phase(lanes);
     }
@@ -315,14 +293,7 @@ pub(crate) fn compile_nano_graph(
     let executable_plan = plan_builder.build();
     obs.on_milestone("compiled.compile_phases", None, t0, Instant::now());
 
-    if profile_compile {
-        crate::compiler::attempts::v14::codegen::profile::disable();
-        print_compile_profile(&span_records);
-    }
-
-    if std::env::var("X86_JIT").is_ok() {
-        x86_jit_stats::print_summary();
-    }
+    x86_jit_stats::print_summary();
 
     Ok((executable_plan, plan_summary, compile_errors))
 }
@@ -346,8 +317,7 @@ fn compile_phase_parallel(
                 .iter()
                 .any(|g| matches!(g.op, crate::nano_graph::ops::ScalarOp::OpaqueOutput { .. }));
 
-            if has_opaque
-                || (span.graph.groups().is_empty() && !span.graph.opaque_ops().is_empty())
+            if has_opaque || (span.graph.groups().is_empty() && !span.graph.opaque_ops().is_empty())
             {
                 Ok(Box::new(PoolEvalSpan::new(
                     span.graph.clone(),
@@ -387,29 +357,14 @@ fn compile_phase_parallel(
         .collect()
 }
 
-/// Compile one phase's spans sequentially (used when profiling is enabled).
-#[allow(clippy::too_many_arguments)]
-fn compile_phase_sequential(
-    pi: usize,
+/// Wrap every span in a PoolEvalSpan (used when force_pool_eval is set).
+fn compile_phase_pool_eval(
     spans: &[crate::compiler::attempts::v14::types::Span],
-    force_pool_eval: bool,
-    profile_compile: bool,
-    span_records: &mut Vec<CompileSpanRecord>,
-    compile_errors: &mut usize,
 ) -> Vec<LaneTuple> {
-    let mut lanes = Vec::new();
-    for (si, span) in spans.iter().enumerate() {
-        let has_opaque = span
-            .graph
-            .groups()
-            .iter()
-            .any(|g| matches!(g.op, crate::nano_graph::ops::ScalarOp::OpaqueOutput { .. }));
-
-        if force_pool_eval
-            || has_opaque
-            || (span.graph.groups().is_empty() && !span.graph.opaque_ops().is_empty())
-        {
-            lanes.push((
+    spans
+        .iter()
+        .map(|span| {
+            (
                 Box::new(PoolEvalSpan::new(
                     span.graph.clone(),
                     span.inputs.clone(),
@@ -417,93 +372,34 @@ fn compile_phase_sequential(
                 )) as Box<dyn CompiledSpanFn>,
                 span.inputs.clone(),
                 span.outputs.clone(),
-            ));
-        } else {
-            let t_span = Instant::now();
-            let result = compile_one_span_native(&span.graph, &span.outputs);
-            let dt_span = t_span.elapsed();
-            if profile_compile {
-                let stages = crate::compiler::attempts::v14::codegen::profile::take()
-                    .pop()
-                    .unwrap_or_default();
-                let num_groups = span.graph.num_groups();
-                let num_atoms: u64 = span.graph.groups().iter().map(|g| g.count).sum();
-                span_records.push(CompileSpanRecord {
-                    phase: pi,
-                    lane: si,
-                    num_groups,
-                    num_atoms,
-                    total: dt_span,
-                    stages,
-                });
-            }
-            match result {
-                Ok(boxed) => {
-                    lanes.push((boxed, span.inputs.clone(), span.outputs.clone()));
-                }
-                Err(e) => {
-                    *compile_errors += 1;
-                    if *compile_errors <= 5 {
-                        eprintln!(
-                            "[compiled_eval] compile error phase {} span {}: {}",
-                            pi, si, e
-                        );
-                    }
-                    lanes.push((
-                        Box::new(PoolEvalSpan::new(
-                            span.graph.clone(),
-                            span.inputs.clone(),
-                            span.outputs.clone(),
-                        )) as Box<dyn CompiledSpanFn>,
-                        span.inputs.clone(),
-                        span.outputs.clone(),
-                    ));
-                }
-            }
-        }
-    }
-    lanes
+            )
+        })
+        .collect()
 }
 
-/// Compile a single span into a boxed `CompiledSpanFn`, dispatching across
-/// available native backends.
+/// Compile a single span into a boxed `CompiledSpanFn` via x86_jit (dynasm).
 ///
-/// On a build with `x86_compile` enabled, `X86_JIT=1` selects the dynasm-rs
-/// backend first; on `Err` it falls back to Cranelift unless `X86_JIT_STRICT=1`
-/// is set, in which case the error propagates and the caller routes the span
+/// On compile error, the error propagates and the caller routes the span
 /// through `PoolEvalSpan` instead.
-///
-/// On a build without `x86_compile`, this is just `JitCompiledSpan::compile`
-/// wrapped in `Box`.
 fn compile_one_span_native(
     graph: &NanoGraph<'static, SystemPool>,
     outputs: &[AtomRange],
 ) -> Result<Box<dyn CompiledSpanFn>, String> {
-    #[cfg(feature = "x86_compile")]
-    {
-        if std::env::var("X86_JIT").is_ok() {
-            match crate::compiler::attempts::v14::x86_jit::X86JitSpan::compile(graph, outputs) {
-                Ok(s) => {
-                    x86_jit_stats::record_accept();
-                    return Ok(Box::new(s) as Box<dyn CompiledSpanFn>);
-                }
-                Err(e) => {
-                    x86_jit_stats::record_fallback(&e);
-                    if std::env::var("X86_JIT_STRICT").is_ok() {
-                        return Err(format!("X86_JIT_STRICT: {e}"));
-                    }
-                    // Fall through to Cranelift fallback during rollout.
-                }
-            }
+    match crate::compiler::attempts::v14::x86_jit::X86JitSpan::compile(graph, outputs) {
+        Ok(s) => {
+            x86_jit_stats::record_accept();
+            Ok(Box::new(s) as Box<dyn CompiledSpanFn>)
+        }
+        Err(e) => {
+            x86_jit_stats::record_fallback(&e);
+            Err(e)
         }
     }
-    JitCompiledSpan::compile(graph, outputs).map(|s| Box::new(s) as Box<dyn CompiledSpanFn>)
 }
 
 /// Per-process counters of which backend handled each span. Reset per
 /// `compile_nano_graph` call (the printer prints + resets at the end of the
 /// model compile).
-#[cfg(feature = "x86_compile")]
 mod x86_jit_stats {
     use std::collections::HashMap;
     use std::sync::Mutex;
@@ -570,125 +466,6 @@ mod x86_jit_stats {
                 eprintln!("  {count:>6}  {reason}");
             }
         }
-    }
-}
-
-#[cfg(not(feature = "x86_compile"))]
-mod x86_jit_stats {
-    pub(super) fn enable() {}
-    pub(super) fn print_summary() {}
-}
-
-#[derive(Clone)]
-struct CompileSpanRecord {
-    phase: usize,
-    lane: usize,
-    num_groups: usize,
-    num_atoms: u64,
-    total: std::time::Duration,
-    stages: crate::compiler::attempts::v14::codegen::profile::SpanStageTimes,
-}
-
-fn print_compile_profile(records: &[CompileSpanRecord]) {
-    if records.is_empty() {
-        return;
-    }
-    let to_ms = |d: std::time::Duration| d.as_secs_f64() * 1e3;
-    let n = records.len();
-    let total_ms: f64 = records.iter().map(|r| to_ms(r.total)).sum();
-    let layout_ms: f64 = records.iter().map(|r| to_ms(r.stages.layout)).sum();
-    let setup_ms: f64 = records.iter().map(|r| to_ms(r.stages.setup)).sum();
-    let ir_ms: f64 = records.iter().map(|r| to_ms(r.stages.ir_build)).sum();
-    let define_ms: f64 = records.iter().map(|r| to_ms(r.stages.cl_define)).sum();
-    let finalize_ms: f64 = records.iter().map(|r| to_ms(r.stages.cl_finalize)).sum();
-    let lit_ms: f64 = records
-        .iter()
-        .map(|r| to_ms(r.stages.literal_template))
-        .sum();
-    let accounted = layout_ms + setup_ms + ir_ms + define_ms + finalize_ms + lit_ms;
-    let other_ms = total_ms - accounted;
-
-    let pct = |v: f64| v / total_ms * 100.0;
-
-    eprintln!();
-    eprintln!("=== Compile-phase per-span profile ({} spans) ===", n);
-    eprintln!("  total {:>8.0}ms  ({:.1}s)", total_ms, total_ms / 1000.0);
-    eprintln!(
-        "    compute_layout  {:>8.0}ms  ({:.1}%)",
-        layout_ms,
-        pct(layout_ms)
-    );
-    eprintln!(
-        "    setup           {:>8.0}ms  ({:.1}%)",
-        setup_ms,
-        pct(setup_ms)
-    );
-    eprintln!("    ir_build        {:>8.0}ms  ({:.1}%)", ir_ms, pct(ir_ms));
-    eprintln!(
-        "    cranelift_def   {:>8.0}ms  ({:.1}%)",
-        define_ms,
-        pct(define_ms)
-    );
-    eprintln!(
-        "    cranelift_fin   {:>8.0}ms  ({:.1}%)",
-        finalize_ms,
-        pct(finalize_ms)
-    );
-    eprintln!(
-        "    literal_tmpl    {:>8.0}ms  ({:.1}%)",
-        lit_ms,
-        pct(lit_ms)
-    );
-    eprintln!(
-        "    other           {:>8.0}ms  ({:.1}%)",
-        other_ms,
-        pct(other_ms)
-    );
-
-    // Histogram by total span time.
-    let mut buckets = [0usize; 8];
-    let edges_ms = [0.5, 1.0, 5.0, 20.0, 50.0, 100.0, 500.0, f64::MAX];
-    for r in records {
-        let t = to_ms(r.total);
-        for (i, &e) in edges_ms.iter().enumerate() {
-            if t < e {
-                buckets[i] += 1;
-                break;
-            }
-        }
-    }
-    eprintln!("  span time histogram:");
-    let labels = [
-        "<0.5ms", "<1ms", "<5ms", "<20ms", "<50ms", "<100ms", "<500ms", ">=500ms",
-    ];
-    for (label, count) in labels.iter().zip(buckets.iter()) {
-        if *count > 0 {
-            eprintln!("    {:<10} {:>5}", label, count);
-        }
-    }
-
-    // Top hot spans.
-    let mut sorted: Vec<&CompileSpanRecord> = records.iter().collect();
-    sorted.sort_by(|a, b| b.total.cmp(&a.total));
-    eprintln!("  top 20 hot spans:");
-    eprintln!(
-        "    {:>4}/{:<5} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>6} {:>10}",
-        "ph", "lane", "total", "layout", "ir", "cl_def", "cl_fin", "lit", "grps", "atoms"
-    );
-    for r in sorted.iter().take(20) {
-        eprintln!(
-            "    {:>4}/{:<5} {:>8.1} {:>8.1} {:>8.1} {:>8.1} {:>8.1} {:>8.1} {:>6} {:>10}",
-            r.phase,
-            r.lane,
-            to_ms(r.total),
-            to_ms(r.stages.layout),
-            to_ms(r.stages.ir_build),
-            to_ms(r.stages.cl_define),
-            to_ms(r.stages.cl_finalize),
-            to_ms(r.stages.literal_template),
-            r.num_groups,
-            r.num_atoms,
-        );
     }
 }
 

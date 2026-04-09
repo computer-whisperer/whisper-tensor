@@ -13,7 +13,7 @@ variables:
   GIT_SUBMODULE_STRATEGY: none
   # Features to test (everything except vulkan and tch which need
   # heavy system deps not yet available in the runner image)
-  CI_FEATURES: "tokenizers,rwkv-tokenizer,http,blas,safetensors,cranelift"
+  CI_FEATURES: "tokenizers,rwkv-tokenizer,http,blas,safetensors,x86_compile"
 
 default:
   image: docker.io/library/rust:latest
@@ -47,7 +47,7 @@ clippy:
   script:
     - rustup component add clippy
     - cargo clippy -p whisper-tensor --no-deps --features "$CI_FEATURES" -- -D warnings
-    - cargo clippy -p whisper-tensor-server --no-deps --features "import,cranelift" -- -D warnings
+    - cargo clippy -p whisper-tensor-server --no-deps --features "import,x86_compile" -- -D warnings
     - cargo clippy -p whisper-tensor-import --no-deps --all-features -- -D warnings
 
 # ---------------------------------------------------------------------------

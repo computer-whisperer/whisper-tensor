@@ -437,7 +437,16 @@ fn cast_f32_to_f16_count_eight() {
         vec![],
         vec![InputRef::affine(inp, 1)],
     );
-    let src: Vec<f32> = vec![0.0, 1.0, -1.0, 0.5, 65504.0, -65504.0, f32::INFINITY, f32::NAN];
+    let src: Vec<f32> = vec![
+        0.0,
+        1.0,
+        -1.0,
+        0.5,
+        65504.0,
+        -65504.0,
+        f32::INFINITY,
+        f32::NAN,
+    ];
     let bytes = f32_input_bytes(&src);
     let outs = ab_test_bytes(
         &g,
@@ -601,11 +610,7 @@ fn cast_i32_to_f32() {
 
 // ─── Float Binary op tests ──────────────────────────────────────────
 
-fn binary_f32_test(
-    op: ScalarBinOp,
-    a_vals: &[f32],
-    b_vals: &[f32],
-) -> Vec<Vec<u8>> {
+fn binary_f32_test(op: ScalarBinOp, a_vals: &[f32], b_vals: &[f32]) -> Vec<Vec<u8>> {
     assert_eq!(a_vals.len(), b_vals.len());
     let n = a_vals.len() as u64;
     let mut g = NanoGraph::new();
@@ -619,10 +624,7 @@ fn binary_f32_test(
             compute_dtype: NumericDType::F32,
         },
         vec![],
-        vec![
-            InputRef::affine(inp_a, 1),
-            InputRef::affine(inp_b, 1),
-        ],
+        vec![InputRef::affine(inp_a, 1), InputRef::affine(inp_b, 1)],
     );
     let a_bytes = f32_input_bytes(a_vals);
     let b_bytes = f32_input_bytes(b_vals);
@@ -750,7 +752,11 @@ fn unary_f32_test(op: ScalarUnaryOp, vals: &[f32]) -> Vec<Vec<u8>> {
     ab_test_bytes(
         &g,
         &[(inp, NumericDType::F32, bytes)],
-        &[AtomRange { base: out, count: n, dtype: NumericDType::F32 }],
+        &[AtomRange {
+            base: out,
+            count: n,
+            dtype: NumericDType::F32,
+        }],
     )
 }
 
@@ -814,7 +820,10 @@ fn binary_i32_test(op: ScalarBinOp, a_vals: &[i32], b_vals: &[i32]) -> Vec<Vec<u
     let out = g.push_group(
         n,
         NumericDType::I32,
-        ScalarOp::Binary { op, compute_dtype: NumericDType::I32 },
+        ScalarOp::Binary {
+            op,
+            compute_dtype: NumericDType::I32,
+        },
         vec![],
         vec![InputRef::affine(inp_a, 1), InputRef::affine(inp_b, 1)],
     );
@@ -826,7 +835,11 @@ fn binary_i32_test(op: ScalarBinOp, a_vals: &[i32], b_vals: &[i32]) -> Vec<Vec<u
             (inp_a, NumericDType::I32, a_bytes),
             (inp_b, NumericDType::I32, b_bytes),
         ],
-        &[AtomRange { base: out, count: n, dtype: NumericDType::I32 }],
+        &[AtomRange {
+            base: out,
+            count: n,
+            dtype: NumericDType::I32,
+        }],
     )
 }
 
@@ -843,22 +856,14 @@ fn binary_i32_add_wrapping() {
 
 #[test]
 fn binary_i32_mul_wrapping() {
-    let outs = binary_i32_test(
-        ScalarBinOp::Mul,
-        &[3, -3, 100000, 0],
-        &[7, 7, 100000, 42],
-    );
+    let outs = binary_i32_test(ScalarBinOp::Mul, &[3, -3, 100000, 0], &[7, 7, 100000, 42]);
     assert_eq!(outs[0].len(), 16, "I32 Mul output size");
 }
 
 #[test]
 fn binary_i32_div() {
     // Includes div-by-zero → 0.
-    let outs = binary_i32_test(
-        ScalarBinOp::Div,
-        &[10, -10, 42, i32::MIN],
-        &[3, 3, 0, -1],
-    );
+    let outs = binary_i32_test(ScalarBinOp::Div, &[10, -10, 42, i32::MIN], &[3, 3, 0, -1]);
     assert_eq!(outs[0].len(), 16, "I32 Div output size");
 }
 
@@ -870,17 +875,15 @@ fn binary_i32_bitwise_and() {
         &[0x0F, 0xFF, 0x55555555, -1],
     );
     let expected: Vec<u8> = [0x0Fi32, 0x0F, 0x55555555, 0]
-        .iter().flat_map(|v| v.to_le_bytes()).collect();
+        .iter()
+        .flat_map(|v| v.to_le_bytes())
+        .collect();
     assert_eq!(outs[0], expected, "I32 BitwiseAnd");
 }
 
 #[test]
 fn binary_i32_shift_left() {
-    let outs = binary_i32_test(
-        ScalarBinOp::BitShiftLeft,
-        &[1, 1, -1, 0xFF],
-        &[0, 8, 16, 4],
-    );
+    let outs = binary_i32_test(ScalarBinOp::BitShiftLeft, &[1, 1, -1, 0xFF], &[0, 8, 16, 4]);
     assert_eq!(outs[0].len(), 16, "I32 ShiftLeft output size");
 }
 
@@ -901,12 +904,22 @@ fn binary_i32_greater() {
         vec![],
         vec![InputRef::affine(inp_a, 1), InputRef::affine(inp_b, 1)],
     );
-    let a: Vec<u8> = [5i32, 3, 3, -1].iter().flat_map(|v| v.to_le_bytes()).collect();
-    let b: Vec<u8> = [3i32, 5, 3, 1].iter().flat_map(|v| v.to_le_bytes()).collect();
+    let a: Vec<u8> = [5i32, 3, 3, -1]
+        .iter()
+        .flat_map(|v| v.to_le_bytes())
+        .collect();
+    let b: Vec<u8> = [3i32, 5, 3, 1]
+        .iter()
+        .flat_map(|v| v.to_le_bytes())
+        .collect();
     let outs = ab_test_bytes(
         &g,
         &[(inp_a, NumericDType::I32, a), (inp_b, NumericDType::I32, b)],
-        &[AtomRange { base: out, count: 4, dtype: NumericDType::I32 }],
+        &[AtomRange {
+            base: out,
+            count: 4,
+            dtype: NumericDType::I32,
+        }],
     );
     assert_eq!(outs[0].len(), 16, "I32 Greater output size");
 }
@@ -914,11 +927,7 @@ fn binary_i32_greater() {
 #[test]
 fn binary_i32_pow() {
     // Pow: saturating semantics. Includes negative exponent → 0.
-    let outs = binary_i32_test(
-        ScalarBinOp::Pow,
-        &[2, 3, 10, 2],
-        &[10, 3, 3, -1],
-    );
+    let outs = binary_i32_test(ScalarBinOp::Pow, &[2, 3, 10, 2], &[10, 3, 3, -1]);
     // 2^10 = 1024, 3^3 = 27, 10^3 = 1000, 2^(-1) = 0
     let expected: Vec<u8> = [1024i32, 27, 1000, 0]
         .iter()
@@ -938,7 +947,10 @@ fn select_f32_with_float_cond() {
     let x = g.add_input_tensor(GlobalId(1), 4, NumericDType::F32);
     let y = g.add_input_tensor(GlobalId(2), 4, NumericDType::F32);
     let out = g.push_group(
-        4, NumericDType::F32, ScalarOp::Select, vec![],
+        4,
+        NumericDType::F32,
+        ScalarOp::Select,
+        vec![],
         vec![
             InputRef::affine(cond, 1),
             InputRef::affine(x, 1),
@@ -955,7 +967,11 @@ fn select_f32_with_float_cond() {
             (x, NumericDType::F32, x_bytes),
             (y, NumericDType::F32, y_bytes),
         ],
-        &[AtomRange { base: out, count: 4, dtype: NumericDType::F32 }],
+        &[AtomRange {
+            base: out,
+            count: 4,
+            dtype: NumericDType::F32,
+        }],
     );
     // truthy=[T,F,F,T] → [x0, y1, y2, x3] = [10, 200, 300, 40]
     let expected = f32_input_bytes(&[10.0, 200.0, 300.0, 40.0]);
@@ -970,14 +986,20 @@ fn select_f32_with_int_cond() {
     let x = g.add_input_tensor(GlobalId(1), 4, NumericDType::F32);
     let y = g.add_input_tensor(GlobalId(2), 4, NumericDType::F32);
     let out = g.push_group(
-        4, NumericDType::F32, ScalarOp::Select, vec![],
+        4,
+        NumericDType::F32,
+        ScalarOp::Select,
+        vec![],
         vec![
             InputRef::affine(cond, 1),
             InputRef::affine(x, 1),
             InputRef::affine(y, 1),
         ],
     );
-    let c_bytes: Vec<u8> = [1i32, 0, -1, 42].iter().flat_map(|v| v.to_le_bytes()).collect();
+    let c_bytes: Vec<u8> = [1i32, 0, -1, 42]
+        .iter()
+        .flat_map(|v| v.to_le_bytes())
+        .collect();
     let x_bytes = f32_input_bytes(&[1.0, 2.0, 3.0, 4.0]);
     let y_bytes = f32_input_bytes(&[10.0, 20.0, 30.0, 40.0]);
     let outs = ab_test_bytes(
@@ -987,7 +1009,11 @@ fn select_f32_with_int_cond() {
             (x, NumericDType::F32, x_bytes),
             (y, NumericDType::F32, y_bytes),
         ],
-        &[AtomRange { base: out, count: 4, dtype: NumericDType::F32 }],
+        &[AtomRange {
+            base: out,
+            count: 4,
+            dtype: NumericDType::F32,
+        }],
     );
     let expected = f32_input_bytes(&[1.0, 20.0, 3.0, 4.0]);
     assert_eq!(outs[0], expected, "Select F32 with int cond");
@@ -1000,15 +1026,27 @@ fn unary_i32_neg() {
     let mut g = NanoGraph::new();
     let inp = g.add_input_tensor(GlobalId(0), 4, NumericDType::I32);
     let out = g.push_group(
-        4, NumericDType::I32,
-        ScalarOp::Unary { op: ScalarUnaryOp::Neg, compute_dtype: NumericDType::I32 },
-        vec![], vec![InputRef::affine(inp, 1)],
+        4,
+        NumericDType::I32,
+        ScalarOp::Unary {
+            op: ScalarUnaryOp::Neg,
+            compute_dtype: NumericDType::I32,
+        },
+        vec![],
+        vec![InputRef::affine(inp, 1)],
     );
-    let bytes: Vec<u8> = [1i32, -1, 0, i32::MAX].iter().flat_map(|v| v.to_le_bytes()).collect();
+    let bytes: Vec<u8> = [1i32, -1, 0, i32::MAX]
+        .iter()
+        .flat_map(|v| v.to_le_bytes())
+        .collect();
     let outs = ab_test_bytes(
         &g,
         &[(inp, NumericDType::I32, bytes)],
-        &[AtomRange { base: out, count: 4, dtype: NumericDType::I32 }],
+        &[AtomRange {
+            base: out,
+            count: 4,
+            dtype: NumericDType::I32,
+        }],
     );
     assert_eq!(outs[0].len(), 16, "I32 Neg output size");
 }
@@ -1018,15 +1056,27 @@ fn unary_i32_abs() {
     let mut g = NanoGraph::new();
     let inp = g.add_input_tensor(GlobalId(0), 4, NumericDType::I32);
     let out = g.push_group(
-        4, NumericDType::I32,
-        ScalarOp::Unary { op: ScalarUnaryOp::Abs, compute_dtype: NumericDType::I32 },
-        vec![], vec![InputRef::affine(inp, 1)],
+        4,
+        NumericDType::I32,
+        ScalarOp::Unary {
+            op: ScalarUnaryOp::Abs,
+            compute_dtype: NumericDType::I32,
+        },
+        vec![],
+        vec![InputRef::affine(inp, 1)],
     );
-    let bytes: Vec<u8> = [5i32, -5, 0, -1].iter().flat_map(|v| v.to_le_bytes()).collect();
+    let bytes: Vec<u8> = [5i32, -5, 0, -1]
+        .iter()
+        .flat_map(|v| v.to_le_bytes())
+        .collect();
     let outs = ab_test_bytes(
         &g,
         &[(inp, NumericDType::I32, bytes)],
-        &[AtomRange { base: out, count: 4, dtype: NumericDType::I32 }],
+        &[AtomRange {
+            base: out,
+            count: 4,
+            dtype: NumericDType::I32,
+        }],
     );
     assert_eq!(outs[0].len(), 16, "I32 Abs output size");
 }
@@ -1036,15 +1086,27 @@ fn unary_i32_bitwise_not() {
     let mut g = NanoGraph::new();
     let inp = g.add_input_tensor(GlobalId(0), 3, NumericDType::I32);
     let out = g.push_group(
-        3, NumericDType::I32,
-        ScalarOp::Unary { op: ScalarUnaryOp::BitwiseNot, compute_dtype: NumericDType::I32 },
-        vec![], vec![InputRef::affine(inp, 1)],
+        3,
+        NumericDType::I32,
+        ScalarOp::Unary {
+            op: ScalarUnaryOp::BitwiseNot,
+            compute_dtype: NumericDType::I32,
+        },
+        vec![],
+        vec![InputRef::affine(inp, 1)],
     );
-    let bytes: Vec<u8> = [0i32, -1, 0x55555555].iter().flat_map(|v| v.to_le_bytes()).collect();
+    let bytes: Vec<u8> = [0i32, -1, 0x55555555]
+        .iter()
+        .flat_map(|v| v.to_le_bytes())
+        .collect();
     let outs = ab_test_bytes(
         &g,
         &[(inp, NumericDType::I32, bytes)],
-        &[AtomRange { base: out, count: 3, dtype: NumericDType::I32 }],
+        &[AtomRange {
+            base: out,
+            count: 3,
+            dtype: NumericDType::I32,
+        }],
     );
     assert_eq!(outs[0].len(), 12, "I32 BitwiseNot output size");
 }
@@ -1074,7 +1136,11 @@ fn reduce_sum_f32() {
     let outs = ab_test_bytes(
         &g,
         &[(inp, NumericDType::F32, bytes)],
-        &[AtomRange { base: out, count: 1, dtype: NumericDType::F32 }],
+        &[AtomRange {
+            base: out,
+            count: 1,
+            dtype: NumericDType::F32,
+        }],
     );
     let expected = f32_input_bytes(&[10.0]);
     assert_eq!(outs[0], expected, "ReduceSum F32 [1,2,3,4] = 10");
@@ -1101,7 +1167,11 @@ fn reduce_max_f32_with_nan() {
     let outs = ab_test_bytes(
         &g,
         &[(inp, NumericDType::F32, bytes)],
-        &[AtomRange { base: out, count: 1, dtype: NumericDType::F32 }],
+        &[AtomRange {
+            base: out,
+            count: 1,
+            dtype: NumericDType::F32,
+        }],
     );
     assert_eq!(outs[0].len(), 4, "ReduceMax F32 output size");
 }
@@ -1130,7 +1200,11 @@ fn reduce_sum_f32_multiple_outputs() {
     let outs = ab_test_bytes(
         &g,
         &[(inp, NumericDType::F32, bytes)],
-        &[AtomRange { base: out, count: 2, dtype: NumericDType::F32 }],
+        &[AtomRange {
+            base: out,
+            count: 2,
+            dtype: NumericDType::F32,
+        }],
     );
     // out[0] = inp[0]+inp[1]+inp[2] = 6.0
     // out[1] = inp[1]+inp[2]+inp[3] = 9.0
@@ -1158,7 +1232,11 @@ fn reduce_prod_f32() {
     let outs = ab_test_bytes(
         &g,
         &[(inp, NumericDType::F32, bytes)],
-        &[AtomRange { base: out, count: 1, dtype: NumericDType::F32 }],
+        &[AtomRange {
+            base: out,
+            count: 1,
+            dtype: NumericDType::F32,
+        }],
     );
     let expected = f32_input_bytes(&[24.0]);
     assert_eq!(outs[0], expected, "ReduceProd F32 [1,2,3,4] = 24");
@@ -1172,10 +1250,34 @@ fn indirect_load_f32_gather() {
     use crate::numeric_scalar::NumericScalar;
     let mut g = NanoGraph::new();
     // Table: 4 literals [10.0, 20.0, 30.0, 40.0]
-    let t0 = g.push_group(1, NumericDType::F32, ScalarOp::Literal(NumericScalar::from_f32(10.0)), vec![], vec![]);
-    let t1 = g.push_group(1, NumericDType::F32, ScalarOp::Literal(NumericScalar::from_f32(20.0)), vec![], vec![]);
-    let t2 = g.push_group(1, NumericDType::F32, ScalarOp::Literal(NumericScalar::from_f32(30.0)), vec![], vec![]);
-    let _t3 = g.push_group(1, NumericDType::F32, ScalarOp::Literal(NumericScalar::from_f32(40.0)), vec![], vec![]);
+    let t0 = g.push_group(
+        1,
+        NumericDType::F32,
+        ScalarOp::Literal(NumericScalar::from_f32(10.0)),
+        vec![],
+        vec![],
+    );
+    let t1 = g.push_group(
+        1,
+        NumericDType::F32,
+        ScalarOp::Literal(NumericScalar::from_f32(20.0)),
+        vec![],
+        vec![],
+    );
+    let t2 = g.push_group(
+        1,
+        NumericDType::F32,
+        ScalarOp::Literal(NumericScalar::from_f32(30.0)),
+        vec![],
+        vec![],
+    );
+    let _t3 = g.push_group(
+        1,
+        NumericDType::F32,
+        ScalarOp::Literal(NumericScalar::from_f32(40.0)),
+        vec![],
+        vec![],
+    );
 
     // Index input: [2, 0, 3, 1] as I32.
     let idx = g.add_input_tensor(GlobalId(0), 4, NumericDType::I32);
@@ -1189,11 +1291,18 @@ fn indirect_load_f32_gather() {
         vec![InputRef::affine(idx, 1)],
     );
 
-    let idx_bytes: Vec<u8> = [2i32, 0, 3, 1].iter().flat_map(|v| v.to_le_bytes()).collect();
+    let idx_bytes: Vec<u8> = [2i32, 0, 3, 1]
+        .iter()
+        .flat_map(|v| v.to_le_bytes())
+        .collect();
     let outs = ab_test_bytes(
         &g,
         &[(idx, NumericDType::I32, idx_bytes)],
-        &[AtomRange { base: out, count: 4, dtype: NumericDType::F32 }],
+        &[AtomRange {
+            base: out,
+            count: 4,
+            dtype: NumericDType::F32,
+        }],
     );
     // indices [2, 0, 3, 1] → table[2]=30, table[0]=10, table[3]=40, table[1]=20
     let expected = f32_input_bytes(&[30.0, 10.0, 40.0, 20.0]);

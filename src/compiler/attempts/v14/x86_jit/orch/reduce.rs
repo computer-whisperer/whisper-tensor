@@ -78,12 +78,23 @@ pub fn emit_reduce_group(
 
     if group.count == 1 {
         emit_reduce_body(
-            asm, layout, &group.inputs[0],
-            group.base_id, group.atom_offset,
-            kind, reduce_count, k_bit_stride, compute_dtype, group.output_dtype,
-            repr, n_bits, src_info.src_dtype,
-            IterVar::Const(group.atom_offset), group.atom_offset,
-            addr_tables, codec_tables,
+            asm,
+            layout,
+            &group.inputs[0],
+            group.base_id,
+            group.atom_offset,
+            kind,
+            reduce_count,
+            k_bit_stride,
+            compute_dtype,
+            group.output_dtype,
+            repr,
+            n_bits,
+            src_info.src_dtype,
+            IterVar::Const(group.atom_offset),
+            group.atom_offset,
+            addr_tables,
+            codec_tables,
         )
     } else {
         let start = group.atom_offset as i64;
@@ -98,12 +109,23 @@ pub fn emit_reduce_group(
         dynasm!(asm; =>loop_top; cmp Rq(LOOP_VAR_REG), Rq(LOOP_END_REG); jge =>loop_exit);
 
         emit_reduce_body(
-            asm, layout, &group.inputs[0],
-            group.base_id, group.atom_offset,
-            kind, reduce_count, k_bit_stride, compute_dtype, group.output_dtype,
-            repr, n_bits, src_info.src_dtype,
-            IterVar::Reg(LOOP_VAR_REG), group.atom_offset,
-            addr_tables, codec_tables,
+            asm,
+            layout,
+            &group.inputs[0],
+            group.base_id,
+            group.atom_offset,
+            kind,
+            reduce_count,
+            k_bit_stride,
+            compute_dtype,
+            group.output_dtype,
+            repr,
+            n_bits,
+            src_info.src_dtype,
+            IterVar::Reg(LOOP_VAR_REG),
+            group.atom_offset,
+            addr_tables,
+            codec_tables,
         )?;
 
         dynasm!(asm; add Rq(LOOP_VAR_REG), 1; jmp =>loop_top; =>loop_exit);
@@ -125,7 +147,8 @@ fn resolve_reduce_source_info(
     // Resolve the input's base atom to get the slot info.
     match input {
         InputRef::Broadcast(id) => {
-            let (slot, _) = layout.find(*id)
+            let (slot, _) = layout
+                .find(*id)
                 .ok_or_else(|| format!("reduce: no slot for Broadcast atom={id}"))?;
             Ok(ReduceSourceInfo {
                 n_bits: slot.elem_bits as u32,
@@ -133,14 +156,20 @@ fn resolve_reduce_source_info(
                 src_dtype: slot.dtype,
             })
         }
-        InputRef::Strided { base, dim_strides, dim_shape } => {
+        InputRef::Strided {
+            base,
+            dim_strides,
+            dim_shape,
+        } => {
             let first_offset = crate::compiler::attempts::v14::layout::strided_resolve_offset(
-                dim_strides, dim_shape, atom_offset,
+                dim_strides,
+                dim_shape,
+                atom_offset,
             );
-            let first_atom = crate::nano_graph::pattern::AtomId(
-                ((base.0 as i64) + first_offset) as u64,
-            );
-            let (slot, _) = layout.find(*base)
+            let first_atom =
+                crate::nano_graph::pattern::AtomId(((base.0 as i64) + first_offset) as u64);
+            let (slot, _) = layout
+                .find(*base)
                 .or_else(|| layout.find(first_atom))
                 .ok_or_else(|| format!("reduce: no slot for Strided base={base}"))?;
             Ok(ReduceSourceInfo {
@@ -150,7 +179,8 @@ fn resolve_reduce_source_info(
             })
         }
         InputRef::Explicit(ids) if !ids.is_empty() => {
-            let (slot, _) = layout.find(ids[0])
+            let (slot, _) = layout
+                .find(ids[0])
                 .ok_or_else(|| format!("reduce: no slot for Explicit[0]={}", ids[0]))?;
             Ok(ReduceSourceInfo {
                 n_bits: slot.elem_bits as u32,
@@ -185,8 +215,14 @@ fn emit_reduce_body(
 ) -> Result<(), String> {
     // 1. Compute base address for k=0 → r10, copy to rdi.
     emit_compute_bit_offset(
-        asm, layout, input, iter, atom_offset,
-        BIT_OFF, SCRATCH, addr_tables,
+        asm,
+        layout,
+        input,
+        iter,
+        atom_offset,
+        BIT_OFF,
+        SCRATCH,
+        addr_tables,
     )?;
     dynasm!(asm; .arch x64; mov Rq(REDUCE_SRC_BIT), Rq(BIT_OFF));
 
@@ -213,7 +249,15 @@ fn emit_reduce_body(
         ComputeRepr::F32 | ComputeRepr::F64 => CodecSlot::Xmm(FLT_SLOT_A),
         ComputeRepr::Int => CodecSlot::Gp(RAW),
     };
-    emit_decode(asm, src_dtype, RAW, slot_a, CODEC_SCRATCH, CODEC_XMM_SCRATCH, codec_tables)?;
+    emit_decode(
+        asm,
+        src_dtype,
+        RAW,
+        slot_a,
+        CODEC_SCRATCH,
+        CODEC_XMM_SCRATCH,
+        codec_tables,
+    )?;
 
     // 3b. Accumulate: acc = acc op val.
     emit_reduce_accum(asm, kind, repr, compute_dtype)?;
@@ -224,8 +268,13 @@ fn emit_reduce_body(
         ComputeRepr::Int => CodecSlot::Gp(INT_SLOT_C),
     };
     emit_narrow_to(
-        asm, compute_dtype, acc_slot,
-        RAW, CODEC_SCRATCH, BIT_OFF, CODEC_XMM_SCRATCH,
+        asm,
+        compute_dtype,
+        acc_slot,
+        RAW,
+        CODEC_SCRATCH,
+        BIT_OFF,
+        CODEC_XMM_SCRATCH,
         codec_tables,
     )?;
 
@@ -247,16 +296,32 @@ fn emit_reduce_body(
 
     // 4. Encode accumulator → rax, store.
     emit_encode(
-        asm, output_dtype, acc_slot, RAW,
-        CODEC_SCRATCH, BIT_OFF, CODEC_XMM_SCRATCH,
+        asm,
+        output_dtype,
+        acc_slot,
+        RAW,
+        CODEC_SCRATCH,
+        BIT_OFF,
+        CODEC_XMM_SCRATCH,
     )?;
     let dst_info = emit_output_bit_offset(
-        asm, layout, output_base, output_atom_offset, iter,
-        BIT_OFF, SCRATCH,
+        asm,
+        layout,
+        output_base,
+        output_atom_offset,
+        iter,
+        BIT_OFF,
+        SCRATCH,
     )?;
     emit_store_bits(
-        asm, BUFFER_REG, BIT_OFF, dst_info.n_bits, RAW,
-        CODEC_SCRATCH, REDUCE_K, SCRATCH,
+        asm,
+        BUFFER_REG,
+        BIT_OFF,
+        dst_info.n_bits,
+        RAW,
+        CODEC_SCRATCH,
+        REDUCE_K,
+        SCRATCH,
     );
 
     Ok(())

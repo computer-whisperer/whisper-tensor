@@ -40,12 +40,6 @@ arbitrary-int = { version = "2.1", features = ["serde"] }
 
 tch = { version = "0.23.0", optional = true }
 
-cranelift-codegen = { version = "0.116", optional = true }
-cranelift-frontend = { version = "0.116", optional = true }
-cranelift-module = { version = "0.116", optional = true }
-cranelift-jit = { version = "0.116", optional = true }
-cranelift-native = { version = "0.116", optional = true }
-
 dynasm = { version = "5.0", optional = true }
 dynasmrt = { version = "5.0", optional = true }
 
@@ -53,16 +47,12 @@ dynasmrt = { version = "5.0", optional = true }
 whisper-tensor-import = {workspace=true}
 
 [features]
-default = ["tokenizers", "rwkv-tokenizer", "http", "safetensors"]
+default = ["tokenizers", "rwkv-tokenizer", "http", "safetensors", "x86_compile"]
 safetensors = ["dep:safetensors", "dep:memmap2"]
 tokenizers = ["dep:tokenizers"]
 http = ["tokenizers?/http"]
 rwkv-tokenizer = ["dep:rwkv-tokenizer"]
-cranelift = ["dep:cranelift-codegen", "dep:cranelift-frontend", "dep:cranelift-module", "dep:cranelift-jit", "dep:cranelift-native"]
-# x86_compile requires cranelift through P0–P7 of the rollout: Cranelift
-# is the per-span fallback while op coverage is built up. The dependency
-# inverts in P8 when JitCompiledSpan + the cranelift-* crates are deleted.
-x86_compile = ["dep:dynasm", "dep:dynasmrt", "cranelift"]
+x86_compile = ["dep:dynasm", "dep:dynasmrt"]
 espeak = ["dep:espeak-rs"]
 tch = ["dep:tch"]
 

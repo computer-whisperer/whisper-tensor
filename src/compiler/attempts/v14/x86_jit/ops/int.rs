@@ -301,11 +301,7 @@ fn emit_int_mod(asm: &mut Assembler, signed: bool, bits: u8, _scratch: u8) {
 ///
 /// Input in `INT_SLOT_A` (rax). Result in `INT_SLOT_C` (rdx).
 /// The caller applies wrapping after this returns.
-pub fn emit_unop_int(
-    asm: &mut Assembler,
-    op: ScalarUnaryOp,
-    signed: bool,
-) -> Result<(), String> {
+pub fn emit_unop_int(asm: &mut Assembler, op: ScalarUnaryOp, signed: bool) -> Result<(), String> {
     let a = INT_SLOT_A;
     let c = INT_SLOT_C;
     match op {

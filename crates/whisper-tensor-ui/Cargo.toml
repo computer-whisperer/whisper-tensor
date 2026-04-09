@@ -12,9 +12,9 @@ path = "src/main.rs"
 
 [features]
 default = []
-native = ["import", "cranelift", "http", "safetensors"]
+native = ["import", "x86_compile", "http", "safetensors"]
 import = ["whisper-tensor-server/import"]
-cranelift = ["whisper-tensor-server/cranelift"]
+x86_compile = ["whisper-tensor-server/x86_compile"]
 http = ["whisper-tensor/http", "whisper-tensor-server/http"]
 safetensors = ["whisper-tensor/safetensors", "whisper-tensor-server/safetensors"]
 espeak = ["whisper-tensor-server/espeak"]

@@ -43,11 +43,7 @@ use crate::nano_graph::ops::{ScalarBinOp, ScalarUnaryOp};
 ///
 /// `scratch_gp` is a free GP register, clobbered by comparison /
 /// logical paths (used for the `setcc` → `cvtsi2ss` sequence).
-pub fn emit_binop_f32(
-    asm: &mut Assembler,
-    op: ScalarBinOp,
-    scratch_gp: u8,
-) -> Result<(), String> {
+pub fn emit_binop_f32(asm: &mut Assembler, op: ScalarBinOp, scratch_gp: u8) -> Result<(), String> {
     let a = FLT_SLOT_A;
     let b = FLT_SLOT_B;
     let c = FLT_SLOT_C;
@@ -88,11 +84,7 @@ pub fn emit_binop_f32(
 }
 
 /// Emit a float binary op in F64 compute repr.
-pub fn emit_binop_f64(
-    asm: &mut Assembler,
-    op: ScalarBinOp,
-    scratch_gp: u8,
-) -> Result<(), String> {
+pub fn emit_binop_f64(asm: &mut Assembler, op: ScalarBinOp, scratch_gp: u8) -> Result<(), String> {
     let a = FLT_SLOT_A;
     let b = FLT_SLOT_B;
     let c = FLT_SLOT_C;
@@ -140,36 +132,44 @@ pub fn emit_binop_f64(
 /// x86 `vminss`/`vmaxss` propagate src2 when *either* is NaN, so we
 /// emit two instructions with swapped operands and combine:
 ///
-///     vmaxss tmp, A, B   ; tmp = max(A,B), but if A is NaN → B
-///     vmaxss C, B, A     ; C   = max(B,A), but if B is NaN → A
-///     vmaxss C, tmp, C   ; picks the non-NaN result (or NaN if both)
+/// ```text
+/// vmaxss tmp, A, B   ; tmp = max(A,B), but if A is NaN → B
+/// vmaxss C, B, A     ; C   = max(B,A), but if B is NaN → A
+/// vmaxss C, tmp, C   ; picks the non-NaN result (or NaN if both)
+/// ```
 ///
 /// Wait, that's 3 instructions. Simpler: vmaxss with both orderings
 /// gives `max(A,B)` when neither is NaN, `B` when `A` is NaN (first),
 /// `A` when `B` is NaN (second). We want the non-NaN, so:
 ///
-///     vmaxss C, A, B     ; if A NaN → B, if B NaN → B(!), if neither → max
-///     vmaxss tmp, B, A   ; if B NaN → A, if A NaN → A(!), if neither → max
+/// ```text
+/// vmaxss C, A, B     ; if A NaN → B, if B NaN → B(!), if neither → max
+/// vmaxss tmp, B, A   ; if B NaN → A, if A NaN → A(!), if neither → max
+/// ```
 ///
 /// Hmm, this doesn't work simply. The canonical approach is:
 ///
-///     vmaxss C, A, B      ; C = vmaxss(A,B)
-///     vcmpunordss mask, A, A  ; mask = A is NaN
-///     vblendvps C, C, B, mask ; if A was NaN, use B
+/// ```text
+/// vmaxss C, A, B      ; C = vmaxss(A,B)
+/// vcmpunordss mask, A, A  ; mask = A is NaN
+/// vblendvps C, C, B, mask ; if A was NaN, use B
+/// ```
 ///
 /// But vblendvps is SSE4.1 and operates on packed. Let me use a simpler
 /// two-vmax approach which is correct for minNum/maxNum:
 ///
-///     vmaxss C, A, B      ; if A NaN: C=B; if B NaN: C=B (wrong!); else max
-///     vmaxss tmp, B, A    ; if B NaN: tmp=A; if A NaN: tmp=A (wrong!); else max
-///     ; Need: if both NaN → NaN, if A NaN → B, if B NaN → A, else max
-///     ; vmaxss(A,B) gives: A NaN→B, B NaN→B, both NaN→NaN(?), neither→max
-///     ; vmaxss(B,A) gives: B NaN→A, A NaN→A, both NaN→NaN(?), neither→max
-///     ; So: vmaxss(A,B) is correct when B is not NaN (gives B if A NaN, max if neither)
-///     ;     vmaxss(B,A) is correct when A is not NaN (gives A if B NaN, max if neither)
-///     ; Combine: use vmaxss(A,B) unless B is NaN → use vmaxss(B,A) instead.
-///     ; Detect B NaN: if B NaN, vmaxss(A,B) != vmaxss(B,A) only when A is not NaN.
-///     ; Simplest correct: vmaxss(A,B), then vmaxss(result, B, A) — nope.
+/// ```text
+/// vmaxss C, A, B      ; if A NaN: C=B; if B NaN: C=B (wrong!); else max
+/// vmaxss tmp, B, A    ; if B NaN: tmp=A; if A NaN: tmp=A (wrong!); else max
+/// ; Need: if both NaN → NaN, if A NaN → B, if B NaN → A, else max
+/// ; vmaxss(A,B) gives: A NaN→B, B NaN→B, both NaN→NaN(?), neither→max
+/// ; vmaxss(B,A) gives: B NaN→A, A NaN→A, both NaN→NaN(?), neither→max
+/// ; So: vmaxss(A,B) is correct when B is not NaN (gives B if A NaN, max if neither)
+/// ;     vmaxss(B,A) is correct when A is not NaN (gives A if B NaN, max if neither)
+/// ; Combine: use vmaxss(A,B) unless B is NaN → use vmaxss(B,A) instead.
+/// ; Detect B NaN: if B NaN, vmaxss(A,B) != vmaxss(B,A) only when A is not NaN.
+/// ; Simplest correct: vmaxss(A,B), then vmaxss(result, B, A) — nope.
+/// ```
 ///
 /// Actually the simplest correct approach for minNum:
 ///     vminss C, B, A    ; C = min(B, A): if B NaN → A (correct!)
@@ -509,11 +509,7 @@ fn emit_fimod_f64(asm: &mut Assembler) {
 /// **Libm calls** clobber all caller-saved registers (GP and XMM).
 /// The orchestration layer must ensure callee-saved registers (r12–r14)
 /// hold the only live state across a unary op call.
-pub fn emit_unop_f32(
-    asm: &mut Assembler,
-    op: ScalarUnaryOp,
-    scratch_gp: u8,
-) -> Result<(), String> {
+pub fn emit_unop_f32(asm: &mut Assembler, op: ScalarUnaryOp, scratch_gp: u8) -> Result<(), String> {
     let a = FLT_SLOT_A;
     let c = FLT_SLOT_C;
     match op {
@@ -579,7 +575,10 @@ pub fn emit_unop_f32(
                 ; vcvtsi2ss Rx(c), Rx(c), Rd(scratch_gp)
             );
         }
-        ScalarUnaryOp::IsInf { detect_positive, detect_negative } => {
+        ScalarUnaryOp::IsInf {
+            detect_positive,
+            detect_negative,
+        } => {
             // Check if raw bits match ±inf pattern.
             let inf_pos: u32 = 0x7f800000;
             let inf_neg: u32 = 0xff800000;
@@ -657,11 +656,7 @@ pub fn emit_unop_f32(
 }
 
 /// Emit a float unary op in F64 compute repr.
-pub fn emit_unop_f64(
-    asm: &mut Assembler,
-    op: ScalarUnaryOp,
-    scratch_gp: u8,
-) -> Result<(), String> {
+pub fn emit_unop_f64(asm: &mut Assembler, op: ScalarUnaryOp, scratch_gp: u8) -> Result<(), String> {
     let a = FLT_SLOT_A;
     let c = FLT_SLOT_C;
     match op {
@@ -722,7 +717,10 @@ pub fn emit_unop_f64(
                 ; vcvtsi2sd Rx(c), Rx(c), Rd(scratch_gp)
             );
         }
-        ScalarUnaryOp::IsInf { detect_positive, detect_negative } => {
+        ScalarUnaryOp::IsInf {
+            detect_positive,
+            detect_negative,
+        } => {
             let inf_pos: u64 = 0x7ff0000000000000;
             let inf_neg: u64 = 0xfff0000000000000;
             dynasm!(asm

@@ -34,7 +34,7 @@ sysinfo = { version = "0.32", default-features = false, features = ["system"] }
 [features]
 default = ["whisper-tensor/default", "import"]
 import = ["dep:whisper-tensor-import"]
-cranelift = ["whisper-tensor/cranelift"]
+x86_compile = ["whisper-tensor/x86_compile"]
 http = ["whisper-tensor/http"]
 safetensors = ["whisper-tensor/safetensors"]
 espeak = ["whisper-tensor/espeak"]

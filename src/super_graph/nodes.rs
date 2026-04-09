@@ -444,7 +444,7 @@ impl SuperGraphNode for SuperGraphNodeModelExecution {
                 }
                 // Fall through to symbolic eval if lowered path declined.
             }
-            #[cfg(feature = "cranelift")]
+            #[cfg(feature = "x86_compile")]
             crate::super_graph::ModelEvalMode::CompiledEval {
                 inline_constant_threshold,
                 compile_options,
@@ -703,7 +703,7 @@ impl SuperGraphNodeModelExecution {
     /// - `Ok(Some(results))` if compiled eval succeeded
     /// - `Ok(None)` if the graph can't be lowered/compiled (fall back)
     /// - `Err(e)` on hard failure
-    #[cfg(feature = "cranelift")]
+    #[cfg(feature = "x86_compile")]
     #[allow(clippy::type_complexity, clippy::too_many_arguments)]
     fn try_compiled_eval<'short, 'model, 'p, P: Pool + 'p, T: SuperGraphObserver>(
         &self,

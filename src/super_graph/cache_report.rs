@@ -97,7 +97,7 @@ impl SuperGraphCache {
         lowered_models.sort_by_key(|m| m.graph_id);
 
         let mut compiled_plans: Vec<CompiledPlanReport> = Vec::new();
-        #[cfg(feature = "cranelift")]
+        #[cfg(feature = "x86_compile")]
         for (&graph_id, cached) in &self.compiled_plan_cache {
             compiled_plans.push(CompiledPlanReport {
                 graph_id,

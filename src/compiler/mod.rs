@@ -38,17 +38,17 @@ impl Default for PartitionerKind {
 
 /// Which codegen backend to use for compiling each span.
 ///
-/// Default: `Jit` (Cranelift), with automatic fallback to pool_eval for
-/// spans containing opaque ops or for which compilation fails.
+/// Default: `Jit` (x86_jit / dynasm), with automatic fallback to pool_eval
+/// for spans containing opaque ops or for which compilation fails.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub enum CodegenKind {
-    /// Cranelift JIT. Falls back to pool_eval per-span on opaque ops or
-    /// compile errors. Requires the `cranelift` feature.
+    /// x86_jit (dynasm). Falls back to pool_eval per-span on opaque ops or
+    /// compile errors. Requires the `x86_compile` feature.
     #[default]
     Jit,
     /// Force pool_eval for every span (no JIT). Slow but useful as a
     /// correctness baseline that exercises the executor's I/O contract
-    /// without depending on Cranelift codegen.
+    /// without depending on JIT codegen.
     PoolEval,
 }
 
