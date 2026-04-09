@@ -84,7 +84,7 @@ pub fn emit_group(
     codec_tables: &mut CodecTables,
 ) -> Result<(), String> {
     match &group.op {
-        ScalarOp::Identity => emit_identity_group(asm, layout, group, addr_tables),
+        ScalarOp::Identity => emit_identity_group(asm, layout, group, addr_tables, codec_tables),
         ScalarOp::Cast { .. } => emit_cast_group(asm, layout, group, addr_tables, codec_tables),
         ScalarOp::Literal(_) | ScalarOp::LiteralSpan(_) => {
             // Values are pre-populated in the buffer template by
@@ -125,6 +125,7 @@ fn emit_identity_group(
     layout: &BufferLayout,
     group: &AtomGroup<'static, SystemPool>,
     tables: &mut AddressTables,
+    codec_tables: &mut CodecTables,
 ) -> Result<(), String> {
     if group.inputs.len() != 1 {
         return Err(format!(
@@ -138,15 +139,11 @@ fn emit_identity_group(
     // primitive keeps the math in one place.
     let output_ref = InputRef::affine(group.base_id, 1);
 
-    // P2.B.3 only handles same-dtype Identity. Verify by peeking at
-    // the slot dtypes via the InputRef base lookups (cheap).
+    // If src and output dtypes differ, this is effectively a Cast —
+    // route through the Cast path which does decode(src) → encode(dst).
     let src_dtype = lookup_input_dtype(layout, &group.inputs[0], group.atom_offset)?;
     if src_dtype != group.output_dtype {
-        return Err(format!(
-            "x86_jit emit_group Identity: src dtype {:?} != output dtype {:?} \
-             (P2.B.5 will add Cast)",
-            src_dtype, group.output_dtype
-        ));
+        return emit_cast_group(asm, layout, group, tables, codec_tables);
     }
 
     if group.count == 1 {
