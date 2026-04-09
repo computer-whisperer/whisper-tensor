@@ -19,7 +19,7 @@ use dynasmrt::x64::Assembler;
 use dynasmrt::{DynasmApi, DynasmLabelApi, dynasm};
 
 use super::super::prologue::{FLT_SLOT_A, FLT_SLOT_B, FLT_SLOT_C};
-use crate::nano_graph::ops::ScalarBinOp;
+use crate::nano_graph::ops::{ScalarBinOp, ScalarUnaryOp};
 
 /// Emit a float binary op in F32 compute repr.
 ///
@@ -411,29 +411,434 @@ fn emit_logical_f64(asm: &mut Assembler, kind: LogicalKind, scratch: u8) {
 // Need r8 for the F64 logical path mask.
 const BIT_IO_TMP1_REG: u8 = 8;
 
-// ─── Mod / IMod / Pow stubs ─────────────────────────────────────────
-// These need libm trampolines. Stubs for now.
+// ─── Binary libm trampolines ────────────────────────────────────────
 
-fn emit_fmod_f32(_asm: &mut Assembler) {
-    todo!("emit_fmod_f32: needs libm fmodf trampoline (P3.E)")
+/// Emit a call to a binary libm function `fn(f32, f32) -> f32`.
+/// Inputs are already in xmm0 (slot A) and xmm1 (slot B) — the
+/// System V first two float arguments. Result lands in xmm0, then
+/// is copied to slot C (xmm2).
+fn emit_libm2_f32(asm: &mut Assembler, fn_ptr: *const ()) {
+    dynasm!(asm
+        ; .arch x64
+        ; mov rax, QWORD fn_ptr as i64
+        ; call rax
+        ; vmovaps Rx(FLT_SLOT_C), xmm0
+    );
 }
 
-fn emit_fmod_f64(_asm: &mut Assembler) {
-    todo!("emit_fmod_f64: needs libm fmod trampoline (P3.E)")
+fn emit_libm2_f64(asm: &mut Assembler, fn_ptr: *const ()) {
+    dynasm!(asm
+        ; .arch x64
+        ; mov rax, QWORD fn_ptr as i64
+        ; call rax
+        ; vmovaps Rx(FLT_SLOT_C), xmm0
+    );
 }
 
-fn emit_fimod_f32(_asm: &mut Assembler) {
-    todo!("emit_fimod_f32: needs libm remainderf trampoline (P3.E)")
+unsafe extern "C" {
+    fn fmodf(a: f32, b: f32) -> f32;
+    fn fmod(a: f64, b: f64) -> f64;
+    fn powf(a: f32, b: f32) -> f32;
+    fn pow(a: f64, b: f64) -> f64;
 }
 
-fn emit_fimod_f64(_asm: &mut Assembler) {
-    todo!("emit_fimod_f64: needs libm remainder trampoline (P3.E)")
+fn emit_fmod_f32(asm: &mut Assembler) {
+    emit_libm2_f32(asm, fmodf as *const ());
+}
+fn emit_fmod_f64(asm: &mut Assembler) {
+    emit_libm2_f64(asm, fmod as *const ());
+}
+fn emit_fpow_f32(asm: &mut Assembler) {
+    emit_libm2_f32(asm, powf as *const ());
+}
+fn emit_fpow_f64(asm: &mut Assembler) {
+    emit_libm2_f64(asm, pow as *const ());
 }
 
-fn emit_fpow_f32(_asm: &mut Assembler) {
-    todo!("emit_fpow_f32: needs libm powf trampoline (P3.E)")
+/// IMod (Euclidean modulo): `a - floor(a/b) * b`.
+/// For floats, this differs from fmod when signs differ.
+fn emit_fimod_f32(asm: &mut Assembler) {
+    // Compute via: result = a - floor(a/b) * b
+    let a = FLT_SLOT_A;
+    let b = FLT_SLOT_B;
+    let c = FLT_SLOT_C;
+    dynasm!(asm
+        ; .arch x64
+        ; vdivss Rx(c), Rx(a), Rx(b)       // c = a / b
+        ; vroundss Rx(c), Rx(c), Rx(c), 1   // c = floor(a / b)
+        ; vmulss Rx(c), Rx(c), Rx(b)        // c = floor(a / b) * b
+        ; vsubss Rx(c), Rx(a), Rx(c)        // c = a - floor(a / b) * b
+    );
 }
 
-fn emit_fpow_f64(_asm: &mut Assembler) {
-    todo!("emit_fpow_f64: needs libm pow trampoline (P3.E)")
+fn emit_fimod_f64(asm: &mut Assembler) {
+    let a = FLT_SLOT_A;
+    let b = FLT_SLOT_B;
+    let c = FLT_SLOT_C;
+    dynasm!(asm
+        ; .arch x64
+        ; vdivsd Rx(c), Rx(a), Rx(b)
+        ; vroundsd Rx(c), Rx(c), Rx(c), 1
+        ; vmulsd Rx(c), Rx(c), Rx(b)
+        ; vsubsd Rx(c), Rx(a), Rx(c)
+    );
+}
+
+// ─── Float unary ops ────────────────────────────────────────────────
+
+/// Emit a float unary op in F32 compute repr.
+///
+/// Input in `xmm(FLT_SLOT_A)`. Result in `xmm(FLT_SLOT_C)`.
+/// `scratch_gp` is a free GP register, clobbered by some paths.
+///
+/// **Libm calls** clobber all caller-saved registers (GP and XMM).
+/// The orchestration layer must ensure callee-saved registers (r12–r14)
+/// hold the only live state across a unary op call.
+pub fn emit_unop_f32(
+    asm: &mut Assembler,
+    op: ScalarUnaryOp,
+    scratch_gp: u8,
+) -> Result<(), String> {
+    let a = FLT_SLOT_A;
+    let c = FLT_SLOT_C;
+    match op {
+        ScalarUnaryOp::Neg => {
+            // Flip sign bit via XOR with 0x80000000.
+            dynasm!(asm
+                ; .arch x64
+                ; mov Rd(scratch_gp), DWORD 0x80000000_u32 as i32
+                ; vmovd Rx(c), Rd(scratch_gp)
+                ; vxorps Rx(c), Rx(a), Rx(c)
+            );
+        }
+        ScalarUnaryOp::Abs => {
+            // Clear sign bit via AND with 0x7fffffff.
+            dynasm!(asm
+                ; .arch x64
+                ; mov Rd(scratch_gp), 0x7fffffff
+                ; vmovd Rx(c), Rd(scratch_gp)
+                ; vandps Rx(c), Rx(a), Rx(c)
+            );
+        }
+        ScalarUnaryOp::Sqrt => {
+            dynasm!(asm; .arch x64; vsqrtss Rx(c), Rx(c), Rx(a));
+        }
+        ScalarUnaryOp::Reciprocal => {
+            // 1.0 / A
+            dynasm!(asm
+                ; .arch x64
+                ; mov Rd(scratch_gp), DWORD 0x3f800000_u32 as i32  // 1.0f
+                ; vmovd Rx(c), Rd(scratch_gp)
+                ; vdivss Rx(c), Rx(c), Rx(a)
+            );
+        }
+        ScalarUnaryOp::Floor => {
+            dynasm!(asm; .arch x64; vroundss Rx(c), Rx(c), Rx(a), 1);
+        }
+        ScalarUnaryOp::Ceil => {
+            dynasm!(asm; .arch x64; vroundss Rx(c), Rx(c), Rx(a), 2);
+        }
+        ScalarUnaryOp::Round => {
+            dynasm!(asm; .arch x64; vroundss Rx(c), Rx(c), Rx(a), 0);
+        }
+        ScalarUnaryOp::Not => {
+            // Float Not: truthy(A) → 0.0, falsy(A) → 1.0.
+            // Truthy = (raw & 0x7fffffff) != 0.
+            dynasm!(asm
+                ; .arch x64
+                ; vmovd Rd(scratch_gp), Rx(a)
+                ; and Rd(scratch_gp), 0x7fffffff
+                ; test Rd(scratch_gp), Rd(scratch_gp)
+                ; sete Rb(scratch_gp)
+                ; movzx Rd(scratch_gp), Rb(scratch_gp)
+                ; vcvtsi2ss Rx(c), Rx(c), Rd(scratch_gp)
+            );
+        }
+        ScalarUnaryOp::IsNan => {
+            // 1.0 if NaN, 0.0 otherwise.
+            dynasm!(asm
+                ; .arch x64
+                ; vucomiss Rx(a), Rx(a)
+                ; setp Rb(scratch_gp)
+                ; movzx Rd(scratch_gp), Rb(scratch_gp)
+                ; vcvtsi2ss Rx(c), Rx(c), Rd(scratch_gp)
+            );
+        }
+        ScalarUnaryOp::IsInf { detect_positive, detect_negative } => {
+            // Check if raw bits match ±inf pattern.
+            let inf_pos: u32 = 0x7f800000;
+            let inf_neg: u32 = 0xff800000;
+            dynasm!(asm
+                ; .arch x64
+                ; vmovd Rd(scratch_gp), Rx(a)
+                ; xor ecx, ecx  // result = 0
+            );
+            if detect_positive {
+                dynasm!(asm
+                    ; cmp Rd(scratch_gp), DWORD inf_pos as i32
+                    ; sete cl
+                );
+            }
+            if detect_negative {
+                dynasm!(asm
+                    ; cmp Rd(scratch_gp), DWORD inf_neg as i32
+                    ; sete Rb(scratch_gp)
+                    ; or cl, Rb(scratch_gp)
+                );
+            }
+            dynasm!(asm
+                ; .arch x64
+                ; movzx Rd(scratch_gp), cl
+                ; vcvtsi2ss Rx(c), Rx(c), Rd(scratch_gp)
+            );
+        }
+        ScalarUnaryOp::Sign => {
+            // -1.0 if A < 0, 0.0 if A is ±0 or NaN, 1.0 if A > 0.
+            let neg = asm.new_dynamic_label();
+            let zero_or_nan = asm.new_dynamic_label();
+            let done = asm.new_dynamic_label();
+            dynasm!(asm
+                ; .arch x64
+                ; vxorps Rx(c), Rx(c), Rx(c)  // 0.0
+                ; vucomiss Rx(a), Rx(c)
+                ; jp =>zero_or_nan             // NaN
+                ; je =>zero_or_nan             // ±0
+                ; jb =>neg                     // A < 0
+                // A > 0
+                ; mov Rd(scratch_gp), DWORD 0x3f800000_u32 as i32
+                ; vmovd Rx(c), Rd(scratch_gp)
+                ; jmp =>done
+                ; =>neg
+                ; mov Rd(scratch_gp), DWORD 0xbf800000_u32 as i32
+                ; vmovd Rx(c), Rd(scratch_gp)
+                ; jmp =>done
+                ; =>zero_or_nan
+                ; vxorps Rx(c), Rx(c), Rx(c)
+                ; =>done
+            );
+        }
+        ScalarUnaryOp::BitwiseNot => {
+            return Err("emit_unop_f32: BitwiseNot not valid for float".to_string());
+        }
+        // Libm trampolines — input already in xmm0 (slot A = System V arg0).
+        ScalarUnaryOp::Exp => emit_libm1_f32(asm, expf as *const ()),
+        ScalarUnaryOp::Ln => emit_libm1_f32(asm, logf as *const ()),
+        ScalarUnaryOp::Tanh => emit_libm1_f32(asm, tanhf as *const ()),
+        ScalarUnaryOp::Erf => emit_libm1_f32(asm, erff as *const ()),
+        ScalarUnaryOp::Sin => emit_libm1_f32(asm, sinf as *const ()),
+        ScalarUnaryOp::Cos => emit_libm1_f32(asm, cosf as *const ()),
+        ScalarUnaryOp::Tan => emit_libm1_f32(asm, tanf as *const ()),
+        ScalarUnaryOp::Asin => emit_libm1_f32(asm, asinf as *const ()),
+        ScalarUnaryOp::Acos => emit_libm1_f32(asm, acosf as *const ()),
+        ScalarUnaryOp::Atan => emit_libm1_f32(asm, atanf as *const ()),
+        ScalarUnaryOp::Sinh => emit_libm1_f32(asm, sinhf as *const ()),
+        ScalarUnaryOp::Cosh => emit_libm1_f32(asm, coshf as *const ()),
+        ScalarUnaryOp::Asinh => emit_libm1_f32(asm, asinhf as *const ()),
+        ScalarUnaryOp::Acosh => emit_libm1_f32(asm, acoshf as *const ()),
+        ScalarUnaryOp::Atanh => emit_libm1_f32(asm, atanhf as *const ()),
+        ScalarUnaryOp::Log1p => emit_libm1_f32(asm, log1pf as *const ()),
+    }
+    Ok(())
+}
+
+/// Emit a float unary op in F64 compute repr.
+pub fn emit_unop_f64(
+    asm: &mut Assembler,
+    op: ScalarUnaryOp,
+    scratch_gp: u8,
+) -> Result<(), String> {
+    let a = FLT_SLOT_A;
+    let c = FLT_SLOT_C;
+    match op {
+        ScalarUnaryOp::Neg => {
+            dynasm!(asm
+                ; .arch x64
+                ; mov Rq(scratch_gp), QWORD 0x8000000000000000_u64 as i64
+                ; vmovq Rx(c), Rq(scratch_gp)
+                ; vxorpd Rx(c), Rx(a), Rx(c)
+            );
+        }
+        ScalarUnaryOp::Abs => {
+            dynasm!(asm
+                ; .arch x64
+                ; mov Rq(scratch_gp), QWORD 0x7fffffffffffffff_u64 as i64
+                ; vmovq Rx(c), Rq(scratch_gp)
+                ; vandpd Rx(c), Rx(a), Rx(c)
+            );
+        }
+        ScalarUnaryOp::Sqrt => {
+            dynasm!(asm; .arch x64; vsqrtsd Rx(c), Rx(c), Rx(a));
+        }
+        ScalarUnaryOp::Reciprocal => {
+            dynasm!(asm
+                ; .arch x64
+                ; mov Rq(scratch_gp), QWORD 0x3ff0000000000000_u64 as i64
+                ; vmovq Rx(c), Rq(scratch_gp)
+                ; vdivsd Rx(c), Rx(c), Rx(a)
+            );
+        }
+        ScalarUnaryOp::Floor => {
+            dynasm!(asm; .arch x64; vroundsd Rx(c), Rx(c), Rx(a), 1);
+        }
+        ScalarUnaryOp::Ceil => {
+            dynasm!(asm; .arch x64; vroundsd Rx(c), Rx(c), Rx(a), 2);
+        }
+        ScalarUnaryOp::Round => {
+            dynasm!(asm; .arch x64; vroundsd Rx(c), Rx(c), Rx(a), 0);
+        }
+        ScalarUnaryOp::Not => {
+            dynasm!(asm
+                ; .arch x64
+                ; vmovq Rq(scratch_gp), Rx(a)
+                ; mov rcx, QWORD 0x7fffffffffffffff_u64 as i64
+                ; and Rq(scratch_gp), rcx
+                ; test Rq(scratch_gp), Rq(scratch_gp)
+                ; sete Rb(scratch_gp)
+                ; movzx Rd(scratch_gp), Rb(scratch_gp)
+                ; vcvtsi2sd Rx(c), Rx(c), Rd(scratch_gp)
+            );
+        }
+        ScalarUnaryOp::IsNan => {
+            dynasm!(asm
+                ; .arch x64
+                ; vucomisd Rx(a), Rx(a)
+                ; setp Rb(scratch_gp)
+                ; movzx Rd(scratch_gp), Rb(scratch_gp)
+                ; vcvtsi2sd Rx(c), Rx(c), Rd(scratch_gp)
+            );
+        }
+        ScalarUnaryOp::IsInf { detect_positive, detect_negative } => {
+            let inf_pos: u64 = 0x7ff0000000000000;
+            let inf_neg: u64 = 0xfff0000000000000;
+            dynasm!(asm
+                ; .arch x64
+                ; vmovq Rq(scratch_gp), Rx(a)
+                ; xor ecx, ecx
+            );
+            if detect_positive {
+                dynasm!(asm
+                    ; mov rax, QWORD inf_pos as i64
+                    ; cmp Rq(scratch_gp), rax
+                    ; sete cl
+                );
+            }
+            if detect_negative {
+                dynasm!(asm
+                    ; mov rax, QWORD inf_neg as i64
+                    ; cmp Rq(scratch_gp), rax
+                    ; sete Rb(scratch_gp)
+                    ; or cl, Rb(scratch_gp)
+                );
+            }
+            dynasm!(asm
+                ; .arch x64
+                ; movzx Rd(scratch_gp), cl
+                ; vcvtsi2sd Rx(c), Rx(c), Rd(scratch_gp)
+            );
+        }
+        ScalarUnaryOp::Sign => {
+            let neg = asm.new_dynamic_label();
+            let zero_or_nan = asm.new_dynamic_label();
+            let done = asm.new_dynamic_label();
+            dynasm!(asm
+                ; .arch x64
+                ; vxorpd Rx(c), Rx(c), Rx(c)
+                ; vucomisd Rx(a), Rx(c)
+                ; jp =>zero_or_nan
+                ; je =>zero_or_nan
+                ; jb =>neg
+                ; mov Rq(scratch_gp), QWORD 0x3ff0000000000000_u64 as i64
+                ; vmovq Rx(c), Rq(scratch_gp)
+                ; jmp =>done
+                ; =>neg
+                ; mov Rq(scratch_gp), QWORD 0xbff0000000000000_u64 as i64
+                ; vmovq Rx(c), Rq(scratch_gp)
+                ; jmp =>done
+                ; =>zero_or_nan
+                ; vxorpd Rx(c), Rx(c), Rx(c)
+                ; =>done
+            );
+        }
+        ScalarUnaryOp::BitwiseNot => {
+            return Err("emit_unop_f64: BitwiseNot not valid for float".to_string());
+        }
+        ScalarUnaryOp::Exp => emit_libm1_f64(asm, exp as *const ()),
+        ScalarUnaryOp::Ln => emit_libm1_f64(asm, log as *const ()),
+        ScalarUnaryOp::Tanh => emit_libm1_f64(asm, tanh as *const ()),
+        ScalarUnaryOp::Erf => emit_libm1_f64(asm, erf as *const ()),
+        ScalarUnaryOp::Sin => emit_libm1_f64(asm, sin as *const ()),
+        ScalarUnaryOp::Cos => emit_libm1_f64(asm, cos as *const ()),
+        ScalarUnaryOp::Tan => emit_libm1_f64(asm, tan as *const ()),
+        ScalarUnaryOp::Asin => emit_libm1_f64(asm, asin as *const ()),
+        ScalarUnaryOp::Acos => emit_libm1_f64(asm, acos as *const ()),
+        ScalarUnaryOp::Atan => emit_libm1_f64(asm, atan as *const ()),
+        ScalarUnaryOp::Sinh => emit_libm1_f64(asm, sinh as *const ()),
+        ScalarUnaryOp::Cosh => emit_libm1_f64(asm, cosh as *const ()),
+        ScalarUnaryOp::Asinh => emit_libm1_f64(asm, asinh as *const ()),
+        ScalarUnaryOp::Acosh => emit_libm1_f64(asm, acosh as *const ()),
+        ScalarUnaryOp::Atanh => emit_libm1_f64(asm, atanh as *const ()),
+        ScalarUnaryOp::Log1p => emit_libm1_f64(asm, log1p as *const ()),
+    }
+    Ok(())
+}
+
+// ─── Unary libm trampolines ────────────────────────────────────────
+
+/// Emit a call to a unary libm function `fn(f32) -> f32`.
+/// Input already in xmm0 (slot A = System V first float arg).
+/// Result lands in xmm0, copied to slot C (xmm2).
+///
+/// Clobbers all caller-saved registers (GP + XMM).
+fn emit_libm1_f32(asm: &mut Assembler, fn_ptr: *const ()) {
+    dynasm!(asm
+        ; .arch x64
+        ; mov rax, QWORD fn_ptr as i64
+        ; call rax
+        ; vmovaps Rx(FLT_SLOT_C), xmm0
+    );
+}
+
+fn emit_libm1_f64(asm: &mut Assembler, fn_ptr: *const ()) {
+    dynasm!(asm
+        ; .arch x64
+        ; mov rax, QWORD fn_ptr as i64
+        ; call rax
+        ; vmovaps Rx(FLT_SLOT_C), xmm0
+    );
+}
+
+unsafe extern "C" {
+    fn expf(x: f32) -> f32;
+    fn logf(x: f32) -> f32;
+    fn tanhf(x: f32) -> f32;
+    fn erff(x: f32) -> f32;
+    fn sinf(x: f32) -> f32;
+    fn cosf(x: f32) -> f32;
+    fn tanf(x: f32) -> f32;
+    fn asinf(x: f32) -> f32;
+    fn acosf(x: f32) -> f32;
+    fn atanf(x: f32) -> f32;
+    fn sinhf(x: f32) -> f32;
+    fn coshf(x: f32) -> f32;
+    fn asinhf(x: f32) -> f32;
+    fn acoshf(x: f32) -> f32;
+    fn atanhf(x: f32) -> f32;
+    fn log1pf(x: f32) -> f32;
+
+    fn exp(x: f64) -> f64;
+    fn log(x: f64) -> f64;
+    fn tanh(x: f64) -> f64;
+    fn erf(x: f64) -> f64;
+    fn sin(x: f64) -> f64;
+    fn cos(x: f64) -> f64;
+    fn tan(x: f64) -> f64;
+    fn asin(x: f64) -> f64;
+    fn acos(x: f64) -> f64;
+    fn atan(x: f64) -> f64;
+    fn sinh(x: f64) -> f64;
+    fn cosh(x: f64) -> f64;
+    fn asinh(x: f64) -> f64;
+    fn acosh(x: f64) -> f64;
+    fn atanh(x: f64) -> f64;
+    fn log1p(x: f64) -> f64;
 }

@@ -727,3 +727,78 @@ fn binary_f32_greater() {
     );
     assert_eq!(outs[0].len(), 16, "F32 Greater output size");
 }
+
+// ─── Float Unary op tests ───────────────────────────────────────────
+
+use crate::nano_graph::ops::ScalarUnaryOp;
+
+fn unary_f32_test(op: ScalarUnaryOp, vals: &[f32]) -> Vec<Vec<u8>> {
+    let n = vals.len() as u64;
+    let mut g = NanoGraph::new();
+    let inp = g.add_input_tensor(GlobalId(0), n, NumericDType::F32);
+    let out = g.push_group(
+        n,
+        NumericDType::F32,
+        ScalarOp::Unary {
+            op,
+            compute_dtype: NumericDType::F32,
+        },
+        vec![],
+        vec![InputRef::affine(inp, 1)],
+    );
+    let bytes = f32_input_bytes(vals);
+    ab_test_bytes(
+        &g,
+        &[(inp, NumericDType::F32, bytes)],
+        &[AtomRange { base: out, count: n, dtype: NumericDType::F32 }],
+    )
+}
+
+#[test]
+fn unary_f32_neg() {
+    let outs = unary_f32_test(ScalarUnaryOp::Neg, &[1.0, -1.0, 0.0, f32::INFINITY]);
+    let expected = f32_input_bytes(&[-1.0, 1.0, -0.0, f32::NEG_INFINITY]);
+    assert_eq!(outs[0], expected, "F32 Neg");
+}
+
+#[test]
+fn unary_f32_abs() {
+    let outs = unary_f32_test(ScalarUnaryOp::Abs, &[-3.0, 3.0, -0.0, f32::NEG_INFINITY]);
+    let expected = f32_input_bytes(&[3.0, 3.0, 0.0, f32::INFINITY]);
+    assert_eq!(outs[0], expected, "F32 Abs");
+}
+
+#[test]
+fn unary_f32_sqrt() {
+    let outs = unary_f32_test(ScalarUnaryOp::Sqrt, &[4.0, 9.0, 0.0, 1.0]);
+    let expected = f32_input_bytes(&[2.0, 3.0, 0.0, 1.0]);
+    assert_eq!(outs[0], expected, "F32 Sqrt");
+}
+
+#[test]
+fn unary_f32_reciprocal() {
+    let outs = unary_f32_test(ScalarUnaryOp::Reciprocal, &[2.0, 0.5, -4.0, 1.0]);
+    let expected = f32_input_bytes(&[0.5, 2.0, -0.25, 1.0]);
+    assert_eq!(outs[0], expected, "F32 Reciprocal");
+}
+
+#[test]
+fn unary_f32_floor() {
+    let outs = unary_f32_test(ScalarUnaryOp::Floor, &[1.7, -1.7, 2.0, -0.5]);
+    let expected = f32_input_bytes(&[1.0, -2.0, 2.0, -1.0]);
+    assert_eq!(outs[0], expected, "F32 Floor");
+}
+
+#[test]
+fn unary_f32_exp() {
+    // Exp via libm trampoline.
+    let outs = unary_f32_test(ScalarUnaryOp::Exp, &[0.0, 1.0, -1.0, 2.0]);
+    assert_eq!(outs[0].len(), 16, "F32 Exp output size");
+}
+
+#[test]
+fn unary_f32_tanh() {
+    // Tanh via libm trampoline.
+    let outs = unary_f32_test(ScalarUnaryOp::Tanh, &[0.0, 1.0, -1.0, 100.0]);
+    assert_eq!(outs[0].len(), 16, "F32 Tanh output size");
+}

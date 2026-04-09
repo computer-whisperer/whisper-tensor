@@ -46,7 +46,7 @@ use dynasmrt::{DynasmApi, DynasmLabelApi, dynasm};
 
 use crate::compiler::attempts::v14::layout::BufferLayout;
 use crate::nano_graph::ScalarOp;
-use crate::nano_graph::ops::ScalarBinOp;
+use crate::nano_graph::ops::{ScalarBinOp, ScalarUnaryOp};
 use crate::nano_graph::pattern::{AtomGroup, AtomId, InputRef};
 use crate::numeric_dtype::NumericDType;
 use crate::pool::SystemPool;
@@ -94,8 +94,11 @@ pub fn emit_group(
         ScalarOp::Binary { op, compute_dtype } => {
             emit_binary_group(asm, layout, group, *op, *compute_dtype, addr_tables, codec_tables)
         }
+        ScalarOp::Unary { op, compute_dtype } => {
+            emit_unary_group(asm, layout, group, *op, *compute_dtype, addr_tables, codec_tables)
+        }
         op => Err(format!(
-            "x86_jit emit_group: unsupported op {op:?} (P3.A = +Binary)"
+            "x86_jit emit_group: unsupported op {op:?} not yet supported"
         )),
     }
 }
@@ -571,7 +574,7 @@ fn emit_binary_iter(
 
     // ── Load + decode input A ──
     let _a_info = emit_load_decode_input(
-        asm, layout, input_a, compute_dtype, iter, atom_offset,
+        asm, layout, input_a, iter, atom_offset,
         addr_tables, codec_tables,
         match repr {
             ComputeRepr::F32 | ComputeRepr::F64 => CodecSlot::Xmm(FLT_SLOT_A),
@@ -590,7 +593,7 @@ fn emit_binary_iter(
         ComputeRepr::Int => CodecSlot::Gp(INT_SLOT_B),
     };
     let _b_info = emit_load_decode_input(
-        asm, layout, input_b, compute_dtype, iter, atom_offset,
+        asm, layout, input_b, iter, atom_offset,
         addr_tables, codec_tables, b_slot,
     )?;
 
@@ -636,13 +639,16 @@ fn emit_binary_iter(
 }
 
 /// Helper: compute bit offset, load raw bits, decode to compute repr.
-/// Used by the Binary emitter for each of the two inputs.
+///
+/// The decode uses the **storage dtype** from the layout slot (via
+/// `AddressInfo::dtype`), not the op's `compute_dtype`. This is
+/// correct because the codec converts from the storage format to
+/// the dtype's natural compute repr (e.g., BF16 → F32).
 #[allow(clippy::too_many_arguments)]
 fn emit_load_decode_input(
     asm: &mut Assembler,
     layout: &BufferLayout,
     input: &InputRef,
-    decode_dtype: NumericDType,
     iter: IterVar,
     atom_offset: u64,
     addr_tables: &mut AddressTables,
@@ -654,7 +660,7 @@ fn emit_load_decode_input(
         BIT_OFF_REG, ADDR_SCRATCH, addr_tables,
     )?;
     emit_load_bits(asm, BUFFER_REG, BIT_OFF_REG, info.n_bits, RAW_REG, ADDR_SCRATCH);
-    emit_decode(asm, decode_dtype, RAW_REG, slot, BIT_IO_TMP1, FLT_SCRATCH, codec_tables)?;
+    emit_decode(asm, info.dtype, RAW_REG, slot, BIT_IO_TMP1, FLT_SCRATCH, codec_tables)?;
     Ok(info)
 }
 
@@ -694,6 +700,159 @@ fn emit_binary_loop(
 
     emit_binary_iter(
         asm, layout, input_a, input_b, output,
+        op, compute_dtype, output_dtype,
+        IterVar::Reg(LOOP_VAR_REG), 0,
+        addr_tables, codec_tables,
+    )?;
+
+    dynasm!(asm
+        ; add Rq(LOOP_VAR_REG), 1
+        ; jmp =>loop_top
+        ; =>loop_exit
+    );
+
+    Ok(())
+}
+
+// ─── Unary op emission ──────────────────────────────────────────────
+
+/// Emit a Unary group: load one input, apply the op, store result.
+#[allow(clippy::too_many_arguments)]
+fn emit_unary_group(
+    asm: &mut Assembler,
+    layout: &BufferLayout,
+    group: &AtomGroup<'static, SystemPool>,
+    op: ScalarUnaryOp,
+    compute_dtype: NumericDType,
+    addr_tables: &mut AddressTables,
+    codec_tables: &mut CodecTables,
+) -> Result<(), String> {
+    if group.inputs.len() != 1 {
+        return Err(format!(
+            "Unary group has {} inputs, expected 1",
+            group.inputs.len()
+        ));
+    }
+    let output_ref = InputRef::affine(group.base_id, 1);
+
+    if group.count == 1 {
+        emit_unary_iter(
+            asm, layout, &group.inputs[0], &output_ref,
+            op, compute_dtype, group.output_dtype,
+            IterVar::Const(group.atom_offset), group.atom_offset,
+            addr_tables, codec_tables,
+        )
+    } else {
+        emit_unary_loop(
+            asm, layout, &group.inputs[0], &output_ref,
+            op, compute_dtype, group.output_dtype,
+            group.atom_offset, group.count,
+            addr_tables, codec_tables,
+        )
+    }
+}
+
+/// Emit one iteration of a Unary body.
+#[allow(clippy::too_many_arguments)]
+fn emit_unary_iter(
+    asm: &mut Assembler,
+    layout: &BufferLayout,
+    input: &InputRef,
+    output: &InputRef,
+    op: ScalarUnaryOp,
+    compute_dtype: NumericDType,
+    output_dtype: NumericDType,
+    iter: IterVar,
+    atom_offset: u64,
+    addr_tables: &mut AddressTables,
+    codec_tables: &mut CodecTables,
+) -> Result<(), String> {
+    use super::super::ops::float::{emit_unop_f32, emit_unop_f64};
+    use super::super::prologue::FLT_SLOT_A;
+
+    let repr = ComputeRepr::for_dtype(compute_dtype);
+
+    // Load + decode input → slot A.
+    let _info = emit_load_decode_input(
+        asm, layout, input, iter, atom_offset,
+        addr_tables, codec_tables,
+        match repr {
+            ComputeRepr::F32 | ComputeRepr::F64 => CodecSlot::Xmm(FLT_SLOT_A),
+            ComputeRepr::Int => CodecSlot::Gp(super::super::prologue::INT_SLOT_A),
+        },
+    )?;
+
+    // Apply the op.
+    match repr {
+        ComputeRepr::F32 => emit_unop_f32(asm, op, BIT_IO_TMP1)?,
+        ComputeRepr::F64 => emit_unop_f64(asm, op, BIT_IO_TMP1)?,
+        ComputeRepr::Int => {
+            return Err(format!(
+                "x86_jit Unary int op {op:?} not yet implemented (P3.F)"
+            ));
+        }
+    }
+
+    // Encode result + store.
+    let result_slot = match repr {
+        ComputeRepr::F32 | ComputeRepr::F64 => {
+            CodecSlot::Xmm(super::super::prologue::FLT_SLOT_C)
+        }
+        ComputeRepr::Int => CodecSlot::Gp(super::super::prologue::INT_SLOT_C),
+    };
+    emit_encode(
+        asm, output_dtype, result_slot, RAW_REG,
+        BIT_IO_TMP1, BIT_IO_TMP2, FLT_SCRATCH,
+    )?;
+
+    let dst_info = emit_compute_bit_offset(
+        asm, layout, output, iter, atom_offset,
+        BIT_OFF_REG, ADDR_SCRATCH, addr_tables,
+    )?;
+
+    emit_store_bits(
+        asm, BUFFER_REG, BIT_OFF_REG, dst_info.n_bits, RAW_REG,
+        BIT_IO_TMP1, BIT_IO_TMP2, ADDR_SCRATCH,
+    );
+
+    Ok(())
+}
+
+/// Emit a count-loop around `emit_unary_iter`.
+#[allow(clippy::too_many_arguments)]
+fn emit_unary_loop(
+    asm: &mut Assembler,
+    layout: &BufferLayout,
+    input: &InputRef,
+    output: &InputRef,
+    op: ScalarUnaryOp,
+    compute_dtype: NumericDType,
+    output_dtype: NumericDType,
+    atom_offset: u64,
+    count: u64,
+    addr_tables: &mut AddressTables,
+    codec_tables: &mut CodecTables,
+) -> Result<(), String> {
+    let start = atom_offset as i64;
+    let end = (atom_offset + count) as i64;
+
+    dynasm!(asm
+        ; .arch x64
+        ; mov Rq(LOOP_VAR_REG), QWORD start
+        ; mov Rq(LOOP_END_REG), QWORD end
+    );
+
+    let loop_top = asm.new_dynamic_label();
+    let loop_exit = asm.new_dynamic_label();
+
+    dynasm!(asm
+        ; =>loop_top
+        ; cmp Rq(LOOP_VAR_REG), Rq(LOOP_END_REG)
+        ; jge =>loop_exit
+    );
+
+    emit_unary_iter(
+        asm, layout, input, output,
         op, compute_dtype, output_dtype,
         IterVar::Reg(LOOP_VAR_REG), 0,
         addr_tables, codec_tables,
