@@ -1147,3 +1147,39 @@ fn reduce_prod_f32() {
     let expected = f32_input_bytes(&[24.0]);
     assert_eq!(outs[0], expected, "ReduceProd F32 [1,2,3,4] = 24");
 }
+
+// ─── IndirectLoad tests ─────────────────────────────────────────────
+
+#[test]
+fn indirect_load_f32_gather() {
+    // Table of 4 F32 values. Index input selects which one to output.
+    use crate::numeric_scalar::NumericScalar;
+    let mut g = NanoGraph::new();
+    // Table: 4 literals [10.0, 20.0, 30.0, 40.0]
+    let t0 = g.push_group(1, NumericDType::F32, ScalarOp::Literal(NumericScalar::from_f32(10.0)), vec![], vec![]);
+    let t1 = g.push_group(1, NumericDType::F32, ScalarOp::Literal(NumericScalar::from_f32(20.0)), vec![], vec![]);
+    let t2 = g.push_group(1, NumericDType::F32, ScalarOp::Literal(NumericScalar::from_f32(30.0)), vec![], vec![]);
+    let _t3 = g.push_group(1, NumericDType::F32, ScalarOp::Literal(NumericScalar::from_f32(40.0)), vec![], vec![]);
+
+    // Index input: [2, 0, 3, 1] as I32.
+    let idx = g.add_input_tensor(GlobalId(0), 4, NumericDType::I32);
+
+    // IndirectLoad: table starts at t0.
+    let out = g.push_group(
+        4,
+        NumericDType::F32,
+        ScalarOp::IndirectLoad { table_base: t0 },
+        vec![],
+        vec![InputRef::affine(idx, 1)],
+    );
+
+    let idx_bytes: Vec<u8> = [2i32, 0, 3, 1].iter().flat_map(|v| v.to_le_bytes()).collect();
+    let outs = ab_test_bytes(
+        &g,
+        &[(idx, NumericDType::I32, idx_bytes)],
+        &[AtomRange { base: out, count: 4, dtype: NumericDType::F32 }],
+    );
+    // indices [2, 0, 3, 1] → table[2]=30, table[0]=10, table[3]=40, table[1]=20
+    let expected = f32_input_bytes(&[30.0, 10.0, 40.0, 20.0]);
+    assert_eq!(outs[0], expected, "IndirectLoad F32 gather");
+}

@@ -100,6 +100,9 @@ pub fn emit_group(
         ScalarOp::Select => {
             emit_select_group(asm, layout, group, addr_tables, codec_tables)
         }
+        ScalarOp::IndirectLoad { table_base } => {
+            emit_indirect_load_group(asm, layout, group, *table_base, addr_tables, codec_tables)
+        }
         ScalarOp::Reduce {
             kind,
             reduce_count,
@@ -1180,6 +1183,181 @@ fn emit_select_loop(
         addr_tables, codec_tables,
     )?;
     dynasm!(asm; add Rq(LOOP_VAR_REG), 1; jmp =>loop_top; =>loop_exit);
+    Ok(())
+}
+
+// ─── IndirectLoad emission ──────────────────────────────────────────
+
+/// Emit an IndirectLoad group: load a runtime index, look up a value
+/// from the table at `table_base + index`, store.
+fn emit_indirect_load_group(
+    asm: &mut Assembler,
+    layout: &BufferLayout,
+    group: &AtomGroup<'static, SystemPool>,
+    table_base: crate::nano_graph::pattern::AtomId,
+    addr_tables: &mut AddressTables,
+    codec_tables: &mut CodecTables,
+) -> Result<(), String> {
+    if group.inputs.len() != 1 {
+        return Err(format!(
+            "IndirectLoad group has {} inputs, expected 1",
+            group.inputs.len()
+        ));
+    }
+
+    // Look up the table slot at JIT-build time.
+    let (table_slot, _) = layout
+        .find(table_base)
+        .ok_or_else(|| format!("IndirectLoad: no slot for table_base={table_base}"))?;
+    let table_bit_offset = table_slot.bit_offset;
+    let table_bit_stride = table_slot.bit_stride;
+    let table_n_bits = table_slot.elem_bits as u32;
+    let table_dtype = table_slot.dtype;
+
+    let output_ref = InputRef::affine(group.base_id, 1);
+
+    if group.count == 1 {
+        emit_indirect_load_iter(
+            asm, layout, &group.inputs[0], &output_ref,
+            table_bit_offset, table_bit_stride, table_n_bits, table_dtype,
+            group.output_dtype,
+            IterVar::Const(group.atom_offset), group.atom_offset,
+            addr_tables, codec_tables,
+        )
+    } else {
+        let start = group.atom_offset as i64;
+        let end = (group.atom_offset + group.count) as i64;
+        dynasm!(asm
+            ; .arch x64
+            ; mov Rq(LOOP_VAR_REG), QWORD start
+            ; mov Rq(LOOP_END_REG), QWORD end
+        );
+        let loop_top = asm.new_dynamic_label();
+        let loop_exit = asm.new_dynamic_label();
+        dynasm!(asm; =>loop_top; cmp Rq(LOOP_VAR_REG), Rq(LOOP_END_REG); jge =>loop_exit);
+
+        emit_indirect_load_iter(
+            asm, layout, &group.inputs[0], &output_ref,
+            table_bit_offset, table_bit_stride, table_n_bits, table_dtype,
+            group.output_dtype,
+            IterVar::Reg(LOOP_VAR_REG), 0,
+            addr_tables, codec_tables,
+        )?;
+
+        dynasm!(asm; add Rq(LOOP_VAR_REG), 1; jmp =>loop_top; =>loop_exit);
+        Ok(())
+    }
+}
+
+/// Emit one iteration of IndirectLoad.
+#[allow(clippy::too_many_arguments)]
+fn emit_indirect_load_iter(
+    asm: &mut Assembler,
+    layout: &BufferLayout,
+    index_input: &InputRef,
+    output: &InputRef,
+    table_bit_offset: u64,
+    table_bit_stride: u64,
+    table_n_bits: u32,
+    table_dtype: NumericDType,
+    output_dtype: NumericDType,
+    iter: IterVar,
+    atom_offset: u64,
+    addr_tables: &mut AddressTables,
+    codec_tables: &mut CodecTables,
+) -> Result<(), String> {
+    // 1. Load the index value.
+    let idx_info = emit_compute_bit_offset(
+        asm, layout, index_input, iter, atom_offset,
+        BIT_OFF_REG, ADDR_SCRATCH, addr_tables,
+    )?;
+    emit_load_bits(asm, BUFFER_REG, BIT_OFF_REG, idx_info.n_bits, RAW_REG, ADDR_SCRATCH);
+
+    // 2. Decode index to its compute repr, then extract as u64.
+    let idx_repr = ComputeRepr::for_dtype(idx_info.dtype);
+    match idx_repr {
+        ComputeRepr::F32 => {
+            emit_decode(
+                asm, idx_info.dtype, RAW_REG,
+                CodecSlot::Xmm(FLT_SLOT), BIT_IO_TMP1, FLT_SCRATCH, codec_tables,
+            )?;
+            // Convert F32 → u64 (truncate).
+            dynasm!(asm; .arch x64; vcvttss2si Rq(RAW_REG), Rx(FLT_SLOT));
+        }
+        ComputeRepr::F64 => {
+            emit_decode(
+                asm, idx_info.dtype, RAW_REG,
+                CodecSlot::Xmm(FLT_SLOT), BIT_IO_TMP1, FLT_SCRATCH, codec_tables,
+            )?;
+            dynasm!(asm; .arch x64; vcvttsd2si Rq(RAW_REG), Rx(FLT_SLOT));
+        }
+        ComputeRepr::Int => {
+            emit_decode(
+                asm, idx_info.dtype, RAW_REG,
+                CodecSlot::Gp(RAW_REG), BIT_IO_TMP1, FLT_SCRATCH, codec_tables,
+            )?;
+            // Value already in rax as i64. Treat as u64.
+        }
+    }
+    // rax now holds the index as u64.
+
+    // 3. Compute table bit offset: r10 = table_bit_offset + index * table_bit_stride.
+    let stride = table_bit_stride as i64;
+    if (i32::MIN as i64..=i32::MAX as i64).contains(&stride) {
+        dynasm!(asm; .arch x64; imul Rq(BIT_OFF_REG), Rq(RAW_REG), stride as i32);
+    } else {
+        dynasm!(asm
+            ; .arch x64
+            ; mov Rq(BIT_OFF_REG), QWORD stride
+            ; imul Rq(BIT_OFF_REG), Rq(RAW_REG)
+        );
+    }
+    if (i32::MIN as i64..=i32::MAX as i64).contains(&(table_bit_offset as i64)) {
+        dynasm!(asm; .arch x64; add Rq(BIT_OFF_REG), table_bit_offset as i32);
+    } else {
+        dynasm!(asm
+            ; .arch x64
+            ; mov Rq(ADDR_SCRATCH), QWORD table_bit_offset as i64
+            ; add Rq(BIT_OFF_REG), Rq(ADDR_SCRATCH)
+        );
+    }
+
+    // 4. Load table value → rax.
+    emit_load_bits(asm, BUFFER_REG, BIT_OFF_REG, table_n_bits, RAW_REG, ADDR_SCRATCH);
+
+    // 5. Decode table value, encode to output dtype.
+    let out_repr = ComputeRepr::for_dtype(output_dtype);
+    let val_slot = match out_repr {
+        ComputeRepr::F32 | ComputeRepr::F64 => CodecSlot::Xmm(FLT_SLOT),
+        ComputeRepr::Int => CodecSlot::Gp(RAW_REG),
+    };
+    emit_decode(asm, table_dtype, RAW_REG, val_slot, BIT_IO_TMP1, FLT_SCRATCH, codec_tables)?;
+
+    // If table_dtype's repr != output_dtype's repr, convert.
+    let table_repr = ComputeRepr::for_dtype(table_dtype);
+    if table_repr != out_repr {
+        emit_repr_convert(asm, table_repr, out_repr)?;
+    }
+
+    let encode_slot = match out_repr {
+        ComputeRepr::F32 | ComputeRepr::F64 => CodecSlot::Xmm(FLT_SLOT),
+        ComputeRepr::Int => CodecSlot::Gp(RAW_REG),
+    };
+    emit_encode(
+        asm, output_dtype, encode_slot, RAW_REG,
+        BIT_IO_TMP1, BIT_IO_TMP2, FLT_SCRATCH,
+    )?;
+
+    // 6. Compute output address + store.
+    let dst_info = emit_compute_bit_offset(
+        asm, layout, output, iter, atom_offset,
+        BIT_OFF_REG, ADDR_SCRATCH, addr_tables,
+    )?;
+    emit_store_bits(
+        asm, BUFFER_REG, BIT_OFF_REG, dst_info.n_bits, RAW_REG,
+        BIT_IO_TMP1, BIT_IO_TMP2, ADDR_SCRATCH,
+    );
+
     Ok(())
 }
 

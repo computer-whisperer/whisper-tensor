@@ -68,6 +68,14 @@ pub fn check_supported(graph: &NanoGraph<'static, SystemPool>) -> Result<(), Str
                     ));
                 }
             }
+            ScalarOp::IndirectLoad { .. } => {
+                if group.inputs.len() != 1 {
+                    return Err(format!(
+                        "x86_jit: group {gi} IndirectLoad has {} inputs, expected 1",
+                        group.inputs.len()
+                    ));
+                }
+            }
             ScalarOp::Literal(_) | ScalarOp::LiteralSpan(_) => {}
             op => {
                 return Err(format!(
