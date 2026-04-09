@@ -46,7 +46,9 @@ use dynasmrt::{DynasmApi, DynasmLabelApi, dynasm};
 
 use crate::compiler::attempts::v14::layout::BufferLayout;
 use crate::nano_graph::ScalarOp;
+use crate::nano_graph::ops::ScalarBinOp;
 use crate::nano_graph::pattern::{AtomGroup, AtomId, InputRef};
+use crate::numeric_dtype::NumericDType;
 use crate::pool::SystemPool;
 
 use super::super::codec::bit_io::{emit_load_bits, emit_store_bits};
@@ -89,8 +91,11 @@ pub fn emit_group(
             // `BufferLayout::populate_literals`. No code emission.
             Ok(())
         }
+        ScalarOp::Binary { op, compute_dtype } => {
+            emit_binary_group(asm, layout, group, *op, *compute_dtype, addr_tables, codec_tables)
+        }
         op => Err(format!(
-            "x86_jit emit_group: unsupported op {op:?} (P2.B.5 = Identity/Cast/Literal only)"
+            "x86_jit emit_group: unsupported op {op:?} (P3.A = +Binary)"
         )),
     }
 }
@@ -480,6 +485,218 @@ fn emit_cast_loop(
         0,
         addr_tables,
         codec_tables,
+    )?;
+
+    dynasm!(asm
+        ; add Rq(LOOP_VAR_REG), 1
+        ; jmp =>loop_top
+        ; =>loop_exit
+    );
+
+    Ok(())
+}
+
+// ─── Binary op emission ─────────────────────────────────────────────
+
+/// Emit a Binary group: load two inputs, apply the op, store result.
+#[allow(clippy::too_many_arguments)]
+fn emit_binary_group(
+    asm: &mut Assembler,
+    layout: &BufferLayout,
+    group: &AtomGroup<'static, SystemPool>,
+    op: ScalarBinOp,
+    compute_dtype: NumericDType,
+    addr_tables: &mut AddressTables,
+    codec_tables: &mut CodecTables,
+) -> Result<(), String> {
+    if group.inputs.len() != 2 {
+        return Err(format!(
+            "Binary group has {} inputs, expected 2",
+            group.inputs.len()
+        ));
+    }
+    let output_ref = InputRef::affine(group.base_id, 1);
+
+    if group.count == 1 {
+        emit_binary_iter(
+            asm, layout, &group.inputs[0], &group.inputs[1], &output_ref,
+            op, compute_dtype, group.output_dtype,
+            IterVar::Const(group.atom_offset), group.atom_offset,
+            addr_tables, codec_tables,
+        )
+    } else {
+        emit_binary_loop(
+            asm, layout, &group.inputs[0], &group.inputs[1], &output_ref,
+            op, compute_dtype, group.output_dtype,
+            group.atom_offset, group.count,
+            addr_tables, codec_tables,
+        )
+    }
+}
+
+/// Emit one iteration of a Binary body.
+///
+/// Register flow for float compute repr:
+///   1. Load+decode A → xmm0 (FLT_SLOT_A)
+///   2. Load+decode B → xmm1 (FLT_SLOT_B)  [rax free, xmm0 holds A]
+///   3. Op → xmm2 (FLT_SLOT_C)
+///   4. Encode xmm2 → rax, store
+///
+/// Register flow for int compute repr:
+///   1. Load+decode A → rax (INT_SLOT_A)
+///   2. Stash A: movq xmm0, rax
+///   3. Load+decode B → rcx (INT_SLOT_B)
+///   4. Restore A: movq rax, xmm0
+///   5. Op → rdx (INT_SLOT_C)
+///   6. Encode rdx → rax, store
+#[allow(clippy::too_many_arguments)]
+fn emit_binary_iter(
+    asm: &mut Assembler,
+    layout: &BufferLayout,
+    input_a: &InputRef,
+    input_b: &InputRef,
+    output: &InputRef,
+    op: ScalarBinOp,
+    compute_dtype: NumericDType,
+    output_dtype: NumericDType,
+    iter: IterVar,
+    atom_offset: u64,
+    addr_tables: &mut AddressTables,
+    codec_tables: &mut CodecTables,
+) -> Result<(), String> {
+    use super::super::ops::float::{emit_binop_f32, emit_binop_f64};
+    use super::super::prologue::{FLT_SLOT_A, FLT_SLOT_B, INT_SLOT_A, INT_SLOT_B};
+
+    let repr = ComputeRepr::for_dtype(compute_dtype);
+
+    // ── Load + decode input A ──
+    let _a_info = emit_load_decode_input(
+        asm, layout, input_a, compute_dtype, iter, atom_offset,
+        addr_tables, codec_tables,
+        match repr {
+            ComputeRepr::F32 | ComputeRepr::F64 => CodecSlot::Xmm(FLT_SLOT_A),
+            ComputeRepr::Int => CodecSlot::Gp(INT_SLOT_A),
+        },
+    )?;
+
+    // For int ops: stash A in xmm0 before loading B (which clobbers rax).
+    if repr == ComputeRepr::Int {
+        dynasm!(asm; .arch x64; movq Rx(FLT_SLOT), Rq(INT_SLOT_A));
+    }
+
+    // ── Load + decode input B ──
+    let b_slot = match repr {
+        ComputeRepr::F32 | ComputeRepr::F64 => CodecSlot::Xmm(FLT_SLOT_B),
+        ComputeRepr::Int => CodecSlot::Gp(INT_SLOT_B),
+    };
+    let _b_info = emit_load_decode_input(
+        asm, layout, input_b, compute_dtype, iter, atom_offset,
+        addr_tables, codec_tables, b_slot,
+    )?;
+
+    // For int ops: restore A from xmm stash.
+    if repr == ComputeRepr::Int {
+        dynasm!(asm; .arch x64; movq Rq(INT_SLOT_A), Rx(FLT_SLOT));
+    }
+
+    // ── Apply the op ──
+    match repr {
+        ComputeRepr::F32 => emit_binop_f32(asm, op, BIT_IO_TMP1)?,
+        ComputeRepr::F64 => emit_binop_f64(asm, op, BIT_IO_TMP1)?,
+        ComputeRepr::Int => {
+            return Err(format!(
+                "x86_jit Binary int op {op:?} not yet implemented (P3.C)"
+            ));
+        }
+    }
+
+    // ── Encode result + store ──
+    let result_slot = match repr {
+        ComputeRepr::F32 | ComputeRepr::F64 => {
+            CodecSlot::Xmm(super::super::prologue::FLT_SLOT_C)
+        }
+        ComputeRepr::Int => CodecSlot::Gp(super::super::prologue::INT_SLOT_C),
+    };
+    emit_encode(
+        asm, output_dtype, result_slot, RAW_REG,
+        BIT_IO_TMP1, BIT_IO_TMP2, FLT_SCRATCH,
+    )?;
+
+    let dst_info = emit_compute_bit_offset(
+        asm, layout, output, iter, atom_offset,
+        BIT_OFF_REG, ADDR_SCRATCH, addr_tables,
+    )?;
+
+    emit_store_bits(
+        asm, BUFFER_REG, BIT_OFF_REG, dst_info.n_bits, RAW_REG,
+        BIT_IO_TMP1, BIT_IO_TMP2, ADDR_SCRATCH,
+    );
+
+    Ok(())
+}
+
+/// Helper: compute bit offset, load raw bits, decode to compute repr.
+/// Used by the Binary emitter for each of the two inputs.
+#[allow(clippy::too_many_arguments)]
+fn emit_load_decode_input(
+    asm: &mut Assembler,
+    layout: &BufferLayout,
+    input: &InputRef,
+    decode_dtype: NumericDType,
+    iter: IterVar,
+    atom_offset: u64,
+    addr_tables: &mut AddressTables,
+    codec_tables: &mut CodecTables,
+    slot: CodecSlot,
+) -> Result<AddressInfo, String> {
+    let info = emit_compute_bit_offset(
+        asm, layout, input, iter, atom_offset,
+        BIT_OFF_REG, ADDR_SCRATCH, addr_tables,
+    )?;
+    emit_load_bits(asm, BUFFER_REG, BIT_OFF_REG, info.n_bits, RAW_REG, ADDR_SCRATCH);
+    emit_decode(asm, decode_dtype, RAW_REG, slot, BIT_IO_TMP1, FLT_SCRATCH, codec_tables)?;
+    Ok(info)
+}
+
+/// Emit a count-loop around `emit_binary_iter`.
+#[allow(clippy::too_many_arguments)]
+fn emit_binary_loop(
+    asm: &mut Assembler,
+    layout: &BufferLayout,
+    input_a: &InputRef,
+    input_b: &InputRef,
+    output: &InputRef,
+    op: ScalarBinOp,
+    compute_dtype: NumericDType,
+    output_dtype: NumericDType,
+    atom_offset: u64,
+    count: u64,
+    addr_tables: &mut AddressTables,
+    codec_tables: &mut CodecTables,
+) -> Result<(), String> {
+    let start = atom_offset as i64;
+    let end = (atom_offset + count) as i64;
+
+    dynasm!(asm
+        ; .arch x64
+        ; mov Rq(LOOP_VAR_REG), QWORD start
+        ; mov Rq(LOOP_END_REG), QWORD end
+    );
+
+    let loop_top = asm.new_dynamic_label();
+    let loop_exit = asm.new_dynamic_label();
+
+    dynasm!(asm
+        ; =>loop_top
+        ; cmp Rq(LOOP_VAR_REG), Rq(LOOP_END_REG)
+        ; jge =>loop_exit
+    );
+
+    emit_binary_iter(
+        asm, layout, input_a, input_b, output,
+        op, compute_dtype, output_dtype,
+        IterVar::Reg(LOOP_VAR_REG), 0,
+        addr_tables, codec_tables,
     )?;
 
     dynasm!(asm

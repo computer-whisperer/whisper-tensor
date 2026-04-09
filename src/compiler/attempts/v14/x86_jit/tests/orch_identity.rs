@@ -598,3 +598,132 @@ fn cast_i32_to_f32() {
     let expected = f32_input_bytes(&[0.0, 1.0, -1.0, 42.0]);
     assert_eq!(outs[0], expected, "I32→F32 cast");
 }
+
+// ─── Float Binary op tests ──────────────────────────────────────────
+
+fn binary_f32_test(
+    op: ScalarBinOp,
+    a_vals: &[f32],
+    b_vals: &[f32],
+) -> Vec<Vec<u8>> {
+    assert_eq!(a_vals.len(), b_vals.len());
+    let n = a_vals.len() as u64;
+    let mut g = NanoGraph::new();
+    let inp_a = g.add_input_tensor(GlobalId(0), n, NumericDType::F32);
+    let inp_b = g.add_input_tensor(GlobalId(1), n, NumericDType::F32);
+    let out = g.push_group(
+        n,
+        NumericDType::F32,
+        ScalarOp::Binary {
+            op,
+            compute_dtype: NumericDType::F32,
+        },
+        vec![],
+        vec![
+            InputRef::affine(inp_a, 1),
+            InputRef::affine(inp_b, 1),
+        ],
+    );
+    let a_bytes = f32_input_bytes(a_vals);
+    let b_bytes = f32_input_bytes(b_vals);
+    ab_test_bytes(
+        &g,
+        &[
+            (inp_a, NumericDType::F32, a_bytes),
+            (inp_b, NumericDType::F32, b_bytes),
+        ],
+        &[AtomRange {
+            base: out,
+            count: n,
+            dtype: NumericDType::F32,
+        }],
+    )
+}
+
+use crate::nano_graph::ops::ScalarBinOp;
+
+#[test]
+fn binary_f32_add() {
+    let outs = binary_f32_test(
+        ScalarBinOp::Add,
+        &[1.0, -1.0, 0.0, f32::INFINITY],
+        &[2.0, 3.0, -0.0, 1.0],
+    );
+    let expected = f32_input_bytes(&[3.0, 2.0, 0.0, f32::INFINITY]);
+    assert_eq!(outs[0], expected, "F32 Add");
+}
+
+#[test]
+fn binary_f32_sub() {
+    let outs = binary_f32_test(
+        ScalarBinOp::Sub,
+        &[5.0, 1.0, 0.0, -1.0],
+        &[3.0, 2.0, 0.0, -1.0],
+    );
+    let expected = f32_input_bytes(&[2.0, -1.0, 0.0, 0.0]);
+    assert_eq!(outs[0], expected, "F32 Sub");
+}
+
+#[test]
+fn binary_f32_mul() {
+    let outs = binary_f32_test(
+        ScalarBinOp::Mul,
+        &[2.0, -3.0, 0.0, f32::INFINITY],
+        &[3.0, 4.0, 5.0, 0.0],
+    );
+    // inf * 0 = NaN — pool_eval agrees.
+    assert_eq!(outs[0].len(), 16, "F32 Mul output size");
+}
+
+#[test]
+fn binary_f32_div() {
+    let outs = binary_f32_test(
+        ScalarBinOp::Div,
+        &[6.0, -6.0, 1.0, 0.0],
+        &[3.0, 2.0, 0.0, 0.0],
+    );
+    // 1.0/0.0 = +inf, 0.0/0.0 = NaN — pool_eval agrees.
+    assert_eq!(outs[0].len(), 16, "F32 Div output size");
+}
+
+#[test]
+fn binary_f32_max_with_nan() {
+    // Max with NaN: the non-NaN operand should win (minNum/maxNum).
+    let outs = binary_f32_test(
+        ScalarBinOp::Max,
+        &[1.0, f32::NAN, 3.0, f32::NAN],
+        &[2.0, 4.0, f32::NAN, f32::NAN],
+    );
+    assert_eq!(outs[0].len(), 16, "F32 Max output size");
+}
+
+#[test]
+fn binary_f32_min_with_nan() {
+    let outs = binary_f32_test(
+        ScalarBinOp::Min,
+        &[1.0, f32::NAN, 3.0, f32::NAN],
+        &[2.0, 4.0, f32::NAN, f32::NAN],
+    );
+    assert_eq!(outs[0].len(), 16, "F32 Min output size");
+}
+
+#[test]
+fn binary_f32_equal() {
+    let outs = binary_f32_test(
+        ScalarBinOp::Equal,
+        &[1.0, 2.0, f32::NAN, 0.0],
+        &[1.0, 3.0, f32::NAN, -0.0],
+    );
+    // NaN != NaN → 0.0, +0.0 == -0.0 → 1.0
+    assert_eq!(outs[0].len(), 16, "F32 Equal output size");
+}
+
+#[test]
+fn binary_f32_greater() {
+    let outs = binary_f32_test(
+        ScalarBinOp::Greater,
+        &[2.0, 1.0, 1.0, f32::NAN],
+        &[1.0, 2.0, 1.0, 1.0],
+    );
+    assert_eq!(outs[0].len(), 16, "F32 Greater output size");
+}

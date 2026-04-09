@@ -36,11 +36,18 @@ pub fn check_supported(graph: &NanoGraph<'static, SystemPool>) -> Result<(), Str
                     ));
                 }
             }
+            ScalarOp::Binary { .. } => {
+                if group.inputs.len() != 2 {
+                    return Err(format!(
+                        "x86_jit: group {gi} Binary has {} inputs, expected 2",
+                        group.inputs.len()
+                    ));
+                }
+            }
             ScalarOp::Literal(_) | ScalarOp::LiteralSpan(_) => {}
             op => {
                 return Err(format!(
-                    "x86_jit: group {gi} op {op:?} not yet supported \
-                     (Identity/Cast/Literal only)"
+                    "x86_jit: group {gi} op {op:?} not yet supported"
                 ));
             }
         }
