@@ -623,4 +623,28 @@ mod tests {
             );
         }
     }
+
+    /// Per-category partitioned tests for isolating x86_jit crashes.
+    #[cfg(feature = "cranelift")]
+    mod partitioned_by_category {
+        use super::super::*;
+
+        fn run_category(cases: Vec<TestCase>) {
+            for case in &cases {
+                eprintln!("  running: {}", case.name);
+                run_case_via_compiled_eval(case, 8).unwrap();
+            }
+        }
+
+        #[test] fn elementwise() { run_category(super::super::elementwise::build_cases()); }
+        #[test] fn matmul() { run_category(super::super::matmul::build_cases()); }
+        #[test] fn cast() { run_category(super::super::cast::build_cases()); }
+        #[test] fn reduce() { run_category(super::super::reduce::build_cases()); }
+        #[test] fn composite() { run_category(super::super::composite::build_cases()); }
+        #[test] fn conv() { run_category(super::super::conv::build_cases()); }
+        #[test] fn pad() { run_category(super::super::pad::build_cases()); }
+        #[test] fn structural() { run_category(super::super::structural::build_cases()); }
+        #[test] fn opaque_ops() { run_category(super::super::opaque_ops::build_cases()); }
+        #[test] fn dtype_discipline() { run_category(super::super::dtype_discipline::build_cases()); }
+    }
 }

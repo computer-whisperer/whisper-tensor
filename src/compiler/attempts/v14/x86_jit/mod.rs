@@ -173,10 +173,16 @@ impl CompiledSpanFn for X86JitSpan {
         }
 
         // Working buffer = literal template + marshalled inputs.
+        // Add a canary zone after the buffer to detect out-of-bounds writes.
+        const CANARY_SIZE: usize = 256;
+        const CANARY_BYTE: u8 = 0xCD;
         let mut buffer = self.literal_template.clone();
+        buffer.extend_from_slice(&[CANARY_BYTE; CANARY_SIZE]);
         for slice in inputs {
             write_store_slice_to_buffer(slice, &self.layout, &mut buffer);
         }
+
+        let canary_start = buffer.len() - CANARY_SIZE;
 
         // Run the JIT.
         // SAFETY: bytes at `self.code.ptr(self.entry)` were emitted
@@ -185,6 +191,14 @@ impl CompiledSpanFn for X86JitSpan {
         let func: unsafe extern "C" fn(*mut u8) =
             unsafe { std::mem::transmute(self.code.ptr(self.entry)) };
         unsafe { func(buffer.as_mut_ptr()) };
+
+        // Check canary zone for buffer overrun.
+        if buffer[canary_start..].iter().any(|&b| b != CANARY_BYTE) {
+            panic!(
+                "x86_jit: buffer overrun detected (total_bytes={}, canary_start={canary_start})",
+                self.layout.total_bytes,
+            );
+        }
 
         // Marshal declared outputs back into SpanOutputs.
         for (range, out) in self.output_ranges.iter().zip(outputs.iter_mut()) {

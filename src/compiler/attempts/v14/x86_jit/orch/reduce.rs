@@ -21,7 +21,7 @@ use dynasmrt::{DynasmApi, DynasmLabelApi, dynasm};
 
 use crate::compiler::attempts::v14::layout::BufferLayout;
 use crate::nano_graph::ops::ReduceKind;
-use crate::nano_graph::pattern::{AtomGroup, InputRef};
+use crate::nano_graph::pattern::{AtomGroup, AtomId, InputRef};
 use crate::numeric_dtype::NumericDType;
 use crate::pool::SystemPool;
 
@@ -32,6 +32,7 @@ use super::super::prologue::{
     BUFFER_REG, FLT_SLOT_A, FLT_SLOT_C, INT_SLOT_C, LOOP_END_REG, LOOP_VAR_REG,
 };
 use super::address::{AddressTables, IterVar, emit_compute_bit_offset};
+use super::group::emit_output_bit_offset;
 
 /// Inner loop counter `k`.
 const REDUCE_K: u8 = 9; // r9
@@ -69,7 +70,6 @@ pub fn emit_reduce_group(
     }
 
     let repr = ComputeRepr::for_dtype(compute_dtype);
-    let output_ref = InputRef::affine(group.base_id, 1);
 
     // Look up the source slot to determine n_bits and k_bit_stride.
     let src_info = resolve_reduce_source_info(layout, &group.inputs[0], group.atom_offset)?;
@@ -78,7 +78,8 @@ pub fn emit_reduce_group(
 
     if group.count == 1 {
         emit_reduce_body(
-            asm, layout, &group.inputs[0], &output_ref,
+            asm, layout, &group.inputs[0],
+            group.base_id, group.atom_offset,
             kind, reduce_count, k_bit_stride, compute_dtype, group.output_dtype,
             repr, n_bits, src_info.src_dtype,
             IterVar::Const(group.atom_offset), group.atom_offset,
@@ -97,7 +98,8 @@ pub fn emit_reduce_group(
         dynasm!(asm; =>loop_top; cmp Rq(LOOP_VAR_REG), Rq(LOOP_END_REG); jge =>loop_exit);
 
         emit_reduce_body(
-            asm, layout, &group.inputs[0], &output_ref,
+            asm, layout, &group.inputs[0],
+            group.base_id, group.atom_offset,
             kind, reduce_count, k_bit_stride, compute_dtype, group.output_dtype,
             repr, n_bits, src_info.src_dtype,
             IterVar::Reg(LOOP_VAR_REG), 0,
@@ -166,7 +168,8 @@ fn emit_reduce_body(
     asm: &mut Assembler,
     layout: &BufferLayout,
     input: &InputRef,
-    output: &InputRef,
+    output_base: AtomId,
+    output_atom_offset: u64,
     kind: ReduceKind,
     reduce_count: u64,
     k_bit_stride: i64,
@@ -247,9 +250,9 @@ fn emit_reduce_body(
         asm, output_dtype, acc_slot, RAW,
         CODEC_SCRATCH, BIT_OFF, CODEC_XMM_SCRATCH,
     )?;
-    let dst_info = emit_compute_bit_offset(
-        asm, layout, output, iter, atom_offset,
-        BIT_OFF, SCRATCH, addr_tables,
+    let dst_info = emit_output_bit_offset(
+        asm, layout, output_base, output_atom_offset, iter,
+        BIT_OFF, SCRATCH,
     )?;
     emit_store_bits(
         asm, BUFFER_REG, BIT_OFF, dst_info.n_bits, RAW,

@@ -134,11 +134,6 @@ fn emit_identity_group(
         ));
     }
 
-    // The output is the group's own slot, accessed via the same
-    // 1D-affine pattern as a Strided source. Reusing the address
-    // primitive keeps the math in one place.
-    let output_ref = InputRef::affine(group.base_id, 1);
-
     // If src and output dtypes differ, this is effectively a Cast —
     // route through the Cast path which does decode(src) → encode(dst).
     let src_dtype = lookup_input_dtype(layout, &group.inputs[0], group.atom_offset)?;
@@ -147,26 +142,16 @@ fn emit_identity_group(
     }
 
     if group.count == 1 {
-        // Single-element fast path: no loop, both addresses are
-        // compile-time constants from the iter point of view.
         emit_identity_iter(
-            asm,
-            layout,
-            &group.inputs[0],
-            &output_ref,
-            IterVar::Const(group.atom_offset),
-            group.atom_offset,
-            tables,
+            asm, layout, &group.inputs[0],
+            group.base_id, group.atom_offset,
+            IterVar::Const(group.atom_offset), group.atom_offset, tables,
         )
     } else {
         emit_identity_loop(
-            asm,
-            layout,
-            &group.inputs[0],
-            &output_ref,
-            group.atom_offset,
-            group.count,
-            tables,
+            asm, layout, &group.inputs[0],
+            group.base_id, group.atom_offset,
+            group.atom_offset, group.count, tables,
         )
     }
 }
@@ -177,44 +162,25 @@ fn emit_identity_iter(
     asm: &mut Assembler,
     layout: &BufferLayout,
     src_input: &InputRef,
-    dst_input: &InputRef,
+    output_base: crate::nano_graph::pattern::AtomId,
+    output_atom_offset: u64,
     iter: IterVar,
     atom_offset: u64,
     tables: &mut AddressTables,
 ) -> Result<(), String> {
     // 1. Compute src bit offset → r10.
     let src_info = emit_compute_bit_offset(
-        asm,
-        layout,
-        src_input,
-        iter,
-        atom_offset,
-        BIT_OFF_REG,
-        ADDR_SCRATCH,
-        tables,
+        asm, layout, src_input, iter, atom_offset,
+        BIT_OFF_REG, ADDR_SCRATCH, tables,
     )?;
 
     // 2. Load src bits → rax.
-    emit_load_bits(
-        asm,
-        BUFFER_REG,
-        BIT_OFF_REG,
-        src_info.n_bits,
-        RAW_REG,
-        ADDR_SCRATCH,
-    );
+    emit_load_bits(asm, BUFFER_REG, BIT_OFF_REG, src_info.n_bits, RAW_REG, ADDR_SCRATCH);
 
-    // 3. Compute dst bit offset → r10 (overwriting the src offset,
-    // which we no longer need).
-    let dst_info = emit_compute_bit_offset(
-        asm,
-        layout,
-        dst_input,
-        iter,
-        atom_offset,
-        BIT_OFF_REG,
-        ADDR_SCRATCH,
-        tables,
+    // 3. Compute dst bit offset → r10 with atom_offset compensation.
+    let dst_info = emit_output_bit_offset(
+        asm, layout, output_base, output_atom_offset, iter,
+        BIT_OFF_REG, ADDR_SCRATCH,
     )?;
 
     if src_info.n_bits != dst_info.n_bits {
@@ -224,17 +190,10 @@ fn emit_identity_iter(
         ));
     }
 
-    // 4. Store rax at dst bit offset. ADDR_SCRATCH (r11) is dead at
-    // this point and can be reused as bit_io's tmp3.
+    // 4. Store rax at dst bit offset.
     emit_store_bits(
-        asm,
-        BUFFER_REG,
-        BIT_OFF_REG,
-        dst_info.n_bits,
-        RAW_REG,
-        BIT_IO_TMP1,
-        BIT_IO_TMP2,
-        ADDR_SCRATCH,
+        asm, BUFFER_REG, BIT_OFF_REG, dst_info.n_bits, RAW_REG,
+        BIT_IO_TMP1, BIT_IO_TMP2, ADDR_SCRATCH,
     );
 
     Ok(())
@@ -259,7 +218,8 @@ fn emit_identity_loop(
     asm: &mut Assembler,
     layout: &BufferLayout,
     src_input: &InputRef,
-    dst_input: &InputRef,
+    output_base: crate::nano_graph::pattern::AtomId,
+    output_atom_offset: u64,
     atom_offset: u64,
     count: u64,
     tables: &mut AddressTables,
@@ -285,13 +245,9 @@ fn emit_identity_loop(
     // Inside the loop, the iter register IS the absolute intra-slab
     // index — pass `atom_offset = 0` so address.rs doesn't double-shift.
     emit_identity_iter(
-        asm,
-        layout,
-        src_input,
-        dst_input,
-        IterVar::Reg(LOOP_VAR_REG),
-        0,
-        tables,
+        asm, layout, src_input,
+        output_base, output_atom_offset,
+        IterVar::Reg(LOOP_VAR_REG), 0, tables,
     )?;
 
     dynasm!(asm
@@ -324,14 +280,12 @@ fn emit_cast_group(
     let src_dtype = lookup_input_dtype(layout, &group.inputs[0], group.atom_offset)?;
     let dst_dtype = group.output_dtype;
 
-    let output_ref = InputRef::affine(group.base_id, 1);
-
     if group.count == 1 {
         emit_cast_iter(
             asm,
             layout,
             &group.inputs[0],
-            &output_ref,
+            group.base_id, group.atom_offset,
             src_dtype,
             dst_dtype,
             IterVar::Const(group.atom_offset),
@@ -344,7 +298,7 @@ fn emit_cast_group(
             asm,
             layout,
             &group.inputs[0],
-            &output_ref,
+            group.base_id, group.atom_offset,
             src_dtype,
             dst_dtype,
             group.atom_offset,
@@ -363,7 +317,8 @@ fn emit_cast_iter(
     asm: &mut Assembler,
     layout: &BufferLayout,
     src_input: &InputRef,
-    dst_input: &InputRef,
+    output_base: crate::nano_graph::pattern::AtomId,
+    output_atom_offset: u64,
     src_dtype: crate::numeric_dtype::NumericDType,
     dst_dtype: crate::numeric_dtype::NumericDType,
     iter: IterVar,
@@ -431,15 +386,9 @@ fn emit_cast_iter(
     )?;
 
     // 5. Compute dst bit offset → r10.
-    let dst_info = emit_compute_bit_offset(
-        asm,
-        layout,
-        dst_input,
-        iter,
-        atom_offset,
-        BIT_OFF_REG,
-        ADDR_SCRATCH,
-        addr_tables,
+    let dst_info = emit_output_bit_offset(
+        asm, layout, output_base, output_atom_offset, iter,
+        BIT_OFF_REG, ADDR_SCRATCH,
     )?;
 
     // 6. Store raw bits.
@@ -463,7 +412,8 @@ fn emit_cast_loop(
     asm: &mut Assembler,
     layout: &BufferLayout,
     src_input: &InputRef,
-    dst_input: &InputRef,
+    output_base: crate::nano_graph::pattern::AtomId,
+    output_atom_offset: u64,
     src_dtype: crate::numeric_dtype::NumericDType,
     dst_dtype: crate::numeric_dtype::NumericDType,
     atom_offset: u64,
@@ -493,7 +443,7 @@ fn emit_cast_loop(
         asm,
         layout,
         src_input,
-        dst_input,
+        output_base, output_atom_offset,
         src_dtype,
         dst_dtype,
         IterVar::Reg(LOOP_VAR_REG),
@@ -530,18 +480,18 @@ fn emit_binary_group(
             group.inputs.len()
         ));
     }
-    let output_ref = InputRef::affine(group.base_id, 1);
-
     if group.count == 1 {
         emit_binary_iter(
-            asm, layout, &group.inputs[0], &group.inputs[1], &output_ref,
+            asm, layout, &group.inputs[0], &group.inputs[1],
+            group.base_id, group.atom_offset,
             op, compute_dtype, group.output_dtype,
             IterVar::Const(group.atom_offset), group.atom_offset,
             addr_tables, codec_tables,
         )
     } else {
         emit_binary_loop(
-            asm, layout, &group.inputs[0], &group.inputs[1], &output_ref,
+            asm, layout, &group.inputs[0], &group.inputs[1],
+            group.base_id, group.atom_offset,
             op, compute_dtype, group.output_dtype,
             group.atom_offset, group.count,
             addr_tables, codec_tables,
@@ -570,7 +520,8 @@ fn emit_binary_iter(
     layout: &BufferLayout,
     input_a: &InputRef,
     input_b: &InputRef,
-    output: &InputRef,
+    output_base: crate::nano_graph::pattern::AtomId,
+    output_atom_offset: u64,
     op: ScalarBinOp,
     compute_dtype: NumericDType,
     output_dtype: NumericDType,
@@ -639,9 +590,9 @@ fn emit_binary_iter(
         BIT_IO_TMP1, BIT_IO_TMP2, FLT_SCRATCH,
     )?;
 
-    let dst_info = emit_compute_bit_offset(
-        asm, layout, output, iter, atom_offset,
-        BIT_OFF_REG, ADDR_SCRATCH, addr_tables,
+    let dst_info = emit_output_bit_offset(
+        asm, layout, output_base, output_atom_offset, iter,
+        BIT_OFF_REG, ADDR_SCRATCH,
     )?;
 
     emit_store_bits(
@@ -685,7 +636,8 @@ fn emit_binary_loop(
     layout: &BufferLayout,
     input_a: &InputRef,
     input_b: &InputRef,
-    output: &InputRef,
+    output_base: crate::nano_graph::pattern::AtomId,
+    output_atom_offset: u64,
     op: ScalarBinOp,
     compute_dtype: NumericDType,
     output_dtype: NumericDType,
@@ -713,7 +665,8 @@ fn emit_binary_loop(
     );
 
     emit_binary_iter(
-        asm, layout, input_a, input_b, output,
+        asm, layout, input_a, input_b,
+        output_base, output_atom_offset,
         op, compute_dtype, output_dtype,
         IterVar::Reg(LOOP_VAR_REG), 0,
         addr_tables, codec_tables,
@@ -747,18 +700,18 @@ fn emit_unary_group(
             group.inputs.len()
         ));
     }
-    let output_ref = InputRef::affine(group.base_id, 1);
-
     if group.count == 1 {
         emit_unary_iter(
-            asm, layout, &group.inputs[0], &output_ref,
+            asm, layout, &group.inputs[0],
+            group.base_id, group.atom_offset,
             op, compute_dtype, group.output_dtype,
             IterVar::Const(group.atom_offset), group.atom_offset,
             addr_tables, codec_tables,
         )
     } else {
         emit_unary_loop(
-            asm, layout, &group.inputs[0], &output_ref,
+            asm, layout, &group.inputs[0],
+            group.base_id, group.atom_offset,
             op, compute_dtype, group.output_dtype,
             group.atom_offset, group.count,
             addr_tables, codec_tables,
@@ -772,7 +725,8 @@ fn emit_unary_iter(
     asm: &mut Assembler,
     layout: &BufferLayout,
     input: &InputRef,
-    output: &InputRef,
+    output_base: crate::nano_graph::pattern::AtomId,
+    output_atom_offset: u64,
     op: ScalarUnaryOp,
     compute_dtype: NumericDType,
     output_dtype: NumericDType,
@@ -820,9 +774,9 @@ fn emit_unary_iter(
         BIT_IO_TMP1, BIT_IO_TMP2, FLT_SCRATCH,
     )?;
 
-    let dst_info = emit_compute_bit_offset(
-        asm, layout, output, iter, atom_offset,
-        BIT_OFF_REG, ADDR_SCRATCH, addr_tables,
+    let dst_info = emit_output_bit_offset(
+        asm, layout, output_base, output_atom_offset, iter,
+        BIT_OFF_REG, ADDR_SCRATCH,
     )?;
 
     emit_store_bits(
@@ -839,7 +793,8 @@ fn emit_unary_loop(
     asm: &mut Assembler,
     layout: &BufferLayout,
     input: &InputRef,
-    output: &InputRef,
+    output_base: crate::nano_graph::pattern::AtomId,
+    output_atom_offset: u64,
     op: ScalarUnaryOp,
     compute_dtype: NumericDType,
     output_dtype: NumericDType,
@@ -867,7 +822,8 @@ fn emit_unary_loop(
     );
 
     emit_unary_iter(
-        asm, layout, input, output,
+        asm, layout, input,
+        output_base, output_atom_offset,
         op, compute_dtype, output_dtype,
         IterVar::Reg(LOOP_VAR_REG), 0,
         addr_tables, codec_tables,
@@ -997,17 +953,17 @@ fn emit_select_group(
             group.inputs.len()
         ));
     }
-    let output_ref = InputRef::affine(group.base_id, 1);
-
     if group.count == 1 {
         emit_select_iter(
-            asm, layout, group, &output_ref,
+            asm, layout, group,
+            group.base_id, group.atom_offset,
             IterVar::Const(group.atom_offset), group.atom_offset,
             addr_tables, codec_tables,
         )
     } else {
         emit_select_loop(
-            asm, layout, group, &output_ref,
+            asm, layout, group,
+            group.base_id, group.atom_offset,
             group.atom_offset, group.count,
             addr_tables, codec_tables,
         )
@@ -1019,7 +975,8 @@ fn emit_select_iter(
     asm: &mut Assembler,
     layout: &BufferLayout,
     group: &AtomGroup<'static, SystemPool>,
-    output: &InputRef,
+    output_base: crate::nano_graph::pattern::AtomId,
+    output_atom_offset: u64,
     iter: IterVar,
     atom_offset: u64,
     addr_tables: &mut AddressTables,
@@ -1142,9 +1099,9 @@ fn emit_select_iter(
         asm, output_dtype, result_slot, RAW_REG,
         BIT_IO_TMP1, BIT_IO_TMP2, FLT_SCRATCH,
     )?;
-    let dst_info = emit_compute_bit_offset(
-        asm, layout, output, iter, atom_offset,
-        BIT_OFF_REG, ADDR_SCRATCH, addr_tables,
+    let dst_info = emit_output_bit_offset(
+        asm, layout, output_base, output_atom_offset, iter,
+        BIT_OFF_REG, ADDR_SCRATCH,
     )?;
     emit_store_bits(
         asm, BUFFER_REG, BIT_OFF_REG, dst_info.n_bits, RAW_REG,
@@ -1158,7 +1115,8 @@ fn emit_select_loop(
     asm: &mut Assembler,
     layout: &BufferLayout,
     group: &AtomGroup<'static, SystemPool>,
-    output: &InputRef,
+    output_base: crate::nano_graph::pattern::AtomId,
+    output_atom_offset: u64,
     atom_offset: u64,
     count: u64,
     addr_tables: &mut AddressTables,
@@ -1175,7 +1133,8 @@ fn emit_select_loop(
     let loop_exit = asm.new_dynamic_label();
     dynasm!(asm; =>loop_top; cmp Rq(LOOP_VAR_REG), Rq(LOOP_END_REG); jge =>loop_exit);
     emit_select_iter(
-        asm, layout, group, output,
+        asm, layout, group,
+        output_base, output_atom_offset,
         IterVar::Reg(LOOP_VAR_REG), 0,
         addr_tables, codec_tables,
     )?;
@@ -1211,11 +1170,10 @@ fn emit_indirect_load_group(
     let table_n_bits = table_slot.elem_bits as u32;
     let table_dtype = table_slot.dtype;
 
-    let output_ref = InputRef::affine(group.base_id, 1);
-
     if group.count == 1 {
         emit_indirect_load_iter(
-            asm, layout, &group.inputs[0], &output_ref,
+            asm, layout, &group.inputs[0],
+            group.base_id, group.atom_offset,
             table_bit_offset, table_bit_stride, table_n_bits, table_dtype,
             group.output_dtype,
             IterVar::Const(group.atom_offset), group.atom_offset,
@@ -1234,7 +1192,8 @@ fn emit_indirect_load_group(
         dynasm!(asm; =>loop_top; cmp Rq(LOOP_VAR_REG), Rq(LOOP_END_REG); jge =>loop_exit);
 
         emit_indirect_load_iter(
-            asm, layout, &group.inputs[0], &output_ref,
+            asm, layout, &group.inputs[0],
+            group.base_id, group.atom_offset,
             table_bit_offset, table_bit_stride, table_n_bits, table_dtype,
             group.output_dtype,
             IterVar::Reg(LOOP_VAR_REG), 0,
@@ -1252,7 +1211,8 @@ fn emit_indirect_load_iter(
     asm: &mut Assembler,
     layout: &BufferLayout,
     index_input: &InputRef,
-    output: &InputRef,
+    output_base: crate::nano_graph::pattern::AtomId,
+    output_atom_offset: u64,
     table_bit_offset: u64,
     table_bit_stride: u64,
     table_n_bits: u32,
@@ -1346,9 +1306,9 @@ fn emit_indirect_load_iter(
     )?;
 
     // 6. Compute output address + store.
-    let dst_info = emit_compute_bit_offset(
-        asm, layout, output, iter, atom_offset,
-        BIT_OFF_REG, ADDR_SCRATCH, addr_tables,
+    let dst_info = emit_output_bit_offset(
+        asm, layout, output_base, output_atom_offset, iter,
+        BIT_OFF_REG, ADDR_SCRATCH,
     )?;
     emit_store_bits(
         asm, BUFFER_REG, BIT_OFF_REG, dst_info.n_bits, RAW_REG,
@@ -1356,6 +1316,78 @@ fn emit_indirect_load_iter(
     );
 
     Ok(())
+}
+
+// ─── Output address helper ──────────────────────────────────────────
+
+/// Compute the output bit offset for a group's store.
+///
+/// The output slot's base atom is `group.base_id`, which for split
+/// groups already incorporates `atom_offset`. The cranelift backend
+/// compensates: `store_base = slot.byte_offset() - atom_offset * elem_bytes`.
+/// We do the same in bits so that `i = atom_offset` maps to
+/// `slot.bit_offset`.
+pub(super) fn emit_output_bit_offset(
+    asm: &mut Assembler,
+    layout: &BufferLayout,
+    group_base_id: crate::nano_graph::pattern::AtomId,
+    atom_offset: u64,
+    iter: IterVar,
+    dst_bit_reg: u8,
+    scratch_reg: u8,
+) -> Result<super::address::AddressInfo, String> {
+    let (slot, elem_idx) = layout
+        .find(group_base_id)
+        .ok_or_else(|| format!("output: no slot for group base={group_base_id}"))?;
+
+    let info = super::address::AddressInfo {
+        dtype: slot.dtype,
+        n_bits: slot.elem_bits as u32,
+    };
+
+    // store_base_bit = slot_bit - atom_offset * bit_stride
+    let slot_bit = slot.bit_offset as i64 + elem_idx as i64 * slot.bit_stride as i64;
+    let store_base_bit = slot_bit - atom_offset as i64 * slot.bit_stride as i64;
+    let bit_stride = slot.bit_stride as i64;
+
+    match iter {
+        IterVar::Const(c) => {
+            let abs_bit = store_base_bit + bit_stride * c as i64;
+            dynasm!(asm
+                ; .arch x64
+                ; mov Rq(dst_bit_reg), QWORD abs_bit
+            );
+        }
+        IterVar::Reg(iter_reg) => {
+            // dst = iter * bit_stride + store_base_bit
+            if (i32::MIN as i64..=i32::MAX as i64).contains(&bit_stride) {
+                dynasm!(asm
+                    ; .arch x64
+                    ; imul Rq(dst_bit_reg), Rq(iter_reg), bit_stride as i32
+                );
+            } else {
+                dynasm!(asm
+                    ; .arch x64
+                    ; mov Rq(scratch_reg), QWORD bit_stride
+                    ; mov Rq(dst_bit_reg), Rq(iter_reg)
+                    ; imul Rq(dst_bit_reg), Rq(scratch_reg)
+                );
+            }
+            if (i32::MIN as i64..=i32::MAX as i64).contains(&store_base_bit) {
+                dynasm!(asm
+                    ; .arch x64
+                    ; add Rq(dst_bit_reg), store_base_bit as i32
+                );
+            } else {
+                dynasm!(asm
+                    ; .arch x64
+                    ; mov Rq(scratch_reg), QWORD store_base_bit
+                    ; add Rq(dst_bit_reg), Rq(scratch_reg)
+                );
+            }
+        }
+    }
+    Ok(info)
 }
 
 // ─── Int wrapping helpers ────────────────────────────────────────────
