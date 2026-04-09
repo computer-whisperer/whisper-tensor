@@ -97,6 +97,9 @@ pub fn emit_group(
         ScalarOp::Unary { op, compute_dtype } => {
             emit_unary_group(asm, layout, group, *op, *compute_dtype, addr_tables, codec_tables)
         }
+        ScalarOp::Select => {
+            emit_select_group(asm, layout, group, addr_tables, codec_tables)
+        }
         op => Err(format!(
             "x86_jit emit_group: unsupported op {op:?} not yet supported"
         )),
@@ -789,9 +792,10 @@ fn emit_unary_iter(
         ComputeRepr::F32 => emit_unop_f32(asm, op, BIT_IO_TMP1)?,
         ComputeRepr::F64 => emit_unop_f64(asm, op, BIT_IO_TMP1)?,
         ComputeRepr::Int => {
-            return Err(format!(
-                "x86_jit Unary int op {op:?} not yet implemented (P3.F)"
-            ));
+            use super::super::ops::int::emit_unop_int;
+            let (signed, bits) = int_dtype_info(compute_dtype)?;
+            emit_unop_int(asm, op, signed)?;
+            emit_int_wrap(asm, bits, signed, super::super::prologue::INT_SLOT_C);
         }
     }
 
@@ -963,6 +967,211 @@ fn emit_repr_convert(
         // Same repr — should not be called.
         _ => Ok(()),
     }
+}
+
+// ─── Select emission ────────────────────────────────────────────────
+
+/// Register used to hold the truthiness boolean across loads.
+/// r9 (BIT_IO_TMP2) is not clobbered by address/load/decode.
+const COND_REG: u8 = 9;
+
+fn emit_select_group(
+    asm: &mut Assembler,
+    layout: &BufferLayout,
+    group: &AtomGroup<'static, SystemPool>,
+    addr_tables: &mut AddressTables,
+    codec_tables: &mut CodecTables,
+) -> Result<(), String> {
+    if group.inputs.len() != 3 {
+        return Err(format!(
+            "Select group has {} inputs, expected 3",
+            group.inputs.len()
+        ));
+    }
+    let output_ref = InputRef::affine(group.base_id, 1);
+
+    if group.count == 1 {
+        emit_select_iter(
+            asm, layout, group, &output_ref,
+            IterVar::Const(group.atom_offset), group.atom_offset,
+            addr_tables, codec_tables,
+        )
+    } else {
+        emit_select_loop(
+            asm, layout, group, &output_ref,
+            group.atom_offset, group.count,
+            addr_tables, codec_tables,
+        )
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_select_iter(
+    asm: &mut Assembler,
+    layout: &BufferLayout,
+    group: &AtomGroup<'static, SystemPool>,
+    output: &InputRef,
+    iter: IterVar,
+    atom_offset: u64,
+    addr_tables: &mut AddressTables,
+    codec_tables: &mut CodecTables,
+) -> Result<(), String> {
+    use super::super::prologue::{FLT_SLOT_A, FLT_SLOT_B, FLT_SLOT_C, INT_SLOT_A, INT_SLOT_B};
+
+    let output_dtype = group.output_dtype;
+    let out_repr = ComputeRepr::for_dtype(output_dtype);
+
+    // 1. Load condition, test truthiness → COND_REG (r9).
+    let cond_info = emit_compute_bit_offset(
+        asm, layout, &group.inputs[0], iter, atom_offset,
+        BIT_OFF_REG, ADDR_SCRATCH, addr_tables,
+    )?;
+    emit_load_bits(asm, BUFFER_REG, BIT_OFF_REG, cond_info.n_bits, RAW_REG, ADDR_SCRATCH);
+    let cond_repr = ComputeRepr::for_dtype(cond_info.dtype);
+    let cond_slot = match cond_repr {
+        ComputeRepr::F32 | ComputeRepr::F64 => CodecSlot::Xmm(FLT_SLOT_A),
+        ComputeRepr::Int => CodecSlot::Gp(RAW_REG),
+    };
+    emit_decode(asm, cond_info.dtype, RAW_REG, cond_slot, BIT_IO_TMP1, FLT_SCRATCH, codec_tables)?;
+
+    // Extract truthiness to COND_REG: nonzero → 1, zero → 0.
+    match cond_repr {
+        ComputeRepr::F32 => {
+            // Float truthiness: (raw & 0x7fffffff) != 0.
+            dynasm!(asm
+                ; .arch x64
+                ; vmovd Rd(COND_REG), Rx(FLT_SLOT_A)
+                ; and Rd(COND_REG), 0x7fffffff
+                ; test Rd(COND_REG), Rd(COND_REG)
+                ; setne Rb(COND_REG)
+                ; movzx Rd(COND_REG), Rb(COND_REG)
+            );
+        }
+        ComputeRepr::F64 => {
+            dynasm!(asm
+                ; .arch x64
+                ; vmovq Rq(COND_REG), Rx(FLT_SLOT_A)
+                ; mov Rq(BIT_IO_TMP1), QWORD 0x7fffffffffffffff_u64 as i64
+                ; and Rq(COND_REG), Rq(BIT_IO_TMP1)
+                ; test Rq(COND_REG), Rq(COND_REG)
+                ; setne Rb(COND_REG)
+                ; movzx Rd(COND_REG), Rb(COND_REG)
+            );
+        }
+        ComputeRepr::Int => {
+            dynasm!(asm
+                ; .arch x64
+                ; test Rq(RAW_REG), Rq(RAW_REG)
+                ; setne Rb(COND_REG)
+                ; movzx Rd(COND_REG), Rb(COND_REG)
+            );
+        }
+    }
+    // COND_REG now holds 0 or 1. It survives all subsequent loads.
+
+    // 2. Load x (true branch) → slot A.
+    let _x_info = emit_load_decode_input(
+        asm, layout, &group.inputs[1], iter, atom_offset,
+        addr_tables, codec_tables,
+        match out_repr {
+            ComputeRepr::F32 | ComputeRepr::F64 => CodecSlot::Xmm(FLT_SLOT_A),
+            ComputeRepr::Int => CodecSlot::Gp(INT_SLOT_A),
+        },
+    )?;
+
+    // For int: stash x before loading y.
+    if out_repr == ComputeRepr::Int {
+        dynasm!(asm; .arch x64; movq Rx(FLT_SLOT), Rq(INT_SLOT_A));
+    }
+
+    // 3. Load y (false branch) → slot B.
+    let _y_info = emit_load_decode_input(
+        asm, layout, &group.inputs[2], iter, atom_offset,
+        addr_tables, codec_tables,
+        match out_repr {
+            ComputeRepr::F32 | ComputeRepr::F64 => CodecSlot::Xmm(FLT_SLOT_B),
+            ComputeRepr::Int => CodecSlot::Gp(INT_SLOT_B),
+        },
+    )?;
+
+    // For int: restore x.
+    if out_repr == ComputeRepr::Int {
+        dynasm!(asm; .arch x64; movq Rq(INT_SLOT_A), Rx(FLT_SLOT));
+    }
+
+    // 4. Select: result = cond ? x : y → slot C.
+    let done = asm.new_dynamic_label();
+    match out_repr {
+        ComputeRepr::F32 | ComputeRepr::F64 => {
+            // Default to y, overwrite with x if cond is truthy.
+            dynasm!(asm
+                ; .arch x64
+                ; vmovaps Rx(FLT_SLOT_C), Rx(FLT_SLOT_B)
+                ; test Rd(COND_REG), Rd(COND_REG)
+                ; jz =>done
+                ; vmovaps Rx(FLT_SLOT_C), Rx(FLT_SLOT_A)
+                ; =>done
+            );
+        }
+        ComputeRepr::Int => {
+            // cmovnz: if cond != 0, C = x; else C = y.
+            dynasm!(asm
+                ; .arch x64
+                ; mov Rq(super::super::prologue::INT_SLOT_C), Rq(INT_SLOT_B)
+                ; test Rd(COND_REG), Rd(COND_REG)
+                ; cmovnz Rq(super::super::prologue::INT_SLOT_C), Rq(INT_SLOT_A)
+            );
+        }
+    }
+
+    // 5. Encode + store.
+    let result_slot = match out_repr {
+        ComputeRepr::F32 | ComputeRepr::F64 => CodecSlot::Xmm(FLT_SLOT_C),
+        ComputeRepr::Int => CodecSlot::Gp(super::super::prologue::INT_SLOT_C),
+    };
+    emit_encode(
+        asm, output_dtype, result_slot, RAW_REG,
+        BIT_IO_TMP1, BIT_IO_TMP2, FLT_SCRATCH,
+    )?;
+    let dst_info = emit_compute_bit_offset(
+        asm, layout, output, iter, atom_offset,
+        BIT_OFF_REG, ADDR_SCRATCH, addr_tables,
+    )?;
+    emit_store_bits(
+        asm, BUFFER_REG, BIT_OFF_REG, dst_info.n_bits, RAW_REG,
+        BIT_IO_TMP1, BIT_IO_TMP2, ADDR_SCRATCH,
+    );
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_select_loop(
+    asm: &mut Assembler,
+    layout: &BufferLayout,
+    group: &AtomGroup<'static, SystemPool>,
+    output: &InputRef,
+    atom_offset: u64,
+    count: u64,
+    addr_tables: &mut AddressTables,
+    codec_tables: &mut CodecTables,
+) -> Result<(), String> {
+    let start = atom_offset as i64;
+    let end = (atom_offset + count) as i64;
+    dynasm!(asm
+        ; .arch x64
+        ; mov Rq(LOOP_VAR_REG), QWORD start
+        ; mov Rq(LOOP_END_REG), QWORD end
+    );
+    let loop_top = asm.new_dynamic_label();
+    let loop_exit = asm.new_dynamic_label();
+    dynasm!(asm; =>loop_top; cmp Rq(LOOP_VAR_REG), Rq(LOOP_END_REG); jge =>loop_exit);
+    emit_select_iter(
+        asm, layout, group, output,
+        IterVar::Reg(LOOP_VAR_REG), 0,
+        addr_tables, codec_tables,
+    )?;
+    dynasm!(asm; add Rq(LOOP_VAR_REG), 1; jmp =>loop_top; =>loop_exit);
+    Ok(())
 }
 
 // ─── Int wrapping helpers ────────────────────────────────────────────

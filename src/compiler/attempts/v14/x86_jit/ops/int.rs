@@ -22,7 +22,7 @@ use dynasmrt::x64::Assembler;
 use dynasmrt::{DynasmApi, DynasmLabelApi, dynasm};
 
 use super::super::prologue::{INT_SLOT_A, INT_SLOT_B, INT_SLOT_C};
-use crate::nano_graph::ops::ScalarBinOp;
+use crate::nano_graph::ops::{ScalarBinOp, ScalarUnaryOp};
 
 /// Emit an integer binary op.
 ///
@@ -288,6 +288,114 @@ fn emit_int_mod(asm: &mut Assembler, signed: bool, bits: u8, _scratch: u8) {
         ; xor Rq(c), Rq(c)
         ; =>done
     );
+}
+
+// ─── Int unary ops ──────────────────────────────────────────────────
+
+/// Emit an integer unary op.
+///
+/// Input in `INT_SLOT_A` (rax). Result in `INT_SLOT_C` (rdx).
+/// The caller applies wrapping after this returns.
+pub fn emit_unop_int(
+    asm: &mut Assembler,
+    op: ScalarUnaryOp,
+    signed: bool,
+) -> Result<(), String> {
+    let a = INT_SLOT_A;
+    let c = INT_SLOT_C;
+    match op {
+        ScalarUnaryOp::Neg => {
+            dynasm!(asm; .arch x64; xor Rq(c), Rq(c); sub Rq(c), Rq(a));
+        }
+        ScalarUnaryOp::Abs => {
+            if signed {
+                // Branchless abs: negate, then cmov if the negation
+                // went negative (i.e., original was positive).
+                dynasm!(asm
+                    ; .arch x64
+                    ; mov Rq(c), Rq(a)
+                    ; neg Rq(c)
+                    ; cmovs Rq(c), Rq(a)
+                );
+            } else {
+                // Unsigned abs is identity.
+                dynasm!(asm; .arch x64; mov Rq(c), Rq(a));
+            }
+        }
+        ScalarUnaryOp::Not => {
+            // Logical not: truthy → 0, falsy → 1.
+            dynasm!(asm
+                ; .arch x64
+                ; test Rq(a), Rq(a)
+                ; sete Rb(c)
+                ; movzx Rq(c), Rb(c)
+            );
+        }
+        ScalarUnaryOp::BitwiseNot => {
+            dynasm!(asm; .arch x64; mov Rq(c), Rq(a); not Rq(c));
+        }
+        ScalarUnaryOp::Sign => {
+            if signed {
+                let neg = asm.new_dynamic_label();
+                let done = asm.new_dynamic_label();
+                dynasm!(asm
+                    ; .arch x64
+                    ; xor Rq(c), Rq(c)
+                    ; test Rq(a), Rq(a)
+                    ; jz =>done
+                    ; js =>neg
+                    ; mov Rq(c), 1
+                    ; jmp =>done
+                    ; =>neg
+                    ; mov Rq(c), -1
+                    ; =>done
+                );
+            } else {
+                // Unsigned sign: 0 if zero, 1 if nonzero.
+                dynasm!(asm
+                    ; .arch x64
+                    ; test Rq(a), Rq(a)
+                    ; setne Rb(c)
+                    ; movzx Rq(c), Rb(c)
+                );
+            }
+        }
+        ScalarUnaryOp::IsNan => {
+            // Integers are never NaN → always 0.
+            dynasm!(asm; .arch x64; xor Rq(c), Rq(c));
+        }
+        ScalarUnaryOp::IsInf { .. } => {
+            // Integers are never infinite → always 0.
+            dynasm!(asm; .arch x64; xor Rq(c), Rq(c));
+        }
+        // Float-only ops: not valid for int compute repr.
+        ScalarUnaryOp::Sqrt
+        | ScalarUnaryOp::Reciprocal
+        | ScalarUnaryOp::Floor
+        | ScalarUnaryOp::Ceil
+        | ScalarUnaryOp::Round
+        | ScalarUnaryOp::Exp
+        | ScalarUnaryOp::Ln
+        | ScalarUnaryOp::Tanh
+        | ScalarUnaryOp::Erf
+        | ScalarUnaryOp::Sin
+        | ScalarUnaryOp::Cos
+        | ScalarUnaryOp::Tan
+        | ScalarUnaryOp::Asin
+        | ScalarUnaryOp::Acos
+        | ScalarUnaryOp::Atan
+        | ScalarUnaryOp::Sinh
+        | ScalarUnaryOp::Cosh
+        | ScalarUnaryOp::Asinh
+        | ScalarUnaryOp::Acosh
+        | ScalarUnaryOp::Atanh
+        | ScalarUnaryOp::Log1p => {
+            return Err(format!(
+                "emit_unop_int: float-only op {op:?} not valid for int compute repr"
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Emit Euclidean modulo (IMod): result sign matches divisor.

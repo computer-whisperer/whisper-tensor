@@ -52,6 +52,14 @@ pub fn check_supported(graph: &NanoGraph<'static, SystemPool>) -> Result<(), Str
                     ));
                 }
             }
+            ScalarOp::Select => {
+                if group.inputs.len() != 3 {
+                    return Err(format!(
+                        "x86_jit: group {gi} Select has {} inputs, expected 3",
+                        group.inputs.len()
+                    ));
+                }
+            }
             ScalarOp::Literal(_) | ScalarOp::LiteralSpan(_) => {}
             op => {
                 return Err(format!(
