@@ -19,13 +19,12 @@
 //!   the prologue/epilogue. The only layer that knows about
 //!   `BufferLayout` and the executor ABI.
 //!
-//! # Phase 2.B.4 status
+//! # Phase 2.B.5 status
 //!
-//! The pipeline emits Identity-only graphs (single input, source
-//! dtype matches output dtype) with **all InputRef shapes**: Broadcast,
-//! N-d Strided, and multi-entry Explicit. Everything else is rejected
-//! by [`support::check_supported`] and falls back to the cranelift
-//! backend.
+//! The pipeline emits Identity, same-repr Cast, Literal, and
+//! LiteralSpan with **all InputRef shapes**. Cross-compute-repr
+//! Cast (float↔int) falls back to cranelift. Everything else is
+//! rejected by [`support::check_supported`].
 
 pub mod codec;
 pub mod ops;
@@ -129,7 +128,7 @@ impl X86JitSpan {
         // Build the JIT. Empty graphs still go through the prologue
         // and epilogue so the function shape matches what later
         // phases will produce.
-        let tables = CodecTables::new();
+        let mut tables = CodecTables::new();
         let mut addr_tables = AddressTables::new();
         let mut asm = Assembler::new().map_err(|e| format!("x86_jit: assembler init: {e}"))?;
         let entry = asm.offset();
@@ -145,7 +144,7 @@ impl X86JitSpan {
             if layout.group_use_counts[gi] == 0 {
                 continue;
             }
-            emit_group(&mut asm, &layout, group, &mut addr_tables)?;
+            emit_group(&mut asm, &layout, group, &mut addr_tables, &mut tables)?;
         }
         prologue::emit_epilogue(&mut asm);
         let code = asm

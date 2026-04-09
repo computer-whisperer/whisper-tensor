@@ -50,6 +50,7 @@ use crate::nano_graph::pattern::{AtomGroup, AtomId, InputRef};
 use crate::pool::SystemPool;
 
 use super::super::codec::bit_io::{emit_load_bits, emit_store_bits};
+use super::super::codec::format::{CodecSlot, CodecTables, ComputeRepr, emit_decode, emit_encode};
 use super::super::prologue::{BUFFER_REG, LOOP_END_REG, LOOP_VAR_REG};
 use super::address::{AddressInfo, AddressTables, IterVar, emit_compute_bit_offset};
 
@@ -59,10 +60,14 @@ const BIT_OFF_REG: u8 = 10;
 const ADDR_SCRATCH: u8 = 11;
 /// Holds the loaded raw bits across the load → store sequence.
 const RAW_REG: u8 = 0;
-/// Bit_io store tmp1.
+/// Bit_io store tmp1. Also codec scratch_gp1 between load and store.
 const BIT_IO_TMP1: u8 = 8;
-/// Bit_io store tmp2.
+/// Bit_io store tmp2. Also codec scratch_gp2 between load and store.
 const BIT_IO_TMP2: u8 = 9;
+/// XMM register used as the float compute slot A.
+const FLT_SLOT: u8 = 0;
+/// XMM register used as codec scratch.
+const FLT_SCRATCH: u8 = 1;
 
 /// Emit one `AtomGroup` body. Either inlined (for `count == 1`) or
 /// wrapped in a loop over the group's atoms.
@@ -73,12 +78,19 @@ pub fn emit_group(
     asm: &mut Assembler,
     layout: &BufferLayout,
     group: &AtomGroup<'static, SystemPool>,
-    tables: &mut AddressTables,
+    addr_tables: &mut AddressTables,
+    codec_tables: &mut CodecTables,
 ) -> Result<(), String> {
     match &group.op {
-        ScalarOp::Identity => emit_identity_group(asm, layout, group, tables),
+        ScalarOp::Identity => emit_identity_group(asm, layout, group, addr_tables),
+        ScalarOp::Cast { .. } => emit_cast_group(asm, layout, group, addr_tables, codec_tables),
+        ScalarOp::Literal(_) | ScalarOp::LiteralSpan(_) => {
+            // Values are pre-populated in the buffer template by
+            // `BufferLayout::populate_literals`. No code emission.
+            Ok(())
+        }
         op => Err(format!(
-            "x86_jit emit_group: unsupported op {op:?} (P2.B.3 only handles Identity)"
+            "x86_jit emit_group: unsupported op {op:?} (P2.B.5 = Identity/Cast/Literal only)"
         )),
     }
 }
@@ -260,6 +272,217 @@ fn emit_identity_loop(
         IterVar::Reg(LOOP_VAR_REG),
         0,
         tables,
+    )?;
+
+    dynasm!(asm
+        ; add Rq(LOOP_VAR_REG), 1
+        ; jmp =>loop_top
+        ; =>loop_exit
+    );
+
+    Ok(())
+}
+
+// ─── Cast emission ──────────────────────────────────────────────────
+
+/// Emit a Cast group: load raw bits, decode via src dtype, encode via
+/// dst dtype, store raw bits.
+///
+/// Currently handles same-compute-repr casts (float↔float, int↔int).
+/// Cross-repr casts (float↔int) return `Err` and fall back to
+/// cranelift.
+fn emit_cast_group(
+    asm: &mut Assembler,
+    layout: &BufferLayout,
+    group: &AtomGroup<'static, SystemPool>,
+    addr_tables: &mut AddressTables,
+    codec_tables: &mut CodecTables,
+) -> Result<(), String> {
+    if group.inputs.len() != 1 {
+        return Err(format!(
+            "Cast group has {} inputs, expected 1",
+            group.inputs.len()
+        ));
+    }
+
+    let src_dtype = lookup_input_dtype(layout, &group.inputs[0], group.atom_offset)?;
+    let dst_dtype = group.output_dtype;
+    let src_repr = ComputeRepr::for_dtype(src_dtype);
+    let dst_repr = ComputeRepr::for_dtype(dst_dtype);
+
+    if src_repr != dst_repr {
+        return Err(format!(
+            "x86_jit Cast: cross-repr {src_dtype} ({src_repr:?}) → \
+             {dst_dtype} ({dst_repr:?}) not yet supported (P2.B.6)"
+        ));
+    }
+
+    let output_ref = InputRef::affine(group.base_id, 1);
+
+    if group.count == 1 {
+        emit_cast_iter(
+            asm,
+            layout,
+            &group.inputs[0],
+            &output_ref,
+            src_dtype,
+            dst_dtype,
+            IterVar::Const(group.atom_offset),
+            group.atom_offset,
+            addr_tables,
+            codec_tables,
+        )
+    } else {
+        emit_cast_loop(
+            asm,
+            layout,
+            &group.inputs[0],
+            &output_ref,
+            src_dtype,
+            dst_dtype,
+            group.atom_offset,
+            group.count,
+            addr_tables,
+            codec_tables,
+        )
+    }
+}
+
+/// Emit one iteration of the Cast body: load raw bits, decode to
+/// compute repr via src_dtype, encode from compute repr via dst_dtype,
+/// store raw bits.
+#[allow(clippy::too_many_arguments)]
+fn emit_cast_iter(
+    asm: &mut Assembler,
+    layout: &BufferLayout,
+    src_input: &InputRef,
+    dst_input: &InputRef,
+    src_dtype: crate::numeric_dtype::NumericDType,
+    dst_dtype: crate::numeric_dtype::NumericDType,
+    iter: IterVar,
+    atom_offset: u64,
+    addr_tables: &mut AddressTables,
+    codec_tables: &mut CodecTables,
+) -> Result<(), String> {
+    // 1. Compute src bit offset → r10.
+    let src_info = emit_compute_bit_offset(
+        asm,
+        layout,
+        src_input,
+        iter,
+        atom_offset,
+        BIT_OFF_REG,
+        ADDR_SCRATCH,
+        addr_tables,
+    )?;
+
+    // 2. Load src raw bits → rax.
+    emit_load_bits(
+        asm,
+        BUFFER_REG,
+        BIT_OFF_REG,
+        src_info.n_bits,
+        RAW_REG,
+        ADDR_SCRATCH,
+    );
+
+    // 3. Decode raw bits to compute repr.
+    let compute_repr = ComputeRepr::for_dtype(src_dtype);
+    let slot = match compute_repr {
+        ComputeRepr::F32 | ComputeRepr::F64 => CodecSlot::Xmm(FLT_SLOT),
+        ComputeRepr::Int => CodecSlot::Gp(RAW_REG),
+    };
+    emit_decode(
+        asm,
+        src_dtype,
+        RAW_REG,
+        slot,
+        BIT_IO_TMP1,  // scratch_gp
+        FLT_SCRATCH,   // scratch_xmm
+        codec_tables,
+    )?;
+
+    // 4. Encode from compute repr to dst raw bits → rax.
+    emit_encode(
+        asm,
+        dst_dtype,
+        slot,
+        RAW_REG,
+        BIT_IO_TMP1,  // scratch_gp1
+        BIT_IO_TMP2,  // scratch_gp2
+        FLT_SCRATCH,   // scratch_xmm
+    )?;
+
+    // 5. Compute dst bit offset → r10.
+    let dst_info = emit_compute_bit_offset(
+        asm,
+        layout,
+        dst_input,
+        iter,
+        atom_offset,
+        BIT_OFF_REG,
+        ADDR_SCRATCH,
+        addr_tables,
+    )?;
+
+    // 6. Store raw bits.
+    emit_store_bits(
+        asm,
+        BUFFER_REG,
+        BIT_OFF_REG,
+        dst_info.n_bits,
+        RAW_REG,
+        BIT_IO_TMP1,
+        BIT_IO_TMP2,
+        ADDR_SCRATCH,
+    );
+
+    Ok(())
+}
+
+/// Emit a count-loop around `emit_cast_iter`.
+#[allow(clippy::too_many_arguments)]
+fn emit_cast_loop(
+    asm: &mut Assembler,
+    layout: &BufferLayout,
+    src_input: &InputRef,
+    dst_input: &InputRef,
+    src_dtype: crate::numeric_dtype::NumericDType,
+    dst_dtype: crate::numeric_dtype::NumericDType,
+    atom_offset: u64,
+    count: u64,
+    addr_tables: &mut AddressTables,
+    codec_tables: &mut CodecTables,
+) -> Result<(), String> {
+    let start = atom_offset as i64;
+    let end = (atom_offset + count) as i64;
+
+    dynasm!(asm
+        ; .arch x64
+        ; mov Rq(LOOP_VAR_REG), QWORD start
+        ; mov Rq(LOOP_END_REG), QWORD end
+    );
+
+    let loop_top = asm.new_dynamic_label();
+    let loop_exit = asm.new_dynamic_label();
+
+    dynasm!(asm
+        ; =>loop_top
+        ; cmp Rq(LOOP_VAR_REG), Rq(LOOP_END_REG)
+        ; jge =>loop_exit
+    );
+
+    emit_cast_iter(
+        asm,
+        layout,
+        src_input,
+        dst_input,
+        src_dtype,
+        dst_dtype,
+        IterVar::Reg(LOOP_VAR_REG),
+        0,
+        addr_tables,
+        codec_tables,
     )?;
 
     dynasm!(asm

@@ -367,3 +367,179 @@ fn identity_f32_explicit_multi() {
     let expected = f32_input_bytes(&[400.0, 100.0, 300.0, 200.0]);
     assert_eq!(outs[0], expected, "F32 explicit multi identity");
 }
+
+// ─── Cast tests ─────────────────────────────────────────────────────
+
+#[test]
+fn cast_f32_to_bf16() {
+    // F32 → BF16: the format codec's RTNE rounding path.
+    let mut g = NanoGraph::new();
+    let inp = g.add_input_tensor(GlobalId(0), 4, NumericDType::F32);
+    let out = g.push_group(
+        4,
+        NumericDType::BF16,
+        ScalarOp::Cast { saturating: false },
+        vec![],
+        vec![InputRef::affine(inp, 1)],
+    );
+    let src = [1.0_f32, -1.0, 0.0, 3.140625]; // values exact in BF16
+    let bytes = f32_input_bytes(&src);
+    let outs = ab_test_bytes(
+        &g,
+        &[(inp, NumericDType::F32, bytes)],
+        &[AtomRange {
+            base: out,
+            count: 4,
+            dtype: NumericDType::BF16,
+        }],
+    );
+    // BF16 is 2 bytes each → 8 bytes total.
+    assert_eq!(outs[0].len(), 8, "BF16 output size");
+}
+
+#[test]
+fn cast_bf16_to_f32() {
+    // BF16 → F32: decode BF16 raw bits, encode as F32.
+    let mut g = NanoGraph::new();
+    let inp = g.add_input_tensor(GlobalId(0), 4, NumericDType::BF16);
+    let out = g.push_group(
+        4,
+        NumericDType::F32,
+        ScalarOp::Cast { saturating: false },
+        vec![],
+        vec![InputRef::affine(inp, 1)],
+    );
+    // BF16 for 1.0, -1.0, +inf, -0.0
+    let raw: [u16; 4] = [0x3f80, 0xbf80, 0x7f80, 0x8000];
+    let bytes: Vec<u8> = raw.iter().flat_map(|b| b.to_le_bytes()).collect();
+    let outs = ab_test_bytes(
+        &g,
+        &[(inp, NumericDType::BF16, bytes)],
+        &[AtomRange {
+            base: out,
+            count: 4,
+            dtype: NumericDType::F32,
+        }],
+    );
+    let expected = f32_input_bytes(&[1.0, -1.0, f32::INFINITY, -0.0]);
+    assert_eq!(outs[0], expected, "BF16→F32 cast");
+}
+
+#[test]
+fn cast_f32_to_f16_count_eight() {
+    // F32 → F16: exercises the F16C encode path.
+    let mut g = NanoGraph::new();
+    let inp = g.add_input_tensor(GlobalId(0), 8, NumericDType::F32);
+    let out = g.push_group(
+        8,
+        NumericDType::F16,
+        ScalarOp::Cast { saturating: false },
+        vec![],
+        vec![InputRef::affine(inp, 1)],
+    );
+    let src: Vec<f32> = vec![0.0, 1.0, -1.0, 0.5, 65504.0, -65504.0, f32::INFINITY, f32::NAN];
+    let bytes = f32_input_bytes(&src);
+    let outs = ab_test_bytes(
+        &g,
+        &[(inp, NumericDType::F32, bytes)],
+        &[AtomRange {
+            base: out,
+            count: 8,
+            dtype: NumericDType::F16,
+        }],
+    );
+    assert_eq!(outs[0].len(), 16, "F16 output size = 8 * 2 bytes");
+}
+
+#[test]
+fn cast_i32_to_i8_saturating() {
+    // I32 → I8: saturating narrowing (values outside [-128, 127] clamp).
+    let mut g = NanoGraph::new();
+    let inp = g.add_input_tensor(GlobalId(0), 6, NumericDType::I32);
+    let out = g.push_group(
+        6,
+        NumericDType::I8,
+        ScalarOp::Cast { saturating: false },
+        vec![],
+        vec![InputRef::affine(inp, 1)],
+    );
+    let values: [i32; 6] = [0, 127, -128, 200, -200, 42];
+    let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+    let outs = ab_test_bytes(
+        &g,
+        &[(inp, NumericDType::I32, bytes)],
+        &[AtomRange {
+            base: out,
+            count: 6,
+            dtype: NumericDType::I8,
+        }],
+    );
+    assert_eq!(outs[0].len(), 6, "I8 output = 6 bytes");
+}
+
+#[test]
+fn cast_u8_to_i32_widening() {
+    // U8 → I32: widening (zero-extend U8, sign-extend to I32).
+    let mut g = NanoGraph::new();
+    let inp = g.add_input_tensor(GlobalId(0), 4, NumericDType::U8);
+    let out = g.push_group(
+        4,
+        NumericDType::I32,
+        ScalarOp::Cast { saturating: false },
+        vec![],
+        vec![InputRef::affine(inp, 1)],
+    );
+    let bytes: Vec<u8> = vec![0, 127, 128, 255];
+    let outs = ab_test_bytes(
+        &g,
+        &[(inp, NumericDType::U8, bytes)],
+        &[AtomRange {
+            base: out,
+            count: 4,
+            dtype: NumericDType::I32,
+        }],
+    );
+    // U8 values 0, 127, 128, 255 → I32 0, 127, 128, 255 (all positive)
+    let expected: Vec<u8> = [0i32, 127, 128, 255]
+        .iter()
+        .flat_map(|v| v.to_le_bytes())
+        .collect();
+    assert_eq!(outs[0], expected, "U8→I32 widening");
+}
+
+// ─── Literal test ───────────────────────────────────────────────────
+
+#[test]
+fn literal_f32_group() {
+    // A Literal group produces a constant value. The buffer template
+    // is pre-populated; the JIT emits no code for it. Another group
+    // (Identity) reads the literal output to verify it's correct.
+    use crate::numeric_scalar::NumericScalar;
+    let mut g = NanoGraph::new();
+    let lit = g.push_group(
+        1,
+        NumericDType::F32,
+        ScalarOp::Literal(NumericScalar::from_f32(42.0)),
+        vec![],
+        vec![],
+    );
+    // Identity group reads the literal.
+    let out = g.push_group(
+        1,
+        NumericDType::F32,
+        ScalarOp::Identity,
+        vec![],
+        vec![InputRef::affine(lit, 1)],
+    );
+    let outs = ab_test_bytes(
+        &g,
+        &[],
+        &[AtomRange {
+            base: out,
+            count: 1,
+            dtype: NumericDType::F32,
+        }],
+    );
+    let expected = f32_input_bytes(&[42.0]);
+    assert_eq!(outs[0], expected, "Literal F32 42.0");
+}
