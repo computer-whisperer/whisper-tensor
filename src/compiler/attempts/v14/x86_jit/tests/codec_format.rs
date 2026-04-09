@@ -17,24 +17,45 @@
 //! All registers are caller-saved under System V; the harness needs
 //! no prologue/epilogue beyond the trailing `ret`.
 
-use super::super::codec::format::{CodecSlot, ComputeRepr, emit_decode, emit_encode};
+use super::super::codec::format::{CodecSlot, CodecTables, ComputeRepr, emit_decode, emit_encode};
 use super::jit_harness::JitFn;
 use crate::numeric_dtype::{FloatType, IntType, NumericDType};
 
 const RAW_IN: u8 = 7; // rdi (arg 0)
 const RAW_OUT: u8 = 0; // rax (return)
 const SCRATCH_GP: u8 = 1; // rcx — caller-saved scratch
+const SCRATCH_GP2: u8 = 2; // rdx — second caller-saved scratch
 const FLT_SLOT: u8 = 0; // xmm0
 const FLT_SCRATCH: u8 = 1; // xmm1
 
+/// A built JIT plus the codec tables it holds pointers into.
+///
+/// The `_tables` field is `_`-prefixed because we never read it
+/// directly; its sole purpose is to keep the table allocations alive
+/// for as long as `jit` exists, since the JIT'd code embeds raw
+/// pointers to the table memory.
+struct JitWithTables {
+    jit: JitFn,
+    _tables: CodecTables,
+}
+
 /// Build a JIT that does `decode → encode` for one dtype, returning
 /// the raw output bits in `rax`. The input is in `rdi`.
-fn build_roundtrip(dtype: NumericDType) -> Option<JitFn> {
+fn build_roundtrip(dtype: NumericDType) -> Option<JitWithTables> {
+    let mut tables = CodecTables::new();
     let repr = ComputeRepr::for_dtype(dtype);
     let jit = JitFn::build(|asm| match repr {
         ComputeRepr::F32 | ComputeRepr::F64 => {
-            emit_decode(asm, dtype, RAW_IN, CodecSlot::Xmm(FLT_SLOT), FLT_SCRATCH)
-                .expect("decode emit");
+            emit_decode(
+                asm,
+                dtype,
+                RAW_IN,
+                CodecSlot::Xmm(FLT_SLOT),
+                SCRATCH_GP2,
+                FLT_SCRATCH,
+                &mut tables,
+            )
+            .expect("decode emit");
             emit_encode(
                 asm,
                 dtype,
@@ -46,8 +67,16 @@ fn build_roundtrip(dtype: NumericDType) -> Option<JitFn> {
             .expect("encode emit");
         }
         ComputeRepr::Int => {
-            emit_decode(asm, dtype, RAW_IN, CodecSlot::Gp(RAW_OUT), FLT_SCRATCH)
-                .expect("decode emit");
+            emit_decode(
+                asm,
+                dtype,
+                RAW_IN,
+                CodecSlot::Gp(RAW_OUT),
+                SCRATCH_GP2,
+                FLT_SCRATCH,
+                &mut tables,
+            )
+            .expect("decode emit");
             emit_encode(
                 asm,
                 dtype,
@@ -59,12 +88,15 @@ fn build_roundtrip(dtype: NumericDType) -> Option<JitFn> {
             .expect("encode emit");
         }
     });
-    Some(jit)
+    Some(JitWithTables {
+        jit,
+        _tables: tables,
+    })
 }
 
 /// Run the JIT roundtrip for one input value.
-fn run_roundtrip(jit: &JitFn, raw_in: u64) -> u64 {
-    let f: extern "C" fn(u64) -> u64 = unsafe { std::mem::transmute(jit.ptr()) };
+fn run_roundtrip(jit: &JitWithTables, raw_in: u64) -> u64 {
+    let f: extern "C" fn(u64) -> u64 = unsafe { std::mem::transmute(jit.jit.ptr()) };
     f(raw_in)
 }
 
@@ -355,7 +387,7 @@ fn roundtrip_bool() {
 /// input is in `rdi`, the output is in `rax`. For float→float, both
 /// dtypes must use the same compute repr; for int↔float we'd need
 /// extra plumbing (deferred to Phase 2.B's full op pipeline).
-fn build_cast(src: NumericDType, dst: NumericDType) -> Option<JitFn> {
+fn build_cast(src: NumericDType, dst: NumericDType) -> Option<JitWithTables> {
     let src_repr = ComputeRepr::for_dtype(src);
     let dst_repr = ComputeRepr::for_dtype(dst);
     if src_repr != dst_repr {
@@ -363,9 +395,19 @@ fn build_cast(src: NumericDType, dst: NumericDType) -> Option<JitFn> {
         // belong in P2.A.4 / Phase 2.B's `ops::cast`. Skip here.
         return None;
     }
+    let mut tables = CodecTables::new();
     let jit = JitFn::build(|asm| match src_repr {
         ComputeRepr::F32 | ComputeRepr::F64 => {
-            emit_decode(asm, src, RAW_IN, CodecSlot::Xmm(FLT_SLOT), FLT_SCRATCH).unwrap();
+            emit_decode(
+                asm,
+                src,
+                RAW_IN,
+                CodecSlot::Xmm(FLT_SLOT),
+                SCRATCH_GP2,
+                FLT_SCRATCH,
+                &mut tables,
+            )
+            .unwrap();
             emit_encode(
                 asm,
                 dst,
@@ -377,7 +419,16 @@ fn build_cast(src: NumericDType, dst: NumericDType) -> Option<JitFn> {
             .unwrap();
         }
         ComputeRepr::Int => {
-            emit_decode(asm, src, RAW_IN, CodecSlot::Gp(RAW_OUT), FLT_SCRATCH).unwrap();
+            emit_decode(
+                asm,
+                src,
+                RAW_IN,
+                CodecSlot::Gp(RAW_OUT),
+                SCRATCH_GP2,
+                FLT_SCRATCH,
+                &mut tables,
+            )
+            .unwrap();
             emit_encode(
                 asm,
                 dst,
@@ -389,7 +440,10 @@ fn build_cast(src: NumericDType, dst: NumericDType) -> Option<JitFn> {
             .unwrap();
         }
     });
-    Some(jit)
+    Some(JitWithTables {
+        jit,
+        _tables: tables,
+    })
 }
 
 #[test]
@@ -408,7 +462,7 @@ fn cast_f32_to_bf16_samples() {
     ];
     for raw in inputs {
         let want = src.cast_raw(raw, dst);
-        let f: extern "C" fn(u64) -> u64 = unsafe { std::mem::transmute(jit.ptr()) };
+        let f: extern "C" fn(u64) -> u64 = unsafe { std::mem::transmute(jit.jit.ptr()) };
         let got = f(raw);
         assert_eq!(
             got, want,
@@ -424,7 +478,7 @@ fn cast_bf16_to_f32_exhaustive() {
     let jit = build_cast(src, dst).expect("bf16→f32 supported");
     for raw in 0u64..(1u64 << 16) {
         let want = src.cast_raw(raw, dst);
-        let f: extern "C" fn(u64) -> u64 = unsafe { std::mem::transmute(jit.ptr()) };
+        let f: extern "C" fn(u64) -> u64 = unsafe { std::mem::transmute(jit.jit.ptr()) };
         let got = f(raw);
         assert_eq!(
             got, want,
@@ -440,7 +494,7 @@ fn cast_f16_to_f32_exhaustive() {
     let jit = build_cast(src, dst).expect("f16→f32 supported");
     for raw in 0u64..(1u64 << 16) {
         let want = src.cast_raw(raw, dst);
-        let f: extern "C" fn(u64) -> u64 = unsafe { std::mem::transmute(jit.ptr()) };
+        let f: extern "C" fn(u64) -> u64 = unsafe { std::mem::transmute(jit.jit.ptr()) };
         let got = f(raw);
         assert_eq!(
             got, want,
@@ -465,7 +519,7 @@ fn cast_f32_to_f16_samples() {
     ];
     for raw in inputs {
         let want = src.cast_raw(raw, dst);
-        let f: extern "C" fn(u64) -> u64 = unsafe { std::mem::transmute(jit.ptr()) };
+        let f: extern "C" fn(u64) -> u64 = unsafe { std::mem::transmute(jit.jit.ptr()) };
         let got = f(raw);
         assert_eq!(
             got, want,
@@ -482,7 +536,7 @@ fn cast_int_widening() {
     let jit = build_cast(NumericDType::I8, NumericDType::I32).expect("i8→i32");
     for raw in 0u64..256 {
         let want = NumericDType::I8.cast_raw(raw, NumericDType::I32);
-        let f: extern "C" fn(u64) -> u64 = unsafe { std::mem::transmute(jit.ptr()) };
+        let f: extern "C" fn(u64) -> u64 = unsafe { std::mem::transmute(jit.jit.ptr()) };
         let got = f(raw);
         assert_eq!(
             got, want,
@@ -494,13 +548,58 @@ fn cast_int_widening() {
     let jit = build_cast(NumericDType::U8, NumericDType::U16).expect("u8→u16");
     for raw in 0u64..256 {
         let want = NumericDType::U8.cast_raw(raw, NumericDType::U16);
-        let f: extern "C" fn(u64) -> u64 = unsafe { std::mem::transmute(jit.ptr()) };
+        let f: extern "C" fn(u64) -> u64 = unsafe { std::mem::transmute(jit.jit.ptr()) };
         let got = f(raw);
         assert_eq!(
             got, want,
             "u8→u16: input {raw} → got 0x{got:x} want 0x{want:x}"
         );
     }
+}
+
+/// Exhaustively decode every raw bit pattern of a sub-F16 float type
+/// to F32, asserting the result matches `cast_raw(raw, ft, F32)` —
+/// this is the only thing the lookup-table decode is responsible for.
+/// Encode is the inverse direction and lands in P2.A.3.b.
+fn assert_subf16_decode_to_f32_exhaustive(src: NumericDType) {
+    let dst = NumericDType::F32;
+    let jit = build_cast(src, dst).expect("decode→F32 supported");
+    let total_bits = src.total_bits() as u32;
+    let n: u64 = 1u64 << total_bits;
+    for raw in 0..n {
+        let want = src.cast_raw(raw, dst);
+        let f: extern "C" fn(u64) -> u64 = unsafe { std::mem::transmute(jit.jit.ptr()) };
+        let got = f(raw);
+        assert_eq!(
+            got, want,
+            "{src}→F32: input 0x{raw:x} → got 0x{got:x} want 0x{want:x}"
+        );
+    }
+}
+
+#[test]
+fn decode_f8e5m2_exhaustive() {
+    assert_subf16_decode_to_f32_exhaustive(NumericDType::F8E5M2);
+}
+
+#[test]
+fn decode_f8e4m3fn_exhaustive() {
+    assert_subf16_decode_to_f32_exhaustive(NumericDType::F8E4M3FN);
+}
+
+#[test]
+fn decode_f4e2m1_exhaustive() {
+    assert_subf16_decode_to_f32_exhaustive(NumericDType::F4E2M1);
+}
+
+#[test]
+fn decode_f6e3m2_exhaustive() {
+    assert_subf16_decode_to_f32_exhaustive(NumericDType::F6E3M2);
+}
+
+#[test]
+fn decode_f6e2m3_exhaustive() {
+    assert_subf16_decode_to_f32_exhaustive(NumericDType::F6E2M3);
 }
 
 #[test]
@@ -515,7 +614,7 @@ fn cast_int_narrowing_in_range_only() {
     for raw in [0i32, 1, -1, 127, -128, 42, -42] {
         let raw_u = raw as u32 as u64;
         let want = NumericDType::I32.cast_raw(raw_u, NumericDType::I8);
-        let f: extern "C" fn(u64) -> u64 = unsafe { std::mem::transmute(jit.ptr()) };
+        let f: extern "C" fn(u64) -> u64 = unsafe { std::mem::transmute(jit.jit.ptr()) };
         let got = f(raw_u);
         assert_eq!(
             got, want,

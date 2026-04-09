@@ -13,25 +13,97 @@
 //! Conversion is specialized at JIT-build time on the `FloatType` /
 //! `IntType` properties — no runtime dispatch, no extern `"C"` calls.
 //!
-//! # P2.A.2 scope
+//! # Coverage
 //!
-//! This commit covers the *native* and *near-native* dtypes:
-//!   - F32, F64 — trivial `movd`/`movq` (compute repr IS the storage form)
-//!   - BF16 — inline shift-and-mask
-//!   - F16 — F16C instructions (Ivy Bridge+, statically assumed)
+//! All named `NumericDType`s are supported via two strategies:
+//!   - F32, F64 — trivial `movd` / `movq`
+//!   - BF16 — inline shift-and-mask with branchless NaN canonicalization
+//!   - F16 — F16C (`vcvtph2ps` / `vcvtps2ph`) with branched NaN
+//!     canonicalization
+//!   - F8E5M2, F8E4M3FN, F4E2M1, F6E3M2, F6E2M3 (sub-F16 floats) —
+//!     decode via a per-`FloatType` lookup table baked at JIT-build
+//!     time and held alive by [`CodecTables`]; encode via inline
+//!     rounding (P2.A.3.b)
 //!   - All `IntType` widths (1..=64), signed and unsigned — single
-//!     `movsx`/`movzx`/mask instruction
-//!   - Bool — `test` + `setne` + `movzx`
+//!     `movsx` / `movzx` / mask sequence
+//!   - Bool — `and 1` decode, `test` + `setne` + `movzx` encode
 //!
-//! Sub-byte and sub-F16 floats (F8E5M2, F8E4M3FN, F4E2M1, F6E3M2,
-//! F6E2M3) land in P2.A.3 via lookup-table decode + inline rounding
-//! encode. The `unsupported_for_now` set in this file lists them
-//! explicitly so callers get a clear error rather than miscompiled
-//! code.
+//! Decode for sub-F16 floats requires a runtime-resident lookup table
+//! whose pointer is embedded as an absolute imm64 in the JIT buffer.
+//! [`CodecTables`] owns the table memory; callers (the test harness
+//! and the orchestration layer) must keep it alive at least as long
+//! as the JIT function itself.
 
 use dynasmrt::{DynasmApi, DynasmLabelApi, dynasm, x64::Assembler};
 
 use crate::numeric_dtype::{FloatType, NumericDType};
+
+/// Owns the lookup tables baked into a JIT compilation.
+///
+/// The codec emits a `mov rN, imm64` to load each table's absolute
+/// address into a register at runtime, so the table memory must
+/// remain pinned at the same address from emit time through every
+/// execution of the compiled function. We achieve that by holding
+/// `Box<[u32]>` slabs here — each one is heap-allocated and never
+/// reallocates.
+///
+/// The same instance can carry multiple tables (one per dtype that
+/// the JIT references). Callers construct one `CodecTables` per JIT
+/// function and store it alongside the executable buffer.
+#[derive(Default)]
+pub struct CodecTables {
+    tables: Vec<Box<[u32]>>,
+}
+
+impl CodecTables {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Build (or look up) the F32-decode table for `ft` and return a
+    /// raw pointer the codec can embed in the JIT.
+    ///
+    /// The table maps every raw bit pattern of `ft` (interpreted as
+    /// the low `total_bits` of an index) to the corresponding F32 bit
+    /// pattern. NaN inputs map to the canonical F32 NaN
+    /// (`0x7fc00000`) — the codec contract requires encode to
+    /// canonicalize NaN, and we extend the same canonicalization to
+    /// decode for sub-F16 floats so cross-dtype casts agree
+    /// bit-for-bit with `cast_raw`.
+    pub fn alloc_f32_decode_table(&mut self, ft: FloatType) -> *const u32 {
+        let table = compute_f32_decode_table(ft);
+        let boxed: Box<[u32]> = table.into_boxed_slice();
+        let ptr = boxed.as_ptr();
+        self.tables.push(boxed);
+        ptr
+    }
+}
+
+/// Compute the F32-decode table for `ft`. The result has `1 <<
+/// ft.total_bits()` entries.
+///
+/// Each entry holds the F32 bit pattern that the corresponding raw
+/// `ft`-encoded value decodes to. NaN-encoded inputs are mapped to
+/// the canonical F32 NaN (`0x7fc00000`).
+pub(super) fn compute_f32_decode_table(ft: FloatType) -> Vec<u32> {
+    debug_assert!(ft.is_supported());
+    debug_assert!(
+        ft.total_bits() <= 16,
+        "decode table is impractical for FloatType with > 16 total bits"
+    );
+    let n = 1usize << ft.total_bits() as u32;
+    (0..n)
+        .map(|raw| {
+            let raw_u64 = raw as u64;
+            let f64_val = ft.decode_f64(raw_u64);
+            if f64_val.is_nan() {
+                0x7fc00000_u32
+            } else {
+                (f64_val as f32).to_bits()
+            }
+        })
+        .collect()
+}
 
 /// The compute representation a dtype lives in. Selected by the
 /// codec at JIT-build time per the table in `x86_jit_codec.md` §1.
@@ -84,23 +156,29 @@ pub enum CodecSlot {
 ///
 /// # Register usage
 /// - `raw_reg`: GP holding the raw bits. **Clobbered** for some
-///   dtype-specific paths (e.g., BF16 shifts in place); callers should
-///   treat it as consumed.
+///   dtype-specific paths (e.g., BF16 shifts in place, sub-F16 lookup
+///   loads); callers should treat it as consumed.
 /// - `slot`: must match `ComputeRepr::for_dtype(dtype)`.
+/// - `scratch_gp`: a free GP register, **clobbered.** Used to hold
+///   the lookup-table address for sub-F16 floats. Ignored otherwise.
 /// - `scratch_xmm`: a free XMM register, **clobbered**, used as a
 ///   stepping stone for paths like F16C that need an intermediate
 ///   xmm. May alias `slot` only when `slot` is the GP variant.
+/// - `tables`: codec table store. The codec may push a new table
+///   into it for sub-F16 floats; the resulting table memory must
+///   stay alive for as long as the JIT function executes.
 ///
 /// # Errors
-/// Returns `Err` for dtypes outside the P2.A.2 scope. The error
-/// message names the offending dtype so callers can route around
-/// (or report unsupported via the orchestration's reject list).
+/// Returns `Err` for an unsupported dtype or a slot variant that
+/// doesn't match the dtype's compute repr.
 pub fn emit_decode(
     asm: &mut Assembler,
     dtype: NumericDType,
     raw_reg: u8,
     slot: CodecSlot,
+    scratch_gp: u8,
     scratch_xmm: u8,
+    tables: &mut CodecTables,
 ) -> Result<(), String> {
     let expected_repr = ComputeRepr::for_dtype(dtype);
     match (expected_repr, slot) {
@@ -114,7 +192,9 @@ pub fn emit_decode(
     }
 
     match dtype {
-        NumericDType::Float(ft) => emit_float_decode(asm, ft, raw_reg, slot, scratch_xmm),
+        NumericDType::Float(ft) => {
+            emit_float_decode(asm, ft, raw_reg, slot, scratch_gp, scratch_xmm, tables)
+        }
         NumericDType::SignedInt(it) => {
             emit_int_decode(asm, raw_reg, slot, it.bits, true);
             Ok(())
@@ -191,7 +271,9 @@ fn emit_float_decode(
     ft: FloatType,
     raw_reg: u8,
     slot: CodecSlot,
+    scratch_gp: u8,
     scratch_xmm: u8,
+    tables: &mut CodecTables,
 ) -> Result<(), String> {
     let xmm_dst = match slot {
         CodecSlot::Xmm(x) => x,
@@ -269,8 +351,37 @@ fn emit_float_decode(
         return Ok(());
     }
 
+    // Sub-F16 floats: lookup-table decode. The codec supports any
+    // FloatType with `total_bits ≤ 16`, but in practice the named
+    // sub-F16 types are F8E5M2, F8E4M3FN, F4E2M1, F6E3M2, F6E2M3 —
+    // table sizes 256/256/16/64/64 entries × 4 bytes each.
+    if ft.total_bits() <= 16 {
+        // Cap the index width: the codec contract says `raw_reg`
+        // holds the value in its low `total_bits` (zero-extended), so
+        // an explicit mask is redundant *if* the bit_io upstream is
+        // honoring its contract. We mask anyway as defence-in-depth
+        // — `total_bits ≤ 8` keeps the mask in the 32-bit immediate
+        // form, and the AND clears any garbage in the high bits the
+        // table address arithmetic would otherwise dereference.
+        let total_bits = ft.total_bits() as u32;
+        let mask: i32 = if total_bits >= 32 {
+            -1
+        } else {
+            ((1u32 << total_bits) - 1) as i32
+        };
+        let table_ptr = tables.alloc_f32_decode_table(ft);
+        dynasm!(asm
+            ; .arch x64
+            ; and Rd(raw_reg), DWORD mask
+            ; mov Rq(scratch_gp), QWORD table_ptr as i64
+            ; mov Rd(raw_reg), DWORD [Rq(scratch_gp) + Rq(raw_reg) * 4]
+            ; movd Rx(xmm_dst), Rd(raw_reg)
+        );
+        return Ok(());
+    }
+
     Err(format!(
-        "emit_decode: float type {ft} not in P2.A.2 scope (sub-byte / sub-F16 floats land in P2.A.3)"
+        "emit_decode: float type {ft} not supported (total_bits > 16 needs F64 compute repr)"
     ))
 }
 
