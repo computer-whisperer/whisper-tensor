@@ -6,10 +6,10 @@
 //! bit-identical bytes. This harness is used by every layer's tests
 //! once it has something concrete to compile.
 //!
-//! Phase 0: x86_jit only handles empty spans, so `ab_test_bytes` is
-//! useful only as a smoke test that the executor + ABI plumbing works.
-//! As coverage grows, the same harness drives codec, op, and
-//! orchestration tests.
+//! P2.B.3: lights up for Identity-only graphs. The `inputs` slice is
+//! converted into `StoreSlice`s and `PoolEvalSpan` derives its
+//! declared input ranges from the graph's `input_tensors()` so the
+//! caller doesn't have to specify them twice.
 
 use crate::compiler::attempts::v14::executor::{
     CompiledSpanFn, PoolEvalSpan, SpanOutput, StoreSlice,
@@ -52,9 +52,23 @@ pub fn ab_test_bytes(
             .collect()
     };
 
+    // PoolEvalSpan needs to know which atom ranges to extract from
+    // the StoreSlices and turn into NumericTensors. The graph's
+    // declared `input_tensors()` are exactly that — derive them here
+    // so the caller only specifies the data once.
+    let pool_input_ranges: Vec<AtomRange> = graph
+        .input_tensors()
+        .iter()
+        .map(|it| AtomRange {
+            base: it.base_id,
+            count: it.count,
+            dtype: it.dtype,
+        })
+        .collect();
+
     let mut pool_outs = alloc_out();
     {
-        let span = PoolEvalSpan::new(graph.clone(), Vec::new(), outputs.to_vec());
+        let span = PoolEvalSpan::new(graph.clone(), pool_input_ranges, outputs.to_vec());
         let mut span_outs: Vec<SpanOutput<'_>> = outputs
             .iter()
             .zip(pool_outs.iter_mut())

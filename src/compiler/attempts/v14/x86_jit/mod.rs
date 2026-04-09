@@ -19,13 +19,13 @@
 //!   the prologue/epilogue. The only layer that knows about
 //!   `BufferLayout` and the executor ABI.
 //!
-//! # Phase 2.B.1 status
+//! # Phase 2.B.3 status
 //!
-//! The full executor pipeline is wired (compute_layout, literal
-//! template, prologue/epilogue, marshalling) but no group bodies are
-//! emitted yet — `support::check_supported` still rejects every
-//! non-empty graph. Empty graphs compile via the new pipeline and
-//! pass `empty_span_*` end-to-end.
+//! The pipeline emits Identity-only graphs (single input, source
+//! dtype matches output dtype, InputRef shapes Broadcast / 1D Strided
+//! / single-element Explicit). Everything else is rejected by
+//! [`support::check_supported`] and falls back to the cranelift
+//! backend.
 
 pub mod codec;
 pub mod ops;
@@ -47,6 +47,15 @@ use crate::nano_graph::pattern::{AtomRange, NanoGraph};
 use crate::pool::SystemPool;
 
 use codec::format::CodecTables;
+use orch::group::emit_group;
+
+/// Tail padding (in bytes) added to the working buffer beyond
+/// `BufferLayout::total_bytes`. The bit_io codec primitives may read
+/// up to 16 bytes starting at any byte offset they touch, so the
+/// last few atoms in the buffer can spill past `total_bytes` by up
+/// to 8 bytes. We zero-pad those bytes once in the literal template
+/// and the read-modify-write store path preserves them as zero.
+const CODEC_TAIL_SLACK: usize = 8;
 
 /// A span compiled to native x86-64 machine code.
 ///
@@ -88,11 +97,10 @@ impl X86JitSpan {
     /// Compile a span's NanoGraph into a native function ready for the
     /// executor.
     ///
-    /// Phase 2.B.1: only zero-group graphs make it past
-    /// [`support::check_supported`]. The pipeline (layout, literal
-    /// template, prologue / epilogue) runs unconditionally so the
-    /// machinery is exercised end-to-end before group emission lands
-    /// in P2.B.3.
+    /// Phase 2.B.3: zero-group graphs and Identity-only graphs whose
+    /// inputs use shapes [`orch::address`] can resolve. Anything else
+    /// is rejected by [`support::check_supported`] and the caller
+    /// falls back to cranelift.
     pub fn compile(
         graph: &NanoGraph<'static, SystemPool>,
         output_ranges: &[AtomRange],
@@ -107,10 +115,11 @@ impl X86JitSpan {
         let layout = compute_layout(graph, output_ranges);
 
         // Pre-populate the working-buffer template with literals.
-        // P2.B.1 has no group bodies and no embedded tables yet, so
-        // the template is just `layout.total_bytes` of literal-filled
-        // bytes.
-        let mut literal_template = vec![0u8; layout.total_bytes];
+        // For empty / Identity-only graphs there are no embedded
+        // codec tables yet, so the template is just `total_bytes` of
+        // literal-filled bytes plus the codec tail-slack.
+        let template_bytes = layout.total_bytes + CODEC_TAIL_SLACK;
+        let mut literal_template = vec![0u8; template_bytes];
         layout.populate_literals(graph, &mut literal_template);
 
         // Build the JIT. Empty graphs still go through the prologue
@@ -120,7 +129,19 @@ impl X86JitSpan {
         let mut asm = Assembler::new().map_err(|e| format!("x86_jit: assembler init: {e}"))?;
         let entry = asm.offset();
         prologue::emit_prologue(&mut asm);
-        // P2.B.1: no group bodies yet — empty graphs only.
+        for group in graph.groups() {
+            // Skip dead groups (use_count == 0). The layout still
+            // allocates them, but their consumers have been deleted
+            // so the JIT must not write into the (potentially
+            // reused) slot. Mirrors the cranelift backend.
+            let gi = graph
+                .find_group_idx(group.base_id)
+                .expect("group must be present");
+            if layout.group_use_counts[gi] == 0 {
+                continue;
+            }
+            emit_group(&mut asm, &layout, group)?;
+        }
         prologue::emit_epilogue(&mut asm);
         let code = asm
             .finalize()
