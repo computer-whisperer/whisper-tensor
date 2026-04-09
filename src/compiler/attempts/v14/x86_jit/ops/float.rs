@@ -14,6 +14,21 @@
 //!
 //! Logical ops (And, Or, Xor, Not) treat nonzero float as truthy
 //! (including -0.0 as falsy, NaN as truthy per dtype contract §5.4).
+//!
+//! # Performance debt: extern "C" trampolines
+//!
+//! The following ops call out to libm or custom Rust functions via
+//! `mov rax, imm64; call rax`, which is a full function-call boundary
+//! (all caller-saved registers spilled, no fusion across the call):
+//!
+//! - **Unary libm (16):** Exp, Ln, Tanh, Erf, Sin, Cos, Tan, Asin,
+//!   Acos, Atan, Sinh, Cosh, Asinh, Acosh, Atanh, Log1p
+//! - **Binary libm (2):** Mod (fmodf/fmod), Pow (powf/pow)
+//!
+//! These should be replaced with inline polynomial approximations
+//! (minimax/Chebyshev) that produce bit-identical results to the
+//! reference `scalar_ops` implementations. This eliminates the call
+//! barrier and enables future loop fusion across these ops.
 
 use dynasmrt::x64::Assembler;
 use dynasmrt::{DynasmApi, DynasmLabelApi, dynasm};

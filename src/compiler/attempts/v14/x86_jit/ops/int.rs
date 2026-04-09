@@ -9,6 +9,13 @@
 //! caller (`orch::group`) applies the width mask + sign-extension
 //! after the op returns.
 //!
+//! # Performance debt: Pow trampoline
+//!
+//! Int Pow calls a custom Rust `extern "C"` function via absolute
+//! pointer (same mechanism as the float libm trampolines). The
+//! saturating i128 exponentiation loop could be implemented inline
+//! as x86 assembly to eliminate the call boundary.
+//!
 //! # Register layout
 //!
 //! - Slot A: `rax` (0) — first operand
