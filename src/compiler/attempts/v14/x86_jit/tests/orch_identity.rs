@@ -245,3 +245,125 @@ fn identity_f32_explicit_single() {
     );
     assert_eq!(outs[0], bytes, "F32 explicit single identity");
 }
+
+// ─── N-d Strided identity tests ─────────────────────────────────────
+
+#[test]
+fn identity_f32_modular_input() {
+    // Modular InputRef: output atom i reads source atom (i % 4).
+    // 8 output atoms, 4 source atoms → each source read twice.
+    let mut g = NanoGraph::new();
+    let inp = g.add_input_tensor(GlobalId(0), 4, NumericDType::F32);
+    let out = g.push_group(
+        8,
+        NumericDType::F32,
+        ScalarOp::Identity,
+        vec![],
+        vec![InputRef::modular(inp, 1, 4)],
+    );
+    let src = [1.0_f32, 2.0, 3.0, 4.0];
+    let bytes = f32_input_bytes(&src);
+    let outs = ab_test_bytes(
+        &g,
+        &[(inp, NumericDType::F32, bytes)],
+        &[AtomRange {
+            base: out,
+            count: 8,
+            dtype: NumericDType::F32,
+        }],
+    );
+    let expected = f32_input_bytes(&[1.0, 2.0, 3.0, 4.0, 1.0, 2.0, 3.0, 4.0]);
+    assert_eq!(outs[0], expected, "F32 modular identity");
+}
+
+#[test]
+fn identity_f32_modular_non_power_of_two() {
+    // Modular with modulus=3 (exercises the general div path).
+    let mut g = NanoGraph::new();
+    let inp = g.add_input_tensor(GlobalId(0), 3, NumericDType::F32);
+    let out = g.push_group(
+        9,
+        NumericDType::F32,
+        ScalarOp::Identity,
+        vec![],
+        vec![InputRef::modular(inp, 1, 3)],
+    );
+    let src = [10.0_f32, 20.0, 30.0];
+    let bytes = f32_input_bytes(&src);
+    let outs = ab_test_bytes(
+        &g,
+        &[(inp, NumericDType::F32, bytes)],
+        &[AtomRange {
+            base: out,
+            count: 9,
+            dtype: NumericDType::F32,
+        }],
+    );
+    let expected = f32_input_bytes(&[10.0, 20.0, 30.0, 10.0, 20.0, 30.0, 10.0, 20.0, 30.0]);
+    assert_eq!(outs[0], expected, "F32 modular mod3 identity");
+}
+
+#[test]
+fn identity_f32_strided_broadcast_input() {
+    // Strided broadcast: output atom i reads source atom (i / 4).
+    // 8 output atoms from 2 source atoms, each repeated 4 times.
+    let mut g = NanoGraph::new();
+    let inp = g.add_input_tensor(GlobalId(0), 2, NumericDType::F32);
+    let out = g.push_group(
+        8,
+        NumericDType::F32,
+        ScalarOp::Identity,
+        vec![],
+        vec![InputRef::strided_broadcast(inp, 1, 4)],
+    );
+    let src = [5.0_f32, 9.0];
+    let bytes = f32_input_bytes(&src);
+    let outs = ab_test_bytes(
+        &g,
+        &[(inp, NumericDType::F32, bytes)],
+        &[AtomRange {
+            base: out,
+            count: 8,
+            dtype: NumericDType::F32,
+        }],
+    );
+    let expected = f32_input_bytes(&[5.0, 5.0, 5.0, 5.0, 9.0, 9.0, 9.0, 9.0]);
+    assert_eq!(outs[0], expected, "F32 strided_broadcast identity");
+}
+
+// ─── Multi-entry Explicit identity tests ────────────────────────────
+
+#[test]
+fn identity_f32_explicit_multi() {
+    // Explicit multi-entry: 4-element output where each atom
+    // reads a specific (shuffled) source atom.
+    let mut g = NanoGraph::new();
+    let inp = g.add_input_tensor(GlobalId(0), 4, NumericDType::F32);
+    let ids = vec![
+        crate::nano_graph::pattern::AtomId(inp.0 + 3),
+        crate::nano_graph::pattern::AtomId(inp.0 + 0),
+        crate::nano_graph::pattern::AtomId(inp.0 + 2),
+        crate::nano_graph::pattern::AtomId(inp.0 + 1),
+    ];
+    let out = g.push_group(
+        4,
+        NumericDType::F32,
+        ScalarOp::Identity,
+        vec![],
+        vec![InputRef::Explicit(ids)],
+    );
+    let src = [100.0_f32, 200.0, 300.0, 400.0];
+    let bytes = f32_input_bytes(&src);
+    let outs = ab_test_bytes(
+        &g,
+        &[(inp, NumericDType::F32, bytes)],
+        &[AtomRange {
+            base: out,
+            count: 4,
+            dtype: NumericDType::F32,
+        }],
+    );
+    // ids = [3, 0, 2, 1] → src[3], src[0], src[2], src[1]
+    let expected = f32_input_bytes(&[400.0, 100.0, 300.0, 200.0]);
+    assert_eq!(outs[0], expected, "F32 explicit multi identity");
+}

@@ -51,7 +51,7 @@ use crate::pool::SystemPool;
 
 use super::super::codec::bit_io::{emit_load_bits, emit_store_bits};
 use super::super::prologue::{BUFFER_REG, LOOP_END_REG, LOOP_VAR_REG};
-use super::address::{AddressInfo, IterVar, emit_compute_bit_offset};
+use super::address::{AddressInfo, AddressTables, IterVar, emit_compute_bit_offset};
 
 /// Address output / bit_io input.
 const BIT_OFF_REG: u8 = 10;
@@ -73,9 +73,10 @@ pub fn emit_group(
     asm: &mut Assembler,
     layout: &BufferLayout,
     group: &AtomGroup<'static, SystemPool>,
+    tables: &mut AddressTables,
 ) -> Result<(), String> {
     match &group.op {
-        ScalarOp::Identity => emit_identity_group(asm, layout, group),
+        ScalarOp::Identity => emit_identity_group(asm, layout, group, tables),
         op => Err(format!(
             "x86_jit emit_group: unsupported op {op:?} (P2.B.3 only handles Identity)"
         )),
@@ -88,6 +89,7 @@ fn emit_identity_group(
     asm: &mut Assembler,
     layout: &BufferLayout,
     group: &AtomGroup<'static, SystemPool>,
+    tables: &mut AddressTables,
 ) -> Result<(), String> {
     if group.inputs.len() != 1 {
         return Err(format!(
@@ -103,7 +105,7 @@ fn emit_identity_group(
 
     // P2.B.3 only handles same-dtype Identity. Verify by peeking at
     // the slot dtypes via the InputRef base lookups (cheap).
-    let src_dtype = lookup_input_dtype(layout, &group.inputs[0])?;
+    let src_dtype = lookup_input_dtype(layout, &group.inputs[0], group.atom_offset)?;
     if src_dtype != group.output_dtype {
         return Err(format!(
             "x86_jit emit_group Identity: src dtype {:?} != output dtype {:?} \
@@ -122,6 +124,7 @@ fn emit_identity_group(
             &output_ref,
             IterVar::Const(group.atom_offset),
             group.atom_offset,
+            tables,
         )
     } else {
         emit_identity_loop(
@@ -131,6 +134,7 @@ fn emit_identity_group(
             &output_ref,
             group.atom_offset,
             group.count,
+            tables,
         )
     }
 }
@@ -144,6 +148,7 @@ fn emit_identity_iter(
     dst_input: &InputRef,
     iter: IterVar,
     atom_offset: u64,
+    tables: &mut AddressTables,
 ) -> Result<(), String> {
     // 1. Compute src bit offset → r10.
     let src_info = emit_compute_bit_offset(
@@ -154,6 +159,7 @@ fn emit_identity_iter(
         atom_offset,
         BIT_OFF_REG,
         ADDR_SCRATCH,
+        tables,
     )?;
 
     // 2. Load src bits → rax.
@@ -176,6 +182,7 @@ fn emit_identity_iter(
         atom_offset,
         BIT_OFF_REG,
         ADDR_SCRATCH,
+        tables,
     )?;
 
     if src_info.n_bits != dst_info.n_bits {
@@ -223,6 +230,7 @@ fn emit_identity_loop(
     dst_input: &InputRef,
     atom_offset: u64,
     count: u64,
+    tables: &mut AddressTables,
 ) -> Result<(), String> {
     let start = atom_offset as i64;
     let end = (atom_offset + count) as i64;
@@ -251,6 +259,7 @@ fn emit_identity_loop(
         dst_input,
         IterVar::Reg(LOOP_VAR_REG),
         0,
+        tables,
     )?;
 
     dynasm!(asm
@@ -273,6 +282,7 @@ fn emit_identity_loop(
 fn lookup_input_dtype(
     layout: &BufferLayout,
     input: &InputRef,
+    atom_offset: u64,
 ) -> Result<crate::numeric_dtype::NumericDType, String> {
     match input {
         InputRef::Broadcast(a) => layout
@@ -280,19 +290,28 @@ fn lookup_input_dtype(
             .map(|(slot, _)| slot.dtype)
             .ok_or_else(|| format!("emit_group: no slot for Broadcast atom={a}")),
 
-        InputRef::Strided { base, .. } => {
-            // P2.B.3: stride is always 1 for the InputRef shapes
-            // accepted here (1D affine), so the first accessed atom
-            // is just `base + atom_offset`. The address.rs back-compute
-            // branch then handles split groups by deriving base_bit
-            // from the slot. Both lookups land on the same dtype.
+        InputRef::Strided {
+            base,
+            dim_strides,
+            dim_shape,
+        } => {
             if let Some((slot, _)) = layout.find(*base) {
                 return Ok(slot.dtype);
             }
-            // The 1D-affine case is the only one we accept; falling
-            // back to base+0 is enough because P2.B.3 doesn't pass
-            // atom_offset != 0 directly through this path.
-            Err(format!("emit_group: no slot for Strided base atom={base}"))
+            // Split group fallback: resolve the first accessed atom.
+            let first_offset =
+                crate::compiler::attempts::v14::layout::strided_resolve_offset(
+                    dim_strides, dim_shape, atom_offset,
+                );
+            let first_atom = AtomId(((base.0 as i64) + first_offset) as u64);
+            layout
+                .find(first_atom)
+                .map(|(slot, _)| slot.dtype)
+                .ok_or_else(|| {
+                    format!(
+                        "emit_group: no slot for Strided base={base} first={first_atom}"
+                    )
+                })
         }
 
         InputRef::Explicit(ids) if !ids.is_empty() => layout

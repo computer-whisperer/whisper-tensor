@@ -15,26 +15,60 @@
 //! The bit offset is **relative to the buffer base**, not a pointer.
 //! `bit_io` adds it to the buffer base register (`r12`) internally.
 //!
-//! # Phase 2.B.2 scope
+//! # InputRef coverage
 //!
-//! Only the simplest InputRef shapes are wired here, just enough for
-//! Identity / Cast over byte-aligned slots:
+//! All three InputRef variants are handled:
 //!
-//! - `Broadcast` — single source atom, always a constant offset
-//! - `Strided` 1D affine — `base + dim_strides[0] * i`, where `i`
-//!   may be a compile-time constant or a runtime register
-//! - `Explicit` with exactly one entry — equivalent to `Broadcast`
+//! - `Broadcast` — single source atom, always a constant offset.
+//! - `Strided` 1D affine — `base + dim_strides[0] * i`.
+//! - `Strided` N-d — decomposes the flat index into per-dimension
+//!   coordinates (innermost first), then accumulates
+//!   `coord[d] * dim_strides[d] * bit_stride`. Power-of-2 moduli
+//!   use `and` + `shr`; general moduli use x86 `div`.
+//! - `Explicit` single — equivalent to `Broadcast`.
+//! - `Explicit` multi — builds a heap-resident bit-offset lookup
+//!   table whose pointer is embedded as imm64 in the JIT code.
 //!
-//! N-d Strided and multi-entry Explicit return `Err` for now and are
-//! widened in [P2.B.4]. The `support::check_supported` gate refuses
-//! anything that uses an unsupported InputRef shape.
+//! # Extra register clobbering (N-d Strided, `IterVar::Reg`)
+//!
+//! The N-d Strided path with a runtime iteration variable uses `rax`
+//! (0) and `rdx` (2) for the x86 `div` instruction in addition to
+//! `dst_bit_reg` and `scratch_reg`. All four plus `iter_reg` must be
+//! pairwise distinct. The 1D path and all `IterVar::Const` paths do
+//! **not** clobber `rax` / `rdx`.
 
 use dynasmrt::x64::Assembler;
 use dynasmrt::{DynasmApi, dynasm};
 
-use crate::compiler::attempts::v14::layout::BufferLayout;
+use crate::compiler::attempts::v14::layout::{BufferLayout, strided_resolve_offset};
 use crate::nano_graph::pattern::{AtomId, InputRef};
 use crate::numeric_dtype::NumericDType;
+
+/// Owns lookup tables for multi-entry `Explicit` InputRefs.
+///
+/// Each table is a boxed slice of `i64` bit offsets — one per Explicit
+/// entry. The JIT code embeds each table's raw pointer as an imm64,
+/// so the table memory must stay at the same address for the lifetime
+/// of the compiled function.
+pub struct AddressTables {
+    tables: Vec<Box<[i64]>>,
+}
+
+impl AddressTables {
+    pub fn new() -> Self {
+        Self { tables: Vec::new() }
+    }
+
+    /// Allocate a bit-offset lookup table and return a raw pointer the
+    /// JIT can embed. The caller must keep this `AddressTables` alive
+    /// for as long as the JIT function executes.
+    pub fn alloc_bit_offset_table(&mut self, bit_offsets: Vec<i64>) -> *const i64 {
+        let boxed: Box<[i64]> = bit_offsets.into_boxed_slice();
+        let ptr = boxed.as_ptr();
+        self.tables.push(boxed);
+        ptr
+    }
+}
 
 /// Where the per-element iteration variable comes from when computing
 /// an address.
@@ -76,11 +110,14 @@ pub struct AddressInfo {
 /// `dst_bit_reg`, `scratch_reg`, and the iter register (if `Reg`)
 /// must be pairwise distinct.
 ///
+/// For N-d Strided with [`IterVar::Reg`], `rax` (0) and `rdx` (2)
+/// are additionally clobbered — see the module-level doc comment.
+/// `dst_bit_reg`, `scratch_reg`, and `iter_reg` must all be distinct
+/// from `rax` and `rdx` in that case.
+///
 /// # Errors
 ///
 /// Returns `Err` for:
-/// - InputRef shapes not yet supported in P2.B.2 (n-d Strided,
-///   multi-entry Explicit)
 /// - Missing slot in the layout (typically a layout bug)
 /// - Register-aliasing violations
 /// - Negative absolute bit offsets (typically an InputRef stride bug)
@@ -92,42 +129,52 @@ pub fn emit_compute_bit_offset(
     atom_offset: u64,
     dst_bit_reg: u8,
     scratch_reg: u8,
+    tables: &mut AddressTables,
 ) -> Result<AddressInfo, String> {
     match input {
         InputRef::Broadcast(atom_id) => emit_constant_atom(asm, layout, *atom_id, dst_bit_reg),
 
-        InputRef::Explicit(ids) => {
-            if ids.len() != 1 {
-                return Err(format!(
-                    "address: Explicit with {} entries not yet supported (P2.B.4)",
-                    ids.len()
-                ));
+        InputRef::Explicit(ids) if ids.len() <= 1 => {
+            if ids.is_empty() {
+                return Err("address: empty Explicit InputRef".to_string());
             }
             emit_constant_atom(asm, layout, ids[0], dst_bit_reg)
+        }
+
+        InputRef::Explicit(ids) => {
+            emit_explicit_multi(asm, layout, ids, iter, dst_bit_reg, scratch_reg, tables)
         }
 
         InputRef::Strided {
             base,
             dim_strides,
-            dim_shape: _,
-        } => {
-            if dim_strides.len() != 1 {
-                return Err(format!(
-                    "address: Strided n-d (nd={}) not yet supported (P2.B.4)",
-                    dim_strides.len()
-                ));
-            }
-            emit_strided_1d(
-                asm,
-                layout,
-                *base,
-                dim_strides[0],
-                iter,
-                atom_offset,
-                dst_bit_reg,
-                scratch_reg,
-            )
-        }
+            dim_shape,
+        } if dim_strides.len() == 1 => emit_strided_1d(
+            asm,
+            layout,
+            *base,
+            dim_strides[0],
+            iter,
+            atom_offset,
+            dst_bit_reg,
+            scratch_reg,
+        ),
+
+        InputRef::Strided {
+            base,
+            dim_strides,
+            dim_shape,
+        } => emit_strided_nd(
+            asm,
+            layout,
+            *base,
+            dim_strides,
+            dim_shape,
+            iter,
+            atom_offset,
+            dst_bit_reg,
+            scratch_reg,
+        ),
     }
 }
 
@@ -256,6 +303,288 @@ fn emit_strided_1d(
 
     Ok(info)
 }
+
+// ─── N-d Strided ────────────────────────────────────────────────────
+
+/// N-d Strided address computation.
+///
+/// Decomposes the flat iteration index into per-dimension coordinates
+/// (innermost first, matching [`InputRef::resolve`]) and sums
+/// `coord[d] * dim_strides[d] * bit_stride` into a total bit offset.
+#[allow(clippy::too_many_arguments)]
+fn emit_strided_nd(
+    asm: &mut Assembler,
+    layout: &BufferLayout,
+    base: AtomId,
+    dim_strides: &[i64],
+    dim_shape: &[u64],
+    iter: IterVar,
+    atom_offset: u64,
+    dst_bit_reg: u8,
+    scratch_reg: u8,
+) -> Result<AddressInfo, String> {
+    let nd = dim_strides.len();
+    assert!(nd >= 2, "emit_strided_nd called with nd < 2");
+    assert_eq!(nd, dim_shape.len(), "dim_strides/dim_shape length mismatch");
+
+    // Resolve the slot via `base` or the first accessed atom.
+    let first_offset = strided_resolve_offset(dim_strides, dim_shape, atom_offset);
+    let first_atom = AtomId(((base.0 as i64) + first_offset) as u64);
+
+    let (slot, elem_idx) = layout
+        .find(base)
+        .or_else(|| layout.find(first_atom))
+        .ok_or_else(|| {
+            format!(
+                "address: no slot for Strided n-d base={base} \
+                 first_atom={first_atom} (atom_offset={atom_offset})"
+            )
+        })?;
+
+    let slot_bit = slot.bit_offset + elem_idx * slot.bit_stride;
+    let base_bit_signed = if layout.find(base).is_some() {
+        slot_bit as i64
+    } else {
+        slot_bit as i64 - first_offset * slot.bit_stride as i64
+    };
+
+    let info = AddressInfo {
+        dtype: slot.dtype,
+        n_bits: slot.elem_bits as u32,
+    };
+
+    match iter {
+        IterVar::Const(c) => {
+            let atom_off = strided_resolve_offset(dim_strides, dim_shape, c);
+            let abs_bit = base_bit_signed + atom_off * slot.bit_stride as i64;
+            if abs_bit < 0 {
+                return Err(format!(
+                    "address: negative bit offset {abs_bit} for n-d Strided \
+                     base={base} c={c}"
+                ));
+            }
+            emit_mov_imm64(asm, dst_bit_reg, abs_bit as u64);
+        }
+        IterVar::Reg(iter_reg) => {
+            emit_strided_nd_reg(
+                asm,
+                base_bit_signed,
+                dim_strides,
+                dim_shape,
+                slot.bit_stride,
+                iter_reg,
+                dst_bit_reg,
+                scratch_reg,
+            )?;
+        }
+    }
+    Ok(info)
+}
+
+/// `rax` — used as the remaining/quotient register by x86 `div`.
+const ND_REMAINING: u8 = 0;
+/// `rdx` — used as the remainder/coordinate register by x86 `div`.
+const ND_COORD: u8 = 2;
+
+/// Emit the runtime n-d coordinate decomposition loop.
+///
+/// Uses `rax` (0) as the remaining register and `rdx` (2) as the
+/// coordinate register (matching x86 `div rdx:rax / r/m → rax, rdx`).
+/// Both are clobbered. `dst_bit_reg`, `scratch_reg`, and `iter_reg`
+/// must all be distinct from each other and from `rax`/`rdx`.
+#[allow(clippy::too_many_arguments)]
+fn emit_strided_nd_reg(
+    asm: &mut Assembler,
+    base_bit_signed: i64,
+    dim_strides: &[i64],
+    dim_shape: &[u64],
+    bit_stride: u64,
+    iter_reg: u8,
+    dst_bit_reg: u8,
+    scratch_reg: u8,
+) -> Result<(), String> {
+    let nd = dim_strides.len();
+
+    // Validate: none of the caller's registers may alias rax or rdx.
+    for (name, reg) in [
+        ("dst_bit_reg", dst_bit_reg),
+        ("scratch_reg", scratch_reg),
+        ("iter_reg", iter_reg),
+    ] {
+        if reg == ND_REMAINING {
+            return Err(format!(
+                "address n-d: {name} ({reg}) aliases rax (used by div)"
+            ));
+        }
+        if reg == ND_COORD {
+            return Err(format!(
+                "address n-d: {name} ({reg}) aliases rdx (used by div)"
+            ));
+        }
+    }
+    assert_distinct(dst_bit_reg, scratch_reg, iter_reg)?;
+
+    // dst = base_bit
+    emit_mov_imm64(asm, dst_bit_reg, base_bit_signed as u64);
+    // remaining = iter_reg
+    dynasm!(asm
+        ; .arch x64
+        ; mov Rq(ND_REMAINING), Rq(iter_reg)
+    );
+
+    // Inner-to-outer decomposition, mirroring InputRef::resolve.
+    for d in (0..nd).rev() {
+        let stride_bits = dim_strides[d] * bit_stride as i64;
+
+        if d == 0 {
+            // Outermost: coord = remaining. No modulus.
+            if stride_bits != 0 {
+                emit_imul_accum(asm, ND_REMAINING, stride_bits, dst_bit_reg, scratch_reg);
+            }
+        } else {
+            let modulus = dim_shape[d];
+            if modulus <= 1 {
+                // coord is always 0, remaining unchanged. No-op.
+                continue;
+            }
+
+            // Decompose: coord = remaining % modulus, remaining /= modulus.
+            if modulus.is_power_of_two() {
+                let shift = modulus.trailing_zeros() as i8;
+                let mask = modulus as i64 - 1;
+                // coord = remaining & mask
+                dynasm!(asm
+                    ; .arch x64
+                    ; mov Rq(ND_COORD), Rq(ND_REMAINING)
+                );
+                if mask <= i32::MAX as i64 {
+                    dynasm!(asm
+                        ; and Rq(ND_COORD), DWORD mask as i32
+                    );
+                } else {
+                    emit_mov_imm64(asm, scratch_reg, mask as u64);
+                    dynasm!(asm
+                        ; and Rq(ND_COORD), Rq(scratch_reg)
+                    );
+                }
+                // remaining >>= shift
+                dynasm!(asm
+                    ; shr Rq(ND_REMAINING), shift
+                );
+            } else {
+                // General: div. rdx:rax / scratch → rax = quot, rdx = rem.
+                dynasm!(asm
+                    ; .arch x64
+                    ; xor Rq(ND_COORD), Rq(ND_COORD)
+                );
+                emit_mov_imm64(asm, scratch_reg, modulus);
+                dynasm!(asm
+                    ; div Rq(scratch_reg)
+                );
+            }
+
+            // Accumulate: dst += coord * stride_bits.
+            if stride_bits != 0 {
+                emit_imul_accum(asm, ND_COORD, stride_bits, dst_bit_reg, scratch_reg);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Emit `dst += src_reg * imm`, using `scratch` for large immediates.
+fn emit_imul_accum(asm: &mut Assembler, src_reg: u8, imm: i64, dst_reg: u8, scratch: u8) {
+    if imm == 1 {
+        dynasm!(asm
+            ; .arch x64
+            ; add Rq(dst_reg), Rq(src_reg)
+        );
+    } else if imm == -1 {
+        dynasm!(asm
+            ; .arch x64
+            ; sub Rq(dst_reg), Rq(src_reg)
+        );
+    } else if (i32::MIN as i64..=i32::MAX as i64).contains(&imm) {
+        dynasm!(asm
+            ; .arch x64
+            ; imul Rq(scratch), Rq(src_reg), imm as i32
+            ; add Rq(dst_reg), Rq(scratch)
+        );
+    } else {
+        emit_mov_imm64(asm, scratch, imm as u64);
+        dynasm!(asm
+            ; .arch x64
+            ; imul Rq(scratch), Rq(src_reg)
+            ; add Rq(dst_reg), Rq(scratch)
+        );
+    }
+}
+
+// ─── Multi-entry Explicit ───────────────────────────────────────────
+
+/// Multi-entry Explicit address: build a heap-resident lookup table of
+/// bit offsets (one `i64` per entry), embed the table pointer as imm64
+/// in the JIT, and load `table[i]` at runtime.
+fn emit_explicit_multi(
+    asm: &mut Assembler,
+    layout: &BufferLayout,
+    ids: &[AtomId],
+    iter: IterVar,
+    dst_bit_reg: u8,
+    scratch_reg: u8,
+    tables: &mut AddressTables,
+) -> Result<AddressInfo, String> {
+    debug_assert!(ids.len() >= 2);
+
+    // Resolve dtype from the first entry. All entries are expected to
+    // share the same dtype (the graph construction enforces this).
+    let (first_slot, _) = layout
+        .find(ids[0])
+        .ok_or_else(|| format!("address: no slot for Explicit[0] atom={}", ids[0]))?;
+    let info = AddressInfo {
+        dtype: first_slot.dtype,
+        n_bits: first_slot.elem_bits as u32,
+    };
+
+    match iter {
+        IterVar::Const(c) => {
+            let idx = c as usize;
+            if idx >= ids.len() {
+                return Err(format!(
+                    "address: Explicit const index {c} out of bounds (len={})",
+                    ids.len()
+                ));
+            }
+            // Delegate to the single-atom path — just a constant mov.
+            emit_constant_atom(asm, layout, ids[idx], dst_bit_reg)?;
+        }
+        IterVar::Reg(iter_reg) => {
+            // Build the bit-offset lookup table.
+            let bit_offsets: Vec<i64> = ids
+                .iter()
+                .enumerate()
+                .map(|(i, id)| {
+                    let (slot, elem_idx) = layout
+                        .find(*id)
+                        .ok_or_else(|| format!("address: no slot for Explicit[{i}] atom={id}"))?;
+                    Ok((slot.bit_offset + elem_idx * slot.bit_stride) as i64)
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+
+            let table_ptr = tables.alloc_bit_offset_table(bit_offsets);
+
+            // dst = table[iter_reg]
+            dynasm!(asm
+                ; .arch x64
+                ; mov Rq(scratch_reg), QWORD table_ptr as i64
+                ; mov Rq(dst_bit_reg), QWORD [Rq(scratch_reg) + Rq(iter_reg) * 8]
+            );
+        }
+    }
+    Ok(info)
+}
+
+// ─── Helpers ────────────────────────────────────────────────────────
 
 /// Emit `mov dst_reg, imm64`. Always emits the full 10-byte form
 /// — codegen optimization (xor for zero, mov-imm32 for small

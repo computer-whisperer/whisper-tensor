@@ -18,7 +18,7 @@
 
 use crate::compiler::attempts::v14::layout::{BufferLayout, compute_layout};
 use crate::compiler::attempts::v14::x86_jit::orch::address::{
-    AddressInfo, IterVar, emit_compute_bit_offset,
+    AddressInfo, AddressTables, IterVar, emit_compute_bit_offset,
 };
 use crate::graph::GlobalId;
 use crate::nano_graph::ops::ScalarOp;
@@ -85,6 +85,7 @@ fn broadcast_returns_constant_bit_offset() {
             0,
             RAX,
             SCRATCH,
+            &mut AddressTables::new(),
         )
         .expect("Broadcast address emit");
         *info_cell.borrow_mut() = Some(info);
@@ -113,6 +114,7 @@ fn explicit_single_atom_returns_constant_bit_offset() {
             0,
             RAX,
             SCRATCH,
+            &mut AddressTables::new(),
         )
         .expect("Explicit single emit");
     });
@@ -137,6 +139,7 @@ fn strided_1d_const_iter() {
                 0,
                 RAX,
                 SCRATCH,
+                &mut AddressTables::new(),
             )
             .expect("Strided 1D const emit");
         });
@@ -160,6 +163,7 @@ fn strided_1d_reg_iter_stride_one() {
             0,
             RAX,
             SCRATCH,
+            &mut AddressTables::new(),
         )
         .expect("Strided 1D reg emit");
     });
@@ -188,6 +192,7 @@ fn strided_1d_reg_iter_stride_two() {
             0,
             RAX,
             SCRATCH,
+            &mut AddressTables::new(),
         )
         .expect("Strided 1D stride-2 emit");
     });
@@ -229,6 +234,7 @@ fn strided_1d_const_with_atom_offset() {
             4, // atom_offset — non-zero, but base is in layout
             RAX,
             SCRATCH,
+            &mut AddressTables::new(),
         )
         .expect("Strided 1D const+atom_offset emit");
     });
@@ -257,6 +263,7 @@ fn strided_1d_reg_iter_with_bool_input() {
             0,
             RAX,
             SCRATCH,
+            &mut AddressTables::new(),
         )
         .expect("Bool affine reg emit");
         *info_cell.borrow_mut() = Some(info);
@@ -272,38 +279,6 @@ fn strided_1d_reg_iter_with_bool_input() {
 }
 
 #[test]
-fn rejects_strided_n_d() {
-    let (layout, inp, _ident, _out) = flat_layout(8, NumericDType::F32);
-    let nd = InputRef::Strided {
-        base: inp,
-        dim_strides: vec![0, 1],
-        dim_shape: vec![u64::MAX, 4],
-    };
-    let mut asm = dynasmrt::x64::Assembler::new().unwrap();
-    let err = emit_compute_bit_offset(&mut asm, &layout, &nd, IterVar::Const(0), 0, RAX, SCRATCH)
-        .expect_err("n-d Strided should reject in P2.B.2");
-    assert!(err.contains("Strided n-d"), "{err}");
-}
-
-#[test]
-fn rejects_explicit_multi() {
-    let (layout, inp, _ident, _out) = flat_layout(4, NumericDType::F32);
-    let multi = InputRef::Explicit(vec![inp, AtomId(inp.0 + 1)]);
-    let mut asm = dynasmrt::x64::Assembler::new().unwrap();
-    let err = emit_compute_bit_offset(
-        &mut asm,
-        &layout,
-        &multi,
-        IterVar::Const(0),
-        0,
-        RAX,
-        SCRATCH,
-    )
-    .expect_err("multi-entry Explicit should reject in P2.B.2");
-    assert!(err.contains("Explicit"), "{err}");
-}
-
-#[test]
 fn rejects_register_aliasing_for_reg_iter() {
     let (layout, inp, _ident, _out) = flat_layout(4, NumericDType::F32);
     let mut asm = dynasmrt::x64::Assembler::new().unwrap();
@@ -316,7 +291,263 @@ fn rejects_register_aliasing_for_reg_iter() {
         0,
         RAX,
         SCRATCH,
+        &mut AddressTables::new(),
     )
     .expect_err("dst aliasing iter should reject");
     assert!(err.contains("aliases iter_reg"), "{err}");
+}
+
+// ─── N-d Strided tests ─────────────────────────────────────────────
+
+/// N-d tests use r10 as dst (not rax), since the n-d Reg path
+/// clobbers rax for the division. A trailing `mov rax, r10` copies
+/// the result to the return register.
+const ND_DST: u8 = 10; // r10
+
+/// Build a 2D-modular layout: input count atoms, an Identity group
+/// whose input uses `InputRef::modular(inp, stride, modulus)`.
+fn modular_layout(
+    count: u64,
+    stride: i64,
+    modulus: u64,
+    dtype: NumericDType,
+) -> (BufferLayout, AtomId, AtomId, AtomRange) {
+    let mut g: NanoGraph<'static, SystemPool> = NanoGraph::new();
+    let inp = g.add_input_tensor(GlobalId(0), count, dtype);
+    let ident = g.push_group(
+        count,
+        dtype,
+        ScalarOp::Identity,
+        vec![],
+        vec![InputRef::modular(inp, stride, modulus)],
+    );
+    let out = AtomRange {
+        base: ident,
+        count,
+        dtype,
+    };
+    let layout = compute_layout(&g, std::slice::from_ref(&out));
+    (layout, inp, ident, out)
+}
+
+/// Run a no-arg JIT (Const cases) where dst is ND_DST (r10) and the
+/// function copies to rax before returning.
+fn run_nd_const(jit: &JitFn) -> u64 {
+    let f: extern "C" fn() -> u64 = unsafe { std::mem::transmute(jit.ptr()) };
+    f()
+}
+
+/// Run a single-arg JIT (Reg cases) where dst is ND_DST (r10) and
+/// the function copies to rax before returning.
+fn run_nd_with_i(jit: &JitFn, i: u64) -> u64 {
+    let f: extern "C" fn(u64) -> u64 = unsafe { std::mem::transmute(jit.ptr()) };
+    f(i)
+}
+
+#[test]
+fn strided_2d_modular_const() {
+    // modular(inp, stride=1, modulus=4): resolve(i) = base + (i % 4)
+    let (layout, inp, _ident, _out) = modular_layout(16, 1, 4, NumericDType::F32);
+    let (slot, _) = layout.find(inp).expect("input slot");
+
+    for i in [0u64, 1, 3, 4, 7, 15] {
+        let expected_atom_off = (i % 4) as i64;
+        let want = (slot.bit_offset as i64 + expected_atom_off * slot.bit_stride as i64) as u64;
+        let jit = JitFn::build(|asm| {
+            emit_compute_bit_offset(
+                asm,
+                &layout,
+                &InputRef::modular(inp, 1, 4),
+                IterVar::Const(i),
+                0,
+                RAX,
+                SCRATCH,
+                &mut AddressTables::new(),
+            )
+            .expect("modular const emit");
+        });
+        assert_eq!(run_const(&jit), want, "modular const i={i}");
+    }
+}
+
+#[test]
+fn strided_2d_modular_reg_power_of_two() {
+    // modular(inp, stride=1, modulus=4) — power-of-2 fast path.
+    let (layout, inp, _ident, _out) = modular_layout(16, 1, 4, NumericDType::F32);
+    let (slot, _) = layout.find(inp).expect("input slot");
+    let base_bit = slot.bit_offset;
+    let bit_stride = slot.bit_stride;
+
+    use dynasmrt::{DynasmApi, dynasm};
+    let jit = JitFn::build(|asm| {
+        emit_compute_bit_offset(
+            asm,
+            &layout,
+            &InputRef::modular(inp, 1, 4),
+            IterVar::Reg(RDI),
+            0,
+            ND_DST,
+            SCRATCH,
+            &mut AddressTables::new(),
+        )
+        .expect("modular reg emit");
+        // Copy result to rax for return.
+        dynasm!(asm ; .arch x64 ; mov rax, Rq(ND_DST));
+    });
+    for i in [0u64, 1, 3, 4, 7, 15] {
+        let want = base_bit + (i % 4) * bit_stride;
+        assert_eq!(run_nd_with_i(&jit, i), want, "modular reg i={i}");
+    }
+}
+
+#[test]
+fn strided_2d_modular_reg_non_power_of_two() {
+    // modular(inp, stride=1, modulus=3) — general div path.
+    let (layout, inp, _ident, _out) = modular_layout(12, 1, 3, NumericDType::F32);
+    let (slot, _) = layout.find(inp).expect("input slot");
+    let base_bit = slot.bit_offset;
+    let bit_stride = slot.bit_stride;
+
+    use dynasmrt::{DynasmApi, dynasm};
+    let jit = JitFn::build(|asm| {
+        emit_compute_bit_offset(
+            asm,
+            &layout,
+            &InputRef::modular(inp, 1, 3),
+            IterVar::Reg(RDI),
+            0,
+            ND_DST,
+            SCRATCH,
+            &mut AddressTables::new(),
+        )
+        .expect("modular reg non-pow2 emit");
+        dynasm!(asm ; .arch x64 ; mov rax, Rq(ND_DST));
+    });
+    for i in [0u64, 1, 2, 3, 5, 11] {
+        let want = base_bit + (i % 3) * bit_stride;
+        assert_eq!(run_nd_with_i(&jit, i), want, "modular reg mod3 i={i}");
+    }
+}
+
+#[test]
+fn strided_2d_broadcast_reg() {
+    // strided_broadcast(inp, stride=1, repeat=4): resolve(i) = base + (i / 4)
+    let mut g: NanoGraph<'static, SystemPool> = NanoGraph::new();
+    let inp = g.add_input_tensor(GlobalId(0), 16, NumericDType::F32);
+    let ident = g.push_group(
+        16,
+        NumericDType::F32,
+        ScalarOp::Identity,
+        vec![],
+        vec![InputRef::strided_broadcast(inp, 1, 4)],
+    );
+    let out = AtomRange {
+        base: ident,
+        count: 16,
+        dtype: NumericDType::F32,
+    };
+    let layout = compute_layout(&g, std::slice::from_ref(&out));
+    let (slot, _) = layout.find(inp).expect("input slot");
+    let base_bit = slot.bit_offset;
+    let bit_stride = slot.bit_stride;
+
+    use dynasmrt::{DynasmApi, dynasm};
+    let jit = JitFn::build(|asm| {
+        emit_compute_bit_offset(
+            asm,
+            &layout,
+            &InputRef::strided_broadcast(inp, 1, 4),
+            IterVar::Reg(RDI),
+            0,
+            ND_DST,
+            SCRATCH,
+            &mut AddressTables::new(),
+        )
+        .expect("strided_broadcast reg emit");
+        dynasm!(asm ; .arch x64 ; mov rax, Rq(ND_DST));
+    });
+    for i in [0u64, 1, 3, 4, 7, 12, 15] {
+        let want = base_bit + (i / 4) * bit_stride;
+        assert_eq!(run_nd_with_i(&jit, i), want, "strided_broadcast i={i}");
+    }
+}
+
+// ─── Multi-entry Explicit tests ─────────────────────────────────────
+
+#[test]
+fn explicit_multi_const() {
+    let (layout, inp, _ident, _out) = flat_layout(8, NumericDType::F32);
+    let ids = vec![
+        AtomId(inp.0 + 3),
+        AtomId(inp.0 + 0),
+        AtomId(inp.0 + 7),
+        AtomId(inp.0 + 1),
+    ];
+    let (slot, _) = layout.find(inp).expect("input slot");
+
+    for (c, id) in ids.iter().enumerate() {
+        let elem_idx = id.0 - slot.atom_base.0;
+        let want = slot.bit_offset + elem_idx * slot.bit_stride;
+        let ids_clone = ids.clone();
+        let jit = JitFn::build(|asm| {
+            emit_compute_bit_offset(
+                asm,
+                &layout,
+                &InputRef::Explicit(ids_clone),
+                IterVar::Const(c as u64),
+                0,
+                RAX,
+                SCRATCH,
+                &mut AddressTables::new(),
+            )
+            .expect("explicit multi const emit");
+        });
+        assert_eq!(run_const(&jit), want, "explicit multi const c={c}");
+    }
+}
+
+#[test]
+fn explicit_multi_reg() {
+    let (layout, inp, _ident, _out) = flat_layout(8, NumericDType::F32);
+    let ids = vec![
+        AtomId(inp.0 + 5),
+        AtomId(inp.0 + 2),
+        AtomId(inp.0 + 7),
+        AtomId(inp.0 + 0),
+    ];
+    let (slot, _) = layout.find(inp).expect("input slot");
+
+    // Build expected bit offsets.
+    let expected: Vec<u64> = ids
+        .iter()
+        .map(|id| {
+            let elem_idx = id.0 - slot.atom_base.0;
+            slot.bit_offset + elem_idx * slot.bit_stride
+        })
+        .collect();
+
+    // The Reg path builds a lookup table, so AddressTables must
+    // outlive the JIT call. Use a struct that holds both.
+    let mut tables = AddressTables::new();
+    use dynasmrt::{DynasmApi, dynasm};
+    let jit = JitFn::build(|asm| {
+        emit_compute_bit_offset(
+            asm,
+            &layout,
+            &InputRef::Explicit(ids.clone()),
+            IterVar::Reg(RDI),
+            0,
+            RAX,
+            SCRATCH,
+            &mut tables,
+        )
+        .expect("explicit multi reg emit");
+    });
+    for (i, want) in expected.iter().enumerate() {
+        assert_eq!(
+            run_with_i(&jit, i as u64),
+            *want,
+            "explicit multi reg i={i}"
+        );
+    }
 }

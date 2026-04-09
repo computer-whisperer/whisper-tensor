@@ -2,18 +2,16 @@
 //! `X86JitSpan::compile` accepts a graph or returns Err for the
 //! cranelift fallback.
 //!
-//! Phase 2.B.3 gate: zero-group graphs **or** all-Identity graphs
-//! whose inputs use only the InputRef shapes
-//! [`super::orch::address`] currently handles (Broadcast, 1D Strided,
-//! single-element Explicit) and whose source dtype matches the output
-//! dtype.
+//! Phase 2.B.4 gate: zero-group graphs **or** all-Identity graphs.
+//! All InputRef shapes (Broadcast, Strided N-d, Explicit multi) are
+//! now accepted — the address layer handles them all.
 //!
 //! As phases land, the reject list shrinks. Phase 4's gate is
 //! "rejects nothing"; once that holds, the cranelift fallback can be
 //! deleted (phase 5).
 
 use crate::nano_graph::ScalarOp;
-use crate::nano_graph::pattern::{InputRef, NanoGraph};
+use crate::nano_graph::pattern::NanoGraph;
 use crate::pool::SystemPool;
 
 /// Returns `Ok(())` if `X86JitSpan::compile` should accept this graph,
@@ -27,10 +25,10 @@ pub fn check_supported(graph: &NanoGraph<'static, SystemPool>) -> Result<(), Str
     }
 
     for (gi, group) in graph.groups().iter().enumerate() {
-        // P2.B.3 only knows how to emit Identity bodies.
+        // Only Identity bodies are emitted so far.
         if !matches!(group.op, ScalarOp::Identity) {
             return Err(format!(
-                "x86_jit: group {gi} op {:?} not yet supported (P2.B.3 = Identity only)",
+                "x86_jit: group {gi} op {:?} not yet supported (Identity only)",
                 group.op
             ));
         }
@@ -41,25 +39,6 @@ pub fn check_supported(graph: &NanoGraph<'static, SystemPool>) -> Result<(), Str
                 "x86_jit: group {gi} Identity has {} inputs, expected 1",
                 group.inputs.len()
             ));
-        }
-
-        // Restrict the InputRef to shapes orch::address can resolve.
-        match &group.inputs[0] {
-            InputRef::Broadcast(_) => {}
-            InputRef::Strided { dim_strides, .. } if dim_strides.len() == 1 => {}
-            InputRef::Strided { dim_strides, .. } => {
-                return Err(format!(
-                    "x86_jit: group {gi} Strided n-d (nd={}) not yet supported (P2.B.4)",
-                    dim_strides.len()
-                ));
-            }
-            InputRef::Explicit(ids) if ids.len() == 1 => {}
-            InputRef::Explicit(ids) => {
-                return Err(format!(
-                    "x86_jit: group {gi} Explicit({}) not yet supported (P2.B.4)",
-                    ids.len()
-                ));
-            }
         }
     }
 

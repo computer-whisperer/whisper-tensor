@@ -19,12 +19,12 @@
 //!   the prologue/epilogue. The only layer that knows about
 //!   `BufferLayout` and the executor ABI.
 //!
-//! # Phase 2.B.3 status
+//! # Phase 2.B.4 status
 //!
 //! The pipeline emits Identity-only graphs (single input, source
-//! dtype matches output dtype, InputRef shapes Broadcast / 1D Strided
-//! / single-element Explicit). Everything else is rejected by
-//! [`support::check_supported`] and falls back to the cranelift
+//! dtype matches output dtype) with **all InputRef shapes**: Broadcast,
+//! N-d Strided, and multi-entry Explicit. Everything else is rejected
+//! by [`support::check_supported`] and falls back to the cranelift
 //! backend.
 
 pub mod codec;
@@ -47,6 +47,7 @@ use crate::nano_graph::pattern::{AtomRange, NanoGraph};
 use crate::pool::SystemPool;
 
 use codec::format::CodecTables;
+use orch::address::AddressTables;
 use orch::group::emit_group;
 
 /// Tail padding (in bytes) added to the working buffer beyond
@@ -82,6 +83,9 @@ pub struct X86JitSpan {
     /// The compiled code embeds raw pointers into these slabs, so
     /// they must not be dropped or relocated until `code` is.
     _tables: CodecTables,
+    /// Address lookup tables for multi-entry Explicit InputRefs.
+    /// Same lifetime contract as `_tables`.
+    _addr_tables: AddressTables,
 }
 
 // SAFETY: ExecutableBuffer is Send+Sync, the entry offset is a plain
@@ -97,10 +101,10 @@ impl X86JitSpan {
     /// Compile a span's NanoGraph into a native function ready for the
     /// executor.
     ///
-    /// Phase 2.B.3: zero-group graphs and Identity-only graphs whose
-    /// inputs use shapes [`orch::address`] can resolve. Anything else
-    /// is rejected by [`support::check_supported`] and the caller
-    /// falls back to cranelift.
+    /// Phase 2.B.4: zero-group graphs and Identity-only graphs with
+    /// any InputRef shape. Anything else is rejected by
+    /// [`support::check_supported`] and the caller falls back to
+    /// cranelift.
     pub fn compile(
         graph: &NanoGraph<'static, SystemPool>,
         output_ranges: &[AtomRange],
@@ -126,6 +130,7 @@ impl X86JitSpan {
         // and epilogue so the function shape matches what later
         // phases will produce.
         let tables = CodecTables::new();
+        let mut addr_tables = AddressTables::new();
         let mut asm = Assembler::new().map_err(|e| format!("x86_jit: assembler init: {e}"))?;
         let entry = asm.offset();
         prologue::emit_prologue(&mut asm);
@@ -140,7 +145,7 @@ impl X86JitSpan {
             if layout.group_use_counts[gi] == 0 {
                 continue;
             }
-            emit_group(&mut asm, &layout, group)?;
+            emit_group(&mut asm, &layout, group, &mut addr_tables)?;
         }
         prologue::emit_epilogue(&mut asm);
         let code = asm
@@ -154,6 +159,7 @@ impl X86JitSpan {
             literal_template,
             output_ranges: output_ranges.to_vec(),
             _tables: tables,
+            _addr_tables: addr_tables,
         })
     }
 }
