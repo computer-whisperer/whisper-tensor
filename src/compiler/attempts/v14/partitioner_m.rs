@@ -43,6 +43,56 @@ type DeclaredInputKey = (u64, u64, NumericDType, Option<GlobalId>);
 
 // ─── Matmul relayout ──────────────────────────────────────────────────────
 
+fn is_strided_broadcast_repeat(input: &InputRef, repeat: u64) -> bool {
+    match input {
+        InputRef::Strided {
+            dim_strides,
+            dim_shape,
+            ..
+        } => {
+            dim_strides.len() == 2
+                && dim_shape.len() == 2
+                && dim_strides[1] == 0
+                && dim_shape[1] == repeat
+        }
+        _ => false,
+    }
+}
+
+fn is_affine_strided(input: &InputRef) -> Option<i64> {
+    match input {
+        InputRef::Strided {
+            dim_strides,
+            dim_shape,
+            ..
+        } if dim_strides.len() == 1 && dim_shape.len() == 1 && dim_shape[0] == u64::MAX => {
+            Some(dim_strides[0])
+        }
+        _ => None,
+    }
+}
+
+fn is_strided_transposed_nk(input: &InputRef, n: u64, k: u64) -> Option<i64> {
+    match input {
+        InputRef::Strided {
+            dim_strides,
+            dim_shape,
+            ..
+        } if dim_strides.len() == 2 && dim_shape.len() == 2 && dim_shape[1] == n => {
+            let outer = dim_strides[0];
+            let Some(expected_inner) = outer.checked_mul(k as i64) else {
+                return None;
+            };
+            if dim_strides[1] == expected_inner {
+                Some(outer)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
 /// Detect matmul Mul→Reduce pairs in [K,N] layout and transpose to [N,K].
 ///
 /// Pattern detected (per pair):
@@ -119,29 +169,25 @@ fn relayout_matmul_groups(graph: &mut NanoGraph<'static, crate::pool::SystemPool
             continue;
         }
 
-        // Verify the Mul's inputs match the [K,N] pattern:
-        // One input is StridedBroadcast(_, _, repeat=N) — the A input
-        // One input is Affine(_, stride=1) — the B input
+        // Verify the Mul's inputs match a [K,N]-ordered matmul expansion:
+        // One input is StridedBroadcast(_, _, repeat=N) — the A input.
+        // The other input is either:
+        //   - Affine(base, stride=s), or
+        //   - Strided(base, [s, s*K], [MAX, N]) (equivalent transposed view).
         if mgroup.inputs.len() != 2 {
             continue;
         }
-        let has_sb_n = mgroup.inputs.iter().any(|inp| match inp {
-            InputRef::Strided {
-                dim_strides,
-                dim_shape,
-                ..
-            } if dim_strides.len() == 2 && dim_strides[1] == 0 && dim_shape[1] == n => true,
-            _ => false,
-        });
-        let has_affine_1 = mgroup.inputs.iter().any(|inp| match inp {
-            InputRef::Strided {
-                dim_strides,
-                dim_shape,
-                ..
-            } if dim_strides.len() == 1 && dim_strides[0] == 1 && dim_shape[0] == u64::MAX => true,
-            _ => false,
-        });
-        if !has_sb_n || !has_affine_1 {
+        let sb_idx = mgroup
+            .inputs
+            .iter()
+            .position(|inp| is_strided_broadcast_repeat(inp, n));
+        let Some(sb_idx) = sb_idx else {
+            continue;
+        };
+        let other_idx = if sb_idx == 0 { 1 } else { 0 };
+        let other = &mgroup.inputs[other_idx];
+        let other_ok = is_affine_strided(other).is_some() || is_strided_transposed_nk(other, n, k).is_some();
+        if !other_ok {
             continue;
         }
 
@@ -170,18 +216,37 @@ fn relayout_matmul_groups(graph: &mut NanoGraph<'static, crate::pool::SystemPool
                     dim_strides[1] = a_stride;
                     dim_shape[1] = k;
                 }
-                // Affine(B_base, stride=1)
-                //   → Strided(B_base, dim_strides=[1, N], dim_shape=[MAX, K])
+                // Affine(B_base, stride=s)
+                //   → Strided(B_base, dim_strides=[s, s*N], dim_shape=[MAX, K])
                 InputRef::Strided {
                     dim_strides,
                     dim_shape,
                     ..
-                } if dim_strides.len() == 1 && dim_strides[0] == 1 && dim_shape[0] == u64::MAX => {
-                    // Was: 1D affine stride=1
-                    // New: 2D with dim_strides=[1, N], dim_shape=[MAX, K]
-                    // (old: stride_inner=N, stride_outer=1, modulus=K)
-                    *dim_strides = vec![1, n as i64];
-                    *dim_shape = vec![u64::MAX, k];
+                } if dim_strides.len() == 1 && dim_shape[0] == u64::MAX => {
+                    let s = dim_strides[0];
+                    // Was: 1D affine stride=s
+                    // New: 2D with dim_strides=[s, s*N], dim_shape=[MAX, K]
+                    if let Some(inner) = s.checked_mul(n as i64) {
+                        *dim_strides = vec![s, inner];
+                        *dim_shape = vec![u64::MAX, k];
+                    }
+                }
+                // Strided(B_base, [s, s*K], [MAX, N])
+                //   → Affine(B_base, stride=s)
+                InputRef::Strided {
+                    dim_strides,
+                    dim_shape,
+                    ..
+                } if dim_strides.len() == 2
+                    && dim_shape.len() == 2
+                    && dim_shape[1] == n
+                    && dim_strides[0]
+                        .checked_mul(k as i64)
+                        .is_some_and(|expected_inner| dim_strides[1] == expected_inner) =>
+                {
+                    let s = dim_strides[0];
+                    *dim_strides = vec![s];
+                    *dim_shape = vec![u64::MAX];
                 }
                 _ => {}
             }
@@ -355,6 +420,18 @@ fn assign_phases(
 ) -> Vec<usize> {
     let n = groups.len();
     let mut phase_of = vec![0usize; n];
+    let trace_barriers = std::env::var("WT_PARTITIONER_M_TRACE_BARRIERS")
+        .ok()
+        .is_some_and(|v| v != "0");
+    let trace_min_atoms = std::env::var("WT_PARTITIONER_M_TRACE_MIN_ATOMS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(0);
+    let trace_top = std::env::var("WT_PARTITIONER_M_TRACE_TOP")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(64);
+    let mut barrier_events: Vec<(usize, usize, BarrierReason)> = Vec::new();
 
     // For each group, determine the earliest phase it can be in.
     // Groups are in topological order (NanoGraph invariant).
@@ -367,11 +444,18 @@ fn assign_phases(
             let cons_kind = kinds[gi];
 
             // Determine if we need a barrier between producer and consumer.
-            let needs_barrier =
-                needs_barrier_between(pi, gi, prod_kind, cons_kind, groups, graph, num_lanes);
+            let barrier_reason =
+                barrier_reason_between(pi, gi, prod_kind, cons_kind, groups, graph, num_lanes);
 
-            if needs_barrier {
+            if let Some(reason) = barrier_reason {
                 min_phase = min_phase.max(prod_phase + 1);
+                if trace_barriers {
+                    let prod_atoms = groups[pi].count;
+                    let cons_atoms = groups[gi].count;
+                    if prod_atoms.max(cons_atoms) >= trace_min_atoms {
+                        barrier_events.push((pi, gi, reason));
+                    }
+                }
             } else {
                 // Same phase is fine — no cross-lane dependency.
                 min_phase = min_phase.max(prod_phase);
@@ -381,14 +465,210 @@ fn assign_phases(
         phase_of[gi] = min_phase;
     }
 
+    if trace_barriers && !barrier_events.is_empty() {
+        fn op_tag(op: &ScalarOp) -> &'static str {
+            match op {
+                ScalarOp::Binary { .. } => "Binary",
+                ScalarOp::Unary { .. } => "Unary",
+                ScalarOp::Select => "Select",
+                ScalarOp::Identity => "Identity",
+                ScalarOp::Cast { .. } => "Cast",
+                ScalarOp::Literal(_) => "Literal",
+                ScalarOp::Reduce { .. } => "Reduce",
+                ScalarOp::IndirectLoad { .. } => "IndirectLoad",
+                ScalarOp::OpaqueOutput { .. } => "OpaqueOutput",
+                ScalarOp::LiteralSpan(_) => "LiteralSpan",
+            }
+        }
+
+        barrier_events.sort_by_key(|(pi, gi, _)| std::cmp::Reverse(groups[*pi].count.max(groups[*gi].count)));
+        eprintln!(
+            "  [partitioner_m] barrier trace: {} edges (min_atoms={}, top={})",
+            barrier_events.len(),
+            trace_min_atoms,
+            trace_top
+        );
+        for (idx, (pi, gi, reason)) in barrier_events.iter().enumerate() {
+            if idx >= trace_top {
+                break;
+            }
+            let prod = &groups[*pi];
+            let cons = &groups[*gi];
+            eprintln!(
+                "    g{} [{} {} base={} count={} phase={}] -> g{} [{} {} base={} count={} phase={}]  reason={}",
+                pi,
+                op_tag(&prod.op),
+                kind_tag(kinds[*pi]),
+                prod.base_id.0,
+                prod.count,
+                phase_of[*pi],
+                gi,
+                op_tag(&cons.op),
+                kind_tag(kinds[*gi]),
+                cons.base_id.0,
+                cons.count,
+                phase_of[*gi],
+                reason.as_str()
+            );
+            let access = describe_consumer_access_to_producer(cons, prod);
+            if !access.is_empty() {
+                eprintln!("      access: {access}");
+            }
+            let prod_inputs = describe_group_inputs(prod, 2);
+            if !prod_inputs.is_empty() {
+                eprintln!("      producer_inputs: {prod_inputs}");
+            }
+            let cons_inputs = describe_group_inputs(cons, 2);
+            if !cons_inputs.is_empty() {
+                eprintln!("      consumer_inputs: {cons_inputs}");
+            }
+        }
+        if barrier_events.len() > trace_top {
+            eprintln!(
+                "    ... {} additional barrier edges omitted",
+                barrier_events.len() - trace_top
+            );
+        }
+    }
+
     phase_of
 }
 
-/// Determine if a barrier is needed between a producer and consumer group.
+fn describe_group_inputs(
+    group: &AtomGroup<'static, crate::pool::SystemPool>,
+    max_inputs: usize,
+) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for (idx, input) in group.inputs.iter().take(max_inputs).enumerate() {
+        let s = match input {
+            InputRef::Broadcast(id) => format!("in{idx}=Broadcast({})", id.0),
+            InputRef::Explicit(ids) => format!("in{idx}=Explicit(len={})", ids.len()),
+            InputRef::Strided {
+                base,
+                dim_strides,
+                dim_shape,
+            } => format!(
+                "in{idx}=Strided(base={} strides={:?} shape={:?})",
+                base.0, dim_strides, dim_shape
+            ),
+        };
+        parts.push(s);
+    }
+    parts.join(", ")
+}
+
+fn describe_consumer_access_to_producer(
+    consumer: &AtomGroup<'static, crate::pool::SystemPool>,
+    producer: &AtomGroup<'static, crate::pool::SystemPool>,
+) -> String {
+    for input in &consumer.inputs {
+        if !input_refs_group(input, consumer.count, consumer.atom_offset, producer) {
+            continue;
+        }
+
+        match input {
+            InputRef::Broadcast(id) => {
+                return format!(
+                    "broadcast(id={}) cons_offset={} cons_count={} prod_base={} prod_count={}",
+                    id.0, consumer.atom_offset, consumer.count, producer.base_id.0, producer.count
+                );
+            }
+            InputRef::Strided {
+                base,
+                dim_strides,
+                dim_shape,
+            } => {
+                let nd = dim_strides.len();
+                let first = input.resolve(consumer.atom_offset).0;
+                let last = input.resolve(consumer.atom_offset + consumer.count - 1).0;
+                let stride_hint = if nd == 0 {
+                    0
+                } else if nd == 1 {
+                    dim_strides[0]
+                } else {
+                    dim_strides[nd - 1]
+                };
+                let stride_mul = stride_hint.unsigned_abs().saturating_mul(consumer.count);
+                let reduce_meta = if let ScalarOp::Reduce {
+                    reduce_count,
+                    reduce_stride,
+                    ..
+                } = &consumer.op
+                {
+                    format!(
+                        " reduce_count={} reduce_stride={}",
+                        reduce_count, reduce_stride
+                    )
+                } else {
+                    String::new()
+                };
+                return format!(
+                    "strided(base={} nd={} strides={:?} shape={:?} cons_offset={} cons_count={} first={} last={} stride_hint={} |stride|*count={} prod_base={} prod_count={}{}",
+                    base.0,
+                    nd,
+                    dim_strides,
+                    dim_shape,
+                    consumer.atom_offset,
+                    consumer.count,
+                    first,
+                    last,
+                    stride_hint,
+                    stride_mul,
+                    producer.base_id.0,
+                    producer.count,
+                    reduce_meta
+                );
+            }
+            InputRef::Explicit(ids) => {
+                return format!(
+                    "explicit(len={} cons_offset={} cons_count={} prod_base={} prod_count={})",
+                    ids.len(),
+                    consumer.atom_offset,
+                    consumer.count,
+                    producer.base_id.0,
+                    producer.count
+                );
+            }
+        }
+    }
+
+    String::new()
+}
+
+fn kind_tag(kind: GroupKind) -> &'static str {
+    match kind {
+        GroupKind::Split => "Split",
+        GroupKind::Duplicate => "Duplicate",
+        GroupKind::Whole => "Whole",
+    }
+}
+
+#[derive(Debug, Clone)]
+enum BarrierReason {
+    SplitSplitNonLocal(&'static str),
+    SplitToDuplicate,
+    SplitToWhole,
+    WholeToSplit,
+    WholeToDuplicate,
+}
+
+impl BarrierReason {
+    fn as_str(&self) -> &'static str {
+        match self {
+            BarrierReason::SplitSplitNonLocal(msg) => msg,
+            BarrierReason::SplitToDuplicate => "split->duplicate",
+            BarrierReason::SplitToWhole => "split->whole",
+            BarrierReason::WholeToSplit => "whole->split",
+            BarrierReason::WholeToDuplicate => "whole->duplicate",
+        }
+    }
+}
+
+/// Determine whether a barrier is needed between producer/consumer groups.
 ///
-/// Returns true if the consumer cannot safely execute in the same phase
-/// as the producer due to cross-lane data dependencies.
-fn needs_barrier_between(
+/// Returns `Some(reason)` when the consumer cannot safely execute in the same
+/// phase as the producer due to cross-lane dependencies.
+fn barrier_reason_between(
     pi: usize,
     ci: usize,
     prod_kind: GroupKind,
@@ -396,7 +676,7 @@ fn needs_barrier_between(
     groups: &[AtomGroup<'static, crate::pool::SystemPool>],
     graph: &NanoGraph<'static, crate::pool::SystemPool>,
     num_lanes: usize,
-) -> bool {
+) -> Option<BarrierReason> {
     let prod = &groups[pi];
     let cons = &groups[ci];
 
@@ -404,15 +684,12 @@ fn needs_barrier_between(
         // Split → Split: no barrier if the consumer reads only from its own
         // lane's slice. This is true when the input pattern is Affine with
         // stride 1 (elementwise chain) or StridedBroadcast with aligned blocks.
-        (GroupKind::Split, GroupKind::Split) => {
-            // Check if the consumer's input refs to this producer are
-            // lane-local (each lane's fragment only reads from the same
-            // lane's fragment of the producer).
-            !is_lane_local_access(cons, prod, num_lanes)
-        }
+        (GroupKind::Split, GroupKind::Split) => lane_local_access_check(cons, prod, num_lanes)
+            .err()
+            .map(BarrierReason::SplitSplitNonLocal),
 
         // Duplicate → anything: no barrier. Duplicated data is in every lane.
-        (GroupKind::Duplicate, _) => false,
+        (GroupKind::Duplicate, _) => None,
 
         // Split → Duplicate consumer: the consumer is duplicated into every
         // lane, and it reads from the split producer. If the consumer needs
@@ -420,35 +697,27 @@ fn needs_barrier_between(
         // that's a cross-lane dependency → barrier needed.
         // If the consumer only reads a broadcast (single atom), no barrier
         // if that atom is available.
-        (GroupKind::Split, GroupKind::Duplicate) => {
-            // A duplicated consumer that reads from a split producer:
-            // if the consumer broadcasts a single atom from the producer,
-            // we need a barrier because we don't know which lane has it.
-            // Actually: duplicated groups are small (literals, scalars).
-            // If a non-literal duplicated group reads from a split group,
-            // we need a barrier.
-            true
-        }
+        (GroupKind::Split, GroupKind::Duplicate) => Some(BarrierReason::SplitToDuplicate),
 
         // Split → Whole: the whole group sits on one lane but may need
         // atoms from all lanes of the split producer → barrier.
-        (GroupKind::Split, GroupKind::Whole) => true,
+        (GroupKind::Split, GroupKind::Whole) => Some(BarrierReason::SplitToWhole),
 
         // Whole → Split: the whole group is on lane 0 only. Other lanes
         // can't read its output within the same phase. Barrier needed.
-        (GroupKind::Whole, GroupKind::Split) => true,
+        (GroupKind::Whole, GroupKind::Split) => Some(BarrierReason::WholeToSplit),
 
         // Whole → Whole: both on lane 0 (or same lane) → no barrier if
         // same phase ordering works.
-        (GroupKind::Whole, GroupKind::Whole) => false,
+        (GroupKind::Whole, GroupKind::Whole) => None,
 
         // Whole → Duplicate: the duplicate runs on all lanes but Whole is only
         // on lane 0. If in the same phase, other lanes can't access the Whole
         // output. Need a barrier so the Whole group's output is in the value store.
-        (GroupKind::Whole, GroupKind::Duplicate) => true,
+        (GroupKind::Whole, GroupKind::Duplicate) => Some(BarrierReason::WholeToDuplicate),
 
         // Duplicate → anything already handled above.
-        (GroupKind::Duplicate, _) => false,
+        (GroupKind::Duplicate, _) => None,
     }
 }
 
@@ -469,6 +738,14 @@ fn is_lane_local_access(
     producer: &AtomGroup<'static, crate::pool::SystemPool>,
     num_lanes: usize,
 ) -> bool {
+    lane_local_access_check(consumer, producer, num_lanes).is_ok()
+}
+
+fn lane_local_access_check(
+    consumer: &AtomGroup<'static, crate::pool::SystemPool>,
+    producer: &AtomGroup<'static, crate::pool::SystemPool>,
+    num_lanes: usize,
+) -> Result<(), &'static str> {
     let prod_base = producer.base_id.0;
     let prod_end = prod_base + producer.count;
 
@@ -484,7 +761,7 @@ fn is_lane_local_access(
                 // A broadcast reads a single atom. If the producer is split,
                 // that atom lives on exactly one lane. Other lanes won't have it.
                 // → Not lane-local (need barrier or duplication).
-                return false;
+                return Err("split->split non-lane-local: broadcast input");
             }
             InputRef::Strided {
                 base,
@@ -519,7 +796,9 @@ fn is_lane_local_access(
 
                     // chunk must be a multiple of repeat for alignment.
                     if chunk % repeat != 0 {
-                        return false;
+                        return Err(
+                            "split->split non-lane-local: strided-broadcast chunk not aligned",
+                        );
                     }
 
                     let distinct_per_chunk = chunk / repeat;
@@ -538,7 +817,7 @@ fn is_lane_local_access(
                         }
                     }
 
-                    return false;
+                    return Err("split->split non-lane-local: strided-broadcast mismatch");
                 }
 
                 // Modular: dim_strides=[0, stride], dim_shape=[MAX, modulus]
@@ -546,7 +825,7 @@ fn is_lane_local_access(
                     // Modular: atom i reads base + stride * (i % modulus).
                     // This tiles/repeats — every lane needs the same modulus-sized
                     // range. NOT lane-local unless the producer is duplicated.
-                    return false;
+                    return Err("split->split non-lane-local: modular input");
                 }
 
                 // Affine or general: use innermost stride
@@ -602,7 +881,9 @@ fn is_lane_local_access(
                             // of last output in the largest lane fragment.
                             let span = abs_stride * (max_chunk - 1) + reduce_extent + 1;
                             if span > prod_chunk {
-                                return false;
+                                return Err(
+                                    "split->split non-lane-local: reduce footprint exceeds producer chunk",
+                                );
                             }
                         }
                         // Lane-local with aligned split.
@@ -625,16 +906,16 @@ fn is_lane_local_access(
                 }
 
                 // Not lane-local.
-                return false;
+                return Err("split->split non-lane-local: affine/general stride mismatch");
             }
             InputRef::Explicit(_) => {
                 // Arbitrary mapping — not lane-local in general.
-                return false;
+                return Err("split->split non-lane-local: explicit mapping");
             }
         }
     }
 
-    true
+    Ok(())
 }
 
 /// Check if any of the consumer's inputs broadcast a single atom from the producer.
@@ -2519,6 +2800,97 @@ mod tests {
         }];
         let phases = plan(&g, num_lanes, &it, &g.outputs.clone());
         verify_plan_full(&phases);
+    }
+
+    /// Relayout should also catch the variant where the second Mul input is
+    /// already a 2D strided view [s, s*K] with shape [MAX, N].
+    #[test]
+    fn test_matmul_relayout_for_strided_nk_variant() {
+        let mut g = NanoGraph::new();
+        let num_lanes = 4;
+        let n = 8u64;
+        let k = 4u64;
+
+        let a = g.push_group(
+            k,
+            NumericDType::F32,
+            ScalarOp::Literal(NumericScalar::from_f32(1.0)),
+            vec![],
+            vec![],
+        );
+        let b = g.push_group(
+            n * k,
+            NumericDType::F32,
+            ScalarOp::Literal(NumericScalar::from_f32(2.0)),
+            vec![],
+            vec![],
+        );
+
+        let mul = g.push_group(
+            n * k,
+            NumericDType::F32,
+            ScalarOp::Binary {
+                op: ScalarBinOp::Mul,
+                compute_dtype: NumericDType::F32,
+            },
+            vec![],
+            vec![
+                InputRef::strided_broadcast(a, 1, n),
+                InputRef::Strided {
+                    base: b,
+                    dim_strides: vec![1, k as i64],
+                    dim_shape: vec![u64::MAX, n],
+                },
+            ],
+        );
+
+        let reduce = g.push_group(
+            n,
+            NumericDType::F32,
+            ScalarOp::Reduce {
+                kind: ReduceKind::Sum,
+                reduce_count: k,
+                reduce_stride: n as i64,
+                compute_dtype: NumericDType::F32,
+            },
+            vec![],
+            vec![InputRef::affine(mul, 1)],
+        );
+        g.outputs = vec![g.atom_to_range(reduce)];
+
+        let phases = plan(&g, num_lanes, &[], &g.outputs.clone());
+        verify_plan_full(&phases);
+
+        assert_eq!(
+            phases.len(),
+            1,
+            "relayouted [K,N] matmul variant should stay in one phase"
+        );
+
+        for span in &phases[0].spans {
+            let Some(rg) = span.graph.groups().iter().find(|g| g.op.is_reduce()) else {
+                continue;
+            };
+            if let ScalarOp::Reduce { reduce_stride, .. } = &rg.op {
+                assert_eq!(
+                    *reduce_stride, 1,
+                    "reduce_stride should be relayouted to 1 for lane-local splits"
+                );
+            }
+            if let Some(InputRef::Strided { dim_strides, .. }) = rg.inputs.first() {
+                assert_eq!(
+                    dim_strides.len(),
+                    1,
+                    "reduce input should remain affine after relayout"
+                );
+                assert_eq!(
+                    dim_strides[0], k as i64,
+                    "reduce input affine stride should be K after relayout"
+                );
+            } else {
+                panic!("expected affine reduce input after relayout");
+            }
+        }
     }
 
     // ─── Test: LayerNorm-like structure ──────────────────────────────────
