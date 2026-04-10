@@ -8,9 +8,10 @@
 //! GPU backends all implement the `CompiledSpanFn` trait.
 
 use std::collections::HashMap;
+use std::env;
 use std::time::Instant;
 
-use rayon::prelude::*;
+use rayon::{ThreadPool, ThreadPoolBuilder, prelude::*};
 
 use crate::nano_graph::{AtomId, AtomRange};
 use crate::numeric_dtype::NumericDType;
@@ -545,6 +546,9 @@ impl<'a, 'p, P: Pool + 'p> PhaseStore<'a, 'p, P> {
 /// Owns the compiled span functions and drives the phase/barrier loop.
 pub struct ExecutablePlan {
     phases: Vec<ExecutablePhase>,
+    /// Dedicated worker pool sized to max lane count. With `broadcast`,
+    /// lane index `i` executes on worker `i` every phase.
+    lane_pool: Option<ThreadPool>,
     /// Liveness: maps output entry base → last phase that reads it.
     /// Used for store eviction after each phase.
     output_liveness: HashMap<u64, usize>,
@@ -668,15 +672,74 @@ impl ExecutablePlanBuilder {
             tracked, total_outputs,
         );
 
+        let max_lanes = self.phases.iter().map(|p| p.lanes.len()).max().unwrap_or(1);
+        let lane_pool = build_lane_thread_pool(max_lanes);
+
         ExecutablePlan {
             phases: self.phases,
+            lane_pool,
             output_liveness,
             pinned_output_atoms: pinned_atoms,
         }
     }
 }
 
+fn build_lane_thread_pool(max_lanes: usize) -> Option<ThreadPool> {
+    if max_lanes <= 1 {
+        return None;
+    }
+    // Default on: fixed lane workers. Set to 0 to A/B against legacy global
+    // rayon scheduling.
+    let use_dedicated = env::var("WT_EXECUTOR_DEDICATED_LANES")
+        .ok()
+        .is_none_or(|v| v != "0");
+    if !use_dedicated {
+        return None;
+    }
+    Some(
+        ThreadPoolBuilder::new()
+            .num_threads(max_lanes)
+            .thread_name(|idx| format!("wt-lane-{idx}"))
+            .build()
+            .expect("failed to build dedicated lane thread pool"),
+    )
+}
+
 impl ExecutablePlan {
+    fn execute_phase_lanes<'a, 'p, P: Pool + 'p>(
+        &self,
+        phase: &ExecutablePhase,
+        store: &PhaseStore<'a, 'p, P>,
+        pool: &'p P,
+    ) -> Vec<Vec<(AtomId, NumericTensor<'p, DynRank, P>)>> {
+        if let Some(lane_pool) = &self.lane_pool {
+            let lane_count = phase.lanes.len();
+            let mut phase_outputs: Vec<Vec<(AtomId, NumericTensor<'p, DynRank, P>)>> =
+                (0..lane_count).map(|_| Vec::new()).collect();
+            let worker_outputs = lane_pool.broadcast(|ctx| {
+                let lane_idx = ctx.index();
+                let outputs = if lane_idx < lane_count {
+                    execute_lane(&phase.lanes[lane_idx], store, pool)
+                } else {
+                    Vec::new()
+                };
+                (lane_idx, outputs)
+            });
+            for (lane_idx, outputs) in worker_outputs {
+                if lane_idx < lane_count {
+                    phase_outputs[lane_idx] = outputs;
+                }
+            }
+            phase_outputs
+        } else {
+            phase
+                .lanes
+                .par_iter()
+                .map(|lane| execute_lane(lane, store, pool))
+                .collect()
+        }
+    }
+
     /// Execute the plan, returning the value store.
     pub fn execute<'a, 'p, P: Pool + 'p>(
         &self,
@@ -686,12 +749,7 @@ impl ExecutablePlan {
         let mut store = PhaseStore::new(initial_inputs);
 
         for (pi, phase) in self.phases.iter().enumerate() {
-            // Parallel: each lane gathers inputs, executes, produces outputs.
-            let phase_outputs: Vec<Vec<(AtomId, NumericTensor<'p, DynRank, P>)>> = phase
-                .lanes
-                .par_iter()
-                .map(|lane| execute_lane(lane, &store, pool))
-                .collect();
+            let phase_outputs = self.execute_phase_lanes(phase, &store, pool);
 
             // Barrier: merge all outputs into store via a single batched
             // sort+linear-merge (much cheaper than per-element insert). Phase
@@ -723,11 +781,7 @@ impl ExecutablePlan {
 
         for (pi, phase) in self.phases.iter().enumerate() {
             let t0 = Instant::now();
-            let phase_outputs: Vec<Vec<(AtomId, NumericTensor<'p, DynRank, P>)>> = phase
-                .lanes
-                .par_iter()
-                .map(|lane| execute_lane(lane, &store, pool))
-                .collect();
+            let phase_outputs = self.execute_phase_lanes(phase, &store, pool);
             let spans_dt = t0.elapsed();
             total_spans += spans_dt;
 
