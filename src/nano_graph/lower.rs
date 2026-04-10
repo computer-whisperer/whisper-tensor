@@ -204,15 +204,17 @@ impl TensorAtomMapInfo {
                         dtype: g.output_dtype,
                     });
                 }
-            } else if let Some((ti, _)) = graph.find_input_idx(atom)
-                && seen.insert(usize::MAX - ti)
-            {
-                let it = &graph.input_tensors()[ti];
-                ranges.push(AtomRange {
-                    base: it.base_id,
-                    count: it.count,
-                    dtype: it.dtype,
-                });
+            } else {
+                for (ti, _) in graph.find_input_idxs(atom) {
+                    if seen.insert(usize::MAX - ti) {
+                        let it = &graph.input_tensors()[ti];
+                        ranges.push(AtomRange {
+                            base: it.base_id,
+                            count: it.count,
+                            dtype: it.dtype,
+                        });
+                    }
+                }
             }
         }
         ranges
@@ -427,15 +429,17 @@ impl TensorAtomMap {
                         dtype: g.output_dtype,
                     });
                 }
-            } else if let Some((ti, _)) = graph.find_input_idx(atom)
-                && seen.insert(usize::MAX - ti)
-            {
-                let it = &graph.input_tensors()[ti];
-                ranges.push(AtomRange {
-                    base: it.base_id,
-                    count: it.count,
-                    dtype: it.dtype,
-                });
+            } else {
+                for (ti, _) in graph.find_input_idxs(atom) {
+                    if seen.insert(usize::MAX - ti) {
+                        let it = &graph.input_tensors()[ti];
+                        ranges.push(AtomRange {
+                            base: it.base_id,
+                            count: it.count,
+                            dtype: it.dtype,
+                        });
+                    }
+                }
             }
         }
         ranges

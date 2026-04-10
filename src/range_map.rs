@@ -1,4 +1,4 @@
-//! A sorted collection mapping non-overlapping `u64` ranges to values.
+//! A sorted collection mapping `u64` ranges to values.
 //!
 //! Backed by parallel sorted `Vec`s (struct-of-arrays layout) with
 //! binary-search lookup — O(log n) for point queries, O(1) amortized
@@ -16,14 +16,20 @@ use std::fmt;
 /// range.
 ///
 /// Entries are stored sorted by `start`. Insertions must not overlap
-/// existing ranges (checked in debug builds). Appending in order is O(1);
+/// existing ranges when using [`RangeMap::insert`] (checked in debug builds).
+/// Appending in order is O(1);
 /// out-of-order insertion is O(n) due to the shift, but this is rare in
 /// practice — atom IDs are allocated monotonically.
+///
+/// Overlaps can be intentionally enabled via [`RangeMap::insert_allow_overlap`].
+/// In that mode, single-hit point lookups still work but may fall back to a
+/// linear scan for correctness.
 #[derive(Clone)]
 pub struct RangeMap<V> {
     starts: Vec<u64>,
     counts: Vec<u64>,
     values: Vec<V>,
+    has_overlaps: bool,
 }
 
 impl<V> Default for RangeMap<V> {
@@ -32,6 +38,7 @@ impl<V> Default for RangeMap<V> {
             starts: Vec::new(),
             counts: Vec::new(),
             values: Vec::new(),
+            has_overlaps: false,
         }
     }
 }
@@ -46,6 +53,7 @@ impl<V> RangeMap<V> {
             starts: Vec::with_capacity(cap),
             counts: Vec::with_capacity(cap),
             values: Vec::with_capacity(cap),
+            has_overlaps: false,
         }
     }
 
@@ -54,11 +62,15 @@ impl<V> RangeMap<V> {
     /// Panics (debug) if the range overlaps an existing entry or if count is 0.
     pub fn insert(&mut self, start: u64, count: u64, value: V) {
         debug_assert!(count > 0, "RangeMap: count must be > 0");
-        let end = start + count;
+        let end = start
+            .checked_add(count)
+            .expect("RangeMap: range end overflow");
 
         // Fast path: appending in order (the common case for atom ID allocation).
         if let Some(&last_start) = self.starts.last() {
-            let last_end = last_start + self.counts[self.counts.len() - 1];
+            let last_end = last_start
+                .checked_add(self.counts[self.counts.len() - 1])
+                .expect("RangeMap: range end overflow");
             if start >= last_end {
                 self.starts.push(start);
                 self.counts.push(count);
@@ -78,12 +90,14 @@ impl<V> RangeMap<V> {
         // Check overlap with the entry before.
         if pos > 0 {
             debug_assert!(
-                self.starts[pos - 1] + self.counts[pos - 1] <= start,
+                self.ends_at(pos - 1) <= start,
                 "RangeMap: overlapping insert [{}, {}) vs existing [{}, {})",
                 start,
                 end,
                 self.starts[pos - 1],
-                self.starts[pos - 1] + self.counts[pos - 1],
+                self.starts[pos - 1]
+                    .checked_add(self.counts[pos - 1])
+                    .expect("RangeMap: range end overflow"),
             );
         }
         // Check overlap with the entry after.
@@ -94,8 +108,34 @@ impl<V> RangeMap<V> {
                 start,
                 end,
                 self.starts[pos],
-                self.starts[pos] + self.counts[pos],
+                self.starts[pos]
+                    .checked_add(self.counts[pos])
+                    .expect("RangeMap: range end overflow"),
             );
+        }
+
+        self.starts.insert(pos, start);
+        self.counts.insert(pos, count);
+        self.values.insert(pos, value);
+    }
+
+    /// Insert a range `[start, start+count)` → `value`, allowing overlaps.
+    ///
+    /// Entries remain sorted by `start`. Point lookups continue to work, but
+    /// if overlaps exist they may use a linear fallback scan.
+    pub fn insert_allow_overlap(&mut self, start: u64, count: u64, value: V) {
+        debug_assert!(count > 0, "RangeMap: count must be > 0");
+        let end = start
+            .checked_add(count)
+            .expect("RangeMap: range end overflow");
+        let pos = self.starts.partition_point(|&s| s < start);
+
+        if !self.has_overlaps {
+            let overlaps_prev = pos > 0 && self.ends_at(pos - 1) > start;
+            let overlaps_next = pos < self.starts.len() && end > self.starts[pos];
+            if overlaps_prev || overlaps_next {
+                self.has_overlaps = true;
+            }
         }
 
         self.starts.insert(pos, start);
@@ -119,17 +159,42 @@ impl<V> RangeMap<V> {
 
     /// Returns the entry index containing `id`, or `None`.
     fn index_of(&self, id: u64) -> Option<usize> {
+        if self.has_overlaps {
+            return self
+                .starts
+                .iter()
+                .zip(self.counts.iter())
+                .enumerate()
+                .find_map(|(idx, (&start, &count))| {
+                    let end = start
+                        .checked_add(count)
+                        .expect("RangeMap: range end overflow");
+                    if start <= id && id < end {
+                        Some(idx)
+                    } else {
+                        None
+                    }
+                });
+        }
+
         // Binary search: find the last entry whose start <= id.
         let pos = self.starts.partition_point(|&s| s <= id);
         if pos == 0 {
             return None;
         }
         let idx = pos - 1;
-        if id < self.starts[idx] + self.counts[idx] {
+        if id < self.ends_at(idx) {
             Some(idx)
         } else {
             None
         }
+    }
+
+    #[inline]
+    fn ends_at(&self, idx: usize) -> u64 {
+        self.starts[idx]
+            .checked_add(self.counts[idx])
+            .expect("RangeMap: range end overflow")
     }
 
     /// Look up by entry index (insertion order). O(1).
@@ -192,9 +257,65 @@ impl<V> RangeMap<V> {
             .map(|((&s, &c), v)| (s, c, v))
     }
 
+    /// Iterate all entries that contain `id`.
+    ///
+    /// Yields `(index, start, count, &value)` in storage order.
+    pub fn iter_point_overlaps(&self, id: u64) -> impl Iterator<Item = (usize, u64, u64, &V)> {
+        self.starts
+            .iter()
+            .zip(self.counts.iter())
+            .zip(self.values.iter())
+            .enumerate()
+            .filter_map(move |(idx, ((&start, &count), value))| {
+                let end = start
+                    .checked_add(count)
+                    .expect("RangeMap: range end overflow");
+                if start <= id && id < end {
+                    Some((idx, start, count, value))
+                } else {
+                    None
+                }
+            })
+    }
+
+    /// Iterate all entries that overlap the query range `[start, start+count)`.
+    ///
+    /// Yields `(index, entry_start, entry_count, &value)` in storage order.
+    pub fn iter_range_overlaps(
+        &self,
+        start: u64,
+        count: u64,
+    ) -> impl Iterator<Item = (usize, u64, u64, &V)> {
+        debug_assert!(count > 0, "RangeMap: count must be > 0");
+        let end = start
+            .checked_add(count)
+            .expect("RangeMap: range end overflow");
+        self.starts
+            .iter()
+            .zip(self.counts.iter())
+            .zip(self.values.iter())
+            .enumerate()
+            .filter_map(move |(idx, ((&entry_start, &entry_count), value))| {
+                let entry_end = entry_start
+                    .checked_add(entry_count)
+                    .expect("RangeMap: range end overflow");
+                if start < entry_end && entry_start < end {
+                    Some((idx, entry_start, entry_count, value))
+                } else {
+                    None
+                }
+            })
+    }
+
     /// Check if `id` falls within any stored range.
     pub fn contains(&self, id: u64) -> bool {
         self.index_of(id).is_some()
+    }
+
+    /// True if at least one overlap has been inserted with
+    /// [`RangeMap::insert_allow_overlap`].
+    pub fn has_overlaps(&self) -> bool {
+        self.has_overlaps
     }
 }
 
@@ -205,7 +326,9 @@ impl<V: fmt::Debug> fmt::Debug for RangeMap<V> {
                 format!(
                     "[{}..{}) → {:?}",
                     self.starts[i],
-                    self.starts[i] + self.counts[i],
+                    self.starts[i]
+                        .checked_add(self.counts[i])
+                        .expect("RangeMap: range end overflow"),
                     self.values[i]
                 )
             }))
@@ -374,5 +497,39 @@ mod tests {
         m.insert(10, 10, "b"); // immediately adjacent, not overlapping
         assert_eq!(m.get(9), Some((&"a", 9)));
         assert_eq!(m.get(10), Some((&"b", 0)));
+    }
+
+    #[test]
+    fn overlapping_insert_and_point_iter() {
+        let mut m = RangeMap::new();
+        m.insert_allow_overlap(0, 100, "wide");
+        m.insert_allow_overlap(50, 10, "narrow");
+        assert!(m.has_overlaps());
+
+        // Overlap-aware point iterator returns both.
+        let hits: Vec<_> = m
+            .iter_point_overlaps(55)
+            .map(|(_, s, c, v)| (s, c, *v))
+            .collect();
+        assert_eq!(hits, vec![(0, 100, "wide"), (50, 10, "narrow")]);
+
+        // Single-hit get/contains stay correct even with overlaps.
+        assert!(m.contains(90));
+        assert_eq!(m.get(90), Some((&"wide", 90)));
+        assert_eq!(m.get(55), Some((&"wide", 55)));
+    }
+
+    #[test]
+    fn overlapping_range_iter() {
+        let mut m = RangeMap::new();
+        m.insert_allow_overlap(10, 10, "a"); // [10, 20)
+        m.insert_allow_overlap(18, 10, "b"); // [18, 28)
+        m.insert_allow_overlap(40, 5, "c"); // [40, 45)
+
+        let hits: Vec<_> = m
+            .iter_range_overlaps(15, 10) // [15, 25)
+            .map(|(_, s, c, v)| (s, c, *v))
+            .collect();
+        assert_eq!(hits, vec![(10, 10, "a"), (18, 10, "b")]);
     }
 }

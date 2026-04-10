@@ -550,6 +550,35 @@ impl<'p, P: Pool + 'p> NanoGraph<'p, P> {
         }
     }
 
+    /// Insert an input tensor at a specific base AtomId, allowing overlap
+    /// with existing input ranges.
+    ///
+    /// This is useful for span graphs that want to describe sub-ranges of an
+    /// existing tensor mapping without forcing a one-to-one range partition.
+    pub fn insert_input_tensor_at_allow_overlap(
+        &mut self,
+        base_id: AtomId,
+        tensor_id: GlobalId,
+        count: u64,
+        dtype: NumericDType,
+    ) {
+        self.input_ranges.insert_allow_overlap(
+            base_id.0,
+            count,
+            InputTensor {
+                tensor_id,
+                base_id,
+                count,
+                dtype,
+            },
+        );
+        // Ensure next_atom_id stays past this range.
+        let end = base_id.0 + count;
+        if end > self.next_atom_id {
+            self.next_atom_id = end;
+        }
+    }
+
     /// Insert a group at a specific base AtomId.
     ///
     /// Unlike `push_group`, this does NOT allocate sequential IDs.
@@ -660,9 +689,24 @@ impl<'p, P: Pool + 'p> NanoGraph<'p, P> {
     /// Find which input tensor an AtomId belongs to.
     /// Returns `(index_into_input_tensors, offset_within_tensor)`.
     pub fn find_input_idx(&self, id: AtomId) -> Option<(usize, u64)> {
+        self.find_input_idxs(id).next()
+    }
+
+    /// Find all input tensors covering an AtomId.
+    ///
+    /// Yields `(index_into_input_tensors, offset_within_tensor)` in
+    /// `RangeMap` storage order.
+    pub fn find_input_idxs(&self, id: AtomId) -> impl Iterator<Item = (usize, u64)> + '_ {
         self.input_ranges
-            .find_index(id.0)
-            .map(|idx| (idx, id.0 - self.input_ranges.values()[idx].base_id.0))
+            .iter_point_overlaps(id.0)
+            .map(move |(idx, start, _count, _)| (idx, id.0 - start))
+    }
+
+    /// Find an input tensor by exact base AtomId.
+    pub fn find_input_idx_by_base(&self, base: AtomId) -> Option<usize> {
+        self.input_tensors()
+            .iter()
+            .position(|it| it.base_id == base)
     }
 
     /// Build an `AtomRange` for an atom that belongs to either a group or an

@@ -798,7 +798,7 @@ fn collect_input_atom_ranges(
     for input in &group.inputs {
         match input {
             InputRef::Broadcast(id) | InputRef::Strided { base: id, .. } => {
-                if let Some((idx, _)) = graph.find_input_idx(*id) {
+                for (idx, _) in graph.find_input_idxs(*id) {
                     let it = &graph.input_tensors()[idx];
                     if seen_bases.insert(it.base_id.0) {
                         ranges.push((it.base_id, it.count, it.dtype));
@@ -807,7 +807,7 @@ fn collect_input_atom_ranges(
             }
             InputRef::Explicit(ids) => {
                 for id in ids {
-                    if let Some((idx, _)) = graph.find_input_idx(*id) {
+                    for (idx, _) in graph.find_input_idxs(*id) {
                         let it = &graph.input_tensors()[idx];
                         if seen_bases.insert(it.base_id.0) {
                             ranges.push((it.base_id, it.count, it.dtype));
@@ -825,10 +825,12 @@ fn collect_input_atom_ranges(
             if seen_bases.insert(tg.base_id.0) {
                 ranges.push((tg.base_id, tg.count, tg.output_dtype));
             }
-        } else if let Some((ti, _)) = graph.find_input_idx(*table_base) {
-            let it = &graph.input_tensors()[ti];
-            if seen_bases.insert(it.base_id.0) {
-                ranges.push((it.base_id, it.count, it.dtype));
+        } else {
+            for (ti, _) in graph.find_input_idxs(*table_base) {
+                let it = &graph.input_tensors()[ti];
+                if seen_bases.insert(it.base_id.0) {
+                    ranges.push((it.base_id, it.count, it.dtype));
+                }
             }
         }
     }
@@ -1406,7 +1408,7 @@ fn ensure_inputs_declared(
             count: cnt,
             dtype,
         });
-        span_graphs[lane].insert_input_tensor_at(
+        span_graphs[lane].insert_input_tensor_at_allow_overlap(
             base,
             tensor_id.unwrap_or(GlobalId(0)),
             cnt,
@@ -1478,9 +1480,11 @@ fn ensure_inputs_declared(
     if let ScalarOp::IndirectLoad { table_base } = op {
         if let Some(tg) = graph.group_of(*table_base) {
             ranges_to_cover.push((tg.base_id.0, tg.base_id.0 + tg.count - 1));
-        } else if let Some((ti, _)) = graph.find_input_idx(*table_base) {
-            let it = &graph.input_tensors()[ti];
-            ranges_to_cover.push((it.base_id.0, it.base_id.0 + it.count - 1));
+        } else {
+            for (ti, _) in graph.find_input_idxs(*table_base) {
+                let it = &graph.input_tensors()[ti];
+                ranges_to_cover.push((it.base_id.0, it.base_id.0 + it.count - 1));
+            }
         }
     }
 
@@ -1522,7 +1526,7 @@ fn find_covering_input_tensor<'a>(
     graph: &NanoGraph<'static, crate::pool::SystemPool>,
 ) -> Option<InputTensor> {
     // Check graph's input tensors via find_input_idx
-    if let Some((idx, _)) = graph.find_input_idx(*atom) {
+    if let Some((idx, _)) = graph.find_input_idxs(*atom).next() {
         let it = &graph.input_tensors()[idx];
         return Some(it.clone());
     }

@@ -47,7 +47,10 @@ pub fn pool_eval<'p, P: Pool + 'p>(
         (0..input_tensors.len()).map(|_| None).collect();
 
     for &(tam, view) in inputs {
-        if let Some((ti, _offset)) = graph.find_input_idx(tam.base_id) {
+        let input_index = graph
+            .find_input_idx_by_base(tam.base_id)
+            .or_else(|| graph.find_input_idx(tam.base_id).map(|(ti, _)| ti));
+        if let Some(ti) = input_index {
             let element_bits = tam.dtype.total_bits() as u64;
             let strides_bits: Vec<u64> = tam
                 .known_strides
