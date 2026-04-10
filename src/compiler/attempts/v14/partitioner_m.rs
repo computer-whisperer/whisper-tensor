@@ -369,6 +369,205 @@ fn classify_group(
     }
 }
 
+fn input_is_modular_like(input: &InputRef) -> bool {
+    match input {
+        InputRef::Strided { dim_strides, .. } => dim_strides.len() >= 2 && dim_strides[0] == 0,
+        _ => false,
+    }
+}
+
+fn consumer_has_direct_ref_to_producer(
+    consumer: &AtomGroup<'static, crate::pool::SystemPool>,
+    producer: &AtomGroup<'static, crate::pool::SystemPool>,
+) -> bool {
+    consumer.inputs.iter().any(|inp| {
+        input_refs_group(
+            inp,
+            consumer.count,
+            consumer.atom_offset,
+            producer,
+        )
+    })
+}
+
+fn consumer_reads_producer_modularly(
+    consumer: &AtomGroup<'static, crate::pool::SystemPool>,
+    producer: &AtomGroup<'static, crate::pool::SystemPool>,
+) -> bool {
+    consumer.inputs.iter().any(|inp| {
+        input_is_modular_like(inp)
+            && input_refs_group(
+                inp,
+                consumer.count,
+                consumer.atom_offset,
+                producer,
+            )
+    })
+}
+
+/// Promote small split groups to Duplicate when they are consumed only through
+/// modular/tiled expansion by large split consumers.
+///
+/// This avoids creating a phase barrier just to gather a tiny producer range
+/// across lanes for a huge modular consumer.
+fn promote_small_modular_sources_to_duplicate(
+    groups: &[AtomGroup<'static, crate::pool::SystemPool>],
+    successors: &[Vec<usize>],
+    kinds: &mut [GroupKind],
+) {
+    let dup_max = std::env::var("WT_PARTITIONER_M_MODULAR_DUP_MAX")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(4096);
+    let min_expand = std::env::var("WT_PARTITIONER_M_MODULAR_DUP_MIN_EXPAND")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(16384);
+    let trace_dup = std::env::var("WT_PARTITIONER_M_TRACE_DUP_PROMOTE")
+        .ok()
+        .is_some_and(|v| v != "0");
+
+    let mut promoted = 0usize;
+    for pi in 0..groups.len() {
+        if kinds[pi] != GroupKind::Split {
+            continue;
+        }
+        let prod = &groups[pi];
+        if prod.count == 0 || prod.count > dup_max {
+            continue;
+        }
+
+        let mut saw_direct = false;
+        let mut saw_large_modular = false;
+        let mut all_direct_are_large_modular = true;
+
+        for &ci in &successors[pi] {
+            let cons = &groups[ci];
+            if !consumer_has_direct_ref_to_producer(cons, prod) {
+                continue;
+            }
+            saw_direct = true;
+
+            let is_large_modular = kinds[ci] == GroupKind::Split
+                && cons.count >= prod.count.saturating_mul(min_expand)
+                && consumer_reads_producer_modularly(cons, prod);
+
+            if is_large_modular {
+                saw_large_modular = true;
+            } else {
+                all_direct_are_large_modular = false;
+                break;
+            }
+        }
+
+        if saw_direct && saw_large_modular && all_direct_are_large_modular {
+            kinds[pi] = GroupKind::Duplicate;
+            promoted += 1;
+            if trace_dup {
+                eprintln!(
+                    "  [partitioner_m] promoted g{} to Duplicate for modular fanout (count={})",
+                    pi, prod.count
+                );
+            }
+        }
+    }
+
+    if trace_dup && promoted > 0 {
+        eprintln!("  [partitioner_m] promoted {promoted} groups to Duplicate");
+    }
+}
+
+/// Promote tiny split sources to Duplicate when they would otherwise force a
+/// split->split non-lane-local barrier into very large split consumers.
+///
+/// This is opt-in (disabled by default) and is intended for experimentation
+/// on over-partitioned tiny producer groups.
+fn promote_small_nonlocal_sources_to_duplicate(
+    groups: &[AtomGroup<'static, crate::pool::SystemPool>],
+    successors: &[Vec<usize>],
+    kinds: &mut [GroupKind],
+    num_lanes: usize,
+) {
+    let dup_max = std::env::var("WT_PARTITIONER_M_DUP_NONLOCAL_MAX")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(0);
+    if dup_max == 0 {
+        return;
+    }
+
+    let min_expand = std::env::var("WT_PARTITIONER_M_DUP_NONLOCAL_MIN_EXPAND")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(256);
+    let min_consumer_atoms = std::env::var("WT_PARTITIONER_M_DUP_NONLOCAL_MIN_CONSUMER")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(1_000_000);
+    let reduce_only = std::env::var("WT_PARTITIONER_M_DUP_NONLOCAL_REDUCE_ONLY")
+        .ok()
+        .map(|v| v != "0")
+        .unwrap_or(true);
+    let trace_dup = std::env::var("WT_PARTITIONER_M_TRACE_DUP_PROMOTE")
+        .ok()
+        .is_some_and(|v| v != "0");
+
+    let mut promoted = 0usize;
+    for pi in 0..groups.len() {
+        if kinds[pi] != GroupKind::Split {
+            continue;
+        }
+        let prod = &groups[pi];
+        if prod.count == 0 || prod.count > dup_max {
+            continue;
+        }
+        if reduce_only && !matches!(prod.op, ScalarOp::Reduce { .. }) {
+            continue;
+        }
+
+        let mut saw_direct = false;
+        let mut saw_candidate = false;
+        let mut all_direct_are_candidates = true;
+
+        for &ci in &successors[pi] {
+            let cons = &groups[ci];
+            if !consumer_has_direct_ref_to_producer(cons, prod) {
+                continue;
+            }
+            saw_direct = true;
+
+            let is_candidate = kinds[ci] == GroupKind::Split
+                && cons.count >= min_consumer_atoms
+                && cons.count >= prod.count.saturating_mul(min_expand)
+                && lane_local_access_check(cons, prod, num_lanes).is_err();
+
+            if is_candidate {
+                saw_candidate = true;
+            } else {
+                all_direct_are_candidates = false;
+                break;
+            }
+        }
+
+        if saw_direct && saw_candidate && all_direct_are_candidates {
+            kinds[pi] = GroupKind::Duplicate;
+            promoted += 1;
+            if trace_dup {
+                eprintln!(
+                    "  [partitioner_m] promoted g{} to Duplicate for nonlocal fanout (count={})",
+                    pi, prod.count
+                );
+            }
+        }
+    }
+
+    if trace_dup && promoted > 0 {
+        eprintln!(
+            "  [partitioner_m] promoted {promoted} groups to Duplicate via nonlocal heuristic"
+        );
+    }
+}
+
 // ─── Dependency analysis ───────────────────────────────────────────────────
 
 /// Build group-level dependency DAG.
@@ -945,62 +1144,9 @@ fn input_refs_group(
     }
     let pb = producer.base_id.0;
     let pe = pb + producer.count;
-
-    match input {
-        InputRef::Broadcast(id) => id.0 >= pb && id.0 < pe,
-        InputRef::Strided {
-            base,
-            dim_strides,
-            dim_shape,
-        } => {
-            let nd = dim_strides.len();
-            if nd == 1 {
-                // Affine: base + stride * i
-                let stride = dim_strides[0];
-                let first = base
-                    .0
-                    .wrapping_add((stride * consumer_offset as i64) as u64);
-                let last = base
-                    .0
-                    .wrapping_add((stride * (consumer_offset + consumer_count - 1) as i64) as u64);
-                let lo = first.min(last);
-                let hi = first.max(last);
-                lo < pe && hi >= pb
-            } else if nd >= 2 && dim_strides[1] == 0 {
-                // StridedBroadcast: base + stride * (i / repeat)
-                let stride = dim_strides[0];
-                let repeat = dim_shape[1];
-                let first_block = consumer_offset / repeat;
-                let last_block = (consumer_offset + consumer_count - 1) / repeat;
-                let first = base.0.wrapping_add((stride * first_block as i64) as u64);
-                let last = base.0.wrapping_add((stride * last_block as i64) as u64);
-                let lo = first.min(last);
-                let hi = first.max(last);
-                lo < pe && hi >= pb
-            } else if nd >= 2 && dim_strides[0] == 0 {
-                // Modular: base + stride * (i % modulus), range is [0..modulus-1]
-                let stride = dim_strides[1];
-                let modulus = dim_shape[1];
-                let a = base.0;
-                let b = base.0.wrapping_add((stride * (modulus as i64 - 1)) as u64);
-                let lo = a.min(b);
-                let hi = a.max(b);
-                lo < pe && hi >= pb
-            } else {
-                // General 2D: use resolve for bounding
-                let first = input.resolve(consumer_offset);
-                let last = input.resolve(consumer_offset + consumer_count - 1);
-                let lo = first.0.min(last.0);
-                let hi = first.0.max(last.0);
-                lo < pe && hi >= pb
-            }
-        }
-        InputRef::Explicit(ids) => ids
-            .iter()
-            .skip(consumer_offset as usize)
-            .take(consumer_count as usize)
-            .any(|id| id.0 >= pb && id.0 < pe),
-    }
+    input_access_segments(input, consumer_offset, consumer_count)
+        .into_iter()
+        .any(|(lo, hi)| lo < pe && hi > pb)
 }
 
 // ─── Span building ─────────────────────────────────────────────────────────
@@ -1012,6 +1158,21 @@ fn split_range(
     num_lanes: usize,
 ) -> (u64, u64) {
     split_count(group.count, lane, num_lanes)
+}
+
+fn normalize_num_lanes(requested: usize) -> usize {
+    let n = requested.max(1);
+    let allow_any = std::env::var("WT_PARTITIONER_M_ALLOW_ANY_LANES")
+        .ok()
+        .is_some_and(|v| v != "0");
+    if allow_any {
+        return n;
+    }
+    if n.is_power_of_two() {
+        return n;
+    }
+    let floor_pow2 = 1usize << (usize::BITS - 1 - n.leading_zeros());
+    floor_pow2.max(1)
 }
 
 /// Split `count` items evenly across lanes.
@@ -1132,7 +1293,14 @@ pub fn plan(
     input_tensors: &[InputTensor],
     output_atom_ids: &[AtomRange],
 ) -> Vec<Phase> {
-    let num_lanes = num_lanes.max(1);
+    let requested_lanes = num_lanes.max(1);
+    let num_lanes = normalize_num_lanes(requested_lanes);
+    if num_lanes != requested_lanes {
+        eprintln!(
+            "  [partitioner_m] requested {} lanes is not supported; using {} lanes",
+            requested_lanes, num_lanes
+        );
+    }
 
     if graph.groups().is_empty() {
         return vec![Phase {
@@ -1169,13 +1337,20 @@ pub fn plan(
     let n = groups.len();
 
     // Step 1: Classify groups.
-    let kinds: Vec<GroupKind> = groups
+    let mut kinds: Vec<GroupKind> = groups
         .iter()
         .map(|g| classify_group(g, num_lanes))
         .collect();
 
     // Step 2: Build dependency DAG.
     let (producers, successors) = build_dependency_dag(graph);
+
+    // Step 2b: Duplicate tiny modular sources so large modular expansion
+    // consumers don't force a cross-lane barrier.
+    promote_small_modular_sources_to_duplicate(groups, &successors, &mut kinds);
+    // Step 2c: Optional heuristic for tiny non-lane-local sources feeding
+    // very large split consumers.
+    promote_small_nonlocal_sources_to_duplicate(groups, &successors, &mut kinds, num_lanes);
 
     // Step 3: Assign phases.
     let phase_of = assign_phases(groups, &kinds, &producers, graph, num_lanes);
@@ -1324,6 +1499,8 @@ fn build_phase(
                         let abs_stride = stride.unsigned_abs();
                         if abs_stride > 0
                             && abs_stride * cons.count == group.count
+                            && cons.count % num_lanes as u64 == 0
+                            && group.count % num_lanes as u64 == 0
                             && input_refs_group(inp, cons.count, cons.atom_offset, group)
                         {
                             aligned_splits.insert(gi, (cons.count, abs_stride));
@@ -1682,6 +1859,85 @@ fn explicit_access_segments(ids: &[AtomId], atom_offset: u64, count: u64) -> Vec
     out
 }
 
+fn clamp_i128_to_u64(x: i128) -> u64 {
+    if x <= 0 {
+        0
+    } else if x >= u64::MAX as i128 {
+        u64::MAX
+    } else {
+        x as u64
+    }
+}
+
+fn strided_linear_segment(base: u64, stride: i64, idx_lo: u64, idx_hi: u64) -> Option<(u64, u64)> {
+    if idx_lo > idx_hi {
+        return None;
+    }
+    let a = (base as i128).saturating_add((stride as i128).saturating_mul(idx_lo as i128));
+    let b = (base as i128).saturating_add((stride as i128).saturating_mul(idx_hi as i128));
+    let lo = a.min(b);
+    let hi = a.max(b).saturating_add(1);
+    let lo_u = clamp_i128_to_u64(lo);
+    let hi_u = clamp_i128_to_u64(hi);
+    if lo_u < hi_u {
+        Some((lo_u, hi_u))
+    } else {
+        None
+    }
+}
+
+fn generic_nd_strided_hull(
+    base: u64,
+    dim_strides: &[i64],
+    dim_shape: &[u64],
+    atom_offset: u64,
+    count: u64,
+) -> Option<(u64, u64)> {
+    if count == 0 || dim_strides.is_empty() || dim_strides.len() != dim_shape.len() {
+        return None;
+    }
+    if dim_shape.iter().skip(1).any(|&d| d == 0) {
+        return None;
+    }
+
+    let mut inner_volume: u128 = 1;
+    for &d in dim_shape.iter().skip(1) {
+        inner_volume = inner_volume.saturating_mul(d as u128);
+    }
+    if inner_volume == 0 {
+        return None;
+    }
+
+    let start = atom_offset as u128;
+    let end = start.saturating_add(count as u128).saturating_sub(1);
+    let outer_lo = start / inner_volume;
+    let outer_hi = end / inner_volume;
+
+    let mut min_off: i128 = 0;
+    let mut max_off: i128 = 0;
+    for (d, &stride) in dim_strides.iter().enumerate() {
+        let (coord_lo, coord_hi): (u128, u128) = if d == 0 {
+            (outer_lo, outer_hi)
+        } else {
+            (0, dim_shape[d].saturating_sub(1) as u128)
+        };
+        let a = (stride as i128).saturating_mul(coord_lo as i128);
+        let b = (stride as i128).saturating_mul(coord_hi as i128);
+        min_off = min_off.saturating_add(a.min(b));
+        max_off = max_off.saturating_add(a.max(b));
+    }
+
+    let lo = (base as i128).saturating_add(min_off);
+    let hi = (base as i128).saturating_add(max_off).saturating_add(1);
+    let lo_u = clamp_i128_to_u64(lo);
+    let hi_u = clamp_i128_to_u64(hi);
+    if lo_u < hi_u {
+        Some((lo_u, hi_u))
+    } else {
+        None
+    }
+}
+
 fn input_access_segments(input: &InputRef, atom_offset: u64, count: u64) -> Vec<(u64, u64)> {
     if count == 0 {
         return Vec::new();
@@ -1690,34 +1946,87 @@ fn input_access_segments(input: &InputRef, atom_offset: u64, count: u64) -> Vec<
         InputRef::Broadcast(id) => vec![(id.0, id.0.saturating_add(1))],
         InputRef::Explicit(ids) => explicit_access_segments(ids, atom_offset, count),
         InputRef::Strided {
-            base: _,
+            base,
             dim_strides,
             dim_shape,
         } => {
-            // Stage 1 precise handling: 1D affine strided refs.
-            if dim_strides.len() == 1 && dim_shape.len() == 1 && dim_shape[0] == u64::MAX {
-                let stride = dim_strides[0];
-                let first = input.resolve(atom_offset).0;
-                if stride == 0 {
-                    return vec![(first, first.saturating_add(1))];
-                }
-                if stride == 1 {
-                    return vec![(first, first.saturating_add(count))];
-                }
-                if stride == -1 {
-                    let last = input.resolve(atom_offset + count - 1).0;
-                    return vec![(last, first.saturating_add(1))];
+            let nd = dim_strides.len();
+            if nd == 0 {
+                return Vec::new();
+            }
+
+            // 1D affine.
+            if nd == 1 && dim_shape.len() == 1 && dim_shape[0] == u64::MAX {
+                if let Some(seg) = strided_linear_segment(
+                    base.0,
+                    dim_strides[0],
+                    atom_offset,
+                    atom_offset + count - 1,
+                ) {
+                    return vec![seg];
+                } else {
+                    return Vec::new();
                 }
             }
 
-            // Conservative fallback for general ND/modular/strided-broadcast:
-            // use the first/last hull. This still benefits from per-input
-            // segmentation elsewhere (e.g., Explicit refs).
-            let first = input.resolve(atom_offset).0;
-            let last = input.resolve(atom_offset + count - 1).0;
-            let lo = first.min(last);
-            let hi = first.max(last).saturating_add(1);
-            vec![(lo, hi)]
+            // StridedBroadcast: base + stride * (i / repeat).
+            if nd == 2 && dim_shape.len() == 2 && dim_strides[1] == 0 {
+                let repeat = dim_shape[1].max(1);
+                let first_block = atom_offset / repeat;
+                let last_block = (atom_offset + count - 1) / repeat;
+                if let Some(seg) =
+                    strided_linear_segment(base.0, dim_strides[0], first_block, last_block)
+                {
+                    return vec![seg];
+                } else {
+                    return Vec::new();
+                }
+            }
+
+            // Modular: base + stride * (i % modulus).
+            // The residue interval may wrap; emit one or two conservative
+            // segments over the covered residue window.
+            if nd == 2 && dim_shape.len() == 2 && dim_strides[0] == 0 {
+                let modulus = dim_shape[1].max(1);
+                let covered = count.min(modulus);
+                if covered == 0 {
+                    return Vec::new();
+                }
+                let start = atom_offset % modulus;
+                let end_excl = start + covered;
+                let mut segs = Vec::with_capacity(2);
+                if end_excl <= modulus {
+                    if let Some(seg) =
+                        strided_linear_segment(base.0, dim_strides[1], start, end_excl - 1)
+                    {
+                        segs.push(seg);
+                    }
+                } else {
+                    if let Some(seg) =
+                        strided_linear_segment(base.0, dim_strides[1], start, modulus - 1)
+                    {
+                        segs.push(seg);
+                    }
+                    let wrap_end = end_excl % modulus;
+                    if wrap_end > 0
+                        && let Some(seg) =
+                            strided_linear_segment(base.0, dim_strides[1], 0, wrap_end - 1)
+                    {
+                        segs.push(seg);
+                    }
+                }
+                return normalize_half_open_segments(segs);
+            }
+
+            // Generic ND conservative hull: bound outer index range for this
+            // lane fragment and allow full inner-dimension variation.
+            if let Some(seg) =
+                generic_nd_strided_hull(base.0, dim_strides, dim_shape, atom_offset, count)
+            {
+                vec![seg]
+            } else {
+                Vec::new()
+            }
         }
     }
 }
@@ -1936,6 +2245,57 @@ mod tests {
             .iter()
             .filter(|s| s.graph.num_groups() > 0)
             .count()
+    }
+
+    #[test]
+    fn test_normalize_num_lanes() {
+        assert_eq!(normalize_num_lanes(0), 1);
+        assert_eq!(normalize_num_lanes(1), 1);
+        assert_eq!(normalize_num_lanes(2), 2);
+        assert_eq!(normalize_num_lanes(3), 2);
+        assert_eq!(normalize_num_lanes(4), 4);
+        assert_eq!(normalize_num_lanes(5), 4);
+        assert_eq!(normalize_num_lanes(6), 4);
+        assert_eq!(normalize_num_lanes(7), 4);
+        assert_eq!(normalize_num_lanes(8), 8);
+    }
+
+    fn segments_contain(segs: &[(u64, u64)], atom: u64) -> bool {
+        segs.iter().any(|(lo, hi)| *lo <= atom && atom < *hi)
+    }
+
+    #[test]
+    fn test_input_access_segments_modular_wrap() {
+        let input = InputRef::modular(AtomId(1_000), 1, 64);
+        let segs = input_access_segments(&input, 60, 16);
+
+        // Covers residues [60..64) U [0..12).
+        assert!(segments_contain(&segs, 1_060));
+        assert!(segments_contain(&segs, 1_063));
+        assert!(segments_contain(&segs, 1_000));
+        assert!(segments_contain(&segs, 1_011));
+        assert!(!segments_contain(&segs, 1_050));
+    }
+
+    #[test]
+    fn test_input_access_segments_nd_not_misclassified_as_strided_broadcast() {
+        // 3D strided pattern seen in RWKV runs.
+        let input = InputRef::Strided {
+            base: AtomId(10_000),
+            dim_strides: vec![64, 0, 1],
+            dim_shape: vec![12, 64, 64],
+        };
+        let atom_offset = 8_192;
+        let count = 8_192;
+        let segs = input_access_segments(&input, atom_offset, count);
+
+        let first = input.resolve(atom_offset).0;
+        let mid = input.resolve(atom_offset + count / 2).0;
+        let last = input.resolve(atom_offset + count - 1).0;
+
+        assert!(segments_contain(&segs, first));
+        assert!(segments_contain(&segs, mid));
+        assert!(segments_contain(&segs, last));
     }
 
     /// Helper: validate all span nanographs.
@@ -2891,6 +3251,82 @@ mod tests {
                 panic!("expected affine reduce input after relayout");
             }
         }
+    }
+
+    #[test]
+    fn test_small_modular_source_promoted_to_duplicate() {
+        let mut g = NanoGraph::new();
+        let num_lanes = 4;
+
+        let a = g.push_group(
+            8,
+            NumericDType::F32,
+            ScalarOp::Literal(NumericScalar::from_f32(1.0)),
+            vec![],
+            vec![],
+        );
+        let b = g.push_group(
+            8,
+            NumericDType::F32,
+            ScalarOp::Literal(NumericScalar::from_f32(2.0)),
+            vec![],
+            vec![],
+        );
+        let src = g.push_group(
+            8,
+            NumericDType::F32,
+            ScalarOp::Binary {
+                op: ScalarBinOp::Add,
+                compute_dtype: NumericDType::F32,
+            },
+            vec![],
+            vec![InputRef::affine(a, 1), InputRef::affine(b, 1)],
+        );
+
+        let expanded = 131_072u64; // 8 * 16_384
+        let w = g.push_group(
+            expanded,
+            NumericDType::F32,
+            ScalarOp::Literal(NumericScalar::from_f32(3.0)),
+            vec![],
+            vec![],
+        );
+        let out = g.push_group(
+            expanded,
+            NumericDType::F32,
+            ScalarOp::Binary {
+                op: ScalarBinOp::Mul,
+                compute_dtype: NumericDType::F32,
+            },
+            vec![],
+            vec![InputRef::modular(src, 1, 8), InputRef::affine(w, 1)],
+        );
+        g.outputs = vec![g.atom_to_range(out)];
+
+        let phases = plan(&g, num_lanes, &[], &g.outputs.clone());
+        verify_plan_full(&phases);
+
+        assert_eq!(
+            phases.len(),
+            1,
+            "small modular source should be duplicated instead of forcing a barrier"
+        );
+
+        let mut lanes_with_src = 0usize;
+        for span in &phases[0].spans {
+            if span
+                .graph
+                .groups()
+                .iter()
+                .any(|grp| grp.base_id == src && grp.count == 8)
+            {
+                lanes_with_src += 1;
+            }
+        }
+        assert_eq!(
+            lanes_with_src, num_lanes,
+            "modular source should be duplicated to all lanes"
+        );
     }
 
     // ─── Test: LayerNorm-like structure ──────────────────────────────────
