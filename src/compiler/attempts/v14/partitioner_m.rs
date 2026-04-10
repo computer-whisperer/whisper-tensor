@@ -1162,10 +1162,10 @@ fn split_range(
 
 fn normalize_num_lanes(requested: usize) -> usize {
     let n = requested.max(1);
-    let allow_any = std::env::var("WT_PARTITIONER_M_ALLOW_ANY_LANES")
+    let force_pow2 = std::env::var("WT_PARTITIONER_M_FORCE_POW2")
         .ok()
         .is_some_and(|v| v != "0");
-    if allow_any {
+    if !force_pow2 {
         return n;
     }
     if n.is_power_of_two() {
@@ -2252,11 +2252,11 @@ mod tests {
         assert_eq!(normalize_num_lanes(0), 1);
         assert_eq!(normalize_num_lanes(1), 1);
         assert_eq!(normalize_num_lanes(2), 2);
-        assert_eq!(normalize_num_lanes(3), 2);
+        assert_eq!(normalize_num_lanes(3), 3);
         assert_eq!(normalize_num_lanes(4), 4);
-        assert_eq!(normalize_num_lanes(5), 4);
-        assert_eq!(normalize_num_lanes(6), 4);
-        assert_eq!(normalize_num_lanes(7), 4);
+        assert_eq!(normalize_num_lanes(5), 5);
+        assert_eq!(normalize_num_lanes(6), 6);
+        assert_eq!(normalize_num_lanes(7), 7);
         assert_eq!(normalize_num_lanes(8), 8);
     }
 
