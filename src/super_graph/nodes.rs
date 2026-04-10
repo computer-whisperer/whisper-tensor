@@ -751,45 +751,121 @@ impl SuperGraphNodeModelExecution {
             })
             .collect();
 
-        // Build info_inputs for lowering. Walks every symbolic-graph tensor;
-        // expensive on every call (see compiled.exec.info_inputs_build).
-        let t_info = Instant::now();
-        let (info_inputs, user_input_ext_ids, weight_input_ext_ids) =
-            lowered_eval::build_info_inputs(
-                symbolic_graph,
-                tensor_store,
-                &user_input_view_map,
-                inline_constant_threshold,
-            );
-        context.observer.on_compiled_milestone(
-            &observer_path,
-            "compiled.exec.info_inputs_build",
-            None,
-            t_info,
-            Instant::now(),
-        );
-
-        let info_hash = lowered_eval::hash_info_inputs(&info_inputs);
-
         let sym_graph_id = {
             use crate::graph::Graph;
             symbolic_graph.global_id()
         };
 
+        let user_inputs_signature =
+            lowered_eval::hash_user_input_views(&user_input_view_map, inline_constant_threshold);
+
+        // Fast path: reuse the previously computed info-inputs hash when the
+        // user-input shape/dtype signature and inline-constant policy match.
+        let mut info_hash_opt = context
+            .caches
+            .as_ref()
+            .and_then(|c| c.compiled_info_signature_cache.get(&sym_graph_id))
+            .filter(|sig| {
+                sig.inline_constant_threshold == inline_constant_threshold
+                    && sig.user_inputs_signature == user_inputs_signature
+            })
+            .map(|sig| sig.info_inputs_hash);
+
+        // Build details are only needed when lowering/compiling misses cache.
+        let mut info_inputs_opt: Option<
+            HashMap<
+                GlobalId,
+                crate::tensor_info::TensorInfo<'static, 'static, crate::pool::SystemPool>,
+            >,
+        > = None;
+        let mut user_input_ext_ids: Vec<GlobalId> = Vec::new();
+        let mut weight_input_ext_ids: Vec<GlobalId> = Vec::new();
+
+        let build_info_inputs = |context: &mut SuperGraphContext<'short, 'model, 'p, P, T>| {
+            let t_info = Instant::now();
+            let (info_inputs, users, weights) = lowered_eval::build_info_inputs(
+                symbolic_graph,
+                tensor_store,
+                &user_input_view_map,
+                inline_constant_threshold,
+            );
+            context.observer.on_compiled_milestone(
+                &observer_path,
+                "compiled.exec.info_inputs_build",
+                None,
+                t_info,
+                Instant::now(),
+            );
+            let info_hash = lowered_eval::hash_info_inputs(&info_inputs);
+            if let Some(caches) = &mut context.caches {
+                caches.compiled_info_signature_cache.insert(
+                    sym_graph_id,
+                    crate::super_graph::cache::CompiledInfoSignature {
+                        user_inputs_signature,
+                        inline_constant_threshold,
+                        info_inputs_hash: info_hash,
+                    },
+                );
+            }
+            (info_inputs, users, weights, info_hash)
+        };
+
+        if info_hash_opt.is_none() {
+            let (info_inputs, users, weights, info_hash) = build_info_inputs(context);
+            info_inputs_opt = Some(info_inputs);
+            user_input_ext_ids = users;
+            weight_input_ext_ids = weights;
+            info_hash_opt = Some(info_hash);
+        }
+        let mut info_hash = info_hash_opt.expect("info hash should be available");
+
         // --- Ensure lowered model available (cached or owned) ---
-        let lower_cache_hit = context
+        let mut lower_cache_hit = context
             .caches
             .as_ref()
             .and_then(|c| c.lowered_model_cache.get(&sym_graph_id))
             .map(|cached| cached.info_inputs_hash == info_hash)
             .unwrap_or(false);
 
+        let mut compile_cache_hit = context
+            .caches
+            .as_ref()
+            .and_then(|c| c.compiled_plan_cache.get(&sym_graph_id))
+            .map(|cached| cached.info_inputs_hash == info_hash)
+            .unwrap_or(false);
+
+        // If the quick signature path produced a hash but either cache entry is
+        // missing/mismatched, materialize full info_inputs now so we can lower
+        // and/or compile below.
+        if !(lower_cache_hit && compile_cache_hit) && info_inputs_opt.is_none() {
+            let (info_inputs, users, weights, rebuilt_hash) = build_info_inputs(context);
+            info_inputs_opt = Some(info_inputs);
+            user_input_ext_ids = users;
+            weight_input_ext_ids = weights;
+            info_hash = rebuilt_hash;
+            lower_cache_hit = context
+                .caches
+                .as_ref()
+                .and_then(|c| c.lowered_model_cache.get(&sym_graph_id))
+                .map(|cached| cached.info_inputs_hash == info_hash)
+                .unwrap_or(false);
+            compile_cache_hit = context
+                .caches
+                .as_ref()
+                .and_then(|c| c.compiled_plan_cache.get(&sym_graph_id))
+                .map(|cached| cached.info_inputs_hash == info_hash)
+                .unwrap_or(false);
+        }
+
         let owned_lower: Option<lowered_eval::CachedLoweredModel>;
         if !lower_cache_hit {
+            let info_inputs = info_inputs_opt
+                .as_ref()
+                .expect("info_inputs must be available when lowering is needed");
             let t0 = Instant::now();
             let cached = match lowered_eval::lower_symbolic_graph(
                 symbolic_graph,
-                &info_inputs,
+                info_inputs,
                 info_hash,
                 user_input_ext_ids,
                 weight_input_ext_ids,
@@ -829,12 +905,7 @@ impl SuperGraphNodeModelExecution {
         //
         // Compile if needed, then re-borrow both from cache (or owned).
         // We must drop lower_ref before mutably borrowing the cache.
-        let compile_needed = !context
-            .caches
-            .as_ref()
-            .and_then(|c| c.compiled_plan_cache.get(&sym_graph_id))
-            .map(|cached| cached.info_inputs_hash == info_hash)
-            .unwrap_or(false);
+        let compile_needed = !compile_cache_hit;
 
         let owned_compiled: Option<compiled_eval::CachedCompiledPlan>;
         if compile_needed {

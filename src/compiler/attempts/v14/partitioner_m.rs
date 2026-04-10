@@ -186,7 +186,8 @@ fn relayout_matmul_groups(graph: &mut NanoGraph<'static, crate::pool::SystemPool
         };
         let other_idx = if sb_idx == 0 { 1 } else { 0 };
         let other = &mgroup.inputs[other_idx];
-        let other_ok = is_affine_strided(other).is_some() || is_strided_transposed_nk(other, n, k).is_some();
+        let other_ok =
+            is_affine_strided(other).is_some() || is_strided_transposed_nk(other, n, k).is_some();
         if !other_ok {
             continue;
         }
@@ -380,14 +381,10 @@ fn consumer_has_direct_ref_to_producer(
     consumer: &AtomGroup<'static, crate::pool::SystemPool>,
     producer: &AtomGroup<'static, crate::pool::SystemPool>,
 ) -> bool {
-    consumer.inputs.iter().any(|inp| {
-        input_refs_group(
-            inp,
-            consumer.count,
-            consumer.atom_offset,
-            producer,
-        )
-    })
+    consumer
+        .inputs
+        .iter()
+        .any(|inp| input_refs_group(inp, consumer.count, consumer.atom_offset, producer))
 }
 
 fn consumer_reads_producer_modularly(
@@ -396,12 +393,7 @@ fn consumer_reads_producer_modularly(
 ) -> bool {
     consumer.inputs.iter().any(|inp| {
         input_is_modular_like(inp)
-            && input_refs_group(
-                inp,
-                consumer.count,
-                consumer.atom_offset,
-                producer,
-            )
+            && input_refs_group(inp, consumer.count, consumer.atom_offset, producer)
     })
 }
 
@@ -680,7 +672,8 @@ fn assign_phases(
             }
         }
 
-        barrier_events.sort_by_key(|(pi, gi, _)| std::cmp::Reverse(groups[*pi].count.max(groups[*gi].count)));
+        barrier_events
+            .sort_by_key(|(pi, gi, _)| std::cmp::Reverse(groups[*pi].count.max(groups[*gi].count)));
         eprintln!(
             "  [partitioner_m] barrier trace: {} edges (min_atoms={}, top={})",
             barrier_events.len(),
@@ -1161,18 +1154,7 @@ fn split_range(
 }
 
 fn normalize_num_lanes(requested: usize) -> usize {
-    let n = requested.max(1);
-    let force_pow2 = std::env::var("WT_PARTITIONER_M_FORCE_POW2")
-        .ok()
-        .is_some_and(|v| v != "0");
-    if !force_pow2 {
-        return n;
-    }
-    if n.is_power_of_two() {
-        return n;
-    }
-    let floor_pow2 = 1usize << (usize::BITS - 1 - n.leading_zeros());
-    floor_pow2.max(1)
+    requested.max(1)
 }
 
 /// Split `count` items evenly across lanes.
@@ -2647,16 +2629,11 @@ mod tests {
         // But mul itself is split by its M*K atoms.
 
         // Check that groups ARE actually split across lanes.
-        // Count total non-literal atoms across all spans.
-        let mut total_non_lit = 0u64;
         let mut lanes_with_mul = 0;
         for phase in &phases {
-            for (lane, span) in phase.spans.iter().enumerate() {
+            for span in &phase.spans {
                 let mut has_mul = false;
                 for g in span.graph.groups() {
-                    if !matches!(g.op, ScalarOp::Literal(_) | ScalarOp::LiteralSpan(_)) {
-                        total_non_lit += g.count;
-                    }
                     if matches!(
                         g.op,
                         ScalarOp::Binary {

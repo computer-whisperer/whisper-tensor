@@ -4,6 +4,7 @@ pub mod executor;
 #[cfg(feature = "x86_compile")]
 pub mod layout;
 pub mod partitioner_m;
+pub mod partitioner_n;
 pub mod plan;
 pub mod report;
 pub mod types;

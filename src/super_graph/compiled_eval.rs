@@ -11,12 +11,14 @@
 //! so that test_set can reuse them without supergraph dependencies.
 
 use std::collections::HashMap;
+use std::env;
 use std::time::Instant;
 
 use crate::compiler::attempts::v14::executor::{
     CompiledSpanFn, ExecutablePlan, ExecutablePlanBuilder, PhaseStore, PoolEvalSpan,
 };
 use crate::compiler::attempts::v14::partitioner_m;
+use crate::compiler::attempts::v14::partitioner_n;
 use crate::compiler::attempts::v14::report::{self, PlanSummary};
 use crate::compiler::{CodegenKind, CompileOptions, PartitionerKind};
 use crate::graph::GlobalId;
@@ -150,6 +152,42 @@ pub(crate) fn build_output_ranges(
     (output_ranges, output_shapes, all_output_atom_ranges)
 }
 
+fn resolve_partitioner_override(requested: &PartitionerKind) -> PartitionerKind {
+    let override_kind = match env::var("WT_PARTITIONER_KIND") {
+        Ok(v) => v.to_ascii_lowercase(),
+        Err(_) => return requested.clone(),
+    };
+
+    let requested_lanes = match requested {
+        PartitionerKind::LaneSplit { num_lanes } | PartitionerKind::LaneSplitV2 { num_lanes } => {
+            (*num_lanes).max(1)
+        }
+        PartitionerKind::Trivial => 1,
+    };
+    let override_lanes = env::var("WT_PARTITIONER_LANES")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .map(|n| n.max(1))
+        .unwrap_or(requested_lanes);
+
+    match override_kind.as_str() {
+        "trivial" => PartitionerKind::Trivial,
+        "m" | "lanesplit" | "lane_split" => PartitionerKind::LaneSplit {
+            num_lanes: override_lanes,
+        },
+        "n" | "lanesplitv2" | "lane_split_v2" => PartitionerKind::LaneSplitV2 {
+            num_lanes: override_lanes,
+        },
+        _ => {
+            eprintln!(
+                "[compiled_eval] ignoring unknown WT_PARTITIONER_KIND='{}' (expected trivial|m|n)",
+                override_kind
+            );
+            requested.clone()
+        }
+    }
+}
+
 /// Partition and compile a NanoGraph into an ExecutablePlan.
 ///
 /// `options`: selects between alternative partitioner / codegen
@@ -167,7 +205,8 @@ pub(crate) fn compile_nano_graph(
 ) -> Result<(ExecutablePlan, PlanSummary, usize), String> {
     // Partition the NanoGraph — dispatch on the selected partitioner.
     let t0 = Instant::now();
-    let phases = match &options.partitioner {
+    let partitioner = resolve_partitioner_override(&options.partitioner);
+    let phases = match &partitioner {
         PartitionerKind::Trivial => {
             // 1 phase, 1 span containing the whole graph. Debug baseline
             // that isolates I/O / codegen issues from partitioner issues.
@@ -190,6 +229,12 @@ pub(crate) fn compile_nano_graph(
             }]
         }
         PartitionerKind::LaneSplit { num_lanes } => partitioner_m::plan(
+            graph,
+            (*num_lanes).max(1),
+            graph.input_tensors(),
+            all_output_atom_ranges,
+        ),
+        PartitionerKind::LaneSplitV2 { num_lanes } => partitioner_n::plan(
             graph,
             (*num_lanes).max(1),
             graph.input_tensors(),

@@ -18,6 +18,14 @@ pub type CachedTensor = NumericTensor<'static, DynRank, ArcTrackedPool>;
 type RNNCache = HashMap<Vec<u32>, HashMap<String, CachedTensor>>;
 type TensorPackCache = HashMap<String, CachedTensor>;
 
+/// Compact per-model signature used to skip rebuilding `info_inputs` on every
+/// compiled-eval call when user input shapes/dtypes are unchanged.
+pub struct CompiledInfoSignature {
+    pub user_inputs_signature: u64,
+    pub inline_constant_threshold: u64,
+    pub info_inputs_hash: u64,
+}
+
 /// Per-slot cache of model weights resolved from a `TensorStore`, keyed by
 /// `TensorStoreTensorId`. Populated lazily by `execute_lowered` /
 /// `execute_compiled` on the first iteration that touches a given weight,
@@ -111,6 +119,10 @@ pub struct SuperGraphCache {
     #[cfg(feature = "x86_compile")]
     pub compiled_plan_cache:
         HashMap<GlobalId, crate::super_graph::compiled_eval::CachedCompiledPlan>,
+    /// Last successful compiled-eval input signature per symbolic graph.
+    /// Lets compiled eval skip the expensive `build_info_inputs` scan on
+    /// steady-state token loops when input shapes/dtypes stay fixed.
+    pub compiled_info_signature_cache: HashMap<GlobalId, CompiledInfoSignature>,
 }
 
 impl SuperGraphCache {
@@ -126,6 +138,7 @@ impl SuperGraphCache {
             lowered_model_cache: HashMap::new(),
             #[cfg(feature = "x86_compile")]
             compiled_plan_cache: HashMap::new(),
+            compiled_info_signature_cache: HashMap::new(),
         }
     }
 }

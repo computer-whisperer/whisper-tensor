@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 
 /// Which partitioner to use when building the execution plan.
 ///
-/// Default: `LaneSplit { num_lanes: 8 }` (the current best, attempt M).
+/// Default: `LaneSplit { num_lanes: min(hw_threads, 4) }`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum PartitionerKind {
     /// Single phase, single span containing the whole NanoGraph. No
@@ -26,13 +26,24 @@ pub enum PartitionerKind {
     Trivial,
     /// Spatial-tiling partitioner (attempt M). Splits splittable groups
     /// across `num_lanes` lanes and avoids barriers within elementwise
-    /// chains. Currently the only non-trivial partitioner.
+    /// chains.
     LaneSplit { num_lanes: usize },
+    /// Phase-coalescing partitioner (attempt N). Starts from attempt M and
+    /// greedily merges adjacent phases when span validation and cross-lane
+    /// independence checks still pass.
+    LaneSplitV2 { num_lanes: usize },
 }
 
 impl Default for PartitionerKind {
     fn default() -> Self {
-        Self::LaneSplit { num_lanes: 8 }
+        let hw_threads = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+        // Empirically, 8-way lane splitting over-partitions large decoder
+        // graphs on this backend and increases inter-phase traffic. Cap the
+        // default at 4 lanes and scale down on small CPUs.
+        let num_lanes = hw_threads.clamp(1, 4);
+        Self::LaneSplit { num_lanes }
     }
 }
 

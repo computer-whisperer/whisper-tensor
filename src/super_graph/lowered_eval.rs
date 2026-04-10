@@ -154,6 +154,30 @@ pub fn hash_info_inputs(info_inputs: &HashMap<GlobalId, TensorInfo<'_, '_, Syste
     hasher.finish()
 }
 
+/// Hash user-provided runtime inputs (IDs + dtype + concrete shape) plus the
+/// inline-constant policy to detect whether compiled-eval info_inputs can be
+/// reused without re-walking the whole symbolic graph.
+pub fn hash_user_input_views(
+    user_input_views: &HashMap<GlobalId, NumericTensorView<'_, DynRank>>,
+    inline_constant_threshold: u64,
+) -> u64 {
+    use std::collections::BTreeMap;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    inline_constant_threshold.hash(&mut hasher);
+    let sorted: BTreeMap<&GlobalId, &NumericTensorView<'_, DynRank>> =
+        user_input_views.iter().collect();
+    for (&id, view) in &sorted {
+        id.hash(&mut hasher);
+        view.dtype().hash(&mut hasher);
+        let shape = view.shape();
+        shape.len().hash(&mut hasher);
+        for &dim in shape {
+            dim.hash(&mut hasher);
+        }
+    }
+    hasher.finish()
+}
+
 /// Check whether a symbolic graph can use the lowered eval path.
 /// Returns false if any operation contains sub-graphs (Scan, If, LSTM).
 pub fn can_lower_symbolic_graph(sym_graph: &SymbolicGraph) -> bool {
