@@ -39,6 +39,8 @@ use crate::numeric_dtype::NumericDType;
 
 use super::types::{Phase, Span};
 
+type DeclaredInputKey = (u64, u64, NumericDType, Option<GlobalId>);
+
 // ─── Matmul relayout ──────────────────────────────────────────────────────
 
 /// Detect matmul Mul→Reduce pairs in [K,N] layout and transpose to [N,K].
@@ -1001,7 +1003,8 @@ fn build_phase(
     }
 
     // Track which atom ranges have been declared as inputs in each span.
-    let mut declared_inputs: Vec<HashSet<u64>> = (0..num_lanes).map(|_| HashSet::new()).collect();
+    let mut declared_inputs: Vec<HashSet<DeclaredInputKey>> =
+        (0..num_lanes).map(|_| HashSet::new()).collect();
     // Track which atom ranges are produced in each span (for intra-phase deps).
     let mut produced_in_span: Vec<HashSet<u64>> = (0..num_lanes).map(|_| HashSet::new()).collect();
 
@@ -1147,7 +1150,7 @@ fn emit_split_group(
     span_graphs: &mut [NanoGraph<'static, crate::pool::SystemPool>],
     span_inputs: &mut [Vec<AtomRange>],
     span_outputs: &mut [Vec<AtomRange>],
-    declared_inputs: &mut [HashSet<u64>],
+    declared_inputs: &mut [HashSet<DeclaredInputKey>],
     produced_in_span: &mut [HashSet<u64>],
     phase_of: &[usize],
     kinds: &[GroupKind],
@@ -1245,7 +1248,7 @@ fn emit_duplicate_group(
     span_graphs: &mut [NanoGraph<'static, crate::pool::SystemPool>],
     span_inputs: &mut [Vec<AtomRange>],
     span_outputs: &mut [Vec<AtomRange>],
-    declared_inputs: &mut [HashSet<u64>],
+    declared_inputs: &mut [HashSet<DeclaredInputKey>],
     produced_in_span: &mut [HashSet<u64>],
     phase_of: &[usize],
     kinds: &[GroupKind],
@@ -1303,7 +1306,7 @@ fn emit_whole_group(
     span_graphs: &mut [NanoGraph<'static, crate::pool::SystemPool>],
     span_inputs: &mut [Vec<AtomRange>],
     span_outputs: &mut [Vec<AtomRange>],
-    declared_inputs: &mut [HashSet<u64>],
+    declared_inputs: &mut [HashSet<DeclaredInputKey>],
     produced_in_span: &mut [HashSet<u64>],
     phase_of: &[usize],
     kinds: &[GroupKind],
@@ -1348,6 +1351,120 @@ fn emit_whole_group(
     }
 }
 
+fn normalize_half_open_segments(mut segments: Vec<(u64, u64)>) -> Vec<(u64, u64)> {
+    segments.retain(|(lo, hi)| lo < hi);
+    segments.sort_unstable_by_key(|&(lo, hi)| (lo, hi));
+    if segments.is_empty() {
+        return segments;
+    }
+    let mut merged: Vec<(u64, u64)> = Vec::with_capacity(segments.len());
+    for (lo, hi) in segments {
+        if let Some((last_lo, last_hi)) = merged.last_mut()
+            && lo <= *last_hi
+        {
+            *last_hi = (*last_hi).max(hi);
+            continue;
+        }
+        merged.push((lo, hi));
+    }
+    merged
+}
+
+fn explicit_access_segments(ids: &[AtomId], atom_offset: u64, count: u64) -> Vec<(u64, u64)> {
+    if count == 0 || ids.is_empty() {
+        return Vec::new();
+    }
+    let ids_len = ids.len() as u64;
+    let start = atom_offset.min(ids_len) as usize;
+    let end = atom_offset.saturating_add(count).min(ids_len) as usize;
+    if start >= end {
+        return Vec::new();
+    }
+
+    let mut points: Vec<u64> = ids[start..end].iter().map(|id| id.0).collect();
+    points.sort_unstable();
+    points.dedup();
+
+    let mut out = Vec::new();
+    let mut run_lo = points[0];
+    let mut prev = points[0];
+    for &p in points.iter().skip(1) {
+        if p == prev.saturating_add(1) {
+            prev = p;
+        } else {
+            out.push((run_lo, prev.saturating_add(1)));
+            run_lo = p;
+            prev = p;
+        }
+    }
+    out.push((run_lo, prev.saturating_add(1)));
+    out
+}
+
+fn input_access_segments(input: &InputRef, atom_offset: u64, count: u64) -> Vec<(u64, u64)> {
+    if count == 0 {
+        return Vec::new();
+    }
+    match input {
+        InputRef::Broadcast(id) => vec![(id.0, id.0.saturating_add(1))],
+        InputRef::Explicit(ids) => explicit_access_segments(ids, atom_offset, count),
+        InputRef::Strided {
+            base: _,
+            dim_strides,
+            dim_shape,
+        } => {
+            // Stage 1 precise handling: 1D affine strided refs.
+            if dim_strides.len() == 1 && dim_shape.len() == 1 && dim_shape[0] == u64::MAX {
+                let stride = dim_strides[0];
+                let first = input.resolve(atom_offset).0;
+                if stride == 0 {
+                    return vec![(first, first.saturating_add(1))];
+                }
+                if stride == 1 {
+                    return vec![(first, first.saturating_add(count))];
+                }
+                if stride == -1 {
+                    let last = input.resolve(atom_offset + count - 1).0;
+                    return vec![(last, first.saturating_add(1))];
+                }
+            }
+
+            // Conservative fallback for general ND/modular/strided-broadcast:
+            // use the first/last hull. This still benefits from per-input
+            // segmentation elsewhere (e.g., Explicit refs).
+            let first = input.resolve(atom_offset).0;
+            let last = input.resolve(atom_offset + count - 1).0;
+            let lo = first.min(last);
+            let hi = first.max(last).saturating_add(1);
+            vec![(lo, hi)]
+        }
+    }
+}
+
+fn expand_segments_for_reduce(
+    segments: &[(u64, u64)],
+    reduce_count: u64,
+    reduce_stride: i64,
+) -> Vec<(u64, u64)> {
+    if reduce_count <= 1 || reduce_stride == 0 {
+        return segments.to_vec();
+    }
+    let end_off = (reduce_count as i128 - 1) * reduce_stride as i128;
+    let mut out = Vec::with_capacity(segments.len());
+    for &(lo, hi) in segments {
+        if lo >= hi {
+            continue;
+        }
+        let last = hi - 1;
+        let a = lo as i128;
+        let b = last as i128;
+        let lo_i = a.min(b).min(a + end_off).min(b + end_off).max(0);
+        let hi_i = a.max(b).max(a + end_off).max(b + end_off).max(0);
+        out.push((lo_i as u64, (hi_i as u64).saturating_add(1)));
+    }
+    normalize_half_open_segments(out)
+}
+
 /// Ensure that all atoms referenced by a group's inputs (and reduce strides,
 /// indirect load tables) are either produced in this span or declared as
 /// span inputs.
@@ -1363,115 +1480,77 @@ fn ensure_inputs_declared(
     lane: usize,
     span_graphs: &mut [NanoGraph<'static, crate::pool::SystemPool>],
     span_inputs: &mut [Vec<AtomRange>],
-    declared_inputs: &mut [HashSet<u64>],
+    declared_inputs: &mut [HashSet<DeclaredInputKey>],
     produced_in_span: &[HashSet<u64>],
     input_tensor_set: &HashMap<u64, &InputTensor>,
 ) {
-    // Strategy: collect all producer groups from the main graph, then check
-    // which ones need to be declared as span inputs (not already in span).
-    //
-    // For each InputRef, find the range of atom IDs it can resolve to,
-    // then look up which main-graph groups/input-tensors cover that range.
-
-    // Helper: declare a range as a span input if not already present.
-    // `access_lo` and `access_hi` describe the actual atom range accessed
-    // (may be a subset of the full group range).
+    // Helper: declare a source range intersection as a span input if needed.
+    // `access_lo..access_hi` is the actually accessed half-open segment.
     let mut declare_range = |base: AtomId,
                              cnt: u64,
                              dtype: NumericDType,
                              tensor_id: Option<GlobalId>,
                              access_lo: u64,
                              access_hi: u64| {
-        let key = base.0;
-        if declared_inputs[lane].contains(&key) {
+        if access_lo >= access_hi {
             return;
         }
-        // Check if the accessed portion of this range is already in the span.
-        // We sample a few points in the overlap region [max(base, access_lo), min(base+cnt, access_hi+1)).
+        let source_hi = base.0.saturating_add(cnt);
         let overlap_lo = base.0.max(access_lo);
-        let overlap_hi = (base.0 + cnt).min(access_hi + 1);
-        if overlap_lo < overlap_hi {
-            // Sample the overlap region.
-            let mid = overlap_lo + (overlap_hi - overlap_lo) / 2;
-            if span_graphs[lane].contains_atom(AtomId(overlap_lo))
-                && span_graphs[lane].contains_atom(AtomId(overlap_hi - 1))
-                && span_graphs[lane].contains_atom(AtomId(mid))
-            {
-                return; // Already in span (produced by a same-phase, same-lane group).
-            }
-        } else if span_graphs[lane].contains_atom(base) {
+        let overlap_hi = source_hi.min(access_hi);
+        if overlap_lo >= overlap_hi {
             return;
         }
-        declared_inputs[lane].insert(key);
+
+        // Sample the overlap region.
+        let mid = overlap_lo + (overlap_hi - overlap_lo) / 2;
+        if span_graphs[lane].contains_atom(AtomId(overlap_lo))
+            && span_graphs[lane].contains_atom(AtomId(overlap_hi - 1))
+            && span_graphs[lane].contains_atom(AtomId(mid))
+        {
+            return; // Already in span (produced by a same-phase, same-lane group).
+        }
+
+        let key = (overlap_lo, overlap_hi, dtype, tensor_id);
+        if !declared_inputs[lane].insert(key) {
+            return;
+        }
+
+        let overlap_count = overlap_hi - overlap_lo;
         span_inputs[lane].push(AtomRange {
-            base,
-            count: cnt,
+            base: AtomId(overlap_lo),
+            count: overlap_count,
             dtype,
         });
         span_graphs[lane].insert_input_tensor_at_allow_overlap(
-            base,
+            AtomId(overlap_lo),
             tensor_id.unwrap_or(GlobalId(0)),
-            cnt,
+            overlap_count,
             dtype,
         );
     };
 
-    // Collect the full atom range accessed by each InputRef for this fragment.
-    // We compute [lo, hi] bounds for the resolved atoms, then find all
-    // main-graph groups and input tensors in that range.
-    let mut ranges_to_cover: Vec<(u64, u64)> = Vec::new(); // (lo, hi) inclusive
+    // Build precise access segments when possible (half-open [lo, hi)).
+    let reduce_cfg = match op {
+        ScalarOp::Reduce {
+            reduce_count,
+            reduce_stride,
+            ..
+        } if *reduce_count > 1 && *reduce_stride != 0 => Some((*reduce_count, *reduce_stride)),
+        _ => None,
+    };
 
+    let mut segments: Vec<(u64, u64)> = Vec::new();
     for input in inputs {
-        if count == 0 {
-            continue;
-        }
-        match input {
-            InputRef::Broadcast(id) => {
-                ranges_to_cover.push((id.0, id.0));
-            }
-            InputRef::Strided { .. } => {
-                let first = input.resolve(atom_offset).0;
-                let last = input.resolve(atom_offset + count - 1).0;
-                ranges_to_cover.push((first.min(last), first.max(last)));
-            }
-            InputRef::Explicit(ids) => {
-                let start = atom_offset as usize;
-                let end = (atom_offset + count) as usize;
-                let slice = &ids[start.min(ids.len())..end.min(ids.len())];
-                if !slice.is_empty() {
-                    let lo = slice.iter().map(|id| id.0).min().unwrap();
-                    let hi = slice.iter().map(|id| id.0).max().unwrap();
-                    ranges_to_cover.push((lo, hi));
-                }
-            }
-        }
-    }
-
-    // Reduce stride: extends the accessed range beyond what the InputRef alone covers.
-    if let ScalarOp::Reduce {
-        reduce_count,
-        reduce_stride,
-        ..
-    } = op
-    {
-        if *reduce_count > 1 && *reduce_stride != 0 {
-            for input in inputs {
-                if count == 0 {
-                    continue;
-                }
-                let first = input.resolve(atom_offset).0;
-                let last_base = input.resolve(atom_offset + count - 1).0;
-                let stride_extent = (*reduce_count as i64 - 1) * reduce_stride;
-                let endpoints = [
-                    first,
-                    (first as i64 + stride_extent) as u64,
-                    last_base,
-                    (last_base as i64 + stride_extent) as u64,
-                ];
-                let lo = *endpoints.iter().min().unwrap();
-                let hi = *endpoints.iter().max().unwrap();
-                ranges_to_cover.push((lo, hi));
-            }
+        let base_segments = input_access_segments(input, atom_offset, count);
+        if let Some((reduce_count, reduce_stride)) = reduce_cfg {
+            segments.extend(expand_segments_for_reduce(
+                &base_segments,
+                reduce_count,
+                reduce_stride,
+            ));
+        } else {
+            segments.extend(base_segments);
         }
     }
 
@@ -1479,40 +1558,40 @@ fn ensure_inputs_declared(
     // May be a group (inlined) or an InputTensor (not inlined).
     if let ScalarOp::IndirectLoad { table_base } = op {
         if let Some(tg) = graph.group_of(*table_base) {
-            ranges_to_cover.push((tg.base_id.0, tg.base_id.0 + tg.count - 1));
+            segments.push((tg.base_id.0, tg.base_id.0.saturating_add(tg.count)));
         } else {
             for (ti, _) in graph.find_input_idxs(*table_base) {
                 let it = &graph.input_tensors()[ti];
-                ranges_to_cover.push((it.base_id.0, it.base_id.0 + it.count - 1));
+                segments.push((it.base_id.0, it.base_id.0.saturating_add(it.count)));
             }
         }
     }
 
-    // For each range, find all main-graph groups and input tensors that intersect it.
+    let segments = normalize_half_open_segments(segments);
+
+    // For each accessed segment, find main-graph groups and input tensors
+    // that intersect it.
     let all_groups = graph.groups();
     let all_inputs = graph.input_tensors();
-    for (lo, hi) in &ranges_to_cover {
+    for (lo, hi) in &segments {
         // Check input tensors (typically few, linear scan is fine).
         for it in all_inputs {
-            let it_end = it.base_id.0 + it.count;
-            if *lo < it_end && it.base_id.0 <= *hi {
+            let it_lo = it.base_id.0;
+            let it_hi = it_lo.saturating_add(it.count);
+            if *lo < it_hi && it_lo < *hi {
                 declare_range(it.base_id, it.count, it.dtype, Some(it.tensor_id), *lo, *hi);
             }
         }
 
         // Check producer groups using binary search.
-        // Groups are sorted by base_id. Find first group that could overlap with [lo, hi].
-        // A group overlaps if group.base_id <= hi AND group.base_id + group.count > lo.
-        // Start scanning from the first group whose base_id could overlap.
-        // The first group that could overlap has base_id such that base_id + count > lo.
-        // Conservative: find first group with base_id >= lo, then back up one.
+        // Groups are sorted by base_id. Find first group that could overlap [lo, hi).
         let start_idx = all_groups.partition_point(|g| g.base_id.0 + g.count <= *lo);
         for pg in &all_groups[start_idx..] {
-            if pg.base_id.0 > *hi {
+            if pg.base_id.0 >= *hi {
                 break;
             }
-            let pg_end = pg.base_id.0 + pg.count;
-            if *lo < pg_end && pg.base_id.0 <= *hi {
+            let pg_end = pg.base_id.0.saturating_add(pg.count);
+            if *lo < pg_end && pg.base_id.0 < *hi {
                 declare_range(pg.base_id, pg.count, pg.output_dtype, None, *lo, *hi);
             }
         }
@@ -3141,6 +3220,48 @@ mod tests {
         g.outputs = vec![g.atom_to_range(output)];
         let phases = plan(&g, num_lanes, &[], &g.outputs.clone());
         verify_plan_full(&phases);
+    }
+
+    /// Explicit sparse input refs should only declare the actually used
+    /// input atoms, not the full input tensor hull.
+    #[test]
+    fn test_explicit_sparse_inputs_are_clipped() {
+        let mut g = NanoGraph::new();
+        let num_lanes = 1;
+
+        let input = g.add_input_tensor(GlobalId(0), 1024, NumericDType::F32);
+        let explicit_ids = vec![input.offset(0), input.offset(511), input.offset(1023)];
+
+        let out = g.push_group(
+            explicit_ids.len() as u64,
+            NumericDType::F32,
+            ScalarOp::Identity,
+            vec![],
+            vec![InputRef::Explicit(explicit_ids)],
+        );
+
+        g.outputs = vec![g.atom_to_range(out)];
+        let it = vec![InputTensor {
+            tensor_id: GlobalId(0),
+            base_id: input,
+            count: 1024,
+            dtype: NumericDType::F32,
+        }];
+
+        let phases = plan(&g, num_lanes, &it, &g.outputs.clone());
+        verify_plan_full(&phases);
+        assert_eq!(phases.len(), 1);
+
+        let span = &phases[0].spans[0];
+        let total_input_atoms: u64 = span.inputs.iter().map(|r| r.count).sum();
+        assert_eq!(
+            total_input_atoms, 3,
+            "expected sparse explicit access to declare only 3 atoms, got {total_input_atoms}"
+        );
+
+        let mut bases: Vec<u64> = span.inputs.iter().map(|r| r.base.0).collect();
+        bases.sort_unstable();
+        assert_eq!(bases, vec![input.0, input.0 + 511, input.0 + 1023]);
     }
 
     // ─── Test: GroupNorm-like reduce needs barrier with non-aligned splits ──
