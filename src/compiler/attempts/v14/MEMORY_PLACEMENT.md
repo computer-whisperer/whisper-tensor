@@ -583,47 +583,47 @@ first cut.
    `input_ref_range` helper with an exact computation. No behavior
    change yet — still using today's per-span layout. Verify the new
    bounds match (or tighten) what `input_ref_range` computed.
-2. **Audit cross-span slab coalescing** — **done** (GPT-2 result
-   below; see `audit.rs` for the instrumentation). Enable with
-   `WT_AUDIT_SLABS=1` on any compiled-eval run to re-measure.
+2. **Audit cross-span slab coalescing** — **done**. See `audit.rs`
+   for the instrumentation; enable with `WT_AUDIT_SLABS=1` on any
+   compiled-eval run to re-measure.
 
-   GPT-2 result (gpt2-lm-head-10.onnx, default 4-lane partition):
-   ```
-   total InputRefs scanned:                       24160
-   InputRefs with >1 item (coalescing):             260  (1.1%)
-     all-scratch    (span-local):                    0  (  0.0%)
-     all-input      (weight-only):                   0  (  0.0%)
-     all-intermediate (pure cross-span):           260  (100.0%)
-     all-output     (model output only):             0  (  0.0%)
-     mixed input+intermediate (cross-buffer):        0  (  0.0%)
-     other mixed:                                    0  (  0.0%)
-   ```
+   Measured on two models:
 
-   Headline findings:
-   - **Cross-buffer coalescing does not fire at all on GPT-2.** The
-     placer's global coalescing logic stays entirely within the
-     intermediate buffer — no weight ↔ intermediate mixing, no
-     startup copies needed.
-   - **1.1% of InputRefs trigger coalescing**, all of them pure
-     intermediate. Non-negligible but bounded.
-   - Spot-checked examples look like hidden-size-728 atom runs
-     (768 single-atom intermediate groups strided by 1) — typical
-     LayerNorm/ReduceMean/Concat patterns where lowering produced
-     many 1-atom groups that a consumer reads as a flat range.
-   - **Zero all-scratch cases.** The matmul Mul→Reduce coalescing I
-     was expecting to show up here does not — those patterns use
-     stride accesses that stay within a single producer group, so
-     they don't trigger the "≥2 items" threshold. Span-local
-     coalescing still exists inside `compute_layout::Step 1` for
-     other reasons (mostly lowering artifacts), but it doesn't
-     register at the InputRef-bound level the global placer cares
-     about.
+   | metric                               | GPT-2 (lm-head-10) | RWKV 0.1B |
+   |--------------------------------------|-------------------:|----------:|
+   | InputRefs scanned                    |             24,160 |   453,934 |
+   | coalescing triggers (>1 item)        |           260 (1.1%) | 148 (0.03%) |
+   | all-scratch (span-local)             |                  0 |  48 (32%) |
+   | all-input (weight-only)              |                  0 |         0 |
+   | all-intermediate (pure cross-span)   |         260 (100%) | 100 (68%) |
+   | all-output                           |                  0 |         0 |
+   | **mixed input+intermediate** (cross-buffer) |                  **0** |     **0** |
+   | other mixed                          |                  0 |         0 |
 
-   Still TODO: run on RWKV (different op mix — Gather-heavy, time
-   mixing). The result is worth confirming on at least one
-   transformer-style model before the placer is implemented, since
-   GPT-2 is small and may under-represent coalescing patterns that
-   only appear in larger graphs.
+   **Headline: zero cross-buffer hits on either model.** The placer's
+   global coalescing logic stays entirely within one buffer at a
+   time — no weight ↔ intermediate mixing, no startup copies needed.
+   The "mixed input+intermediate" handling in the placer can be a
+   hard assertion rather than a supported code path.
+
+   Other findings:
+   - Total coalescing triggers are low: 260 on GPT-2, 148 on RWKV.
+     Placer coalescing is non-trivial but bounded — not a perf
+     concern at any plausible model size.
+   - GPT-2 has zero all-scratch cases; RWKV has 48 (~32%). The RWKV
+     span-local constraints come from its different lowering
+     patterns (time mixing / state evolution) and stay inside
+     per-span `compute_layout`. The global placer ignores them.
+   - Spot-checked GPT-2 examples look like ~768 single-atom
+     intermediate groups strided by 1 — typical LayerNorm/ReduceMean
+     patterns where lowering produced many 1-atom groups that a
+     consumer reads as a flat range. Benign; the placer just bundles
+     them into one intermediate-buffer slab.
+   - The matmul Mul→Reduce pattern I was expecting to dominate
+     coalescing does NOT trigger at the InputRef-bound level — its
+     stride reads stay within a single producer group. Coalescing
+     still happens inside `compute_layout::Step 1` per-span for
+     other lowering artifacts, but those stay in scratch.
 3. **Standalone placer**: implement the global placement pass over a
    `Vec<Phase>` and emit an `AtomPlacementMap`. Test in isolation
    against real model partitions; verify peak live footprint is
@@ -651,11 +651,11 @@ issue surfaces.
 
 ## Open questions
 
-- **Cross-buffer slab coalescing in real models** — **resolved for
-  GPT-2** (0 hits out of 260 coalescing constraints); still want to
-  confirm on RWKV. If RWKV also clears, the "mixed input+intermediate"
-  code path in the placer becomes a debug assertion rather than a
-  supported code path.
+- **Cross-buffer slab coalescing in real models** — **resolved**:
+  zero hits on both GPT-2 (260 coalescing constraints, 0 mixed) and
+  RWKV 0.1B (148 coalescing constraints, 0 mixed). The placer's
+  "mixed input+intermediate" code path becomes a debug assertion
+  rather than a supported case.
 - **`aligned_splits` cooperation between partitioner and placer**:
   partitioner_m already aligns Mul→Reduce split boundaries via
   `aligned_splits` logic tied to reduce stride. Under the new
