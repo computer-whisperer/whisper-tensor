@@ -204,11 +204,16 @@ impl CompiledSpanFn for X86JitSpan {
 
         // Run the JIT.
         // SAFETY: bytes at `self.code.ptr(self.entry)` were emitted
-        // as a System V AMD64 function taking a single `*mut u8` and
-        // returning nothing. The buffer outlives this call.
-        let func: unsafe extern "C" fn(*mut u8) =
+        // as a System V AMD64 function taking a `*const *mut u8` — a
+        // pointer to an array of buffer base pointers — and returning
+        // nothing. Phase 4c only populates index 0 (the working buffer);
+        // step 5 will extend this to multiple bases resolved from the
+        // placement map. The stack-local `buffer_ptrs` array and the
+        // `buffer` Vec both outlive this call.
+        let mut buffer_ptrs: [*mut u8; 1] = [buffer.as_mut_ptr()];
+        let func: unsafe extern "C" fn(*const *mut u8) =
             unsafe { std::mem::transmute(self.code.ptr(self.entry)) };
-        unsafe { func(buffer.as_mut_ptr()) };
+        unsafe { func(buffer_ptrs.as_mut_ptr()) };
 
         // Check canary zone for buffer overrun.
         if buffer[canary_start..].iter().any(|&b| b != CANARY_BYTE) {

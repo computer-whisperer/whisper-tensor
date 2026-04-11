@@ -1,9 +1,18 @@
 //! Function prologue, epilogue, and register allocation map.
 //!
-//! ABI: `extern "C" fn(buffer: *mut u8) -> ()`, System V AMD64. The
-//! `buffer` argument arrives in `rdi`. The compiled function is
-//! responsible for saving/restoring all callee-saved registers it
-//! clobbers (per System V).
+//! ABI: `extern "C" fn(buffer_ptrs: *const *mut u8) -> ()`, System V
+//! AMD64. `rdi` holds a pointer to an array of buffer base pointers;
+//! `buffer_ptrs[buffer_id]` is the base of the buffer the span's
+//! `buffer_id` addresses. The compiled function is responsible for
+//! saving/restoring all callee-saved registers it clobbers (per
+//! System V).
+//!
+//! Phase 4c wired up this indirection while keeping the spans
+//! single-buffer: the prologue loads `buffer_ptrs[0]` into `r12`
+//! (`BUFFER_REG`), reproducing the old single-pointer behaviour but
+//! through the new indirect calling convention. Phase 5 will extend
+//! the prologue to load additional bases into extra callee-saved
+//! registers as the per-span `BufferBases` map directs.
 //!
 //! # Register layout
 //!
@@ -82,9 +91,12 @@ pub const FLT_SLOT_C: u8 = 2;
 /// `rcx` across a codec call must spill it.
 pub const RCX_REG: u8 = 1;
 
-/// Buffer pointer register code (`r12`). The prologue copies the
-/// `*mut u8` buffer argument from `rdi` here so it survives any libm
-/// trampoline (`r12`–`r15` are callee-saved under System V).
+/// Buffer pointer register code (`r12`). Under the current (phase 4c)
+/// ABI the prologue loads `buffer_ptrs[0]` (the span's first buffer
+/// base) from the argument array in `rdi` into `r12`. Holds the base
+/// of the slot-`buffer_id = 0` buffer, which is the only buffer the
+/// per-span layout uses today. `r12`–`r15` are callee-saved under
+/// System V, so the value survives any libm trampoline.
 pub const BUFFER_REG: u8 = 12;
 
 /// Loop induction variable register code (`r13`). Used by `emit_group`
@@ -98,17 +110,18 @@ pub const LOOP_END_REG: u8 = 14;
 /// Emit the function prologue.
 ///
 /// Saves the callee-saved scratch registers we use (`r12`, `r13`,
-/// `r14`) and copies the buffer pointer from the System V argument
-/// register (`rdi`) into `r12`. After this returns, the stack is
-/// 16-byte aligned (see the §Stack frame doc-comment above) and any
-/// emit_group code can call into libm without further alignment work.
+/// `r14`) and loads `buffer_ptrs[0]` (the span's working buffer) from
+/// the argument array in `rdi` into `r12`. After this returns, the
+/// stack is 16-byte aligned (see the §Stack frame doc-comment above)
+/// and any emit_group code can call into libm without further
+/// alignment work.
 pub fn emit_prologue(asm: &mut Assembler) {
     dynasm!(asm
         ; .arch x64
         ; push r12
         ; push r13
         ; push r14
-        ; mov r12, rdi
+        ; mov r12, QWORD [rdi]
     );
 }
 
