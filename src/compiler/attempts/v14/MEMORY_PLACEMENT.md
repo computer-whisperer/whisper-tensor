@@ -466,41 +466,57 @@ model inputs) follows the same rules but could in principle be huge.
 If this becomes a footprint issue, a follow-up would move them to
 their own dedicated read-only buffer. Not worth solving up front.
 
-## InputRef bounds
+## Access bounds
 
-To make placement tractable, every `InputRef` carries explicit access
-bounds:
+The placer needs a tight upper/lower atom ID per access in order to
+(a) detect when a single access crosses buffer boundaries and (b)
+build coalescing slabs. For most accesses this is cheap to compute
+from the existing `InputRef` + `(count, atom_offset)` context — the
+stride patterns are all closed-form and the placer can get exact
+bounds from a single method call:
 
 ```rust
-enum InputRef {
-    Strided {
-        base: AtomId,
-        dim_strides: Vec<i64>,
-        dim_shape: Vec<u64>,
-        // NEW:
-        min_atom: AtomId,  // tightest lower bound on accessed atom IDs
-        max_atom: AtomId,  // tightest upper bound (inclusive)
-    },
-    Broadcast(AtomId),  // bounds = (atom, atom) trivially
-    Explicit(Vec<AtomId>),  // bounds = (min(ids), max(ids))
+impl InputRef {
+    /// Exact (min_atom, max_atom) for a consumer group of `count` atoms
+    /// resolved at `atom_offset`. No stored state; computed on demand.
+    pub fn access_bounds(&self, count: u64, atom_offset: u64) -> (AtomId, AtomId);
 }
 ```
 
-- **Lowering** computes the bounds when constructing each InputRef.
-  Every `milli_graph/ops/*.rs` site that creates a Strided InputRef
-  has full knowledge of the access pattern and can compute exact
-  bounds.
-- **Partitioner** updates bounds in `clone_input_for_split` to reflect
-  the per-fragment access range (tighter than the parent's).
-- **Placer** consumes bounds for cross-buffer detection and
-  coalescing decisions.
-- **Per-span codegen** can sanity-check bounds against the
-  placement map (debug-mode assertion).
+This replaces today's conservative `input_ref_range` in
+`layout.rs:417` (which deliberately over-approximates for safety
+margin). The placer calls `access_bounds` directly rather than
+re-deriving bounds from the stride math.
 
-This change is a strict refinement: today's `input_ref_range` in
-`layout.rs:417` does the math conservatively at layout time. Moving
-to explicit author-known bounds gives tighter answers and frees the
-placer from the math.
+### IndirectLoad needs an explicit range
+
+`ScalarOp::IndirectLoad { table_base }` is the exception: its access
+range is determined by a **runtime** index, not a compile-time
+stride. Today the partitioner and placer have to guess by looking
+at the full extent of the group or input tensor that `table_base`
+points into (see `partitioner_m.rs:2131`), which is a conservative
+default but requires a graph-wide lookup to find the table's size.
+
+The fix is to add an explicit `index_range` field:
+
+```rust
+IndirectLoad {
+    table_base: AtomId,
+    /// The index input is bounded to `[0, index_range)`. The op
+    /// reads atoms in `[table_base, table_base + index_range)`.
+    index_range: u64,
+}
+```
+
+Lowering populates `index_range` at construction time — both
+`gather.rs` and `gather_elements.rs` already know the full table
+size (`data_map.count`) at the point they build the IndirectLoad.
+The placer then has a local `(table_base, index_range)` pair and
+doesn't need to traverse graph state to find the bounds.
+
+This is a small, surgical change — three construction sites plus
+the enum definition — and is prerequisite for the placer's
+cross-buffer detection on IndirectLoad ops.
 
 ## Testing and validation
 
@@ -559,10 +575,14 @@ first cut.
 
 ## Implementation order (proposed)
 
-1. **InputRef bounds**: add the fields, populate from lowering, update
-   in `clone_input_for_split`. No behavior change yet — still using
-   today's per-span layout. Verify bounds match the values
-   `input_ref_range` computes.
+1. **IndirectLoad index_range + access_bounds method**: add
+   `index_range: u64` to `ScalarOp::IndirectLoad` and populate it at
+   the three lowering sites (`gather.rs` ×2, `gather_elements.rs`).
+   Add an `InputRef::access_bounds(count, atom_offset) -> (AtomId,
+   AtomId)` method that replaces today's conservative
+   `input_ref_range` helper with an exact computation. No behavior
+   change yet — still using today's per-span layout. Verify the new
+   bounds match (or tighten) what `input_ref_range` computed.
 2. **Audit cross-span slab coalescing**: with bounds available,
    instrument today's layout pass to count how often coalescing
    actually fires on cross-span atoms in real models (vs. span-local,
@@ -624,7 +644,3 @@ issue surfaces.
 - **Debug overrun detection**: with a shared buffer, a buggy span
   could corrupt unrelated atoms invisibly. Worth a debug-only
   per-slot-canary mode or a span-write-bound checker.
-- **Bound updates for Explicit InputRefs after split**: Explicit
-  groups stay Whole today, so split-fragment bound updates are only
-  relevant for Strided/Broadcast. Confirm this stays true under the
-  new design.

@@ -361,6 +361,7 @@ impl MilliOp for GatherElements {
             out_dt,
             ScalarOp::IndirectLoad {
                 table_base: data_map.base_id,
+                index_range: data_map.count,
             },
             out_sym_dims.clone(),
             vec![InputRef::affine(add_base, 1)],

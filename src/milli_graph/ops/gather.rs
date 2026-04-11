@@ -291,6 +291,7 @@ impl Gather {
                 out_dt,
                 ScalarOp::IndirectLoad {
                     table_base: data_map.base_id,
+                    index_range: data_map.count,
                 },
                 indices_map.sym_dims.clone(),
                 vec![InputRef::affine(add_id, 1)],
@@ -414,6 +415,7 @@ impl Gather {
                 out_dt,
                 ScalarOp::IndirectLoad {
                     table_base: data_map.base_id,
+                    index_range: data_map.count,
                 },
                 vec![],
                 vec![InputRef::affine(add_base, 1)],

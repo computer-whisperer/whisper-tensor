@@ -199,7 +199,16 @@ pub enum ScalarOp<'p, P: Pool + 'p = crate::pool::SystemPool> {
     /// Indirect load: given a runtime-computed index (one input), read a value
     /// from a known table of atoms at `table_base + index`. Used for Gather
     /// (embedding lookups). No computation, just a runtime-dependent load.
-    IndirectLoad { table_base: super::pattern::AtomId },
+    ///
+    /// `index_range` is the upper bound on the runtime index: the op will
+    /// only ever read atoms in `[table_base, table_base + index_range)`.
+    /// Populated at construction time by lowering (which knows the table's
+    /// size), used by the memory placer to know the exact atom range the
+    /// op may access without walking graph state.
+    IndirectLoad {
+        table_base: super::pattern::AtomId,
+        index_range: u64,
+    },
     /// Output of an opaque milli-op. The evaluator looks up the opaque op
     /// by index in `NanoGraph::opaque_ops`, calls it (once, caching results
     /// across all output groups), and reads this group's portion of the output.
@@ -249,9 +258,13 @@ impl<P: Pool> std::fmt::Debug for ScalarOp<'_, P> {
                 .field("reduce_stride", reduce_stride)
                 .field("compute_dtype", compute_dtype)
                 .finish(),
-            ScalarOp::IndirectLoad { table_base } => f
+            ScalarOp::IndirectLoad {
+                table_base,
+                index_range,
+            } => f
                 .debug_struct("IndirectLoad")
                 .field("table_base", table_base)
+                .field("index_range", index_range)
                 .finish(),
             ScalarOp::OpaqueOutput {
                 opaque_idx,
@@ -297,8 +310,12 @@ where
                 reduce_stride: *reduce_stride,
                 compute_dtype: *compute_dtype,
             },
-            ScalarOp::IndirectLoad { table_base } => ScalarOp::IndirectLoad {
+            ScalarOp::IndirectLoad {
+                table_base,
+                index_range,
+            } => ScalarOp::IndirectLoad {
                 table_base: *table_base,
+                index_range: *index_range,
             },
             ScalarOp::OpaqueOutput {
                 opaque_idx,

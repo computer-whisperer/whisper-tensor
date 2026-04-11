@@ -110,7 +110,7 @@ pub fn emit_group(
             codec_tables,
         ),
         ScalarOp::Select => emit_select_group(asm, layout, group, addr_tables, codec_tables),
-        ScalarOp::IndirectLoad { table_base } => {
+        ScalarOp::IndirectLoad { table_base, .. } => {
             emit_indirect_load_group(asm, layout, group, *table_base, addr_tables, codec_tables)
         }
         ScalarOp::Reduce {

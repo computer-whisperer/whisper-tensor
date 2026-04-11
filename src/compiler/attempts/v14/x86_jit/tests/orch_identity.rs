@@ -1282,11 +1282,14 @@ fn indirect_load_f32_gather() {
     // Index input: [2, 0, 3, 1] as I32.
     let idx = g.add_input_tensor(GlobalId(0), 4, NumericDType::I32);
 
-    // IndirectLoad: table starts at t0.
+    // IndirectLoad: table starts at t0, 4 entries (t0..t3).
     let out = g.push_group(
         4,
         NumericDType::F32,
-        ScalarOp::IndirectLoad { table_base: t0 },
+        ScalarOp::IndirectLoad {
+            table_base: t0,
+            index_range: 4,
+        },
         vec![],
         vec![InputRef::affine(idx, 1)],
     );

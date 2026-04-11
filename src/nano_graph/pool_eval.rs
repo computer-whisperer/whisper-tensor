@@ -368,7 +368,7 @@ pub fn pool_eval<'p, P: Pool + 'p>(
                                 lookup_atom_dtype(chosen_src, graph, &group_stores, &input_stores);
                             val_dtype.cast_raw(val, output_dtype)
                         }
-                        ScalarOp::IndirectLoad { table_base } => {
+                        ScalarOp::IndirectLoad { table_base, .. } => {
                             let idx_src = group.inputs[0].resolve(ri);
                             let idx_scalar =
                                 lookup_atom_scalar(idx_src, graph, &group_stores, &input_stores);
