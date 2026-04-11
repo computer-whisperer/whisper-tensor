@@ -743,11 +743,28 @@ first cut.
    The design's cache-residency story works for the LM head: each
    lane streams `A·W` into a local accumulator, no cross-core
    traffic on the hot bytes, the working set fits in L2/L3.
-4. **Multi-buffer JIT ABI**: extend `SlotInfo` with `buffer_id`,
-   thread it through the address.rs emit functions, change the
-   prologue to load multiple bases. Run the existing executor with
-   per-span layouts but the new ABI to confirm no behavioral
-   regression.
+4. **Multi-buffer JIT ABI** — **done** (3 commits, landed as
+   `971e110`, `d1b81c4`, `34d2fd8`).
+   - *4a*: added `buffer_id: u8` to `SlotInfo` and `AddressInfo`,
+     defaulting to 0 everywhere. No behavior change.
+   - *4b*: replaced every `BUFFER_REG` in the `orch/group.rs` and
+     `orch/reduce.rs` `emit_load_bits` / `emit_store_bits` call
+     sites with `buffer_base_reg(info.buffer_id)`. `emit_indirect_load_iter`
+     grew a `table_buffer_id` parameter. Under phase 4 the helper
+     debug-asserts `buffer_id == 0` and returns `BUFFER_REG`; step 5
+     will turn this into a real dispatch table.
+   - *4c*: flipped the external ABI from
+     `fn(buffer: *mut u8)` to `fn(buffer_ptrs: *const *mut u8)`.
+     The prologue's `mov r12, rdi` became `mov r12, QWORD [rdi]` —
+     it now loads `buffer_ptrs[0]` into r12. `X86JitSpan::execute`
+     assembles a one-entry stack array (`[buffer.as_mut_ptr(); 1]`)
+     and passes its pointer. Spans still only use buffer_id 0; the
+     indirection is in place for step 5 to populate more slots.
+
+   All 160 v14 tests and the JIT-compiled partitioned `test_set`
+   categories (matmul, reduce, elementwise, …) remain green across
+   all three commits. End-to-end GPT-2 runs cleanly through the new
+   ABI with the same compile/execute footprint as before step 4.
 5. **Wire the placer in**: per-span layout consults the placement map
    for cross-span atoms; total scratch bytes recorded per span.
 6. **Replace the executor**: delete `PhaseStore`, allocate
