@@ -28,9 +28,7 @@ use crate::pool::SystemPool;
 use super::super::codec::bit_io::{emit_load_bits, emit_store_bits};
 use super::super::codec::format::{CodecSlot, CodecTables, ComputeRepr, emit_decode, emit_encode};
 use super::super::codec::precision::emit_narrow_to;
-use super::super::prologue::{
-    BUFFER_REG, FLT_SLOT_A, FLT_SLOT_C, INT_SLOT_C, LOOP_END_REG, LOOP_VAR_REG,
-};
+use super::super::prologue::{FLT_SLOT_A, FLT_SLOT_C, INT_SLOT_C, LOOP_END_REG, LOOP_VAR_REG};
 use super::address::{AddressTables, IterVar, emit_compute_bit_offset};
 use super::group::emit_output_bit_offset;
 
@@ -214,7 +212,7 @@ fn emit_reduce_body(
     codec_tables: &mut CodecTables,
 ) -> Result<(), String> {
     // 1. Compute base address for k=0 → r10, copy to rdi.
-    emit_compute_bit_offset(
+    let src_info = emit_compute_bit_offset(
         asm,
         layout,
         input,
@@ -224,6 +222,7 @@ fn emit_reduce_body(
         SCRATCH,
         addr_tables,
     )?;
+    let src_buffer_reg = super::group::buffer_base_reg_pub(src_info.buffer_id);
     dynasm!(asm; .arch x64; mov Rq(REDUCE_SRC_BIT), Rq(BIT_OFF));
 
     // 2. Initialize accumulator.
@@ -244,7 +243,7 @@ fn emit_reduce_body(
     );
 
     // 3a. Load source bits from rdi, decode to slot A.
-    emit_load_bits(asm, BUFFER_REG, REDUCE_SRC_BIT, n_bits, RAW, SCRATCH);
+    emit_load_bits(asm, src_buffer_reg, REDUCE_SRC_BIT, n_bits, RAW, SCRATCH);
     let slot_a = match repr {
         ComputeRepr::F32 | ComputeRepr::F64 => CodecSlot::Xmm(FLT_SLOT_A),
         ComputeRepr::Int => CodecSlot::Gp(RAW),
@@ -315,7 +314,7 @@ fn emit_reduce_body(
     )?;
     emit_store_bits(
         asm,
-        BUFFER_REG,
+        super::group::buffer_base_reg_pub(dst_info.buffer_id),
         BIT_OFF,
         dst_info.n_bits,
         RAW,

@@ -71,6 +71,28 @@ const FLT_SLOT: u8 = 0;
 /// XMM register used as codec scratch.
 const FLT_SCRATCH: u8 = 1;
 
+/// Phase 4b shim: resolve a slot's `buffer_id` to the GP register that
+/// holds that buffer's base pointer. Phase 4 only threads one buffer
+/// through the ABI (the per-span working buffer at `BUFFER_REG` / r12);
+/// phase 5 will replace this with a `BufferBases` lookup populated by
+/// the prologue from the `buffer_ptrs` argument array, and the
+/// debug_assert turns into a real dispatch table.
+#[inline]
+fn buffer_base_reg(buffer_id: u8) -> u8 {
+    debug_assert_eq!(
+        buffer_id, 0,
+        "phase 4b: only single-buffer spans (buffer_id=0) supported",
+    );
+    BUFFER_REG
+}
+
+/// Sibling-module accessor for [`buffer_base_reg`]. `reduce.rs` uses
+/// this so the helper's source of truth stays in `group.rs`.
+#[inline]
+pub(super) fn buffer_base_reg_pub(buffer_id: u8) -> u8 {
+    buffer_base_reg(buffer_id)
+}
+
 /// Emit one `AtomGroup` body. Either inlined (for `count == 1`) or
 /// wrapped in a loop over the group's atoms.
 ///
@@ -210,7 +232,7 @@ fn emit_identity_iter(
     // 2. Load src bits → rax.
     emit_load_bits(
         asm,
-        BUFFER_REG,
+        buffer_base_reg(src_info.buffer_id),
         BIT_OFF_REG,
         src_info.n_bits,
         RAW_REG,
@@ -238,7 +260,7 @@ fn emit_identity_iter(
     // 4. Store rax at dst bit offset.
     emit_store_bits(
         asm,
-        BUFFER_REG,
+        buffer_base_reg(dst_info.buffer_id),
         BIT_OFF_REG,
         dst_info.n_bits,
         RAW_REG,
@@ -399,7 +421,7 @@ fn emit_cast_iter(
     // 2. Load src raw bits → rax.
     emit_load_bits(
         asm,
-        BUFFER_REG,
+        buffer_base_reg(src_info.buffer_id),
         BIT_OFF_REG,
         src_info.n_bits,
         RAW_REG,
@@ -457,7 +479,7 @@ fn emit_cast_iter(
     // 6. Store raw bits.
     emit_store_bits(
         asm,
-        BUFFER_REG,
+        buffer_base_reg(dst_info.buffer_id),
         BIT_OFF_REG,
         dst_info.n_bits,
         RAW_REG,
@@ -696,7 +718,7 @@ fn emit_binary_iter(
 
     emit_store_bits(
         asm,
-        BUFFER_REG,
+        buffer_base_reg(dst_info.buffer_id),
         BIT_OFF_REG,
         dst_info.n_bits,
         RAW_REG,
@@ -737,7 +759,7 @@ fn emit_load_decode_input(
     )?;
     emit_load_bits(
         asm,
-        BUFFER_REG,
+        buffer_base_reg(info.buffer_id),
         BIT_OFF_REG,
         info.n_bits,
         RAW_REG,
@@ -942,7 +964,7 @@ fn emit_unary_iter(
 
     emit_store_bits(
         asm,
-        BUFFER_REG,
+        buffer_base_reg(dst_info.buffer_id),
         BIT_OFF_REG,
         dst_info.n_bits,
         RAW_REG,
@@ -1184,7 +1206,7 @@ fn emit_select_iter(
     )?;
     emit_load_bits(
         asm,
-        BUFFER_REG,
+        buffer_base_reg(cond_info.buffer_id),
         BIT_OFF_REG,
         cond_info.n_bits,
         RAW_REG,
@@ -1330,7 +1352,7 @@ fn emit_select_iter(
     )?;
     emit_store_bits(
         asm,
-        BUFFER_REG,
+        buffer_base_reg(dst_info.buffer_id),
         BIT_OFF_REG,
         dst_info.n_bits,
         RAW_REG,
@@ -1405,6 +1427,7 @@ fn emit_indirect_load_group(
     let table_bit_stride = table_slot.bit_stride;
     let table_n_bits = table_slot.elem_bits as u32;
     let table_dtype = table_slot.dtype;
+    let table_buffer_id = table_slot.buffer_id;
 
     if group.count == 1 {
         emit_indirect_load_iter(
@@ -1417,6 +1440,7 @@ fn emit_indirect_load_group(
             table_bit_stride,
             table_n_bits,
             table_dtype,
+            table_buffer_id,
             group.output_dtype,
             IterVar::Const(group.atom_offset),
             group.atom_offset,
@@ -1445,6 +1469,7 @@ fn emit_indirect_load_group(
             table_bit_stride,
             table_n_bits,
             table_dtype,
+            table_buffer_id,
             group.output_dtype,
             IterVar::Reg(LOOP_VAR_REG),
             group.atom_offset,
@@ -1469,6 +1494,7 @@ fn emit_indirect_load_iter(
     table_bit_stride: u64,
     table_n_bits: u32,
     table_dtype: NumericDType,
+    table_buffer_id: u8,
     output_dtype: NumericDType,
     iter: IterVar,
     atom_offset: u64,
@@ -1488,7 +1514,7 @@ fn emit_indirect_load_iter(
     )?;
     emit_load_bits(
         asm,
-        BUFFER_REG,
+        buffer_base_reg(idx_info.buffer_id),
         BIT_OFF_REG,
         idx_info.n_bits,
         RAW_REG,
@@ -1562,7 +1588,7 @@ fn emit_indirect_load_iter(
     // 4. Load table value → rax.
     emit_load_bits(
         asm,
-        BUFFER_REG,
+        buffer_base_reg(table_buffer_id),
         BIT_OFF_REG,
         table_n_bits,
         RAW_REG,
@@ -1617,7 +1643,7 @@ fn emit_indirect_load_iter(
     )?;
     emit_store_bits(
         asm,
-        BUFFER_REG,
+        buffer_base_reg(dst_info.buffer_id),
         BIT_OFF_REG,
         dst_info.n_bits,
         RAW_REG,
