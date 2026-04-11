@@ -624,10 +624,47 @@ first cut.
      stride reads stay within a single producer group. Coalescing
      still happens inside `compute_layout::Step 1` per-span for
      other lowering artifacts, but those stay in scratch.
-3. **Standalone placer**: implement the global placement pass over a
-   `Vec<Phase>` and emit an `AtomPlacementMap`. Test in isolation
-   against real model partitions; verify peak live footprint is
-   reasonable.
+3. **Standalone placer** — **done** (see `placer.rs`; enable with
+   `WT_PRINT_PLACEMENT=1` on any compiled-eval run to see the
+   summary). Implements classification → liveness → coalescing
+   (union-find over Intermediate groups only, with a hard assertion
+   against cross-buffer slabs per the step 2 audit) → first-fit
+   interval packing → per-buffer emission.
+
+   Measured peak footprints (default 4-lane partition):
+
+   | model    | input buffers | output buffers | intermediate peak | slabs | scratch groups |
+   |----------|--------------:|---------------:|------------------:|------:|---------------:|
+   | GPT-2    |      634 MiB |         1.3 MB |         **736 MiB** | 2039 |          2814 |
+   | RWKV 0.1B|      367 MiB |         2.4 MB |         **0.9 MB** | 19167 |         38918 |
+
+   RWKV's peak is tiny — per-layer Mul intermediates of ~192 KB
+   each, packed sequentially with full liveness reuse. This is
+   exactly the cache-residency sweet spot the design is aiming for.
+
+   **GPT-2's 736 MB intermediate peak is correct but surprising.**
+   Investigation: 5 of the top slabs are 147 MB each (38.6M atoms =
+   50257 vocab × 768 hidden), all live concurrently in phases
+   307–308. These are the LM head matmul Mul intermediates for the
+   5 sequence positions. Their Mul groups got classified as
+   cross-span because the downstream Reduce crossed into a later
+   phase, forcing the partitioner to declare the Mul in span
+   outputs. The current executor's `PhaseStore` holds 737 MB of
+   data at the same phase — the placer is matching today's actual
+   footprint, not over-allocating.
+
+   This is a **partitioner opportunity, not a placer bug**: if the
+   LM head Mul→Reduce pair were kept span-local (as it is for
+   RWKV's per-layer matmuls), the GPT-2 intermediate would drop by
+   hundreds of megabytes. Filed for future partitioner work;
+   unblocks the placer implementation.
+
+   The placer's output includes:
+   - `AtomPlacementMap` with per-atom `(buffer_id, byte_offset)`.
+   - Per-buffer metadata (size, kind, debug name).
+   - `intermediate_peak_bytes` diagnostic.
+   - `intermediate_slab_count`, `scratch_group_count`,
+     `top_slabs` summary for postmortem.
 4. **Multi-buffer JIT ABI**: extend `SlotInfo` with `buffer_id`,
    thread it through the address.rs emit functions, change the
    prologue to load multiple bases. Run the existing executor with

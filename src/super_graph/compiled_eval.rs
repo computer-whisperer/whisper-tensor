@@ -245,13 +245,33 @@ pub(crate) fn compile_nano_graph(
 
     // Cross-span slab coalescing audit (gated by env var, see
     // MEMORY_PLACEMENT.md §"Implementation order" step 2).
-    if std::env::var("WT_AUDIT_SLABS").ok().is_some_and(|v| v != "0") {
+    if std::env::var("WT_AUDIT_SLABS")
+        .ok()
+        .is_some_and(|v| v != "0")
+    {
         let report = crate::compiler::attempts::v14::audit::audit_slab_coalescing(
             graph,
             &phases,
             all_output_atom_ranges,
         );
         report.print();
+    }
+
+    // Standalone memory placer diagnostic (step 3 of the implementation
+    // order). Computes the intermediate/input/output buffer layout but
+    // doesn't yet change execution.
+    if std::env::var("WT_PRINT_PLACEMENT")
+        .ok()
+        .is_some_and(|v| v != "0")
+    {
+        match crate::compiler::attempts::v14::placer::run_placer(
+            graph,
+            &phases,
+            all_output_atom_ranges,
+        ) {
+            Ok(map) => map.print_summary(),
+            Err(e) => eprintln!("[placer] error: {e}"),
+        }
     }
 
     // Extract plan summary before compilation consumes the phases.

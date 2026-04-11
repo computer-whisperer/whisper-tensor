@@ -80,7 +80,10 @@ pub struct SlabAuditReport {
 impl SlabAuditReport {
     pub fn print(&self) {
         eprintln!("[placer audit] cross-span slab coalescing");
-        eprintln!("  total InputRefs scanned:        {}", self.total_input_refs);
+        eprintln!(
+            "  total InputRefs scanned:        {}",
+            self.total_input_refs
+        );
         eprintln!(
             "  InputRefs with >1 item (coalescing): {}",
             self.coalescing_refs
@@ -214,11 +217,7 @@ pub fn audit_slab_coalescing(
         sorted_items.push((it.base_id.0, it.base_id.0 + it.count, ItemRef::Input(ii)));
     }
     for (gi, g) in groups.iter().enumerate() {
-        sorted_items.push((
-            g.base_id.0,
-            g.base_id.0 + g.count,
-            ItemRef::Group(gi),
-        ));
+        sorted_items.push((g.base_id.0, g.base_id.0 + g.count, ItemRef::Group(gi)));
     }
     sorted_items.sort_unstable_by_key(|&(lo, _, _)| lo);
 
@@ -235,8 +234,7 @@ pub fn audit_slab_coalescing(
                 for (ii, input_ref) in group.inputs.iter().enumerate() {
                     report.total_input_refs += 1;
 
-                    let segments =
-                        input_access_segments(input_ref, group.atom_offset, group.count);
+                    let segments = input_access_segments(input_ref, group.atom_offset, group.count);
                     if segments.is_empty() {
                         continue;
                     }
@@ -249,8 +247,7 @@ pub fn audit_slab_coalescing(
                             continue;
                         }
                         // Binary search for the first item whose end > seg_lo.
-                        let start_idx = sorted_items
-                            .partition_point(|&(_, hi, _)| hi <= seg_lo);
+                        let start_idx = sorted_items.partition_point(|&(_, hi, _)| hi <= seg_lo);
                         for &(item_lo, item_hi, item) in &sorted_items[start_idx..] {
                             if item_lo >= seg_hi {
                                 break;
@@ -281,7 +278,13 @@ pub fn audit_slab_coalescing(
                             report.all_intermediate += 1;
                             if report.intermediate_examples.len() < 8 {
                                 report.intermediate_examples.push(format_example(
-                                    pi, li, group.base_id.0, ii, &segments, &items, &item_kind,
+                                    pi,
+                                    li,
+                                    group.base_id.0,
+                                    ii,
+                                    &segments,
+                                    &items,
+                                    &item_kind,
                                     main_graph,
                                 ));
                             }
@@ -291,7 +294,13 @@ pub fn audit_slab_coalescing(
                             report.mixed_input_intermediate += 1;
                             if report.mixed_examples.len() < 16 {
                                 report.mixed_examples.push(format_example(
-                                    pi, li, group.base_id.0, ii, &segments, &items, &item_kind,
+                                    pi,
+                                    li,
+                                    group.base_id.0,
+                                    ii,
+                                    &segments,
+                                    &items,
+                                    &item_kind,
                                     main_graph,
                                 ));
                             }
@@ -300,7 +309,13 @@ pub fn audit_slab_coalescing(
                             report.other_mixed += 1;
                             if report.mixed_examples.len() < 16 {
                                 report.mixed_examples.push(format_example(
-                                    pi, li, group.base_id.0, ii, &segments, &items, &item_kind,
+                                    pi,
+                                    li,
+                                    group.base_id.0,
+                                    ii,
+                                    &segments,
+                                    &items,
+                                    &item_kind,
                                     main_graph,
                                 ));
                             }

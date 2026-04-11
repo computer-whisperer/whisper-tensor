@@ -6,6 +6,7 @@ pub mod executor;
 pub mod layout;
 pub mod partitioner_m;
 pub mod partitioner_n;
+pub mod placer;
 pub mod plan;
 pub mod report;
 pub mod types;
