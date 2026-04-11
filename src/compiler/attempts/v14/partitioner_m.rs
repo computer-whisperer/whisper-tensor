@@ -531,7 +531,7 @@ fn promote_small_nonlocal_sources_to_duplicate(
             let is_candidate = kinds[ci] == GroupKind::Split
                 && cons.count >= min_consumer_atoms
                 && cons.count >= prod.count.saturating_mul(min_expand)
-                && lane_local_access_check(cons, prod, num_lanes).is_err();
+                && lane_local_access_check(cons, prod, num_lanes, false).is_err();
 
             if is_candidate {
                 saw_candidate = true;
@@ -606,11 +606,21 @@ fn assign_phases(
     groups: &[AtomGroup<'static, crate::pool::SystemPool>],
     kinds: &[GroupKind],
     producers: &[Vec<usize>],
+    successors: &[Vec<usize>],
     graph: &NanoGraph<'static, crate::pool::SystemPool>,
     num_lanes: usize,
-) -> Vec<usize> {
+) -> (Vec<usize>, Vec<bool>) {
     let n = groups.len();
     let mut phase_of = vec![0usize; n];
+    // `can_be_aligned[gi]` = true if gi can be safely aligned-split to fit
+    // a downstream perfect-tile Reduce consumer. The safety conditions are
+    // (a) gi's only consumer is the Reduce (nothing else sees gi's layout)
+    // and (b) gi has no same-phase group producers (so aligning gi's own
+    // per-lane fragments never crosses a producer lane boundary). The per-
+    // consumer part is checked at use time via `successors[gi].len()`; the
+    // producer-side part is tracked here because it requires phase info
+    // that only becomes available as we walk groups in topo order.
+    let mut has_same_phase_producer = vec![false; n];
     let trace_barriers = std::env::var("WT_PARTITIONER_M_TRACE_BARRIERS")
         .ok()
         .is_some_and(|v| v != "0");
@@ -633,10 +643,27 @@ fn assign_phases(
             let prod_phase = phase_of[pi];
             let prod_kind = kinds[pi];
             let cons_kind = kinds[gi];
+            // The perfect-tile fast path in `lane_local_access_check` is
+            // only safe when the producer P can actually be aligned-split:
+            // (1) P's only consumer is the Reduce that triggered the check
+            // (nothing else sees P's layout), and (2) P has no same-phase
+            // group producers (so aligning P's own per-lane fragments never
+            // crosses a producer lane boundary upstream — see the
+            // LayerNorm `(x-mean)^2 → variance` case).
+            let producer_can_align =
+                successors[pi].len() == 1 && !has_same_phase_producer[pi];
 
             // Determine if we need a barrier between producer and consumer.
-            let barrier_reason =
-                barrier_reason_between(pi, gi, prod_kind, cons_kind, groups, graph, num_lanes);
+            let barrier_reason = barrier_reason_between(
+                pi,
+                gi,
+                prod_kind,
+                cons_kind,
+                groups,
+                graph,
+                num_lanes,
+                producer_can_align,
+            );
 
             if let Some(reason) = barrier_reason {
                 min_phase = min_phase.max(prod_phase + 1);
@@ -654,6 +681,16 @@ fn assign_phases(
         }
 
         phase_of[gi] = min_phase;
+
+        // Now that phase_of[gi] is known, record whether gi has any
+        // lane-boundary-imposing group producer sharing its phase. Read by
+        // the fast-path gate when gi appears as `pi` for a later consumer.
+        // Duplicate producers are exempt: they broadcast the full tensor to
+        // every lane, so aligning gi's per-lane split never crosses a
+        // producer lane boundary against them.
+        has_same_phase_producer[gi] = producers[gi].iter().any(|&pp| {
+            phase_of[pp] == min_phase && kinds[pp] != GroupKind::Duplicate
+        });
     }
 
     if trace_barriers && !barrier_events.is_empty() {
@@ -723,7 +760,7 @@ fn assign_phases(
         }
     }
 
-    phase_of
+    (phase_of, has_same_phase_producer)
 }
 
 fn describe_group_inputs(
@@ -868,6 +905,7 @@ fn barrier_reason_between(
     groups: &[AtomGroup<'static, crate::pool::SystemPool>],
     graph: &NanoGraph<'static, crate::pool::SystemPool>,
     num_lanes: usize,
+    producer_has_unique_consumer: bool,
 ) -> Option<BarrierReason> {
     let prod = &groups[pi];
     let cons = &groups[ci];
@@ -876,9 +914,14 @@ fn barrier_reason_between(
         // Split → Split: no barrier if the consumer reads only from its own
         // lane's slice. This is true when the input pattern is Affine with
         // stride 1 (elementwise chain) or StridedBroadcast with aligned blocks.
-        (GroupKind::Split, GroupKind::Split) => lane_local_access_check(cons, prod, num_lanes)
-            .err()
-            .map(BarrierReason::SplitSplitNonLocal),
+        (GroupKind::Split, GroupKind::Split) => lane_local_access_check(
+            cons,
+            prod,
+            num_lanes,
+            producer_has_unique_consumer,
+        )
+        .err()
+        .map(BarrierReason::SplitSplitNonLocal),
 
         // Duplicate → anything: no barrier. Duplicated data is in every lane.
         (GroupKind::Duplicate, _) => None,
@@ -925,18 +968,25 @@ fn barrier_reason_between(
 /// - Affine where the access pattern tiles identically
 /// - Broadcast (reads single atom — but from which lane?)
 /// - StridedBroadcast with repeat aligned to chunk boundaries
+///
+/// `producer_has_unique_consumer` enables the perfect-tile fast path: when
+/// the producer feeds only this one consumer, we're free to aligned-split
+/// the producer to fit the consumer's access pattern without breaking other
+/// consumers. Matches the matmul Mul→Reduce pair exactly.
+#[allow(dead_code)]
 fn is_lane_local_access(
     consumer: &AtomGroup<'static, crate::pool::SystemPool>,
     producer: &AtomGroup<'static, crate::pool::SystemPool>,
     num_lanes: usize,
 ) -> bool {
-    lane_local_access_check(consumer, producer, num_lanes).is_ok()
+    lane_local_access_check(consumer, producer, num_lanes, false).is_ok()
 }
 
 fn lane_local_access_check(
     consumer: &AtomGroup<'static, crate::pool::SystemPool>,
     producer: &AtomGroup<'static, crate::pool::SystemPool>,
     num_lanes: usize,
+    producer_has_unique_consumer: bool,
 ) -> Result<(), &'static str> {
     let prod_base = producer.base_id.0;
     let prod_end = prod_base + producer.count;
@@ -1065,17 +1115,35 @@ fn lane_local_access_check(
                             ..
                         } = &consumer.op
                         {
-                            let max_chunk =
-                                (consumer.count + num_lanes as u64 - 1) / num_lanes as u64;
-                            let prod_chunk = producer.count / num_lanes as u64;
-                            let reduce_extent = reduce_stride.unsigned_abs() * (*reduce_count - 1);
-                            // Span from first atom of first output to last atom
-                            // of last output in the largest lane fragment.
-                            let span = abs_stride * (max_chunk - 1) + reduce_extent + 1;
-                            if span > prod_chunk {
-                                return Err(
-                                    "split->split non-lane-local: reduce footprint exceeds producer chunk",
-                                );
+                            let reduce_extent = reduce_stride.unsigned_abs() * (*reduce_count - 1) + 1;
+                            // Perfect-tiling fast path: we already know
+                            // abs_stride * consumer.count == producer.count.
+                            // If each output's reduce footprint fits within
+                            // one stride unit of the producer AND the
+                            // producer has no other consumers, we can
+                            // safely align the producer's per-lane split to
+                            // the consumer's per-lane split regardless of
+                            // whether counts divide evenly by num_lanes.
+                            // This matches the post-relayout matmul Mul →
+                            // Reduce pair, where the Mul is only consumed by
+                            // its paired Reduce. If the producer has other
+                            // consumers (e.g. a LayerNorm source feeding
+                            // mean, variance, and (x-mean) simultaneously),
+                            // aligning the producer for the Reduce would
+                            // break the others — fall back to the tight
+                            // per-chunk check against the default split.
+                            let safe_aligned = producer_has_unique_consumer
+                                && reduce_extent <= abs_stride;
+                            if !safe_aligned {
+                                let max_chunk =
+                                    (consumer.count + num_lanes as u64 - 1) / num_lanes as u64;
+                                let prod_chunk = producer.count / num_lanes as u64;
+                                let span = abs_stride * (max_chunk - 1) + reduce_extent;
+                                if span > prod_chunk {
+                                    return Err(
+                                        "split->split non-lane-local: reduce footprint exceeds producer chunk",
+                                    );
+                                }
                             }
                         }
                         // Lane-local with aligned split.
@@ -1335,7 +1403,8 @@ pub fn plan(
     promote_small_nonlocal_sources_to_duplicate(groups, &successors, &mut kinds, num_lanes);
 
     // Step 3: Assign phases.
-    let phase_of = assign_phases(groups, &kinds, &producers, graph, num_lanes);
+    let (phase_of, has_same_phase_producer) =
+        assign_phases(groups, &kinds, &producers, &successors, graph, num_lanes);
 
     // Step 4: Collect groups by phase.
     let num_phases = phase_of.iter().copied().max().unwrap_or(0) + 1;
@@ -1397,6 +1466,7 @@ pub fn plan(
             &phase_of,
             &producers,
             &successors,
+            &has_same_phase_producer,
             &cross_phase_consumed,
             &output_group_set,
             &input_tensor_set,
@@ -1419,6 +1489,7 @@ fn build_phase(
     phase_of: &[usize],
     producers: &[Vec<usize>],
     successors: &[Vec<usize>],
+    has_same_phase_producer: &[bool],
     cross_phase_consumed: &HashSet<usize>,
     output_group_set: &HashSet<usize>,
     input_tensor_set: &HashMap<u64, &InputTensor>,
@@ -1457,7 +1528,17 @@ fn build_phase(
     // feeds a Reduce consumer in the same phase via Affine with stride K,
     // record (consumer_count, K) so emit_split_group uses aligned splitting.
     // This ensures the Mul→Reduce pair stays lane-local even when the Reduce
-    // count doesn't divide evenly by num_lanes.
+    // count doesn't divide evenly by num_lanes — `split_range_aligned` uses
+    // `split_count` which handles the remainder by giving the first few lanes
+    // one extra atom, and the stride multiplier propagates that to the
+    // producer's chunk sizes so the partition stays exact.
+    //
+    // For the non-divisible case, only lift the alignment when the producer
+    // has a single consumer. An aligned per-lane split of the producer fits
+    // exactly one consumer's access pattern; if other consumers existed they
+    // would see the producer's atoms at the wrong lane boundaries. This
+    // matches the relayouted matmul Mul→Reduce pair, where the Mul has only
+    // the Reduce as a consumer (structural).
     let mut aligned_splits: HashMap<usize, (u64, u64)> = HashMap::new(); // gi → (consumer_count, stride)
     let phase_set: HashSet<usize> = phase_group_indices.iter().copied().collect();
     for &gi in phase_group_indices {
@@ -1465,6 +1546,13 @@ fn build_phase(
             continue;
         }
         let group = &all_groups[gi];
+        // Same gate as the `lane_local_access_check` fast path: we can only
+        // non-divisibly align a group whose layout is not observed by any
+        // other consumer AND whose own upstream reads do not depend on a
+        // same-phase lane layout. See the LayerNorm `(x-mean)^2 → variance`
+        // discussion in `assign_phases`.
+        let producer_can_align =
+            successors[gi].len() == 1 && !has_same_phase_producer[gi];
         for &ci in &successors[gi] {
             if !phase_set.contains(&ci) || kinds[ci] != GroupKind::Split {
                 continue;
@@ -1479,10 +1567,11 @@ fn build_phase(
                         // Use innermost stride for the affine-like pattern
                         let stride = dim_strides.last().copied().unwrap_or(0);
                         let abs_stride = stride.unsigned_abs();
+                        let divisible = cons.count % num_lanes as u64 == 0
+                            && group.count % num_lanes as u64 == 0;
                         if abs_stride > 0
                             && abs_stride * cons.count == group.count
-                            && cons.count % num_lanes as u64 == 0
-                            && group.count % num_lanes as u64 == 0
+                            && (divisible || producer_can_align)
                             && input_refs_group(inp, cons.count, cons.atom_offset, group)
                         {
                             aligned_splits.insert(gi, (cons.count, abs_stride));
@@ -4053,13 +4142,15 @@ mod tests {
         assert_eq!(bases, vec![input.0, input.0 + 511, input.0 + 1023]);
     }
 
-    // ─── Test: GroupNorm-like reduce needs barrier with non-aligned splits ──
+    // ─── Test: GroupNorm-like reduce stays lane-local with aligned splits ──
 
     /// Regression test for the RWKV7 GroupNorm pattern:
     /// 768 atoms (12 heads × 64 head_dim), ReduceSum with stride=64 and
-    /// reduce_count=64. When split across 8 lanes, the per-lane reduce
-    /// footprint (128 atoms for the 2-output lanes) exceeds the producer
-    /// chunk (96 atoms), requiring a phase barrier.
+    /// reduce_count=64. When split across 8 lanes, the consumer count (12)
+    /// doesn't divide evenly, but the Mul→Reduce pair is a perfect tile
+    /// (`reduce_extent == abs_stride == 64`), so aligned splitting gives
+    /// each lane a matching producer/consumer chunk and no barrier is
+    /// needed.
     #[test]
     fn test_groupnorm_reduce_needs_barrier() {
         let mut g = NanoGraph::new();
@@ -4121,11 +4212,13 @@ mod tests {
         let phases = plan(&g, num_lanes, &[], &g.outputs.clone());
         verify_plan_full(&phases);
 
-        // The reduce reads cross-lane data (128 atoms per 2-output lane,
-        // but only 96 atoms per producer lane chunk). Must have a barrier.
-        assert!(
-            phases.len() >= 2,
-            "GroupNorm reduce pattern needs at least 2 phases, got {}",
+        // With perfect-tile Mul→Reduce detection, aligned splits give lane
+        // k the exact producer chunk its consumer reads, so the whole chain
+        // collapses into a single phase.
+        assert_eq!(
+            phases.len(),
+            1,
+            "GroupNorm reduce with perfect tile should stay in one phase, got {}",
             phases.len(),
         );
     }

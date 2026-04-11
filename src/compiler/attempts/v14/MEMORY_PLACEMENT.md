@@ -631,33 +631,19 @@ first cut.
    against cross-buffer slabs per the step 2 audit) → first-fit
    interval packing → per-buffer emission.
 
-   Measured peak footprints (default 4-lane partition):
+   Measured peak footprints (default 4-lane partition, post
+   partitioner barrier fix — see section below):
 
    | model    | input buffers | output buffers | intermediate peak | slabs | scratch groups |
    |----------|--------------:|---------------:|------------------:|------:|---------------:|
-   | GPT-2    |      634 MiB |         1.3 MB |         **736 MiB** | 2039 |          2814 |
+   | GPT-2    |      634 MiB |         1.3 MB |         **0.2 MB** | 2034 |          2819 |
    | RWKV 0.1B|      367 MiB |         2.4 MB |         **0.9 MB** | 19167 |         38918 |
 
-   RWKV's peak is tiny — per-layer Mul intermediates of ~192 KB
-   each, packed sequentially with full liveness reuse. This is
-   exactly the cache-residency sweet spot the design is aiming for.
-
-   **GPT-2's 736 MB intermediate peak is correct but surprising.**
-   Investigation: 5 of the top slabs are 147 MB each (38.6M atoms =
-   50257 vocab × 768 hidden), all live concurrently in phases
-   307–308. These are the LM head matmul Mul intermediates for the
-   5 sequence positions. Their Mul groups got classified as
-   cross-span because the downstream Reduce crossed into a later
-   phase, forcing the partitioner to declare the Mul in span
-   outputs. The current executor's `PhaseStore` holds 737 MB of
-   data at the same phase — the placer is matching today's actual
-   footprint, not over-allocating.
-
-   This is a **partitioner opportunity, not a placer bug**: if the
-   LM head Mul→Reduce pair were kept span-local (as it is for
-   RWKV's per-layer matmuls), the GPT-2 intermediate would drop by
-   hundreds of megabytes. Filed for future partitioner work;
-   unblocks the placer implementation.
+   Both models fit the cache-residency sweet spot the design is
+   aiming for: sub-MB cross-span intermediate buffer, with everything
+   else either in per-lane scratch (reused via liveness), inlined
+   into a downstream op (see the matmul case below), or in a
+   dedicated input/output buffer.
 
    The placer's output includes:
    - `AtomPlacementMap` with per-atom `(buffer_id, byte_offset)`.
@@ -665,6 +651,98 @@ first cut.
    - `intermediate_peak_bytes` diagnostic.
    - `intermediate_slab_count`, `scratch_group_count`,
      `top_slabs` summary for postmortem.
+
+   #### GPT-2 LM head investigation and partitioner fix
+
+   The *initial* GPT-2 placer run reported a 736 MB intermediate
+   peak — 5 slabs of 147 MB each, live concurrently in phases 307–
+   308, corresponding to the LM head matmul Mul intermediates for
+   the 5 sequence positions (38.6M atoms = 50257 vocab × 768
+   hidden, one per position). The executor's `PhaseStore` held the
+   same 737 MB at the same phase, so the placer was matching
+   today's actual footprint — but the partitioner was leaving a
+   huge amount of memory on the table.
+
+   Root cause: two `lane_local_access_check` limitations in
+   `partitioner_m.rs` combined to force the Mul→Reduce pair across
+   a phase barrier whenever the consumer count didn't divide evenly
+   by `num_lanes`:
+
+   1. The check computed `prod_chunk = producer.count / num_lanes`
+      via floor division but the consumer footprint via ceil
+      (`max_chunk`), so for `50257 % 4 != 0` the biggest lane's
+      reduce window appeared to overflow the smallest producer
+      chunk by one stride unit. In reality, **aligned splitting**
+      makes the producer chunk grow in lock-step with the consumer
+      chunk — the partition stays exact by construction — but the
+      check didn't model that.
+   2. `aligned_splits` in `build_phase` required divisibility even
+      though `split_range_aligned` → `split_count` already handles
+      uneven splits correctly.
+
+   The fix adds a perfect-tile fast path in
+   `lane_local_access_check` for Reduce consumers where
+   `reduce_extent ≤ abs_stride` (i.e., each output's reduce window
+   fits within one stride unit of the producer), and lifts the
+   divisibility gate in `aligned_splits`. Both are guarded by a
+   **safety gate** that protects against a subtle interaction:
+
+   > A group P can be safely aligned-split (for a downstream
+   > perfect-tile Reduce) only when
+   > (a) P has a unique consumer in the whole graph — no other
+   >     consumer sees P's per-lane layout, and
+   > (b) P has no same-phase Split producers of its own —
+   >     otherwise aligning P creates cross-lane reads upstream
+   >     against those producers' default-split chunks.
+
+   Condition (b) is tracked per-group in `assign_phases` via a
+   `has_same_phase_producer` bool vector (Duplicate producers are
+   exempt, since they broadcast the full tensor to every lane).
+   The first version of the fix only had (a), and introduced 20
+   cross-lane violations on GPT-2 when LayerNorm's `(x-mean)^2 →
+   variance` pattern triggered the fast path: `(x-mean)^2` has a
+   unique consumer (`variance`), but its input `(x-mean)` is
+   multi-consumer default-split, so aligning `(x-mean)^2` tore
+   holes in `(x-mean)`'s lane layout.
+
+   Condition (b) precisely identifies the matmul Mul→Reduce pattern
+   (the Mul is structurally always a single-use intermediate, and
+   its own inputs — weights via input tensor, activations via a
+   cross-phase modular-barrier edge — are always either flat or
+   cross-phase). LayerNorm's squared-diff fails the gate because
+   its producer is same-phase Split.
+
+   #### Interaction with `compute_layout`'s reduce-fold inlining
+
+   The barrier fix alone achieves the 736 MB → 0.2 MB drop because
+   `compute_layout::Step 3b` in `layout.rs` already has a
+   "reduce-fold inlining" pass: when a pure-scalar producer has a
+   single intra-span consumer that is a Reduce with `reduce_stride
+   == 1` and a matching stride-K affine InputRef, the producer's
+   expression is folded directly into the Reduce's loop body. The
+   materialized Mul intermediate vanishes entirely — each Reduce
+   output is computed by reading A and W, multiplying, and
+   accumulating, with no buffer roundtrip for the product.
+
+   With aligned splitting, the Mul and Reduce share matching
+   per-lane `atom_offset` values (`mul.atom_offset == K *
+   reduce.atom_offset` for every lane), which is exactly the
+   inlining precondition. The 5 × 147 MB Muls are not just
+   span-local — they're **never stored anywhere**.
+
+   Execution-side confirmation on GPT-2:
+
+   | metric                    | pre-fix | post-fix |
+   |---------------------------|--------:|---------:|
+   | intermediate buffer peak  |  736 MB | **0.2 MB** |
+   | `PhaseStore` data peak    |  737 MB | **1 MB** |
+   | RSS at peak phase         | 2732 MB | **2069 MB** |
+   | one-step execute time     | 2140 ms | **1771 ms** |
+   | cross-lane violations     |       0 | **0** |
+
+   The design's cache-residency story works for the LM head: each
+   lane streams `A·W` into a local accumulator, no cross-core
+   traffic on the hot bytes, the working set fits in L2/L3.
 4. **Multi-buffer JIT ABI**: extend `SlotInfo` with `buffer_id`,
    thread it through the address.rs emit functions, change the
    prologue to load multiple bases. Run the existing executor with
@@ -693,12 +771,17 @@ issue surfaces.
   RWKV 0.1B (148 coalescing constraints, 0 mixed). The placer's
   "mixed input+intermediate" code path becomes a debug assertion
   rather than a supported case.
-- **`aligned_splits` cooperation between partitioner and placer**:
-  partitioner_m already aligns Mul→Reduce split boundaries via
-  `aligned_splits` logic tied to reduce stride. Under the new
-  design, does this aligning stay in the partitioner, move to the
-  placer, or become cooperative? Needs independent research —
-  probably wants a separate investigation pass before committing.
+- **`aligned_splits` cooperation between partitioner and placer** —
+  **partially resolved**: the partitioner now aligns Mul→Reduce
+  split boundaries for the perfect-tile case even when counts
+  don't divide by `num_lanes`, gated on the producer having a
+  unique consumer *and* no same-phase Split producers (see the
+  GPT-2 LM head investigation above). A looser gate that admits
+  multi-consumer producers — provided all their consumers agree
+  on the aligned layout — would let LayerNorm-style patterns
+  collapse too, but that's chain-wide alignment and is not
+  implemented. The placer does not need to re-derive alignment:
+  it consumes the partitioner's output as-is.
 - **Spans with no cross-span I/O**: edge case in the ABI array
   layout. Need to figure out the convention (empty array vs
   single-entry-for-scratch vs always-include-intermediate-ptr).
