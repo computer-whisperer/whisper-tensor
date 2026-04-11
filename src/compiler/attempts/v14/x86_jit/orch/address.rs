@@ -92,6 +92,12 @@ pub struct AddressInfo {
     /// `slot.elem_bits` (the dtype's semantic width — sub-byte
     /// dtypes have `n_bits < 8`).
     pub n_bits: u32,
+    /// Which buffer the resolved slot lives in. The caller is
+    /// responsible for selecting the base register that holds this
+    /// buffer's pointer and adding the bit offset to it. Under the
+    /// single-buffer per-span layout (pre memory-placement rework)
+    /// this is always 0. See `MEMORY_PLACEMENT.md` §"JIT ABI".
+    pub buffer_id: u8,
 }
 
 /// Emit code that materializes the bit offset of `input.resolve(i)`
@@ -194,6 +200,7 @@ fn emit_constant_atom(
     Ok(AddressInfo {
         dtype: slot.dtype,
         n_bits: slot.elem_bits as u32,
+        buffer_id: slot.buffer_id,
     })
 }
 
@@ -245,6 +252,7 @@ fn emit_strided_1d(
     let info = AddressInfo {
         dtype: slot.dtype,
         n_bits: slot.elem_bits as u32,
+        buffer_id: slot.buffer_id,
     };
 
     match iter {
@@ -351,6 +359,7 @@ fn emit_strided_nd(
     let info = AddressInfo {
         dtype: slot.dtype,
         n_bits: slot.elem_bits as u32,
+        buffer_id: slot.buffer_id,
     };
 
     match iter {
@@ -544,6 +553,7 @@ fn emit_explicit_multi(
     let info = AddressInfo {
         dtype: first_slot.dtype,
         n_bits: first_slot.elem_bits as u32,
+        buffer_id: first_slot.buffer_id,
     };
 
     match iter {

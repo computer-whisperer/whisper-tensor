@@ -1654,6 +1654,7 @@ pub(super) fn emit_output_bit_offset(
     let info = super::address::AddressInfo {
         dtype: slot.dtype,
         n_bits: slot.elem_bits as u32,
+        buffer_id: slot.buffer_id,
     };
 
     // store_base_bit = slot_bit - atom_offset * bit_stride

@@ -45,8 +45,16 @@ pub struct SlotInfo {
     pub atom_base: AtomId,
     /// Number of elements.
     pub count: u64,
-    /// Bit offset of the first element from the start of the buffer.
-    /// Always a multiple of 8 in phase 1 (byte-aligned slot starts).
+    /// Which buffer the slot lives in. Under the single-buffer per-span
+    /// layout (pre memory-placement rework) every slot has
+    /// `buffer_id == 0`. Step 4 of the memory-placement rework adds this
+    /// field so `emit_compute_bit_offset` can start reporting it, and
+    /// step 5 starts populating non-zero values from the global
+    /// placement map. See `MEMORY_PLACEMENT.md` §"JIT ABI".
+    pub buffer_id: u8,
+    /// Bit offset of the first element from the start of the slot's
+    /// buffer. Always a multiple of 8 in phase 1 (byte-aligned slot
+    /// starts).
     pub bit_offset: u64,
     /// Bits between consecutive elements.
     /// In phase 1, equals `dtype.bytes_per_element() * 8` — sub-byte
@@ -741,6 +749,7 @@ pub fn compute_layout(
             all_slots.push(SlotInfo {
                 atom_base: it.base_id,
                 count: it.count,
+                buffer_id: 0,
                 bit_offset: ((slab_base + off_in_slab) as u64) * 8,
                 bit_stride: (slabs[slab_idx].elem_bytes as u64) * 8,
                 elem_bits: elem_bits_semantic,
@@ -752,6 +761,7 @@ pub fn compute_layout(
             all_slots.push(SlotInfo {
                 atom_base: it.base_id,
                 count: it.count,
+                buffer_id: 0,
                 bit_offset: (offset as u64) * 8,
                 bit_stride: (elem_bytes as u64) * 8,
                 elem_bits: elem_bits_semantic,
@@ -782,6 +792,7 @@ pub fn compute_layout(
             all_slots.push(SlotInfo {
                 atom_base: group.base_id,
                 count: group.count,
+                buffer_id: 0,
                 bit_offset: ((slab_base + off_in_slab) as u64) * 8,
                 bit_stride: (slabs[slab_idx].elem_bytes as u64) * 8,
                 elem_bits: elem_bits_semantic,
@@ -793,6 +804,7 @@ pub fn compute_layout(
             all_slots.push(SlotInfo {
                 atom_base: group.base_id,
                 count: group.count,
+                buffer_id: 0,
                 bit_offset: (offset as u64) * 8,
                 bit_stride: (elem_bytes as u64) * 8,
                 elem_bits: elem_bits_semantic,
@@ -1230,6 +1242,7 @@ mod tests {
             let slot = SlotInfo {
                 atom_base: AtomId(0),
                 count: 4,
+                buffer_id: 0,
                 bit_offset: 16,
                 bit_stride: (dtype.bytes_per_element() as u64) * 8,
                 elem_bits: dtype.total_bits() as u64,
@@ -1248,6 +1261,7 @@ mod tests {
         let slot = SlotInfo {
             atom_base: AtomId(7),
             count: 3,
+            buffer_id: 0,
             bit_offset: 24,
             bit_stride: 8,
             elem_bits: 1,
@@ -1269,6 +1283,7 @@ mod tests {
         let slot = SlotInfo {
             atom_base: AtomId(0),
             count: 16,
+            buffer_id: 0,
             bit_offset: 0,
             bit_stride: 1,
             elem_bits: 1,
