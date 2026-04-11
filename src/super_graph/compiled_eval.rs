@@ -243,6 +243,17 @@ pub(crate) fn compile_nano_graph(
     };
     obs.on_milestone("compiled.partition", None, t0, Instant::now());
 
+    // Cross-span slab coalescing audit (gated by env var, see
+    // MEMORY_PLACEMENT.md §"Implementation order" step 2).
+    if std::env::var("WT_AUDIT_SLABS").ok().is_some_and(|v| v != "0") {
+        let report = crate::compiler::attempts::v14::audit::audit_slab_coalescing(
+            graph,
+            &phases,
+            all_output_atom_ranges,
+        );
+        report.print();
+    }
+
     // Extract plan summary before compilation consumes the phases.
     let empty_prov = Vec::new();
     let prov = provenance.unwrap_or(&empty_prov);

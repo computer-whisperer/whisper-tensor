@@ -1,5 +1,6 @@
 #![allow(clippy::all, dead_code, unreachable_patterns)]
 
+pub mod audit;
 pub mod executor;
 #[cfg(feature = "x86_compile")]
 pub mod layout;

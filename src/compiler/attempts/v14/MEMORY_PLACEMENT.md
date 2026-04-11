@@ -583,17 +583,47 @@ first cut.
    `input_ref_range` helper with an exact computation. No behavior
    change yet — still using today's per-span layout. Verify the new
    bounds match (or tighten) what `input_ref_range` computed.
-2. **Audit cross-span slab coalescing**: with bounds available,
-   instrument today's layout pass to count how often coalescing
-   actually fires on cross-span atoms in real models (vs. span-local,
-   which is the common matmul case and stays in scratch). The
-   interesting subset is (a) cross-span coalescing at all, and (b)
-   the further subset where a slab pulls atoms from different buffer
-   kinds (e.g., weight ↔ intermediate). If (a) is rare the global
-   placer's coalescing logic becomes near-dead code and simplifies;
-   if (b) fires, we need to decide between hardening lowering,
-   copying weight regions into the intermediate buffer at startup,
-   or letting codegen handle cross-buffer stride reads.
+2. **Audit cross-span slab coalescing** — **done** (GPT-2 result
+   below; see `audit.rs` for the instrumentation). Enable with
+   `WT_AUDIT_SLABS=1` on any compiled-eval run to re-measure.
+
+   GPT-2 result (gpt2-lm-head-10.onnx, default 4-lane partition):
+   ```
+   total InputRefs scanned:                       24160
+   InputRefs with >1 item (coalescing):             260  (1.1%)
+     all-scratch    (span-local):                    0  (  0.0%)
+     all-input      (weight-only):                   0  (  0.0%)
+     all-intermediate (pure cross-span):           260  (100.0%)
+     all-output     (model output only):             0  (  0.0%)
+     mixed input+intermediate (cross-buffer):        0  (  0.0%)
+     other mixed:                                    0  (  0.0%)
+   ```
+
+   Headline findings:
+   - **Cross-buffer coalescing does not fire at all on GPT-2.** The
+     placer's global coalescing logic stays entirely within the
+     intermediate buffer — no weight ↔ intermediate mixing, no
+     startup copies needed.
+   - **1.1% of InputRefs trigger coalescing**, all of them pure
+     intermediate. Non-negligible but bounded.
+   - Spot-checked examples look like hidden-size-728 atom runs
+     (768 single-atom intermediate groups strided by 1) — typical
+     LayerNorm/ReduceMean/Concat patterns where lowering produced
+     many 1-atom groups that a consumer reads as a flat range.
+   - **Zero all-scratch cases.** The matmul Mul→Reduce coalescing I
+     was expecting to show up here does not — those patterns use
+     stride accesses that stay within a single producer group, so
+     they don't trigger the "≥2 items" threshold. Span-local
+     coalescing still exists inside `compute_layout::Step 1` for
+     other reasons (mostly lowering artifacts), but it doesn't
+     register at the InputRef-bound level the global placer cares
+     about.
+
+   Still TODO: run on RWKV (different op mix — Gather-heavy, time
+   mixing). The result is worth confirming on at least one
+   transformer-style model before the placer is implemented, since
+   GPT-2 is small and may under-represent coalescing patterns that
+   only appear in larger graphs.
 3. **Standalone placer**: implement the global placement pass over a
    `Vec<Phase>` and emit an `AtomPlacementMap`. Test in isolation
    against real model partitions; verify peak live footprint is
@@ -621,12 +651,11 @@ issue surfaces.
 
 ## Open questions
 
-- **Cross-buffer slab coalescing in real models** (step 2 above). If
-  it fires regularly, options are: (a) harden lowering to avoid it,
-  (b) emit a one-time memcpy at executor build to copy weight regions
-  into the intermediate buffer at slab-adjacent positions, (c) demote
-  the affected accesses to non-coalesced and let codegen handle
-  cross-buffer reads. Need data before deciding.
+- **Cross-buffer slab coalescing in real models** — **resolved for
+  GPT-2** (0 hits out of 260 coalescing constraints); still want to
+  confirm on RWKV. If RWKV also clears, the "mixed input+intermediate"
+  code path in the placer becomes a debug assertion rather than a
+  supported code path.
 - **`aligned_splits` cooperation between partitioner and placer**:
   partitioner_m already aligns Mul→Reduce split boundaries via
   `aligned_splits` logic tied to reduce stride. Under the new

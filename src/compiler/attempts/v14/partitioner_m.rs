@@ -1920,7 +1920,11 @@ fn generic_nd_strided_hull(
     }
 }
 
-fn input_access_segments(input: &InputRef, atom_offset: u64, count: u64) -> Vec<(u64, u64)> {
+pub(crate) fn input_access_segments(
+    input: &InputRef,
+    atom_offset: u64,
+    count: u64,
+) -> Vec<(u64, u64)> {
     if count == 0 {
         return Vec::new();
     }
