@@ -58,7 +58,7 @@ use crate::compiler::attempts::v14::layout::BufferLayout;
 use crate::compiler::attempts::v14::placer::{AtomPlacementMap, LITERAL_BUFFER};
 use crate::nano_graph::ScalarOp;
 use crate::nano_graph::ops::{ScalarBinOp, ScalarUnaryOp};
-use crate::nano_graph::pattern::{AtomGroup, AtomId, InputRef};
+use crate::nano_graph::pattern::{AtomGroup, AtomId, InputRef, NanoGraph};
 use crate::numeric_dtype::NumericDType;
 use crate::pool::SystemPool;
 
@@ -276,6 +276,7 @@ pub(super) fn emit_op_compute(
 pub fn emit_group(
     asm: &mut Assembler,
     layout: &BufferLayout,
+    graph: &NanoGraph<'static, SystemPool>,
     group: &AtomGroup<'static, SystemPool>,
     placement: &AtomPlacementMap,
     addr_tables: &mut AddressTables,
@@ -353,6 +354,7 @@ pub fn emit_group(
         } => super::reduce::emit_reduce_group(
             asm,
             layout,
+            graph,
             group,
             *kind,
             *reduce_count,

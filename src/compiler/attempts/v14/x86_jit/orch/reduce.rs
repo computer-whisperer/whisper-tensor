@@ -21,7 +21,7 @@ use dynasmrt::{DynasmApi, DynasmLabelApi, dynasm};
 
 use crate::compiler::attempts::v14::layout::BufferLayout;
 use crate::nano_graph::ops::ReduceKind;
-use crate::nano_graph::pattern::{AtomGroup, AtomId, InputRef};
+use crate::nano_graph::pattern::{AtomGroup, AtomId, InputRef, NanoGraph};
 use crate::numeric_dtype::NumericDType;
 use crate::pool::SystemPool;
 
@@ -54,6 +54,7 @@ const CODEC_XMM_SCRATCH: u8 = 1; // xmm1
 pub fn emit_reduce_group(
     asm: &mut Assembler,
     layout: &BufferLayout,
+    graph: &NanoGraph<'static, SystemPool>,
     group: &AtomGroup<'static, SystemPool>,
     kind: ReduceKind,
     reduce_count: u64,
@@ -71,16 +72,36 @@ pub fn emit_reduce_group(
 
     let repr = ComputeRepr::for_dtype(compute_dtype);
 
-    // Look up the source slot to determine n_bits and k stride.
-    let src_info = resolve_reduce_source_info(layout, &group.inputs[0], group.atom_offset)?;
-    let n_bits = src_info.n_bits;
-    // When byte-aligned, use byte strides to match the byte offsets
-    // from emit_compute_bit_offset.
-    let k_bit_stride = if src_info.byte_aligned {
-        reduce_stride * (src_info.bit_stride / 8) as i64
+    // Check if this reduce inlines a producer (reduce-fold inlining).
+    let reduce_gi = graph
+        .find_group_idx(group.base_id)
+        .expect("reduce group must be in graph");
+    let inline_producer = if reduce_gi < layout.inlines_producer.len() {
+        layout.inlines_producer[reduce_gi].map(|pi| &graph.groups()[pi])
     } else {
-        reduce_stride * src_info.bit_stride as i64
+        None
     };
+
+    // When inlining, we don't need the source slot info (no buffer load).
+    let src_info_opt = if inline_producer.is_some() {
+        None
+    } else {
+        Some(resolve_reduce_source_info(
+            layout,
+            &group.inputs[0],
+            group.atom_offset,
+        )?)
+    };
+    let n_bits = src_info_opt.as_ref().map_or(0, |s| s.n_bits);
+    let k_bit_stride = src_info_opt.as_ref().map_or(0, |s| {
+        let stride = if s.byte_aligned {
+            (s.bit_stride / 8) as i64
+        } else {
+            s.bit_stride as i64
+        };
+        reduce_stride * stride
+    });
+    let src_dtype = src_info_opt.as_ref().map_or(compute_dtype, |s| s.src_dtype);
 
     if group.count == 1 {
         emit_reduce_body(
@@ -96,7 +117,8 @@ pub fn emit_reduce_group(
             group.output_dtype,
             repr,
             n_bits,
-            src_info.src_dtype,
+            src_dtype,
+            inline_producer,
             IterVar::Const(group.atom_offset),
             group.atom_offset,
             addr_tables,
@@ -136,7 +158,8 @@ pub fn emit_reduce_group(
             group.output_dtype,
             repr,
             n_bits,
-            src_info.src_dtype,
+            src_dtype,
+            inline_producer,
             IterVar::Reg(LOOP_VAR_REG),
             group.atom_offset,
             addr_tables,
@@ -227,120 +250,222 @@ fn emit_reduce_body(
     repr: ComputeRepr,
     n_bits: u32,
     src_dtype: NumericDType,
+    inline_producer: Option<&AtomGroup<'static, SystemPool>>,
     iter: IterVar,
     atom_offset: u64,
     addr_tables: &mut AddressTables,
     codec_tables: &mut CodecTables,
 ) -> Result<(), String> {
-    // 1. Compute base address for k=0 → r10, copy to rdi.
-    let src_info = emit_compute_bit_offset(
-        asm,
-        layout,
-        input,
-        iter,
-        atom_offset,
-        BIT_OFF,
-        SCRATCH,
-        addr_tables,
-    )?;
-    // Resolve the source buffer base. If it's in the fast pool we
-    // get a persistent register; if it's overflow we fetch it from
-    // r14 (BUFFER_PTRS_REG) into CODEC_SCRATCH once per k-iteration.
-    // The buffer_ptrs array is tiny and hot in L1, so the extra mov
-    // per inner iteration is negligible compared to the codec work
-    // and the actual reduce arithmetic.
-    let src_fast_reg = layout.buffer_bases.reg_for_opt(src_info.buffer_id);
-    dynasm!(asm; .arch x64; mov Rq(REDUCE_SRC_BIT), Rq(BIT_OFF));
-
-    // 2. Initialize accumulator.
-    emit_reduce_init(asm, kind, compute_dtype, repr)?;
-
-    // 3. Inner loop.
-    dynasm!(asm
-        ; .arch x64
-        ; xor Rq(REDUCE_K), Rq(REDUCE_K)
-        ; mov Rq(REDUCE_K_END), QWORD reduce_count as i64
-    );
-    let inner_top = asm.new_dynamic_label();
-    let inner_done = asm.new_dynamic_label();
-    dynasm!(asm
-        ; =>inner_top
-        ; cmp Rq(REDUCE_K), Rq(REDUCE_K_END)
-        ; jge =>inner_done
-    );
-
-    // 3a. Load source bits from rdi, decode to slot A.
-    //
-    // For fast-pool sources, `src_fast_reg` names the persistent
-    // base register. For overflow sources, fetch the base into
-    // CODEC_SCRATCH on each iteration — it's one extra mov per
-    // iter and CODEC_SCRATCH is dead at this point (it's only
-    // used by `emit_decode` below and doesn't need to carry state
-    // into the next iter).
-    let src_buffer_reg = match src_fast_reg {
-        Some(reg) => reg,
-        None => {
-            dynasm!(asm
-                ; .arch x64
-                ; mov Rq(CODEC_SCRATCH), QWORD [Rq(super::super::prologue::BUFFER_PTRS_REG)
-                    + (src_info.buffer_id as i32) * 8]
-            );
-            CODEC_SCRATCH
-        }
-    };
-    if src_info.byte_aligned {
-        emit_load_aligned(asm, src_buffer_reg, REDUCE_SRC_BIT, n_bits, RAW);
-    } else {
-        emit_load_bits(asm, src_buffer_reg, REDUCE_SRC_BIT, n_bits, RAW, SCRATCH);
-    }
-    let slot_a = match repr {
-        ComputeRepr::F32 | ComputeRepr::F64 => CodecSlot::Xmm(FLT_SLOT_A),
-        ComputeRepr::Int => CodecSlot::Gp(RAW),
-    };
-    emit_decode(
-        asm,
-        src_dtype,
-        RAW,
-        slot_a,
-        CODEC_SCRATCH,
-        CODEC_XMM_SCRATCH,
-        codec_tables,
-    )?;
-
-    // 3b. Accumulate: acc = acc op val.
-    emit_reduce_accum(asm, kind, repr, compute_dtype)?;
-
-    // 3c. Per-step quantization: narrow_to(compute_dtype).
     let acc_slot = match repr {
         ComputeRepr::F32 | ComputeRepr::F64 => CodecSlot::Xmm(FLT_SLOT_C),
         ComputeRepr::Int => CodecSlot::Gp(INT_SLOT_C),
     };
-    emit_narrow_to(
-        asm,
-        compute_dtype,
-        acc_slot,
-        RAW,
-        CODEC_SCRATCH,
-        BIT_OFF,
-        CODEC_XMM_SCRATCH,
-        codec_tables,
-    )?;
 
-    // 3d. Advance source pointer, increment k.
-    if (i32::MIN as i64..=i32::MAX as i64).contains(&k_bit_stride) {
-        dynasm!(asm; .arch x64; add Rq(REDUCE_SRC_BIT), k_bit_stride as i32);
-    } else {
+    if let Some(producer) = inline_producer {
+        // ── Reduce-fold inlining: re-evaluate producer per k-iteration ──
+        //
+        // Instead of loading from a pre-computed buffer, we compute the
+        // producer's expression inline for each k. REDUCE_SRC_BIT (rdi)
+        // holds the flat producer atom index (outer * reduce_count + k),
+        // used as the IterVar for emit_op_compute.
+
+        // 1. Initialize flat index: rdi = outer_iter * reduce_count.
+        let rc = reduce_count as i64;
+        match iter {
+            IterVar::Const(c) => {
+                let base_idx = c as i64 * rc;
+                dynasm!(asm; .arch x64; mov Rq(REDUCE_SRC_BIT), QWORD base_idx);
+            }
+            IterVar::Reg(r) => {
+                if (i32::MIN as i64..=i32::MAX as i64).contains(&rc) {
+                    dynasm!(asm; .arch x64; imul Rq(REDUCE_SRC_BIT), Rq(r), rc as i32);
+                } else {
+                    dynasm!(asm; .arch x64
+                        ; mov Rq(REDUCE_SRC_BIT), QWORD rc
+                        ; imul Rq(REDUCE_SRC_BIT), Rq(r)
+                    );
+                }
+            }
+        }
+
+        // 2. Initialize accumulator.
+        emit_reduce_init(asm, kind, compute_dtype, repr)?;
+
+        // 3. Inner k-loop.
         dynasm!(asm
             ; .arch x64
-            ; mov Rq(SCRATCH), QWORD k_bit_stride
-            ; add Rq(REDUCE_SRC_BIT), Rq(SCRATCH)
+            ; xor Rq(REDUCE_K), Rq(REDUCE_K)
+            ; mov Rq(REDUCE_K_END), QWORD reduce_count as i64
+        );
+        let inner_top = asm.new_dynamic_label();
+        let inner_done = asm.new_dynamic_label();
+        dynasm!(asm
+            ; =>inner_top
+            ; cmp Rq(REDUCE_K), Rq(REDUCE_K_END)
+            ; jge =>inner_done
+        );
+
+        // 3a. Evaluate producer at flat index rdi → result in some slot.
+        let result_slot = super::group::emit_op_compute(
+            asm,
+            layout,
+            producer,
+            IterVar::Reg(REDUCE_SRC_BIT),
+            producer.atom_offset,
+            addr_tables,
+            codec_tables,
+        )?;
+
+        // Narrow the producer's result to its output dtype. This
+        // matches the precision loss that would occur if the value
+        // went through a buffer store+load round-trip (encode to
+        // output_dtype, decode back). Without this, the fused path
+        // would silently use full compute-repr precision for the
+        // intermediate, violating the dtype contract.
+        emit_narrow_to(
+            asm,
+            producer.output_dtype,
+            result_slot,
+            RAW,
+            CODEC_SCRATCH,
+            BIT_OFF,
+            CODEC_XMM_SCRATCH,
+            codec_tables,
+        )?;
+
+        // Move result to slot A if not already there.
+        let slot_a = match repr {
+            ComputeRepr::F32 | ComputeRepr::F64 => CodecSlot::Xmm(FLT_SLOT_A),
+            ComputeRepr::Int => CodecSlot::Gp(RAW),
+        };
+        match (result_slot, slot_a) {
+            (CodecSlot::Xmm(src), CodecSlot::Xmm(dst)) if src != dst => {
+                dynasm!(asm; .arch x64; vmovaps Rx(dst), Rx(src));
+            }
+            (CodecSlot::Gp(src), CodecSlot::Gp(dst)) if src != dst => {
+                dynasm!(asm; .arch x64; mov Rq(dst), Rq(src));
+            }
+            _ => {} // already in the right slot
+        }
+
+        // 3b. Accumulate: acc = acc op val.
+        emit_reduce_accum(asm, kind, repr, compute_dtype)?;
+
+        // 3c. Per-step quantization.
+        emit_narrow_to(
+            asm,
+            compute_dtype,
+            acc_slot,
+            RAW,
+            CODEC_SCRATCH,
+            BIT_OFF,
+            CODEC_XMM_SCRATCH,
+            codec_tables,
+        )?;
+
+        // 3d. Advance flat index, increment k.
+        dynasm!(asm
+            ; add Rq(REDUCE_SRC_BIT), 1
+            ; add Rq(REDUCE_K), 1
+            ; jmp =>inner_top
+            ; =>inner_done
+        );
+    } else {
+        // ── Standard path: load from pre-computed buffer ──
+
+        // 1. Compute base address for k=0 → r10, copy to rdi.
+        let src_info = emit_compute_bit_offset(
+            asm,
+            layout,
+            input,
+            iter,
+            atom_offset,
+            BIT_OFF,
+            SCRATCH,
+            addr_tables,
+        )?;
+        let src_fast_reg = layout.buffer_bases.reg_for_opt(src_info.buffer_id);
+        dynasm!(asm; .arch x64; mov Rq(REDUCE_SRC_BIT), Rq(BIT_OFF));
+
+        // 2. Initialize accumulator.
+        emit_reduce_init(asm, kind, compute_dtype, repr)?;
+
+        // 3. Inner loop.
+        dynasm!(asm
+            ; .arch x64
+            ; xor Rq(REDUCE_K), Rq(REDUCE_K)
+            ; mov Rq(REDUCE_K_END), QWORD reduce_count as i64
+        );
+        let inner_top = asm.new_dynamic_label();
+        let inner_done = asm.new_dynamic_label();
+        dynasm!(asm
+            ; =>inner_top
+            ; cmp Rq(REDUCE_K), Rq(REDUCE_K_END)
+            ; jge =>inner_done
+        );
+
+        // 3a. Load source bits, decode to slot A.
+        let src_buffer_reg = match src_fast_reg {
+            Some(reg) => reg,
+            None => {
+                dynasm!(asm
+                    ; .arch x64
+                    ; mov Rq(CODEC_SCRATCH), QWORD [Rq(super::super::prologue::BUFFER_PTRS_REG)
+                        + (src_info.buffer_id as i32) * 8]
+                );
+                CODEC_SCRATCH
+            }
+        };
+        if src_info.byte_aligned {
+            emit_load_aligned(asm, src_buffer_reg, REDUCE_SRC_BIT, n_bits, RAW);
+        } else {
+            emit_load_bits(asm, src_buffer_reg, REDUCE_SRC_BIT, n_bits, RAW, SCRATCH);
+        }
+        let slot_a = match repr {
+            ComputeRepr::F32 | ComputeRepr::F64 => CodecSlot::Xmm(FLT_SLOT_A),
+            ComputeRepr::Int => CodecSlot::Gp(RAW),
+        };
+        emit_decode(
+            asm,
+            src_dtype,
+            RAW,
+            slot_a,
+            CODEC_SCRATCH,
+            CODEC_XMM_SCRATCH,
+            codec_tables,
+        )?;
+
+        // 3b. Accumulate.
+        emit_reduce_accum(asm, kind, repr, compute_dtype)?;
+
+        // 3c. Per-step quantization.
+        emit_narrow_to(
+            asm,
+            compute_dtype,
+            acc_slot,
+            RAW,
+            CODEC_SCRATCH,
+            BIT_OFF,
+            CODEC_XMM_SCRATCH,
+            codec_tables,
+        )?;
+
+        // 3d. Advance source pointer, increment k.
+        if (i32::MIN as i64..=i32::MAX as i64).contains(&k_bit_stride) {
+            dynasm!(asm; .arch x64; add Rq(REDUCE_SRC_BIT), k_bit_stride as i32);
+        } else {
+            dynasm!(asm
+                ; .arch x64
+                ; mov Rq(SCRATCH), QWORD k_bit_stride
+                ; add Rq(REDUCE_SRC_BIT), Rq(SCRATCH)
+            );
+        }
+        dynasm!(asm
+            ; add Rq(REDUCE_K), 1
+            ; jmp =>inner_top
+            ; =>inner_done
         );
     }
-    dynasm!(asm
-        ; add Rq(REDUCE_K), 1
-        ; jmp =>inner_top
-        ; =>inner_done
-    );
 
     // 4. Encode accumulator → rax, store.
     let dst_info = emit_output_bit_offset(
