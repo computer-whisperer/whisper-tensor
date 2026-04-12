@@ -303,8 +303,6 @@ fn classify_group(
 
     // Very small groups aren't worth splitting.
     if group.count < num_lanes as u64 {
-        // But if count == 1 and it's not a literal, it might be a scalar
-        // intermediate. Still not worth splitting.
         if group.count <= 1 {
             return GroupKind::Duplicate; // scalar — just duplicate
         }
@@ -650,8 +648,7 @@ fn assign_phases(
             // group producers (so aligning P's own per-lane fragments never
             // crosses a producer lane boundary upstream — see the
             // LayerNorm `(x-mean)^2 → variance` case).
-            let producer_can_align =
-                successors[pi].len() == 1 && !has_same_phase_producer[pi];
+            let producer_can_align = successors[pi].len() == 1 && !has_same_phase_producer[pi];
 
             // Determine if we need a barrier between producer and consumer.
             let barrier_reason = barrier_reason_between(
@@ -688,9 +685,9 @@ fn assign_phases(
         // Duplicate producers are exempt: they broadcast the full tensor to
         // every lane, so aligning gi's per-lane split never crosses a
         // producer lane boundary against them.
-        has_same_phase_producer[gi] = producers[gi].iter().any(|&pp| {
-            phase_of[pp] == min_phase && kinds[pp] != GroupKind::Duplicate
-        });
+        has_same_phase_producer[gi] = producers[gi]
+            .iter()
+            .any(|&pp| phase_of[pp] == min_phase && kinds[pp] != GroupKind::Duplicate);
     }
 
     if trace_barriers && !barrier_events.is_empty() {
@@ -914,14 +911,11 @@ fn barrier_reason_between(
         // Split → Split: no barrier if the consumer reads only from its own
         // lane's slice. This is true when the input pattern is Affine with
         // stride 1 (elementwise chain) or StridedBroadcast with aligned blocks.
-        (GroupKind::Split, GroupKind::Split) => lane_local_access_check(
-            cons,
-            prod,
-            num_lanes,
-            producer_has_unique_consumer,
-        )
-        .err()
-        .map(BarrierReason::SplitSplitNonLocal),
+        (GroupKind::Split, GroupKind::Split) => {
+            lane_local_access_check(cons, prod, num_lanes, producer_has_unique_consumer)
+                .err()
+                .map(BarrierReason::SplitSplitNonLocal)
+        }
 
         // Duplicate → anything: no barrier. Duplicated data is in every lane.
         (GroupKind::Duplicate, _) => None,
@@ -1115,7 +1109,8 @@ fn lane_local_access_check(
                             ..
                         } = &consumer.op
                         {
-                            let reduce_extent = reduce_stride.unsigned_abs() * (*reduce_count - 1) + 1;
+                            let reduce_extent =
+                                reduce_stride.unsigned_abs() * (*reduce_count - 1) + 1;
                             // Perfect-tiling fast path: we already know
                             // abs_stride * consumer.count == producer.count.
                             // If each output's reduce footprint fits within
@@ -1132,8 +1127,8 @@ fn lane_local_access_check(
                             // aligning the producer for the Reduce would
                             // break the others — fall back to the tight
                             // per-chunk check against the default split.
-                            let safe_aligned = producer_has_unique_consumer
-                                && reduce_extent <= abs_stride;
+                            let safe_aligned =
+                                producer_has_unique_consumer && reduce_extent <= abs_stride;
                             if !safe_aligned {
                                 let max_chunk =
                                     (consumer.count + num_lanes as u64 - 1) / num_lanes as u64;
@@ -1218,14 +1213,25 @@ fn split_range(
     lane: usize,
     num_lanes: usize,
 ) -> (u64, u64) {
-    split_count(group.count, lane, num_lanes)
+    let cl_atoms = cache_line_atoms(group.output_dtype);
+    split_count_cl(group.count, lane, num_lanes, cl_atoms)
 }
 
 fn normalize_num_lanes(requested: usize) -> usize {
     requested.max(1)
 }
 
-/// Split `count` items evenly across lanes.
+/// Atoms per cache line for a given dtype.
+fn cache_line_atoms(dtype: crate::numeric_dtype::NumericDType) -> u64 {
+    const CACHE_LINE_BYTES: u64 = 64;
+    let bpe = dtype.bytes_per_element() as u64;
+    if bpe == 0 {
+        return 1;
+    }
+    CACHE_LINE_BYTES / bpe
+}
+
+/// Split `count` items evenly across lanes (no alignment).
 fn split_count(count: u64, lane: usize, num_lanes: usize) -> (u64, u64) {
     let chunk = count / num_lanes as u64;
     let remainder = count % num_lanes as u64;
@@ -1233,6 +1239,48 @@ fn split_count(count: u64, lane: usize, num_lanes: usize) -> (u64, u64) {
     let start = chunk * lane as u64 + (lane as u64).min(remainder);
     let lane_count = chunk + if (lane as u64) < remainder { 1 } else { 0 };
     (start, lane_count)
+}
+
+/// Split `count` items across lanes with cache-line-aligned boundaries.
+///
+/// Every inter-lane boundary falls on a `cl_atoms` multiple so that
+/// adjacent lanes never share a cache line. When `count` is too small
+/// to give every lane a full cache-line-sized chunk, the effective lane
+/// count is reduced — surplus lanes receive `(start_past_end, 0)`.
+fn split_count_cl(count: u64, lane: usize, num_lanes: usize, cl_atoms: u64) -> (u64, u64) {
+    if cl_atoms <= 1 || num_lanes <= 1 {
+        return split_count(count, lane, num_lanes);
+    }
+
+    let n_blocks = count / cl_atoms;
+    let tail = count - n_blocks * cl_atoms;
+
+    // Effective lanes: no more than available blocks.
+    let eff = (n_blocks as usize).min(num_lanes).max(1);
+    if eff <= 1 {
+        // Whole-lane fallback: lane 0 gets everything.
+        return if lane == 0 { (0, count) } else { (count, 0) };
+    }
+
+    if lane >= eff {
+        // This lane is inactive.
+        return (count, 0);
+    }
+
+    // Distribute cache-line blocks among effective lanes.
+    let blocks_per = n_blocks / eff as u64;
+    let block_rem = n_blocks % eff as u64;
+    let my_blocks = blocks_per + if (lane as u64) < block_rem { 1 } else { 0 };
+    let start_block = blocks_per * lane as u64 + (lane as u64).min(block_rem);
+    let start = start_block * cl_atoms;
+    let mut my_count = my_blocks * cl_atoms;
+
+    // Last active lane absorbs the sub-cache-line tail.
+    if lane == eff - 1 {
+        my_count += tail;
+    }
+
+    (start, my_count)
 }
 
 /// Split a producer group aligned to a consumer's boundaries.
@@ -1248,8 +1296,11 @@ fn split_range_aligned(
     consumer_count: u64,
     stride: u64,
 ) -> (u64, u64) {
-    // Split the consumer evenly, then scale by stride for the producer.
-    let (cons_start, cons_lane_count) = split_count(consumer_count, lane, num_lanes);
+    // Split the consumer with cache-line alignment, then scale by
+    // stride for the producer. The consumer dtype matches the
+    // producer's output_dtype (the reduce reads from the producer).
+    let cl_atoms = cache_line_atoms(group.output_dtype);
+    let (cons_start, cons_lane_count) = split_count_cl(consumer_count, lane, num_lanes, cl_atoms);
     let start = cons_start * stride;
     let count = cons_lane_count * stride;
     debug_assert!(
@@ -1402,6 +1453,23 @@ pub fn plan(
     // very large split consumers.
     promote_small_nonlocal_sources_to_duplicate(groups, &successors, &mut kinds, num_lanes);
 
+    // Step 2d: Cache-line discipline — demote remaining Split groups
+    // whose per-lane fragment would be smaller than a cache line to
+    // Whole. This runs AFTER promotion passes so that groups eligible
+    // for Duplicate have already been promoted; only groups that
+    // stayed Split are considered. The demotion to Whole causes
+    // assign_phases to insert phase barriers for downstream Split
+    // consumers that can no longer read lane-locally.
+    for gi in 0..groups.len() {
+        if kinds[gi] != GroupKind::Split {
+            continue;
+        }
+        let cl_atoms = cache_line_atoms(groups[gi].output_dtype);
+        if cl_atoms > 1 && groups[gi].count < cl_atoms * num_lanes as u64 {
+            kinds[gi] = GroupKind::Whole;
+        }
+    }
+
     // Step 3: Assign phases.
     let (phase_of, has_same_phase_producer) =
         assign_phases(groups, &kinds, &producers, &successors, graph, num_lanes);
@@ -1551,8 +1619,7 @@ fn build_phase(
         // other consumer AND whose own upstream reads do not depend on a
         // same-phase lane layout. See the LayerNorm `(x-mean)^2 → variance`
         // discussion in `assign_phases`.
-        let producer_can_align =
-            successors[gi].len() == 1 && !has_same_phase_producer[gi];
+        let producer_can_align = successors[gi].len() == 1 && !has_same_phase_producer[gi];
         for &ci in &successors[gi] {
             if !phase_set.contains(&ci) || kinds[ci] != GroupKind::Split {
                 continue;
@@ -2798,7 +2865,22 @@ mod tests {
             );
         }
 
-        // Each lane should have 250 neg atoms (1000 / 4).
+        // Total neg atoms across all lanes should sum to 1000. Per-lane
+        // counts may differ from 250 due to cache-line-aligned splitting
+        // (boundaries rounded to 16-atom multiples for F32).
+        let total_neg: u64 = phases[0]
+            .spans
+            .iter()
+            .flat_map(|s| s.graph.groups().iter())
+            .filter(|g| matches!(g.op, ScalarOp::Unary { .. }))
+            .map(|g| g.count)
+            .sum();
+        assert_eq!(
+            total_neg, 1000,
+            "Total neg atoms across lanes should be 1000, got {}",
+            total_neg,
+        );
+        // Every lane should have a non-zero share.
         for (lane, span) in phases[0].spans.iter().enumerate() {
             let neg_atoms: u64 = span
                 .graph
@@ -2807,10 +2889,10 @@ mod tests {
                 .filter(|g| matches!(g.op, ScalarOp::Unary { .. }))
                 .map(|g| g.count)
                 .sum();
-            assert_eq!(
-                neg_atoms, 250,
-                "Lane {} should have 250 neg atoms, got {}",
-                lane, neg_atoms,
+            assert!(
+                neg_atoms > 0,
+                "Lane {} should have non-zero neg atoms",
+                lane,
             );
         }
 
@@ -4212,13 +4294,14 @@ mod tests {
         let phases = plan(&g, num_lanes, &[], &g.outputs.clone());
         verify_plan_full(&phases);
 
-        // With perfect-tile Mul→Reduce detection, aligned splits give lane
-        // k the exact producer chunk its consumer reads, so the whole chain
-        // collapses into a single phase.
-        assert_eq!(
-            phases.len(),
-            1,
-            "GroupNorm reduce with perfect tile should stay in one phase, got {}",
+        // The reduce has 12 output atoms — below the cache-line
+        // threshold (16 F32 atoms) for safe multi-lane splitting.
+        // Cache-line discipline demotes it to Whole, requiring a
+        // barrier before downstream consumers. Production-scale
+        // models have reduce counts >> 128 and remain single-phase.
+        assert!(
+            phases.len() <= 3,
+            "GroupNorm reduce should need at most 3 phases, got {}",
             phases.len(),
         );
     }

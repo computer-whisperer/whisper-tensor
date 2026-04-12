@@ -15,7 +15,7 @@
 //! maps every `buffer_id` the span actually touches to a callee-saved
 //! GPR the prologue loads from the `buffer_ptrs` argument array.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use super::placer::{AtomPlacementMap, INTERMEDIATE_BUFFER, LITERAL_BUFFER};
 use crate::nano_graph::{AtomGroup, AtomId, AtomRange, InputRef, NanoGraph, ScalarOp};
@@ -515,10 +515,7 @@ pub fn compute_layout(
     let mut item_kinds: Vec<ItemKind> = vec![ItemKind::Fixed; total_items];
     for (gi, group) in groups.iter().enumerate() {
         let placed = placement.byte_offset_of(group.base_id);
-        let is_literal = matches!(
-            &group.op,
-            ScalarOp::Literal(_) | ScalarOp::LiteralSpan(_)
-        );
+        let is_literal = matches!(&group.op, ScalarOp::Literal(_) | ScalarOp::LiteralSpan(_));
         let canonical_writer = range_overlaps_outputs(group.base_id, group.count);
         let kind = if is_literal {
             ItemKind::Literal
@@ -671,8 +668,11 @@ pub fn compute_layout(
 
     // ── Step 2: Build contiguous slabs for each component ──
 
-    // Collect components: root → list of item indices.
-    let mut components: HashMap<usize, Vec<usize>> = HashMap::new();
+    // Collect components: root → list of item indices. BTreeMap for
+    // deterministic iteration; per-span slab index ends up in the
+    // per-span layout and affects register allocation / first-fit
+    // order downstream.
+    let mut components: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
     for i in 0..total_items {
         let root = uf_find(&mut parent, i);
         components.entry(root).or_default().push(i);
@@ -703,9 +703,7 @@ pub fn compute_layout(
         // at least one non-Literal member is promoted to a scratch
         // slab and Literal members in it get an on-the-fly copy
         // from the literal buffer at JIT emit time.
-        let all_literal = members
-            .iter()
-            .all(|&m| item_kinds[m] == ItemKind::Literal);
+        let all_literal = members.iter().all(|&m| item_kinds[m] == ItemKind::Literal);
         if all_literal {
             continue;
         }
@@ -1004,14 +1002,12 @@ pub fn compute_layout(
                 dtype: group.output_dtype,
             });
         } else if matches!(item_kinds[item_idx], ItemKind::Fixed | ItemKind::Literal) {
-            let (buf_id, byte_off) = placement
-                .byte_offset_of(group.base_id)
-                .ok_or_else(|| {
-                    format!(
-                        "compute_layout: group base={} (kind={:?}) missing from placement map",
-                        group.base_id, item_kinds[item_idx]
-                    )
-                })?;
+            let (buf_id, byte_off) = placement.byte_offset_of(group.base_id).ok_or_else(|| {
+                format!(
+                    "compute_layout: group base={} (kind={:?}) missing from placement map",
+                    group.base_id, item_kinds[item_idx]
+                )
+            })?;
             all_slots.push(SlotInfo {
                 atom_base: group.base_id,
                 count: group.count,

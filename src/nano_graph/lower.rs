@@ -518,11 +518,23 @@ pub fn lower<'a, 'p: 'a, P: crate::pool::Pool + 'p>(
         .flat_map(|op| op.outputs().collect::<Vec<_>>())
         .collect();
     // Copy the shared reference to avoid borrowing ctx during iteration.
+    // Iterate in sorted order: `all_infos` is a HashMap and the
+    // iteration order decides which tensor gets atom_id=0, 1, ..., so
+    // an unsorted walk would hand different atom IDs to the same input
+    // / weight / bias tensor on every process (different RandomState
+    // seed), producing different-but-correct lowerings per run. The
+    // placer + JIT are deterministic given a fixed lowering, but
+    // downstream test flakiness shows up as soon as any placement
+    // decision depends on atom-id ordering of the pre-op tensors.
     let infos_ref = ctx.all_infos;
-    for (id, info) in infos_ref {
-        if !op_outputs.contains(id) {
-            ctx.register_constant(*id, info);
-        }
+    let mut pre_op_ids: Vec<&GlobalId> = infos_ref
+        .keys()
+        .filter(|id| !op_outputs.contains(id))
+        .collect();
+    pre_op_ids.sort_unstable();
+    for id in pre_op_ids {
+        let info = infos_ref.get(id).expect("key from same map");
+        ctx.register_constant(*id, info);
     }
 
     // Walk ops in topological order.

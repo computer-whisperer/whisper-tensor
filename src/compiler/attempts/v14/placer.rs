@@ -399,6 +399,12 @@ pub fn run_placer(
     //
     // Intermediate and Output groups need liveness; Input lives for
     // the whole call; Scratch is per-span so it doesn't need tracking.
+    // Literal groups are tracked here too, in case step 3 promotes
+    // any of them into an Intermediate slab (Pad-style: a Literal
+    // pad zero group that a consumer's Strided InputRef coalesces
+    // with adjacent Identity groups). A promoted Literal's slab
+    // needs a first_phase/last_phase interval like any other
+    // intermediate-buffer resident.
 
     let last_phase = phases.len().saturating_sub(1);
     let mut liveness: HashMap<usize, (usize, usize)> = HashMap::new();
@@ -410,7 +416,7 @@ pub fn run_placer(
                 if let Some(gi) = main_graph.find_group_idx(range.base) {
                     if matches!(
                         group_kind[gi],
-                        BufferKind::Intermediate | BufferKind::Output
+                        BufferKind::Intermediate | BufferKind::Output | BufferKind::Literal
                     ) {
                         let entry = liveness.entry(gi).or_insert((pi, pi));
                         entry.0 = entry.0.min(pi);
@@ -423,7 +429,7 @@ pub fn run_placer(
                 if let Some(gi) = main_graph.find_group_idx(range.base) {
                     if matches!(
                         group_kind[gi],
-                        BufferKind::Intermediate | BufferKind::Output
+                        BufferKind::Intermediate | BufferKind::Output | BufferKind::Literal
                     ) {
                         let entry = liveness.entry(gi).or_insert((pi, pi));
                         entry.1 = entry.1.max(pi);
@@ -443,12 +449,34 @@ pub fn run_placer(
         }
     }
 
-    // ── Step 3: coalescing constraints via union-find over Intermediate groups ──
+    // ── Step 3: coalescing constraints via union-find ──
     //
-    // Only Intermediate groups participate. We confirmed via the audit
-    // (step 2) that cross-buffer coalescing never fires on real models,
-    // so any InputRef whose access spans a non-Intermediate group is a
-    // hard error.
+    // Unions any two groups that a consumer's Strided InputRef (or
+    // Reduce k-stride) requires to be laid out contiguously in
+    // memory. Both `Intermediate` and `Literal` groups participate:
+    //
+    // - `Intermediate` members are ordinary cross-span values that
+    //   live in the shared intermediate buffer; coalescing packs
+    //   them into slabs.
+    //
+    // - `Literal` members are pulled into a slab only when a
+    //   consumer's access interleaves them with Intermediate atoms
+    //   (Pad-style lowering where pad zeros and copied input rows
+    //   alternate). A Literal that lands in an intermediate slab
+    //   gets its **primary** placement moved from the plan-wide
+    //   literal buffer to the slab position in the intermediate
+    //   buffer; its source bytes still live in the literal buffer
+    //   at `literal_sources[base]`, and the per-span JIT emits an
+    //   ordinary copy from that source into the intermediate slot
+    //   at every execute (same mechanism compute_layout already
+    //   uses for the intra-span Pad case).
+    //
+    // `Output` members are pinned to their placer-assigned output
+    // buffer and can't move; `Scratch` members are span-local and
+    // never reach the placer's coalescer. Input tensors are
+    // similarly Fixed. Any coalescing constraint that pulls in
+    // such a member is still rejected as cross-buffer (the audit
+    // said it never happens on real models).
 
     let mut uf = UnionFind::new(groups.len());
 
@@ -481,7 +509,44 @@ pub fn run_placer(
         for span in &phase.spans {
             for group in span.graph.groups() {
                 for input_ref in &group.inputs {
-                    let segments = input_access_segments(input_ref, group.atom_offset, group.count);
+                    let mut segments =
+                        input_access_segments(input_ref, group.atom_offset, group.count);
+
+                    // Reduce groups iterate an inner k-loop that reads
+                    // `k * reduce_stride` atoms beyond each nominal
+                    // atom. `input_access_segments` only sees the
+                    // InputRef's own stride pattern and has no knowledge
+                    // of the ScalarOp, so the base segments cover only
+                    // `k == 0`. Replicate the base segments at each
+                    // `k * reduce_stride` offset so the coalescing pass
+                    // can see every producer group the reduce actually
+                    // reads and union them into one contiguous slab.
+                    // Without this, a multi-group reduce (e.g. Conv's
+                    // 9 kernel-position Mul groups feeding one Reduce
+                    // with reduce_stride == spatial_size) lands with
+                    // its producers at arbitrary first-fit offsets,
+                    // and the JIT's `base + k*reduce_stride*bit_stride`
+                    // formula reads the wrong bytes.
+                    if let ScalarOp::Reduce {
+                        reduce_count,
+                        reduce_stride,
+                        ..
+                    } = &group.op
+                    {
+                        if *reduce_count > 1 && *reduce_stride != 0 {
+                            let base_segments: Vec<(u64, u64)> = segments.clone();
+                            for k in 1..*reduce_count {
+                                let off = k as i64 * *reduce_stride;
+                                for &(seg_lo, seg_hi) in &base_segments {
+                                    let new_lo = seg_lo as i64 + off;
+                                    let new_hi = seg_hi as i64 + off;
+                                    if new_lo >= 0 && new_hi > new_lo {
+                                        segments.push((new_lo as u64, new_hi as u64));
+                                    }
+                                }
+                            }
+                        }
+                    }
 
                     // Gather the set of main-graph groups overlapping any segment.
                     let mut items: Vec<usize> = Vec::new();
@@ -520,39 +585,47 @@ pub fn run_placer(
                         continue;
                     }
 
-                    // A coalescing constraint that touches an input
-                    // tensor, a scratch group, or an output group is a
-                    // design violation per the audit.
-                    let mut intermediate_members: Vec<usize> = items
+                    // Members eligible for coalescing: Intermediate
+                    // (natural slab citizen) and Literal (promoted
+                    // into the slab via a plan-build copy). Any
+                    // other member kind (Scratch / Output / Input)
+                    // being pulled into the access range is a
+                    // cross-buffer design violation.
+                    let coalescable_members: Vec<usize> = items
                         .iter()
                         .copied()
-                        .filter(|&gi| group_kind[gi] == BufferKind::Intermediate)
+                        .filter(|&gi| {
+                            matches!(
+                                group_kind[gi],
+                                BufferKind::Intermediate | BufferKind::Literal
+                            )
+                        })
                         .collect();
 
-                    // If the constraint has any non-Intermediate member
-                    // mixed with Intermediate members, refuse to coalesce
-                    // — that would imply a cross-buffer slab.
-                    let has_non_intermediate = items
-                        .iter()
-                        .any(|&gi| group_kind[gi] != BufferKind::Intermediate);
-                    if has_non_intermediate && !intermediate_members.is_empty() {
+                    let has_non_coalescable = items.iter().any(|&gi| {
+                        !matches!(
+                            group_kind[gi],
+                            BufferKind::Intermediate | BufferKind::Literal
+                        )
+                    });
+                    if has_non_coalescable && !coalescable_members.is_empty() {
                         // Diagnostic: report the first such case and continue.
                         // (The audit said this never happens — if it does
                         // now, we want to know.)
                         eprintln!(
                             "[placer] WARN: cross-buffer coalescing constraint \
                              (expected none per audit). Consumer group base={} \
-                             intermediate={} non-intermediate={}",
+                             coalescable={} other={}",
                             group.base_id.0,
-                            intermediate_members.len(),
-                            items.len() - intermediate_members.len(),
+                            coalescable_members.len(),
+                            items.len() - coalescable_members.len(),
                         );
                         continue;
                     }
 
-                    // Union all Intermediate members together.
-                    for i in 1..intermediate_members.len() {
-                        uf.union(intermediate_members[0], intermediate_members[i]);
+                    // Union all coalescable members together.
+                    for i in 1..coalescable_members.len() {
+                        uf.union(coalescable_members[0], coalescable_members[i]);
                     }
                 }
             }
@@ -560,10 +633,30 @@ pub fn run_placer(
     }
 
     // ── Step 4: build slabs from connected components ──
+    //
+    // Components are built from both Intermediate and Literal groups
+    // — any Literal that got unioned with an Intermediate member
+    // during step 3 shows up in the same component. A component is
+    // promoted to an intermediate slab iff it has at least one
+    // Intermediate member; all-Literal components (which happen
+    // when a consumer's Strided access spans only consecutive
+    // Literal groups) stay at their placer-assigned literal-buffer
+    // offsets and don't need a slab. `literal_promoted[gi]` tracks
+    // which Literal groups got pulled into an intermediate slab so
+    // the literal-entry emission below knows to skip them.
 
-    let mut component_members: HashMap<usize, Vec<usize>> = HashMap::new();
+    let mut literal_promoted: Vec<bool> = vec![false; groups.len()];
+
+    // BTreeMap for deterministic iteration — slab ordering affects
+    // first-fit packing. Even though a correct layout must produce
+    // identical outputs regardless of ordering, keeping this
+    // deterministic removes one variable when debugging.
+    let mut component_members: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
     for gi in 0..groups.len() {
-        if group_kind[gi] != BufferKind::Intermediate {
+        if !matches!(
+            group_kind[gi],
+            BufferKind::Intermediate | BufferKind::Literal
+        ) {
             continue;
         }
         let root = uf.find(gi);
@@ -572,6 +665,21 @@ pub fn run_placer(
 
     let mut slabs: Vec<SlabInterval> = Vec::new();
     for (_, members) in component_members {
+        // Skip all-Literal components: those groups stay in the
+        // literal buffer, laid out contiguously by step 6.
+        let has_intermediate = members
+            .iter()
+            .any(|&gi| group_kind[gi] == BufferKind::Intermediate);
+        if !has_intermediate {
+            continue;
+        }
+        // Mark Literal members of this slab as promoted so they
+        // skip the LITERAL_BUFFER primary-entry emission below.
+        for &gi in &members {
+            if group_kind[gi] == BufferKind::Literal {
+                literal_promoted[gi] = true;
+            }
+        }
         // Compute slab extent, dtype, liveness, split-written flag.
         let mut lo = u64::MAX;
         let mut hi = 0u64;
@@ -617,6 +725,22 @@ pub fn run_placer(
             continue;
         }
 
+        if std::env::var("WT_DUMP_PLACER_SLABS")
+            .ok()
+            .is_some_and(|v| v != "0")
+        {
+            let member_info: Vec<String> = members
+                .iter()
+                .map(|&mi| {
+                    let g = &groups[mi];
+                    format!("{}+{}:{:?}", g.base_id.0, g.count, group_kind[mi])
+                })
+                .collect();
+            eprintln!(
+                "[placer slab] atom_range=[{lo}..{hi}) eb={elem_bytes} first={first_phase} last={last_p} members=[{}]",
+                member_info.join(",")
+            );
+        }
         slabs.push(SlabInterval {
             members,
             atom_lo: lo,
@@ -760,7 +884,13 @@ pub fn run_placer(
         let aligned = align_up(literal_watermark, eb.max(1));
         literal_watermark = aligned + g.count * eb;
         literal_sources.insert(g.base_id, aligned);
-        if group_kind[gi] == BufferKind::Literal {
+        // Primary `LITERAL_BUFFER` entry only for groups whose
+        // classification stayed `Literal` AND weren't pulled into an
+        // intermediate slab in step 4. Promoted Literals get their
+        // primary entry in the intermediate slab emission loop
+        // below; the JIT then reads their source bytes from
+        // `literal_sources[base]` via an emit-time copy.
+        if group_kind[gi] == BufferKind::Literal && !literal_promoted[gi] {
             literal_offsets[gi] = Some(aligned);
         }
     }

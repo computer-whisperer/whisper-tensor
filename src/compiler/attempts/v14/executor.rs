@@ -207,9 +207,8 @@ impl CompiledSpanFn for PoolEvalSpan {
             let bpe = pr.range.dtype.bytes_per_element();
             let needed = pr.range.count as usize * bpe;
             let copy = src.len().min(needed);
-            let dst_ptr = unsafe {
-                buffer_ptrs[pr.buffer_id as usize].add(pr.byte_offset as usize)
-            };
+            let dst_ptr =
+                unsafe { buffer_ptrs[pr.buffer_id as usize].add(pr.byte_offset as usize) };
             unsafe {
                 std::ptr::copy_nonoverlapping(src.as_ptr(), dst_ptr, copy);
             }
@@ -622,8 +621,10 @@ impl ExecutablePlan {
         // guarantees lane workers touch disjoint byte ranges.
         let template_atomic: Vec<AtomicPtr<u8>> =
             template.iter().map(|&p| AtomicPtr::new(p)).collect();
-        let scratch_atomic: Vec<AtomicPtr<u8>> =
-            lane_scratch_ptrs.iter().map(|&p| AtomicPtr::new(p)).collect();
+        let scratch_atomic: Vec<AtomicPtr<u8>> = lane_scratch_ptrs
+            .iter()
+            .map(|&p| AtomicPtr::new(p))
+            .collect();
 
         if let Some(lane_pool) = lane_pool {
             let lane_count = phase.lanes.len();

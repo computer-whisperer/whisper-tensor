@@ -140,10 +140,7 @@ fn bbase(asm: &mut Assembler, layout: &BufferLayout, buffer_id: u8) -> u8 {
 /// Returns the fast-pool register, or an error the caller can bubble
 /// up to route the span to pool_eval.
 #[inline]
-pub(super) fn buffer_base_reg_pub_fast(
-    layout: &BufferLayout,
-    buffer_id: u8,
-) -> Result<u8, String> {
+pub(super) fn buffer_base_reg_pub_fast(layout: &BufferLayout, buffer_id: u8) -> Result<u8, String> {
     layout.buffer_bases.reg_for_opt(buffer_id).ok_or_else(|| {
         format!(
             "x86_jit: reduce source buffer {buffer_id} is not in the fast-pool \
@@ -211,10 +208,7 @@ pub fn emit_group(
             //      synthesized from the placer's `literal_sources`
             //      map. No special case in the executor.
             let (dst_slot, _) = layout.find(group.base_id).ok_or_else(|| {
-                format!(
-                    "emit_group Literal: no dst slot for base={}",
-                    group.base_id
-                )
+                format!("emit_group Literal: no dst slot for base={}", group.base_id)
             })?;
             if dst_slot.buffer_id == LITERAL_BUFFER.0 {
                 return Ok(());
@@ -353,12 +347,7 @@ fn emit_identity_iter(
     //    for fast-pool buffers this is a no-op (returns a persistent
     //    register), for overflow buffers it emits a mov from
     //    `[r14 + id*8]` into `OVERFLOW_BASE_SCRATCH`.
-    let src_base = materialize_buffer_base(
-        asm,
-        layout,
-        src_info.buffer_id,
-        OVERFLOW_BASE_SCRATCH,
-    );
+    let src_base = materialize_buffer_base(asm, layout, src_info.buffer_id, OVERFLOW_BASE_SCRATCH);
     emit_load_bits(
         asm,
         src_base,
@@ -387,12 +376,7 @@ fn emit_identity_iter(
     }
 
     // 4. Store rax at dst bit offset.
-    let dst_base = materialize_buffer_base(
-        asm,
-        layout,
-        dst_info.buffer_id,
-        OVERFLOW_BASE_SCRATCH,
-    );
+    let dst_base = materialize_buffer_base(asm, layout, dst_info.buffer_id, OVERFLOW_BASE_SCRATCH);
     emit_store_bits(
         asm,
         dst_base,
@@ -574,20 +558,8 @@ fn emit_literal_copy_iter(
     );
 
     // 2. Load n_bits from the literal buffer → RAW_REG.
-    let src_base = materialize_buffer_base(
-        asm,
-        layout,
-        LITERAL_BUFFER.0,
-        OVERFLOW_BASE_SCRATCH,
-    );
-    emit_load_bits(
-        asm,
-        src_base,
-        BIT_OFF_REG,
-        n_bits,
-        RAW_REG,
-        ADDR_SCRATCH,
-    );
+    let src_base = materialize_buffer_base(asm, layout, LITERAL_BUFFER.0, OVERFLOW_BASE_SCRATCH);
+    emit_load_bits(asm, src_base, BIT_OFF_REG, n_bits, RAW_REG, ADDR_SCRATCH);
 
     // 3. Compute dst bit offset → BIT_OFF_REG (overwrites src value
     //    in the register, but RAW_REG still holds the loaded bits).
@@ -601,12 +573,7 @@ fn emit_literal_copy_iter(
     );
 
     // 4. Store RAW_REG at the destination bit offset.
-    let dst_base = materialize_buffer_base(
-        asm,
-        layout,
-        dst_buffer_id,
-        OVERFLOW_BASE_SCRATCH,
-    );
+    let dst_base = materialize_buffer_base(asm, layout, dst_buffer_id, OVERFLOW_BASE_SCRATCH);
     emit_store_bits(
         asm,
         dst_base,

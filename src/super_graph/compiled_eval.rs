@@ -17,9 +17,9 @@ use std::time::Instant;
 use crate::compiler::attempts::v14::executor::{
     CompiledSpanFn, ExecutablePlan, ExecutablePlanBuilder, PoolEvalSpan,
 };
-use crate::compiler::attempts::v14::placer::{AtomPlacementMap, run_placer};
 use crate::compiler::attempts::v14::partitioner_m;
 use crate::compiler::attempts::v14::partitioner_n;
+use crate::compiler::attempts::v14::placer::{AtomPlacementMap, run_placer};
 use crate::compiler::attempts::v14::report::{self, PlanSummary};
 use crate::compiler::{CodegenKind, CompileOptions, PartitionerKind};
 use crate::graph::GlobalId;
@@ -261,8 +261,8 @@ pub(crate) fn compile_nano_graph(
     // Run the global memory placer. Its output drives both per-span
     // codegen (`SlotInfo::buffer_id` / `BufferBases`) and the executor
     // (`buffer_ptrs` layout).
-    let placement = run_placer(graph, &phases, all_output_atom_ranges)
-        .map_err(|e| format!("placer: {e}"))?;
+    let placement =
+        run_placer(graph, &phases, all_output_atom_ranges).map_err(|e| format!("placer: {e}"))?;
 
     if std::env::var("WT_PRINT_PLACEMENT")
         .ok()
