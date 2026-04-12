@@ -483,20 +483,36 @@ pub fn compute_layout(
         })
     };
 
-    // Which items are scratch in THIS span? Input tensors are never
-    // scratch — the placer owns their layout unconditionally. A group
-    // is scratch iff it's not writing to a placer-owned slot, which
-    // means either (a) the placer has no entry for it, or (b) the
-    // placer has an entry but this span is not the canonical writer
-    // (Duplicate groups in non-canonical lanes recompute the value
-    // into their own scratch; only the canonical writer stores to
-    // the shared slot). A group is canonical-writer for its slot iff
-    // its atom range overlaps one of this span's output_ranges.
+    // Classify each item (input tensor or group) by how it's laid
+    // out in memory:
     //
-    // Literal groups are always placer-owned and never scratch — the
-    // span never writes to them regardless of canonical-writer logic
-    // (the literal buffer is populated once at plan-build).
-    let mut item_is_scratch: Vec<bool> = vec![false; total_items];
+    // - `Fixed`: input tensors, and group writers that own a
+    //   placer-assigned slot and can't be moved (cross-span outputs,
+    //   canonical writers for duplicate groups). Fixed items do NOT
+    //   participate in slab coalescing — they sit at their placer
+    //   offsets.
+    //
+    // - `Scratch`: ordinary span-local groups. Either get pulled
+    //   into a coalesced slab (driven by some consumer's Strided
+    //   InputRef) or allocated standalone via the FreeList.
+    //
+    // - `Literal`: `Literal`/`LiteralSpan` groups. Default to living
+    //   in the plan-wide literal buffer at their placer-assigned
+    //   offset, with the JIT emitting no store. If a consumer's
+    //   Strided InputRef pulls a Literal group into a slab with
+    //   non-Literal members, the Literal gets **promoted** to a
+    //   scratch slab slot and the JIT emits an ordinary copy from
+    //   `placement.literal_sources[base]` into that slot — same
+    //   mechanism the Pad-output-overlap path already uses. This
+    //   keeps the stride-contiguity guarantee the consumer's
+    //   InputRef relies on without carving up the nano graph.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    enum ItemKind {
+        Fixed,
+        Scratch,
+        Literal,
+    }
+    let mut item_kinds: Vec<ItemKind> = vec![ItemKind::Fixed; total_items];
     for (gi, group) in groups.iter().enumerate() {
         let placed = placement.byte_offset_of(group.base_id);
         let is_literal = matches!(
@@ -504,12 +520,14 @@ pub fn compute_layout(
             ScalarOp::Literal(_) | ScalarOp::LiteralSpan(_)
         );
         let canonical_writer = range_overlaps_outputs(group.base_id, group.count);
-        let scratch = if is_literal {
-            false
+        let kind = if is_literal {
+            ItemKind::Literal
+        } else if placed.is_some() && canonical_writer {
+            ItemKind::Fixed
         } else {
-            !(placed.is_some() && canonical_writer)
+            ItemKind::Scratch
         };
-        item_is_scratch[num_inputs + gi] = scratch;
+        item_kinds[num_inputs + gi] = kind;
     }
 
     // ── Step 1: Find contiguity constraints ──
@@ -592,21 +610,25 @@ pub fn compute_layout(
         }
     };
 
-    // Slab coalescing only runs over scratch items. Placer-owned
-    // atoms have fixed offsets already (the global placer coalesced
-    // cross-span slabs during its pass) and can't be unioned into
-    // per-span slabs without conflict.
-    let only_scratch = |items: Vec<usize>| -> Vec<usize> {
+    // Slab coalescing unions items that a Strided consumer requires
+    // to be contiguous in memory. `Fixed` items (inputs, cross-span
+    // outputs, canonical writers) are excluded — their byte offsets
+    // are authoritative and can't be moved into a slab. `Scratch`
+    // and `Literal` items are both eligible; if a component ends up
+    // with any non-Literal member the whole thing is promoted to a
+    // scratch slab, and Literal members of that slab get an
+    // on-the-fly copy from the literal buffer emitted by the JIT.
+    let coalescable = |items: Vec<usize>| -> Vec<usize> {
         items
             .into_iter()
-            .filter(|&i| item_is_scratch[i])
+            .filter(|&i| item_kinds[i] != ItemKind::Fixed)
             .collect()
     };
 
     for group in groups {
         for ir in &group.inputs {
             if let Some((lo, hi)) = input_ref_range(ir, group.count, group.atom_offset) {
-                let items = only_scratch(items_in_range(lo, hi));
+                let items = coalescable(items_in_range(lo, hi));
                 if items.len() > 1 {
                     for i in 1..items.len() {
                         uf_union(&mut parent, items[0], items[i]);
@@ -636,7 +658,7 @@ pub fn compute_layout(
                     let endpoints = [first_i, first_i + end_off, last_i, last_i + end_off];
                     let lo = *endpoints.iter().min().unwrap() as u64;
                     let hi = *endpoints.iter().max().unwrap() as u64 + 1;
-                    let items = only_scratch(items_in_range(lo, hi));
+                    let items = coalescable(items_in_range(lo, hi));
                     if items.len() > 1 {
                         for i in 1..items.len() {
                             uf_union(&mut parent, items[0], items[i]);
@@ -670,6 +692,21 @@ pub fn compute_layout(
 
     for (_, members) in &components {
         if members.len() <= 1 {
+            continue;
+        }
+        // Skip all-Literal components: they're already laid out
+        // contiguously in the plan-wide literal buffer (the placer's
+        // `literal_sources` walks groups in declaration order, which
+        // matches their atom-id order for any consecutive Literal
+        // range). Promoting them to scratch just adds a useless copy
+        // and another buffer base register. Any component that has
+        // at least one non-Literal member is promoted to a scratch
+        // slab and Literal members in it get an on-the-fly copy
+        // from the literal buffer at JIT emit time.
+        let all_literal = members
+            .iter()
+            .all(|&m| item_kinds[m] == ItemKind::Literal);
+        if all_literal {
             continue;
         }
         // Find atom range and elem_bytes for this component.
@@ -897,8 +934,8 @@ pub fn compute_layout(
     // Input tensor slots. The placer owns every input tensor's layout
     // unconditionally, so we read the assigned (buffer_id, byte_offset)
     // directly and skip the FreeList. Slab assignment from step 2
-    // cannot apply because `item_is_scratch` is `false` for every
-    // input item.
+    // cannot apply because input items are `ItemKind::Fixed` and were
+    // excluded from the coalescing filter.
     for it in graph.input_tensors().iter() {
         let elem_bytes = dtype_elem_bytes(it.dtype);
         let elem_bits_semantic = it.dtype.total_bits() as u64;
@@ -936,34 +973,26 @@ pub fn compute_layout(
         let item_idx = num_inputs + gi;
         let slot_idx = all_slots.len();
 
-        // Three cases:
-        // 1. Placer owns this atom AND we're the canonical writer for it
-        //    (or it's a Literal, which is always placer-owned without a
-        //    canonical-writer check). Use the placer's (buf_id, byte_off)
-        //    verbatim; skip the FreeList. Slab assignment cannot apply —
-        //    `item_is_scratch` was false so it was excluded from union-find.
-        // 2. Span-local, slab-coalesced: FreeList-allocated via the slab,
-        //    scratch buffer_id.
-        // 3. Span-local, standalone (including non-canonical writers of
-        //    placer-owned duplicate groups): FreeList-allocated directly,
-        //    scratch buffer_id.
-        let placer_slot = if !item_is_scratch[item_idx] {
-            placement.byte_offset_of(group.base_id)
-        } else {
-            None
-        };
-
-        if let Some((buf_id, byte_off)) = placer_slot {
-            all_slots.push(SlotInfo {
-                atom_base: group.base_id,
-                count: group.count,
-                buffer_id: buf_id.0,
-                bit_offset: byte_off * 8,
-                bit_stride: (elem_bytes as u64) * 8,
-                elem_bits: elem_bits_semantic,
-                dtype: group.output_dtype,
-            });
-        } else if let Some((slab_idx, off_in_slab)) = slab_assignment[item_idx] {
+        // Slot allocation, ordered by precedence:
+        //
+        // 1. **Slab** — if the item was pulled into a scratch slab
+        //    during coalescing, the slab slot wins unconditionally.
+        //    This includes Literal groups that got promoted: their
+        //    primary slot becomes the slab offset in scratch, and
+        //    `emit_group`'s Literal path will emit an on-the-fly
+        //    copy from `placement.literal_sources[base]` into that
+        //    slot at execute time.
+        //
+        // 2. **Placer slot** — for Literal groups that stayed out
+        //    of any slab (they live in the plan-wide literal buffer)
+        //    and for Fixed items (cross-span outputs / canonical
+        //    writers that own placer-assigned offsets).
+        //
+        // 3. **Standalone FreeList scratch** — for ordinary Scratch
+        //    items that didn't get coalesced, and for non-canonical
+        //    writers of duplicate groups (which recompute the value
+        //    locally without touching the placer's shared slot).
+        if let Some((slab_idx, off_in_slab)) = slab_assignment[item_idx] {
             let slab_base = ensure_slab(&mut slabs, &mut slab_allocated, &mut allocator, slab_idx);
             all_slots.push(SlotInfo {
                 atom_base: group.base_id,
@@ -971,6 +1000,24 @@ pub fn compute_layout(
                 buffer_id: scratch_buffer_id,
                 bit_offset: ((slab_base + off_in_slab) as u64) * 8,
                 bit_stride: (slabs[slab_idx].elem_bytes as u64) * 8,
+                elem_bits: elem_bits_semantic,
+                dtype: group.output_dtype,
+            });
+        } else if matches!(item_kinds[item_idx], ItemKind::Fixed | ItemKind::Literal) {
+            let (buf_id, byte_off) = placement
+                .byte_offset_of(group.base_id)
+                .ok_or_else(|| {
+                    format!(
+                        "compute_layout: group base={} (kind={:?}) missing from placement map",
+                        group.base_id, item_kinds[item_idx]
+                    )
+                })?;
+            all_slots.push(SlotInfo {
+                atom_base: group.base_id,
+                count: group.count,
+                buffer_id: buf_id.0,
+                bit_offset: byte_off * 8,
+                bit_stride: (elem_bytes as u64) * 8,
                 elem_bits: elem_bits_semantic,
                 dtype: group.output_dtype,
             });
