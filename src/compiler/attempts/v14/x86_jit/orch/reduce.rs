@@ -25,7 +25,9 @@ use crate::nano_graph::pattern::{AtomGroup, AtomId, InputRef};
 use crate::numeric_dtype::NumericDType;
 use crate::pool::SystemPool;
 
-use super::super::codec::bit_io::{emit_load_aligned, emit_load_bits, emit_store_aligned, emit_store_bits};
+use super::super::codec::bit_io::{
+    emit_load_aligned, emit_load_bits, emit_store_aligned, emit_store_bits,
+};
 use super::super::codec::format::{CodecSlot, CodecTables, ComputeRepr, emit_decode, emit_encode};
 use super::super::codec::precision::emit_narrow_to;
 use super::super::prologue::{FLT_SLOT_A, FLT_SLOT_C, INT_SLOT_C, LOOP_VAR_REG};
@@ -376,11 +378,36 @@ fn emit_reduce_body(
             }
         }
         // Other byte-aligned: encode to GP, then direct store.
-        emit_encode(asm, output_dtype, acc_slot, RAW, CODEC_SCRATCH, BIT_OFF, CODEC_XMM_SCRATCH)?;
+        emit_encode(
+            asm,
+            output_dtype,
+            acc_slot,
+            RAW,
+            CODEC_SCRATCH,
+            BIT_OFF,
+            CODEC_XMM_SCRATCH,
+        )?;
         emit_store_aligned(asm, dst_base, BIT_OFF, dst_info.n_bits, RAW);
     } else {
-        emit_encode(asm, output_dtype, acc_slot, RAW, CODEC_SCRATCH, BIT_OFF, CODEC_XMM_SCRATCH)?;
-        emit_store_bits(asm, dst_base, BIT_OFF, dst_info.n_bits, RAW, CODEC_SCRATCH, REDUCE_K, SCRATCH);
+        emit_encode(
+            asm,
+            output_dtype,
+            acc_slot,
+            RAW,
+            CODEC_SCRATCH,
+            BIT_OFF,
+            CODEC_XMM_SCRATCH,
+        )?;
+        emit_store_bits(
+            asm,
+            dst_base,
+            BIT_OFF,
+            dst_info.n_bits,
+            RAW,
+            CODEC_SCRATCH,
+            REDUCE_K,
+            SCRATCH,
+        );
     }
 
     Ok(())

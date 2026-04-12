@@ -1053,7 +1053,6 @@ fn main() {
 /// Classifies each tensor as Weight, Input, or Computed by cross-referencing
 /// the milli_graph's input_map with the user-provided input_info.
 
-
 fn build_tensor_map(
     lower_tensor_map: &HashMap<GlobalId, lower::TensorAtomMapInfo>,
     input_map: &HashMap<GlobalId, GlobalId>,

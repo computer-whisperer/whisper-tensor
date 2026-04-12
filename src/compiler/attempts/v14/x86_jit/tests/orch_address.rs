@@ -277,7 +277,10 @@ fn strided_1d_const_with_atom_offset() {
         )
         .expect("Strided 1D const+atom_offset emit");
     });
-    assert_eq!(run_const(&jit), expected_offset(slot, base_bit + bit_stride * 2));
+    assert_eq!(
+        run_const(&jit),
+        expected_offset(slot, base_bit + bit_stride * 2)
+    );
 }
 
 #[test]
@@ -392,7 +395,10 @@ fn strided_2d_modular_const() {
 
     for i in [0u64, 1, 3, 4, 7, 15] {
         let expected_atom_off = (i % 4) as i64;
-        let want = expected_offset(slot, (slot.bit_offset as i64 + expected_atom_off * slot.bit_stride as i64) as u64);
+        let want = expected_offset(
+            slot,
+            (slot.bit_offset as i64 + expected_atom_off * slot.bit_stride as i64) as u64,
+        );
         let jit = JitFn::build(|asm| {
             emit_compute_bit_offset(
                 asm,

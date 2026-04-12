@@ -351,7 +351,14 @@ fn emit_identity_iter(
     if src_info.byte_aligned {
         emit_load_aligned(asm, src_base, BIT_OFF_REG, src_info.n_bits, RAW_REG);
     } else {
-        emit_load_bits(asm, src_base, BIT_OFF_REG, src_info.n_bits, RAW_REG, ADDR_SCRATCH);
+        emit_load_bits(
+            asm,
+            src_base,
+            BIT_OFF_REG,
+            src_info.n_bits,
+            RAW_REG,
+            ADDR_SCRATCH,
+        );
     }
 
     // 3. Compute dst offset → r10 with atom_offset compensation.
@@ -377,7 +384,16 @@ fn emit_identity_iter(
     if dst_info.byte_aligned {
         emit_store_aligned(asm, dst_base, BIT_OFF_REG, dst_info.n_bits, RAW_REG);
     } else {
-        emit_store_bits(asm, dst_base, BIT_OFF_REG, dst_info.n_bits, RAW_REG, BIT_IO_TMP1, BIT_IO_TMP2, ADDR_SCRATCH);
+        emit_store_bits(
+            asm,
+            dst_base,
+            BIT_OFF_REG,
+            dst_info.n_bits,
+            RAW_REG,
+            BIT_IO_TMP1,
+            BIT_IO_TMP2,
+            ADDR_SCRATCH,
+        );
     }
 
     Ok(())
@@ -537,13 +553,24 @@ fn emit_literal_copy_iter(
 
     // When byte-aligned, use byte strides for linear offset computation.
     let (eff_stride, eff_src_base, eff_dst_base) = if byte_fast {
-        (bit_stride / 8, src_store_base_bit / 8, dst_store_base_bit / 8)
+        (
+            bit_stride / 8,
+            src_store_base_bit / 8,
+            dst_store_base_bit / 8,
+        )
     } else {
         (bit_stride, src_store_base_bit, dst_store_base_bit)
     };
 
     // 1. Compute src offset → BIT_OFF_REG.
-    emit_linear_bit_offset(asm, iter, eff_stride, eff_src_base, BIT_OFF_REG, ADDR_SCRATCH);
+    emit_linear_bit_offset(
+        asm,
+        iter,
+        eff_stride,
+        eff_src_base,
+        BIT_OFF_REG,
+        ADDR_SCRATCH,
+    );
 
     // 2. Load from the literal buffer → RAW_REG.
     let src_base = materialize_buffer_base(asm, layout, LITERAL_BUFFER.0, OVERFLOW_BASE_SCRATCH);
@@ -554,14 +581,30 @@ fn emit_literal_copy_iter(
     }
 
     // 3. Compute dst offset → BIT_OFF_REG.
-    emit_linear_bit_offset(asm, iter, eff_stride, eff_dst_base, BIT_OFF_REG, ADDR_SCRATCH);
+    emit_linear_bit_offset(
+        asm,
+        iter,
+        eff_stride,
+        eff_dst_base,
+        BIT_OFF_REG,
+        ADDR_SCRATCH,
+    );
 
     // 4. Store RAW_REG at the destination offset.
     let dst_base = materialize_buffer_base(asm, layout, dst_buffer_id, OVERFLOW_BASE_SCRATCH);
     if byte_fast {
         emit_store_aligned(asm, dst_base, BIT_OFF_REG, n_bits, RAW_REG);
     } else {
-        emit_store_bits(asm, dst_base, BIT_OFF_REG, n_bits, RAW_REG, BIT_IO_TMP1, BIT_IO_TMP2, ADDR_SCRATCH);
+        emit_store_bits(
+            asm,
+            dst_base,
+            BIT_OFF_REG,
+            n_bits,
+            RAW_REG,
+            BIT_IO_TMP1,
+            BIT_IO_TMP2,
+            ADDR_SCRATCH,
+        );
     }
 
     Ok(())
@@ -704,7 +747,14 @@ fn emit_cast_iter(
     if src_info.byte_aligned {
         emit_load_aligned(asm, src_base, BIT_OFF_REG, src_info.n_bits, RAW_REG);
     } else {
-        emit_load_bits(asm, src_base, BIT_OFF_REG, src_info.n_bits, RAW_REG, ADDR_SCRATCH);
+        emit_load_bits(
+            asm,
+            src_base,
+            BIT_OFF_REG,
+            src_info.n_bits,
+            RAW_REG,
+            ADDR_SCRATCH,
+        );
     }
 
     // 3. Decode raw bits to src compute repr.
@@ -995,15 +1045,14 @@ fn try_sib_input(
     iter: IterVar,
     atom_offset: u64,
 ) -> Option<(SibMode, AddressInfo)> {
-
     let iter_reg = match iter {
         IterVar::Reg(r) => r,
         _ => return None,
     };
     let (base_id, stride_atoms) = match input {
-        InputRef::Strided { base, dim_strides, .. } if dim_strides.len() == 1 => {
-            (*base, dim_strides[0])
-        }
+        InputRef::Strided {
+            base, dim_strides, ..
+        } if dim_strides.len() == 1 => (*base, dim_strides[0]),
         _ => return None,
     };
     let first_offset = stride_atoms * atom_offset as i64;
@@ -1049,7 +1098,6 @@ fn try_sib_output(
     atom_offset: u64,
     iter: IterVar,
 ) -> Option<(SibMode, AddressInfo)> {
-
     let iter_reg = match iter {
         IterVar::Reg(r) => r,
         _ => return None,
@@ -1103,7 +1151,10 @@ fn emit_load_decode_input(
 
         // Direct XMM load for F32 via SIB.
         if info.dtype == NumericDType::F32 && matches!(slot, CodecSlot::Xmm(_)) {
-            let xmm = match slot { CodecSlot::Xmm(x) => x, _ => unreachable!() };
+            let xmm = match slot {
+                CodecSlot::Xmm(x) => x,
+                _ => unreachable!(),
+            };
             match sib.scale {
                 1 => dynasm!(asm; .arch x64; movd Rx(xmm), DWORD [Rq(base) + Rq(idx) * 1 + disp]),
                 2 => dynasm!(asm; .arch x64; movd Rx(xmm), DWORD [Rq(base) + Rq(idx) * 2 + disp]),
@@ -1115,7 +1166,10 @@ fn emit_load_decode_input(
         }
         // Direct XMM load for F64 via SIB.
         if info.dtype == NumericDType::F64 && matches!(slot, CodecSlot::Xmm(_)) {
-            let xmm = match slot { CodecSlot::Xmm(x) => x, _ => unreachable!() };
+            let xmm = match slot {
+                CodecSlot::Xmm(x) => x,
+                _ => unreachable!(),
+            };
             match sib.scale {
                 1 => dynasm!(asm; .arch x64; movq Rx(xmm), QWORD [Rq(base) + Rq(idx) * 1 + disp]),
                 2 => dynasm!(asm; .arch x64; movq Rx(xmm), QWORD [Rq(base) + Rq(idx) * 2 + disp]),
@@ -1127,7 +1181,15 @@ fn emit_load_decode_input(
         }
         // Other SIB types: load to GP, then decode.
         emit_load_sib(asm, base, &sib, info.n_bits, RAW_REG);
-        emit_decode(asm, info.dtype, RAW_REG, slot, BIT_IO_TMP1, FLT_SCRATCH, codec_tables)?;
+        emit_decode(
+            asm,
+            info.dtype,
+            RAW_REG,
+            slot,
+            BIT_IO_TMP1,
+            FLT_SCRATCH,
+            codec_tables,
+        )?;
         return Ok(info);
     }
 
@@ -1146,14 +1208,20 @@ fn emit_load_decode_input(
     if info.byte_aligned {
         // Direct XMM load for F32/F64 — skips load_bits + decode entirely.
         if info.dtype == NumericDType::F32 && matches!(slot, CodecSlot::Xmm(_)) {
-            let xmm = match slot { CodecSlot::Xmm(x) => x, _ => unreachable!() };
+            let xmm = match slot {
+                CodecSlot::Xmm(x) => x,
+                _ => unreachable!(),
+            };
             dynasm!(asm; .arch x64
                 ; movd Rx(xmm), DWORD [Rq(base) + Rq(BIT_OFF_REG)]
             );
             return Ok(info);
         }
         if info.dtype == NumericDType::F64 && matches!(slot, CodecSlot::Xmm(_)) {
-            let xmm = match slot { CodecSlot::Xmm(x) => x, _ => unreachable!() };
+            let xmm = match slot {
+                CodecSlot::Xmm(x) => x,
+                _ => unreachable!(),
+            };
             dynasm!(asm; .arch x64
                 ; movq Rx(xmm), QWORD [Rq(base) + Rq(BIT_OFF_REG)]
             );
@@ -1206,10 +1274,18 @@ fn emit_encode_store_output(
         if output_dtype == NumericDType::F32 {
             if let CodecSlot::Xmm(xmm) = result_slot {
                 match sib.scale {
-                    1 => dynasm!(asm; .arch x64; movd DWORD [Rq(base) + Rq(idx) * 1 + disp], Rx(xmm)),
-                    2 => dynasm!(asm; .arch x64; movd DWORD [Rq(base) + Rq(idx) * 2 + disp], Rx(xmm)),
-                    4 => dynasm!(asm; .arch x64; movd DWORD [Rq(base) + Rq(idx) * 4 + disp], Rx(xmm)),
-                    8 => dynasm!(asm; .arch x64; movd DWORD [Rq(base) + Rq(idx) * 8 + disp], Rx(xmm)),
+                    1 => {
+                        dynasm!(asm; .arch x64; movd DWORD [Rq(base) + Rq(idx) * 1 + disp], Rx(xmm))
+                    }
+                    2 => {
+                        dynasm!(asm; .arch x64; movd DWORD [Rq(base) + Rq(idx) * 2 + disp], Rx(xmm))
+                    }
+                    4 => {
+                        dynasm!(asm; .arch x64; movd DWORD [Rq(base) + Rq(idx) * 4 + disp], Rx(xmm))
+                    }
+                    8 => {
+                        dynasm!(asm; .arch x64; movd DWORD [Rq(base) + Rq(idx) * 8 + disp], Rx(xmm))
+                    }
                     _ => unreachable!(),
                 }
                 return Ok(());
@@ -1218,17 +1294,33 @@ fn emit_encode_store_output(
         if output_dtype == NumericDType::F64 {
             if let CodecSlot::Xmm(xmm) = result_slot {
                 match sib.scale {
-                    1 => dynasm!(asm; .arch x64; movq QWORD [Rq(base) + Rq(idx) * 1 + disp], Rx(xmm)),
-                    2 => dynasm!(asm; .arch x64; movq QWORD [Rq(base) + Rq(idx) * 2 + disp], Rx(xmm)),
-                    4 => dynasm!(asm; .arch x64; movq QWORD [Rq(base) + Rq(idx) * 4 + disp], Rx(xmm)),
-                    8 => dynasm!(asm; .arch x64; movq QWORD [Rq(base) + Rq(idx) * 8 + disp], Rx(xmm)),
+                    1 => {
+                        dynasm!(asm; .arch x64; movq QWORD [Rq(base) + Rq(idx) * 1 + disp], Rx(xmm))
+                    }
+                    2 => {
+                        dynasm!(asm; .arch x64; movq QWORD [Rq(base) + Rq(idx) * 2 + disp], Rx(xmm))
+                    }
+                    4 => {
+                        dynasm!(asm; .arch x64; movq QWORD [Rq(base) + Rq(idx) * 4 + disp], Rx(xmm))
+                    }
+                    8 => {
+                        dynasm!(asm; .arch x64; movq QWORD [Rq(base) + Rq(idx) * 8 + disp], Rx(xmm))
+                    }
                     _ => unreachable!(),
                 }
                 return Ok(());
             }
         }
         // Other SIB types: encode to GP, then SIB store.
-        emit_encode(asm, output_dtype, result_slot, RAW_REG, BIT_IO_TMP1, BIT_IO_TMP2, FLT_SCRATCH)?;
+        emit_encode(
+            asm,
+            output_dtype,
+            result_slot,
+            RAW_REG,
+            BIT_IO_TMP1,
+            BIT_IO_TMP2,
+            FLT_SCRATCH,
+        )?;
         emit_store_sib(asm, base, &sib, dst_info.n_bits, RAW_REG);
         return Ok(());
     }
@@ -1702,7 +1794,14 @@ fn emit_select_iter(
     if cond_info.byte_aligned {
         emit_load_aligned(asm, __bbase4, BIT_OFF_REG, cond_info.n_bits, RAW_REG);
     } else {
-        emit_load_bits(asm, __bbase4, BIT_OFF_REG, cond_info.n_bits, RAW_REG, ADDR_SCRATCH);
+        emit_load_bits(
+            asm,
+            __bbase4,
+            BIT_OFF_REG,
+            cond_info.n_bits,
+            RAW_REG,
+            ADDR_SCRATCH,
+        );
     }
     let cond_repr = ComputeRepr::for_dtype(cond_info.dtype);
     let cond_slot = match cond_repr {
@@ -1991,7 +2090,14 @@ fn emit_indirect_load_iter(
     if idx_info.byte_aligned {
         emit_load_aligned(asm, __bbase6, BIT_OFF_REG, idx_info.n_bits, RAW_REG);
     } else {
-        emit_load_bits(asm, __bbase6, BIT_OFF_REG, idx_info.n_bits, RAW_REG, ADDR_SCRATCH);
+        emit_load_bits(
+            asm,
+            __bbase6,
+            BIT_OFF_REG,
+            idx_info.n_bits,
+            RAW_REG,
+            ADDR_SCRATCH,
+        );
     }
 
     // 2. Decode index to its compute repr, then extract as u64.
