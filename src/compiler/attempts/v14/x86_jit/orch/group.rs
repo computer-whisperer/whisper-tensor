@@ -1943,8 +1943,19 @@ fn emit_indirect_load_group(
     let (table_slot, _) = layout
         .find(table_base)
         .ok_or_else(|| format!("IndirectLoad: no slot for table_base={table_base}"))?;
-    let table_bit_offset = table_slot.bit_offset;
-    let table_bit_stride = table_slot.bit_stride;
+    let table_byte_fast =
+        table_slot.is_byte_aligned() && matches!(table_slot.elem_bits, 8 | 16 | 32 | 64);
+    // When byte-aligned, pass byte offsets/strides to the iter function.
+    let table_offset = if table_byte_fast {
+        table_slot.bit_offset / 8
+    } else {
+        table_slot.bit_offset
+    };
+    let table_stride = if table_byte_fast {
+        table_slot.bit_stride / 8
+    } else {
+        table_slot.bit_stride
+    };
     let table_n_bits = table_slot.elem_bits as u32;
     let table_dtype = table_slot.dtype;
     let table_buffer_id = table_slot.buffer_id;
@@ -1956,11 +1967,12 @@ fn emit_indirect_load_group(
             &group.inputs[0],
             group.base_id,
             group.atom_offset,
-            table_bit_offset,
-            table_bit_stride,
+            table_offset,
+            table_stride,
             table_n_bits,
             table_dtype,
             table_buffer_id,
+            table_byte_fast,
             group.output_dtype,
             IterVar::Const(group.atom_offset),
             group.atom_offset,
@@ -1986,11 +1998,12 @@ fn emit_indirect_load_group(
             &group.inputs[0],
             group.base_id,
             group.atom_offset,
-            table_bit_offset,
-            table_bit_stride,
+            table_offset,
+            table_stride,
             table_n_bits,
             table_dtype,
             table_buffer_id,
+            table_byte_fast,
             group.output_dtype,
             IterVar::Reg(LOOP_VAR_REG),
             group.atom_offset,
@@ -2011,11 +2024,12 @@ fn emit_indirect_load_iter(
     index_input: &InputRef,
     output_base: crate::nano_graph::pattern::AtomId,
     output_atom_offset: u64,
-    table_bit_offset: u64,
-    table_bit_stride: u64,
+    table_offset: u64,
+    table_stride: u64,
     table_n_bits: u32,
     table_dtype: NumericDType,
     table_buffer_id: u8,
+    table_byte_aligned: bool,
     output_dtype: NumericDType,
     iter: IterVar,
     atom_offset: u64,
@@ -2090,8 +2104,9 @@ fn emit_indirect_load_iter(
     }
     // rax now holds the index as u64.
 
-    // 3. Compute table bit offset: r10 = table_bit_offset + index * table_bit_stride.
-    let stride = table_bit_stride as i64;
+    // 3. Compute table offset: r10 = table_offset + index * table_stride.
+    //    When table_byte_aligned, offsets/strides are in bytes; otherwise bits.
+    let stride = table_stride as i64;
     if (i32::MIN as i64..=i32::MAX as i64).contains(&stride) {
         dynasm!(asm; .arch x64; imul Rq(BIT_OFF_REG), Rq(RAW_REG), stride as i32);
     } else {
@@ -2101,26 +2116,30 @@ fn emit_indirect_load_iter(
             ; imul Rq(BIT_OFF_REG), Rq(RAW_REG)
         );
     }
-    if (i32::MIN as i64..=i32::MAX as i64).contains(&(table_bit_offset as i64)) {
-        dynasm!(asm; .arch x64; add Rq(BIT_OFF_REG), table_bit_offset as i32);
+    if (i32::MIN as i64..=i32::MAX as i64).contains(&(table_offset as i64)) {
+        dynasm!(asm; .arch x64; add Rq(BIT_OFF_REG), table_offset as i32);
     } else {
         dynasm!(asm
             ; .arch x64
-            ; mov Rq(ADDR_SCRATCH), QWORD table_bit_offset as i64
+            ; mov Rq(ADDR_SCRATCH), QWORD table_offset as i64
             ; add Rq(BIT_OFF_REG), Rq(ADDR_SCRATCH)
         );
     }
 
     // 4. Load table value → rax.
     let __bbase7 = bbase(asm, layout, table_buffer_id);
-    emit_load_bits(
-        asm,
-        __bbase7,
-        BIT_OFF_REG,
-        table_n_bits,
-        RAW_REG,
-        ADDR_SCRATCH,
-    );
+    if table_byte_aligned {
+        emit_load_aligned(asm, __bbase7, BIT_OFF_REG, table_n_bits, RAW_REG);
+    } else {
+        emit_load_bits(
+            asm,
+            __bbase7,
+            BIT_OFF_REG,
+            table_n_bits,
+            RAW_REG,
+            ADDR_SCRATCH,
+        );
+    }
 
     // 5. Decode table value, encode to output dtype.
     let out_repr = ComputeRepr::for_dtype(output_dtype);
