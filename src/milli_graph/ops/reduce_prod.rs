@@ -1,3 +1,4 @@
+use rand::Rng;
 use crate::graph::{GlobalId, Node};
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
@@ -146,7 +147,7 @@ impl MilliOp for ReduceProd {
     fn infer<'a, 'p, P: Pool + 'p>(
         &self,
         known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'a, 'p, P>>,
-        symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
+        rng: &mut impl Rng,
         pool: &'p P,
     ) -> Result<Vec<(GlobalId, crate::tensor_info::TensorInfo<'a, 'p, P>)>, MilliOpGraphError>
     where
@@ -168,7 +169,7 @@ impl MilliOp for ReduceProd {
             self.keepdims,
             self.noop_with_empty_axes,
             known_inputs,
-            symbolic_resolver,
+            rng,
         ) {
             TensorInfo::from_dtype_and_shape_scalars(out_dtype, &out_dims)
         } else {
@@ -201,19 +202,19 @@ impl MilliOp for ReduceProd {
                         ScalarInfoTyped::Numeric(input_rank)
                     } else {
                         ScalarInfoTyped::Symbolic(crate::symbolic_scalar::SymbolicScalarTyped::new(
-                            symbolic_resolver,
+                            rng,
                         ))
                     }
                 }
                 _ => ScalarInfoTyped::Symbolic(crate::symbolic_scalar::SymbolicScalarTyped::new(
-                    symbolic_resolver,
+                    rng,
                 )),
             };
 
             let first_elem = crate::scalar_info::ScalarInfo::Symbolic(
-                crate::symbolic_scalar::SymbolicScalar::new(out_dtype, symbolic_resolver),
+                crate::symbolic_scalar::SymbolicScalar::new(out_dtype, rng),
             );
-            TensorInfo::new_from_first_element_and_rank(first_elem, out_rank, symbolic_resolver)
+            TensorInfo::new_from_first_element_and_rank(first_elem, out_rank, rng)
         };
 
         // Handle empty reduction: if the data input has 0 elements in the
@@ -227,7 +228,7 @@ impl MilliOp for ReduceProd {
                 self.keepdims,
                 self.noop_with_empty_axes,
                 known_inputs,
-                symbolic_resolver,
+                rng,
             ) {
                 out_dims
                     .iter()

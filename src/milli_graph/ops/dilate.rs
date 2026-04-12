@@ -1,3 +1,4 @@
+use rand::Rng;
 use crate::graph::GlobalId;
 use crate::milli_graph::MilliOpGraphError;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
@@ -290,7 +291,7 @@ impl MilliOp for Dilate {
     fn infer<'a, 'p, P: Pool + 'p>(
         &self,
         known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'a, 'p, P>>,
-        _symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
+        _rng: &mut impl Rng,
         pool: &'p P,
     ) -> Result<Vec<(GlobalId, crate::tensor_info::TensorInfo<'a, 'p, P>)>, MilliOpGraphError>
     where

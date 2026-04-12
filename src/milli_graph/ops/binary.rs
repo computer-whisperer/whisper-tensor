@@ -385,7 +385,7 @@ impl MilliOp for SimpleBinary {
     fn infer<'a, 'p, P: Pool + 'p>(
         &self,
         known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'a, 'p, P>>,
-        symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
+        rng: &mut impl Rng,
         pool: &'p P,
     ) -> Result<Vec<(GlobalId, crate::tensor_info::TensorInfo<'a, 'p, P>)>, MilliOpGraphError>
     where
@@ -422,36 +422,36 @@ impl MilliOp for SimpleBinary {
                 let b_dims = b_ranked.shape();
                 if let Ok(out_dims) = super::infer_multidirectional_broadcasting_shape(
                     &[a_dims.clone(), b_dims.clone()],
-                    symbolic_resolver,
+                    rng,
                 ) {
                     TensorInfo::from_dtype_and_shape_scalars(out_dtype, &out_dims)
                 } else {
-                    let a_shape = a_info.shape(symbolic_resolver);
-                    let b_shape = b_info.shape(symbolic_resolver);
+                    let a_shape = a_info.shape(rng);
+                    let b_shape = b_info.shape(rng);
                     let out_rank = super::infer_multidirectional_broadcasting_rank(
                         &[a_shape, b_shape],
-                        symbolic_resolver,
+                        rng,
                     )?;
                     let first_elem = crate::scalar_info::ScalarInfo::Symbolic(
-                        crate::symbolic_scalar::SymbolicScalar::new(out_dtype, symbolic_resolver),
+                        crate::symbolic_scalar::SymbolicScalar::new(out_dtype, rng),
                     );
                     TensorInfo::new_from_first_element_and_rank(
                         first_elem,
                         out_rank,
-                        symbolic_resolver,
+                        rng,
                     )
                 }
             } else {
-                let a_shape = a_info.shape(symbolic_resolver);
-                let b_shape = b_info.shape(symbolic_resolver);
+                let a_shape = a_info.shape(rng);
+                let b_shape = b_info.shape(rng);
                 let out_rank = super::infer_multidirectional_broadcasting_rank(
                     &[a_shape, b_shape],
-                    symbolic_resolver,
+                    rng,
                 )?;
                 let first_elem = crate::scalar_info::ScalarInfo::Symbolic(
-                    crate::symbolic_scalar::SymbolicScalar::new(out_dtype, symbolic_resolver),
+                    crate::symbolic_scalar::SymbolicScalar::new(out_dtype, rng),
                 );
-                TensorInfo::new_from_first_element_and_rank(first_elem, out_rank, symbolic_resolver)
+                TensorInfo::new_from_first_element_and_rank(first_elem, out_rank, rng)
             }
         };
 
@@ -800,7 +800,7 @@ impl MilliOp for Pow {
     fn infer<'a, 'p, P: Pool + 'p>(
         &self,
         known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'a, 'p, P>>,
-        symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
+        rng: &mut impl Rng,
         pool: &'p P,
     ) -> Result<Vec<(GlobalId, crate::tensor_info::TensorInfo<'a, 'p, P>)>, MilliOpGraphError>
     where
@@ -827,36 +827,36 @@ impl MilliOp for Pow {
                 let b_dims = b_ranked.shape();
                 if let Ok(out_dims) = super::infer_multidirectional_broadcasting_shape(
                     &[a_dims.clone(), b_dims.clone()],
-                    symbolic_resolver,
+                    rng,
                 ) {
                     TensorInfo::from_dtype_and_shape_scalars(out_dtype, &out_dims)
                 } else {
-                    let a_shape = a_info.shape(symbolic_resolver);
-                    let b_shape = b_info.shape(symbolic_resolver);
+                    let a_shape = a_info.shape(rng);
+                    let b_shape = b_info.shape(rng);
                     let out_rank = super::infer_multidirectional_broadcasting_rank(
                         &[a_shape, b_shape],
-                        symbolic_resolver,
+                        rng,
                     )?;
                     let first_elem = crate::scalar_info::ScalarInfo::Symbolic(
-                        crate::symbolic_scalar::SymbolicScalar::new(out_dtype, symbolic_resolver),
+                        crate::symbolic_scalar::SymbolicScalar::new(out_dtype, rng),
                     );
                     TensorInfo::new_from_first_element_and_rank(
                         first_elem,
                         out_rank,
-                        symbolic_resolver,
+                        rng,
                     )
                 }
             } else {
-                let a_shape = a_info.shape(symbolic_resolver);
-                let b_shape = b_info.shape(symbolic_resolver);
+                let a_shape = a_info.shape(rng);
+                let b_shape = b_info.shape(rng);
                 let out_rank = super::infer_multidirectional_broadcasting_rank(
                     &[a_shape, b_shape],
-                    symbolic_resolver,
+                    rng,
                 )?;
                 let first_elem = crate::scalar_info::ScalarInfo::Symbolic(
-                    crate::symbolic_scalar::SymbolicScalar::new(out_dtype, symbolic_resolver),
+                    crate::symbolic_scalar::SymbolicScalar::new(out_dtype, rng),
                 );
-                TensorInfo::new_from_first_element_and_rank(first_elem, out_rank, symbolic_resolver)
+                TensorInfo::new_from_first_element_and_rank(first_elem, out_rank, rng)
             }
         };
 
@@ -1434,7 +1434,7 @@ impl MilliOp for MatMul {
     fn infer<'a, 'p, P: Pool + 'p>(
         &self,
         known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'a, 'p, P>>,
-        symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
+        rng: &mut impl Rng,
         pool: &'p P,
     ) -> Result<Vec<(GlobalId, crate::tensor_info::TensorInfo<'a, 'p, P>)>, MilliOpGraphError>
     where
@@ -1469,7 +1469,7 @@ impl MilliOp for MatMul {
                         let b_batch = &b_dims[..b_rank - 2];
                         let batch = super::infer_multidirectional_broadcasting_shape(
                             &[a_batch.to_vec(), b_batch.to_vec()],
-                            symbolic_resolver,
+                            rng,
                         )
                         .ok();
                         batch.map(|mut out| {
@@ -1500,12 +1500,12 @@ impl MilliOp for MatMul {
                 } else {
                     // Ranked inputs but couldn't compute shape — fall through to rank-only
                     let first_elem = crate::scalar_info::ScalarInfo::Symbolic(
-                        crate::symbolic_scalar::SymbolicScalar::new(out_dtype, symbolic_resolver),
+                        crate::symbolic_scalar::SymbolicScalar::new(out_dtype, rng),
                     );
                     TensorInfo::new_from_first_element_and_rank(
                         first_elem,
                         a_info.rank(),
-                        symbolic_resolver,
+                        rng,
                     )
                 }
             } else {
@@ -1527,14 +1527,14 @@ impl MilliOp for MatMul {
                         crate::scalar_info::ScalarInfoTyped::Numeric(out_r)
                     }
                     _ => crate::scalar_info::ScalarInfoTyped::Symbolic(
-                        crate::symbolic_scalar::SymbolicScalarTyped::new(symbolic_resolver),
+                        crate::symbolic_scalar::SymbolicScalarTyped::new(rng),
                     ),
                 };
 
                 let first_elem = crate::scalar_info::ScalarInfo::Symbolic(
-                    crate::symbolic_scalar::SymbolicScalar::new(out_dtype, symbolic_resolver),
+                    crate::symbolic_scalar::SymbolicScalar::new(out_dtype, rng),
                 );
-                TensorInfo::new_from_first_element_and_rank(first_elem, out_rank, symbolic_resolver)
+                TensorInfo::new_from_first_element_and_rank(first_elem, out_rank, rng)
             };
 
         // If both inputs are concrete, try constant fold via nano+pool_eval path.

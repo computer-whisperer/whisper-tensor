@@ -91,7 +91,7 @@ impl MilliOp for TopK {
     fn infer<'a, 'p, P: Pool + 'p>(
         &self,
         known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'a, 'p, P>>,
-        symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
+        rng: &mut impl Rng,
         _pool: &'p P,
     ) -> Result<Vec<(GlobalId, crate::tensor_info::TensorInfo<'a, 'p, P>)>, MilliOpGraphError>
     where
@@ -130,7 +130,7 @@ impl MilliOp for TopK {
                         out_dims.push(ScalarInfoTyped::Numeric(k as u64));
                     } else {
                         out_dims.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(
-                            symbolic_resolver,
+                            rng,
                         )));
                     }
                 } else {

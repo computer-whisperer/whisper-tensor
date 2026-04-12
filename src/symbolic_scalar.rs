@@ -1,5 +1,6 @@
 use crate::numeric_dtype::NumericDType;
 use crate::numeric_dtype::NumericPrimitive;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::marker::PhantomData;
 
@@ -10,18 +11,18 @@ where
 {
     _phantom_type: PhantomData<T>,
     offset: i64,
-    symbol_idx: usize,
+    symbol_id: u64,
 }
 
 impl<T> SymbolicScalarTyped<T>
 where
     T: Clone + Copy + NumericPrimitive,
 {
-    pub(crate) fn new(resolver: &mut SymbolicResolver) -> Self {
+    pub(crate) fn new(rng: &mut impl Rng) -> Self {
         Self {
             _phantom_type: PhantomData,
             offset: 0,
-            symbol_idx: resolver.new_id(),
+            symbol_id: rng.next_u64(),
         }
     }
 
@@ -32,18 +33,18 @@ where
         SymbolicScalarTyped {
             _phantom_type: PhantomData::<T2>,
             offset: self.offset,
-            symbol_idx: self.symbol_idx,
+            symbol_id: self.symbol_id,
         }
     }
 
     #[allow(dead_code)]
-    pub(crate) fn symbol_idx(&self) -> usize {
-        self.symbol_idx
+    pub(crate) fn symbol_id(&self) -> u64 {
+        self.symbol_id
     }
 
     #[allow(dead_code)]
     pub(crate) fn try_eq(&self, other: &Self) -> Option<bool> {
-        if self.symbol_idx == other.symbol_idx {
+        if self.symbol_id == other.symbol_id {
             Some(self.offset == other.offset)
         } else {
             None
@@ -54,7 +55,7 @@ where
     pub(crate) fn add_offset(&self, offset: i64) -> Self {
         Self {
             offset: self.offset + offset,
-            symbol_idx: self.symbol_idx,
+            symbol_id: self.symbol_id,
             _phantom_type: PhantomData,
         }
     }
@@ -64,15 +65,15 @@ where
 pub struct SymbolicScalar {
     offset: i64,
     dtype: NumericDType,
-    symbol_idx: usize,
+    symbol_id: u64,
 }
 
 impl SymbolicScalar {
-    pub(crate) fn new(dtype: NumericDType, resolver: &mut SymbolicResolver) -> Self {
+    pub(crate) fn new(dtype: NumericDType, rng: &mut impl Rng) -> Self {
         SymbolicScalar {
             offset: 0,
             dtype,
-            symbol_idx: resolver.new_id(),
+            symbol_id: rng.next_u64(),
         }
     }
 
@@ -81,7 +82,7 @@ impl SymbolicScalar {
     }
 
     pub fn try_eq(&self, other: &Self) -> Option<bool> {
-        if self.symbol_idx == other.symbol_idx {
+        if self.symbol_id == other.symbol_id {
             Some(self.offset == other.offset)
         } else {
             None
@@ -96,36 +97,7 @@ impl SymbolicScalar {
         SymbolicScalarTyped {
             _phantom_type: PhantomData,
             offset: self.offset,
-            symbol_idx: self.symbol_idx,
+            symbol_id: self.symbol_id,
         }
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct SymbolicResolver {
-    next_symbolic_id: usize,
-}
-
-impl SymbolicResolver {
-    pub fn new() -> Self {
-        SymbolicResolver {
-            next_symbolic_id: 0,
-        }
-    }
-    pub(crate) fn update_last_assigned(&mut self, scalar: SymbolicScalar) {
-        if scalar.symbol_idx >= self.next_symbolic_id {
-            self.next_symbolic_id = scalar.symbol_idx + 1;
-        }
-    }
-    fn new_id(&mut self) -> usize {
-        let id = self.next_symbolic_id;
-        self.next_symbolic_id += 1;
-        id
-    }
-}
-
-impl Default for SymbolicResolver {
-    fn default() -> Self {
-        Self::new()
     }
 }

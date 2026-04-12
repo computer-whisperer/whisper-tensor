@@ -12,7 +12,8 @@ use crate::numeric_dtype::NumericDType;
 use crate::numeric_tensor::{NumericTensor as NewNumericTensor, NumericTensorView, TensorLayout};
 use crate::pool::{Pool, SystemPool};
 use crate::scalar_info::{ScalarInfo, ScalarInfoTyped};
-use crate::symbolic_scalar::{SymbolicResolver, SymbolicScalar, SymbolicScalarTyped};
+use crate::symbolic_scalar::{SymbolicScalar, SymbolicScalarTyped};
+use rand::Rng;
 use crate::tensor_info::{MinimalTensor, ShapedTensor, TensorInfo, TensorInfoRanked};
 use crate::tensor_rank::DynRank;
 use std::collections::HashMap;
@@ -112,7 +113,7 @@ impl GroundTruth {
 fn ablate_view<'a, 'p, P: Pool + 'p>(
     view: &NumericTensorView<'_, DynRank>,
     level: AblationLevel,
-    resolver: &mut SymbolicResolver,
+    rng: &mut impl Rng,
     pool: &'p P,
 ) -> TensorInfo<'a, 'p, P> {
     let dtype = view.dtype();
@@ -121,29 +122,29 @@ fn ablate_view<'a, 'p, P: Pool + 'p>(
     match level {
         AblationLevel::Numeric => TensorInfo::from_view(view, pool),
         AblationLevel::Shaped => {
-            let first_element = ScalarInfo::Symbolic(SymbolicScalar::new(dtype, resolver));
+            let first_element = ScalarInfo::Symbolic(SymbolicScalar::new(dtype, rng));
             TensorInfo::from(ShapedTensor::<DynRank>::new_symbolic(
                 first_element,
                 shape.clone(),
-                resolver,
+                rng,
             ))
         }
         AblationLevel::Ranked => {
-            let first_element = ScalarInfo::Symbolic(SymbolicScalar::new(dtype, resolver));
+            let first_element = ScalarInfo::Symbolic(SymbolicScalar::new(dtype, rng));
             let symbolic_dims: Vec<ScalarInfoTyped<u64>> = (0..rank)
-                .map(|_| ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(resolver)))
+                .map(|_| ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(rng)))
                 .collect();
             TensorInfo::Ranked(TensorInfoRanked::new(
                 first_element,
                 symbolic_dims,
-                resolver,
+                rng,
             ))
         }
         AblationLevel::Minimal => {
-            let first_element = ScalarInfo::Symbolic(SymbolicScalar::new(dtype, resolver));
+            let first_element = ScalarInfo::Symbolic(SymbolicScalar::new(dtype, rng));
             TensorInfo::from(MinimalTensor::new(
                 first_element,
-                SymbolicScalarTyped::new(resolver),
+                SymbolicScalarTyped::new(rng),
             ))
         }
     }
@@ -286,7 +287,7 @@ impl MilliOpGraph {
             }
 
             for &level in &levels {
-                let mut resolver = SymbolicResolver::new();
+                let mut rng = rand::rng();
                 let input_ids: Vec<GlobalId> = op.inputs().collect();
 
                 let mut known: HashMap<GlobalId, TensorInfo<'_, '_, SystemPool>> = HashMap::new();
@@ -301,12 +302,12 @@ impl MilliOpGraph {
                     if let Some(tensor) = intermediates.get(&input_id) {
                         known.insert(
                             input_id,
-                            ablate_view(&tensor.view(), level, &mut resolver, &POOL),
+                            ablate_view(&tensor.view(), level, &mut rng, &POOL),
                         );
                     }
                 }
 
-                let result = op.infer(&known, &mut resolver, &POOL);
+                let result = op.infer(&known, &mut rng, &POOL);
 
                 match result {
                     Err(MilliOpGraphError::UnableToInfer) => {

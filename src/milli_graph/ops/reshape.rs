@@ -1,3 +1,4 @@
+use rand::Rng;
 use crate::graph::{GlobalId, Node};
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
@@ -133,7 +134,7 @@ impl MilliOp for Reshape {
     fn infer<'a, 'p, P: Pool + 'p>(
         &self,
         known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'a, 'p, P>>,
-        symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
+        rng: &mut impl Rng,
         pool: &'p P,
     ) -> Result<Vec<(GlobalId, crate::tensor_info::TensorInfo<'a, 'p, P>)>, MilliOpGraphError>
     where
@@ -170,24 +171,24 @@ impl MilliOp for Reshape {
                             hint_dims.push(ScalarInfoTyped::Numeric(*d));
                         } else {
                             hint_dims.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(
-                                symbolic_resolver,
+                                rng,
                             )));
                         }
                     } else {
                         hint_dims.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(
-                            symbolic_resolver,
+                            rng,
                         )));
                     }
                 } else if sv == -1 {
                     has_minus_one = true;
                     hint_dims.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(
-                        symbolic_resolver,
+                        rng,
                     )));
                 } else if sv > 0 {
                     hint_dims.push(ScalarInfoTyped::Numeric(sv as u64));
                 } else {
                     hint_dims.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(
-                        symbolic_resolver,
+                        rng,
                     )));
                 }
             }
@@ -245,19 +246,19 @@ impl MilliOp for Reshape {
                             output_dims.push(ScalarInfoTyped::Numeric(*d));
                         } else {
                             output_dims.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(
-                                symbolic_resolver,
+                                rng,
                             )));
                         }
                     } else {
                         output_dims.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(
-                            symbolic_resolver,
+                            rng,
                         )));
                     }
                 } else if sv == -1 {
                     has_minus_one = true;
                     // Placeholder, will try to resolve below
                     output_dims.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(
-                        symbolic_resolver,
+                        rng,
                     )));
                 } else if sv > 0 {
                     output_dims.push(ScalarInfoTyped::Numeric(sv as u64));
@@ -290,7 +291,7 @@ impl MilliOp for Reshape {
             let out = TensorInfo::Ranked(crate::tensor_info::TensorInfoRanked::new(
                 first_elem,
                 output_dims,
-                symbolic_resolver,
+                rng,
             ));
             return Ok(vec![(self.output, out)]);
         }
@@ -305,7 +306,7 @@ impl MilliOp for Reshape {
                 let out = TensorInfo::new_from_first_element_and_rank(
                     first_elem,
                     ScalarInfoTyped::Numeric(*output_rank as u32),
-                    symbolic_resolver,
+                    rng,
                 );
                 return Ok(vec![(self.output, out)]);
             }
@@ -314,8 +315,8 @@ impl MilliOp for Reshape {
         // Fallback: propagate dtype only
         let out = TensorInfo::new_from_first_element_and_rank(
             first_elem,
-            ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(symbolic_resolver)),
-            symbolic_resolver,
+            ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(rng)),
+            rng,
         );
         Ok(vec![(self.output, out)])
     }

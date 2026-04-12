@@ -70,7 +70,7 @@ impl MilliOp for Compress {
     fn infer<'a, 'p, P: Pool + 'p>(
         &self,
         known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'a, 'p, P>>,
-        symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
+        rng: &mut impl Rng,
         pool: &'p P,
     ) -> Result<Vec<(GlobalId, crate::tensor_info::TensorInfo<'a, 'p, P>)>, MilliOpGraphError>
     where
@@ -136,12 +136,12 @@ impl MilliOp for Compress {
             };
             let mut s: Vec<crate::scalar_info::ScalarInfoTyped<u64>> = input_shape.clone();
             s[axis] = crate::scalar_info::ScalarInfoTyped::Symbolic(
-                crate::symbolic_scalar::SymbolicScalarTyped::new(symbolic_resolver),
+                crate::symbolic_scalar::SymbolicScalarTyped::new(rng),
             );
             s
         } else {
             vec![crate::scalar_info::ScalarInfoTyped::Symbolic(
-                crate::symbolic_scalar::SymbolicScalarTyped::new(symbolic_resolver),
+                crate::symbolic_scalar::SymbolicScalarTyped::new(rng),
             )]
         };
 

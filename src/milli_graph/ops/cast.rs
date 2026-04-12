@@ -106,7 +106,7 @@ impl MilliOp for Cast {
     fn infer<'a, 'p, P: Pool + 'p>(
         &self,
         known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'a, 'p, P>>,
-        symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
+        rng: &mut impl Rng,
         pool: &'p P,
     ) -> Result<Vec<(GlobalId, crate::tensor_info::TensorInfo<'a, 'p, P>)>, MilliOpGraphError>
     where
@@ -125,12 +125,12 @@ impl MilliOp for Cast {
             TensorInfo::from_dtype_and_shape_scalars(out_ndt, &dims)
         } else {
             let first_elem = crate::scalar_info::ScalarInfo::Symbolic(
-                crate::symbolic_scalar::SymbolicScalar::new(out_ndt, symbolic_resolver),
+                crate::symbolic_scalar::SymbolicScalar::new(out_ndt, rng),
             );
             TensorInfo::new_from_first_element_and_rank(
                 first_elem,
                 input_info.rank(),
-                symbolic_resolver,
+                rng,
             )
         };
 

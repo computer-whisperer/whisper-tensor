@@ -1,3 +1,4 @@
+use rand::Rng;
 use crate::graph::{GlobalId, Node};
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
@@ -64,7 +65,7 @@ impl MilliOp for ArgMin {
     fn infer<'a, 'p, P: Pool + 'p>(
         &self,
         known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'a, 'p, P>>,
-        symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
+        rng: &mut impl Rng,
         _pool: &'p P,
     ) -> Result<Vec<(GlobalId, crate::tensor_info::TensorInfo<'a, 'p, P>)>, MilliOpGraphError>
     where
@@ -106,13 +107,13 @@ impl MilliOp for ArgMin {
         }
 
         // Fallback: unknown shape
-        let first = ScalarInfo::Symbolic(SymbolicScalar::new(out_dtype, symbolic_resolver));
+        let first = ScalarInfo::Symbolic(SymbolicScalar::new(out_dtype, rng));
         Ok(vec![(
             self.output,
             TensorInfo::new_from_first_element_and_rank(
                 first,
                 input_info.rank(),
-                symbolic_resolver,
+                rng,
             ),
         )])
     }

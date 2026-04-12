@@ -1,3 +1,4 @@
+use rand::Rng;
 use crate::graph::GlobalId;
 use crate::milli_graph::MilliOpGraph;
 use crate::milli_graph::MilliOpGraphError;
@@ -687,7 +688,7 @@ impl MilliOp for Resize {
     fn infer<'a, 'p, P: Pool + 'p>(
         &self,
         known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'a, 'p, P>>,
-        symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
+        rng: &mut impl Rng,
         _pool: &'p P,
     ) -> Result<Vec<(GlobalId, crate::tensor_info::TensorInfo<'a, 'p, P>)>, MilliOpGraphError>
     where
@@ -770,7 +771,7 @@ impl MilliOp for Resize {
                         // Input shape is partially symbolic — can't compute aspect ratio
                         for &axis in &resolved_axes {
                             out_dims[axis] = ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(
-                                symbolic_resolver,
+                                rng,
                             ));
                         }
                     }
@@ -800,7 +801,7 @@ impl MilliOp for Resize {
                         }
                         ScalarInfoTyped::Symbolic(_) => {
                             out_dims[axis] = ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(
-                                symbolic_resolver,
+                                rng,
                             ));
                         }
                     }
@@ -814,7 +815,7 @@ impl MilliOp for Resize {
 
         // Neither sizes nor scales are concrete — return same rank with symbolic dims
         let out_dims: Vec<ScalarInfoTyped<u64>> = (0..rank)
-            .map(|_| ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(symbolic_resolver)))
+            .map(|_| ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(rng)))
             .collect();
         Ok(vec![(
             self.output,

@@ -1,3 +1,4 @@
+use rand::Rng;
 use crate::graph::{GlobalId, Node};
 use crate::milli_graph::MilliOpGraph;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
@@ -65,7 +66,7 @@ impl MilliOp for Shape {
     fn infer<'a, 'p, P: Pool + 'p>(
         &self,
         known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'a, 'p, P>>,
-        symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
+        rng: &mut impl Rng,
         pool: &'p P,
     ) -> Result<
         Vec<(GlobalId, crate::tensor_info::TensorInfo<'a, 'p, P>)>,
@@ -113,12 +114,12 @@ impl MilliOp for Shape {
         let first_elem =
             crate::scalar_info::ScalarInfo::Symbolic(crate::symbolic_scalar::SymbolicScalar::new(
                 crate::numeric_dtype::NumericDType::I64,
-                symbolic_resolver,
+                rng,
             ));
         let out_info = TensorInfo::new_from_first_element_and_rank(
             first_elem,
             crate::scalar_info::ScalarInfoTyped::Numeric(1),
-            symbolic_resolver,
+            rng,
         );
 
         Ok(vec![(self.output, out_info)])

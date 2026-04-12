@@ -175,7 +175,7 @@ impl MilliOp for Constant {
     fn infer<'a, 'p, P: Pool + 'p>(
         &self,
         _known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'a, 'p, P>>,
-        _symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
+        _rng: &mut impl Rng,
         pool: &'p P,
     ) -> Result<Vec<(GlobalId, crate::tensor_info::TensorInfo<'a, 'p, P>)>, MilliOpGraphError>
     where
@@ -293,7 +293,7 @@ impl MilliOp for ConstantOfShape {
     fn infer<'a, 'p, P: Pool + 'p>(
         &self,
         known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'a, 'p, P>>,
-        _symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
+        _rng: &mut impl Rng,
         pool: &'p P,
     ) -> Result<Vec<(GlobalId, crate::tensor_info::TensorInfo<'a, 'p, P>)>, MilliOpGraphError>
     where
@@ -339,14 +339,14 @@ impl MilliOp for ConstantOfShape {
                 for i in 0..out_rank {
                     // Try to read the i-th element of the shape tensor.
                     if let Some(crate::scalar_info::ScalarInfo::Numeric(n)) =
-                        shape_info.get(&vec![i as u64], _symbolic_resolver)
+                        shape_info.get(&vec![i as u64], _rng)
                     {
                         // n is new NumericScalar — extract as u64 via to_i64
                         let v = n.to_i64() as u64;
                         out_dims.push(ScalarInfoTyped::Numeric(v));
                     } else {
                         out_dims.push(ScalarInfoTyped::Symbolic(
-                            crate::symbolic_scalar::SymbolicScalarTyped::new(_symbolic_resolver),
+                            crate::symbolic_scalar::SymbolicScalarTyped::new(_rng),
                         ));
                     }
                 }

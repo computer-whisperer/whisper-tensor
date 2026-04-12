@@ -237,7 +237,7 @@ impl MilliOp for Concat {
     fn infer<'a, 'p, P: Pool + 'p>(
         &self,
         known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'a, 'p, P>>,
-        symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
+        rng: &mut impl Rng,
         pool: &'p P,
     ) -> Result<Vec<(GlobalId, crate::tensor_info::TensorInfo<'a, 'p, P>)>, MilliOpGraphError>
     where
@@ -284,7 +284,7 @@ impl MilliOp for Concat {
                     match total {
                         Some(v) => out_dims.push(ScalarInfoTyped::Numeric(v)),
                         None => out_dims.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(
-                            symbolic_resolver,
+                            rng,
                         ))),
                     }
                 } else {
@@ -295,7 +295,7 @@ impl MilliOp for Concat {
                     match known_dim {
                         Some(v) => out_dims.push(ScalarInfoTyped::Numeric(v)),
                         None => out_dims.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(
-                            symbolic_resolver,
+                            rng,
                         ))),
                     }
                 }
@@ -345,7 +345,7 @@ impl MilliOp for Concat {
                     match total {
                         Some(v) => out_dims.push(ScalarInfoTyped::Numeric(v)),
                         None => out_dims.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(
-                            symbolic_resolver,
+                            rng,
                         ))),
                     }
                 } else {
@@ -357,7 +357,7 @@ impl MilliOp for Concat {
                     match known_dim {
                         Some(v) => out_dims.push(ScalarInfoTyped::Numeric(v)),
                         None => out_dims.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(
-                            symbolic_resolver,
+                            rng,
                         ))),
                     }
                 }
@@ -368,13 +368,13 @@ impl MilliOp for Concat {
         } else {
             // No input has known rank — fall back to Minimal.
             let first_elem = crate::scalar_info::ScalarInfo::Symbolic(
-                crate::symbolic_scalar::SymbolicScalar::new(out_dtype, symbolic_resolver),
+                crate::symbolic_scalar::SymbolicScalar::new(out_dtype, rng),
             );
             let out_rank = input_infos[0].rank();
             let out_info = TensorInfo::new_from_first_element_and_rank(
                 first_elem,
                 out_rank,
-                symbolic_resolver,
+                rng,
             );
             Ok(vec![(self.output, out_info)])
         }

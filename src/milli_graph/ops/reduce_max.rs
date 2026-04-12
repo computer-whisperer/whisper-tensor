@@ -1,3 +1,4 @@
+use rand::Rng;
 use crate::graph::{GlobalId, Node};
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
@@ -108,7 +109,7 @@ impl MilliOp for ReduceMax {
     fn infer<'a, 'p, P: Pool + 'p>(
         &self,
         known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'a, 'p, P>>,
-        symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
+        rng: &mut impl Rng,
         pool: &'p P,
     ) -> Result<Vec<(GlobalId, crate::tensor_info::TensorInfo<'a, 'p, P>)>, MilliOpGraphError>
     where
@@ -130,7 +131,7 @@ impl MilliOp for ReduceMax {
             self.keepdims,
             self.noop_with_empty_axes,
             known_inputs,
-            symbolic_resolver,
+            rng,
         ) {
             TensorInfo::from_dtype_and_shape_scalars(out_dtype, &out_dims)
         } else {
@@ -163,19 +164,19 @@ impl MilliOp for ReduceMax {
                         ScalarInfoTyped::Numeric(input_rank)
                     } else {
                         ScalarInfoTyped::Symbolic(crate::symbolic_scalar::SymbolicScalarTyped::new(
-                            symbolic_resolver,
+                            rng,
                         ))
                     }
                 }
                 _ => ScalarInfoTyped::Symbolic(crate::symbolic_scalar::SymbolicScalarTyped::new(
-                    symbolic_resolver,
+                    rng,
                 )),
             };
 
             let first_elem = crate::scalar_info::ScalarInfo::Symbolic(
-                crate::symbolic_scalar::SymbolicScalar::new(out_dtype, symbolic_resolver),
+                crate::symbolic_scalar::SymbolicScalar::new(out_dtype, rng),
             );
-            TensorInfo::new_from_first_element_and_rank(first_elem, out_rank, symbolic_resolver)
+            TensorInfo::new_from_first_element_and_rank(first_elem, out_rank, rng)
         };
 
         // Check if all inputs are concrete; if so, try constant fold with output hints.

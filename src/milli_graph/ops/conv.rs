@@ -255,7 +255,7 @@ fn make_symbolic_output<'a, 'p, P: Pool + 'p>(
     batch: &crate::scalar_info::ScalarInfoTyped<u64>,
     out_channels: &crate::scalar_info::ScalarInfoTyped<u64>,
     n_spatial: usize,
-    symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
+    rng: &mut impl Rng,
 ) -> Result<
     Vec<(GlobalId, crate::tensor_info::TensorInfo<'a, 'p, P>)>,
     crate::milli_graph::MilliOpGraphError,
@@ -269,7 +269,7 @@ fn make_symbolic_output<'a, 'p, P: Pool + 'p>(
     out_dims.push(out_channels.clone());
     for _ in 0..n_spatial {
         out_dims.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(
-            symbolic_resolver,
+            rng,
         )));
     }
     Ok(vec![(
@@ -756,7 +756,7 @@ impl MilliOp for Conv {
     fn infer<'a, 'p, P: Pool + 'p>(
         &self,
         known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'a, 'p, P>>,
-        symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
+        rng: &mut impl Rng,
         _pool: &'p P,
     ) -> Result<Vec<(GlobalId, crate::tensor_info::TensorInfo<'a, 'p, P>)>, MilliOpGraphError>
     where
@@ -801,7 +801,7 @@ impl MilliOp for Conv {
                             &batch,
                             &out_channels,
                             n_spatial,
-                            symbolic_resolver,
+                            rng,
                         );
                     }
                 }
@@ -863,12 +863,12 @@ impl MilliOp for Conv {
                             ScalarInfoTyped::Numeric(out as u64)
                         }
                         ScalarInfoTyped::Symbolic(_) => {
-                            ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(symbolic_resolver))
+                            ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(rng))
                         }
                     })
                     .collect(),
                 _ => (0..n_spatial)
-                    .map(|_| ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(symbolic_resolver)))
+                    .map(|_| ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(rng)))
                     .collect(),
             }
         };
@@ -1082,7 +1082,7 @@ impl MilliOp for ConvInputGrad {
     fn infer<'a, 'p, P: crate::pool::Pool + 'p>(
         &self,
         known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'a, 'p, P>>,
-        _symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
+        _rng: &mut impl Rng,
         _pool: &'p P,
     ) -> Result<Vec<(GlobalId, crate::tensor_info::TensorInfo<'a, 'p, P>)>, MilliOpGraphError>
     where
@@ -1359,7 +1359,7 @@ impl MilliOp for ConvWeightGrad {
     fn infer<'a, 'p, P: crate::pool::Pool + 'p>(
         &self,
         known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'a, 'p, P>>,
-        _symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
+        _rng: &mut impl Rng,
         _pool: &'p P,
     ) -> Result<Vec<(GlobalId, crate::tensor_info::TensorInfo<'a, 'p, P>)>, MilliOpGraphError>
     where
@@ -1611,7 +1611,7 @@ impl MilliOp for ConvBiasGrad {
     fn infer<'a, 'p, P: Pool + 'p>(
         &self,
         known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'a, 'p, P>>,
-        _symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
+        _rng: &mut impl Rng,
         _pool: &'p P,
     ) -> Result<Vec<(GlobalId, crate::tensor_info::TensorInfo<'a, 'p, P>)>, MilliOpGraphError>
     where

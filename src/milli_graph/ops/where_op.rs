@@ -1,3 +1,4 @@
+use rand::Rng;
 use crate::graph::{GlobalId, Node};
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
@@ -142,7 +143,7 @@ impl MilliOp for Where {
     fn infer<'a, 'p, P: Pool + 'p>(
         &self,
         known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'a, 'p, P>>,
-        symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
+        rng: &mut impl Rng,
         pool: &'p P,
     ) -> Result<Vec<(GlobalId, crate::tensor_info::TensorInfo<'a, 'p, P>)>, MilliOpGraphError>
     where
@@ -169,21 +170,21 @@ impl MilliOp for Where {
             y_info.as_ranked(),
         ) && let Ok(out_dims) = super::infer_multidirectional_broadcasting_shape(
             &[c_ranked.shape(), x_ranked.shape(), y_ranked.shape()],
-            symbolic_resolver,
+            rng,
         ) {
             TensorInfo::from_dtype_and_shape_scalars(out_dtype, &out_dims)
         } else {
-            let c_shape = cond_info.shape(symbolic_resolver);
-            let x_shape = x_info.shape(symbolic_resolver);
-            let y_shape = y_info.shape(symbolic_resolver);
+            let c_shape = cond_info.shape(rng);
+            let x_shape = x_info.shape(rng);
+            let y_shape = y_info.shape(rng);
             let out_rank = super::infer_multidirectional_broadcasting_rank(
                 &[c_shape, x_shape, y_shape],
-                symbolic_resolver,
+                rng,
             )?;
             let first_elem = crate::scalar_info::ScalarInfo::Symbolic(
-                crate::symbolic_scalar::SymbolicScalar::new(out_dtype, symbolic_resolver),
+                crate::symbolic_scalar::SymbolicScalar::new(out_dtype, rng),
             );
-            TensorInfo::new_from_first_element_and_rank(first_elem, out_rank, symbolic_resolver)
+            TensorInfo::new_from_first_element_and_rank(first_elem, out_rank, rng)
         };
 
         // If all concrete, try constant fold with output hints.

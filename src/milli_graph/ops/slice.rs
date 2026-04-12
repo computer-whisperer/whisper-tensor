@@ -1,3 +1,4 @@
+use rand::Rng;
 use crate::graph::{GlobalId, Node};
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
@@ -308,7 +309,7 @@ impl MilliOp for Slice {
     fn infer<'a, 'p, P: Pool + 'p>(
         &self,
         known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'a, 'p, P>>,
-        _symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
+        _rng: &mut impl Rng,
         pool: &'p P,
     ) -> Result<Vec<(GlobalId, crate::tensor_info::TensorInfo<'a, 'p, P>)>, MilliOpGraphError>
     where
@@ -390,7 +391,7 @@ impl MilliOp for Slice {
             // make those dims symbolic.
             for &axis in axes {
                 out_dims[axis] = ScalarInfoTyped::Symbolic(
-                    crate::symbolic_scalar::SymbolicScalarTyped::new(_symbolic_resolver),
+                    crate::symbolic_scalar::SymbolicScalarTyped::new(_rng),
                 );
             }
         } else {
@@ -398,7 +399,7 @@ impl MilliOp for Slice {
             // Make all dims symbolic to avoid claiming incorrect concrete sizes.
             for dim in out_dims.iter_mut() {
                 *dim = ScalarInfoTyped::Symbolic(crate::symbolic_scalar::SymbolicScalarTyped::new(
-                    _symbolic_resolver,
+                    _rng,
                 ));
             }
         }

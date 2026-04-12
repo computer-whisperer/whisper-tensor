@@ -1,3 +1,4 @@
+use rand::Rng;
 use crate::graph::{GlobalId, Node};
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
@@ -237,7 +238,7 @@ impl MilliOp for Transpose {
     fn infer<'a, 'p, P: Pool + 'p>(
         &self,
         known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'a, 'p, P>>,
-        symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
+        rng: &mut impl Rng,
         pool: &'p P,
     ) -> Result<Vec<(GlobalId, crate::tensor_info::TensorInfo<'a, 'p, P>)>, MilliOpGraphError>
     where
@@ -293,12 +294,12 @@ impl MilliOp for Transpose {
             TensorInfo::Ranked(crate::tensor_info::TensorInfoRanked::new(
                 first_elem,
                 output_shape,
-                symbolic_resolver,
+                rng,
             ))
         } else {
             // At minimum: same rank, same dtype
             let rank = input_info.rank();
-            TensorInfo::new_from_first_element_and_rank(first_elem, rank, symbolic_resolver)
+            TensorInfo::new_from_first_element_and_rank(first_elem, rank, rng)
         };
 
         // If input is concrete, try constant fold via nano+pool_eval path.

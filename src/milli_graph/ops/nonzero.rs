@@ -1,9 +1,10 @@
+use rand::Rng;
 use crate::graph::{GlobalId, Node};
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
 use crate::pool::Pool;
 use crate::scalar_info::ScalarInfo;
-use crate::symbolic_scalar::{SymbolicResolver, SymbolicScalar, SymbolicScalarTyped};
+use crate::symbolic_scalar::{SymbolicScalar, SymbolicScalarTyped};
 use crate::tensor_info::{MinimalTensor, TensorInfo};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -71,7 +72,7 @@ impl MilliOp for NonZero {
     fn infer<'a, 'p, P: Pool + 'p>(
         &self,
         known_inputs: &HashMap<GlobalId, TensorInfo<'a, 'p, P>>,
-        symbolic_resolver: &mut SymbolicResolver,
+        rng: &mut impl Rng,
         pool: &'p P,
     ) -> Result<Vec<(GlobalId, TensorInfo<'a, 'p, P>)>, MilliOpGraphError>
     where
@@ -131,8 +132,8 @@ impl MilliOp for NonZero {
 
         // Fallback: dtype I64, unknown shape.
         let minimal = TensorInfo::Minimal(MinimalTensor::new(
-            ScalarInfo::Symbolic(SymbolicScalar::new(out_dtype, symbolic_resolver)),
-            SymbolicScalarTyped::new(symbolic_resolver),
+            ScalarInfo::Symbolic(SymbolicScalar::new(out_dtype, rng)),
+            SymbolicScalarTyped::new(rng),
         ));
         Ok(vec![(self.output, minimal)])
     }

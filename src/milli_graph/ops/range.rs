@@ -79,7 +79,7 @@ impl MilliOp for Range {
     fn infer<'a, 'p, P: Pool + 'p>(
         &self,
         known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'a, 'p, P>>,
-        symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
+        rng: &mut impl Rng,
         pool: &'p P,
     ) -> Result<Vec<(GlobalId, crate::tensor_info::TensorInfo<'a, 'p, P>)>, MilliOpGraphError>
     where
@@ -132,11 +132,11 @@ impl MilliOp for Range {
         }
 
         // Can't determine output length without concrete values.
-        let first = ScalarInfo::Symbolic(SymbolicScalar::new(out_dtype, symbolic_resolver));
+        let first = ScalarInfo::Symbolic(SymbolicScalar::new(out_dtype, rng));
         let rank = ScalarInfoTyped::Numeric(1u32);
         Ok(vec![(
             self.output,
-            TensorInfo::new_from_first_element_and_rank(first, rank, symbolic_resolver),
+            TensorInfo::new_from_first_element_and_rank(first, rank, rng),
         )])
     }
 

@@ -1,3 +1,4 @@
+use rand::Rng;
 use crate::graph::{GlobalId, Node};
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
@@ -80,7 +81,7 @@ impl MilliOp for SumTo {
     fn infer<'a, 'p, P: Pool + 'p>(
         &self,
         known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'a, 'p, P>>,
-        symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
+        rng: &mut impl Rng,
         _pool: &'p P,
     ) -> Result<Vec<(GlobalId, crate::tensor_info::TensorInfo<'a, 'p, P>)>, MilliOpGraphError>
     where
@@ -113,13 +114,13 @@ impl MilliOp for SumTo {
         // target_shape is a 1D tensor whose length = output rank.
         // If we know the length of target_shape, we know the output rank.
         if let Some(out_rank) = target_info.dim_if_known(0) {
-            let first = ScalarInfo::Symbolic(SymbolicScalar::new(out_dtype, symbolic_resolver));
+            let first = ScalarInfo::Symbolic(SymbolicScalar::new(out_dtype, rng));
             return Ok(vec![(
                 self.output,
                 TensorInfo::new_from_first_element_and_rank(
                     first,
                     ScalarInfoTyped::Numeric(out_rank as u32),
-                    symbolic_resolver,
+                    rng,
                 ),
             )]);
         }

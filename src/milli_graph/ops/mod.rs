@@ -88,7 +88,7 @@ use crate::graph::{GlobalId, Node, NodeMetadata, NodeSlotEditError, SlotDirectio
 use crate::milli_graph::MilliOpGraphError;
 use crate::pool::Pool;
 use crate::scalar_info::ScalarInfoTyped;
-use crate::symbolic_scalar::{SymbolicResolver, SymbolicScalarTyped};
+use crate::symbolic_scalar::{SymbolicScalarTyped};
 use crate::tensor_info::{TensorInfo, TensorInfoTypedRanked};
 use crate::tensor_rank::DynRank;
 use rand::Rng;
@@ -234,7 +234,7 @@ pub fn constant_fold<'a, 'p: 'a, P: Pool + 'p>(
                     Some(d) => crate::scalar_info::ScalarInfoTyped::Numeric(d),
                     None => crate::scalar_info::ScalarInfoTyped::Symbolic(
                         crate::symbolic_scalar::SymbolicScalarTyped::new(
-                            &mut crate::symbolic_scalar::SymbolicResolver::new(),
+                            &mut rand::rng(),
                         ),
                     ),
                 })
@@ -248,7 +248,7 @@ pub fn constant_fold<'a, 'p: 'a, P: Pool + 'p>(
                         crate::numeric_scalar::NumericScalar::zero(dtype),
                     ),
                     crate::symbolic_scalar::SymbolicScalarTyped::new(
-                        &mut crate::symbolic_scalar::SymbolicResolver::new(),
+                        &mut rand::rng(),
                     ),
                 )),
             );
@@ -483,7 +483,7 @@ pub trait MilliOp: Node<OpKind = String> {
     fn infer<'a, 'p, P: Pool + 'p>(
         &self,
         known_inputs: &HashMap<GlobalId, TensorInfo<'a, 'p, P>>,
-        _symbolic_resolver: &mut SymbolicResolver,
+        _rng: &mut impl Rng,
         _pool: &'p P,
     ) -> Result<Vec<(GlobalId, TensorInfo<'a, 'p, P>)>, MilliOpGraphError>
     where
@@ -555,7 +555,7 @@ pub trait MilliOp: Node<OpKind = String> {
 #[allow(dead_code)]
 fn infer_multidirectional_broadcasting_rank(
     shapes: &[TensorInfoTypedRanked<u64, P1>],
-    symbolic_resolver: &mut SymbolicResolver,
+    rng: &mut impl Rng,
 ) -> Result<ScalarInfoTyped<u32>, MilliOpGraphError> {
     let mut output_rank: Option<usize> = None;
     for shape in shapes {
@@ -577,7 +577,7 @@ fn infer_multidirectional_broadcasting_rank(
     match output_rank {
         Some(x) => Ok(ScalarInfoTyped::Numeric(x as u32)),
         None => Ok(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(
-            symbolic_resolver,
+            rng,
         ))),
     }
 }
@@ -585,7 +585,7 @@ fn infer_multidirectional_broadcasting_rank(
 #[allow(dead_code)]
 fn infer_multidirectional_broadcasting_shape(
     shapes: &[Vec<ScalarInfoTyped<u64>>],
-    symbolic_resolver: &mut SymbolicResolver,
+    rng: &mut impl Rng,
 ) -> Result<Vec<ScalarInfoTyped<u64>>, MilliOpGraphError> {
     if shapes.is_empty() {
         return Err(MilliOpGraphError::InvalidInput(
@@ -644,7 +644,7 @@ fn infer_multidirectional_broadcasting_shape(
                                     None => {
                                         // Must use new unknown dimension
                                         dim = ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(
-                                            symbolic_resolver,
+                                            rng,
                                         ))
                                     }
                                     Some(is_same) => {
@@ -653,7 +653,7 @@ fn infer_multidirectional_broadcasting_shape(
                                         } else {
                                             // Must use new unknown dimension
                                             dim = ScalarInfoTyped::Symbolic(
-                                                SymbolicScalarTyped::new(symbolic_resolver),
+                                                SymbolicScalarTyped::new(rng),
                                             )
                                         }
                                     }
@@ -677,7 +677,7 @@ fn infer_reduce_output_shape<'a, 'p, P: Pool + 'p>(
     keepdims: bool,
     noop_with_empty_axes: bool,
     known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'a, 'p, P>>,
-    symbolic_resolver: &mut SymbolicResolver,
+    rng: &mut impl Rng,
 ) -> Option<Vec<ScalarInfoTyped<u64>>> {
     // Need input with known per-dim shape.
     let data_ranked = data_info.as_ranked()?;
@@ -708,17 +708,17 @@ fn infer_reduce_output_shape<'a, 'p, P: Pool + 'p>(
     if axes.is_empty() {
         // Empty axes, not noop → reduce all.
         let axes: Vec<usize> = (0..rank).collect();
-        return infer_reduce_dims(&data_shape, &axes, keepdims, symbolic_resolver);
+        return infer_reduce_dims(&data_shape, &axes, keepdims, rng);
     }
 
-    infer_reduce_dims(&data_shape, &axes, keepdims, symbolic_resolver)
+    infer_reduce_dims(&data_shape, &axes, keepdims, rng)
 }
 
 fn infer_reduce_dims(
     data_shape: &[ScalarInfoTyped<u64>],
     axes: &[usize],
     keepdims: bool,
-    _symbolic_resolver: &mut SymbolicResolver,
+    _rng: &mut impl Rng,
 ) -> Option<Vec<ScalarInfoTyped<u64>>> {
     let mut out_dims = Vec::new();
     for (i, dim) in data_shape.iter().enumerate() {
@@ -999,61 +999,61 @@ impl MilliOp for AnyMilliOp {
     fn infer<'a, 'p, P: Pool + 'p>(
         &self,
         known_inputs: &HashMap<GlobalId, TensorInfo<'a, 'p, P>>,
-        symbolic_resolver: &mut SymbolicResolver,
+        rng: &mut impl Rng,
         pool: &'p P,
     ) -> Result<Vec<(GlobalId, TensorInfo<'a, 'p, P>)>, MilliOpGraphError>
     where
         'p: 'a,
     {
         match self {
-            AnyMilliOp::Constant(x) => x.infer(known_inputs, symbolic_resolver, pool),
-            AnyMilliOp::ConstantOfShape(x) => x.infer(known_inputs, symbolic_resolver, pool),
-            AnyMilliOp::SimpleBinary(x) => x.infer(known_inputs, symbolic_resolver, pool),
-            AnyMilliOp::MatMul(x) => x.infer(known_inputs, symbolic_resolver, pool),
-            AnyMilliOp::Pow(x) => x.infer(known_inputs, symbolic_resolver, pool),
-            AnyMilliOp::SimpleUnary(x) => x.infer(known_inputs, symbolic_resolver, pool),
-            AnyMilliOp::ClampMin(x) => x.infer(known_inputs, symbolic_resolver, pool),
-            AnyMilliOp::NonZero(x) => x.infer(known_inputs, symbolic_resolver, pool),
-            AnyMilliOp::CumSum(x) => x.infer(known_inputs, symbolic_resolver, pool),
-            AnyMilliOp::Shape(x) => x.infer(known_inputs, symbolic_resolver, pool),
-            AnyMilliOp::Reshape(x) => x.infer(known_inputs, symbolic_resolver, pool),
-            AnyMilliOp::Slice(x) => x.infer(known_inputs, symbolic_resolver, pool),
-            AnyMilliOp::ReduceSum(x) => x.infer(known_inputs, symbolic_resolver, pool),
-            AnyMilliOp::ReduceMin(x) => x.infer(known_inputs, symbolic_resolver, pool),
-            AnyMilliOp::ReduceMax(x) => x.infer(known_inputs, symbolic_resolver, pool),
-            AnyMilliOp::ReduceProd(x) => x.infer(known_inputs, symbolic_resolver, pool),
-            AnyMilliOp::ReduceMean(x) => x.infer(known_inputs, symbolic_resolver, pool),
-            AnyMilliOp::Cast(x) => x.infer(known_inputs, symbolic_resolver, pool),
-            AnyMilliOp::CastLike(x) => x.infer(known_inputs, symbolic_resolver, pool),
-            AnyMilliOp::Transpose(x) => x.infer(known_inputs, symbolic_resolver, pool),
-            AnyMilliOp::Squeeze(x) => x.infer(known_inputs, symbolic_resolver, pool),
-            AnyMilliOp::Unsqueeze(x) => x.infer(known_inputs, symbolic_resolver, pool),
-            AnyMilliOp::Gather(x) => x.infer(known_inputs, symbolic_resolver, pool),
-            AnyMilliOp::GatherElements(x) => x.infer(known_inputs, symbolic_resolver, pool),
-            AnyMilliOp::GatherND(x) => x.infer(known_inputs, symbolic_resolver, pool),
-            AnyMilliOp::GatherGrad(x) => x.infer(known_inputs, symbolic_resolver, pool),
-            AnyMilliOp::Concat(x) => x.infer(known_inputs, symbolic_resolver, pool),
-            AnyMilliOp::Split(x) => x.infer(known_inputs, symbolic_resolver, pool),
-            AnyMilliOp::Where(x) => x.infer(known_inputs, symbolic_resolver, pool),
-            AnyMilliOp::Range(x) => x.infer(known_inputs, symbolic_resolver, pool),
-            AnyMilliOp::Expand(x) => x.infer(known_inputs, symbolic_resolver, pool),
-            AnyMilliOp::EyeLike(x) => x.infer(known_inputs, symbolic_resolver, pool),
-            AnyMilliOp::SumTo(x) => x.infer(known_inputs, symbolic_resolver, pool),
-            AnyMilliOp::ArgMax(x) => x.infer(known_inputs, symbolic_resolver, pool),
-            AnyMilliOp::ArgMin(x) => x.infer(known_inputs, symbolic_resolver, pool),
-            AnyMilliOp::Resize(x) => x.infer(known_inputs, symbolic_resolver, pool),
-            AnyMilliOp::Conv(x) => x.infer(known_inputs, symbolic_resolver, pool),
-            AnyMilliOp::ConvInputGrad(x) => x.infer(known_inputs, symbolic_resolver, pool),
-            AnyMilliOp::ConvWeightGrad(x) => x.infer(known_inputs, symbolic_resolver, pool),
-            AnyMilliOp::ConvBiasGrad(x) => x.infer(known_inputs, symbolic_resolver, pool),
-            AnyMilliOp::Pad(x) => x.infer(known_inputs, symbolic_resolver, pool),
-            AnyMilliOp::Dilate(x) => x.infer(known_inputs, symbolic_resolver, pool),
-            AnyMilliOp::Compress(x) => x.infer(known_inputs, symbolic_resolver, pool),
-            AnyMilliOp::ReverseSequence(x) => x.infer(known_inputs, symbolic_resolver, pool),
-            AnyMilliOp::ScatterElements(x) => x.infer(known_inputs, symbolic_resolver, pool),
-            AnyMilliOp::ScatterND(x) => x.infer(known_inputs, symbolic_resolver, pool),
-            AnyMilliOp::TopK(x) => x.infer(known_inputs, symbolic_resolver, pool),
-            AnyMilliOp::RandomNormalLike(x) => x.infer(known_inputs, symbolic_resolver, pool),
+            AnyMilliOp::Constant(x) => x.infer(known_inputs, rng, pool),
+            AnyMilliOp::ConstantOfShape(x) => x.infer(known_inputs, rng, pool),
+            AnyMilliOp::SimpleBinary(x) => x.infer(known_inputs, rng, pool),
+            AnyMilliOp::MatMul(x) => x.infer(known_inputs, rng, pool),
+            AnyMilliOp::Pow(x) => x.infer(known_inputs, rng, pool),
+            AnyMilliOp::SimpleUnary(x) => x.infer(known_inputs, rng, pool),
+            AnyMilliOp::ClampMin(x) => x.infer(known_inputs, rng, pool),
+            AnyMilliOp::NonZero(x) => x.infer(known_inputs, rng, pool),
+            AnyMilliOp::CumSum(x) => x.infer(known_inputs, rng, pool),
+            AnyMilliOp::Shape(x) => x.infer(known_inputs, rng, pool),
+            AnyMilliOp::Reshape(x) => x.infer(known_inputs, rng, pool),
+            AnyMilliOp::Slice(x) => x.infer(known_inputs, rng, pool),
+            AnyMilliOp::ReduceSum(x) => x.infer(known_inputs, rng, pool),
+            AnyMilliOp::ReduceMin(x) => x.infer(known_inputs, rng, pool),
+            AnyMilliOp::ReduceMax(x) => x.infer(known_inputs, rng, pool),
+            AnyMilliOp::ReduceProd(x) => x.infer(known_inputs, rng, pool),
+            AnyMilliOp::ReduceMean(x) => x.infer(known_inputs, rng, pool),
+            AnyMilliOp::Cast(x) => x.infer(known_inputs, rng, pool),
+            AnyMilliOp::CastLike(x) => x.infer(known_inputs, rng, pool),
+            AnyMilliOp::Transpose(x) => x.infer(known_inputs, rng, pool),
+            AnyMilliOp::Squeeze(x) => x.infer(known_inputs, rng, pool),
+            AnyMilliOp::Unsqueeze(x) => x.infer(known_inputs, rng, pool),
+            AnyMilliOp::Gather(x) => x.infer(known_inputs, rng, pool),
+            AnyMilliOp::GatherElements(x) => x.infer(known_inputs, rng, pool),
+            AnyMilliOp::GatherND(x) => x.infer(known_inputs, rng, pool),
+            AnyMilliOp::GatherGrad(x) => x.infer(known_inputs, rng, pool),
+            AnyMilliOp::Concat(x) => x.infer(known_inputs, rng, pool),
+            AnyMilliOp::Split(x) => x.infer(known_inputs, rng, pool),
+            AnyMilliOp::Where(x) => x.infer(known_inputs, rng, pool),
+            AnyMilliOp::Range(x) => x.infer(known_inputs, rng, pool),
+            AnyMilliOp::Expand(x) => x.infer(known_inputs, rng, pool),
+            AnyMilliOp::EyeLike(x) => x.infer(known_inputs, rng, pool),
+            AnyMilliOp::SumTo(x) => x.infer(known_inputs, rng, pool),
+            AnyMilliOp::ArgMax(x) => x.infer(known_inputs, rng, pool),
+            AnyMilliOp::ArgMin(x) => x.infer(known_inputs, rng, pool),
+            AnyMilliOp::Resize(x) => x.infer(known_inputs, rng, pool),
+            AnyMilliOp::Conv(x) => x.infer(known_inputs, rng, pool),
+            AnyMilliOp::ConvInputGrad(x) => x.infer(known_inputs, rng, pool),
+            AnyMilliOp::ConvWeightGrad(x) => x.infer(known_inputs, rng, pool),
+            AnyMilliOp::ConvBiasGrad(x) => x.infer(known_inputs, rng, pool),
+            AnyMilliOp::Pad(x) => x.infer(known_inputs, rng, pool),
+            AnyMilliOp::Dilate(x) => x.infer(known_inputs, rng, pool),
+            AnyMilliOp::Compress(x) => x.infer(known_inputs, rng, pool),
+            AnyMilliOp::ReverseSequence(x) => x.infer(known_inputs, rng, pool),
+            AnyMilliOp::ScatterElements(x) => x.infer(known_inputs, rng, pool),
+            AnyMilliOp::ScatterND(x) => x.infer(known_inputs, rng, pool),
+            AnyMilliOp::TopK(x) => x.infer(known_inputs, rng, pool),
+            AnyMilliOp::RandomNormalLike(x) => x.infer(known_inputs, rng, pool),
         }
     }
 

@@ -11,7 +11,7 @@ use crate::numeric_dtype::{NumericDType, ONNXDType};
 use crate::scalar_info::ScalarInfoTyped;
 use crate::symbolic_graph::ops::{AnyOperation, EvalError, Operation};
 use crate::symbolic_graph::tensor_store::{StoredTensor, TensorStore, TensorStoreTensorId};
-use crate::symbolic_scalar::{SymbolicResolver, SymbolicScalar, SymbolicScalarTyped};
+use crate::symbolic_scalar::{SymbolicScalar, SymbolicScalarTyped};
 use crate::tensor_rank::DynRank;
 use crate::{TrigOp, onnx};
 use prost::Message;
@@ -1558,7 +1558,7 @@ pub struct SymbolicGraphMutator {
     graph: Option<SymbolicGraph>,
     tensors_by_name: HashMap<String, GlobalId>,
     unknown_dimensions_by_name: HashMap<String, SymbolicScalarTyped<u64>>,
-    symbolic_resolver: SymbolicResolver,
+    rng: rand::rngs::SmallRng,
     tensor_store: TensorStore,
 }
 
@@ -1582,14 +1582,13 @@ impl SymbolicGraphMutator {
     }
 
     pub fn from_graph(graph: SymbolicGraph, tensor_store: TensorStore) -> Self {
-        let mut dimension_resolver = SymbolicResolver::new();
-        for dim in graph.unknown_dimensions.values() {
-            dimension_resolver.update_last_assigned(dim.clone())
-        }
         Self {
             tensors_by_name: graph.get_tensors_by_name(),
             graph: Some(graph),
-            symbolic_resolver: dimension_resolver,
+            rng: {
+                use rand::SeedableRng;
+                rand::rngs::SmallRng::from_rng(&mut rand::rng())
+            },
             unknown_dimensions_by_name: HashMap::new(),
             tensor_store,
         }
@@ -1799,7 +1798,7 @@ impl SymbolicGraphMutator {
                         if let Some(x) = self.unknown_dimensions_by_name.get(x.as_str()) {
                             x.clone()
                         } else {
-                            let new_dim = SymbolicScalarTyped::new(&mut self.symbolic_resolver);
+                            let new_dim = SymbolicScalarTyped::new(&mut self.rng);
                             self.unknown_dimensions_by_name
                                 .insert(x.clone(), new_dim.clone());
                             new_dim

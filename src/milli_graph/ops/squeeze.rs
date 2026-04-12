@@ -1,3 +1,4 @@
+use rand::Rng;
 use crate::graph::{GlobalId, Node};
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
@@ -80,7 +81,7 @@ impl MilliOp for Squeeze {
     fn infer<'a, 'p, P: Pool + 'p>(
         &self,
         known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo<'a, 'p, P>>,
-        symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
+        rng: &mut impl Rng,
         pool: &'p P,
     ) -> Result<Vec<(GlobalId, crate::tensor_info::TensorInfo<'a, 'p, P>)>, MilliOpGraphError>
     where
@@ -162,7 +163,7 @@ impl MilliOp for Squeeze {
             let out = TensorInfo::Ranked(crate::tensor_info::TensorInfoRanked::new(
                 first_elem,
                 output_shape,
-                symbolic_resolver,
+                rng,
             ));
             return Ok(vec![(self.output, out)]);
         }
@@ -176,7 +177,7 @@ impl MilliOp for Squeeze {
                 let out = TensorInfo::new_from_first_element_and_rank(
                     first_elem,
                     ScalarInfoTyped::Numeric(output_rank),
-                    symbolic_resolver,
+                    rng,
                 );
                 return Ok(vec![(self.output, out)]);
             }
@@ -185,8 +186,8 @@ impl MilliOp for Squeeze {
         // Fallback: propagate dtype only
         let out = TensorInfo::new_from_first_element_and_rank(
             first_elem,
-            ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(symbolic_resolver)),
-            symbolic_resolver,
+            ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(rng)),
+            rng,
         );
         Ok(vec![(self.output, out)])
     }

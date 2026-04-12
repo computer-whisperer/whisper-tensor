@@ -1,3 +1,4 @@
+use rand::Rng;
 use crate::TrigOp;
 use crate::graph::{GlobalId, Node};
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
@@ -365,7 +366,7 @@ impl MilliOp for SimpleUnaryOp {
     fn infer<'a, 'p, P: Pool + 'p>(
         &self,
         known_inputs: &HashMap<GlobalId, TensorInfo<'a, 'p, P>>,
-        symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
+        rng: &mut impl Rng,
         pool: &'p P,
     ) -> Result<Vec<(GlobalId, TensorInfo<'a, 'p, P>)>, MilliOpGraphError>
     where
@@ -383,12 +384,12 @@ impl MilliOp for SimpleUnaryOp {
                 use crate::symbolic_scalar::SymbolicScalar;
                 let first_elem = ScalarInfo::Symbolic(SymbolicScalar::new(
                     crate::numeric_dtype::NumericDType::Bool,
-                    symbolic_resolver,
+                    rng,
                 ));
                 TensorInfo::new_from_first_element_and_rank(
                     first_elem,
                     input_info.rank(),
-                    symbolic_resolver,
+                    rng,
                 )
             }
             _ => {
@@ -693,7 +694,7 @@ impl MilliOp for ClampMin {
     fn infer<'a, 'p, P: Pool + 'p>(
         &self,
         known_inputs: &HashMap<GlobalId, TensorInfo<'a, 'p, P>>,
-        _symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
+        _rng: &mut impl Rng,
         pool: &'p P,
     ) -> Result<Vec<(GlobalId, TensorInfo<'a, 'p, P>)>, MilliOpGraphError>
     where

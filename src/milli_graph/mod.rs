@@ -3,7 +3,7 @@ use crate::graph::{GlobalId, Graph, Node, collect_disconnected_node_slots};
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::numeric_dtype::NumericDType;
 use crate::scalar_info::ScalarInfo;
-use crate::symbolic_scalar::{SymbolicResolver, SymbolicScalar, SymbolicScalarTyped};
+use crate::symbolic_scalar::{SymbolicScalar, SymbolicScalarTyped};
 use crate::tensor_info::{MinimalTensor, TensorInfo, TensorInfoError};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -1204,7 +1204,7 @@ impl MilliOpGraph {
             return Err(MilliOpGraphError::InvalidGraph(first_issue));
         }
 
-        let mut resolver = SymbolicResolver::new();
+        let mut rng = rand::rng();
         let mut known: HashMap<GlobalId, TensorInfo<'a, 'p, P>> = HashMap::new();
 
         // Map external input IDs to internal IDs.
@@ -1222,7 +1222,7 @@ impl MilliOpGraph {
             let op = self.ops.get(op_id).ok_or_else(|| {
                 MilliOpGraphError::InvalidGraph(format!("missing op {op_id} in op_ordering"))
             })?;
-            match op.infer(&known, &mut resolver, pool) {
+            match op.infer(&known, &mut rng, pool) {
                 Ok(outputs) => {
                     for (tensor_id, info) in outputs {
                         known.insert(tensor_id, info);
@@ -1234,9 +1234,9 @@ impl MilliOpGraph {
                             TensorInfo::Minimal(MinimalTensor::new(
                                 ScalarInfo::Symbolic(SymbolicScalar::new(
                                     NumericDType::F32,
-                                    &mut resolver,
+                                    &mut rng,
                                 )),
-                                SymbolicScalarTyped::new(&mut resolver),
+                                SymbolicScalarTyped::new(&mut rng),
                             ))
                         });
                     }
@@ -4240,11 +4240,10 @@ mod tests {
         // Build: neg(add(x, y)) where x and y are symbolic (non-concrete).
         // Verify dtype and rank propagate through even without concrete values.
         use crate::scalar_info::ScalarInfo;
-        use crate::symbolic_scalar::{SymbolicResolver, SymbolicScalar, SymbolicScalarTyped};
+        use crate::symbolic_scalar::{SymbolicScalar, SymbolicScalarTyped};
         use crate::tensor_info::{MinimalTensor, TensorInfo};
 
         let rng = &mut rand::rng();
-        let mut resolver = SymbolicResolver::new();
 
         let ext_x = GlobalId::new(rng);
         let ext_y = GlobalId::new(rng);
@@ -4261,8 +4260,8 @@ mod tests {
             inputs.insert(
                 ext_id,
                 TensorInfo::Minimal(MinimalTensor::new(
-                    ScalarInfo::Symbolic(SymbolicScalar::new(NumericDType::F32, &mut resolver)),
-                    SymbolicScalarTyped::new(&mut resolver),
+                    ScalarInfo::Symbolic(SymbolicScalar::new(NumericDType::F32, rng)),
+                    SymbolicScalarTyped::new(rng),
                 )),
             );
         }
