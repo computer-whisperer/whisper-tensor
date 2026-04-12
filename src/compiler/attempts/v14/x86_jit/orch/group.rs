@@ -63,11 +63,12 @@ use crate::numeric_dtype::NumericDType;
 use crate::pool::SystemPool;
 
 use super::super::codec::bit_io::{
-    emit_load_aligned, emit_load_bits, emit_store_aligned, emit_store_bits,
+    emit_load_aligned, emit_load_bits, emit_load_sib, emit_store_aligned, emit_store_bits,
+    emit_store_sib,
 };
 use super::super::codec::format::{CodecSlot, CodecTables, ComputeRepr, emit_decode, emit_encode};
 use super::super::prologue::{BUFFER_PTRS_REG, LOOP_VAR_REG};
-use super::address::{AddressInfo, AddressTables, IterVar, emit_compute_bit_offset};
+use super::address::{AddressInfo, AddressTables, IterVar, SibMode, emit_compute_bit_offset};
 
 /// Address output / bit_io input.
 const BIT_OFF_REG: u8 = 10;
@@ -978,6 +979,110 @@ fn emit_binary_iter(
 /// and `emit_decode`. For other byte-aligned dtypes, we use
 /// `emit_load_aligned` (a single `mov` instead of bit extraction)
 /// then decode as normal.
+/// Try to resolve a 1D-strided input as a SIB addressing mode.
+///
+/// Returns `Some((SibMode, AddressInfo))` when the input is:
+/// - 1D Strided with stride fitting in {1, 2, 4, 8} bytes
+/// - Byte-aligned (8/16/32/64-bit element)
+/// - Base offset fits in i32
+/// - `iter` is a register (not constant)
+///
+/// When successful, no address code is emitted — the caller uses the
+/// SIB mode directly in the load/store instruction.
+fn try_sib_input(
+    layout: &BufferLayout,
+    input: &InputRef,
+    iter: IterVar,
+    atom_offset: u64,
+) -> Option<(SibMode, AddressInfo)> {
+
+    let iter_reg = match iter {
+        IterVar::Reg(r) => r,
+        _ => return None,
+    };
+    let (base_id, stride_atoms) = match input {
+        InputRef::Strided { base, dim_strides, .. } if dim_strides.len() == 1 => {
+            (*base, dim_strides[0])
+        }
+        _ => return None,
+    };
+    let first_offset = stride_atoms * atom_offset as i64;
+    let first_atom = crate::nano_graph::pattern::AtomId(((base_id.0 as i64) + first_offset) as u64);
+    let (slot, elem_idx) = layout.find(base_id).or_else(|| layout.find(first_atom))?;
+    if !slot.is_byte_aligned() || !matches!(slot.elem_bits, 8 | 16 | 32 | 64) {
+        return None;
+    }
+    let slot_bit = slot.bit_offset + elem_idx * slot.bit_stride;
+    let base_bit = if layout.find(base_id).is_some() {
+        slot_bit as i64
+    } else {
+        slot_bit as i64 - first_offset * slot.bit_stride as i64
+    };
+    let byte_base = base_bit / 8;
+    let byte_stride = (stride_atoms * slot.bit_stride as i64) / 8;
+    if !matches!(byte_stride, 1 | 2 | 4 | 8) {
+        return None;
+    }
+    if !(i32::MIN as i64..=i32::MAX as i64).contains(&byte_base) {
+        return None;
+    }
+    Some((
+        SibMode {
+            index_reg: iter_reg,
+            scale: byte_stride as u8,
+            disp: byte_base as i32,
+        },
+        AddressInfo {
+            dtype: slot.dtype,
+            n_bits: slot.elem_bits as u32,
+            buffer_id: slot.buffer_id,
+            byte_aligned: true,
+            sib: None,
+        },
+    ))
+}
+
+/// Try to resolve an output slot as a SIB addressing mode.
+fn try_sib_output(
+    layout: &BufferLayout,
+    group_base_id: crate::nano_graph::pattern::AtomId,
+    atom_offset: u64,
+    iter: IterVar,
+) -> Option<(SibMode, AddressInfo)> {
+
+    let iter_reg = match iter {
+        IterVar::Reg(r) => r,
+        _ => return None,
+    };
+    let (slot, elem_idx) = layout.find(group_base_id)?;
+    if !slot.is_byte_aligned() || !matches!(slot.elem_bits, 8 | 16 | 32 | 64) {
+        return None;
+    }
+    let slot_off = slot.bit_offset as i64 + elem_idx as i64 * slot.bit_stride as i64;
+    let byte_stride = slot.bit_stride as i64 / 8;
+    let byte_base = slot_off / 8 - atom_offset as i64 * byte_stride;
+    if !matches!(byte_stride, 1 | 2 | 4 | 8) {
+        return None;
+    }
+    if !(i32::MIN as i64..=i32::MAX as i64).contains(&byte_base) {
+        return None;
+    }
+    Some((
+        SibMode {
+            index_reg: iter_reg,
+            scale: byte_stride as u8,
+            disp: byte_base as i32,
+        },
+        AddressInfo {
+            dtype: slot.dtype,
+            n_bits: slot.elem_bits as u32,
+            buffer_id: slot.buffer_id,
+            byte_aligned: true,
+            sib: None,
+        },
+    ))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn emit_load_decode_input(
     asm: &mut Assembler,
@@ -989,6 +1094,43 @@ fn emit_load_decode_input(
     codec_tables: &mut CodecTables,
     slot: CodecSlot,
 ) -> Result<AddressInfo, String> {
+    // SIB fast path: fold address into the load instruction, skip
+    // emit_compute_bit_offset entirely.
+    if let Some((sib, info)) = try_sib_input(layout, input, iter, atom_offset) {
+        let base = bbase(asm, layout, info.buffer_id);
+        let idx = sib.index_reg;
+        let disp = sib.disp;
+
+        // Direct XMM load for F32 via SIB.
+        if info.dtype == NumericDType::F32 && matches!(slot, CodecSlot::Xmm(_)) {
+            let xmm = match slot { CodecSlot::Xmm(x) => x, _ => unreachable!() };
+            match sib.scale {
+                1 => dynasm!(asm; .arch x64; movd Rx(xmm), DWORD [Rq(base) + Rq(idx) * 1 + disp]),
+                2 => dynasm!(asm; .arch x64; movd Rx(xmm), DWORD [Rq(base) + Rq(idx) * 2 + disp]),
+                4 => dynasm!(asm; .arch x64; movd Rx(xmm), DWORD [Rq(base) + Rq(idx) * 4 + disp]),
+                8 => dynasm!(asm; .arch x64; movd Rx(xmm), DWORD [Rq(base) + Rq(idx) * 8 + disp]),
+                _ => unreachable!(),
+            }
+            return Ok(info);
+        }
+        // Direct XMM load for F64 via SIB.
+        if info.dtype == NumericDType::F64 && matches!(slot, CodecSlot::Xmm(_)) {
+            let xmm = match slot { CodecSlot::Xmm(x) => x, _ => unreachable!() };
+            match sib.scale {
+                1 => dynasm!(asm; .arch x64; movq Rx(xmm), QWORD [Rq(base) + Rq(idx) * 1 + disp]),
+                2 => dynasm!(asm; .arch x64; movq Rx(xmm), QWORD [Rq(base) + Rq(idx) * 2 + disp]),
+                4 => dynasm!(asm; .arch x64; movq Rx(xmm), QWORD [Rq(base) + Rq(idx) * 4 + disp]),
+                8 => dynasm!(asm; .arch x64; movq Rx(xmm), QWORD [Rq(base) + Rq(idx) * 8 + disp]),
+                _ => unreachable!(),
+            }
+            return Ok(info);
+        }
+        // Other SIB types: load to GP, then decode.
+        emit_load_sib(asm, base, &sib, info.n_bits, RAW_REG);
+        emit_decode(asm, info.dtype, RAW_REG, slot, BIT_IO_TMP1, FLT_SCRATCH, codec_tables)?;
+        return Ok(info);
+    }
+
     let info = emit_compute_bit_offset(
         asm,
         layout,
@@ -1003,21 +1145,15 @@ fn emit_load_decode_input(
 
     if info.byte_aligned {
         // Direct XMM load for F32/F64 — skips load_bits + decode entirely.
-        if info.dtype == NumericDType::F32 && matches!(slot, CodecSlot::Xmm(x) if x == x) {
-            let xmm = match slot {
-                CodecSlot::Xmm(x) => x,
-                _ => unreachable!(),
-            };
+        if info.dtype == NumericDType::F32 && matches!(slot, CodecSlot::Xmm(_)) {
+            let xmm = match slot { CodecSlot::Xmm(x) => x, _ => unreachable!() };
             dynasm!(asm; .arch x64
                 ; movd Rx(xmm), DWORD [Rq(base) + Rq(BIT_OFF_REG)]
             );
             return Ok(info);
         }
         if info.dtype == NumericDType::F64 && matches!(slot, CodecSlot::Xmm(_)) {
-            let xmm = match slot {
-                CodecSlot::Xmm(x) => x,
-                _ => unreachable!(),
-            };
+            let xmm = match slot { CodecSlot::Xmm(x) => x, _ => unreachable!() };
             dynasm!(asm; .arch x64
                 ; movq Rx(xmm), QWORD [Rq(base) + Rq(BIT_OFF_REG)]
             );
@@ -1061,8 +1197,43 @@ fn emit_encode_store_output(
     output_atom_offset: u64,
     iter: IterVar,
 ) -> Result<(), String> {
-    // Compute offset first (may clobber ADDR_SCRATCH but not RAW_REG
-    // or the XMM slot).
+    // SIB fast path: fold address into store, skip emit_output_bit_offset.
+    if let Some((sib, dst_info)) = try_sib_output(layout, output_base, output_atom_offset, iter) {
+        let base = bbase(asm, layout, dst_info.buffer_id);
+        let idx = sib.index_reg;
+        let disp = sib.disp;
+        // Direct XMM store for F32 via SIB.
+        if output_dtype == NumericDType::F32 {
+            if let CodecSlot::Xmm(xmm) = result_slot {
+                match sib.scale {
+                    1 => dynasm!(asm; .arch x64; movd DWORD [Rq(base) + Rq(idx) * 1 + disp], Rx(xmm)),
+                    2 => dynasm!(asm; .arch x64; movd DWORD [Rq(base) + Rq(idx) * 2 + disp], Rx(xmm)),
+                    4 => dynasm!(asm; .arch x64; movd DWORD [Rq(base) + Rq(idx) * 4 + disp], Rx(xmm)),
+                    8 => dynasm!(asm; .arch x64; movd DWORD [Rq(base) + Rq(idx) * 8 + disp], Rx(xmm)),
+                    _ => unreachable!(),
+                }
+                return Ok(());
+            }
+        }
+        if output_dtype == NumericDType::F64 {
+            if let CodecSlot::Xmm(xmm) = result_slot {
+                match sib.scale {
+                    1 => dynasm!(asm; .arch x64; movq QWORD [Rq(base) + Rq(idx) * 1 + disp], Rx(xmm)),
+                    2 => dynasm!(asm; .arch x64; movq QWORD [Rq(base) + Rq(idx) * 2 + disp], Rx(xmm)),
+                    4 => dynasm!(asm; .arch x64; movq QWORD [Rq(base) + Rq(idx) * 4 + disp], Rx(xmm)),
+                    8 => dynasm!(asm; .arch x64; movq QWORD [Rq(base) + Rq(idx) * 8 + disp], Rx(xmm)),
+                    _ => unreachable!(),
+                }
+                return Ok(());
+            }
+        }
+        // Other SIB types: encode to GP, then SIB store.
+        emit_encode(asm, output_dtype, result_slot, RAW_REG, BIT_IO_TMP1, BIT_IO_TMP2, FLT_SCRATCH)?;
+        emit_store_sib(asm, base, &sib, dst_info.n_bits, RAW_REG);
+        return Ok(());
+    }
+
+    // Non-SIB path: compute offset, then store.
     let dst_info = emit_output_bit_offset(
         asm,
         layout,
@@ -1967,6 +2138,7 @@ pub(super) fn emit_output_bit_offset(
         n_bits: slot.elem_bits as u32,
         buffer_id: slot.buffer_id,
         byte_aligned: byte_fast,
+        sib: None,
     };
 
     // store_base = slot_offset - atom_offset * stride

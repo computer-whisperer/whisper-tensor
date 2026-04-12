@@ -118,6 +118,31 @@ pub struct AddressInfo {
     /// Set when the slot's `bit_offset` and `bit_stride` are both
     /// multiples of 8 and `elem_bits` is 8, 16, 32, or 64.
     pub byte_aligned: bool,
+    /// When `Some`, the address was NOT emitted to a register — the
+    /// caller should fold it into the load/store instruction as a SIB
+    /// addressing mode: `[base_reg + index_reg * scale + disp]`.
+    ///
+    /// `index_reg` is the loop iteration register. `scale` is 1, 2,
+    /// 4, or 8. `disp` fits in i32.
+    ///
+    /// When `None`, the offset was materialized into `dst_bit_reg` as
+    /// before, and the caller uses `[base_reg + dst_bit_reg]`.
+    pub sib: Option<SibMode>,
+}
+
+/// SIB addressing mode: `[base_reg + index_reg * scale + disp]`.
+///
+/// The address layer emits **no code** when it returns a SibMode — the
+/// caller is responsible for encoding the SIB form directly in the
+/// load/store instruction.
+#[derive(Clone, Copy, Debug)]
+pub struct SibMode {
+    /// Register holding the loop iteration variable.
+    pub index_reg: u8,
+    /// SIB scale factor (1, 2, 4, or 8).
+    pub scale: u8,
+    /// Signed 32-bit displacement added to `base + index*scale`.
+    pub disp: i32,
 }
 
 /// Emit code that materializes the bit offset of `input.resolve(i)`
@@ -227,6 +252,7 @@ fn emit_constant_atom(
         n_bits: slot.elem_bits as u32,
         buffer_id: slot.buffer_id,
         byte_aligned: byte_fast,
+        sib: None,
     })
 }
 
@@ -281,6 +307,7 @@ fn emit_strided_1d(
         n_bits: slot.elem_bits as u32,
         buffer_id: slot.buffer_id,
         byte_aligned: byte_fast,
+        sib: None,
     };
 
     // When byte-aligned, emit byte offsets (divide by 8 at JIT-build
@@ -312,8 +339,6 @@ fn emit_strided_1d(
             );
 
             // dst *= stride
-            // Use the imm32 form when possible — saves a `mov scratch,
-            // imm64` and an extra register dependency.
             if (i32::MIN as i64..=i32::MAX as i64).contains(&eff_stride) {
                 let imm = eff_stride as i32;
                 dynasm!(asm
@@ -394,6 +419,7 @@ fn emit_strided_nd(
         n_bits: slot.elem_bits as u32,
         buffer_id: slot.buffer_id,
         byte_aligned: byte_fast,
+        sib: None,
     };
 
     let (eff_base, eff_stride) = if byte_fast {
@@ -596,6 +622,7 @@ fn emit_explicit_multi(
         n_bits: first_slot.elem_bits as u32,
         buffer_id: first_slot.buffer_id,
         byte_aligned: byte_fast,
+        sib: None,
     };
 
     match iter {

@@ -346,6 +346,66 @@ pub fn emit_store_aligned(
     }
 }
 
+// ─── SIB addressing mode ────────────────────────────────────────────
+//
+// When the address layer returns a SibMode, the load/store can fold
+// the address computation directly into the memory operand:
+// `[base_reg + index_reg * scale + disp]`. No separate address
+// register is needed.
+
+use super::super::orch::address::SibMode;
+
+/// Load `n_bits` bits via SIB addressing: `[base_reg + sib.index*sib.scale + sib.disp]`.
+/// Stores result in the low bits of `dst_reg` (zero-extended).
+pub fn emit_load_sib(
+    asm: &mut Assembler,
+    base_reg: u8,
+    sib: &SibMode,
+    n_bits: u32,
+    dst_reg: u8,
+) {
+    let idx = sib.index_reg;
+    let disp = sib.disp;
+    match (n_bits, sib.scale) {
+        (8, 1) => dynasm!(asm; .arch x64; movzx Rd(dst_reg), BYTE [Rq(base_reg) + Rq(idx) * 1 + disp]),
+        (16, 1) => dynasm!(asm; .arch x64; movzx Rd(dst_reg), WORD [Rq(base_reg) + Rq(idx) * 1 + disp]),
+        (16, 2) => dynasm!(asm; .arch x64; movzx Rd(dst_reg), WORD [Rq(base_reg) + Rq(idx) * 2 + disp]),
+        (32, 1) => dynasm!(asm; .arch x64; mov Rd(dst_reg), DWORD [Rq(base_reg) + Rq(idx) * 1 + disp]),
+        (32, 2) => dynasm!(asm; .arch x64; mov Rd(dst_reg), DWORD [Rq(base_reg) + Rq(idx) * 2 + disp]),
+        (32, 4) => dynasm!(asm; .arch x64; mov Rd(dst_reg), DWORD [Rq(base_reg) + Rq(idx) * 4 + disp]),
+        (64, 1) => dynasm!(asm; .arch x64; mov Rq(dst_reg), QWORD [Rq(base_reg) + Rq(idx) * 1 + disp]),
+        (64, 2) => dynasm!(asm; .arch x64; mov Rq(dst_reg), QWORD [Rq(base_reg) + Rq(idx) * 2 + disp]),
+        (64, 4) => dynasm!(asm; .arch x64; mov Rq(dst_reg), QWORD [Rq(base_reg) + Rq(idx) * 4 + disp]),
+        (64, 8) => dynasm!(asm; .arch x64; mov Rq(dst_reg), QWORD [Rq(base_reg) + Rq(idx) * 8 + disp]),
+        _ => panic!("emit_load_sib: unsupported n_bits={n_bits} scale={}", sib.scale),
+    }
+}
+
+/// Store the low `n_bits` of `src_reg` via SIB addressing.
+pub fn emit_store_sib(
+    asm: &mut Assembler,
+    base_reg: u8,
+    sib: &SibMode,
+    n_bits: u32,
+    src_reg: u8,
+) {
+    let idx = sib.index_reg;
+    let disp = sib.disp;
+    match (n_bits, sib.scale) {
+        (8, 1) => dynasm!(asm; .arch x64; mov BYTE [Rq(base_reg) + Rq(idx) * 1 + disp], Rb(src_reg)),
+        (16, 1) => dynasm!(asm; .arch x64; mov WORD [Rq(base_reg) + Rq(idx) * 1 + disp], Rw(src_reg)),
+        (16, 2) => dynasm!(asm; .arch x64; mov WORD [Rq(base_reg) + Rq(idx) * 2 + disp], Rw(src_reg)),
+        (32, 1) => dynasm!(asm; .arch x64; mov DWORD [Rq(base_reg) + Rq(idx) * 1 + disp], Rd(src_reg)),
+        (32, 2) => dynasm!(asm; .arch x64; mov DWORD [Rq(base_reg) + Rq(idx) * 2 + disp], Rd(src_reg)),
+        (32, 4) => dynasm!(asm; .arch x64; mov DWORD [Rq(base_reg) + Rq(idx) * 4 + disp], Rd(src_reg)),
+        (64, 1) => dynasm!(asm; .arch x64; mov QWORD [Rq(base_reg) + Rq(idx) * 1 + disp], Rq(src_reg)),
+        (64, 2) => dynasm!(asm; .arch x64; mov QWORD [Rq(base_reg) + Rq(idx) * 2 + disp], Rq(src_reg)),
+        (64, 4) => dynasm!(asm; .arch x64; mov QWORD [Rq(base_reg) + Rq(idx) * 4 + disp], Rq(src_reg)),
+        (64, 8) => dynasm!(asm; .arch x64; mov QWORD [Rq(base_reg) + Rq(idx) * 8 + disp], Rq(src_reg)),
+        _ => panic!("emit_store_sib: unsupported n_bits={n_bits} scale={}", sib.scale),
+    }
+}
+
 /// Reserved register code for `rcx` — the x86 shift count register.
 const RCX: u8 = 1;
 
