@@ -1053,48 +1053,6 @@ fn main() {
 /// Classifies each tensor as Weight, Input, or Computed by cross-referencing
 /// the milli_graph's input_map with the user-provided input_info.
 
-/// Look up a single atom's f64 value in a PhaseStore.
-fn lookup_atom_in_store(
-    store: &whisper_tensor::compiler::attempts::v14::executor::PhaseStore<
-        '_,
-        '_,
-        impl whisper_tensor::pool::Pool,
-    >,
-    atom: u64,
-) -> Option<f64> {
-    use whisper_tensor::nano_graph::AtomId;
-    let slices = store.gather(AtomId(atom), 1);
-    for slice in &slices {
-        if slice.base.0 <= atom && atom < slice.base.0 + slice.count {
-            let offset = (atom - slice.base.0) as usize;
-            let elem_bytes = slice.dtype.bytes_per_element();
-            let byte_off = offset * elem_bytes;
-            if byte_off + elem_bytes <= slice.data.len() {
-                return Some(match slice.dtype {
-                    NumericDType::F32 => {
-                        f32::from_le_bytes(slice.data[byte_off..byte_off + 4].try_into().unwrap())
-                            as f64
-                    }
-                    NumericDType::F64 => {
-                        f64::from_le_bytes(slice.data[byte_off..byte_off + 8].try_into().unwrap())
-                    }
-                    NumericDType::I64 => {
-                        i64::from_le_bytes(slice.data[byte_off..byte_off + 8].try_into().unwrap())
-                            as f64
-                    }
-                    NumericDType::BF16 => {
-                        let bits = u16::from_le_bytes(
-                            slice.data[byte_off..byte_off + 2].try_into().unwrap(),
-                        );
-                        half::bf16::from_bits(bits).to_f64()
-                    }
-                    _ => 0.0,
-                });
-            }
-        }
-    }
-    None
-}
 
 fn build_tensor_map(
     lower_tensor_map: &HashMap<GlobalId, lower::TensorAtomMapInfo>,
