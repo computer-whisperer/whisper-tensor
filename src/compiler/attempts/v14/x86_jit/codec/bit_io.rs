@@ -38,10 +38,13 @@
 //!
 //! # Byte-aligned fast path
 //!
-//! Phase 6 will add a byte-aligned fast path that bypasses the bit
-//! arithmetic when the static slot offset is known to be byte-aligned
-//! AND the dtype's `total_bits` is a power of two ≤ 64. The general
-//! path is the default and is what this module emits.
+//! When the slot's offset and stride are byte-multiples and the
+//! element width is 8, 16, 32, or 64 bits, the address layer emits
+//! byte offsets and the caller uses `emit_load_aligned` /
+//! `emit_store_aligned` (single `mov` instructions) instead of the
+//! general bit-extraction path. For SIB-eligible 1D-strided accesses,
+//! the load/store address is folded directly into the instruction via
+//! `emit_load_sib*` / `emit_store_sib*`.
 
 use dynasmrt::{DynasmApi, dynasm, x64::Assembler};
 
@@ -348,12 +351,25 @@ pub fn emit_store_aligned(
 
 // ─── SIB addressing mode ────────────────────────────────────────────
 //
-// When the address layer returns a SibMode, the load/store can fold
-// the address computation directly into the memory operand:
-// `[base_reg + index_reg * scale + disp]`. No separate address
-// register is needed.
+// When the orchestration layer detects a 1D-strided byte-aligned input
+// with a SIB-compatible scale, it constructs a `SibMode` and calls the
+// SIB load/store functions below, bypassing the address computation
+// entirely.
 
-use super::super::orch::address::SibMode;
+/// SIB addressing mode: `[base_reg + index_reg * scale + disp]`.
+///
+/// Constructed by `try_sib_input` / `try_sib_output` in the
+/// orchestration layer when a 1D-strided byte-aligned access has
+/// scale in {1, 2, 4, 8} and displacement fitting in i32.
+#[derive(Clone, Copy, Debug)]
+pub struct SibMode {
+    /// Register holding the loop iteration variable.
+    pub index_reg: u8,
+    /// SIB scale factor (1, 2, 4, or 8).
+    pub scale: u8,
+    /// Signed 32-bit displacement added to `base + index*scale`.
+    pub disp: i32,
+}
 
 /// Load `n_bits` bits via SIB addressing: `[base_reg + sib.index*sib.scale + sib.disp]`.
 /// Stores result in the low bits of `dst_reg` (zero-extended).
@@ -437,6 +453,59 @@ pub fn emit_store_sib(asm: &mut Assembler, base_reg: u8, sib: &SibMode, n_bits: 
             "emit_store_sib: unsupported n_bits={n_bits} scale={}",
             sib.scale
         ),
+    }
+}
+
+/// Load an f32 from `[base_reg + sib]` directly into an XMM register.
+/// Equivalent to `movd xmm, DWORD [base + idx*scale + disp]`.
+pub fn emit_load_sib_f32(asm: &mut Assembler, base_reg: u8, sib: &SibMode, xmm: u8) {
+    let idx = sib.index_reg;
+    let disp = sib.disp;
+    match sib.scale {
+        1 => dynasm!(asm; .arch x64; movd Rx(xmm), DWORD [Rq(base_reg) + Rq(idx) * 1 + disp]),
+        2 => dynasm!(asm; .arch x64; movd Rx(xmm), DWORD [Rq(base_reg) + Rq(idx) * 2 + disp]),
+        4 => dynasm!(asm; .arch x64; movd Rx(xmm), DWORD [Rq(base_reg) + Rq(idx) * 4 + disp]),
+        8 => dynasm!(asm; .arch x64; movd Rx(xmm), DWORD [Rq(base_reg) + Rq(idx) * 8 + disp]),
+        _ => unreachable!(),
+    }
+}
+
+/// Store an f32 from an XMM register to `[base_reg + sib]`.
+pub fn emit_store_sib_f32(asm: &mut Assembler, base_reg: u8, sib: &SibMode, xmm: u8) {
+    let idx = sib.index_reg;
+    let disp = sib.disp;
+    match sib.scale {
+        1 => dynasm!(asm; .arch x64; movd DWORD [Rq(base_reg) + Rq(idx) * 1 + disp], Rx(xmm)),
+        2 => dynasm!(asm; .arch x64; movd DWORD [Rq(base_reg) + Rq(idx) * 2 + disp], Rx(xmm)),
+        4 => dynasm!(asm; .arch x64; movd DWORD [Rq(base_reg) + Rq(idx) * 4 + disp], Rx(xmm)),
+        8 => dynasm!(asm; .arch x64; movd DWORD [Rq(base_reg) + Rq(idx) * 8 + disp], Rx(xmm)),
+        _ => unreachable!(),
+    }
+}
+
+/// Load an f64 from `[base_reg + sib]` directly into an XMM register.
+pub fn emit_load_sib_f64(asm: &mut Assembler, base_reg: u8, sib: &SibMode, xmm: u8) {
+    let idx = sib.index_reg;
+    let disp = sib.disp;
+    match sib.scale {
+        1 => dynasm!(asm; .arch x64; movq Rx(xmm), QWORD [Rq(base_reg) + Rq(idx) * 1 + disp]),
+        2 => dynasm!(asm; .arch x64; movq Rx(xmm), QWORD [Rq(base_reg) + Rq(idx) * 2 + disp]),
+        4 => dynasm!(asm; .arch x64; movq Rx(xmm), QWORD [Rq(base_reg) + Rq(idx) * 4 + disp]),
+        8 => dynasm!(asm; .arch x64; movq Rx(xmm), QWORD [Rq(base_reg) + Rq(idx) * 8 + disp]),
+        _ => unreachable!(),
+    }
+}
+
+/// Store an f64 from an XMM register to `[base_reg + sib]`.
+pub fn emit_store_sib_f64(asm: &mut Assembler, base_reg: u8, sib: &SibMode, xmm: u8) {
+    let idx = sib.index_reg;
+    let disp = sib.disp;
+    match sib.scale {
+        1 => dynasm!(asm; .arch x64; movq QWORD [Rq(base_reg) + Rq(idx) * 1 + disp], Rx(xmm)),
+        2 => dynasm!(asm; .arch x64; movq QWORD [Rq(base_reg) + Rq(idx) * 2 + disp], Rx(xmm)),
+        4 => dynasm!(asm; .arch x64; movq QWORD [Rq(base_reg) + Rq(idx) * 4 + disp], Rx(xmm)),
+        8 => dynasm!(asm; .arch x64; movq QWORD [Rq(base_reg) + Rq(idx) * 8 + disp], Rx(xmm)),
+        _ => unreachable!(),
     }
 }
 

@@ -63,12 +63,13 @@ use crate::numeric_dtype::NumericDType;
 use crate::pool::SystemPool;
 
 use super::super::codec::bit_io::{
-    emit_load_aligned, emit_load_bits, emit_load_sib, emit_store_aligned, emit_store_bits,
-    emit_store_sib,
+    SibMode, emit_load_aligned, emit_load_bits, emit_load_sib, emit_load_sib_f32,
+    emit_load_sib_f64, emit_store_aligned, emit_store_bits, emit_store_sib, emit_store_sib_f32,
+    emit_store_sib_f64,
 };
 use super::super::codec::format::{CodecSlot, CodecTables, ComputeRepr, emit_decode, emit_encode};
 use super::super::prologue::{BUFFER_PTRS_REG, LOOP_VAR_REG};
-use super::address::{AddressInfo, AddressTables, IterVar, SibMode, emit_compute_bit_offset};
+use super::address::{AddressInfo, AddressTables, IterVar, emit_compute_bit_offset};
 
 /// Address output / bit_io input.
 const BIT_OFF_REG: u8 = 10;
@@ -1086,7 +1087,6 @@ fn try_sib_input(
             n_bits: slot.elem_bits as u32,
             buffer_id: slot.buffer_id,
             byte_aligned: true,
-            sib: None,
         },
     ))
 }
@@ -1126,7 +1126,6 @@ fn try_sib_output(
             n_bits: slot.elem_bits as u32,
             buffer_id: slot.buffer_id,
             byte_aligned: true,
-            sib: None,
         },
     ))
 }
@@ -1146,38 +1145,17 @@ fn emit_load_decode_input(
     // emit_compute_bit_offset entirely.
     if let Some((sib, info)) = try_sib_input(layout, input, iter, atom_offset) {
         let base = bbase(asm, layout, info.buffer_id);
-        let idx = sib.index_reg;
-        let disp = sib.disp;
-
-        // Direct XMM load for F32 via SIB.
-        if info.dtype == NumericDType::F32 && matches!(slot, CodecSlot::Xmm(_)) {
-            let xmm = match slot {
-                CodecSlot::Xmm(x) => x,
-                _ => unreachable!(),
-            };
-            match sib.scale {
-                1 => dynasm!(asm; .arch x64; movd Rx(xmm), DWORD [Rq(base) + Rq(idx) * 1 + disp]),
-                2 => dynasm!(asm; .arch x64; movd Rx(xmm), DWORD [Rq(base) + Rq(idx) * 2 + disp]),
-                4 => dynasm!(asm; .arch x64; movd Rx(xmm), DWORD [Rq(base) + Rq(idx) * 4 + disp]),
-                8 => dynasm!(asm; .arch x64; movd Rx(xmm), DWORD [Rq(base) + Rq(idx) * 8 + disp]),
-                _ => unreachable!(),
+        if info.dtype == NumericDType::F32 {
+            if let CodecSlot::Xmm(xmm) = slot {
+                emit_load_sib_f32(asm, base, &sib, xmm);
+                return Ok(info);
             }
-            return Ok(info);
         }
-        // Direct XMM load for F64 via SIB.
-        if info.dtype == NumericDType::F64 && matches!(slot, CodecSlot::Xmm(_)) {
-            let xmm = match slot {
-                CodecSlot::Xmm(x) => x,
-                _ => unreachable!(),
-            };
-            match sib.scale {
-                1 => dynasm!(asm; .arch x64; movq Rx(xmm), QWORD [Rq(base) + Rq(idx) * 1 + disp]),
-                2 => dynasm!(asm; .arch x64; movq Rx(xmm), QWORD [Rq(base) + Rq(idx) * 2 + disp]),
-                4 => dynasm!(asm; .arch x64; movq Rx(xmm), QWORD [Rq(base) + Rq(idx) * 4 + disp]),
-                8 => dynasm!(asm; .arch x64; movq Rx(xmm), QWORD [Rq(base) + Rq(idx) * 8 + disp]),
-                _ => unreachable!(),
+        if info.dtype == NumericDType::F64 {
+            if let CodecSlot::Xmm(xmm) = slot {
+                emit_load_sib_f64(asm, base, &sib, xmm);
+                return Ok(info);
             }
-            return Ok(info);
         }
         // Other SIB types: load to GP, then decode.
         emit_load_sib(asm, base, &sib, info.n_bits, RAW_REG);
@@ -1268,46 +1246,15 @@ fn emit_encode_store_output(
     // SIB fast path: fold address into store, skip emit_output_bit_offset.
     if let Some((sib, dst_info)) = try_sib_output(layout, output_base, output_atom_offset, iter) {
         let base = bbase(asm, layout, dst_info.buffer_id);
-        let idx = sib.index_reg;
-        let disp = sib.disp;
-        // Direct XMM store for F32 via SIB.
         if output_dtype == NumericDType::F32 {
             if let CodecSlot::Xmm(xmm) = result_slot {
-                match sib.scale {
-                    1 => {
-                        dynasm!(asm; .arch x64; movd DWORD [Rq(base) + Rq(idx) * 1 + disp], Rx(xmm))
-                    }
-                    2 => {
-                        dynasm!(asm; .arch x64; movd DWORD [Rq(base) + Rq(idx) * 2 + disp], Rx(xmm))
-                    }
-                    4 => {
-                        dynasm!(asm; .arch x64; movd DWORD [Rq(base) + Rq(idx) * 4 + disp], Rx(xmm))
-                    }
-                    8 => {
-                        dynasm!(asm; .arch x64; movd DWORD [Rq(base) + Rq(idx) * 8 + disp], Rx(xmm))
-                    }
-                    _ => unreachable!(),
-                }
+                emit_store_sib_f32(asm, base, &sib, xmm);
                 return Ok(());
             }
         }
         if output_dtype == NumericDType::F64 {
             if let CodecSlot::Xmm(xmm) = result_slot {
-                match sib.scale {
-                    1 => {
-                        dynasm!(asm; .arch x64; movq QWORD [Rq(base) + Rq(idx) * 1 + disp], Rx(xmm))
-                    }
-                    2 => {
-                        dynasm!(asm; .arch x64; movq QWORD [Rq(base) + Rq(idx) * 2 + disp], Rx(xmm))
-                    }
-                    4 => {
-                        dynasm!(asm; .arch x64; movq QWORD [Rq(base) + Rq(idx) * 4 + disp], Rx(xmm))
-                    }
-                    8 => {
-                        dynasm!(asm; .arch x64; movq QWORD [Rq(base) + Rq(idx) * 8 + disp], Rx(xmm))
-                    }
-                    _ => unreachable!(),
-                }
+                emit_store_sib_f64(asm, base, &sib, xmm);
                 return Ok(());
             }
         }
@@ -2244,7 +2191,6 @@ pub(super) fn emit_output_bit_offset(
         n_bits: slot.elem_bits as u32,
         buffer_id: slot.buffer_id,
         byte_aligned: byte_fast,
-        sib: None,
     };
 
     // store_base = slot_offset - atom_offset * stride

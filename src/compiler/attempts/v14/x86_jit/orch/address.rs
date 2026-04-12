@@ -97,52 +97,17 @@ pub enum IterVar {
 /// knows how to read the bits the offset addresses.
 #[derive(Clone, Copy, Debug)]
 pub struct AddressInfo {
-    /// Storage dtype of the slot the bit offset addresses.
+    /// Storage dtype of the slot the offset addresses.
     pub dtype: NumericDType,
-    /// Number of bits to load from that bit offset, equal to
-    /// `slot.elem_bits` (the dtype's semantic width — sub-byte
-    /// dtypes have `n_bits < 8`).
+    /// Number of bits per element, equal to `slot.elem_bits`.
     pub n_bits: u32,
-    /// Which buffer the resolved slot lives in. The caller is
-    /// responsible for selecting the base register that holds this
-    /// buffer's pointer and adding the bit offset to it. Under the
-    /// single-buffer per-span layout (pre memory-placement rework)
-    /// this is always 0. See `MEMORY_PLACEMENT.md` §"JIT ABI".
+    /// Which buffer the resolved slot lives in.
     pub buffer_id: u8,
     /// When true, the emitted offset register holds a **byte** offset
     /// instead of a bit offset, and the element width is a power-of-2
     /// number of bytes (1, 2, 4, or 8). The caller can use the
-    /// byte-aligned load/store fast path in `bit_io` — a single `mov`
-    /// instruction instead of the general bit-extraction sequence.
-    ///
-    /// Set when the slot's `bit_offset` and `bit_stride` are both
-    /// multiples of 8 and `elem_bits` is 8, 16, 32, or 64.
+    /// byte-aligned load/store fast path in `bit_io`.
     pub byte_aligned: bool,
-    /// When `Some`, the address was NOT emitted to a register — the
-    /// caller should fold it into the load/store instruction as a SIB
-    /// addressing mode: `[base_reg + index_reg * scale + disp]`.
-    ///
-    /// `index_reg` is the loop iteration register. `scale` is 1, 2,
-    /// 4, or 8. `disp` fits in i32.
-    ///
-    /// When `None`, the offset was materialized into `dst_bit_reg` as
-    /// before, and the caller uses `[base_reg + dst_bit_reg]`.
-    pub sib: Option<SibMode>,
-}
-
-/// SIB addressing mode: `[base_reg + index_reg * scale + disp]`.
-///
-/// The address layer emits **no code** when it returns a SibMode — the
-/// caller is responsible for encoding the SIB form directly in the
-/// load/store instruction.
-#[derive(Clone, Copy, Debug)]
-pub struct SibMode {
-    /// Register holding the loop iteration variable.
-    pub index_reg: u8,
-    /// SIB scale factor (1, 2, 4, or 8).
-    pub scale: u8,
-    /// Signed 32-bit displacement added to `base + index*scale`.
-    pub disp: i32,
 }
 
 /// Emit code that materializes the bit offset of `input.resolve(i)`
@@ -252,7 +217,6 @@ fn emit_constant_atom(
         n_bits: slot.elem_bits as u32,
         buffer_id: slot.buffer_id,
         byte_aligned: byte_fast,
-        sib: None,
     })
 }
 
@@ -307,7 +271,6 @@ fn emit_strided_1d(
         n_bits: slot.elem_bits as u32,
         buffer_id: slot.buffer_id,
         byte_aligned: byte_fast,
-        sib: None,
     };
 
     // When byte-aligned, emit byte offsets (divide by 8 at JIT-build
@@ -419,7 +382,6 @@ fn emit_strided_nd(
         n_bits: slot.elem_bits as u32,
         buffer_id: slot.buffer_id,
         byte_aligned: byte_fast,
-        sib: None,
     };
 
     let (eff_base, eff_stride) = if byte_fast {
@@ -622,7 +584,6 @@ fn emit_explicit_multi(
         n_bits: first_slot.elem_bits as u32,
         buffer_id: first_slot.buffer_id,
         byte_aligned: byte_fast,
-        sib: None,
     };
 
     match iter {
