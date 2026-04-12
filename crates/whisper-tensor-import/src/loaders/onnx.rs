@@ -67,8 +67,15 @@ impl Loader for OnnxLoader {
         // If a tokenizer is specified, build a simple transformer interface
         if let Some(tok_name) = tokenizer_name {
             let graph = model.get_symbolic_graph();
-            let input_ids = graph.get_inputs();
-            let output_ids = graph.get_outputs();
+            // IMPORTANT: `get_inputs`/`get_outputs` iterate a HashMap
+            // and return results in non-deterministic order — calling
+            // `.first()` on them would pick a random input/output.
+            // Use the ordered accessors which preserve the declaration
+            // order from the ONNX file. For a multi-output model like
+            // GPT-2 lm-head (which exports logits + 12 KV-cache layer
+            // outputs), the first declared output is the one we want.
+            let input_ids = graph.get_ordered_inputs();
+            let output_ids = graph.get_ordered_outputs();
 
             let first_input = input_ids.first().and_then(|id| {
                 let info = graph.get_tensor_info(*id)?;
