@@ -269,20 +269,27 @@ fn emit_reduce_body(
         // holds the flat producer atom index (outer * reduce_count + k),
         // used as the IterVar for emit_op_compute.
 
-        // 1. Initialize flat index: rdi = outer_iter * reduce_count.
+        // 1. Initialize flat index: rsi = outer_iter * reduce_count.
+        //
+        // We use REDUCE_K_END (rsi=6) for the flat producer index
+        // instead of REDUCE_SRC_BIT (rdi=7) because rdi is clobbered
+        // by OVERFLOW_BASE_SCRATCH in bbase() during emit_op_compute.
+        // rsi is not touched by any codec/address function. We compare
+        // k against reduce_count via an immediate instead of the
+        // register.
         let rc = reduce_count as i64;
         match iter {
             IterVar::Const(c) => {
                 let base_idx = c as i64 * rc;
-                dynasm!(asm; .arch x64; mov Rq(REDUCE_SRC_BIT), QWORD base_idx);
+                dynasm!(asm; .arch x64; mov Rq(REDUCE_K_END), QWORD base_idx);
             }
             IterVar::Reg(r) => {
                 if (i32::MIN as i64..=i32::MAX as i64).contains(&rc) {
-                    dynasm!(asm; .arch x64; imul Rq(REDUCE_SRC_BIT), Rq(r), rc as i32);
+                    dynasm!(asm; .arch x64; imul Rq(REDUCE_K_END), Rq(r), rc as i32);
                 } else {
                     dynasm!(asm; .arch x64
-                        ; mov Rq(REDUCE_SRC_BIT), QWORD rc
-                        ; imul Rq(REDUCE_SRC_BIT), Rq(r)
+                        ; mov Rq(REDUCE_K_END), QWORD rc
+                        ; imul Rq(REDUCE_K_END), Rq(r)
                     );
                 }
             }
@@ -291,26 +298,47 @@ fn emit_reduce_body(
         // 2. Initialize accumulator.
         emit_reduce_init(asm, kind, compute_dtype, repr)?;
 
-        // 3. Inner k-loop.
+        // 3. Inner k-loop. Compare k against immediate reduce_count
+        // since REDUCE_K_END holds the flat index now.
         dynasm!(asm
             ; .arch x64
             ; xor Rq(REDUCE_K), Rq(REDUCE_K)
-            ; mov Rq(REDUCE_K_END), QWORD reduce_count as i64
         );
         let inner_top = asm.new_dynamic_label();
         let inner_done = asm.new_dynamic_label();
+        let rc_i32 = if (i32::MIN as i64..=i32::MAX as i64).contains(&rc) {
+            rc as i32
+        } else {
+            return Err(format!(
+                "x86_jit reduce-inline: reduce_count {rc} doesn't fit in i32"
+            ));
+        };
         dynasm!(asm
             ; =>inner_top
-            ; cmp Rq(REDUCE_K), Rq(REDUCE_K_END)
+            ; cmp Rq(REDUCE_K), DWORD rc_i32
             ; jge =>inner_done
         );
 
-        // 3a. Evaluate producer at flat index rdi → result in some slot.
+        // 3a. Evaluate producer at flat index rsi.
+        //
+        // emit_op_compute puts its result in FLT_SLOT_C (xmm2),
+        // which is also the reduce accumulator. Save the accumulator
+        // to xmm3 (ACC_SAVE_XMM) before the op compute. xmm3 is not
+        // used by any codec/ops function (they use xmm0/1/2 only).
+        const ACC_SAVE_XMM: u8 = 3;
+        match repr {
+            ComputeRepr::F32 | ComputeRepr::F64 => {
+                dynasm!(asm; .arch x64; vmovaps Rx(ACC_SAVE_XMM), Rx(FLT_SLOT_C));
+            }
+            ComputeRepr::Int => {
+                dynasm!(asm; .arch x64; push Rq(INT_SLOT_C));
+            }
+        }
         let result_slot = super::group::emit_op_compute(
             asm,
             layout,
             producer,
-            IterVar::Reg(REDUCE_SRC_BIT),
+            IterVar::Reg(REDUCE_K_END),
             producer.atom_offset,
             addr_tables,
             codec_tables,
@@ -333,19 +361,22 @@ fn emit_reduce_body(
             codec_tables,
         )?;
 
-        // Move result to slot A if not already there.
-        let slot_a = match repr {
-            ComputeRepr::F32 | ComputeRepr::F64 => CodecSlot::Xmm(FLT_SLOT_A),
-            ComputeRepr::Int => CodecSlot::Gp(RAW),
-        };
-        match (result_slot, slot_a) {
-            (CodecSlot::Xmm(src), CodecSlot::Xmm(dst)) if src != dst => {
-                dynasm!(asm; .arch x64; vmovaps Rx(dst), Rx(src));
+        // Move result to slot A, then restore the accumulator.
+        // The result is in FLT_SLOT_C (same as acc) — move to A first,
+        // then restore acc from the saved copy.
+        match repr {
+            ComputeRepr::F32 | ComputeRepr::F64 => {
+                // xmm0 = result (from xmm2)
+                dynasm!(asm; .arch x64; vmovaps Rx(FLT_SLOT_A), Rx(FLT_SLOT_C));
+                // xmm2 = saved accumulator (from xmm3)
+                dynasm!(asm; .arch x64; vmovaps Rx(FLT_SLOT_C), Rx(ACC_SAVE_XMM));
             }
-            (CodecSlot::Gp(src), CodecSlot::Gp(dst)) if src != dst => {
-                dynasm!(asm; .arch x64; mov Rq(dst), Rq(src));
+            ComputeRepr::Int => {
+                dynasm!(asm; .arch x64
+                    ; mov Rq(RAW), Rq(INT_SLOT_C)
+                    ; pop Rq(INT_SLOT_C)
+                );
             }
-            _ => {} // already in the right slot
         }
 
         // 3b. Accumulate: acc = acc op val.
@@ -363,9 +394,9 @@ fn emit_reduce_body(
             codec_tables,
         )?;
 
-        // 3d. Advance flat index, increment k.
+        // 3d. Advance flat index (rsi), increment k.
         dynasm!(asm
-            ; add Rq(REDUCE_SRC_BIT), 1
+            ; add Rq(REDUCE_K_END), 1
             ; add Rq(REDUCE_K), 1
             ; jmp =>inner_top
             ; =>inner_done

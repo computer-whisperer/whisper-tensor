@@ -91,12 +91,7 @@ impl X86JitSpan {
     ) -> Result<Self, String> {
         support::check_supported(graph)?;
 
-        // Reduce-fold inlining: when enabled, the layout marks
-        // single-consumer pure-scalar producers of Reduce groups as
-        // inlinable, and the reduce emitter re-evaluates them in the
-        // k-loop instead of loading from a buffer.
-        let allow_inline = std::env::var("WT_X86_NO_INLINE").is_err();
-        let layout = compute_layout(graph, output_ranges, allow_inline, placement)?;
+        let layout = compute_layout(graph, output_ranges, true, placement)?;
 
         let mut tables = CodecTables::new();
         let mut addr_tables = AddressTables::new();
