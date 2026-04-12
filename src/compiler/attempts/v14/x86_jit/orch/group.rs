@@ -176,6 +176,98 @@ fn emit_loop_cmp_end(asm: &mut Assembler, end: i64) -> Result<(), String> {
     Ok(())
 }
 
+/// Emit the compute portion of any inlinable op (Binary, Unary,
+/// Select, Identity, Cast) for a single iteration at index `iter`.
+///
+/// Returns the `CodecSlot` holding the result in compute repr.
+/// Does NOT store to memory — the caller either stores via
+/// `emit_encode_store_output` (unfused) or forwards the slot to a
+/// consumer (fused chain / reduce-fold inline).
+///
+/// Used by chain fusion and reduce-fold inlining to re-evaluate a
+/// producer's expression without materializing to a buffer.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn emit_op_compute(
+    asm: &mut Assembler,
+    layout: &BufferLayout,
+    group: &AtomGroup<'static, SystemPool>,
+    iter: IterVar,
+    atom_offset: u64,
+    addr_tables: &mut AddressTables,
+    codec_tables: &mut CodecTables,
+) -> Result<CodecSlot, String> {
+    match &group.op {
+        ScalarOp::Binary { op, compute_dtype } => emit_binary_compute(
+            asm,
+            layout,
+            &group.inputs[0],
+            &group.inputs[1],
+            *op,
+            *compute_dtype,
+            iter,
+            atom_offset,
+            addr_tables,
+            codec_tables,
+        ),
+        ScalarOp::Unary { op, compute_dtype } => emit_unary_compute(
+            asm,
+            layout,
+            &group.inputs[0],
+            *op,
+            *compute_dtype,
+            iter,
+            atom_offset,
+            addr_tables,
+            codec_tables,
+        ),
+        ScalarOp::Select => emit_select_compute(
+            asm,
+            layout,
+            group,
+            iter,
+            atom_offset,
+            addr_tables,
+            codec_tables,
+        ),
+        ScalarOp::Identity => {
+            // Identity compute = load + decode the single input.
+            let repr = ComputeRepr::for_dtype(group.output_dtype);
+            let slot = match repr {
+                ComputeRepr::F32 | ComputeRepr::F64 => {
+                    CodecSlot::Xmm(super::super::prologue::FLT_SLOT_A)
+                }
+                ComputeRepr::Int => CodecSlot::Gp(super::super::prologue::INT_SLOT_A),
+            };
+            emit_load_decode_input(
+                asm,
+                layout,
+                &group.inputs[0],
+                iter,
+                atom_offset,
+                addr_tables,
+                codec_tables,
+                slot,
+            )?;
+            Ok(slot)
+        }
+        ScalarOp::Cast { .. } => {
+            let src_dtype = lookup_input_dtype(layout, &group.inputs[0], atom_offset)?;
+            emit_cast_compute(
+                asm,
+                layout,
+                &group.inputs[0],
+                src_dtype,
+                group.output_dtype,
+                iter,
+                atom_offset,
+                addr_tables,
+                codec_tables,
+            )
+        }
+        op => Err(format!("emit_op_compute: {op:?} is not inlinable")),
+    }
+}
+
 /// Emit one `AtomGroup` body. Either inlined (for `count == 1`) or
 /// wrapped in a loop over the group's atoms.
 ///
@@ -718,20 +810,21 @@ fn emit_cast_group(
 /// compute repr via src_dtype, encode from compute repr via dst_dtype,
 /// store raw bits.
 #[allow(clippy::too_many_arguments)]
-fn emit_cast_iter(
+/// Emit the compute portion of a Cast iteration: load + decode in
+/// source repr, convert to destination repr.  Result in FLT_SLOT
+/// (xmm0) or RAW_REG (rax).
+#[allow(clippy::too_many_arguments)]
+fn emit_cast_compute(
     asm: &mut Assembler,
     layout: &BufferLayout,
     src_input: &InputRef,
-    output_base: crate::nano_graph::pattern::AtomId,
-    output_atom_offset: u64,
     src_dtype: crate::numeric_dtype::NumericDType,
     dst_dtype: crate::numeric_dtype::NumericDType,
     iter: IterVar,
     atom_offset: u64,
     addr_tables: &mut AddressTables,
     codec_tables: &mut CodecTables,
-) -> Result<(), String> {
-    // 1. Compute src bit offset → r10.
+) -> Result<CodecSlot, String> {
     let src_info = emit_compute_bit_offset(
         asm,
         layout,
@@ -742,8 +835,6 @@ fn emit_cast_iter(
         ADDR_SCRATCH,
         addr_tables,
     )?;
-
-    // 2. Load src raw bits → rax.
     let src_base = bbase(asm, layout, src_info.buffer_id);
     if src_info.byte_aligned {
         emit_load_aligned(asm, src_base, BIT_OFF_REG, src_info.n_bits, RAW_REG);
@@ -757,8 +848,6 @@ fn emit_cast_iter(
             ADDR_SCRATCH,
         );
     }
-
-    // 3. Decode raw bits to src compute repr.
     let src_repr = ComputeRepr::for_dtype(src_dtype);
     let src_slot = match src_repr {
         ComputeRepr::F32 | ComputeRepr::F64 => CodecSlot::Xmm(FLT_SLOT),
@@ -769,33 +858,55 @@ fn emit_cast_iter(
         src_dtype,
         RAW_REG,
         src_slot,
-        BIT_IO_TMP1, // scratch_gp
-        FLT_SCRATCH, // scratch_xmm
+        BIT_IO_TMP1,
+        FLT_SCRATCH,
         codec_tables,
     )?;
 
-    // 3b. If src and dst compute reprs differ, convert.
     let dst_repr = ComputeRepr::for_dtype(dst_dtype);
-    let dst_slot = match dst_repr {
-        ComputeRepr::F32 | ComputeRepr::F64 => CodecSlot::Xmm(FLT_SLOT),
-        ComputeRepr::Int => CodecSlot::Gp(RAW_REG),
-    };
     if src_repr != dst_repr {
         emit_repr_convert(asm, src_repr, dst_repr)?;
     }
+    Ok(match dst_repr {
+        ComputeRepr::F32 | ComputeRepr::F64 => CodecSlot::Xmm(FLT_SLOT),
+        ComputeRepr::Int => CodecSlot::Gp(RAW_REG),
+    })
+}
 
-    // 4. Encode + store (byte-aligned fast path when applicable).
+#[allow(clippy::too_many_arguments)]
+fn emit_cast_iter(
+    asm: &mut Assembler,
+    layout: &BufferLayout,
+    src_input: &InputRef,
+    output_base: crate::nano_graph::pattern::AtomId,
+    output_atom_offset: u64,
+    src_dtype: crate::numeric_dtype::NumericDType,
+    dst_dtype: crate::numeric_dtype::NumericDType,
+    iter: IterVar,
+    atom_offset: u64,
+    addr_tables: &mut AddressTables,
+    codec_tables: &mut CodecTables,
+) -> Result<(), String> {
+    let result_slot = emit_cast_compute(
+        asm,
+        layout,
+        src_input,
+        src_dtype,
+        dst_dtype,
+        iter,
+        atom_offset,
+        addr_tables,
+        codec_tables,
+    )?;
     emit_encode_store_output(
         asm,
         layout,
         dst_dtype,
-        dst_slot,
+        result_slot,
         output_base,
         output_atom_offset,
         iter,
-    )?;
-
-    Ok(())
+    )
 }
 
 /// Emit a count-loop around `emit_cast_iter`.
@@ -920,22 +1031,23 @@ fn emit_binary_group(
 ///   4. Restore A: movq rax, xmm0
 ///   5. Op → rdx (INT_SLOT_C)
 ///   6. Encode rdx → rax, store
+/// Emit the compute portion of a binary op iteration: load inputs,
+/// apply the op.  Result lands in FLT_SLOT_C (float) or INT_SLOT_C
+/// (int).  Does NOT store — the caller is responsible for either
+/// storing to memory or forwarding in-register to a fused consumer.
 #[allow(clippy::too_many_arguments)]
-fn emit_binary_iter(
+fn emit_binary_compute(
     asm: &mut Assembler,
     layout: &BufferLayout,
     input_a: &InputRef,
     input_b: &InputRef,
-    output_base: crate::nano_graph::pattern::AtomId,
-    output_atom_offset: u64,
     op: ScalarBinOp,
     compute_dtype: NumericDType,
-    output_dtype: NumericDType,
     iter: IterVar,
     atom_offset: u64,
     addr_tables: &mut AddressTables,
     codec_tables: &mut CodecTables,
-) -> Result<(), String> {
+) -> Result<CodecSlot, String> {
     use super::super::ops::float::{emit_binop_f32, emit_binop_f64};
     use super::super::prologue::{FLT_SLOT_A, FLT_SLOT_B, INT_SLOT_A, INT_SLOT_B};
 
@@ -990,16 +1102,44 @@ fn emit_binary_iter(
             use super::super::ops::int::emit_binop_int;
             let (signed, bits) = int_dtype_info(compute_dtype)?;
             emit_binop_int(asm, op, signed, bits, BIT_IO_TMP1)?;
-            // Apply wrapping: mask to compute width + sign-extend.
             emit_int_wrap(asm, bits, signed, super::super::prologue::INT_SLOT_C);
         }
     }
 
-    // ── Encode result + store ──
-    let result_slot = match repr {
+    Ok(match repr {
         ComputeRepr::F32 | ComputeRepr::F64 => CodecSlot::Xmm(super::super::prologue::FLT_SLOT_C),
         ComputeRepr::Int => CodecSlot::Gp(super::super::prologue::INT_SLOT_C),
-    };
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_binary_iter(
+    asm: &mut Assembler,
+    layout: &BufferLayout,
+    input_a: &InputRef,
+    input_b: &InputRef,
+    output_base: crate::nano_graph::pattern::AtomId,
+    output_atom_offset: u64,
+    op: ScalarBinOp,
+    compute_dtype: NumericDType,
+    output_dtype: NumericDType,
+    iter: IterVar,
+    atom_offset: u64,
+    addr_tables: &mut AddressTables,
+    codec_tables: &mut CodecTables,
+) -> Result<(), String> {
+    let result_slot = emit_binary_compute(
+        asm,
+        layout,
+        input_a,
+        input_b,
+        op,
+        compute_dtype,
+        iter,
+        atom_offset,
+        addr_tables,
+        codec_tables,
+    )?;
     emit_encode_store_output(
         asm,
         layout,
@@ -1008,9 +1148,7 @@ fn emit_binary_iter(
         output_base,
         output_atom_offset,
         iter,
-    )?;
-
-    Ok(())
+    )
 }
 
 /// Helper: compute offset, load raw bits, decode to compute repr.
@@ -1448,26 +1586,25 @@ fn emit_unary_group(
 
 /// Emit one iteration of a Unary body.
 #[allow(clippy::too_many_arguments)]
-fn emit_unary_iter(
+/// Emit the compute portion of a unary op iteration: load input,
+/// apply the op.  Result in FLT_SLOT_C or INT_SLOT_C.
+#[allow(clippy::too_many_arguments)]
+fn emit_unary_compute(
     asm: &mut Assembler,
     layout: &BufferLayout,
     input: &InputRef,
-    output_base: crate::nano_graph::pattern::AtomId,
-    output_atom_offset: u64,
     op: ScalarUnaryOp,
     compute_dtype: NumericDType,
-    output_dtype: NumericDType,
     iter: IterVar,
     atom_offset: u64,
     addr_tables: &mut AddressTables,
     codec_tables: &mut CodecTables,
-) -> Result<(), String> {
+) -> Result<CodecSlot, String> {
     use super::super::ops::float::{emit_unop_f32, emit_unop_f64};
     use super::super::prologue::FLT_SLOT_A;
 
     let repr = ComputeRepr::for_dtype(compute_dtype);
 
-    // Load + decode input → slot A.
     let _info = emit_load_decode_input(
         asm,
         layout,
@@ -1482,7 +1619,6 @@ fn emit_unary_iter(
         },
     )?;
 
-    // Apply the op.
     match repr {
         ComputeRepr::F32 => emit_unop_f32(asm, op, BIT_IO_TMP1)?,
         ComputeRepr::F64 => emit_unop_f64(asm, op, BIT_IO_TMP1)?,
@@ -1494,11 +1630,38 @@ fn emit_unary_iter(
         }
     }
 
-    // Encode result + store.
-    let result_slot = match repr {
+    Ok(match repr {
         ComputeRepr::F32 | ComputeRepr::F64 => CodecSlot::Xmm(super::super::prologue::FLT_SLOT_C),
         ComputeRepr::Int => CodecSlot::Gp(super::super::prologue::INT_SLOT_C),
-    };
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_unary_iter(
+    asm: &mut Assembler,
+    layout: &BufferLayout,
+    input: &InputRef,
+    output_base: crate::nano_graph::pattern::AtomId,
+    output_atom_offset: u64,
+    op: ScalarUnaryOp,
+    compute_dtype: NumericDType,
+    output_dtype: NumericDType,
+    iter: IterVar,
+    atom_offset: u64,
+    addr_tables: &mut AddressTables,
+    codec_tables: &mut CodecTables,
+) -> Result<(), String> {
+    let result_slot = emit_unary_compute(
+        asm,
+        layout,
+        input,
+        op,
+        compute_dtype,
+        iter,
+        atom_offset,
+        addr_tables,
+        codec_tables,
+    )?;
     emit_encode_store_output(
         asm,
         layout,
@@ -1507,9 +1670,7 @@ fn emit_unary_iter(
         output_base,
         output_atom_offset,
         iter,
-    )?;
-
-    Ok(())
+    )
 }
 
 /// Emit a count-loop around `emit_unary_iter`.
@@ -1709,18 +1870,21 @@ fn emit_select_group(
     }
 }
 
+/// Emit the compute portion of a Select iteration: load condition,
+/// load true/false branches, select.  Result in FLT_SLOT_C or
+/// INT_SLOT_C.
+///
+/// Requires `group.inputs.len() == 3` (condition, true, false).
 #[allow(clippy::too_many_arguments)]
-fn emit_select_iter(
+fn emit_select_compute(
     asm: &mut Assembler,
     layout: &BufferLayout,
     group: &AtomGroup<'static, SystemPool>,
-    output_base: crate::nano_graph::pattern::AtomId,
-    output_atom_offset: u64,
     iter: IterVar,
     atom_offset: u64,
     addr_tables: &mut AddressTables,
     codec_tables: &mut CodecTables,
-) -> Result<(), String> {
+) -> Result<CodecSlot, String> {
     use super::super::prologue::{FLT_SLOT_A, FLT_SLOT_B, FLT_SLOT_C, INT_SLOT_A, INT_SLOT_B};
 
     let output_dtype = group.output_dtype;
@@ -1865,21 +2029,43 @@ fn emit_select_iter(
         }
     }
 
-    // 5. Encode + store.
-    let result_slot = match out_repr {
+    // 5. Return result slot (store handled by caller).
+    Ok(match out_repr {
         ComputeRepr::F32 | ComputeRepr::F64 => CodecSlot::Xmm(FLT_SLOT_C),
         ComputeRepr::Int => CodecSlot::Gp(super::super::prologue::INT_SLOT_C),
-    };
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_select_iter(
+    asm: &mut Assembler,
+    layout: &BufferLayout,
+    group: &AtomGroup<'static, SystemPool>,
+    output_base: crate::nano_graph::pattern::AtomId,
+    output_atom_offset: u64,
+    iter: IterVar,
+    atom_offset: u64,
+    addr_tables: &mut AddressTables,
+    codec_tables: &mut CodecTables,
+) -> Result<(), String> {
+    let result_slot = emit_select_compute(
+        asm,
+        layout,
+        group,
+        iter,
+        atom_offset,
+        addr_tables,
+        codec_tables,
+    )?;
     emit_encode_store_output(
         asm,
         layout,
-        output_dtype,
+        group.output_dtype,
         result_slot,
         output_base,
         output_atom_offset,
         iter,
-    )?;
-    Ok(())
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
