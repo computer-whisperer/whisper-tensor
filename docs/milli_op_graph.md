@@ -1,20 +1,25 @@
 # MilliOpGraph Subsystem
 
-The MilliOpGraph is a core intermediate representation (IR) layer in Whisper Tensor that provides a simplified, executable computation graph. It sits between the high-level ONNX-based SymbolicGraph and the low-level backend execution, serving as a common target for graph optimization and execution.
+The MilliOpGraph is the tensor-level intermediate representation in
+Whisper Tensor.  It sits between the ONNX-based SymbolicGraph and the
+scalar NanoGraph, reducing 60+ ONNX operations to ~40 primitives with
+explicit data flow via GlobalId references.
 
-## Purpose and Design Goals
+## Purpose
 
-The MilliOpGraph serves several key purposes:
-
-1. **Simplified Operation Set**: Reduces the 60+ ONNX operations to ~30 primitive operations, making backend implementation more tractable
-2. **Explicit Data Flow**: All tensor dependencies are explicitly tracked via GlobalId references
-3. **Serializable**: Full serde support enables saving/loading computation graphs
-4. **Observable**: Built-in observer pattern for execution tracing and debugging
-5. **Backend-Agnostic**: Operations delegate to the `EvalBackend` abstraction
+1. **Simplified operation set** — fewer ops than ONNX, each with
+   precise dtype and broadcasting semantics.
+2. **Explicit data flow** — every tensor dependency is a GlobalId
+   edge, no implicit state.
+3. **Serializable** — full serde support for saving/loading graphs.
+4. **Observable** — execution hooks for tracing and debugging.
+5. **Lowering target** — each op implements `lower_to_nano()` to
+   decompose into scalar nano-ops, or falls back to `eval_new()` for
+   ops that cannot be expressed analytically.
 
 ---
 
-## Architecture Overview
+## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -31,114 +36,91 @@ The MilliOpGraph serves several key purposes:
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-### Key Design Decisions
-
-- **Explicit Topological Ordering**: Operations are stored in `op_ordering` in execution order, eliminating the need for runtime topological sorting
-- **Input/Output Mapping**: External tensor IDs are mapped to internal IDs, enabling graph composition and isolation
-- **Random GlobalIds**: All IDs are randomly generated 64-bit integers, ensuring uniqueness across the system
+- **Explicit topological ordering** — `op_ordering` stores execution
+  order, no runtime sorting needed.
+- **Input/output mapping** — external tensor IDs map to internal IDs,
+  enabling graph composition and isolation.
+- **Random GlobalIds** — all IDs are randomly generated u64, unique
+  across the system.
 
 ---
 
-## Core Data Structures
+## Execution Model
 
-### MilliOpGraph
+The primary execution path is:
 
-The main graph container, located in `src/milli_graph/mod.rs`:
+```
+MilliOpGraph
+  → infer() (shape/dtype inference)
+  → lower_to_nano() (decompose to scalar NanoGraph)
+  → pool_eval or compiled eval (execute the NanoGraph)
+```
+
+Ops that cannot decompose into nano-ops (data-dependent output
+shapes, sequential dependencies, external library calls) fall back to
+`eval_new()`, which runs as an opaque node within the nano evaluation.
+
+A legacy `eval()` path exists for backward compatibility but is not
+the primary execution model.
+
+---
+
+## Core Traits
+
+### MilliOp
+
+The primary interface for all operations (`src/milli_graph/ops/mod.rs`):
 
 ```rust
-pub struct MilliOpGraph {
-    global_id: GlobalId,                              // Unique graph identifier
-    pub input_map: HashMap<GlobalId, GlobalId>,       // External → internal tensor IDs
-    pub input_ordering: Vec<GlobalId>,                // Ordered list of graph inputs
-    pub output_map: Option<HashMap<GlobalId, GlobalId>>, // Internal → external IDs
-    pub output_ordering: Option<Vec<GlobalId>>,       // Ordered list of graph outputs
-    ops: HashMap<GlobalId, AnyMilliOp>,               // All operations by ID
-    op_ordering: Vec<GlobalId>,                       // Execution order
-    tensors: HashMap<GlobalId, MilliOpGraphTensor>,   // All tensor nodes
+pub trait MilliOp: Node<OpKind = String> {
+    /// Shape/dtype inference from known inputs.
+    fn infer<'a, 'p, P: Pool + 'p>(
+        &self,
+        known_inputs: &HashMap<GlobalId, TensorInfo<'a, 'p, P>>,
+        symbolic_resolver: &mut SymbolicResolver,
+        pool: &'p P,
+    ) -> Result<Vec<(GlobalId, TensorInfo<'a, 'p, P>)>, MilliOpGraphError>;
+
+    /// Generate backward ops for autodiff.
+    fn backward(
+        &self,
+        output_grads: &HashMap<GlobalId, GlobalId>,
+        graph: &mut MilliOpGraph,
+        rng: &mut impl Rng,
+    ) -> Option<HashMap<GlobalId, GlobalId>>;
+
+    /// Last-resort evaluation for ops that cannot be expressed as
+    /// nano-op lowerings.  Do NOT use as a performance shortcut.
+    fn eval_new<'p, P: Pool + 'p>(
+        &self,
+        inputs: &[NumericTensorView<'_, DynRank>],
+        pool: &'p P,
+    ) -> Result<Vec<NumericTensor<'p, DynRank, P>>, PoolEvalError>;
+
+    /// Decompose into scalar nano-ops.  Returns Lowered on success,
+    /// Unsupported to fall through to eval_new.
+    fn lower_to_nano<'p, P: Pool + 'p>(
+        &self,
+        ctx: &mut NanoLoweringContext<'_, 'p, P>,
+    ) -> LowerResult;
 }
 ```
 
-### MilliOpGraphTensor
+### MilliOpGraphObserver
 
-A minimal tensor node representation:
+Execution observation hooks (`src/milli_graph/observer.rs`):
 
 ```rust
-pub struct MilliOpGraphTensor {
-    global_id: GlobalId,  // Unique tensor identifier
+pub trait MilliOpGraphObserver {
+    fn on_tensor_assigned(&mut self, tensor_path: &[GlobalId],
+                          tensor: &NumericTensorView<'_, DynRank>);
+    fn on_node_executed(&mut self, node_path: &[GlobalId],
+                        start: Instant, end: Instant);
+    fn should_cancel(&mut self) -> bool;
 }
 ```
 
-Tensors in MilliOpGraph are lightweight link nodes - the actual tensor data flows through during execution, not stored in the graph structure itself.
-
-### AnyMilliOp
-
-An enum that wraps all supported operation types:
-
-```rust
-pub enum AnyMilliOp {
-    // Constants
-    Constant(Constant),
-    ConstantOfShape(ConstantOfShape),
-
-    // Binary Operations
-    SimpleBinary(SimpleBinary),   // Add, Sub, Mul, Div, comparisons, etc.
-    MatMul(MatMul),
-    Pow(Pow),
-
-    // Unary Operations
-    SimpleUnary(SimpleUnaryOp),   // Neg, Abs, Exp, Sqrt, trig, etc.
-    ClampMin(ClampMin),
-
-    // Shape Operations
-    Shape(Shape),
-    Reshape(Reshape),
-    Transpose(Transpose),
-    Squeeze(Squeeze),
-    Unsqueeze(Unsqueeze),
-    Expand(Expand),
-
-    // Indexing Operations
-    Slice(Slice),
-    Gather(Gather),
-    GatherGrad(GatherGrad),
-
-    // Reduction Operations
-    ReduceSum(ReduceSum),
-    ReduceMean(ReduceMean),
-    ReduceMax(ReduceMax),
-    ReduceMin(ReduceMin),
-    ReduceProd(ReduceProd),
-
-    // Type Operations
-    Cast(Cast),
-    CastLike(CastLike),
-
-    // Multi-tensor Operations
-    Concat(Concat),
-    Split(Split),
-    Where(Where),
-
-    // Convolution
-    Conv(Conv),
-    ConvInputGrad(ConvInputGrad),
-    ConvWeightGrad(ConvWeightGrad),
-    ConvBiasGrad(ConvBiasGrad),
-
-    // Padding & Resize
-    Pad(Pad),
-    Resize(Resize),
-
-    // Sequence / Misc Operations
-    Range(Range),
-    CumSum(CumSum),
-    NonZero(NonZero),
-    ArgMax(ArgMax),
-    ArgMin(ArgMin),
-    SumTo(SumTo),
-    TopK(TopK),
-    RandomNormalLike(RandomNormalLike),
-}
-```
+A no-op `impl MilliOpGraphObserver for ()` is provided.
 
 ---
 
@@ -146,575 +128,165 @@ pub enum AnyMilliOp {
 
 ### Constants
 
-| Operation | Description |
-|-----------|-------------|
-| `Constant` | Embeds a fixed tensor value directly in the graph |
-| `ConstantOfShape` | Creates a tensor filled with a scalar value, shape determined at runtime |
+| Op | Description |
+|----|-------------|
+| `Constant` | Fixed tensor value embedded in the graph |
+| `ConstantOfShape` | Scalar fill with runtime-determined shape |
 
-### Binary Operations (SimpleBinary)
+### Binary
 
-All binary operations support broadcasting. The `WhichSimpleBinaryOp` enum specifies the operation:
-
-| Category | Operations |
-|----------|------------|
-| Arithmetic | `Add`, `Sub`, `Mul`, `Div`, `Modulo` |
-| Logical | `And`, `Or`, `Xor` |
-| Bitwise | `BitwiseAnd`, `BitwiseOr`, `BitwiseXor` |
-| Comparison | `Equal`, `Greater`, `GreaterOrEqual`, `Less`, `LessOrEqual` |
-| Element-wise | `Max`, `Min` |
-
-Additional binary ops:
-- `MatMul` - Matrix multiplication with automatic accumulation dtype handling
-- `Pow` - Element-wise power operation
-
-### Unary Operations (SimpleUnaryOp)
-
-The `WhichSimpleUnaryOp` enum includes:
+All binary ops support NumPy-style multidirectional broadcasting.
 
 | Category | Operations |
 |----------|------------|
-| Arithmetic | `Neg`, `Abs`, `Sign`, `Reciprocal` |
-| Exponential | `Exp`, `Ln`, `Sqrt` |
-| Rounding | `Floor`, `Ceil`, `Round` |
-| Logical | `Not`, `BitwiseNot` |
-| Trigonometric | `Trig(TrigOp)` - sin, cos, tan, etc. |
-| Special | `IsNan`, `IsInf`, `Erf` |
+| Arithmetic | Add, Sub, Mul, Div, Modulo |
+| Logical | And, Or, Xor |
+| Bitwise | BitwiseAnd, BitwiseOr, BitwiseXor |
+| Comparison | Equal, Greater, GreaterOrEqual, Less, LessOrEqual |
+| Element-wise | Max, Min |
 
-Additional unary op:
-- `ClampMin` - Clamps values to a minimum threshold
+Additional: `MatMul` (with automatic accumulation dtype), `Pow`.
 
-### Shape Operations
+### Unary
 
-| Operation | Description |
-|-----------|-------------|
-| `Shape` | Returns tensor shape as a 1D tensor |
-| `Reshape` | Reshapes tensor, supports -1 dimension inference |
-| `Transpose` | Permutes tensor dimensions |
-| `Squeeze` | Removes dimensions of size 1 |
-| `Unsqueeze` | Inserts dimensions of size 1 |
-| `Expand` | Broadcasts tensor to larger shape |
+| Category | Operations |
+|----------|------------|
+| Arithmetic | Neg, Abs, Sign, Reciprocal |
+| Exponential | Exp, Ln, Sqrt |
+| Rounding | Floor, Ceil, Round |
+| Logical | Not, BitwiseNot |
+| Trigonometric | Sin, Cos, Tan, etc. |
+| Special | IsNan, IsInf, Erf |
 
-### Indexing Operations
+Additional: `ClampMin`.
 
-| Operation | Description |
-|-----------|-------------|
-| `Slice` | Extracts a contiguous sub-tensor |
-| `Gather` | Gathers elements along an axis using indices |
+### View / Layout
 
-### Reduction Operations
+| Op | Description |
+|----|-------------|
+| Shape | Returns tensor shape as 1D tensor |
+| Reshape | Reshape with -1 inference |
+| Transpose | Permute dimensions |
+| Squeeze | Remove size-1 dimensions |
+| Unsqueeze | Insert size-1 dimensions |
+| Expand | Broadcast to larger shape |
 
-All reductions support:
-- Axis specification (optional, defaults to all axes)
-- `keepdims` flag to preserve reduced dimensions
-- `noop_with_empty_axes` flag for identity behavior
+### Indexing
 
-| Operation | Description |
-|-----------|-------------|
-| `ReduceSum` | Sum elements along axes |
-| `ReduceMean` | Average elements along axes |
-| `ReduceMax` | Maximum element along axes |
-| `ReduceMin` | Minimum element along axes |
-| `ReduceProd` | Product of elements along axes |
+| Op | Description |
+|----|-------------|
+| Slice | Contiguous sub-tensor extraction |
+| Gather | Index along an axis |
+| Concat | Concatenate along an axis |
+| Split | Split into multiple outputs |
 
-**Precision Handling**: BF16/F16 inputs are automatically cast to F32 for accumulation, then cast back to the original dtype for output.
+### Reductions
 
-### Type Operations
+All support axis specification, keepdims, and
+noop\_with\_empty\_axes.  BF16/F16 inputs accumulate in F32.
 
-| Operation | Description |
-|-----------|-------------|
-| `Cast` | Convert tensor to specified dtype |
-| `CastLike` | Convert tensor to match another tensor's dtype |
+| Op | Description |
+|----|-------------|
+| ReduceSum | Sum along axes |
+| ReduceMean | Mean along axes |
+| ReduceMax | Max along axes |
+| ReduceMin | Min along axes |
+| ReduceProd | Product along axes |
 
-### Multi-tensor Operations
+### Type
 
-| Operation | Description |
-|-----------|-------------|
-| `Concat` | Concatenate tensors along an axis |
-| `Split` | Split tensor into multiple outputs |
-| `Where` | Conditional selection between two tensors |
+| Op | Description |
+|----|-------------|
+| Cast | Convert to specified dtype |
+| CastLike | Convert to match another tensor's dtype |
+
+### Conditional
+
+| Op | Description |
+|----|-------------|
+| Where | Element-wise ternary select |
 
 ### Convolution
 
-| Operation | Description |
-|-----------|-------------|
-| `Conv` | N-dimensional convolution (forward) with optional bias |
-| `ConvInputGrad` | Backward: gradient w.r.t. input (col2im) |
-| `ConvWeightGrad` | Backward: gradient w.r.t. weight |
-| `ConvBiasGrad` | Backward: gradient w.r.t. bias (sum reduction) |
+| Op | Description |
+|----|-------------|
+| Conv | N-D convolution (forward) with optional bias |
+| ConvInputGrad | Backward: gradient w.r.t. input |
+| ConvWeightGrad | Backward: gradient w.r.t. weight |
+| ConvBiasGrad | Backward: gradient w.r.t. bias |
 
 ### Padding & Resize
 
-| Operation | Description |
-|-----------|-------------|
-| `Pad` | Pad tensor with constant, reflect, edge, or wrap mode |
-| `Resize` | Spatial resize/interpolation (nearest, linear, cubic) |
+| Op | Description |
+|----|-------------|
+| Pad | Constant, reflect, edge, or wrap mode |
+| Resize | Spatial interpolation (nearest, linear, cubic) |
 
-### Gradient Helpers
+### Misc
 
-| Operation | Description |
-|-----------|-------------|
-| `GatherGrad` | Backward for Gather (scatter-add) |
-| `SumTo` | Un-broadcast reduction: sum to target shape |
-
-### Sequence & Misc Operations
-
-| Operation | Description |
-|-----------|-------------|
-| `Range` | Generate sequence from start to end with step |
-| `CumSum` | Cumulative sum along an axis |
-| `NonZero` | Returns indices of non-zero elements |
-| `ArgMax` | Index of maximum value along axis |
-| `ArgMin` | Index of minimum value along axis |
-| `TopK` | Top-K values and indices along axis |
-| `RandomNormalLike` | Random normal tensor matching input shape |
+| Op | Description |
+|----|-------------|
+| Range | Generate start-to-end sequence |
+| CumSum | Cumulative sum along axis |
+| NonZero | Indices of non-zero elements |
+| ArgMax / ArgMin | Index of extremum along axis |
+| TopK | Top-K values and indices |
+| SumTo | Un-broadcast reduction to target shape |
+| RandomNormalLike | Random normal matching input shape |
+| GatherGrad | Backward for Gather (scatter-add) |
 
 ---
 
-## Core Traits
+## Nano Lowering
 
-### MilliOp Trait
+Each op implements `lower_to_nano()` to decompose into the scalar
+NanoGraph representation.  The lowering maps tensor dimensions into
+two categories:
 
-The primary interface for all operations (`src/milli_graph/ops/mod.rs`):
+- **Known dimensions** — concrete sizes, expanded into separate atoms
+  (each atom computes one scalar per known-dim position).
+- **Symbolic dimensions** — runtime-unknown sizes (batch, seq\_len),
+  carried as `sym_dims` on each atom group.  See
+  `docs/symbolic_dims_nano.md` for the full specification.
 
-```rust
-pub trait MilliOp: Node {
-    /// Type inference from known inputs (optional override)
-    fn infer(
-        &self,
-        known_inputs: &HashMap<GlobalId, TensorInfo>,
-        symbolic_resolver: &mut SymbolicResolver,
-        backend: &mut EvalBackend,
-    ) -> Result<Box<dyn Iterator<Item = (GlobalId, TensorInfo)>>, MilliOpGraphError>;
-
-    /// Execute the operation
-    fn eval(
-        &self,
-        inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
-        config: &MilliEvalConfig,
-        backend: &mut EvalBackend,
-    ) -> EvalResult;
-}
-```
-
-### MilliEvalConfig
-
-Configuration for milli-op evaluation (`src/milli_graph/ops/mod.rs`):
-
-```rust
-/// Configuration for milli-op evaluation.
-#[derive(Debug, Clone, Default)]
-pub struct MilliEvalConfig {
-    /// When true, reductions and matmuls may use BLAS or other fast paths
-    /// that don't guarantee a specific accumulation order. Results may
-    /// differ from the op's `AccumulationMode` but will be faster.
-    ///
-    /// When false (default), all ops respect their specified `AccumulationMode`
-    /// exactly, producing deterministic, bit-reproducible results.
-    pub relaxed_accumulation: bool,
-}
-```
-
-The default `infer` implementation attempts to run `eval` with concrete values to determine output types. Operations can override this for symbolic inference.
-
-### Node Trait
-
-Graph connectivity interface (from `src/graph.rs`):
-
-```rust
-pub trait Node {
-    type OpKind: AsRef<str> + Clone + Debug;
-    
-    fn global_id(&self) -> GlobalId;
-    fn op_kind(&self) -> Self::OpKind;
-    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId> + '_>;
-    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId> + '_>;
-}
-```
-
-### Link Trait
-
-Tensor node interface (from `src/graph.rs`):
-
-```rust
-pub trait Link {
-    fn global_id(&self) -> GlobalId;
-    fn label(&self) -> Option<String> { None }
-}
-```
-
-### MilliOpGraphObserver Trait
-
-Execution observation hooks (`src/milli_graph/observer.rs`):
-
-```rust
-pub trait MilliOpGraphObserver {
-    fn on_tensor_assigned(
-        &mut self,
-        tensor_path: &[GlobalId],
-        tensor: &NumericTensor<DynRank>,
-        backend: &mut EvalBackend,
-    );
-    
-    fn on_node_executed(
-        &mut self,
-        node_path: &[GlobalId],
-        start_instant: Instant,
-        end_instant: Instant,
-        backend: &mut EvalBackend,
-    );
-}
-```
-
-A no-op implementation `impl MilliOpGraphObserver for ()` is provided for when observation is not needed.
+Ops that return `LowerResult::Unsupported` run via `eval_new()` as
+opaque nodes within the nano evaluation.  The design intent is that
+all ops should eventually have full analytical lowerings — `eval_new`
+is a last resort for ops whose semantics cannot be captured by the
+ScalarOp vocabulary.
 
 ---
 
 ## Graph Construction
 
-### Creating a New Graph
-
 ```rust
-let input_ids = vec![external_input_1, external_input_2];
+// Create graph with external inputs
 let (mut graph, input_map) = MilliOpGraph::new(input_ids, &mut rng);
+let a = input_map[&external_a];
+let b = input_map[&external_b];
 
-// input_map contains: external_id → internal_id mappings
-let internal_a = input_map[&external_input_1];
-let internal_b = input_map[&external_input_2];
+// Build computation
+let sum = SimpleBinary::add(&mut graph, a, b, &mut rng);
+let product = MatMul::push_new(&mut graph, sum, weights, &mut rng);
+let mean = ReduceMean::push_new(&mut graph, product, Some(axes), true, false, &mut rng);
+
+// Set outputs
+graph.set_output_map([(mean, external_output)]);
 ```
-
-### Adding Operations
-
-Operations provide builder methods that:
-1. Allocate a new output tensor ID
-2. Create the operation node
-3. Add it to the graph's operation ordering
-4. Return the output tensor ID
-
-Example pattern:
-
-```rust
-// Add two tensors
-let sum = SimpleBinary::add(&mut graph, tensor_a, tensor_b, &mut rng);
-
-// Matrix multiplication
-let product = MatMul::push_new(&mut graph, matrix_a, matrix_b, &mut rng);
-
-// Reshape with inferred dimension
-let reshaped = Reshape::push_new(&mut graph, data, shape_tensor, false, &mut rng);
-
-// Reduction
-let mean = ReduceMean::push_new(&mut graph, data, Some(axes), true, false, &mut rng);
-```
-
-### Setting Output Mapping
-
-```rust
-// Simple output mapping
-graph.set_output_map([
-    (internal_output_1, external_output_1),
-    (internal_output_2, external_output_2),
-]);
-
-// With explicit ordering
-graph.set_output_map_ordered(output_map, output_ordering);
-```
-
----
-
-## Graph Execution
-
-### Execution Flow
-
-The `eval` method executes the graph:
-
-```rust
-pub fn eval<T: MilliOpGraphObserver>(
-    &self,
-    inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
-    observer: &mut T,
-    backend: &mut EvalBackend,
-) -> Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, MilliOpGraphError>
-```
-
-**Execution Steps:**
-
-1. **Input Mapping**: Map external input tensors to internal IDs via `input_map`
-
-2. **Sequential Execution**: Iterate through `op_ordering` in topological order:
-   - Resolve input tensors from `intermediate_values`
-   - Call the operation's `eval` method
-   - Record timing information
-   - Notify observer via `on_node_executed`
-   - Store output tensors in `intermediate_values`
-   - Notify observer via `on_tensor_assigned`
-
-3. **Output Mapping**: Map internal output tensors back to external IDs via `output_map`
-
-### Example Usage
-
-```rust
-let mut inputs = HashMap::new();
-inputs.insert(external_input_id, input_tensor);
-
-let results = graph.eval(&inputs, &mut (), &mut backend)?;
-
-for (output_id, tensor) in results {
-    println!("Output {}: shape {:?}", output_id, tensor.shape());
-}
-```
-
----
-
-## Helper Utilities
-
-The `ops_helpers.rs` module provides common graph-building patterns:
-
-### rank
-
-Computes tensor rank (number of dimensions):
-
-```rust
-pub fn rank(graph: &mut MilliOpGraph, tensor: GlobalId, rng: &mut impl Rng) -> GlobalId
-```
-
-Implementation: `Shape(Shape(tensor))` - shape of shape gives rank.
-
-### scalar_const
-
-Creates a scalar constant tensor:
-
-```rust
-pub fn scalar_const<T: NDArrayNumericTensorType>(
-    graph: &mut MilliOpGraph,
-    value: T,
-    rng: &mut impl Rng,
-) -> GlobalId
-```
-
-### resolve_axes
-
-Normalizes negative axes to positive indices:
-
-```rust
-pub fn resolve_axes(
-    graph: &mut MilliOpGraph,
-    axes: GlobalId,
-    tensor: GlobalId,
-    rng: &mut impl Rng,
-) -> GlobalId
-```
-
-Implementation: `(axes + rank) % rank` - handles negative indexing like Python/NumPy.
 
 ---
 
 ## Broadcasting
 
-MilliOpGraph follows NumPy-style broadcasting rules. The `infer_multidirectional_broadcasting_shape` function in `ops/mod.rs` handles symbolic shape inference:
+NumPy-style multidirectional broadcasting via
+`infer_multidirectional_broadcasting_shape`:
 
-1. Determine output rank as max of input ranks
-2. For each dimension (right-aligned):
-   - If both dimensions are 1, output is 1
-   - If one dimension is 1, use the other
-   - If both are equal, use that value
-   - If both are different and neither is 1, error
+1. Output rank = max of input ranks
+2. Per dimension (right-aligned): if both equal, use that; if one is
+   1, use the other; if both differ and neither is 1, error.
 
-The function handles both concrete and symbolic dimensions via `ScalarInfoTyped<u64>`.
-
----
-
-## Error Handling
-
-```rust
-pub enum MilliOpGraphError {
-    NumericTensorError(NumericTensorError),
-    NDArrayNumericTensorError(NDArrayNumericTensorError),
-    UnimplementedOperatorError(String),
-    InvalidInput(String),
-    DTypeError(DTypeError),
-    TensorInfoError(TensorInfoError),
-    UnableToInfer,
-}
-```
-
-All errors use `thiserror` for transparent error conversion.
-
----
-
-## Serialization
-
-The entire graph structure is serializable via serde:
-
-```rust
-#[derive(Serialize, Deserialize)]
-pub struct MilliOpGraph { ... }
-
-#[derive(Serialize, Deserialize)]  
-pub enum AnyMilliOp { ... }
-```
-
-This enables:
-- Saving/loading computation graphs to disk
-- Transmitting graphs over network
-- Caching compiled graph structures
-
----
-
-## Integration Points
-
-### With SymbolicGraph
-
-MilliOpGraph is typically generated from SymbolicGraph during compilation. Complex ONNX operations are decomposed into simpler MilliOp primitives.
-
-### With SuperGraph
-
-The SuperGraph layer uses MilliOpGraph for direct execution nodes via `SuperGraphNodeModelExecution`. This enables mixing high-level operations (tokenization, caching) with low-level tensor computation.
-
-### With Backends
-
-All operations delegate to `EvalBackend` for actual computation. The backend abstraction allows:
-- NDArray (CPU reference implementation)
-- Vulkan (GPU compute)
-- Future backends (Candle, TCH)
-
-### With NumericTensor
-
-Operations work with `NumericTensor<DynRank>`:
-- Dynamic rank tensors (rank determined at runtime)
-- Backend-agnostic tensor wrapper
-- Automatic dtype conversion and broadcasting
-
----
-
-## Migration Status
-
-The system is migrating from the legacy `eval()` path (HashMap-based, EvalBackend) to the pool-based architecture: `infer()` → `lower_to_nano()` → `pool_eval`, with `eval_new()` as an opaque fallback for ops that can't decompose into scalar nano-ops.
-
-### MilliOp Trait Methods
-
-| Method | Purpose | Default |
-|--------|---------|---------|
-| `infer()` | Shape/dtype inference from symbolic inputs | Attempts constant_fold, else `UnableToInfer` |
-| `eval()` | Legacy execution (required, no default) | — |
-| `eval_new()` | Pool-based opaque execution (for unlowerable ops) | Returns `Unsupported` |
-| `lower_to_nano()` | Decompose into scalar nano-op DAG; returns `LowerResult` | Returns `LowerResult::Unsupported` |
-
-When `lower_to_nano` returns `Unsupported`, the system automatically falls through to an OpaqueOp that calls `eval_new` at runtime. This means any op with `eval_new` is fully executable through pool_eval even without nano decomposition.
-
-### Per-Op Status
-
-Legend:
-- **infer**: ✅ = custom impl, ⚙️ = uses default (constant_fold)
-- **lower**: ✅ = real nano decomposition, ⚠️ = partial (some cases fall to opaque), — = no nano decomposition
-- **eval_new**: ✅ = custom pool-based impl, — = returns Unsupported (trait default)
-- **eval**: ✅ = legacy impl (all ops have this)
-
-#### Constants & Literals
-
-| Op | infer | lower | eval_new | eval | Notes |
-|----|-------|-------|----------|------|-------|
-| Constant | ✅ | ✅ | — | ✅ | Lowered as Literal atoms |
-| ConstantOfShape | ✅ | ✅ | — | ✅ | |
-
-#### Elementwise Binary
-
-| Op | infer | lower | eval_new | eval | Notes |
-|----|-------|-------|----------|------|-------|
-| SimpleBinary | ✅ | ✅ | — | ✅ | All 15 binary ops (Add, Sub, Mul, etc.) |
-| MatMul | ✅ | ⚠️ | — | ✅ | Opaque for >64M output atoms, symbolic K/N, or non-matching batch dims |
-| Pow | ✅ | ✅ | — | ✅ | |
-
-#### Elementwise Unary
-
-| Op | infer | lower | eval_new | eval | Notes |
-|----|-------|-------|----------|------|-------|
-| SimpleUnary | ✅ | ⚠️ | — | ✅ | Opaque for IsInf (has subfields) |
-| ClampMin | ⚙️ | ✅ | — | ✅ | |
-
-#### View / Layout Ops
-
-| Op | infer | lower | eval_new | eval | Notes |
-|----|-------|-------|----------|------|-------|
-| Reshape | ✅ | ✅ | — | ✅ | Zero-cost when row-major |
-| Transpose | ✅ | ⚠️ | — | ✅ | Opaque for symbolic dims |
-| Squeeze | ✅ | ✅ | — | ✅ | |
-| Unsqueeze | ✅ | ✅ | — | ✅ | |
-| Expand | ✅ | ⚠️ | — | ✅ | Opaque if expand shape not constant |
-| Shape | ✅ | ✅ | — | ✅ | |
-| Slice | ✅ | ⚠️ | — | ✅ | Opaque for negative step, non-constant starts/ends |
-| Concat | ✅ | ⚠️ | — | ✅ | Opaque for symbolic concat axis or mixed sym dims |
-| Split | ✅ | ✅ | — | ✅ | |
-
-#### Reductions
-
-| Op | infer | lower | eval_new | eval | Notes |
-|----|-------|-------|----------|------|-------|
-| ReduceSum | ✅ | ⚠️ | ✅ | ✅ | Nano: single-axis only; multi-axis via opaque eval_new |
-| ReduceMean | ✅ | ⚠️ | ✅ | ✅ | Same |
-| ReduceMax | ✅ | ⚠️ | ✅ | ✅ | Same |
-| ReduceMin | ✅ | ⚠️ | ✅ | ✅ | Same |
-| ReduceProd | ✅ | ⚠️ | ✅ | ✅ | Same |
-
-#### Type Ops
-
-| Op | infer | lower | eval_new | eval | Notes |
-|----|-------|-------|----------|------|-------|
-| Cast | ✅ | ✅ | — | ✅ | Identity group with output dtype |
-| CastLike | ✅ | ✅ | — | ✅ | |
-
-#### Indexing
-
-| Op | infer | lower | eval_new | eval | Notes |
-|----|-------|-------|----------|------|-------|
-| Gather | ✅ | ⚠️ | — | ✅ | axis=0 only; uses IndirectLoad for runtime indices |
-| Where | ✅ | ✅ | — | ✅ | Select op |
-
-#### Convolution
-
-| Op | infer | lower | eval_new | eval | Notes |
-|----|-------|-------|----------|------|-------|
-| Conv | ✅ | ⚠️ | — | ✅ | 2D only, group=1, dilation=[1,1], ≤16M atoms |
-| ConvInputGrad | ✅ | — | — | ✅ | col2im backward; complex |
-| ConvWeightGrad | ✅ | — | — | ✅ | im2col backward; complex |
-| ConvBiasGrad | ✅ | — | ✅ | ✅ | Opaque via eval_new (channel-wise sum) |
-
-#### Padding
-
-| Op | infer | lower | eval_new | eval | Notes |
-|----|-------|-------|----------|------|-------|
-| Pad | ✅ | ⚠️ | ✅ | ✅ | Nano: constant mode, known pads; other modes via opaque eval_new |
-
-#### Sequence / Misc
-
-| Op | infer | lower | eval_new | eval | Notes |
-|----|-------|-------|----------|------|-------|
-| Range | ✅ | — | ✅ | ✅ | Opaque via eval_new |
-| CumSum | ✅ | — | ✅ | ✅ | Sequential dependency; opaque via eval_new |
-| NonZero | ✅ | — | ✅ | ✅ | Data-dependent output shape; opaque via eval_new |
-| ArgMax | ✅ | — | ✅ | ✅ | Opaque via eval_new |
-| ArgMin | ✅ | — | ✅ | ✅ | Opaque via eval_new |
-| SumTo | ✅ | — | ✅ | ✅ | Opaque via eval_new (multi-axis reduce + reshape) |
-| Resize | ✅ | — | — | ✅ | No eval_new; complex interpolation |
-| TopK | ✅ | — | — | ✅ | No eval_new; sorting |
-| RandomNormalLike | ✅ | — | — | ✅ | No eval_new; random generation |
-| GatherGrad | ✅ | — | ✅ | ✅ | Opaque via eval_new (scatter-add) |
-
-### Key Issues to Address
-
-**High priority (blocks full nano coverage of common inference models):**
-- Gather is **axis=0 only**. Models using axis!=0 Gather fall to opaque (no eval_new).
-- Conv only handles **group=1, dilation=[1,1]**. Depthwise convolutions (group=C) and dilated convolutions fall to opaque (no eval_new).
-- MatMul has no eval_new — large matmuls or symbolic dims fall to opaque and fail.
-
-**Medium priority (functional but no nano decomposition):**
-- All reductions: **single-axis nano only**; multi-axis works via opaque eval_new but bypasses nano optimizations.
-- ConvInputGrad/ConvWeightGrad have no eval_new — training backward passes require legacy eval.
-- Resize has no eval_new — vision model upsampling requires legacy eval.
-
-**Low priority (rare ops or structural limitations):**
-- TopK, RandomNormalLike have no eval_new.
-- NonZero, Range have data-dependent output shapes — fundamentally cannot decompose into fixed atom groups, but work via opaque eval_new.
-- CumSum has sequential dependency — not naturally parallelizable, works via opaque eval_new.
+Handles both concrete and symbolic dimensions via
+`ScalarInfoTyped<u64>`.
 
 ---
 
@@ -725,118 +297,49 @@ src/milli_graph/
 ├── mod.rs              # MilliOpGraph struct, execution logic
 ├── observer.rs         # MilliOpGraphObserver trait
 ├── ops_helpers.rs      # Graph-building utility functions
+├── validate_infer.rs   # Shape inference validation
 └── ops/
     ├── mod.rs          # AnyMilliOp enum, MilliOp trait, broadcasting
-    ├── argmax.rs       # ArgMax operation
-    ├── argmin.rs       # ArgMin operation
     ├── binary.rs       # SimpleBinary, MatMul, Pow
-    ├── cast.rs         # Cast operation
-    ├── cast_like.rs    # CastLike operation
-    ├── concat.rs       # Concat operation
+    ├── unary.rs        # SimpleUnaryOp, ClampMin
+    ├── cast.rs         # Cast
+    ├── cast_like.rs    # CastLike
+    ├── concat.rs       # Concat
     ├── constant.rs     # Constant, ConstantOfShape
     ├── conv.rs         # Conv, ConvInputGrad, ConvWeightGrad, ConvBiasGrad
-    ├── cumsum.rs       # CumSum operation
-    ├── expand.rs       # Expand operation
-    ├── gather.rs       # Gather, GatherGrad operations
-    ├── nonzero.rs      # NonZero operation
-    ├── pad.rs          # Pad operation
-    ├── random_normal_like.rs  # RandomNormalLike operation
-    ├── range.rs        # Range operation
-    ├── reduce_max.rs   # ReduceMax operation
-    ├── reduce_mean.rs  # ReduceMean operation
-    ├── reduce_min.rs   # ReduceMin operation
-    ├── reduce_prod.rs  # ReduceProd operation
-    ├── reduce_sum.rs   # ReduceSum operation
-    ├── reshape.rs      # Reshape operation
-    ├── resize.rs       # Resize operation
-    ├── shape.rs        # Shape operation
-    ├── slice.rs        # Slice operation
-    ├── split.rs        # Split operation
-    ├── squeeze.rs      # Squeeze operation
-    ├── sum_to.rs       # SumTo operation
-    ├── topk.rs         # TopK operation
-    ├── transpose.rs    # Transpose operation
-    ├── unary.rs        # SimpleUnaryOp, ClampMin
-    ├── unsqueeze.rs    # Unsqueeze operation
-    └── where_op.rs     # Where operation
+    ├── expand.rs       # Expand
+    ├── gather.rs       # Gather, GatherGrad
+    ├── pad.rs          # Pad
+    ├── reduce_*.rs     # ReduceSum, ReduceMean, ReduceMax, ReduceMin, ReduceProd
+    ├── reshape.rs      # Reshape
+    ├── shape.rs        # Shape
+    ├── slice.rs        # Slice
+    ├── split.rs        # Split
+    ├── squeeze.rs      # Squeeze
+    ├── transpose.rs    # Transpose
+    ├── unsqueeze.rs    # Unsqueeze
+    ├── where_op.rs     # Where
+    └── ...             # Range, CumSum, NonZero, ArgMax, ArgMin, TopK, etc.
 ```
 
 ---
 
-## Implementation Patterns
+## Integration Points
 
-### Standard Operation Structure
+### With SymbolicGraph
 
-Each operation follows a consistent pattern:
+MilliOpGraph is generated from SymbolicGraph during compilation.
+Complex ONNX operations are decomposed into simpler primitives.
 
-```rust
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SomeOp {
-    global_id: GlobalId,      // Unique operation ID
-    output: GlobalId,         // Output tensor ID
-    input: GlobalId,          // Input tensor ID(s)
-    // Operation-specific parameters...
-}
+### With SuperGraph
 
-impl SomeOp {
-    pub fn push_new(
-        graph: &mut MilliOpGraph,
-        input: GlobalId,
-        // Operation-specific parameters...
-        rng: &mut impl Rng,
-    ) -> GlobalId {
-        let output = graph.get_new_tensor_id(rng);
-        let node = Self {
-            global_id: GlobalId::new(rng),
-            output,
-            input,
-            // ...
-        };
-        graph.push_op(AnyMilliOp::SomeOp(node));
-        output
-    }
-}
+SuperGraph uses MilliOpGraph for model execution nodes, mixing
+high-level orchestration (tokenization, caching) with tensor
+computation.
 
-impl Node for SomeOp {
-    type OpKind = String;
-    fn global_id(&self) -> GlobalId { self.global_id }
-    fn op_kind(&self) -> String { "SomeOp".to_string() }
-    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
-        Box::new([self.input].into_iter())
-    }
-    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
-        Box::new([self.output].into_iter())
-    }
-}
+### With NanoGraph
 
-impl MilliOp for SomeOp {
-    fn eval(
-        &self,
-        inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
-        config: &MilliEvalConfig,
-        backend: &mut EvalBackend,
-    ) -> EvalResult {
-        let input = &inputs[&self.input];
-        let output = input.some_operation(backend)?;
-        Ok(Box::new([(self.output, output)].into_iter()))
-    }
-}
-```
-
-### Macro-Based Delegation
-
-The `AnyMilliOp` enum uses a `delegate!` macro to forward trait methods to the inner operation type, avoiding boilerplate for each variant:
-
-```rust
-macro_rules! delegate {
-    ($name:ident($($arg:ident: $ty:ty),*) -> $ret:ty) => {
-        fn $name(&self, $($arg: $ty),*) -> $ret {
-            match self {
-                AnyMilliOp::Constant(x) => x.$name($($arg),*),
-                AnyMilliOp::SimpleBinary(x) => x.$name($($arg),*),
-                // ... all variants
-            }
-        }
-    }
-}
-```
+Each op's `lower_to_nano()` produces scalar atom groups with explicit
+addressing (InputRef), dtype handling, and symbolic dimension
+propagation.  The NanoGraph is the target for both interpreted
+evaluation (pool\_eval) and compiled evaluation (x86\_jit).
