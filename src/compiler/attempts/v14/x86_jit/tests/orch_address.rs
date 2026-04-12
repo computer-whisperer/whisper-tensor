@@ -34,6 +34,17 @@ const RAX: u8 = 0; // dst_bit_reg for all tests
 const RDI: u8 = 7; // iter register for the variable-i tests
 const SCRATCH: u8 = 8; // r8 for arithmetic scratch
 
+/// Adjust a bit offset to the expected output value: byte offset when
+/// the slot qualifies for the byte-aligned fast path, bit offset
+/// otherwise.
+fn expected_offset(slot: &crate::compiler::attempts::v14::layout::SlotInfo, bit_off: u64) -> u64 {
+    if slot.is_byte_aligned() && matches!(slot.elem_bits, 8 | 16 | 32 | 64) {
+        bit_off / 8
+    } else {
+        bit_off
+    }
+}
+
 /// Build a trivial placement (one phase, one span) for a test graph
 /// so `compute_layout` has the AtomPlacementMap it needs.
 fn test_placement(
@@ -101,7 +112,7 @@ fn broadcast_returns_constant_bit_offset() {
     // bit_offset + 3 * bit_stride.
     let target = AtomId(inp.0 + 3);
     let (slot, _) = layout.find(target).expect("input slot present");
-    let want = slot.bit_offset + 3 * slot.bit_stride;
+    let want = expected_offset(slot, slot.bit_offset + 3 * slot.bit_stride);
 
     let info_cell = std::cell::RefCell::new(None::<AddressInfo>);
     let jit = JitFn::build(|asm| {
@@ -119,7 +130,7 @@ fn broadcast_returns_constant_bit_offset() {
         *info_cell.borrow_mut() = Some(info);
     });
     let got = run_const(&jit);
-    assert_eq!(got, want, "Broadcast bit_offset");
+    assert_eq!(got, want, "Broadcast offset");
 
     let info = info_cell.into_inner().unwrap();
     assert_eq!(info.dtype, NumericDType::F32);
@@ -131,7 +142,7 @@ fn explicit_single_atom_returns_constant_bit_offset() {
     let (layout, inp, _ident, _out) = flat_layout(4, NumericDType::I64);
     let target = AtomId(inp.0 + 2);
     let (slot, _) = layout.find(target).expect("input slot present");
-    let want = slot.bit_offset + 2 * slot.bit_stride;
+    let want = expected_offset(slot, slot.bit_offset + 2 * slot.bit_stride);
 
     let jit = JitFn::build(|asm| {
         emit_compute_bit_offset(
@@ -157,7 +168,7 @@ fn strided_1d_const_iter() {
     let (slot, _) = layout.find(inp).expect("input slot present");
 
     for i in [0u64, 1, 5, 15] {
-        let want = slot.bit_offset + i * slot.bit_stride;
+        let want = expected_offset(slot, slot.bit_offset + i * slot.bit_stride);
         let jit = JitFn::build(|asm| {
             emit_compute_bit_offset(
                 asm,
@@ -196,7 +207,7 @@ fn strided_1d_reg_iter_stride_one() {
         .expect("Strided 1D reg emit");
     });
     for i in [0u64, 1, 7, 15] {
-        let want = base_bit + i * bit_stride;
+        let want = expected_offset(slot, base_bit + i * bit_stride);
         assert_eq!(run_with_i(&jit, i), want, "i={i}");
     }
 }
@@ -225,7 +236,7 @@ fn strided_1d_reg_iter_stride_two() {
         .expect("Strided 1D stride-2 emit");
     });
     for i in [0u64, 1, 5, 10] {
-        let want = base_bit + 2 * bit_stride * i;
+        let want = expected_offset(slot, base_bit + 2 * bit_stride * i);
         assert_eq!(run_with_i(&jit, i), want, "i={i}");
     }
 }
@@ -266,7 +277,7 @@ fn strided_1d_const_with_atom_offset() {
         )
         .expect("Strided 1D const+atom_offset emit");
     });
-    assert_eq!(run_const(&jit), base_bit + bit_stride * 2);
+    assert_eq!(run_const(&jit), expected_offset(slot, base_bit + bit_stride * 2));
 }
 
 #[test]
@@ -297,7 +308,7 @@ fn strided_1d_reg_iter_with_bool_input() {
         *info_cell.borrow_mut() = Some(info);
     });
     for i in [0u64, 3, 7] {
-        let want = base_bit + i * bit_stride;
+        let want = expected_offset(slot, base_bit + i * bit_stride);
         assert_eq!(run_with_i(&jit, i), want, "i={i}");
     }
 
@@ -381,7 +392,7 @@ fn strided_2d_modular_const() {
 
     for i in [0u64, 1, 3, 4, 7, 15] {
         let expected_atom_off = (i % 4) as i64;
-        let want = (slot.bit_offset as i64 + expected_atom_off * slot.bit_stride as i64) as u64;
+        let want = expected_offset(slot, (slot.bit_offset as i64 + expected_atom_off * slot.bit_stride as i64) as u64);
         let jit = JitFn::build(|asm| {
             emit_compute_bit_offset(
                 asm,
@@ -424,7 +435,7 @@ fn strided_2d_modular_reg_power_of_two() {
         dynasm!(asm ; .arch x64 ; mov rax, Rq(ND_DST));
     });
     for i in [0u64, 1, 3, 4, 7, 15] {
-        let want = base_bit + (i % 4) * bit_stride;
+        let want = expected_offset(slot, base_bit + (i % 4) * bit_stride);
         assert_eq!(run_nd_with_i(&jit, i), want, "modular reg i={i}");
     }
 }
@@ -453,7 +464,7 @@ fn strided_2d_modular_reg_non_power_of_two() {
         dynasm!(asm ; .arch x64 ; mov rax, Rq(ND_DST));
     });
     for i in [0u64, 1, 2, 3, 5, 11] {
-        let want = base_bit + (i % 3) * bit_stride;
+        let want = expected_offset(slot, base_bit + (i % 3) * bit_stride);
         assert_eq!(run_nd_with_i(&jit, i), want, "modular reg mod3 i={i}");
     }
 }
@@ -497,7 +508,7 @@ fn strided_2d_broadcast_reg() {
         dynasm!(asm ; .arch x64 ; mov rax, Rq(ND_DST));
     });
     for i in [0u64, 1, 3, 4, 7, 12, 15] {
-        let want = base_bit + (i / 4) * bit_stride;
+        let want = expected_offset(slot, base_bit + (i / 4) * bit_stride);
         assert_eq!(run_nd_with_i(&jit, i), want, "strided_broadcast i={i}");
     }
 }
@@ -517,7 +528,7 @@ fn explicit_multi_const() {
 
     for (c, id) in ids.iter().enumerate() {
         let elem_idx = id.0 - slot.atom_base.0;
-        let want = slot.bit_offset + elem_idx * slot.bit_stride;
+        let want = expected_offset(slot, slot.bit_offset + elem_idx * slot.bit_stride);
         let ids_clone = ids.clone();
         let jit = JitFn::build(|asm| {
             emit_compute_bit_offset(
@@ -547,12 +558,12 @@ fn explicit_multi_reg() {
     ];
     let (slot, _) = layout.find(inp).expect("input slot");
 
-    // Build expected bit offsets.
+    // Build expected offsets (byte offsets when byte-aligned).
     let expected: Vec<u64> = ids
         .iter()
         .map(|id| {
             let elem_idx = id.0 - slot.atom_base.0;
-            slot.bit_offset + elem_idx * slot.bit_stride
+            expected_offset(slot, slot.bit_offset + elem_idx * slot.bit_stride)
         })
         .collect();
 

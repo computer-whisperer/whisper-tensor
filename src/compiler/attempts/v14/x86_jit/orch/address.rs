@@ -40,9 +40,20 @@
 use dynasmrt::x64::Assembler;
 use dynasmrt::{DynasmApi, dynasm};
 
-use crate::compiler::attempts::v14::layout::{BufferLayout, strided_resolve_offset};
+use crate::compiler::attempts::v14::layout::{BufferLayout, SlotInfo, strided_resolve_offset};
 use crate::nano_graph::pattern::{AtomId, InputRef};
 use crate::numeric_dtype::NumericDType;
+
+/// Whether a slot qualifies for the byte-aligned fast path.
+///
+/// True when `bit_offset` and `bit_stride` are multiples of 8 and
+/// `elem_bits` is a power-of-2 byte width (8, 16, 32, 64). In this
+/// case, the address layer emits **byte** offsets and the codec layer
+/// can use direct `mov` instructions instead of bit extraction.
+#[inline]
+fn slot_is_byte_fast(slot: &SlotInfo) -> bool {
+    slot.is_byte_aligned() && matches!(slot.elem_bits, 8 | 16 | 32 | 64)
+}
 
 /// Owns lookup tables for multi-entry `Explicit` InputRefs.
 ///
@@ -98,6 +109,15 @@ pub struct AddressInfo {
     /// single-buffer per-span layout (pre memory-placement rework)
     /// this is always 0. See `MEMORY_PLACEMENT.md` §"JIT ABI".
     pub buffer_id: u8,
+    /// When true, the emitted offset register holds a **byte** offset
+    /// instead of a bit offset, and the element width is a power-of-2
+    /// number of bytes (1, 2, 4, or 8). The caller can use the
+    /// byte-aligned load/store fast path in `bit_io` — a single `mov`
+    /// instruction instead of the general bit-extraction sequence.
+    ///
+    /// Set when the slot's `bit_offset` and `bit_stride` are both
+    /// multiples of 8 and `elem_bits` is 8, 16, 32, or 64.
+    pub byte_aligned: bool,
 }
 
 /// Emit code that materializes the bit offset of `input.resolve(i)`
@@ -195,12 +215,18 @@ fn emit_constant_atom(
     let (slot, elem_idx) = layout
         .find(atom_id)
         .ok_or_else(|| format!("address: no slot for atom={atom_id}"))?;
+    let byte_fast = slot_is_byte_fast(slot);
     let bit_off = slot.bit_offset + elem_idx * slot.bit_stride;
-    emit_mov_imm64(asm, dst_bit_reg, bit_off);
+    if byte_fast {
+        emit_mov_imm64(asm, dst_bit_reg, bit_off / 8);
+    } else {
+        emit_mov_imm64(asm, dst_bit_reg, bit_off);
+    }
     Ok(AddressInfo {
         dtype: slot.dtype,
         n_bits: slot.elem_bits as u32,
         buffer_id: slot.buffer_id,
+        byte_aligned: byte_fast,
     })
 }
 
@@ -249,22 +275,32 @@ fn emit_strided_1d(
     // Per-iteration bit stride between consecutive consumer atoms.
     let bit_stride_signed = stride_atoms * slot.bit_stride as i64;
 
+    let byte_fast = slot_is_byte_fast(slot);
     let info = AddressInfo {
         dtype: slot.dtype,
         n_bits: slot.elem_bits as u32,
         buffer_id: slot.buffer_id,
+        byte_aligned: byte_fast,
+    };
+
+    // When byte-aligned, emit byte offsets (divide by 8 at JIT-build
+    // time) so the codec can use direct `mov` instructions.
+    let (eff_base, eff_stride) = if byte_fast {
+        (base_bit_signed / 8, bit_stride_signed / 8)
+    } else {
+        (base_bit_signed, bit_stride_signed)
     };
 
     match iter {
         IterVar::Const(c) => {
-            let abs_bit = base_bit_signed + bit_stride_signed * c as i64;
-            if abs_bit < 0 {
+            let abs = eff_base + eff_stride * c as i64;
+            if abs < 0 {
                 return Err(format!(
-                    "address: negative bit offset {abs_bit} for Strided base={base} \
+                    "address: negative offset {abs} for Strided base={base} \
                      atom_offset={atom_offset} stride={stride_atoms} c={c}"
                 ));
             }
-            emit_mov_imm64(asm, dst_bit_reg, abs_bit as u64);
+            emit_mov_imm64(asm, dst_bit_reg, abs as u64);
         }
         IterVar::Reg(iter_reg) => {
             assert_distinct(dst_bit_reg, scratch_reg, iter_reg)?;
@@ -275,33 +311,29 @@ fn emit_strided_1d(
                 ; mov Rq(dst_bit_reg), Rq(iter_reg)
             );
 
-            // dst *= bit_stride
+            // dst *= stride
             // Use the imm32 form when possible — saves a `mov scratch,
             // imm64` and an extra register dependency.
-            if (i32::MIN as i64..=i32::MAX as i64).contains(&bit_stride_signed) {
-                let imm = bit_stride_signed as i32;
+            if (i32::MIN as i64..=i32::MAX as i64).contains(&eff_stride) {
+                let imm = eff_stride as i32;
                 dynasm!(asm
                     ; imul Rq(dst_bit_reg), Rq(dst_bit_reg), imm
                 );
             } else {
-                emit_mov_imm64(asm, scratch_reg, bit_stride_signed as u64);
+                emit_mov_imm64(asm, scratch_reg, eff_stride as u64);
                 dynasm!(asm
                     ; imul Rq(dst_bit_reg), Rq(scratch_reg)
                 );
             }
 
-            // dst += base_bit
-            // base_bit is a full 64-bit signed value; the imm32 add
-            // form (`add r/m64, imm8/imm32`) sign-extends, so we can
-            // use it for small bases. For larger bases, route through
-            // scratch_reg.
-            if (i32::MIN as i64..=i32::MAX as i64).contains(&base_bit_signed) {
-                let imm = base_bit_signed as i32;
+            // dst += base
+            if (i32::MIN as i64..=i32::MAX as i64).contains(&eff_base) {
+                let imm = eff_base as i32;
                 dynasm!(asm
                     ; add Rq(dst_bit_reg), imm
                 );
             } else {
-                emit_mov_imm64(asm, scratch_reg, base_bit_signed as u64);
+                emit_mov_imm64(asm, scratch_reg, eff_base as u64);
                 dynasm!(asm
                     ; add Rq(dst_bit_reg), Rq(scratch_reg)
                 );
@@ -356,31 +388,39 @@ fn emit_strided_nd(
         slot_bit as i64 - first_offset * slot.bit_stride as i64
     };
 
+    let byte_fast = slot_is_byte_fast(slot);
     let info = AddressInfo {
         dtype: slot.dtype,
         n_bits: slot.elem_bits as u32,
         buffer_id: slot.buffer_id,
+        byte_aligned: byte_fast,
+    };
+
+    let (eff_base, eff_stride) = if byte_fast {
+        (base_bit_signed / 8, slot.bit_stride / 8)
+    } else {
+        (base_bit_signed, slot.bit_stride)
     };
 
     match iter {
         IterVar::Const(c) => {
             let atom_off = strided_resolve_offset(dim_strides, dim_shape, c);
-            let abs_bit = base_bit_signed + atom_off * slot.bit_stride as i64;
-            if abs_bit < 0 {
+            let abs = eff_base + atom_off * eff_stride as i64;
+            if abs < 0 {
                 return Err(format!(
-                    "address: negative bit offset {abs_bit} for n-d Strided \
+                    "address: negative offset {abs} for n-d Strided \
                      base={base} c={c}"
                 ));
             }
-            emit_mov_imm64(asm, dst_bit_reg, abs_bit as u64);
+            emit_mov_imm64(asm, dst_bit_reg, abs as u64);
         }
         IterVar::Reg(iter_reg) => {
             emit_strided_nd_reg(
                 asm,
-                base_bit_signed,
+                eff_base,
                 dim_strides,
                 dim_shape,
-                slot.bit_stride,
+                eff_stride,
                 iter_reg,
                 dst_bit_reg,
                 scratch_reg,
@@ -550,10 +590,12 @@ fn emit_explicit_multi(
     let (first_slot, _) = layout
         .find(ids[0])
         .ok_or_else(|| format!("address: no slot for Explicit[0] atom={}", ids[0]))?;
+    let byte_fast = slot_is_byte_fast(first_slot);
     let info = AddressInfo {
         dtype: first_slot.dtype,
         n_bits: first_slot.elem_bits as u32,
         buffer_id: first_slot.buffer_id,
+        byte_aligned: byte_fast,
     };
 
     match iter {
@@ -566,22 +608,26 @@ fn emit_explicit_multi(
                 ));
             }
             // Delegate to the single-atom path — just a constant mov.
-            emit_constant_atom(asm, layout, ids[idx], dst_bit_reg)?;
+            // Override info with what emit_constant_atom returns (it
+            // sets byte_aligned consistently).
+            return emit_constant_atom(asm, layout, ids[idx], dst_bit_reg);
         }
         IterVar::Reg(iter_reg) => {
-            // Build the bit-offset lookup table.
-            let bit_offsets: Vec<i64> = ids
+            // Build the offset lookup table. When byte-aligned, store
+            // byte offsets; otherwise bit offsets.
+            let offsets: Vec<i64> = ids
                 .iter()
                 .enumerate()
                 .map(|(i, id)| {
                     let (slot, elem_idx) = layout
                         .find(*id)
                         .ok_or_else(|| format!("address: no slot for Explicit[{i}] atom={id}"))?;
-                    Ok((slot.bit_offset + elem_idx * slot.bit_stride) as i64)
+                    let bit_off = (slot.bit_offset + elem_idx * slot.bit_stride) as i64;
+                    Ok(if byte_fast { bit_off / 8 } else { bit_off })
                 })
                 .collect::<Result<Vec<_>, String>>()?;
 
-            let table_ptr = tables.alloc_bit_offset_table(bit_offsets);
+            let table_ptr = tables.alloc_bit_offset_table(offsets);
 
             // dst = table[iter_reg]
             dynasm!(asm

@@ -25,7 +25,7 @@ use crate::nano_graph::pattern::{AtomGroup, AtomId, InputRef};
 use crate::numeric_dtype::NumericDType;
 use crate::pool::SystemPool;
 
-use super::super::codec::bit_io::{emit_load_bits, emit_store_bits};
+use super::super::codec::bit_io::{emit_load_aligned, emit_load_bits, emit_store_aligned, emit_store_bits};
 use super::super::codec::format::{CodecSlot, CodecTables, ComputeRepr, emit_decode, emit_encode};
 use super::super::codec::precision::emit_narrow_to;
 use super::super::prologue::{FLT_SLOT_A, FLT_SLOT_C, INT_SLOT_C, LOOP_VAR_REG};
@@ -69,10 +69,16 @@ pub fn emit_reduce_group(
 
     let repr = ComputeRepr::for_dtype(compute_dtype);
 
-    // Look up the source slot to determine n_bits and k_bit_stride.
+    // Look up the source slot to determine n_bits and k stride.
     let src_info = resolve_reduce_source_info(layout, &group.inputs[0], group.atom_offset)?;
     let n_bits = src_info.n_bits;
-    let k_bit_stride = reduce_stride * src_info.bit_stride as i64;
+    // When byte-aligned, use byte strides to match the byte offsets
+    // from emit_compute_bit_offset.
+    let k_bit_stride = if src_info.byte_aligned {
+        reduce_stride * (src_info.bit_stride / 8) as i64
+    } else {
+        reduce_stride * src_info.bit_stride as i64
+    };
 
     if group.count == 1 {
         emit_reduce_body(
@@ -144,6 +150,7 @@ struct ReduceSourceInfo {
     n_bits: u32,
     bit_stride: u64,
     src_dtype: NumericDType,
+    byte_aligned: bool,
 }
 
 fn resolve_reduce_source_info(
@@ -161,6 +168,7 @@ fn resolve_reduce_source_info(
                 n_bits: slot.elem_bits as u32,
                 bit_stride: slot.bit_stride,
                 src_dtype: slot.dtype,
+                byte_aligned: slot.is_byte_aligned() && matches!(slot.elem_bits, 8 | 16 | 32 | 64),
             })
         }
         InputRef::Strided {
@@ -183,6 +191,7 @@ fn resolve_reduce_source_info(
                 n_bits: slot.elem_bits as u32,
                 bit_stride: slot.bit_stride,
                 src_dtype: slot.dtype,
+                byte_aligned: slot.is_byte_aligned() && matches!(slot.elem_bits, 8 | 16 | 32 | 64),
             })
         }
         InputRef::Explicit(ids) if !ids.is_empty() => {
@@ -193,6 +202,7 @@ fn resolve_reduce_source_info(
                 n_bits: slot.elem_bits as u32,
                 bit_stride: slot.bit_stride,
                 src_dtype: slot.dtype,
+                byte_aligned: slot.is_byte_aligned() && matches!(slot.elem_bits, 8 | 16 | 32 | 64),
             })
         }
         _ => Err("reduce: empty Explicit InputRef".to_string()),
@@ -276,7 +286,11 @@ fn emit_reduce_body(
             CODEC_SCRATCH
         }
     };
-    emit_load_bits(asm, src_buffer_reg, REDUCE_SRC_BIT, n_bits, RAW, SCRATCH);
+    if src_info.byte_aligned {
+        emit_load_aligned(asm, src_buffer_reg, REDUCE_SRC_BIT, n_bits, RAW);
+    } else {
+        emit_load_bits(asm, src_buffer_reg, REDUCE_SRC_BIT, n_bits, RAW, SCRATCH);
+    }
     let slot_a = match repr {
         ComputeRepr::F32 | ComputeRepr::F64 => CodecSlot::Xmm(FLT_SLOT_A),
         ComputeRepr::Int => CodecSlot::Gp(RAW),
@@ -327,15 +341,6 @@ fn emit_reduce_body(
     );
 
     // 4. Encode accumulator → rax, store.
-    emit_encode(
-        asm,
-        output_dtype,
-        acc_slot,
-        RAW,
-        CODEC_SCRATCH,
-        BIT_OFF,
-        CODEC_XMM_SCRATCH,
-    )?;
     let dst_info = emit_output_bit_offset(
         asm,
         layout,
@@ -345,26 +350,38 @@ fn emit_reduce_body(
         BIT_OFF,
         SCRATCH,
     )?;
-    // Dst is accessed once per outer iteration (after the k-loop
-    // completes), so an overflow load is fine here. rdi (formerly
-    // REDUCE_SRC_BIT) is dead at this point and serves as the
-    // overflow scratch.
     let dst_base = materialize_buffer_base(
         asm,
         layout,
         dst_info.buffer_id,
         super::group::OVERFLOW_BASE_SCRATCH,
     );
-    emit_store_bits(
-        asm,
-        dst_base,
-        BIT_OFF,
-        dst_info.n_bits,
-        RAW,
-        CODEC_SCRATCH,
-        REDUCE_K,
-        SCRATCH,
-    );
+
+    if dst_info.byte_aligned {
+        // Direct XMM store for F32/F64 — skip encode + store_bits.
+        if output_dtype == NumericDType::F32 {
+            if let CodecSlot::Xmm(xmm) = acc_slot {
+                dynasm!(asm; .arch x64
+                    ; movd DWORD [Rq(dst_base) + Rq(BIT_OFF)], Rx(xmm)
+                );
+                return Ok(());
+            }
+        }
+        if output_dtype == NumericDType::F64 {
+            if let CodecSlot::Xmm(xmm) = acc_slot {
+                dynasm!(asm; .arch x64
+                    ; movq QWORD [Rq(dst_base) + Rq(BIT_OFF)], Rx(xmm)
+                );
+                return Ok(());
+            }
+        }
+        // Other byte-aligned: encode to GP, then direct store.
+        emit_encode(asm, output_dtype, acc_slot, RAW, CODEC_SCRATCH, BIT_OFF, CODEC_XMM_SCRATCH)?;
+        emit_store_aligned(asm, dst_base, BIT_OFF, dst_info.n_bits, RAW);
+    } else {
+        emit_encode(asm, output_dtype, acc_slot, RAW, CODEC_SCRATCH, BIT_OFF, CODEC_XMM_SCRATCH)?;
+        emit_store_bits(asm, dst_base, BIT_OFF, dst_info.n_bits, RAW, CODEC_SCRATCH, REDUCE_K, SCRATCH);
+    }
 
     Ok(())
 }

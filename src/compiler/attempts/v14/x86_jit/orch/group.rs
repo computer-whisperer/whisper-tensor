@@ -62,7 +62,9 @@ use crate::nano_graph::pattern::{AtomGroup, AtomId, InputRef};
 use crate::numeric_dtype::NumericDType;
 use crate::pool::SystemPool;
 
-use super::super::codec::bit_io::{emit_load_bits, emit_store_bits};
+use super::super::codec::bit_io::{
+    emit_load_aligned, emit_load_bits, emit_store_aligned, emit_store_bits,
+};
 use super::super::codec::format::{CodecSlot, CodecTables, ComputeRepr, emit_decode, emit_encode};
 use super::super::prologue::{BUFFER_PTRS_REG, LOOP_VAR_REG};
 use super::address::{AddressInfo, AddressTables, IterVar, emit_compute_bit_offset};
@@ -343,21 +345,15 @@ fn emit_identity_iter(
         tables,
     )?;
 
-    // 2. Load src bits → rax. Materialize src buffer base first;
-    //    for fast-pool buffers this is a no-op (returns a persistent
-    //    register), for overflow buffers it emits a mov from
-    //    `[r14 + id*8]` into `OVERFLOW_BASE_SCRATCH`.
+    // 2. Load src bits → rax.
     let src_base = materialize_buffer_base(asm, layout, src_info.buffer_id, OVERFLOW_BASE_SCRATCH);
-    emit_load_bits(
-        asm,
-        src_base,
-        BIT_OFF_REG,
-        src_info.n_bits,
-        RAW_REG,
-        ADDR_SCRATCH,
-    );
+    if src_info.byte_aligned {
+        emit_load_aligned(asm, src_base, BIT_OFF_REG, src_info.n_bits, RAW_REG);
+    } else {
+        emit_load_bits(asm, src_base, BIT_OFF_REG, src_info.n_bits, RAW_REG, ADDR_SCRATCH);
+    }
 
-    // 3. Compute dst bit offset → r10 with atom_offset compensation.
+    // 3. Compute dst offset → r10 with atom_offset compensation.
     let dst_info = emit_output_bit_offset(
         asm,
         layout,
@@ -375,18 +371,13 @@ fn emit_identity_iter(
         ));
     }
 
-    // 4. Store rax at dst bit offset.
+    // 4. Store rax at dst offset.
     let dst_base = materialize_buffer_base(asm, layout, dst_info.buffer_id, OVERFLOW_BASE_SCRATCH);
-    emit_store_bits(
-        asm,
-        dst_base,
-        BIT_OFF_REG,
-        dst_info.n_bits,
-        RAW_REG,
-        BIT_IO_TMP1,
-        BIT_IO_TMP2,
-        ADDR_SCRATCH,
-    );
+    if dst_info.byte_aligned {
+        emit_store_aligned(asm, dst_base, BIT_OFF_REG, dst_info.n_bits, RAW_REG);
+    } else {
+        emit_store_bits(asm, dst_base, BIT_OFF_REG, dst_info.n_bits, RAW_REG, BIT_IO_TMP1, BIT_IO_TMP2, ADDR_SCRATCH);
+    }
 
     Ok(())
 }
@@ -536,54 +527,41 @@ fn emit_literal_copy_iter(
     let bit_stride = dst_slot.bit_stride as i64;
     let n_bits = dst_slot.elem_bits as u32;
     let dst_buffer_id = dst_slot.buffer_id;
+    let byte_fast = dst_slot.is_byte_aligned() && matches!(dst_slot.elem_bits, 8 | 16 | 32 | 64);
+
     let dst_slot_bit = dst_slot.bit_offset as i64 + elem_idx as i64 * bit_stride;
-    // `emit_output_bit_offset` shape: dst_bit(iter) = slot_bit +
-    // (iter - atom_offset) * bit_stride = dst_store_base_bit +
-    // iter * bit_stride.
     let dst_store_base_bit = dst_slot_bit - atom_offset as i64 * bit_stride;
-    // Source side lives in the literal buffer starting at
-    // `src_byte_off`. The literal bytes are stored contiguously in
-    // the same dtype as the destination, so the stride matches.
     let src_base_bit = src_byte_off as i64 * 8;
     let src_store_base_bit = src_base_bit - atom_offset as i64 * bit_stride;
 
-    // 1. Compute src bit offset → BIT_OFF_REG.
-    emit_linear_bit_offset(
-        asm,
-        iter,
-        bit_stride,
-        src_store_base_bit,
-        BIT_OFF_REG,
-        ADDR_SCRATCH,
-    );
+    // When byte-aligned, use byte strides for linear offset computation.
+    let (eff_stride, eff_src_base, eff_dst_base) = if byte_fast {
+        (bit_stride / 8, src_store_base_bit / 8, dst_store_base_bit / 8)
+    } else {
+        (bit_stride, src_store_base_bit, dst_store_base_bit)
+    };
 
-    // 2. Load n_bits from the literal buffer → RAW_REG.
+    // 1. Compute src offset → BIT_OFF_REG.
+    emit_linear_bit_offset(asm, iter, eff_stride, eff_src_base, BIT_OFF_REG, ADDR_SCRATCH);
+
+    // 2. Load from the literal buffer → RAW_REG.
     let src_base = materialize_buffer_base(asm, layout, LITERAL_BUFFER.0, OVERFLOW_BASE_SCRATCH);
-    emit_load_bits(asm, src_base, BIT_OFF_REG, n_bits, RAW_REG, ADDR_SCRATCH);
+    if byte_fast {
+        emit_load_aligned(asm, src_base, BIT_OFF_REG, n_bits, RAW_REG);
+    } else {
+        emit_load_bits(asm, src_base, BIT_OFF_REG, n_bits, RAW_REG, ADDR_SCRATCH);
+    }
 
-    // 3. Compute dst bit offset → BIT_OFF_REG (overwrites src value
-    //    in the register, but RAW_REG still holds the loaded bits).
-    emit_linear_bit_offset(
-        asm,
-        iter,
-        bit_stride,
-        dst_store_base_bit,
-        BIT_OFF_REG,
-        ADDR_SCRATCH,
-    );
+    // 3. Compute dst offset → BIT_OFF_REG.
+    emit_linear_bit_offset(asm, iter, eff_stride, eff_dst_base, BIT_OFF_REG, ADDR_SCRATCH);
 
-    // 4. Store RAW_REG at the destination bit offset.
+    // 4. Store RAW_REG at the destination offset.
     let dst_base = materialize_buffer_base(asm, layout, dst_buffer_id, OVERFLOW_BASE_SCRATCH);
-    emit_store_bits(
-        asm,
-        dst_base,
-        BIT_OFF_REG,
-        n_bits,
-        RAW_REG,
-        BIT_IO_TMP1,
-        BIT_IO_TMP2,
-        ADDR_SCRATCH,
-    );
+    if byte_fast {
+        emit_store_aligned(asm, dst_base, BIT_OFF_REG, n_bits, RAW_REG);
+    } else {
+        emit_store_bits(asm, dst_base, BIT_OFF_REG, n_bits, RAW_REG, BIT_IO_TMP1, BIT_IO_TMP2, ADDR_SCRATCH);
+    }
 
     Ok(())
 }
@@ -722,14 +700,11 @@ fn emit_cast_iter(
 
     // 2. Load src raw bits → rax.
     let src_base = bbase(asm, layout, src_info.buffer_id);
-    emit_load_bits(
-        asm,
-        src_base,
-        BIT_OFF_REG,
-        src_info.n_bits,
-        RAW_REG,
-        ADDR_SCRATCH,
-    );
+    if src_info.byte_aligned {
+        emit_load_aligned(asm, src_base, BIT_OFF_REG, src_info.n_bits, RAW_REG);
+    } else {
+        emit_load_bits(asm, src_base, BIT_OFF_REG, src_info.n_bits, RAW_REG, ADDR_SCRATCH);
+    }
 
     // 3. Decode raw bits to src compute repr.
     let src_repr = ComputeRepr::for_dtype(src_dtype);
@@ -757,40 +732,16 @@ fn emit_cast_iter(
         emit_repr_convert(asm, src_repr, dst_repr)?;
     }
 
-    // 4. Encode from dst compute repr to dst raw bits → rax.
-    emit_encode(
-        asm,
-        dst_dtype,
-        dst_slot,
-        RAW_REG,
-        BIT_IO_TMP1, // scratch_gp1
-        BIT_IO_TMP2, // scratch_gp2
-        FLT_SCRATCH, // scratch_xmm
-    )?;
-
-    // 5. Compute dst bit offset → r10.
-    let dst_info = emit_output_bit_offset(
+    // 4. Encode + store (byte-aligned fast path when applicable).
+    emit_encode_store_output(
         asm,
         layout,
+        dst_dtype,
+        dst_slot,
         output_base,
         output_atom_offset,
         iter,
-        BIT_OFF_REG,
-        ADDR_SCRATCH,
     )?;
-
-    // 6. Store raw bits.
-    let dst_base = bbase(asm, layout, dst_info.buffer_id);
-    emit_store_bits(
-        asm,
-        dst_base,
-        BIT_OFF_REG,
-        dst_info.n_bits,
-        RAW_REG,
-        BIT_IO_TMP1,
-        BIT_IO_TMP2,
-        ADDR_SCRATCH,
-    );
 
     Ok(())
 }
@@ -997,47 +948,36 @@ fn emit_binary_iter(
         ComputeRepr::F32 | ComputeRepr::F64 => CodecSlot::Xmm(super::super::prologue::FLT_SLOT_C),
         ComputeRepr::Int => CodecSlot::Gp(super::super::prologue::INT_SLOT_C),
     };
-    emit_encode(
-        asm,
-        output_dtype,
-        result_slot,
-        RAW_REG,
-        BIT_IO_TMP1,
-        BIT_IO_TMP2,
-        FLT_SCRATCH,
-    )?;
-
-    let dst_info = emit_output_bit_offset(
+    emit_encode_store_output(
         asm,
         layout,
+        output_dtype,
+        result_slot,
         output_base,
         output_atom_offset,
         iter,
-        BIT_OFF_REG,
-        ADDR_SCRATCH,
     )?;
-
-    let __bbase1 = bbase(asm, layout, dst_info.buffer_id);
-    emit_store_bits(
-        asm,
-        __bbase1,
-        BIT_OFF_REG,
-        dst_info.n_bits,
-        RAW_REG,
-        BIT_IO_TMP1,
-        BIT_IO_TMP2,
-        ADDR_SCRATCH,
-    );
 
     Ok(())
 }
 
-/// Helper: compute bit offset, load raw bits, decode to compute repr.
+/// Helper: compute offset, load raw bits, decode to compute repr.
 ///
 /// The decode uses the **storage dtype** from the layout slot (via
 /// `AddressInfo::dtype`), not the op's `compute_dtype`. This is
 /// correct because the codec converts from the storage format to
 /// the dtype's natural compute repr (e.g., BF16 → F32).
+///
+/// ## Byte-aligned fast path
+///
+/// When `AddressInfo::byte_aligned` is true, the offset register
+/// holds a byte offset and the element is 8/16/32/64 bits wide.
+/// For dtypes whose storage repr matches the compute repr (F32,
+/// F64, I64/U64), we load directly into the compute slot — a
+/// single `movss`/`movsd`/`mov` — skipping both `emit_load_bits`
+/// and `emit_decode`. For other byte-aligned dtypes, we use
+/// `emit_load_aligned` (a single `mov` instead of bit extraction)
+/// then decode as normal.
 #[allow(clippy::too_many_arguments)]
 fn emit_load_decode_input(
     asm: &mut Assembler,
@@ -1059,15 +999,36 @@ fn emit_load_decode_input(
         ADDR_SCRATCH,
         addr_tables,
     )?;
-    let __bbase2 = bbase(asm, layout, info.buffer_id);
-    emit_load_bits(
-        asm,
-        __bbase2,
-        BIT_OFF_REG,
-        info.n_bits,
-        RAW_REG,
-        ADDR_SCRATCH,
-    );
+    let base = bbase(asm, layout, info.buffer_id);
+
+    if info.byte_aligned {
+        // Direct XMM load for F32/F64 — skips load_bits + decode entirely.
+        if info.dtype == NumericDType::F32 && matches!(slot, CodecSlot::Xmm(x) if x == x) {
+            let xmm = match slot {
+                CodecSlot::Xmm(x) => x,
+                _ => unreachable!(),
+            };
+            dynasm!(asm; .arch x64
+                ; movd Rx(xmm), DWORD [Rq(base) + Rq(BIT_OFF_REG)]
+            );
+            return Ok(info);
+        }
+        if info.dtype == NumericDType::F64 && matches!(slot, CodecSlot::Xmm(_)) {
+            let xmm = match slot {
+                CodecSlot::Xmm(x) => x,
+                _ => unreachable!(),
+            };
+            dynasm!(asm; .arch x64
+                ; movq Rx(xmm), QWORD [Rq(base) + Rq(BIT_OFF_REG)]
+            );
+            return Ok(info);
+        }
+        // For other byte-aligned types: single mov into GP, then decode.
+        emit_load_aligned(asm, base, BIT_OFF_REG, info.n_bits, RAW_REG);
+    } else {
+        emit_load_bits(asm, base, BIT_OFF_REG, info.n_bits, RAW_REG, ADDR_SCRATCH);
+    }
+
     emit_decode(
         asm,
         info.dtype,
@@ -1078,6 +1039,92 @@ fn emit_load_decode_input(
         codec_tables,
     )?;
     Ok(info)
+}
+
+/// Helper: encode compute repr to raw bits, compute output offset, store.
+///
+/// ## Byte-aligned fast path
+///
+/// When the output slot is byte-aligned and the output dtype matches
+/// the compute repr (F32 in xmm, F64 in xmm), the store is a single
+/// `movd`/`movsd` from the XMM slot directly to memory — skipping
+/// both `emit_encode` and `emit_store_bits`. For other byte-aligned
+/// types, `emit_store_aligned` replaces the full read-modify-write
+/// `emit_store_bits`.
+#[allow(clippy::too_many_arguments)]
+fn emit_encode_store_output(
+    asm: &mut Assembler,
+    layout: &BufferLayout,
+    output_dtype: NumericDType,
+    result_slot: CodecSlot,
+    output_base: crate::nano_graph::pattern::AtomId,
+    output_atom_offset: u64,
+    iter: IterVar,
+) -> Result<(), String> {
+    // Compute offset first (may clobber ADDR_SCRATCH but not RAW_REG
+    // or the XMM slot).
+    let dst_info = emit_output_bit_offset(
+        asm,
+        layout,
+        output_base,
+        output_atom_offset,
+        iter,
+        BIT_OFF_REG,
+        ADDR_SCRATCH,
+    )?;
+    let base = bbase(asm, layout, dst_info.buffer_id);
+
+    if dst_info.byte_aligned {
+        // Direct XMM store for F32/F64 — skip encode + store_bits.
+        if output_dtype == NumericDType::F32 {
+            if let CodecSlot::Xmm(xmm) = result_slot {
+                dynasm!(asm; .arch x64
+                    ; movd DWORD [Rq(base) + Rq(BIT_OFF_REG)], Rx(xmm)
+                );
+                return Ok(());
+            }
+        }
+        if output_dtype == NumericDType::F64 {
+            if let CodecSlot::Xmm(xmm) = result_slot {
+                dynasm!(asm; .arch x64
+                    ; movq QWORD [Rq(base) + Rq(BIT_OFF_REG)], Rx(xmm)
+                );
+                return Ok(());
+            }
+        }
+        // Other byte-aligned types: encode to GP, then direct store.
+        emit_encode(
+            asm,
+            output_dtype,
+            result_slot,
+            RAW_REG,
+            BIT_IO_TMP1,
+            BIT_IO_TMP2,
+            FLT_SCRATCH,
+        )?;
+        emit_store_aligned(asm, base, BIT_OFF_REG, dst_info.n_bits, RAW_REG);
+    } else {
+        emit_encode(
+            asm,
+            output_dtype,
+            result_slot,
+            RAW_REG,
+            BIT_IO_TMP1,
+            BIT_IO_TMP2,
+            FLT_SCRATCH,
+        )?;
+        emit_store_bits(
+            asm,
+            base,
+            BIT_OFF_REG,
+            dst_info.n_bits,
+            RAW_REG,
+            BIT_IO_TMP1,
+            BIT_IO_TMP2,
+            ADDR_SCRATCH,
+        );
+    }
+    Ok(())
 }
 
 /// Emit a count-loop around `emit_binary_iter`.
@@ -1242,37 +1289,15 @@ fn emit_unary_iter(
         ComputeRepr::F32 | ComputeRepr::F64 => CodecSlot::Xmm(super::super::prologue::FLT_SLOT_C),
         ComputeRepr::Int => CodecSlot::Gp(super::super::prologue::INT_SLOT_C),
     };
-    emit_encode(
-        asm,
-        output_dtype,
-        result_slot,
-        RAW_REG,
-        BIT_IO_TMP1,
-        BIT_IO_TMP2,
-        FLT_SCRATCH,
-    )?;
-
-    let dst_info = emit_output_bit_offset(
+    emit_encode_store_output(
         asm,
         layout,
+        output_dtype,
+        result_slot,
         output_base,
         output_atom_offset,
         iter,
-        BIT_OFF_REG,
-        ADDR_SCRATCH,
     )?;
-
-    let __bbase3 = bbase(asm, layout, dst_info.buffer_id);
-    emit_store_bits(
-        asm,
-        __bbase3,
-        BIT_OFF_REG,
-        dst_info.n_bits,
-        RAW_REG,
-        BIT_IO_TMP1,
-        BIT_IO_TMP2,
-        ADDR_SCRATCH,
-    );
 
     Ok(())
 }
@@ -1503,14 +1528,11 @@ fn emit_select_iter(
         addr_tables,
     )?;
     let __bbase4 = bbase(asm, layout, cond_info.buffer_id);
-    emit_load_bits(
-        asm,
-        __bbase4,
-        BIT_OFF_REG,
-        cond_info.n_bits,
-        RAW_REG,
-        ADDR_SCRATCH,
-    );
+    if cond_info.byte_aligned {
+        emit_load_aligned(asm, __bbase4, BIT_OFF_REG, cond_info.n_bits, RAW_REG);
+    } else {
+        emit_load_bits(asm, __bbase4, BIT_OFF_REG, cond_info.n_bits, RAW_REG, ADDR_SCRATCH);
+    }
     let cond_repr = ComputeRepr::for_dtype(cond_info.dtype);
     let cond_slot = match cond_repr {
         ComputeRepr::F32 | ComputeRepr::F64 => CodecSlot::Xmm(FLT_SLOT_A),
@@ -1631,35 +1653,15 @@ fn emit_select_iter(
         ComputeRepr::F32 | ComputeRepr::F64 => CodecSlot::Xmm(FLT_SLOT_C),
         ComputeRepr::Int => CodecSlot::Gp(super::super::prologue::INT_SLOT_C),
     };
-    emit_encode(
-        asm,
-        output_dtype,
-        result_slot,
-        RAW_REG,
-        BIT_IO_TMP1,
-        BIT_IO_TMP2,
-        FLT_SCRATCH,
-    )?;
-    let dst_info = emit_output_bit_offset(
+    emit_encode_store_output(
         asm,
         layout,
+        output_dtype,
+        result_slot,
         output_base,
         output_atom_offset,
         iter,
-        BIT_OFF_REG,
-        ADDR_SCRATCH,
     )?;
-    let __bbase5 = bbase(asm, layout, dst_info.buffer_id);
-    emit_store_bits(
-        asm,
-        __bbase5,
-        BIT_OFF_REG,
-        dst_info.n_bits,
-        RAW_REG,
-        BIT_IO_TMP1,
-        BIT_IO_TMP2,
-        ADDR_SCRATCH,
-    );
     Ok(())
 }
 
@@ -1815,14 +1817,11 @@ fn emit_indirect_load_iter(
         addr_tables,
     )?;
     let __bbase6 = bbase(asm, layout, idx_info.buffer_id);
-    emit_load_bits(
-        asm,
-        __bbase6,
-        BIT_OFF_REG,
-        idx_info.n_bits,
-        RAW_REG,
-        ADDR_SCRATCH,
-    );
+    if idx_info.byte_aligned {
+        emit_load_aligned(asm, __bbase6, BIT_OFF_REG, idx_info.n_bits, RAW_REG);
+    } else {
+        emit_load_bits(asm, __bbase6, BIT_OFF_REG, idx_info.n_bits, RAW_REG, ADDR_SCRATCH);
+    }
 
     // 2. Decode index to its compute repr, then extract as u64.
     let idx_repr = ComputeRepr::for_dtype(idx_info.dtype);
@@ -1925,37 +1924,17 @@ fn emit_indirect_load_iter(
         ComputeRepr::F32 | ComputeRepr::F64 => CodecSlot::Xmm(FLT_SLOT),
         ComputeRepr::Int => CodecSlot::Gp(RAW_REG),
     };
-    emit_encode(
-        asm,
-        output_dtype,
-        encode_slot,
-        RAW_REG,
-        BIT_IO_TMP1,
-        BIT_IO_TMP2,
-        FLT_SCRATCH,
-    )?;
 
-    // 6. Compute output address + store.
-    let dst_info = emit_output_bit_offset(
+    // 6. Encode + compute output address + store.
+    emit_encode_store_output(
         asm,
         layout,
+        output_dtype,
+        encode_slot,
         output_base,
         output_atom_offset,
         iter,
-        BIT_OFF_REG,
-        ADDR_SCRATCH,
     )?;
-    let __bbase8 = bbase(asm, layout, dst_info.buffer_id);
-    emit_store_bits(
-        asm,
-        __bbase8,
-        BIT_OFF_REG,
-        dst_info.n_bits,
-        RAW_REG,
-        BIT_IO_TMP1,
-        BIT_IO_TMP2,
-        ADDR_SCRATCH,
-    );
 
     Ok(())
 }
@@ -1982,49 +1961,56 @@ pub(super) fn emit_output_bit_offset(
         .find(group_base_id)
         .ok_or_else(|| format!("output: no slot for group base={group_base_id}"))?;
 
+    let byte_fast = slot.is_byte_aligned() && matches!(slot.elem_bits, 8 | 16 | 32 | 64);
     let info = super::address::AddressInfo {
         dtype: slot.dtype,
         n_bits: slot.elem_bits as u32,
         buffer_id: slot.buffer_id,
+        byte_aligned: byte_fast,
     };
 
-    // store_base_bit = slot_bit - atom_offset * bit_stride
-    let slot_bit = slot.bit_offset as i64 + elem_idx as i64 * slot.bit_stride as i64;
-    let store_base_bit = slot_bit - atom_offset as i64 * slot.bit_stride as i64;
-    let bit_stride = slot.bit_stride as i64;
+    // store_base = slot_offset - atom_offset * stride
+    // When byte-aligned, all values are in bytes; otherwise bits.
+    let slot_off = slot.bit_offset as i64 + elem_idx as i64 * slot.bit_stride as i64;
+    let stride = slot.bit_stride as i64;
+    let (eff_base, eff_stride) = if byte_fast {
+        (slot_off / 8 - atom_offset as i64 * (stride / 8), stride / 8)
+    } else {
+        (slot_off - atom_offset as i64 * stride, stride)
+    };
 
     match iter {
         IterVar::Const(c) => {
-            let abs_bit = store_base_bit + bit_stride * c as i64;
+            let abs = eff_base + eff_stride * c as i64;
             dynasm!(asm
                 ; .arch x64
-                ; mov Rq(dst_bit_reg), QWORD abs_bit
+                ; mov Rq(dst_bit_reg), QWORD abs
             );
         }
         IterVar::Reg(iter_reg) => {
-            // dst = iter * bit_stride + store_base_bit
-            if (i32::MIN as i64..=i32::MAX as i64).contains(&bit_stride) {
+            // dst = iter * stride + base
+            if (i32::MIN as i64..=i32::MAX as i64).contains(&eff_stride) {
                 dynasm!(asm
                     ; .arch x64
-                    ; imul Rq(dst_bit_reg), Rq(iter_reg), bit_stride as i32
+                    ; imul Rq(dst_bit_reg), Rq(iter_reg), eff_stride as i32
                 );
             } else {
                 dynasm!(asm
                     ; .arch x64
-                    ; mov Rq(scratch_reg), QWORD bit_stride
+                    ; mov Rq(scratch_reg), QWORD eff_stride
                     ; mov Rq(dst_bit_reg), Rq(iter_reg)
                     ; imul Rq(dst_bit_reg), Rq(scratch_reg)
                 );
             }
-            if (i32::MIN as i64..=i32::MAX as i64).contains(&store_base_bit) {
+            if (i32::MIN as i64..=i32::MAX as i64).contains(&eff_base) {
                 dynasm!(asm
                     ; .arch x64
-                    ; add Rq(dst_bit_reg), store_base_bit as i32
+                    ; add Rq(dst_bit_reg), eff_base as i32
                 );
             } else {
                 dynasm!(asm
                     ; .arch x64
-                    ; mov Rq(scratch_reg), QWORD store_base_bit
+                    ; mov Rq(scratch_reg), QWORD eff_base
                     ; add Rq(dst_bit_reg), Rq(scratch_reg)
                 );
             }

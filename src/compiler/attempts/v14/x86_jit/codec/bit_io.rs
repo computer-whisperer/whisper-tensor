@@ -282,6 +282,70 @@ pub fn emit_store_bits(
     }
 }
 
+// ─── Byte-aligned fast path ─────────────────────────────────────────
+//
+// When the address layer reports `byte_aligned == true`, the offset
+// register holds a **byte** offset and `n_bits` is 8, 16, 32, or 64.
+// These functions emit a single `mov` instead of the general bit
+// extraction / read-modify-write sequence.
+
+/// Load `n_bits` bits from byte-aligned `[base_reg + byte_off_reg]`
+/// into the low `n_bits` of `dst_reg` (zero-extended to 64 bits).
+///
+/// `n_bits` must be 8, 16, 32, or 64. Does NOT clobber `rcx`.
+pub fn emit_load_aligned(
+    asm: &mut Assembler,
+    base_reg: u8,
+    byte_off_reg: u8,
+    n_bits: u32,
+    dst_reg: u8,
+) {
+    match n_bits {
+        8 => dynasm!(asm; .arch x64
+            ; movzx Rd(dst_reg), BYTE [Rq(base_reg) + Rq(byte_off_reg)]
+        ),
+        16 => dynasm!(asm; .arch x64
+            ; movzx Rd(dst_reg), WORD [Rq(base_reg) + Rq(byte_off_reg)]
+        ),
+        32 => dynasm!(asm; .arch x64
+            ; mov Rd(dst_reg), DWORD [Rq(base_reg) + Rq(byte_off_reg)]
+        ),
+        64 => dynasm!(asm; .arch x64
+            ; mov Rq(dst_reg), QWORD [Rq(base_reg) + Rq(byte_off_reg)]
+        ),
+        _ => panic!("emit_load_aligned: n_bits={n_bits} not in {{8,16,32,64}}"),
+    }
+}
+
+/// Store the low `n_bits` of `src_reg` to byte-aligned
+/// `[base_reg + byte_off_reg]`.
+///
+/// `n_bits` must be 8, 16, 32, or 64. Does NOT clobber `rcx` or
+/// any scratch registers.
+pub fn emit_store_aligned(
+    asm: &mut Assembler,
+    base_reg: u8,
+    byte_off_reg: u8,
+    n_bits: u32,
+    src_reg: u8,
+) {
+    match n_bits {
+        8 => dynasm!(asm; .arch x64
+            ; mov BYTE [Rq(base_reg) + Rq(byte_off_reg)], Rb(src_reg)
+        ),
+        16 => dynasm!(asm; .arch x64
+            ; mov WORD [Rq(base_reg) + Rq(byte_off_reg)], Rw(src_reg)
+        ),
+        32 => dynasm!(asm; .arch x64
+            ; mov DWORD [Rq(base_reg) + Rq(byte_off_reg)], Rd(src_reg)
+        ),
+        64 => dynasm!(asm; .arch x64
+            ; mov QWORD [Rq(base_reg) + Rq(byte_off_reg)], Rq(src_reg)
+        ),
+        _ => panic!("emit_store_aligned: n_bits={n_bits} not in {{8,16,32,64}}"),
+    }
+}
+
 /// Reserved register code for `rcx` — the x86 shift count register.
 const RCX: u8 = 1;
 
