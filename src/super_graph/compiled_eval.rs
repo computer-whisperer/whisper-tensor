@@ -15,8 +15,9 @@ use std::env;
 use std::time::Instant;
 
 use crate::compiler::attempts::v14::executor::{
-    CompiledSpanFn, ExecutablePlan, ExecutablePlanBuilder, PhaseStore, PoolEvalSpan,
+    CompiledSpanFn, ExecutablePlan, ExecutablePlanBuilder, PoolEvalSpan,
 };
+use crate::compiler::attempts::v14::placer::{AtomPlacementMap, run_placer};
 use crate::compiler::attempts::v14::partitioner_m;
 use crate::compiler::attempts::v14::partitioner_n;
 use crate::compiler::attempts::v14::report::{self, PlanSummary};
@@ -257,21 +258,17 @@ pub(crate) fn compile_nano_graph(
         report.print();
     }
 
-    // Standalone memory placer diagnostic (step 3 of the implementation
-    // order). Computes the intermediate/input/output buffer layout but
-    // doesn't yet change execution.
+    // Run the global memory placer. Its output drives both per-span
+    // codegen (`SlotInfo::buffer_id` / `BufferBases`) and the executor
+    // (`buffer_ptrs` layout).
+    let placement = run_placer(graph, &phases, all_output_atom_ranges)
+        .map_err(|e| format!("placer: {e}"))?;
+
     if std::env::var("WT_PRINT_PLACEMENT")
         .ok()
         .is_some_and(|v| v != "0")
     {
-        match crate::compiler::attempts::v14::placer::run_placer(
-            graph,
-            &phases,
-            all_output_atom_ranges,
-        ) {
-            Ok(map) => map.print_summary(),
-            Err(e) => eprintln!("[placer] error: {e}"),
-        }
+        placement.print_summary();
     }
 
     // Extract plan summary before compilation consumes the phases.
@@ -359,14 +356,14 @@ pub(crate) fn compile_nano_graph(
 
     for (pi, phase) in phases.iter().enumerate() {
         let lanes = if use_parallel {
-            compile_phase_parallel(pi, &phase.spans, &mut compile_errors)
+            compile_phase_parallel(pi, &phase.spans, &placement, &mut compile_errors)
         } else {
-            compile_phase_pool_eval(&phase.spans)
+            compile_phase_pool_eval(&phase.spans, &placement)
         };
         plan_builder.add_phase(lanes);
     }
 
-    let executable_plan = plan_builder.build();
+    let executable_plan = plan_builder.build(placement, graph);
     obs.on_milestone("compiled.compile_phases", None, t0, Instant::now());
 
     x86_jit_stats::print_summary();
@@ -380,6 +377,7 @@ type LaneTuple = (Box<dyn CompiledSpanFn>, Vec<AtomRange>, Vec<AtomRange>);
 fn compile_phase_parallel(
     pi: usize,
     spans: &[crate::compiler::attempts::v14::types::Span],
+    placement: &AtomPlacementMap,
     compile_errors: &mut usize,
 ) -> Vec<LaneTuple> {
     use rayon::prelude::*;
@@ -399,9 +397,10 @@ fn compile_phase_parallel(
                     span.graph.clone(),
                     span.inputs.clone(),
                     span.outputs.clone(),
+                    placement,
                 )) as Box<dyn CompiledSpanFn>)
             } else {
-                compile_one_span_native(&span.graph, &span.outputs)
+                compile_one_span_native(&span.graph, &span.outputs, placement)
             }
         })
         .collect();
@@ -424,6 +423,7 @@ fn compile_phase_parallel(
                         spans[si].graph.clone(),
                         spans[si].inputs.clone(),
                         spans[si].outputs.clone(),
+                        placement,
                     )) as Box<dyn CompiledSpanFn>,
                     spans[si].inputs.clone(),
                     spans[si].outputs.clone(),
@@ -436,6 +436,7 @@ fn compile_phase_parallel(
 /// Wrap every span in a PoolEvalSpan (used when force_pool_eval is set).
 fn compile_phase_pool_eval(
     spans: &[crate::compiler::attempts::v14::types::Span],
+    placement: &AtomPlacementMap,
 ) -> Vec<LaneTuple> {
     spans
         .iter()
@@ -445,6 +446,7 @@ fn compile_phase_pool_eval(
                     span.graph.clone(),
                     span.inputs.clone(),
                     span.outputs.clone(),
+                    placement,
                 )) as Box<dyn CompiledSpanFn>,
                 span.inputs.clone(),
                 span.outputs.clone(),
@@ -460,8 +462,9 @@ fn compile_phase_pool_eval(
 fn compile_one_span_native(
     graph: &NanoGraph<'static, SystemPool>,
     outputs: &[AtomRange],
+    placement: &AtomPlacementMap,
 ) -> Result<Box<dyn CompiledSpanFn>, String> {
-    match crate::compiler::attempts::v14::x86_jit::X86JitSpan::compile(graph, outputs) {
+    match crate::compiler::attempts::v14::x86_jit::X86JitSpan::compile(graph, outputs, placement) {
         Ok(s) => {
             x86_jit_stats::record_accept();
             Ok(Box::new(s) as Box<dyn CompiledSpanFn>)
@@ -672,14 +675,25 @@ pub(crate) fn prepare_compiled_inputs<'a, 'p, P: Pool + 'p>(
     Ok(initial_inputs)
 }
 
-/// Extract output tensors from the PhaseStore after execution.
-pub(crate) fn extract_outputs<'a, 'p, P: Pool + 'p>(
+/// Re-assemble the executor's flat output Vec into per-GlobalId tensors.
+///
+/// The executor returns `Vec<NumericTensor>` in the same order as the
+/// flat `all_output_atom_ranges` list handed to `compile_nano_graph`
+/// (one entry per `AtomRange`). A single GlobalId may correspond to
+/// multiple atom ranges (Pad-style lowering splits an output into
+/// `zeros | data | zeros`); we concatenate those into one tensor with
+/// the declared shape.
+///
+/// The single-range fast path re-wraps the executor's allocation
+/// with the target layout directly — no copy.
+pub(crate) fn extract_outputs<'p, P: Pool + 'p>(
     output_ranges: &[(GlobalId, Vec<AtomRange>)],
     output_shapes: &[(GlobalId, Vec<u64>)],
-    store: &PhaseStore<'a, 'p, P>,
+    executor_outputs: Vec<NumericTensor<'p, DynRank, P>>,
     pool: &'p P,
 ) -> Result<HashMap<GlobalId, NumericTensor<'p, DynRank, P>>, String> {
     let mut results: HashMap<GlobalId, NumericTensor<'p, DynRank, P>> = HashMap::new();
+    let mut iter = executor_outputs.into_iter();
 
     for ((ext_id, ranges), (_, shape)) in output_ranges.iter().zip(output_shapes.iter()) {
         let dtype = ranges
@@ -688,10 +702,34 @@ pub(crate) fn extract_outputs<'a, 'p, P: Pool + 'p>(
             .unwrap_or(crate::numeric_dtype::NumericDType::F32);
         let elem_bytes = dtype.bytes_per_element();
 
-        // Allocate output tensor with the proper shape.
-        // Use byte-aligned strides (matching JIT output layout) for sub-byte
-        // dtypes like BOOL, then reshape to the correct dimensions.
-        let bpe_bits = dtype.bytes_per_element() as u64 * 8;
+        // Single-range fast path: take the executor's tensor and
+        // reshape in place (no copy).
+        if ranges.len() == 1 {
+            let flat = iter.next().ok_or_else(|| {
+                format!("extract_outputs: executor ran out of tensors for {ext_id:?}")
+            })?;
+            let bpe_bits = elem_bytes as u64 * 8;
+            let dims = shape.as_slice();
+            let mut strides = vec![0u64; dims.len()];
+            if !dims.is_empty() {
+                strides[dims.len() - 1] = bpe_bits;
+                for i in (0..dims.len() - 1).rev() {
+                    strides[i] = strides[i + 1] * dims[i + 1];
+                }
+            }
+            let layout = TensorLayout::<DynRank>::ElementStrided {
+                shape: shape.clone(),
+                dtype,
+                strides,
+                offset_bits: 0,
+            };
+            results.insert(*ext_id, flat.into_layout(layout));
+            continue;
+        }
+
+        // Multi-range: concatenate in declaration order into a fresh
+        // allocation.
+        let bpe_bits = elem_bytes as u64 * 8;
         let dims = shape.as_slice();
         let mut strides = vec![0u64; dims.len()];
         if !dims.is_empty() {
@@ -711,19 +749,23 @@ pub(crate) fn extract_outputs<'a, 'p, P: Pool + 'p>(
             .map_err(|e| format!("output alloc failed: {e}"))?;
         let mut tensor = NumericTensor::from_parts(buf, layout);
 
-        // Gather data from the store for each atom range.
         let mut write_offset = 0usize;
         for range in ranges {
-            let slices = store.gather(range.base, range.count);
-            for slice in &slices {
-                let copy_bytes = slice.count as usize * elem_bytes;
-                let dst = tensor.buffer_mut();
-                if write_offset + copy_bytes <= dst.len() && copy_bytes <= slice.data.len() {
-                    dst[write_offset..write_offset + copy_bytes]
-                        .copy_from_slice(&slice.data[..copy_bytes]);
-                }
-                write_offset += copy_bytes;
+            let src = iter.next().ok_or_else(|| {
+                format!(
+                    "extract_outputs: executor ran out of tensors for {ext_id:?} \
+                     range base={}",
+                    range.base.0
+                )
+            })?;
+            let src_bytes = src.buffer();
+            let copy_bytes = (range.count as usize) * elem_bytes;
+            let dst = tensor.buffer_mut();
+            if write_offset + copy_bytes <= dst.len() && copy_bytes <= src_bytes.len() {
+                dst[write_offset..write_offset + copy_bytes]
+                    .copy_from_slice(&src_bytes[..copy_bytes]);
             }
+            write_offset += copy_bytes;
         }
 
         results.insert(*ext_id, tensor);
@@ -848,9 +890,36 @@ pub fn execute_compiled<'p, P: Pool + 'p>(
     .map_err(|e| super::SuperGraphError::InvalidGraph(format!("compiled_eval: {e}")))?;
     obs.on_milestone("compiled.exec.input_prep", None, t_prep, Instant::now());
 
+    // --- Build input_ptrs array ---
+    //
+    // The executor addresses inputs through `buffer_ptrs[buffer_id]`.
+    // For each (AtomId, NumericTensorCOW) initial input, look up the
+    // placer's buffer_id and drop the tensor's byte pointer into that
+    // slot. The Cow lives in `initial_inputs` across the execute call
+    // so the pointers stay valid.
+    //
+    // Some lowering paths turn concrete input tensors into literal
+    // groups rather than input tensors; the placer has no entry for
+    // them (their data is in the literal buffer, not an input slot),
+    // so we just skip them here.
+    let placement = compiled.executable_plan.placement();
+    let ptr_array_len = (placement.scratch_buffer_id as usize) + 1;
+    let mut input_ptrs: Vec<*mut u8> = vec![std::ptr::null_mut(); ptr_array_len];
+    for (atom_id, cow) in &initial_inputs {
+        if let Some((buf_id, _)) = placement.byte_offset_of(*atom_id) {
+            let ptr = cow.buffer().as_ptr() as *mut u8;
+            if (buf_id.0 as usize) < input_ptrs.len() {
+                input_ptrs[buf_id.0 as usize] = ptr;
+            }
+        }
+    }
+
     // --- JIT execute ---
     let t_jit = Instant::now();
-    let store = compiled.executable_plan.execute_timed(initial_inputs, pool);
+    let executor_outputs = compiled.executable_plan.execute_timed(&input_ptrs, pool);
+    // Keep initial_inputs alive until after execute returns so the
+    // input byte pointers remain valid. Explicit drop for clarity.
+    drop(initial_inputs);
     obs.on_milestone("compiled.exec.jit", None, t_jit, Instant::now());
 
     // --- Extract outputs ---
@@ -858,7 +927,7 @@ pub fn execute_compiled<'p, P: Pool + 'p>(
     let result = extract_outputs(
         &compiled.output_ranges,
         &compiled.output_shapes,
-        &store,
+        executor_outputs,
         pool,
     )
     .map_err(|e| super::SuperGraphError::InvalidGraph(format!("compiled_eval: {e}")));

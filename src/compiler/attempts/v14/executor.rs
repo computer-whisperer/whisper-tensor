@@ -1,158 +1,170 @@
 #![allow(clippy::all, dead_code, unreachable_patterns, unused)]
-//! Backend-agnostic parallel executor for execution plans.
+//! Executable plan runner.
 //!
-//! Drives phases with barriers, runs spans in parallel across lanes,
-//! and manages the inter-phase value store with liveness-based eviction.
+//! `ExecutablePlan` is a frozen compilation artifact: compiled spans
+//! grouped by phase/lane, the global `AtomPlacementMap`, a fixed-worker
+//! rayon thread pool for lane dispatch, and a plan-wide literal buffer.
+//! Every field is immutable.
 //!
-//! The executor is agnostic to how spans compute — JIT, interpreter, and
-//! GPU backends all implement the `CompiledSpanFn` trait.
+//! `execute(&self, input_ptrs, pool)` is the one entry point. On each
+//! call it allocates the intermediate buffer, per-lane scratch arenas,
+//! and output tensors from the pool; builds the stack `buffer_ptrs`
+//! array; dispatches phases over the lane workers; and returns the
+//! output `NumericTensor`s directly, in `pinned_output_ranges` order.
+//! The plan mutates nothing and `execute` is safely callable from
+//! concurrent threads (subject to the pool's own rules).
 
-use std::collections::HashMap;
 use std::env;
 use std::time::Instant;
 
-use rayon::{ThreadPool, ThreadPoolBuilder, prelude::*};
+use rayon::{ThreadPool, ThreadPoolBuilder};
 
 use crate::nano_graph::{AtomId, AtomRange};
 use crate::numeric_dtype::NumericDType;
-use crate::numeric_tensor::{NumericTensor, NumericTensorCOW, TensorLayout};
+use crate::numeric_tensor::{NumericTensor, TensorLayout};
 use crate::pool::Pool;
 use crate::tensor_rank::DynRank;
 
-// ─── Inter-phase data types ─────────────────────────────────────────────────
-
-/// A zero-copy view into a store entry's data.
-///
-/// Spans receive these for their declared input ranges. The data pointer
-/// is valid for the duration of the phase (store is immutably borrowed).
-///
-/// # Bit-aware source addressing
-///
-/// `data` may be bit-strided (sub-byte dtypes, non-byte-aligned offsets,
-/// arbitrary `TensorLayout::ElementStrided` strides). `src_bit_offset` is
-/// the bit position within `data` of element 0 (the atom at `base`), and
-/// `src_bit_stride` is the bit distance between consecutive elements.
-///
-/// For the conventional contiguous byte-aligned case, `src_bit_offset` is
-/// `0` (because `gather()` pre-slices `data` to start at element 0's byte)
-/// and `src_bit_stride` is `dtype.bytes_per_element() * 8` (one byte per
-/// Bool, four bytes per F32, etc). The marshalling functions detect that
-/// case and use a fast `memcpy` path.
-///
-/// For bit-strided sources (sub-byte dtype like Bool packed at 1 bit per
-/// element, or `offset_bits != 0`), `data` is the **full source buffer**
-/// (no pre-slicing), `src_bit_offset` includes the source-tensor offset
-/// plus any per-skip contribution, and `src_bit_stride` is the source's
-/// per-element bit stride. Marshalling reads each element via
-/// `NumericScalarView::to_owned_scalar`.
-pub struct StoreSlice<'a> {
-    pub base: AtomId,
-    pub data: &'a [u8],
-    pub dtype: NumericDType,
-    pub count: u64,
-    /// Bit position of element 0 within `data`.
-    pub src_bit_offset: u64,
-    /// Bits between consecutive elements within `data`.
-    pub src_bit_stride: u64,
-}
-
-impl<'a> StoreSlice<'a> {
-    /// Whether this slice's source is byte-natural — `src_bit_offset` is a
-    /// multiple of 8 and `src_bit_stride` matches the dtype's
-    /// `bytes_per_element() * 8`. The marshalling fast path uses byte
-    /// arithmetic when this is true.
-    #[inline]
-    pub fn is_byte_natural(&self) -> bool {
-        self.src_bit_offset.is_multiple_of(8)
-            && self.src_bit_stride == (self.dtype.bytes_per_element() as u64) * 8
-    }
-
-    /// Byte offset of element 0 within `data`. Only valid when
-    /// `src_bit_offset` is a multiple of 8.
-    #[inline]
-    pub fn src_byte_offset(&self) -> usize {
-        debug_assert!(self.src_bit_offset.is_multiple_of(8));
-        (self.src_bit_offset / 8) as usize
-    }
-}
-
-/// A pre-allocated output buffer that a compiled span writes into.
-///
-/// Borrows the backing `NumericTensor`'s byte buffer. The span fills
-/// this with computed values; the executor owns the actual tensors.
-pub struct SpanOutput<'a> {
-    pub data: &'a mut [u8],
-    pub dtype: NumericDType,
-    pub count: u64,
-}
+use super::placer::{AtomPlacementMap, BufferInfo, BufferKind};
 
 // ─── Compiled span trait ────────────────────────────────────────────────────
 
-/// A prepared span that can execute given input data.
+/// A prepared span that can execute given a `buffer_ptrs` array.
 ///
-/// Backend-agnostic: JIT, interpreter, and GPU all implement this.
-/// The executor calls this once per span per phase, passing zero-copy
-/// slices from the store and pre-allocated output buffers.
+/// Backend-agnostic: x86_jit and pool_eval fallback both implement
+/// this. Under the memory-placement design every span addresses its
+/// atoms via `buffer_ptrs[buffer_id]`, so the entire I/O surface is
+/// the array the executor hands in on every dispatch.
 ///
-/// Pool-agnostic: the trait operates on raw byte buffers. The executor
-/// handles pool-aware allocation and wraps tensors as `SpanOutput`
-/// before calling this.
+/// # buffer_ptrs contract
+///
+/// - `buffer_ptrs[buffer_id]` is the base of the buffer with that id.
+/// - The intermediate, literal, input, and output slots are filled in
+///   by the executor before every phase.
+/// - The scratch slot (`placement.scratch_buffer_id`) is patched
+///   per-lane inside the dispatch closure, so each worker sees its
+///   own lane's scratch arena.
+/// - Every pointer is valid for the duration of the `execute` call.
+///   The span may read/write within each buffer's declared size and
+///   must not stray outside.
 pub trait CompiledSpanFn: Send + Sync {
-    /// Execute the span.
-    ///
-    /// `inputs` contains store slices covering all atoms this span reads
-    /// from prior phases (weights, user inputs, prior-phase outputs).
-    /// The slices may not exactly match the span's declared input ranges —
-    /// they're the overlapping store entries found by the executor.
-    ///
-    /// `outputs` contains pre-allocated byte buffers, one per declared
-    /// output range (same order as the span's output declarations).
-    /// The implementation fills these with computed values.
-    fn execute(&self, inputs: &[StoreSlice<'_>], outputs: &mut [SpanOutput<'_>]);
+    /// Bytes of lane-private scratch this span needs. The executor
+    /// allocates a scratch arena on each lane sized to the max over
+    /// all spans running on that lane.
+    fn scratch_bytes(&self) -> usize;
+
+    /// Execute the span. See the buffer_ptrs contract above.
+    fn execute(&self, buffer_ptrs: &[*mut u8]);
 }
 
 // ─── Pool-eval fallback span ────────────────────────────────────────────────
 
-/// A span that evaluates its NanoGraph via pool_eval instead of JIT.
+/// Pre-resolved byte-range metadata for a span input or output.
 ///
-/// Used for spans containing opaque ops (or any ops the JIT can't compile).
-/// The NanoGraph fragment and its declared I/O ranges are carried verbatim
-/// from the partitioner.
+/// PoolEvalSpan resolves each declared `AtomRange` to its placer-
+/// assigned `(buffer_id, byte_offset)` at construction time; at
+/// execute time it walks this list to gather from / scatter to
+/// `buffer_ptrs` without touching the placement map.
+#[derive(Debug, Clone)]
+struct PoolEvalRange {
+    range: AtomRange,
+    buffer_id: u8,
+    byte_offset: u64,
+}
+
+/// A span that evaluates its NanoGraph via `pool_eval` instead of JIT.
+///
+/// Used for opaque ops and for anything the JIT can't compile. Pool
+/// eval needs owned tensors, so this boundary performs a memcpy at
+/// entry (buffer_ptrs → flat tensors) and exit (results → buffer_ptrs).
+/// Opaque ops are a tiny fraction of execute time so the cost is
+/// acceptable.
 pub struct PoolEvalSpan {
     graph: crate::nano_graph::pattern::NanoGraph<'static, crate::pool::SystemPool>,
-    inputs: Vec<crate::nano_graph::AtomRange>,
-    outputs: Vec<crate::nano_graph::AtomRange>,
+    inputs: Vec<PoolEvalRange>,
+    outputs: Vec<PoolEvalRange>,
 }
 
 impl PoolEvalSpan {
     pub fn new(
         graph: crate::nano_graph::pattern::NanoGraph<'static, crate::pool::SystemPool>,
-        inputs: Vec<crate::nano_graph::AtomRange>,
-        outputs: Vec<crate::nano_graph::AtomRange>,
+        inputs: Vec<AtomRange>,
+        outputs: Vec<AtomRange>,
+        placement: &AtomPlacementMap,
     ) -> Self {
+        let resolve = |range: AtomRange| -> PoolEvalRange {
+            let (buf, off) = placement.byte_offset_of(range.base).unwrap_or_else(|| {
+                panic!(
+                    "PoolEvalSpan: atom range base={} not in placement map",
+                    range.base.0
+                )
+            });
+            PoolEvalRange {
+                range,
+                buffer_id: buf.0,
+                byte_offset: off,
+            }
+        };
         Self {
             graph,
-            inputs,
-            outputs,
+            inputs: inputs.into_iter().map(resolve).collect(),
+            outputs: outputs.into_iter().map(resolve).collect(),
         }
     }
 }
 
 impl CompiledSpanFn for PoolEvalSpan {
-    fn execute(&self, inputs: &[StoreSlice<'_>], outputs: &mut [SpanOutput<'_>]) {
+    fn scratch_bytes(&self) -> usize {
+        // pool_eval manages its own tensor allocations internally;
+        // the executor-provided scratch slot is unused.
+        0
+    }
+
+    fn execute(&self, buffer_ptrs: &[*mut u8]) {
         use crate::nano_graph::lower::TensorAtomMapInfo;
         use crate::nano_graph::pool_eval;
-        use crate::numeric_tensor::{NumericTensor, NumericTensorView, TensorLayout};
+        use crate::numeric_tensor::{NumericTensor, NumericTensorView};
         use crate::pool::SystemPool;
 
         static SYS: SystemPool = SystemPool;
 
-        // Build input TAMIs and views from the StoreSlices.
-        // Each declared input range becomes a flat 1D TAMI.
+        // Gather inputs: copy each range's bytes out of its assigned
+        // buffer into a pool-allocated flat tensor. pool_eval expects
+        // owned tensors, not raw pointers — this boundary copy is
+        // unavoidable.
         let mut input_tamis: Vec<TensorAtomMapInfo> = Vec::new();
         let mut input_tensors: Vec<NumericTensor<'_, DynRank, SystemPool>> = Vec::new();
 
-        for range in &self.inputs {
+        for pr in &self.inputs {
+            let range = &pr.range;
+            let bpe = range.dtype.bytes_per_element();
+            let needed_bytes = range.count as usize * bpe;
+            let layout = jit_flat_layout(range.count, range.dtype);
+            let mut buf = SYS
+                .allocate(layout.buffer_size_bytes().max(needed_bytes))
+                .expect("pool_eval span: alloc failed");
+
+            // Input buffers that the lowering left declared-but-unused
+            // (e.g. Resize's ROI/scales scalars when sizes is provided)
+            // come in as null pointers — the executor skips providing
+            // a pointer for them. Pool_eval still asks for them
+            // mechanically, so we hand it a zeroed tensor. Matches the
+            // old PhaseStore behavior where missing atoms silently
+            // read as zero.
+            let base_ptr = buffer_ptrs[pr.buffer_id as usize];
+            if base_ptr.is_null() {
+                // `buf` is already zero-initialized by the pool.
+            } else {
+                // SAFETY: the executor guarantees each non-null
+                // buffer_ptrs slot is valid for the declared buffer
+                // size and the placer's byte range sits inside it.
+                let src_ptr = unsafe { base_ptr.add(pr.byte_offset as usize) as *const u8 };
+                let copy_bytes = needed_bytes.min(buf.len());
+                unsafe {
+                    std::ptr::copy_nonoverlapping(src_ptr, buf.as_mut_ptr(), copy_bytes);
+                }
+            }
+
             let tami = TensorAtomMapInfo {
                 base_id: range.base,
                 count: range.count,
@@ -162,379 +174,46 @@ impl CompiledSpanFn for PoolEvalSpan {
                 known_dims: vec![range.count],
                 segments: vec![],
             };
-
-            // Find the matching StoreSlice(s) for this range.
-            let bpe = range.dtype.bytes_per_element();
-            let needed_bytes = range.count as usize * bpe;
-            let layout = jit_flat_layout(range.count, range.dtype);
-            let mut buf = SYS
-                .allocate(layout.buffer_size_bytes().max(needed_bytes))
-                .expect("pool_eval span: alloc failed");
-
-            // Gather data from input slices that overlap this range.
-            let range_lo = range.base.0;
-            let range_hi = range_lo + range.count;
-            for slice in inputs {
-                let s_lo = slice.base.0;
-                let s_hi = s_lo + slice.count;
-                // Compute overlap.
-                let overlap_lo = range_lo.max(s_lo);
-                let overlap_hi = range_hi.min(s_hi);
-                if overlap_lo >= overlap_hi {
-                    continue;
-                }
-                let dst_off = (overlap_lo - range_lo) as usize * bpe;
-                let src_off = (overlap_lo - s_lo) as usize * bpe;
-                let copy_bytes = (overlap_hi - overlap_lo) as usize * bpe;
-                if src_off + copy_bytes <= slice.data.len() && dst_off + copy_bytes <= buf.len() {
-                    buf[dst_off..dst_off + copy_bytes]
-                        .copy_from_slice(&slice.data[src_off..src_off + copy_bytes]);
-                }
-            }
-
-            let tensor = NumericTensor::from_parts(buf, layout);
             input_tamis.push(tami);
-            input_tensors.push(tensor);
+            input_tensors.push(NumericTensor::from_parts(buf, layout));
         }
 
-        // Build (TAMI, view) pairs for pool_eval.
         let input_views: Vec<NumericTensorView<'_, DynRank>> =
             input_tensors.iter().map(|t| t.view()).collect();
         let eval_inputs: Vec<(&TensorAtomMapInfo, &NumericTensorView<'_, DynRank>)> =
             input_tamis.iter().zip(input_views.iter()).collect();
 
-        // Build output TAMIs.
         let output_tamis: Vec<TensorAtomMapInfo> = self
             .outputs
             .iter()
-            .map(|r| TensorAtomMapInfo {
-                base_id: r.base,
-                count: r.count,
-                dtype: r.dtype,
+            .map(|pr| TensorAtomMapInfo {
+                base_id: pr.range.base,
+                count: pr.range.count,
+                dtype: pr.range.dtype,
                 sym_dims: vec![],
                 known_strides: vec![1],
-                known_dims: vec![r.count],
+                known_dims: vec![pr.range.count],
                 segments: vec![],
             })
             .collect();
         let output_tami_refs: Vec<&TensorAtomMapInfo> = output_tamis.iter().collect();
 
-        // Run pool_eval.
         let results = pool_eval::pool_eval(&self.graph, &eval_inputs, &output_tami_refs, &SYS)
             .expect("pool_eval span: eval failed");
 
-        // Copy results into the pre-allocated output buffers.
-        for (out_buf, result_tensor) in outputs.iter_mut().zip(results.iter()) {
+        // Scatter results back into buffer_ptrs.
+        for (pr, result_tensor) in self.outputs.iter().zip(results.iter()) {
             let src = result_tensor.buffer();
-            let copy = src.len().min(out_buf.data.len());
-            out_buf.data[..copy].copy_from_slice(&src[..copy]);
-        }
-    }
-}
-
-// ─── Phase store ────────────────────────────────────────────────────────────
-
-/// Inter-phase value store with liveness-based eviction.
-///
-/// Entries are sorted by base AtomId for O(log N) range-overlap lookup.
-/// The executor builds this once with initial inputs (weights + user data),
-/// then incrementally inserts span outputs after each phase and evicts
-/// entries that no future phase will read.
-///
-/// Entries hold `NumericTensorCOW` rather than owned tensors so that initial
-/// inputs (weights, user data) can flow through as zero-copy borrows from
-/// caller-owned source tensors. Span outputs are always wrapped as
-/// `Cow::Owned`. The `'a` lifetime parameter is the borrow lifetime for any
-/// `Cow::Borrowed` entries; the `'p, P` parameters are the pool lifetime
-/// and pool type for `Cow::Owned` entries.
-pub struct PhaseStore<'a, 'p, P: Pool + 'p> {
-    entries: Vec<StoreEntry<'a, 'p, P>>,
-}
-
-struct StoreEntry<'a, 'p, P: Pool + 'p> {
-    base: u64, // AtomId.0
-    tensor: NumericTensorCOW<'a, 'p, DynRank, P>,
-}
-
-impl<'a, 'p, P: Pool + 'p> PhaseStore<'a, 'p, P> {
-    /// Create a store from initial inputs.
-    pub fn new(inputs: Vec<(AtomId, NumericTensorCOW<'a, 'p, DynRank, P>)>) -> Self {
-        let mut entries: Vec<StoreEntry<'a, 'p, P>> = inputs
-            .into_iter()
-            .map(|(base, tensor)| StoreEntry {
-                base: base.0,
-                tensor,
-            })
-            .collect();
-        entries.sort_unstable_by_key(|e| e.base);
-        PhaseStore { entries }
-    }
-
-    /// Number of entries in the store.
-    pub fn len(&self) -> usize {
-        self.entries.len()
-    }
-
-    /// Insert an output tensor. Maintains sorted order.
-    ///
-    /// O(N) per call due to `Vec::insert` shifting. Prefer `insert_batch`
-    /// when adding many entries at once (e.g. all outputs of a phase).
-    pub fn insert(&mut self, base: AtomId, tensor: NumericTensorCOW<'a, 'p, DynRank, P>) {
-        let pos = self.entries.partition_point(|e| e.base < base.0);
-        // If an entry at this exact base exists, replace it.
-        if pos < self.entries.len() && self.entries[pos].base == base.0 {
-            self.entries[pos].tensor = tensor;
-        } else {
-            self.entries.insert(
-                pos,
-                StoreEntry {
-                    base: base.0,
-                    tensor,
-                },
-            );
-        }
-    }
-
-    /// Insert many output tensors at once.
-    ///
-    /// Sorts the new entries by base, then performs a single linear merge
-    /// against the existing sorted store. O(N + M log M) instead of the
-    /// O(N*M) cost of M repeated `insert` calls (each shifting up to N
-    /// `StoreEntry`s of ~96 bytes apiece).
-    ///
-    /// If multiple new entries share the same base, the **last** one wins,
-    /// matching the per-element `insert` semantics. If a new entry's base
-    /// matches an existing entry, the new entry replaces it.
-    pub fn insert_batch(
-        &mut self,
-        new_entries: Vec<(AtomId, NumericTensorCOW<'a, 'p, DynRank, P>)>,
-    ) {
-        if new_entries.is_empty() {
-            return;
-        }
-
-        // Stable sort so that, when two new entries share a base, the one
-        // produced later in the input order ends up later in the sorted run
-        // — the dedup pass below then keeps it.
-        let mut sorted: Vec<StoreEntry<'a, 'p, P>> = new_entries
-            .into_iter()
-            .map(|(base, tensor)| StoreEntry {
-                base: base.0,
-                tensor,
-            })
-            .collect();
-        sorted.sort_by_key(|e| e.base);
-
-        // Collapse adjacent duplicates, keeping the last (latest insert wins).
-        let mut deduped: Vec<StoreEntry<'a, 'p, P>> = Vec::with_capacity(sorted.len());
-        for entry in sorted {
-            if let Some(last) = deduped.last_mut() {
-                if last.base == entry.base {
-                    *last = entry;
-                    continue;
-                }
-            }
-            deduped.push(entry);
-        }
-        let sorted = deduped;
-
-        // Linear merge of two sorted runs: existing self.entries and `sorted`.
-        let existing = std::mem::take(&mut self.entries);
-        let mut merged: Vec<StoreEntry<'a, 'p, P>> =
-            Vec::with_capacity(existing.len() + sorted.len());
-        let mut e_iter = existing.into_iter();
-        let mut s_iter = sorted.into_iter();
-        let mut e_cur = e_iter.next();
-        let mut s_cur = s_iter.next();
-
-        loop {
-            match (e_cur.as_ref(), s_cur.as_ref()) {
-                (Some(e), Some(s)) => match e.base.cmp(&s.base) {
-                    std::cmp::Ordering::Less => {
-                        merged.push(e_cur.take().unwrap());
-                        e_cur = e_iter.next();
-                    }
-                    std::cmp::Ordering::Greater => {
-                        merged.push(s_cur.take().unwrap());
-                        s_cur = s_iter.next();
-                    }
-                    std::cmp::Ordering::Equal => {
-                        // New replaces old.
-                        let _ = e_cur.take();
-                        merged.push(s_cur.take().unwrap());
-                        e_cur = e_iter.next();
-                        s_cur = s_iter.next();
-                    }
-                },
-                (Some(_), None) => {
-                    merged.push(e_cur.take().unwrap());
-                    merged.extend(e_iter);
-                    break;
-                }
-                (None, Some(_)) => {
-                    merged.push(s_cur.take().unwrap());
-                    merged.extend(s_iter);
-                    break;
-                }
-                (None, None) => break,
-            }
-        }
-
-        self.entries = merged;
-    }
-
-    /// Find all store entries overlapping [base, base+count).
-    /// Returns zero-copy slices into the store's buffers.
-    ///
-    /// For byte-natural sources (the conventional case: contiguous
-    /// `TensorLayout::ElementStrided` with `offset_bits == 0` and a dtype
-    /// whose elements live on byte boundaries), the returned slice's
-    /// `data` is **pre-sliced** to start at element 0's byte, and
-    /// `src_bit_offset` is `0`. This preserves the cheap memcpy path.
-    ///
-    /// For bit-strided sources (sub-byte dtype, `offset_bits != 0`, or
-    /// any `TensorLayout` whose per-element stride isn't byte-natural),
-    /// `data` is the **full source buffer** and `src_bit_offset` is
-    /// the absolute bit position of element 0. The marshalling code uses
-    /// `NumericScalarView` for per-element bit-aware reads.
-    pub fn gather(&self, base: AtomId, count: u64) -> Vec<StoreSlice<'_>> {
-        use crate::numeric_tensor::TensorLayout;
-
-        let range_lo = base.0;
-        let range_hi = range_lo + count;
-
-        // Binary search: find first entry that could overlap.
-        // An entry at position `start-1` with base < range_lo could extend
-        // past range_lo if it has enough elements.
-        let search_start = self.entries.partition_point(|e| e.base < range_lo);
-        let start = if search_start > 0 {
-            search_start - 1
-        } else {
-            0
-        };
-
-        let mut slices = Vec::new();
-        for entry in &self.entries[start..] {
-            if entry.base >= range_hi {
-                break;
-            }
-            let entry_count = entry.tensor.numel() as u64;
-            let entry_hi = entry.base + entry_count;
-            if entry_hi <= range_lo {
-                continue;
-            }
-
-            // Compute overlap.
-            let overlap_lo = entry.base.max(range_lo);
-            let overlap_hi = entry_hi.min(range_hi);
-            let skip = (overlap_lo - entry.base) as u64;
-            let overlap_count = (overlap_hi - overlap_lo) as u64;
-            let dtype = entry.tensor.dtype();
-            let elem_bits = dtype.total_bits() as u64;
-            let elem_bytes = dtype.bytes_per_element();
-            let buf = entry.tensor.buffer();
-
-            // Detect the byte-natural fast path: contiguous ElementStrided
-            // with `offset_bits == 0`. Sub-byte dtypes (Bool, I4, ...) are
-            // byte-padded in this case (one element per byte), matching the
-            // pre-bit-rewrite memory layout.
-            let is_byte_natural = match entry.tensor.layout() {
-                TensorLayout::ElementStrided { offset_bits, .. } => {
-                    *offset_bits == 0 && entry.tensor.layout().is_contiguous()
-                }
-                _ => true, // quantized formats are byte-aligned by construction
+            let bpe = pr.range.dtype.bytes_per_element();
+            let needed = pr.range.count as usize * bpe;
+            let copy = src.len().min(needed);
+            let dst_ptr = unsafe {
+                buffer_ptrs[pr.buffer_id as usize].add(pr.byte_offset as usize)
             };
-
-            if is_byte_natural {
-                // Pre-slice the buffer to element 0's byte; the marshalling
-                // fast path then memcpy's directly.
-                let byte_start = (skip as usize) * elem_bytes;
-                let byte_end = byte_start + (overlap_count as usize) * elem_bytes;
-                if byte_end <= buf.len() {
-                    slices.push(StoreSlice {
-                        base: AtomId(overlap_lo),
-                        data: &buf[byte_start..byte_end],
-                        dtype,
-                        count: overlap_count,
-                        src_bit_offset: 0,
-                        src_bit_stride: (elem_bytes as u64) * 8,
-                    });
-                }
-            } else {
-                // Bit-strided source: pass the full buffer, use bit math.
-                // We assume the source's per-flat-element stride is `elem_bits`
-                // (true for any 1D-equivalent ElementStrided layout). Multi-dim
-                // non-contiguous layouts would need a richer representation;
-                // they're not exercised today.
-                let layout_offset_bits = match entry.tensor.layout() {
-                    TensorLayout::ElementStrided { offset_bits, .. } => *offset_bits,
-                    _ => 0,
-                };
-                slices.push(StoreSlice {
-                    base: AtomId(overlap_lo),
-                    data: buf,
-                    dtype,
-                    count: overlap_count,
-                    src_bit_offset: layout_offset_bits + skip * elem_bits,
-                    src_bit_stride: elem_bits,
-                });
+            unsafe {
+                std::ptr::copy_nonoverlapping(src.as_ptr(), dst_ptr, copy);
             }
         }
-        slices
-    }
-
-    /// Evict store entries that are no longer needed.
-    ///
-    /// `liveness` maps entry base AtomId to the last phase that reads it.
-    /// Entries whose last-consumed phase is before `current_phase` are dropped.
-    /// Entries overlapping any `pinned` range are never evicted.
-    pub fn evict(
-        &mut self,
-        current_phase: usize,
-        liveness: &HashMap<u64, usize>,
-        pinned: &[(u64, u64)],
-    ) {
-        self.entries.retain(|entry| {
-            // Check if this entry overlaps any pinned range.
-            if !pinned.is_empty() {
-                let entry_end = entry.base + entry.tensor.numel() as u64;
-                let start = pinned.partition_point(|&(_, hi)| hi <= entry.base);
-                for &(pin_lo, pin_hi) in &pinned[start..] {
-                    if pin_lo >= entry_end {
-                        break;
-                    }
-                    // Overlap found — keep.
-                    return true;
-                }
-            }
-
-            match liveness.get(&entry.base) {
-                Some(&last_phase) => last_phase >= current_phase,
-                // No liveness info → keep (e.g. initial inputs
-                // that might be read in any phase).
-                None => true,
-            }
-        });
-    }
-
-    /// Extract a tensor from the store by base AtomId.
-    pub fn get(&self, base: AtomId) -> Option<&NumericTensorCOW<'a, 'p, DynRank, P>> {
-        let pos = self.entries.partition_point(|e| e.base < base.0);
-        if pos < self.entries.len() && self.entries[pos].base == base.0 {
-            Some(&self.entries[pos].tensor)
-        } else {
-            None
-        }
-    }
-
-    /// Iterate all entries (for output extraction).
-    pub fn iter(&self) -> impl Iterator<Item = (AtomId, &NumericTensorCOW<'a, 'p, DynRank, P>)> {
-        self.entries.iter().map(|e| (AtomId(e.base), &e.tensor))
-    }
-
-    /// Total bytes of data in all store entries.
-    pub fn data_bytes(&self) -> usize {
-        self.entries.iter().map(|e| e.tensor.buffer().len()).sum()
     }
 }
 
@@ -542,19 +221,39 @@ impl<'a, 'p, P: Pool + 'p> PhaseStore<'a, 'p, P> {
 
 /// A fully compiled execution plan, ready to run.
 ///
-/// Backend-agnostic — the executor doesn't know what produced the spans.
-/// Owns the compiled span functions and drives the phase/barrier loop.
+/// Fully immutable — all working buffers are allocated per execute
+/// call from the pool. The plan owns:
+///
+/// - The compiled spans, grouped by phase and lane.
+/// - The placement map (with all buffer sizes and ids).
+/// - A fixed-worker rayon thread pool for lane dispatch.
+/// - A `Box<[u8]>` for the plan-wide literal buffer, populated once
+///   from the main graph at build time and never mutated again.
+/// - Per-lane scratch sizes computed at build time.
+/// - The `pinned_output_ranges` list the executor returns in order.
 pub struct ExecutablePlan {
     phases: Vec<ExecutablePhase>,
-    /// Dedicated worker pool sized to max lane count. With `broadcast`,
-    /// lane index `i` executes on worker `i` every phase.
+    /// Fixed-worker lane pool. With `broadcast`, lane index `i`
+    /// executes on worker `i` every phase.
     lane_pool: Option<ThreadPool>,
-    /// Liveness: maps output entry base → last phase that reads it.
-    /// Used for store eviction after each phase.
-    output_liveness: HashMap<u64, usize>,
-    /// Atom ranges for model outputs that must never be evicted.
-    /// Sorted by (lo, hi) for binary search.
-    pinned_output_atoms: Vec<(u64, u64)>,
+    /// Placer output. Holds every atom's `(buffer_id, byte_offset)`
+    /// plus the per-buffer size metadata the executor needs at
+    /// allocation time.
+    placement: AtomPlacementMap,
+    /// Plan-wide literal buffer. Sized to `placement.literal_buffer_size`
+    /// and populated once at plan-build — every `Literal`/`LiteralSpan`
+    /// group's source bytes live here (even groups whose atoms overlap
+    /// a model output range; the JIT reads from here and emits an
+    /// ordinary copy to the output buffer in that case). Never mutated
+    /// after plan-build; linked in as a read-only source on every
+    /// `execute` call.
+    literal_buffer: Box<[u8]>,
+    /// Per-lane scratch high-water marks. `scratch_sizes[i]` is the
+    /// max `scratch_bytes()` of any span that runs on lane `i`.
+    scratch_sizes: Vec<usize>,
+    /// Model output atom ranges in declaration order. Each entry
+    /// corresponds to one output buffer_id in the placement map.
+    output_ranges: Vec<AtomRange>,
 }
 
 struct ExecutablePhase {
@@ -563,18 +262,15 @@ struct ExecutablePhase {
 
 struct ExecutableLane {
     span: Box<dyn CompiledSpanFn>,
+    #[allow(dead_code)]
     inputs: Vec<AtomRange>,
+    #[allow(dead_code)]
     outputs: Vec<AtomRange>,
 }
 
 /// Builder for constructing an ExecutablePlan from compiled spans.
 pub struct ExecutablePlanBuilder {
     phases: Vec<ExecutablePhase>,
-    /// All input ranges declared across all phases (for liveness computation).
-    all_input_ranges: Vec<(usize, Vec<AtomRange>)>, // (phase_idx, ranges)
-    /// Model-output atom ranges that must survive until after the last phase.
-    /// These are pinned to the last phase during liveness computation so they
-    /// aren't evicted prematurely.
     pinned_output_ranges: Vec<AtomRange>,
 }
 
@@ -582,12 +278,12 @@ impl ExecutablePlanBuilder {
     pub fn new() -> Self {
         ExecutablePlanBuilder {
             phases: Vec::new(),
-            all_input_ranges: Vec::new(),
             pinned_output_ranges: Vec::new(),
         }
     }
 
-    /// Register model-output atom ranges that must survive until extraction.
+    /// Register model-output atom ranges. Stored verbatim; the order
+    /// matches the output buffer_ids the placer assigned.
     pub fn pin_outputs(&mut self, ranges: &[AtomRange]) {
         self.pinned_output_ranges.extend_from_slice(ranges);
     }
@@ -597,89 +293,102 @@ impl ExecutablePlanBuilder {
         &mut self,
         lanes: Vec<(Box<dyn CompiledSpanFn>, Vec<AtomRange>, Vec<AtomRange>)>,
     ) {
-        let phase_idx = self.phases.len();
         let mut exec_lanes = Vec::with_capacity(lanes.len());
-        let mut phase_inputs = Vec::new();
         for (span, inputs, outputs) in lanes {
-            phase_inputs.extend(inputs.iter().cloned());
             exec_lanes.push(ExecutableLane {
                 span,
                 inputs,
                 outputs,
             });
         }
-        self.all_input_ranges.push((phase_idx, phase_inputs));
         self.phases.push(ExecutablePhase { lanes: exec_lanes });
     }
 
-    /// Build the final plan, computing output liveness.
-    ///
-    /// For each output range produced by any phase, determines the last phase
-    /// that reads any atom in that range. This handles group splitting correctly:
-    /// a single input range [base, base+N) may overlap multiple output ranges
-    /// at sub-range offsets.
-    pub fn build(self) -> ExecutablePlan {
-        // Collect all output ranges (base, end) sorted by base, for overlap queries.
-        let mut all_outputs: Vec<(u64, u64)> = Vec::new();
-        for phase in &self.phases {
-            for lane in &phase.lanes {
-                for out in &lane.outputs {
-                    all_outputs.push((out.base.0, out.base.0 + out.count));
-                }
-            }
-        }
-        all_outputs.sort_unstable_by_key(|&(base, _)| base);
-        all_outputs.dedup();
-
-        let mut output_liveness: HashMap<u64, usize> = HashMap::new();
-
-        for (phase_idx, inputs) in &self.all_input_ranges {
-            for input in inputs {
-                let in_lo = input.base.0;
-                let in_hi = in_lo + input.count;
-
-                // Register liveness for the input base itself (covers initial
-                // inputs like weights whose base matches exactly).
-                let entry = output_liveness.entry(in_lo).or_insert(0);
-                *entry = (*entry).max(*phase_idx);
-
-                // Find all output ranges that overlap [in_lo, in_hi) and
-                // register liveness for their bases too.
-                let start = all_outputs.partition_point(|&(_, end)| end <= in_lo);
-                for &(out_base, _) in &all_outputs[start..] {
-                    if out_base >= in_hi {
-                        break;
-                    }
-                    let entry = output_liveness.entry(out_base).or_insert(0);
-                    *entry = (*entry).max(*phase_idx);
-                }
-            }
-        }
-
-        // Build a set of atom ranges that are model outputs — these must
-        // never be evicted regardless of liveness.
-        let mut pinned_atoms: Vec<(u64, u64)> = self
-            .pinned_output_ranges
-            .iter()
-            .map(|r| (r.base.0, r.base.0 + r.count))
-            .collect();
-        pinned_atoms.sort_unstable();
-
-        let tracked = output_liveness.len();
-        let total_outputs = all_outputs.len();
-        eprintln!(
-            "  Liveness: {} output ranges tracked of {} total",
-            tracked, total_outputs,
-        );
-
+    /// Consume the builder and produce a runnable plan. The main
+    /// graph is walked once to populate the literal buffer.
+    pub fn build(
+        self,
+        placement: AtomPlacementMap,
+        main_graph: &crate::nano_graph::pattern::NanoGraph<'static, crate::pool::SystemPool>,
+    ) -> ExecutablePlan {
         let max_lanes = self.phases.iter().map(|p| p.lanes.len()).max().unwrap_or(1);
+
+        // Per-lane scratch sizing. Lane i runs the span at index i of
+        // every phase (the broadcast scheduler guarantees this).
+        let mut scratch_sizes: Vec<usize> = vec![0; max_lanes];
+        for phase in &self.phases {
+            for (li, lane) in phase.lanes.iter().enumerate() {
+                scratch_sizes[li] = scratch_sizes[li].max(lane.span.scratch_bytes());
+            }
+        }
+
+        // Allocate and populate the plan-wide literal buffer. Every
+        // Literal/LiteralSpan group's source bytes land here — both
+        // groups whose primary slot is the literal buffer (read-only
+        // consumer path) and groups whose primary slot is an output
+        // buffer (the JIT reads from here and emits an ordinary copy
+        // to the output buffer).
+        let literal_size = placement.literal_buffer_size as usize;
+        let mut literal_buffer: Box<[u8]> = vec![0u8; literal_size].into_boxed_slice();
+        populate_literal_buffer(main_graph, &placement, &mut literal_buffer);
+
+        let output_ranges = self.pinned_output_ranges.clone();
         let lane_pool = build_lane_thread_pool(max_lanes);
 
         ExecutablePlan {
             phases: self.phases,
             lane_pool,
-            output_liveness,
-            pinned_output_atoms: pinned_atoms,
+            placement,
+            literal_buffer,
+            scratch_sizes,
+            output_ranges,
+        }
+    }
+}
+
+/// Walk the main graph and write every `Literal`/`LiteralSpan`
+/// group's source bytes into the plan-wide literal buffer at the
+/// offset the placer assigned in `literal_sources`. **Every** literal
+/// group has an entry — groups whose primary slot is an output
+/// buffer still have their source bytes here, because the JIT emits
+/// an ordinary copy from this buffer to the destination when it
+/// compiles such groups.
+fn populate_literal_buffer(
+    graph: &crate::nano_graph::pattern::NanoGraph<'static, crate::pool::SystemPool>,
+    placement: &AtomPlacementMap,
+    buffer: &mut [u8],
+) {
+    use crate::nano_graph::ops::ScalarOp;
+
+    for group in graph.groups() {
+        let src_off = match placement.literal_sources.get(&group.base_id) {
+            Some(&o) => o,
+            None => continue,
+        };
+        let elem_bytes = group.output_dtype.bytes_per_element();
+        match &group.op {
+            ScalarOp::Literal(scalar) => {
+                let stored = scalar.cast_to(group.output_dtype);
+                let bytes = stored.as_le_bytes();
+                for i in 0..group.count {
+                    let off = (src_off + i * elem_bytes as u64) as usize;
+                    if off + elem_bytes <= buffer.len() {
+                        buffer[off..off + bytes.len()].copy_from_slice(bytes);
+                    }
+                }
+            }
+            ScalarOp::LiteralSpan(tensor) => {
+                for i in 0..group.count {
+                    let scalar = tensor.read_element(i as usize);
+                    let stored = scalar.cast_to(group.output_dtype);
+                    let bytes = stored.as_le_bytes();
+                    let off = (src_off + i * elem_bytes as u64) as usize;
+                    if off + elem_bytes <= buffer.len() {
+                        buffer[off..off + bytes.len()].copy_from_slice(bytes);
+                    }
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -688,8 +397,6 @@ fn build_lane_thread_pool(max_lanes: usize) -> Option<ThreadPool> {
     if max_lanes <= 1 {
         return None;
     }
-    // Default on: fixed lane workers. Set to 0 to A/B against legacy global
-    // rayon scheduling.
     let use_dedicated = env::var("WT_EXECUTOR_DEDICATED_LANES")
         .ok()
         .is_none_or(|v| v != "0");
@@ -706,195 +413,256 @@ fn build_lane_thread_pool(max_lanes: usize) -> Option<ThreadPool> {
 }
 
 impl ExecutablePlan {
-    fn execute_phase_lanes<'a, 'p, P: Pool + 'p>(
-        &self,
-        phase: &ExecutablePhase,
-        store: &PhaseStore<'a, 'p, P>,
-        pool: &'p P,
-    ) -> Vec<Vec<(AtomId, NumericTensor<'p, DynRank, P>)>> {
-        if let Some(lane_pool) = &self.lane_pool {
-            let lane_count = phase.lanes.len();
-            let mut phase_outputs: Vec<Vec<(AtomId, NumericTensor<'p, DynRank, P>)>> =
-                (0..lane_count).map(|_| Vec::new()).collect();
-            let worker_outputs = lane_pool.broadcast(|ctx| {
-                let lane_idx = ctx.index();
-                let outputs = if lane_idx < lane_count {
-                    execute_lane(&phase.lanes[lane_idx], store, pool)
-                } else {
-                    Vec::new()
-                };
-                (lane_idx, outputs)
-            });
-            for (lane_idx, outputs) in worker_outputs {
-                if lane_idx < lane_count {
-                    phase_outputs[lane_idx] = outputs;
-                }
-            }
-            phase_outputs
-        } else {
-            phase
-                .lanes
-                .par_iter()
-                .map(|lane| execute_lane(lane, store, pool))
-                .collect()
-        }
+    /// Number of phases.
+    pub fn num_phases(&self) -> usize {
+        self.phases.len()
     }
 
-    /// Execute the plan, returning the value store.
-    pub fn execute<'a, 'p, P: Pool + 'p>(
+    /// Placement map the executor was built with. Callers inspect
+    /// this to map atom ids back to buffer slots.
+    pub fn placement(&self) -> &AtomPlacementMap {
+        &self.placement
+    }
+
+    /// Execute the plan. Returns output tensors in
+    /// `pinned_output_ranges` declaration order.
+    ///
+    /// `input_ptrs` is a dense array indexed by `buffer_id`; for each
+    /// input buffer the caller hands in a non-null `*mut u8` pointing
+    /// at the tensor's bytes (any other slot is ignored — the
+    /// executor fills intermediate / literal / output / scratch slots
+    /// itself). The caller must keep every input pointer alive for
+    /// the duration of this call.
+    pub fn execute<'p, P: Pool + 'p>(
         &self,
-        initial_inputs: Vec<(AtomId, NumericTensorCOW<'a, 'p, DynRank, P>)>,
+        input_ptrs: &[*mut u8],
         pool: &'p P,
-    ) -> PhaseStore<'a, 'p, P> {
-        let mut store = PhaseStore::new(initial_inputs);
-
-        for (pi, phase) in self.phases.iter().enumerate() {
-            let phase_outputs = self.execute_phase_lanes(phase, &store, pool);
-
-            // Barrier: merge all outputs into store via a single batched
-            // sort+linear-merge (much cheaper than per-element insert). Phase
-            // outputs are JIT-allocated, owned tensors → wrap as Cow::Owned.
-            let flat: Vec<(AtomId, NumericTensorCOW<'a, 'p, DynRank, P>)> = phase_outputs
-                .into_iter()
-                .flatten()
-                .map(|(id, t)| (id, NumericTensorCOW::Owned(t)))
-                .collect();
-            store.insert_batch(flat);
-
-            // Evict entries no longer needed by future phases.
-            store.evict(pi + 1, &self.output_liveness, &self.pinned_output_atoms);
-        }
-
-        store
+    ) -> Vec<NumericTensor<'p, DynRank, P>> {
+        self.execute_inner(input_ptrs, pool, false)
     }
 
     /// Execute with per-phase timing diagnostics.
-    pub fn execute_timed<'a, 'p, P: Pool + 'p>(
+    pub fn execute_timed<'p, P: Pool + 'p>(
         &self,
-        initial_inputs: Vec<(AtomId, NumericTensorCOW<'a, 'p, DynRank, P>)>,
+        input_ptrs: &[*mut u8],
         pool: &'p P,
-    ) -> PhaseStore<'a, 'p, P> {
-        let mut store = PhaseStore::new(initial_inputs);
-        let mut total_spans = std::time::Duration::ZERO;
-        let mut total_merge = std::time::Duration::ZERO;
-        let mut total_evict = std::time::Duration::ZERO;
+    ) -> Vec<NumericTensor<'p, DynRank, P>> {
+        self.execute_inner(input_ptrs, pool, true)
+    }
 
+    fn execute_inner<'p, P: Pool + 'p>(
+        &self,
+        input_ptrs: &[*mut u8],
+        pool: &'p P,
+        timed: bool,
+    ) -> Vec<NumericTensor<'p, DynRank, P>> {
+        let scratch_id = self.placement.scratch_buffer_id;
+        let ptr_array_len = (scratch_id as usize) + 1;
+
+        // Allocate the intermediate buffer from the pool. Pool reuse
+        // keeps the backing chunk stable across calls, so cache state
+        // can persist within one execute even though the allocation
+        // is formally per-call.
+        let intermediate_size = self.placement.intermediate_peak_bytes as usize;
+        let mut intermediate_buf = pool
+            .allocate(intermediate_size.max(1))
+            .expect("intermediate buffer allocation failed");
+
+        // Allocate per-lane scratch arenas from the pool.
+        let mut scratch_bufs: Vec<_> = self
+            .scratch_sizes
+            .iter()
+            .map(|&n| {
+                pool.allocate(n.max(1))
+                    .expect("scratch arena allocation failed")
+            })
+            .collect();
+
+        // Allocate output tensors from the pool. The `buffer_ptrs`
+        // slot for each output buffer_id will point at one of these,
+        // and they get handed back to the caller at the end — no
+        // copy at extraction time.
+        //
+        // Take pointers *after* the tensor is in the Vec so a move
+        // into the Vec can't invalidate the pointer. (Heap buffers
+        // are stable across `NumericTensor` moves in practice, but
+        // the order here is defensive.)
+        let mut output_tensors: Vec<NumericTensor<'p, DynRank, P>> =
+            Vec::with_capacity(self.output_ranges.len());
+        for range in &self.output_ranges {
+            let layout = jit_flat_layout(range.count, range.dtype);
+            let buf = pool
+                .allocate(layout.buffer_size_bytes())
+                .expect("output tensor allocation failed");
+            output_tensors.push(NumericTensor::from_parts(buf, layout));
+        }
+        // Indexed construction — we materialize each ptr via an
+        // index expression, which refers directly to the Vec's
+        // backing storage each iteration. Taking the ptrs via
+        // `iter_mut().map(...).collect()` produced divergent values
+        // in practice (possibly a Rust aliasing artifact around the
+        // temporary `&mut [u8]` slice in the map closure), and the
+        // indexed form sidesteps it.
+        let mut output_ptrs: Vec<*mut u8> = Vec::with_capacity(output_tensors.len());
+        for i in 0..output_tensors.len() {
+            let p = output_tensors[i].buffer_mut().as_mut_ptr();
+            output_ptrs.push(p);
+        }
+
+        // Build the `buffer_ptrs` template. Input/output/intermediate/
+        // literal/scratch slots all come from here; scratch is patched
+        // per-lane inside the dispatch closure.
+        let mut template: Vec<*mut u8> = vec![std::ptr::null_mut(); ptr_array_len];
+        let mut next_output = 0usize;
+        for info in self.placement.buffers.iter() {
+            let slot = info.id.0 as usize;
+            if slot >= ptr_array_len {
+                panic!(
+                    "execute: buffer_id {} exceeds ptr_array_len {}",
+                    slot, ptr_array_len
+                );
+            }
+            match info.kind {
+                BufferKind::Intermediate => {
+                    template[slot] = intermediate_buf.as_mut_ptr();
+                }
+                BufferKind::Literal => {
+                    template[slot] = self.literal_buffer.as_ptr() as *mut u8;
+                }
+                BufferKind::Input => {
+                    // A null input pointer is tolerated: the span's
+                    // JIT emits loads only for atoms whose consumers
+                    // are alive, so a declared-but-unused input
+                    // buffer is never dereferenced. The prologue may
+                    // still load the base pointer into a register
+                    // (via `buffer_ptrs[buf_id]`), but that's
+                    // harmless — nothing dereferences it. Unused
+                    // inputs arise in test cases where a ModelOp's
+                    // constant attribute gets lifted to an input
+                    // tensor that the final lowering never reads.
+                    template[slot] = input_ptrs
+                        .get(slot)
+                        .copied()
+                        .unwrap_or(std::ptr::null_mut());
+                }
+                BufferKind::Output => {
+                    let ptr = output_ptrs[next_output];
+                    next_output += 1;
+                    template[slot] = ptr;
+                }
+                BufferKind::Scratch => {
+                    // Scratch is not a real BufferInfo entry; this
+                    // branch only fires if someone sticks one in the
+                    // metadata. Safe to ignore — the scratch slot is
+                    // patched per-lane below.
+                }
+            }
+        }
+
+        // Dispatch each phase. The scratch slot is patched per lane
+        // inside the broadcast closure so every worker sees its own
+        // lane's arena.
+        let lane_scratch_ptrs: Vec<*mut u8> =
+            scratch_bufs.iter_mut().map(|b| b.as_mut_ptr()).collect();
+
+        let mut total_spans = std::time::Duration::ZERO;
         for (pi, phase) in self.phases.iter().enumerate() {
             let t0 = Instant::now();
-            let phase_outputs = self.execute_phase_lanes(phase, &store, pool);
-            let spans_dt = t0.elapsed();
-            total_spans += spans_dt;
+            Self::dispatch_phase(
+                self.lane_pool.as_ref(),
+                phase,
+                &template,
+                &lane_scratch_ptrs,
+                scratch_id,
+            );
+            let dt = t0.elapsed();
+            total_spans += dt;
 
-            let t0 = Instant::now();
-            let flat: Vec<(AtomId, NumericTensorCOW<'a, 'p, DynRank, P>)> = phase_outputs
-                .into_iter()
-                .flatten()
-                .map(|(id, t)| (id, NumericTensorCOW::Owned(t)))
-                .collect();
-            let n_outputs = flat.len();
-            store.insert_batch(flat);
-            let merge_dt = t0.elapsed();
-            total_merge += merge_dt;
-
-            let t0 = Instant::now();
-            let store_before = store.len();
-            store.evict(pi + 1, &self.output_liveness, &self.pinned_output_atoms);
-            let evict_dt = t0.elapsed();
-            total_evict += evict_dt;
-
-            if spans_dt.as_millis() > 500 || pi < 3 || pi + 1 == self.phases.len() {
+            if timed && (dt.as_millis() > 100 || pi < 3 || pi + 1 == self.phases.len()) {
                 let rss_mb = read_rss_mb();
-                let store_mb = store.data_bytes() as f64 / (1024.0 * 1024.0);
                 eprintln!(
-                    "  phase {:>3}: spans={:.1}ms merge={:.1}ms evict={:.1}ms ({} out, store {} → {}, {:.0}MB data, RSS {:.0}MB)",
+                    "  phase {:>3}: spans={:.1}ms (RSS {:.0}MB)",
                     pi,
-                    spans_dt.as_secs_f64() * 1e3,
-                    merge_dt.as_secs_f64() * 1e3,
-                    evict_dt.as_secs_f64() * 1e3,
-                    n_outputs,
-                    store_before,
-                    store.len(),
-                    store_mb,
+                    dt.as_secs_f64() * 1e3,
                     rss_mb,
                 );
             }
         }
 
-        eprintln!(
-            "  TOTALS: spans={:.1}ms merge={:.1}ms evict={:.1}ms, final store={}",
-            total_spans.as_secs_f64() * 1e3,
-            total_merge.as_secs_f64() * 1e3,
-            total_evict.as_secs_f64() * 1e3,
-            store.len(),
-        );
+        if timed {
+            eprintln!("  TOTALS: spans={:.1}ms", total_spans.as_secs_f64() * 1e3);
+        }
 
-        store
+        // intermediate_buf and scratch_bufs drop at function exit;
+        // the pool reclaims them. Output tensors carry owned
+        // allocations and are returned to the caller.
+        output_tensors
     }
 
-    /// Number of phases.
-    pub fn num_phases(&self) -> usize {
-        self.phases.len()
+    /// Dispatch one phase across the lane workers.
+    ///
+    /// Associated fn (not `&self`) so the broadcast closure captures
+    /// only what it needs.
+    fn dispatch_phase(
+        lane_pool: Option<&ThreadPool>,
+        phase: &ExecutablePhase,
+        template: &[*mut u8],
+        lane_scratch_ptrs: &[*mut u8],
+        scratch_buffer_id: u8,
+    ) {
+        use std::sync::atomic::{AtomicPtr, Ordering};
+
+        let scratch_id = scratch_buffer_id as usize;
+
+        // Rayon's `broadcast` closure has to be `Sync`, but
+        // `&[*mut u8]` is `!Sync`. Re-box the pointers into
+        // `AtomicPtr<u8>` — which *is* `Sync` by design — and load
+        // them back out inside the closure. This is just a transport
+        // wrapper, not shared-mutable state; the partitioner
+        // guarantees lane workers touch disjoint byte ranges.
+        let template_atomic: Vec<AtomicPtr<u8>> =
+            template.iter().map(|&p| AtomicPtr::new(p)).collect();
+        let scratch_atomic: Vec<AtomicPtr<u8>> =
+            lane_scratch_ptrs.iter().map(|&p| AtomicPtr::new(p)).collect();
+
+        if let Some(lane_pool) = lane_pool {
+            let lane_count = phase.lanes.len();
+            let template_atomic = &template_atomic;
+            let scratch_atomic = &scratch_atomic;
+            lane_pool.broadcast(move |bctx| {
+                let lane_idx = bctx.index();
+                if lane_idx >= lane_count {
+                    return;
+                }
+                let mut local: Vec<*mut u8> = template_atomic
+                    .iter()
+                    .map(|a| a.load(Ordering::Relaxed))
+                    .collect();
+                if scratch_id < local.len() {
+                    local[scratch_id] = scratch_atomic[lane_idx].load(Ordering::Relaxed);
+                }
+                phase.lanes[lane_idx].span.execute(&local);
+            });
+        } else {
+            // Single-lane fallback.
+            for (lane_idx, lane) in phase.lanes.iter().enumerate() {
+                let mut local: Vec<*mut u8> = template.to_vec();
+                if scratch_id < local.len() {
+                    local[scratch_id] = lane_scratch_ptrs[lane_idx];
+                }
+                lane.span.execute(&local);
+            }
+        }
     }
-}
-
-/// Execute a single lane: gather inputs, run span, return outputs.
-fn execute_lane<'a, 'p, P: Pool + 'p>(
-    lane: &ExecutableLane,
-    store: &PhaseStore<'a, 'p, P>,
-    pool: &'p P,
-) -> Vec<(AtomId, NumericTensor<'p, DynRank, P>)> {
-    // Gather all input slices for this lane's declared input ranges.
-    let input_slices: Vec<StoreSlice<'_>> = lane
-        .inputs
-        .iter()
-        .flat_map(|range| store.gather(range.base, range.count))
-        .collect();
-
-    // Pre-allocate output tensors with byte-aligned layout.
-    // JIT writes one byte per sub-byte element (e.g. BOOL), so use
-    // bytes_per_element for stride rather than total_bits.
-    let mut output_tensors: Vec<NumericTensor<'p, DynRank, P>> = lane
-        .outputs
-        .iter()
-        .map(|r| {
-            let layout = jit_flat_layout(r.count, r.dtype);
-            let buf = pool
-                .allocate(layout.buffer_size_bytes())
-                .expect("failed to allocate output tensor");
-            NumericTensor::from_parts(buf, layout)
-        })
-        .collect();
-
-    // Create mutable byte views for the span.
-    {
-        let mut span_outputs: Vec<SpanOutput<'_>> = output_tensors
-            .iter_mut()
-            .zip(lane.outputs.iter())
-            .map(|(t, r)| SpanOutput {
-                data: t.buffer_mut(),
-                dtype: r.dtype,
-                count: r.count,
-            })
-            .collect();
-
-        lane.span.execute(&input_slices, &mut span_outputs);
-    }
-
-    // Return (base, tensor) pairs.
-    lane.outputs
-        .iter()
-        .zip(output_tensors)
-        .map(|(range, tensor)| (range.base, tensor))
-        .collect()
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 /// Create a flat 1D tensor layout with byte-aligned element strides.
 ///
-/// The JIT writes one byte per element for sub-byte dtypes (e.g. BOOL), so the
-/// stride must be `bytes_per_element * 8` bits, not `total_bits`. For types ≥ 8
-/// bits this is identical to `row_major`.
+/// The JIT writes one byte per element for sub-byte dtypes (e.g. BOOL),
+/// so the stride must be `bytes_per_element * 8` bits, not `total_bits`.
+/// For types ≥ 8 bits this is identical to `row_major`.
 pub(crate) fn jit_flat_layout(count: u64, dtype: NumericDType) -> TensorLayout<DynRank> {
     let stride_bits = dtype.bytes_per_element() as u64 * 8;
     TensorLayout::<DynRank>::ElementStrided {

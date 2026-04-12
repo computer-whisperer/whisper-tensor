@@ -1,17 +1,13 @@
 #![allow(clippy::all, dead_code, unreachable_patterns, unused)]
 //! Direct x86-64 JIT codegen via dynasm-rs — coverage-first rewrite.
 //!
-//! This is the v14 x86_jit replacement. See `X86_JIT_PLAN.md` for the
-//! full plan and `x86_jit_codec.md` for the codec architecture.
-//!
 //! # Architecture
 //!
 //! Three layers, each in its own subdirectory and independently
 //! testable:
 //!
 //! - [`codec`] — bit-level I/O, format conversion, and in-register
-//!   precision narrowing. Knows nothing about ScalarOps; takes raw bits
-//!   and a dtype, produces compute-repr values (and vice versa).
+//!   precision narrowing. Knows nothing about ScalarOps.
 //! - [`ops`] — per-ScalarOp emission. Takes compute-repr operands in
 //!   slots A/B and writes to slot C. Knows nothing about loops or
 //!   memory layout.
@@ -19,12 +15,11 @@
 //!   the prologue/epilogue. The only layer that knows about
 //!   `BufferLayout` and the executor ABI.
 //!
-//! # Phase 2.B.5 status
-//!
-//! The pipeline emits Identity, same-repr Cast, Literal, and
-//! LiteralSpan with **all InputRef shapes**. Cross-compute-repr
-//! Cast (float↔int) falls back to cranelift. Everything else is
-//! rejected by [`support::check_supported`].
+//! Under the memory-placement rewrite each compiled span reads and
+//! writes through a `buffer_ptrs: *const *mut u8` argument array. The
+//! prologue loads each distinct `buffer_id` it will touch into a
+//! callee-saved GPR and every load/store indexes that register via
+//! the slot's placer-assigned offset.
 
 pub mod codec;
 pub mod ops;
@@ -38,10 +33,9 @@ pub(crate) mod tests;
 use dynasmrt::x64::Assembler;
 use dynasmrt::{AssemblyOffset, DynasmApi, ExecutableBuffer};
 
-use super::executor::{CompiledSpanFn, SpanOutput, StoreSlice};
-use super::layout::{
-    BufferLayout, compute_layout, read_buffer_to_output, write_store_slice_to_buffer,
-};
+use super::executor::CompiledSpanFn;
+use super::layout::{BufferLayout, compute_layout};
+use super::placer::AtomPlacementMap;
 use crate::nano_graph::pattern::{AtomRange, NanoGraph};
 use crate::pool::SystemPool;
 
@@ -49,112 +43,93 @@ use codec::format::CodecTables;
 use orch::address::AddressTables;
 use orch::group::emit_group;
 
-/// Tail padding (in bytes) added to the working buffer beyond
-/// `BufferLayout::total_bytes`. The bit_io codec primitives may read
-/// up to 16 bytes starting at any byte offset they touch, so the
-/// last few atoms in the buffer can spill past `total_bytes` by up
-/// to 8 bytes. We zero-pad those bytes once in the literal template
-/// and the read-modify-write store path preserves them as zero.
-const CODEC_TAIL_SLACK: usize = 8;
-
 /// A span compiled to native x86-64 machine code.
 ///
-/// Wired into `compiled_eval::compile_one_span_native`. The cranelift
-/// backend remains the per-span fallback for everything this can't
-/// (yet) handle.
+/// Thin wrapper: `code` is the JIT'd function, `layout` tells the
+/// executor how much scratch the span needs, and the codec/address
+/// tables are pinned until the code is dropped. Literals live in the
+/// plan-wide literal buffer the executor owns — the JIT just emits
+/// loads against `buffer_ptrs[literal_buf_id]` like any other buffer.
 pub struct X86JitSpan {
     /// Owned executable memory holding the compiled function. Must
     /// outlive any function pointer derived from it.
     code: ExecutableBuffer,
     /// Offset of the entry point inside `code`.
     entry: AssemblyOffset,
-    /// Buffer layout describing where each atom lives. Empty for
-    /// zero-group graphs.
+    /// Layout metadata — `total_bytes` is the lane scratch size the
+    /// executor must hand this span at dispatch. Also carries the
+    /// per-buffer-id register assignment the prologue already loaded.
     layout: BufferLayout,
-    /// Pre-populated working buffer template — literals and lookup
-    /// tables already baked in. `execute` clones this, marshals
-    /// inputs over it, runs the JIT, then reads outputs back.
-    literal_template: Vec<u8>,
-    /// Output ranges declared by this span — used by `execute` to
-    /// wire span outputs back into the executor.
-    output_ranges: Vec<AtomRange>,
     /// Codec lookup tables held alive for the lifetime of the JIT.
     /// The compiled code embeds raw pointers into these slabs, so
     /// they must not be dropped or relocated until `code` is.
     _tables: CodecTables,
     /// Address lookup tables for multi-entry Explicit InputRefs.
-    /// Same lifetime contract as `_tables`.
     _addr_tables: AddressTables,
 }
 
 // SAFETY: ExecutableBuffer is Send+Sync, the entry offset is a plain
 // usize, and the function we transmute it to has no captured state
-// beyond the buffer pointer it receives as `rdi`. The compiled code
-// reads/writes only the buffer it's handed plus its callee-saved
-// stack slots, and the embedded codec tables (which are pinned by
-// _tables for the JIT's lifetime). All fields are themselves Send/Sync.
+// beyond the caller-supplied `buffer_ptrs` array. All other fields
+// are themselves Send+Sync.
 unsafe impl Send for X86JitSpan {}
 unsafe impl Sync for X86JitSpan {}
 
 impl X86JitSpan {
-    /// Compile a span's NanoGraph into a native function ready for the
-    /// executor.
+    /// Compile a span's NanoGraph into a native function.
     ///
-    /// Phase 2.B.4: zero-group graphs and Identity-only graphs with
-    /// any InputRef shape. Anything else is rejected by
-    /// [`support::check_supported`] and the caller falls back to
-    /// cranelift.
+    /// Reject unsupported ops up front so the caller falls back to
+    /// pool_eval. Literal / LiteralSpan groups generate **no** code —
+    /// their bytes live in the plan-wide literal buffer the executor
+    /// owns, populated once at plan-build from the main graph. The
+    /// JIT just emits loads against `buffer_ptrs[literal_buf_id]`
+    /// when a consumer reads them.
     pub fn compile(
         graph: &NanoGraph<'static, SystemPool>,
         output_ranges: &[AtomRange],
+        placement: &AtomPlacementMap,
     ) -> Result<Self, String> {
-        // Reject anything we can't (yet) handle. Caller falls back to
-        // the cranelift backend for the Err case.
         support::check_supported(graph)?;
 
-        // Layout is computed even for empty graphs — `compute_layout`
-        // returns a zero-byte layout in that case, but going through
-        // the same code path anchors the marshalling pipeline.
-        // Disable reduce-fold inlining (allow_inline=false) — the
-        // x86_jit doesn't implement inlined producer re-evaluation.
-        // This makes compute_layout allocate slots for all groups so
-        // they can be loaded from memory normally.
-        let layout = compute_layout(graph, output_ranges, false);
+        // allow_inline=false — x86_jit doesn't implement inlined
+        // producer re-evaluation yet; compute_layout must allocate
+        // slots for every materialized group.
+        let layout = compute_layout(graph, output_ranges, false, placement)?;
 
-        // Pre-populate the working-buffer template with literals.
-        // For empty / Identity-only graphs there are no embedded
-        // codec tables yet, so the template is just `total_bytes` of
-        // literal-filled bytes plus the codec tail-slack.
-        let template_bytes = layout.total_bytes + CODEC_TAIL_SLACK;
-        let mut literal_template = vec![0u8; template_bytes];
-        layout.populate_literals(graph, &mut literal_template);
-
-        // Build the JIT. Empty graphs still go through the prologue
-        // and epilogue so the function shape matches what later
-        // phases will produce.
         let mut tables = CodecTables::new();
         let mut addr_tables = AddressTables::new();
         let mut asm = Assembler::new().map_err(|e| format!("x86_jit: assembler init: {e}"))?;
         let entry = asm.offset();
-        prologue::emit_prologue(&mut asm);
+        prologue::emit_prologue(&mut asm, &layout.buffer_bases);
         for group in graph.groups() {
-            // Skip dead groups (use_count == 0). The layout still
-            // allocates them, but their consumers have been deleted
-            // so the JIT must not write into the (potentially
-            // reused) slot. Mirrors the cranelift backend.
+            // Skip dead groups (use_count == 0).
             let gi = graph
                 .find_group_idx(group.base_id)
                 .expect("group must be present");
             if layout.group_use_counts[gi] == 0 {
                 continue;
             }
-            // Skip inlinable groups — their expressions are folded into
-            // their consumer's loop by the cranelift backend's reduce-fold
-            // optimization. The layout deallocates their slots.
+            // Skip inlinable groups — consumer's loop will re-emit
+            // the producer's expression inline.
             if gi < layout.inlinable.len() && layout.inlinable[gi] {
                 continue;
             }
-            emit_group(&mut asm, &layout, group, &mut addr_tables, &mut tables).map_err(|e| {
+            // `emit_group` handles `Literal`/`LiteralSpan` groups
+            // itself: when their destination slot lives in the
+            // literal buffer it's a no-op (source == destination,
+            // bytes pre-populated at plan-build); when the
+            // destination is an output buffer it emits an ordinary
+            // copy from the literal buffer. No pre-dispatch skip
+            // here.
+            emit_group(
+                &mut asm,
+                &layout,
+                group,
+                placement,
+                &mut addr_tables,
+                &mut tables,
+            )
+            .map_err(|e| {
                 format!(
                     "group[{gi}] base={} op={:?} count={} offset={}: {e}",
                     group.base_id,
@@ -164,7 +139,7 @@ impl X86JitSpan {
                 )
             })?;
         }
-        prologue::emit_epilogue(&mut asm);
+        prologue::emit_epilogue(&mut asm, &layout.buffer_bases);
         let code = asm
             .finalize()
             .map_err(|_| "x86_jit: assembler finalize failed".to_string())?;
@@ -173,59 +148,36 @@ impl X86JitSpan {
             code,
             entry,
             layout,
-            literal_template,
-            output_ranges: output_ranges.to_vec(),
             _tables: tables,
             _addr_tables: addr_tables,
         })
     }
+
+    /// Expose the span's layout for tests and diagnostics.
+    pub fn layout(&self) -> &BufferLayout {
+        &self.layout
+    }
 }
 
 impl CompiledSpanFn for X86JitSpan {
-    fn execute(&self, inputs: &[StoreSlice<'_>], outputs: &mut [SpanOutput<'_>]) {
-        // Empty layout → nothing to compute, nothing to marshal.
-        // Skip the buffer alloc + JIT call entirely (matches what
-        // `JitCompiledSpan::execute` does for the empty-graph case).
-        if self.layout.total_bytes == 0 {
-            return;
-        }
+    fn scratch_bytes(&self) -> usize {
+        // Codec bit_io primitives may read/write up to 16 bytes
+        // starting at any byte position, so we pad the reported
+        // scratch requirement by a constant tail slack.
+        const CODEC_TAIL_SLACK: usize = 16;
+        self.layout.total_bytes + CODEC_TAIL_SLACK
+    }
 
-        // Working buffer = literal template + marshalled inputs.
-        // Add a canary zone after the buffer to detect out-of-bounds writes.
-        const CANARY_SIZE: usize = 256;
-        const CANARY_BYTE: u8 = 0xCD;
-        let mut buffer = self.literal_template.clone();
-        buffer.extend_from_slice(&[CANARY_BYTE; CANARY_SIZE]);
-        for slice in inputs {
-            write_store_slice_to_buffer(slice, &self.layout, &mut buffer);
-        }
-
-        let canary_start = buffer.len() - CANARY_SIZE;
-
-        // Run the JIT.
-        // SAFETY: bytes at `self.code.ptr(self.entry)` were emitted
-        // as a System V AMD64 function taking a `*const *mut u8` — a
-        // pointer to an array of buffer base pointers — and returning
-        // nothing. Phase 4c only populates index 0 (the working buffer);
-        // step 5 will extend this to multiple bases resolved from the
-        // placement map. The stack-local `buffer_ptrs` array and the
-        // `buffer` Vec both outlive this call.
-        let mut buffer_ptrs: [*mut u8; 1] = [buffer.as_mut_ptr()];
+    fn execute(&self, buffer_ptrs: &[*mut u8]) {
+        // Zero-body spans: the prologue/epilogue is the entire
+        // function and the argument array is unused.
         let func: unsafe extern "C" fn(*const *mut u8) =
             unsafe { std::mem::transmute(self.code.ptr(self.entry)) };
-        unsafe { func(buffer_ptrs.as_mut_ptr()) };
-
-        // Check canary zone for buffer overrun.
-        if buffer[canary_start..].iter().any(|&b| b != CANARY_BYTE) {
-            panic!(
-                "x86_jit: buffer overrun detected (total_bytes={}, canary_start={canary_start})",
-                self.layout.total_bytes,
-            );
-        }
-
-        // Marshal declared outputs back into SpanOutputs.
-        for (range, out) in self.output_ranges.iter().zip(outputs.iter_mut()) {
-            read_buffer_to_output(range, &self.layout, &buffer, out);
-        }
+        // SAFETY: bytes at `code.ptr(entry)` were emitted as a
+        // System V AMD64 function taking a `*const *mut u8` — a
+        // pointer to an array of buffer base pointers — and
+        // returning nothing. Each pointer in `buffer_ptrs` is valid
+        // for this call's duration per the executor's contract.
+        unsafe { func(buffer_ptrs.as_ptr()) };
     }
 }

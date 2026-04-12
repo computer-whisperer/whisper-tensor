@@ -17,6 +17,8 @@
 //! pointer argument or a real buffer for any of these tests.
 
 use crate::compiler::attempts::v14::layout::{BufferLayout, compute_layout};
+use crate::compiler::attempts::v14::placer::{AtomPlacementMap, run_placer};
+use crate::compiler::attempts::v14::types::{Phase, Span};
 use crate::compiler::attempts::v14::x86_jit::orch::address::{
     AddressInfo, AddressTables, IterVar, emit_compute_bit_offset,
 };
@@ -31,6 +33,31 @@ use super::jit_harness::JitFn;
 const RAX: u8 = 0; // dst_bit_reg for all tests
 const RDI: u8 = 7; // iter register for the variable-i tests
 const SCRATCH: u8 = 8; // r8 for arithmetic scratch
+
+/// Build a trivial placement (one phase, one span) for a test graph
+/// so `compute_layout` has the AtomPlacementMap it needs.
+fn test_placement(
+    graph: &NanoGraph<'static, SystemPool>,
+    outputs: &[AtomRange],
+) -> AtomPlacementMap {
+    let span_inputs: Vec<AtomRange> = graph
+        .input_tensors()
+        .iter()
+        .map(|it| AtomRange {
+            base: it.base_id,
+            count: it.count,
+            dtype: it.dtype,
+        })
+        .collect();
+    let phases = vec![Phase {
+        spans: vec![Span {
+            graph: graph.clone(),
+            inputs: span_inputs,
+            outputs: outputs.to_vec(),
+        }],
+    }];
+    run_placer(graph, &phases, outputs).expect("placer failed in test harness")
+}
 
 /// Build a flat 1D NanoGraph: one input tensor of `dtype` followed by
 /// an Identity group consuming it via `affine(1)`. Returns the layout
@@ -50,7 +77,8 @@ fn flat_layout(count: u64, dtype: NumericDType) -> (BufferLayout, AtomId, AtomId
         count,
         dtype,
     };
-    let layout = compute_layout(&g, std::slice::from_ref(&out), false);
+    let placement = test_placement(&g, std::slice::from_ref(&out));
+    let layout = compute_layout(&g, std::slice::from_ref(&out), false, &placement).expect("layout");
     (layout, inp, ident, out)
 }
 
@@ -326,7 +354,8 @@ fn modular_layout(
         count,
         dtype,
     };
-    let layout = compute_layout(&g, std::slice::from_ref(&out), false);
+    let placement = test_placement(&g, std::slice::from_ref(&out));
+    let layout = compute_layout(&g, std::slice::from_ref(&out), false, &placement).expect("layout");
     (layout, inp, ident, out)
 }
 
@@ -446,7 +475,8 @@ fn strided_2d_broadcast_reg() {
         count: 16,
         dtype: NumericDType::F32,
     };
-    let layout = compute_layout(&g, std::slice::from_ref(&out), false);
+    let placement = test_placement(&g, std::slice::from_ref(&out));
+    let layout = compute_layout(&g, std::slice::from_ref(&out), false, &placement).expect("layout");
     let (slot, _) = layout.find(inp).expect("input slot");
     let base_bit = slot.bit_offset;
     let bit_stride = slot.bit_stride;

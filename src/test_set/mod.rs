@@ -501,12 +501,27 @@ pub fn run_case_via_compiled_eval(case: &TestCase, num_lanes: usize) -> Result<(
         )
         .map_err(|e| format!("{}[{}]: prepare inputs failed: {e}", case.name, ds.label))?;
 
+        // Build input_ptrs array from the placer's buffer assignments.
+        let placement = executable_plan.placement();
+        let ptr_array_len = (placement.scratch_buffer_id as usize) + 1;
+        let mut input_ptrs: Vec<*mut u8> = vec![std::ptr::null_mut(); ptr_array_len];
+        for (atom_id, cow) in &initial_inputs {
+            if let Some((buf_id, _)) = placement.byte_offset_of(*atom_id) {
+                let ptr = cow.buffer().as_ptr() as *mut u8;
+                if (buf_id.0 as usize) < input_ptrs.len() {
+                    input_ptrs[buf_id.0 as usize] = ptr;
+                }
+            }
+        }
+
         // Execute.
-        let store = executable_plan.execute(initial_inputs, &pool);
+        let executor_outputs = executable_plan.execute(&input_ptrs, &pool);
+        drop(initial_inputs);
 
         // Extract outputs.
-        let results = compiled_eval::extract_outputs(&output_ranges, &output_shapes, &store, &pool)
-            .map_err(|e| format!("{}[{}]: extract outputs failed: {e}", case.name, ds.label))?;
+        let results =
+            compiled_eval::extract_outputs(&output_ranges, &output_shapes, executor_outputs, &pool)
+                .map_err(|e| format!("{}[{}]: extract outputs failed: {e}", case.name, ds.label))?;
 
         // Compare.
         for (out_id, expected_tensor) in &ds.expected_outputs {

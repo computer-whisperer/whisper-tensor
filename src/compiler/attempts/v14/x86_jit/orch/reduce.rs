@@ -28,9 +28,9 @@ use crate::pool::SystemPool;
 use super::super::codec::bit_io::{emit_load_bits, emit_store_bits};
 use super::super::codec::format::{CodecSlot, CodecTables, ComputeRepr, emit_decode, emit_encode};
 use super::super::codec::precision::emit_narrow_to;
-use super::super::prologue::{FLT_SLOT_A, FLT_SLOT_C, INT_SLOT_C, LOOP_END_REG, LOOP_VAR_REG};
+use super::super::prologue::{FLT_SLOT_A, FLT_SLOT_C, INT_SLOT_C, LOOP_VAR_REG};
 use super::address::{AddressTables, IterVar, emit_compute_bit_offset};
-use super::group::emit_output_bit_offset;
+use super::group::{emit_output_bit_offset, materialize_buffer_base};
 
 /// Inner loop counter `k`.
 const REDUCE_K: u8 = 9; // r9
@@ -97,14 +97,23 @@ pub fn emit_reduce_group(
     } else {
         let start = group.atom_offset as i64;
         let end = (group.atom_offset + group.count) as i64;
+        if !(i32::MIN as i64..=i32::MAX as i64).contains(&end) {
+            return Err(format!(
+                "x86_jit reduce: loop end {end} doesn't fit in i32 — \
+                 falling back to pool_eval"
+            ));
+        }
         dynasm!(asm
             ; .arch x64
             ; mov Rq(LOOP_VAR_REG), QWORD start
-            ; mov Rq(LOOP_END_REG), QWORD end
         );
         let loop_top = asm.new_dynamic_label();
         let loop_exit = asm.new_dynamic_label();
-        dynasm!(asm; =>loop_top; cmp Rq(LOOP_VAR_REG), Rq(LOOP_END_REG); jge =>loop_exit);
+        dynasm!(asm
+            ; =>loop_top
+            ; cmp Rq(LOOP_VAR_REG), DWORD end as i32
+            ; jge =>loop_exit
+        );
 
         emit_reduce_body(
             asm,
@@ -222,7 +231,13 @@ fn emit_reduce_body(
         SCRATCH,
         addr_tables,
     )?;
-    let src_buffer_reg = super::group::buffer_base_reg_pub(src_info.buffer_id);
+    // Resolve the source buffer base. If it's in the fast pool we
+    // get a persistent register; if it's overflow we fetch it from
+    // r14 (BUFFER_PTRS_REG) into CODEC_SCRATCH once per k-iteration.
+    // The buffer_ptrs array is tiny and hot in L1, so the extra mov
+    // per inner iteration is negligible compared to the codec work
+    // and the actual reduce arithmetic.
+    let src_fast_reg = layout.buffer_bases.reg_for_opt(src_info.buffer_id);
     dynasm!(asm; .arch x64; mov Rq(REDUCE_SRC_BIT), Rq(BIT_OFF));
 
     // 2. Initialize accumulator.
@@ -243,6 +258,24 @@ fn emit_reduce_body(
     );
 
     // 3a. Load source bits from rdi, decode to slot A.
+    //
+    // For fast-pool sources, `src_fast_reg` names the persistent
+    // base register. For overflow sources, fetch the base into
+    // CODEC_SCRATCH on each iteration — it's one extra mov per
+    // iter and CODEC_SCRATCH is dead at this point (it's only
+    // used by `emit_decode` below and doesn't need to carry state
+    // into the next iter).
+    let src_buffer_reg = match src_fast_reg {
+        Some(reg) => reg,
+        None => {
+            dynasm!(asm
+                ; .arch x64
+                ; mov Rq(CODEC_SCRATCH), QWORD [Rq(super::super::prologue::BUFFER_PTRS_REG)
+                    + (src_info.buffer_id as i32) * 8]
+            );
+            CODEC_SCRATCH
+        }
+    };
     emit_load_bits(asm, src_buffer_reg, REDUCE_SRC_BIT, n_bits, RAW, SCRATCH);
     let slot_a = match repr {
         ComputeRepr::F32 | ComputeRepr::F64 => CodecSlot::Xmm(FLT_SLOT_A),
@@ -312,9 +345,19 @@ fn emit_reduce_body(
         BIT_OFF,
         SCRATCH,
     )?;
+    // Dst is accessed once per outer iteration (after the k-loop
+    // completes), so an overflow load is fine here. rdi (formerly
+    // REDUCE_SRC_BIT) is dead at this point and serves as the
+    // overflow scratch.
+    let dst_base = materialize_buffer_base(
+        asm,
+        layout,
+        dst_info.buffer_id,
+        super::group::OVERFLOW_BASE_SCRATCH,
+    );
     emit_store_bits(
         asm,
-        super::group::buffer_base_reg_pub(dst_info.buffer_id),
+        dst_base,
         BIT_OFF,
         dst_info.n_bits,
         RAW,

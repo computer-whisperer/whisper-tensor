@@ -67,15 +67,19 @@ partitioner_m  ──→  Vec<Phase{spans:[Span]}>      (unchanged shape;
    ▼
 global placer  ──→  AtomPlacementMap              (NEW)
    │                {atom → (buffer_id, byte_offset)}
-   │                + buffer sizes
+   │                + intermediate / literal buffer sizes
    │                + per-lane scratch high-water marks
    ▼
 per-span codegen  ──→  CompiledSpan               (uses placement map
-   │                                                for cross-span atoms;
-   │                                                allocates own scratch
-   │                                                slots locally)
+   │                                                for cross-span + literal
+   │                                                atoms; allocates own
+   │                                                scratch slots locally)
    ▼
-executor        ──→  reuses pre-allocated buffers, no PhaseStore
+plan-build       ──→  ExecutablePlan              (immutable; owns compiled
+   │                                                spans + literal buffer)
+   ▼
+execute(&self)   ──→  pool-allocated intermediate + scratch + outputs,
+                      no PhaseStore, output tensors returned directly
 ```
 
 The placer is the only new pass. Codegen and the executor change to
@@ -83,15 +87,16 @@ match its outputs.
 
 ## Buffers
 
-Four kinds of buffers, all addressed by an integer `buffer_id` known at
+Five kinds of buffers, all addressed by an integer `buffer_id` known at
 compile time:
 
-| kind          | count            | lifetime   | source                            |
-|---------------|------------------|------------|-----------------------------------|
-| Input         | one per input    | per-call   | caller-owned (often borrowed)     |
-| Output        | one per output   | per-call   | pool-allocated, returned          |
-| Intermediate  | one (shared)     | per-plan   | pool-allocated at build time      |
-| Scratch       | one per lane     | per-plan   | pool-allocated at build time      |
+| kind          | count            | lifetime   | source                              |
+|---------------|------------------|------------|-------------------------------------|
+| Input         | one per input    | per-call   | caller-owned (often borrowed)       |
+| Output        | one per output   | per-call   | pool-allocated per execute, returned |
+| Intermediate  | one (shared)     | per-call   | pool-allocated per execute          |
+| Scratch       | one per lane     | per-call   | pool-allocated per execute          |
+| Literal       | one (shared)     | per-plan   | plan-owned, filled at plan-build    |
 
 - **Input buffers** are pass-through: the executor takes whatever the
   caller hands in (a `NumericTensorCOW`, possibly borrowed) and exposes
@@ -103,38 +108,57 @@ compile time:
   lowering bug upstream, not a placer concern. Dynamic user inputs
   (activations, tokens) are handled by the existing `relayout_to_flat`
   path, which preserves borrows whenever the layout already matches.
-- **Output buffers** are allocated by the executor before each execute
-  call (using the pool) and returned to the caller via the same handle
-  the JIT wrote into — no copy at extract time.
+- **Output buffers** are allocated from the pool at the top of each
+  execute call and returned to the caller via the same handle the JIT
+  wrote into — no copy at extract time.
 - **Intermediate buffer** is the shared cross-span data store. Holds
   every atom that needs to flow from one span to another (different
-  `(phase, lane)` tuples). Sized to the **peak live cross-span data**
-  via liveness-interval allocation.
+  `(phase, lane)` tuples). Sized at compile time to the **peak live
+  cross-span data** via liveness-interval allocation; allocated fresh
+  from the pool at the top of each execute call. The pool makes this
+  cheap — the same backing chunk typically recycles across calls — and
+  it keeps `ExecutablePlan` free of mutable state.
 - **Scratch buffers**: one per lane. Holds atoms that are produced and
-  consumed within a single span. Sized to the maximum scratch demand
-  of any span that lane will run.
+  consumed within a single span. Sized at compile time to the maximum
+  scratch demand of any span that lane will run; allocated from the
+  pool at the top of each execute call, same as the intermediate buffer.
+- **Literal buffer** is a single plan-wide allocation holding every
+  `Literal` / `LiteralSpan` group's bytes. Sized at compile time from
+  the placer's assignments, populated once at plan-build by walking the
+  main graph, and **never written to again** — the JIT emits loads
+  against it but never stores. Because it's immutable, the plan owns
+  it directly (`Box<[u8]>`) and drops its pointer into the buffer_ptrs
+  template on every call. `execute` takes `&self`; plans are free to
+  share across threads. Literal groups do not participate in liveness
+  analysis or slot reuse — every literal byte stays valid for the
+  plan's lifetime.
 
 ## Atom classification
 
-Each atom in the lowered NanoGraph falls into exactly one of three
+Each atom in the lowered NanoGraph falls into exactly one of four
 categories:
 
-1. **Cross-span**: produced in one span, consumed in another (where
+1. **Literal**: produced by a `Literal` or `LiteralSpan` op. Lives in
+   the plan-wide literal buffer at an offset chosen by the global
+   placer. No JIT stores emitted for these groups — the bytes are
+   written once at plan-build and the consumer reads them via a
+   normal `buffer_ptrs[literal_buf_id]` load.
+2. **Cross-span**: produced in one span, consumed in another (where
    "another" means a different `(phase, lane)`). Lives in the
    intermediate buffer (or in an input/output buffer if it is a model
    input/output). Has a `(buffer_id, byte_offset)` in the global
    placement map.
-2. **Span-local, scratch**: produced and consumed within one span.
+3. **Span-local, scratch**: produced and consumed within one span.
    Multi-use, can't be inlined. Lives in the lane's scratch arena at
    an offset chosen by the per-span codegen.
-3. **Span-local, inlinable**: produced and consumed within one span,
+4. **Span-local, inlinable**: produced and consumed within one span,
    single consumer, expression can be folded into the consumer's
    loop body. No slot anywhere — value lives in registers. Existing
    `inlinable` mechanism in `compute_layout` handles this unchanged.
 
 The classification is done by the global placer (which knows which
-atoms cross spans) plus the per-span codegen (which decides scratch
-vs inline for the rest).
+atoms are literals and which cross spans) plus the per-span codegen
+(which decides scratch vs inline for the rest).
 
 ### Why split scratch out
 
@@ -162,8 +186,10 @@ per-execute alloc on the hot path.
 ### Outputs
 
 - `AtomPlacementMap`: `HashMap<AtomId, (BufferId, byte_offset)>` for
-  every cross-span atom.
+  every cross-span atom and every literal group.
 - `intermediate_buffer_size`: bytes.
+- `literal_buffer_size`: bytes. The literal buffer is a plan-owned,
+  immutable `Box<[u8]>` filled at plan-build.
 - One `(BufferId, size)` per input and output buffer, with input
   buffer_ids assigned at placer time (nailed down deterministically
   from the tensor_map) so execute-time just dumps the right view
@@ -177,14 +203,22 @@ per-execute alloc on the hot path.
 
 ### Algorithm sketch
 
-1. **Identify cross-span atoms.** Walk every span. An atom is
+1. **Assign literal groups to the literal buffer.** Walk every group
+   in the main graph; for each `Literal` / `LiteralSpan` op, append
+   its atoms to the literal buffer at the current high-water mark
+   (aligned to `elem_bytes`). Record the assigned offset in the
+   placement map. Literal groups do not participate in liveness
+   analysis — their slots are permanent.
+
+2. **Identify cross-span atoms.** Walk every span. An atom is
    cross-span if it appears in any span's `outputs` list (the
    partitioner already declares these). Model inputs and outputs are
    trivially cross-span and assigned to their dedicated input/output
-   buffers up front.
+   buffers up front. Literal groups are already assigned by step 1
+   and skip this pass.
 
-2. **Compute liveness intervals.** For each cross-span atom (or slab,
-   see step 3), compute `[first_produce_phase, last_consume_phase]`
+3. **Compute liveness intervals.** For each cross-span atom (or slab,
+   see step 4), compute `[first_produce_phase, last_consume_phase]`
    where:
    - `first_produce_phase` is the lowest phase index in which any
      span declares the atom as an output.
@@ -192,7 +226,7 @@ per-execute alloc on the hot path.
      span declares the atom as an input. Model outputs are pinned to
      `phases.len() - 1` so they survive to extraction.
 
-3. **Identify coalescing constraints.**
+4. **Identify coalescing constraints.**
 
    *What slab coalescing is.* The JIT addresses strided reads with a
    single linear formula `base_bit + i * bit_stride`. That formula
@@ -220,26 +254,26 @@ per-execute alloc on the hot path.
    span-local (matmul Mul→Reduce) and stays in per-span scratch
    unchanged.
 
-4. **Per-slab liveness.** A slab's interval is the *union* of its
+5. **Per-slab liveness.** A slab's interval is the *union* of its
    members' intervals. A slab can only be reused after every member
    is dead. Heavy coalescing inflates the intermediate buffer because
    a slab containing one long-lived atom pins space for every other
    member of the slab until that atom dies.
 
-5. **Pack intervals into the intermediate buffer.** Linear-scan or
+6. **Pack intervals into the intermediate buffer.** Linear-scan or
    first-fit allocator over slab-intervals, sorted by start phase.
    Free a slab's offset once `current_phase > slab.end`. Honor:
    - Cache-line alignment for slabs that will be split-written by
      multiple lanes (see "Cache-line discipline" below).
    - Slab elem-bytes alignment (so stride-based InputRefs work).
 
-6. **Detect cross-buffer slab violations.** If a slab's coalescing
+7. **Detect cross-buffer slab violations.** If a slab's coalescing
    constraint pulls in atoms from different buffer kinds (e.g., a
    weight tensor and an intermediate atom), that's currently a hard
    error — the lowering must be hardened to never produce such
    InputRefs. See Open Questions.
 
-7. **Emit the placement map.**
+8. **Emit the placement map.**
 
 ### Split groups
 
@@ -352,51 +386,62 @@ The buffer-id-to-slot-in-rdi-array mapping is part of the
 
 ## Executor changes
 
+`ExecutablePlan` is a frozen compilation artifact. It owns:
+
+- The compiled spans (`Vec<Box<dyn CompiledSpanFn>>`, grouped by phase
+  and lane).
+- The placement map and the buffer-size metadata it needs at
+  execute time.
+- The plan-wide literal buffer (`Box<[u8]>`, immutable after
+  plan-build).
+- A fixed-worker rayon `ThreadPool` for lane dispatch.
+
+It does **not** own the intermediate or scratch buffers. Every field
+is immutable; `execute(&self, ...)` takes a shared reference, and
+plans can be shared across threads freely.
+
 Plan-build time:
-- Receive the placement map and per-span scratch sizes from the
+- Receive the placement map + per-span scratch sizes from the
   compiler.
-- Allocate the intermediate buffer (one big pool allocation).
-- Allocate per-lane scratch arenas (sized to
-  `max(span.scratch_bytes for span in this lane's spans)`).
-- Write literal values into their (non-reusable) slots in the
-  intermediate buffer and the lane scratch arenas.
+- Allocate the literal buffer (`Box<[u8]>` sized to
+  `placement.literal_buffer_size`) and walk the main graph once,
+  writing each `Literal` / `LiteralSpan` group's bytes into its
+  placer-assigned offset.
 
 Per-execute hot path:
-- Allocate output buffers via the pool (one per output, sized from
-  the placement map).
-- Build a small `[*mut u8; N]` buffer-pointer-array **on the
-  executor's stack frame** for this execute call. Fixed-address
-  slots (intermediate + scratch) come from the persistent
-  allocations; input slots get filled with the caller's view
-  pointers; output slots get filled with the freshly-allocated
-  output buffer pointers. The array is a handful of pointers —
-  stack-only, no heap involvement on the hot path.
+- Allocate the intermediate buffer from the pool (sized from the
+  placement map). Pool reuse keeps this cheap; the same backing
+  chunk typically recycles across consecutive executes.
+- Allocate per-lane scratch arenas from the pool (sized to the
+  per-lane high-water mark the compiler recorded at build time).
+- Allocate output tensors from the pool, one per output range,
+  using the declared shape + dtype. These `NumericTensor`s are
+  what `execute` will return — there is no separate extract step.
+- Build a small `[*mut u8; N]` buffer-pointer-array on the stack
+  for this call. Literal slot gets the plan's persistent literal
+  pointer; intermediate and output slots get the freshly-allocated
+  pointers; input slots get the caller's view pointers; the scratch
+  slot gets patched per-lane inside the dispatch closure.
 - For each phase: rayon-broadcast the lanes, each calling its
-  compiled-span fn with a pointer to the stack array. (Per-lane
-  variance is limited to the scratch slot, since each lane has its
-  own scratch arena — either a per-lane copy of the array or a
-  shared array with per-lane scratch patched in before dispatch.)
-- After all phases: hand the output buffers back to the caller.
-  No extract-copy step — output tensors *are* the output buffers,
-  wrapped in `NumericTensor`s with the right layout metadata.
+  compiled-span fn with the stack array. Per-lane variance is
+  limited to the scratch slot, so each worker copies the template
+  once and overwrites `[scratch_buf_id]` with its own lane's
+  pointer.
+- After all phases return: hand the output tensors back to the
+  caller directly. Output tensors **are** the output buffers,
+  wrapped in `NumericTensor`s with the right layout metadata. No
+  memcpy, no hashmap round-trip.
 
 `PhaseStore`, `insert_batch`, `gather`, `evict`, `output_liveness`,
 `pinned_output_atoms`: all deleted.
 
-### Buffers are not wiped between executes
-
-The intermediate buffer and scratch arenas are left in whatever state
-the previous execute call left them in. Correctness is guaranteed by
-a simple invariant: **every atom is written by its producer before
-any consumer reads it**, which holds by construction in a dataflow
-graph. No zero-ing, no scrubbing, no reset step. Literals are the
-only values expected to survive across executes, and they live in
-non-reusable slots the JIT never writes to after plan-build.
-
-The JIT is responsible for respecting the producer-before-reader
-invariant — i.e., for never emitting a load of an atom whose
-producer hasn't run yet in the current execute. This is already
-implicit in how codegen walks the NanoGraph in topological order.
+The producer-before-reader invariant is guaranteed by the
+topologically-ordered JIT emission within each span combined with
+the phase barrier between spans. Intermediate and scratch buffers
+start out whatever the pool hands us (typically zeroed on first
+alloc, recycled on subsequent calls); no scrubbing step is needed
+because every byte a consumer reads was written by a producer
+earlier in the same execute call.
 
 ## Cache-line discipline
 
@@ -430,41 +475,94 @@ not store to the shared slot. No write-write race.
 
 ## Literals
 
-Today literals are written into the per-span `literal_template` at
-compile time and the template is cloned per execute. Under the new
-design there is no per-span template, so literal values need a home
-somewhere that the JIT can read from.
+Every `Literal` / `LiteralSpan` group in the main graph has its
+source bytes stored in a **single plan-wide literal buffer**. The
+buffer is allocated and fully populated at plan-build time and
+never mutated again — the executor links it into `buffer_ptrs` on
+every `execute` call as a **read-only source**. There is no
+execution-time literal-handling logic of any kind: no replay, no
+initialization pass, no conditional writes.
 
-Two categories:
+### Placer outputs
 
-1. **Span-local literals**: produced and consumed inside one span.
-   The per-span codegen assigns them a scratch offset and writes
-   their values into the scratch arena **once at plan-build time**.
-   The scratch arena is persistent across executes, so the literal
-   stays valid as long as the plan lives — no per-execute rewrite.
-   If the per-span FreeList ever reuses that scratch offset (because
-   the literal's lifetime ended), the producer of the reusing atom
-   overwrites it, and subsequent executes would see garbage there
-   next time that phase runs. To avoid this, **literal scratch
-   offsets are marked non-reusable** — their bytes stay live for the
-   plan's lifetime. Literals are almost always small, so the waste
-   is negligible.
+The placer emits two pieces of data for literal groups:
 
-2. **Cross-span literals** (rare but possible — e.g., a padding
-   literal consumed in a later phase): go in the intermediate buffer
-   at an offset chosen by the global placer, also marked
-   non-reusable for the same reason. Written once at plan-build time.
+1. **`literal_sources: HashMap<AtomId, u64>`** — for **every**
+   `Literal` / `LiteralSpan` group, the byte offset in the literal
+   buffer where that group's source bytes live. This includes
+   groups whose primary placement is in a non-literal buffer; the
+   source bytes always live in the literal buffer regardless.
 
-In both cases the placer/codegen distinguishes "literal-backed"
-atoms from regular produced atoms and excludes them from liveness
-reuse. The total non-reusable footprint is `sum(literal_bytes)`,
-which is tiny relative to activation data.
+2. **`PlacementEntry`s for primary-in-literal groups** — i.e., the
+   common case where a group's atoms don't overlap a model output
+   range. These entries point at `LITERAL_BUFFER` with the same
+   offset recorded in `literal_sources[base]`.
 
-`LiteralSpan` (large literal tensors embedded in the graph — weight
-constants that were folded into the NanoGraph rather than kept as
-model inputs) follows the same rules but could in principle be huge.
-If this becomes a footprint issue, a follow-up would move them to
-their own dedicated read-only buffer. Not worth solving up front.
+`literal_buffer_size` is the watermark after walking all literal
+groups; the executor allocates a `Box<[u8]>` of this size at
+plan-build.
+
+### Plan-build
+
+`ExecutablePlanBuilder::build` walks the main graph once, iterates
+every `Literal` / `LiteralSpan` group, and writes its bytes into
+the literal buffer at `literal_sources[base]`. After this walk the
+literal buffer is frozen.
+
+### Execute
+
+`execute(&self)` contains **zero** literal-aware code. The literal
+buffer pointer is dropped into `buffer_ptrs[LITERAL_BUFFER]`
+alongside the intermediate / input / output / scratch pointers,
+and that's it.
+
+### JIT codegen
+
+`emit_group` handles `Literal` / `LiteralSpan` groups in two
+branches depending on the group's primary slot:
+
+1. **Primary slot is `LITERAL_BUFFER`** (the common case): no code
+   is emitted. Source == destination; the bytes are already in
+   place. Consumers read them via ordinary
+   `buffer_ptrs[LITERAL_BUFFER]` loads.
+
+2. **Primary slot is a non-literal buffer** (Pad-style lowering
+   where the literal's atoms overlap a model output range): emit
+   an ordinary copy loop that reads from the literal buffer at
+   `literal_sources[base] + iter * bit_stride` and stores into the
+   destination slot at `slot.bit_offset + iter * bit_stride`. Same
+   shape as an `Identity` group — two bit-offset computations, a
+   load, and a store — but the source side is synthesized from the
+   placer's `literal_sources` map rather than resolved through an
+   `InputRef`. Each span that needs this path forces
+   `LITERAL_BUFFER` into its `BufferBases` table so the prologue
+   loads `buffer_ptrs[LITERAL_BUFFER]` into a callee-saved GPR.
+
+No special case in the executor, no execution-time literal writes,
+no `output_literal_writes` replay. The literal buffer is allocated
+once, written once, read many times.
+
+### Why both branches
+
+Splitting literal groups across two primary buffers (literal vs
+output) is deliberate. The alternative — always placing literal
+bytes in the literal buffer and having the output-extraction path
+read from there — would either require aliasing a read-only
+allocation into a per-execute output `NumericTensor` (breaks
+ownership) or adding a copy at extract time (reintroduces the
+extract-time memcpy the design is meant to eliminate). Having
+the JIT emit a cheap in-phase copy for the overlap case lets the
+output tensor own its allocation cleanly and keeps all literal
+handling on the JIT side of the boundary.
+
+Both `Literal` (scalar) and `LiteralSpan` (embedded constant
+tensor) go through this path. If `LiteralSpan` footprint ever
+becomes a real memory-pressure problem — e.g., a model folds large
+weight constants into the NanoGraph rather than keeping them as
+inputs — the followup is to split the literal buffer into "small
+literals" and "literal spans," with the span buffer coming from
+mmap-backed read-only storage. Not worth solving up front; the
+current RWKV / GPT-2 profiles show literals in the low-MB range.
 
 ## Access bounds
 
@@ -538,15 +636,6 @@ through today's per-span layout and the new placer, and compares
 executed outputs. Any divergence is a placement bug (or a codegen
 bug in the multi-buffer ABI). The existing cross-lane validation
 in `compiled_eval.rs` transplants directly.
-
-## Concurrency
-
-`ExecutablePlan::execute` becomes `&mut self` because the
-intermediate buffer and scratch arenas are mutated. An `Arc<Plan>`
-shared across threads for concurrent execution is no longer
-supported without additional machinery. Callers that need
-concurrent execution of the same plan can hold multiple plans or
-wrap execution in a mutex.
 
 ## Opaque ops (PoolEvalSpan) and pool_eval
 
@@ -765,17 +854,95 @@ first cut.
    categories (matmul, reduce, elementwise, …) remain green across
    all three commits. End-to-end GPT-2 runs cleanly through the new
    ABI with the same compile/execute footprint as before step 4.
-5. **Wire the placer in**: per-span layout consults the placement map
-   for cross-span atoms; total scratch bytes recorded per span.
-6. **Replace the executor**: delete `PhaseStore`, allocate
-   intermediate + scratch buffers at plan-build, simplify the per-
-   execute hot path. Output tensors hand back directly.
-7. **Update pool_eval boundaries**: rework `PoolEvalSpan::execute`
-   and pool_eval's input/output boundary to read/write directly
-   against the shared intermediate buffer instead of through
-   `StoreSlice` / `PhaseStore`. Internal pool_eval allocation is
-   unchanged.
-8. **Cache-line alignment**: enforce in partitioner (split granularity)
+5. **Wire the placer in + replace the executor + update pool_eval
+   boundaries** — **done**. First attempt was scrapped during design
+   review (it accreted `Mutex<PlanBuffers>`, three separate
+   literal-population codepaths, a pointer-aliasing hack, a
+   zero-filled input stub, and a `HashMap<AtomId, NumericTensor>` +
+   second-copy extract path). All of that fell out of one early wrong
+   turn: treating the intermediate and scratch buffers as plan-owned
+   state instead of execute-scope allocations. The corrected shape:
+
+   - `ExecutablePlan` is fully immutable. It owns the compiled spans,
+     the placement map, the fixed-worker lane `ThreadPool`, and a
+     single `Box<[u8]>` holding the plan-wide literal buffer (the
+     only persistent storage the plan needs). No `Mutex`, no
+     interior mutability.
+   - `execute(&self, input_ptrs, pool)` is the one entry point. It
+     allocates the intermediate buffer, per-lane scratch, and output
+     tensors from the pool inside the call; builds the stack
+     `buffer_ptrs` template; dispatches phases; and returns the
+     output `NumericTensor`s directly in declaration order. No
+     hashmap, no extract-time copy.
+   - Literal handling is a single plan-wide literal buffer,
+     allocated and pre-filled at plan-build, linked in as a
+     read-only source at every `execute` call. The placer builds a
+     `literal_sources: HashMap<AtomId, u64>` covering **every**
+     `Literal` / `LiteralSpan` group regardless of its primary
+     placement; plan-build walks the main graph once and writes
+     each group's bytes into that offset; after plan-build the
+     literal buffer is frozen and never touched again. `execute`
+     has zero literal-aware code. Literal groups whose primary
+     slot is the literal buffer are no-ops at JIT emission time
+     (source == destination, consumers read directly from the
+     literal buffer). Literal groups whose primary slot is a
+     non-literal buffer — Pad-style lowering where the literal
+     atoms overlap a model output range — get an ordinary copy
+     loop emitted by the JIT: read from the literal buffer at
+     `literal_sources[base]`, store into the destination slot.
+     Structurally identical to an `Identity` group with the source
+     synthesized from the placer's map. No special case in the
+     executor, no replay loop. (The first corrected attempt used
+     an `output_literal_writes` replay path in the executor; that
+     was replaced with the JIT copy path when the design review
+     caught that "no execute-time literal logic" wasn't being
+     honored.)
+   - `compute_layout` takes `&AtomPlacementMap` and assigns each
+     atom a `(buffer_id, byte_offset)` from the placer when the span
+     is the canonical writer for that atom, otherwise runs the
+     FreeList with `buffer_id = scratch_buffer_id`. The
+     non-canonical-writer rule for duplicate groups stays.
+   - The multi-buffer JIT prologue / `BufferBases` register pool
+     from step 4 is extended: each span touches N distinct buffer
+     ids (intermediate, literal, its inputs, its output, scratch),
+     and the prologue loads each into a callee-saved GPR.
+   - `CompiledSpanFn` is `fn scratch_bytes(&self) -> usize` plus
+     `fn execute(&self, buffer_ptrs: &[*mut u8])`. Nothing else.
+   - `PoolEvalSpan` resolves each input/output range to
+     `(buffer_id, byte_offset)` at construction and
+     gathers/scatters against `buffer_ptrs` at execute time. Unused
+     input pointers are tolerated: pool_eval receives a zeroed
+     tensor for the input, matching the old PhaseStore behavior
+     where missing atoms read as zero (test-only quirk: a
+     constant-folded input leaves the `input_tensors()` entry
+     declared but never bound by the caller).
+   - Lane dispatch uses Rayon's `broadcast`, with the `buffer_ptrs`
+     template and per-lane scratch pointers transported via
+     `Vec<AtomicPtr<u8>>` (which is genuinely `Sync`, vs the
+     pointer-aliasing hack from the first attempt).
+   - `PhaseStore`, `StoreSlice`, `SpanOutput`, `insert_batch`,
+     `gather`, `evict`, `output_liveness`, `pinned_output_atoms`,
+     `write_store_slice_to_buffer`, `read_buffer_to_output`:
+     deleted.
+
+   Cache-residency story is unchanged: the intermediate buffer still
+   holds cross-span atoms through a phase barrier; lanes still read
+   the producer's writes out of shared L2/L3. Allocating it from the
+   pool per-execute doesn't defeat that — pool recycling keeps the
+   backing chunk stable across calls, and the hardware cache state
+   only needs to persist within one execute, not across them.
+
+   **Test results**: 156/156 v14 unit tests pass. 117/119 test_set
+   cases pass through the trivial (1-phase) compiled-eval path;
+   115/119 through the 8-lane partitioned path. The remaining 4
+   failures are all pre-existing conv-partitioner issues flagged
+   in memory prior to this work: `conv_3x3_same_pad` and
+   `conv_with_bias` fail in both trivial and partitioned;
+   `conv_3x3_no_pad` and `conv_1x1` fail only in partitioned (race
+   on a shared intermediate buffer the partitioner didn't prevent).
+   No new regressions from the rewrite.
+
+6. **Cache-line alignment**: enforce in partitioner (split granularity)
    and placer (slab start alignment). Verify with perf measurement.
 
 Each step is independently reviewable and reverts cleanly if a deeper

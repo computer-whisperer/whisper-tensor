@@ -1,26 +1,25 @@
 #![allow(clippy::all, dead_code, unreachable_patterns, unused)]
-//! Buffer layout, slot allocation, marshalling, and validation.
+//! Buffer layout, slot allocation, and validation.
 //!
 //! Defines [`SlotInfo`] and [`BufferLayout`] — the typed-region map a
-//! compiled span uses to find each atom's bytes inside the working
-//! buffer — plus [`compute_layout`], the liveness-aware slot allocator.
-//! Also home to [`EmbeddedTables`] (for `Explicit` InputRef lookup
-//! tables baked into the JIT buffer), the marshalling functions
-//! [`write_store_slice_to_buffer`] / [`read_buffer_to_output`], and
+//! compiled span uses to find each atom's bytes — plus [`compute_layout`],
+//! the liveness-aware slot allocator. Also home to [`EmbeddedTables`]
+//! (for `Explicit` InputRef lookup tables baked into the JIT) and
 //! [`validate_layout`].
 //!
-//! This module is **backend-agnostic**. Both `codegen.rs` (the
-//! Cranelift backend) and the new `x86_jit/` backend import from here.
-//! Phase 1.A is a pure mechanical extraction from `codegen.rs` — no
-//! behavioral changes. Phase 1.B rewrites [`SlotInfo`] to be
-//! bit-addressed; phases 2+ build the new x86_jit on top.
+//! Under the memory-placement rewrite, `compute_layout` consumes a global
+//! [`AtomPlacementMap`] from the placer: atoms the placer has already
+//! assigned to a buffer (input, output, intermediate, literal) are
+//! emitted verbatim; everything else lives in lane-private scratch via
+//! the per-span `FreeList` allocator. Each span's `BufferBases` table
+//! maps every `buffer_id` the span actually touches to a callee-saved
+//! GPR the prologue loads from the `buffer_ptrs` argument array.
 
 use std::collections::{HashMap, HashSet};
 
-use super::executor::{SpanOutput, StoreSlice};
+use super::placer::{AtomPlacementMap, INTERMEDIATE_BUFFER, LITERAL_BUFFER};
 use crate::nano_graph::{AtomGroup, AtomId, AtomRange, InputRef, NanoGraph, ScalarOp};
 use crate::numeric_dtype::NumericDType;
-use crate::numeric_scalar::{NumericScalarView, NumericScalarViewMut};
 
 // ─── Buffer layout types ────────────────────────────────────────────────────
 
@@ -111,16 +110,134 @@ impl SlotInfo {
     }
 }
 
+/// Per-span buffer-base register allocation.
+///
+/// The JIT dedicates `r14` (`BUFFER_PTRS_REG`) to holding the
+/// `buffer_ptrs` array pointer for the whole call, so any buffer's
+/// base is one indirect load away: `mov <scratch>, QWORD [r14 +
+/// id*8]`. For performance, the first few distinct buffer_ids a span
+/// touches get **persistent** callee-saved GPRs from
+/// [`BUFFER_BASE_REG_POOL`] — the prologue loads each once and the
+/// loop bodies address them directly. Buffer_ids beyond the fast
+/// pool are **overflow**: the orch layer's `materialize_buffer_base`
+/// helper emits a per-access load into a caller-chosen scratch
+/// register.
+///
+/// There is no hard upper bound on the number of buffer_ids a span
+/// may reference — the fast pool is a best-effort accelerator, not a
+/// correctness constraint.
+#[derive(Debug, Clone)]
+pub struct BufferBases {
+    /// `buffer_id_to_reg[buf_id as usize]` = `Some(reg_code)` when the
+    /// span has that `buffer_id` pinned to a fast-pool register,
+    /// `None` for overflow buffers (which still count as "seen" but
+    /// are fetched per-access via `[r14 + id*8]`). The vec is sized
+    /// to `max_buffer_id + 1`; entries outside the seen set are
+    /// `None` as well — callers must only query `buffer_id`s the
+    /// span actually touches.
+    buffer_id_to_reg: Vec<Option<u8>>,
+    /// Ordered `(buffer_id, reg_code)` list the prologue emits
+    /// `mov reg, [r14 + buf_id*8]` for — the fast-pool assignments
+    /// in slot-index order.
+    loads: Vec<(u8, u8)>,
+}
+
+/// Size of the fast-path buffer base pool. The first `MAX_BUFFER_BASES`
+/// distinct `buffer_id`s a span touches get persistent callee-saved
+/// GPRs; further buffers go through the overflow path.
+pub const MAX_BUFFER_BASES: usize = 4;
+
+/// Callee-saved GPR pool available to hold buffer base pointers.
+/// `r12, r15, rbx, rbp` — all callee-saved under System V AMD64 so
+/// they survive libm trampolines.
+pub const BUFFER_BASE_REG_POOL: [u8; MAX_BUFFER_BASES] = [12, 15, 3, 5];
+
+impl BufferBases {
+    /// Build a table from a sorted+deduped set of buffer_ids the span
+    /// actually uses. The first [`MAX_BUFFER_BASES`] entries land in
+    /// the fast pool; anything beyond is marked as overflow (its
+    /// `reg_for_opt` returns `None` so the orch layer knows to emit
+    /// a per-access load).
+    pub fn assign(buffer_ids: &[u8]) -> Result<Self, String> {
+        let max_id = buffer_ids.iter().copied().max().unwrap_or(0) as usize;
+        let mut buffer_id_to_reg = vec![None; max_id + 1];
+        let mut loads = Vec::with_capacity(buffer_ids.len().min(MAX_BUFFER_BASES));
+        for (slot_idx, &buf_id) in buffer_ids.iter().enumerate() {
+            if slot_idx < MAX_BUFFER_BASES {
+                let reg = BUFFER_BASE_REG_POOL[slot_idx];
+                buffer_id_to_reg[buf_id as usize] = Some(reg);
+                loads.push((buf_id, reg));
+            }
+            // Beyond the fast pool: buffer_id_to_reg stays None, the
+            // orch layer loads it on demand via r14.
+        }
+        Ok(BufferBases {
+            buffer_id_to_reg,
+            loads,
+        })
+    }
+
+    /// Empty table for spans that emit no body (zero-group graphs).
+    pub fn empty() -> Self {
+        BufferBases {
+            buffer_id_to_reg: Vec::new(),
+            loads: Vec::new(),
+        }
+    }
+
+    /// Look up the fast-pool GPR holding `buffer_id`'s base, if any.
+    /// Returns `None` for overflow buffers — callers must emit an
+    /// on-demand load via `[r14 + buffer_id*8]` in that case.
+    #[inline]
+    pub fn reg_for_opt(&self, buffer_id: u8) -> Option<u8> {
+        self.buffer_id_to_reg
+            .get(buffer_id as usize)
+            .copied()
+            .flatten()
+    }
+
+    /// Look up the fast-pool GPR holding `buffer_id`'s base. Panics
+    /// on overflow — this is the legacy API for call sites that
+    /// require fast-pool residence (e.g. the reduce inner k-loop,
+    /// which can't afford an overflow load per iteration). Such
+    /// call sites are responsible for handling the overflow case
+    /// upstream (typically by rejecting the span so the caller
+    /// falls back to pool_eval).
+    #[inline]
+    pub fn reg_for_fast(&self, buffer_id: u8) -> u8 {
+        self.reg_for_opt(buffer_id).unwrap_or_else(|| {
+            panic!(
+                "BufferBases::reg_for_fast({buffer_id}): buffer not in fast pool \
+                 (overflow buffer — callers that require fast-pool residence \
+                 must check reg_for_opt first). loads = {:?}",
+                self.loads
+            )
+        })
+    }
+
+    /// Ordered `(buffer_id, reg_code)` pairs the prologue loads into
+    /// the fast pool.
+    pub fn loads(&self) -> &[(u8, u8)] {
+        &self.loads
+    }
+}
+
 /// Memory layout for a compiled span.
 ///
-/// Maps each group output and input tensor to a `SlotInfo` in the working
-/// buffer. Computed with liveness-aware reuse: group output slots are freed
-/// when all downstream consumers have been emitted.
+/// Maps each atom in the span's graph to a `SlotInfo`. Slots whose
+/// `buffer_id` names a placer-owned buffer (input, output, intermediate,
+/// literal) carry the placer's offset verbatim; slots with
+/// `buffer_id == scratch_buffer_id` live in the lane's per-execute
+/// scratch arena at an offset the per-span `FreeList` chose.
 pub struct BufferLayout {
     /// All slots sorted by `atom_base` for binary-search lookup.
     slots: Vec<SlotInfo>,
-    /// Total buffer size in bytes (high-water mark of the allocator).
+    /// Scratch high-water mark in bytes. Lane scratch arenas are
+    /// sized to the max `total_bytes` across spans on the lane.
     pub total_bytes: usize,
+    /// Per-buffer-id → callee-saved register assignment, with the
+    /// ordered load list the prologue uses.
+    pub buffer_bases: BufferBases,
     /// Per-group use counts from liveness analysis. Groups with use_count=0
     /// are dead — their slots may be reused, so the JIT must NOT emit code
     /// for them (their writes would corrupt the new slot occupant).
@@ -142,6 +259,7 @@ impl BufferLayout {
         BufferLayout {
             slots: Vec::new(),
             total_bytes: 0,
+            buffer_bases: BufferBases::empty(),
             group_use_counts: Vec::new(),
             inlinable: Vec::new(),
             inlines_producer: Vec::new(),
@@ -168,40 +286,6 @@ impl BufferLayout {
     pub fn byte_offset_of(&self, atom: AtomId) -> Option<usize> {
         self.find(atom)
             .map(|(slot, idx)| slot.byte_offset() + idx as usize * slot.elem_bytes())
-    }
-
-    /// Write literal group values into the buffer.
-    pub fn populate_literals(
-        &self,
-        graph: &NanoGraph<'static, crate::pool::SystemPool>,
-        buffer: &mut [u8],
-    ) {
-        use crate::numeric_scalar::NumericScalar;
-        for group in graph.groups() {
-            match &group.op {
-                ScalarOp::Literal(scalar) => {
-                    if let Some((slot, _)) = self.find(group.base_id) {
-                        // Cast the literal to the slot's storage dtype, then write raw bytes.
-                        let stored = scalar.cast_to(slot.dtype);
-                        for i in 0..group.count {
-                            let off = slot.byte_offset() + i as usize * slot.elem_bytes();
-                            write_scalar(buffer, off, &stored);
-                        }
-                    }
-                }
-                ScalarOp::LiteralSpan(tensor) => {
-                    if let Some((slot, _)) = self.find(group.base_id) {
-                        for i in 0..group.count {
-                            let scalar = tensor.read_element(i as usize);
-                            let stored = scalar.cast_to(slot.dtype);
-                            let off = slot.byte_offset() + i as usize * slot.elem_bytes();
-                            write_scalar(buffer, off, &stored);
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
     }
 
     /// Write f32 input data into the buffer. Handles ranges spanning multiple slots.
@@ -353,21 +437,80 @@ fn align_up(v: usize, align: usize) -> usize {
 }
 // ─── Layout computation ─────────────────────────────────────────────────────
 
-/// Compute a liveness-aware buffer layout for a span's NanoGraph.
+/// Compute a slot layout for a span's NanoGraph, combining the placer's
+/// global assignments with per-span FreeList scratch.
 ///
-/// Groups/inputs whose atoms are accessed by stride-based InputRefs spanning
-/// multiple groups are coalesced into contiguous slabs (atom-ID-proportional
-/// offsets within the slab). This guarantees that stride arithmetic works.
-/// Other groups use liveness-based slot reuse for memory efficiency.
+/// Atoms the placer has already placed (input tensors, model outputs,
+/// cross-span intermediates, literals) are emitted verbatim with the
+/// `(buffer_id, byte_offset)` the placer chose. Everything else runs
+/// through the per-span `FreeList` allocator with
+/// `buffer_id = placement.scratch_buffer_id`, preserving liveness-aware
+/// reuse for span-local intermediates.
+///
+/// The returned layout's `total_bytes` is the scratch high-water mark
+/// for this span — the size the executor must hand this span as a
+/// scratch region at dispatch. Cross-span, input, output, and literal
+/// atoms contribute nothing to that number: they live in buffers the
+/// executor allocates once per execute call (or once per plan, in the
+/// literal case).
+///
+/// Slab coalescing for stride-compatible groups still runs, but only
+/// over **scratch** items. Cross-span atoms that need to share a slab
+/// have already been coalesced by the global placer.
 pub fn compute_layout(
     graph: &NanoGraph<'static, crate::pool::SystemPool>,
     output_ranges: &[AtomRange],
     allow_inline: bool,
-) -> BufferLayout {
+    placement: &AtomPlacementMap,
+) -> Result<BufferLayout, String> {
     let groups = graph.groups();
     let n = groups.len();
     let num_inputs = graph.input_tensors().len();
     let total_items = num_inputs + n; // inputs then groups
+
+    let scratch_buffer_id = placement.scratch_buffer_id;
+
+    // Does this span declare `(base..base+count)` as one of its outputs?
+    // Split fragments of a Split group overlap one output range each;
+    // Duplicate groups are only declared as outputs by lane 0's span.
+    let range_overlaps_outputs = |base_id: AtomId, count: u64| -> bool {
+        let g_lo = base_id.0;
+        let g_hi = g_lo + count;
+        output_ranges.iter().any(|r| {
+            let r_lo = r.base.0;
+            let r_hi = r_lo + r.count;
+            g_lo < r_hi && r_lo < g_hi
+        })
+    };
+
+    // Which items are scratch in THIS span? Input tensors are never
+    // scratch — the placer owns their layout unconditionally. A group
+    // is scratch iff it's not writing to a placer-owned slot, which
+    // means either (a) the placer has no entry for it, or (b) the
+    // placer has an entry but this span is not the canonical writer
+    // (Duplicate groups in non-canonical lanes recompute the value
+    // into their own scratch; only the canonical writer stores to
+    // the shared slot). A group is canonical-writer for its slot iff
+    // its atom range overlaps one of this span's output_ranges.
+    //
+    // Literal groups are always placer-owned and never scratch — the
+    // span never writes to them regardless of canonical-writer logic
+    // (the literal buffer is populated once at plan-build).
+    let mut item_is_scratch: Vec<bool> = vec![false; total_items];
+    for (gi, group) in groups.iter().enumerate() {
+        let placed = placement.byte_offset_of(group.base_id);
+        let is_literal = matches!(
+            &group.op,
+            ScalarOp::Literal(_) | ScalarOp::LiteralSpan(_)
+        );
+        let canonical_writer = range_overlaps_outputs(group.base_id, group.count);
+        let scratch = if is_literal {
+            false
+        } else {
+            !(placed.is_some() && canonical_writer)
+        };
+        item_is_scratch[num_inputs + gi] = scratch;
+    }
 
     // ── Step 1: Find contiguity constraints ──
     //
@@ -449,10 +592,21 @@ pub fn compute_layout(
         }
     };
 
+    // Slab coalescing only runs over scratch items. Placer-owned
+    // atoms have fixed offsets already (the global placer coalesced
+    // cross-span slabs during its pass) and can't be unioned into
+    // per-span slabs without conflict.
+    let only_scratch = |items: Vec<usize>| -> Vec<usize> {
+        items
+            .into_iter()
+            .filter(|&i| item_is_scratch[i])
+            .collect()
+    };
+
     for group in groups {
         for ir in &group.inputs {
             if let Some((lo, hi)) = input_ref_range(ir, group.count, group.atom_offset) {
-                let items = items_in_range(lo, hi);
+                let items = only_scratch(items_in_range(lo, hi));
                 if items.len() > 1 {
                     for i in 1..items.len() {
                         uf_union(&mut parent, items[0], items[i]);
@@ -482,7 +636,7 @@ pub fn compute_layout(
                     let endpoints = [first_i, first_i + end_off, last_i, last_i + end_off];
                     let lo = *endpoints.iter().min().unwrap() as u64;
                     let hi = *endpoints.iter().max().unwrap() as u64 + 1;
-                    let items = items_in_range(lo, hi);
+                    let items = only_scratch(items_in_range(lo, hi));
                     if items.len() > 1 {
                         for i in 1..items.len() {
                             uf_union(&mut parent, items[0], items[i]);
@@ -740,34 +894,29 @@ pub fn compute_layout(
         slabs[slab_idx].byte_offset
     }
 
-    // Input tensor slots.
-    for (ii, it) in graph.input_tensors().iter().enumerate() {
+    // Input tensor slots. The placer owns every input tensor's layout
+    // unconditionally, so we read the assigned (buffer_id, byte_offset)
+    // directly and skip the FreeList. Slab assignment from step 2
+    // cannot apply because `item_is_scratch` is `false` for every
+    // input item.
+    for it in graph.input_tensors().iter() {
         let elem_bytes = dtype_elem_bytes(it.dtype);
         let elem_bits_semantic = it.dtype.total_bits() as u64;
-        if let Some((slab_idx, off_in_slab)) = slab_assignment[ii] {
-            let slab_base = ensure_slab(&mut slabs, &mut slab_allocated, &mut allocator, slab_idx);
-            all_slots.push(SlotInfo {
-                atom_base: it.base_id,
-                count: it.count,
-                buffer_id: 0,
-                bit_offset: ((slab_base + off_in_slab) as u64) * 8,
-                bit_stride: (slabs[slab_idx].elem_bytes as u64) * 8,
-                elem_bits: elem_bits_semantic,
-                dtype: it.dtype,
-            });
-        } else {
-            let size = it.count as usize * elem_bytes;
-            let offset = allocator.alloc(size, elem_bytes);
-            all_slots.push(SlotInfo {
-                atom_base: it.base_id,
-                count: it.count,
-                buffer_id: 0,
-                bit_offset: (offset as u64) * 8,
-                bit_stride: (elem_bytes as u64) * 8,
-                elem_bits: elem_bits_semantic,
-                dtype: it.dtype,
-            });
-        }
+        let (buf_id, byte_off) = placement.byte_offset_of(it.base_id).ok_or_else(|| {
+            format!(
+                "compute_layout: input tensor base={} not in placement map",
+                it.base_id.0
+            )
+        })?;
+        all_slots.push(SlotInfo {
+            atom_base: it.base_id,
+            count: it.count,
+            buffer_id: buf_id.0,
+            bit_offset: byte_off * 8,
+            bit_stride: (elem_bytes as u64) * 8,
+            elem_bits: elem_bits_semantic,
+            dtype: it.dtype,
+        });
     }
 
     // Group slots.
@@ -787,12 +936,39 @@ pub fn compute_layout(
         let item_idx = num_inputs + gi;
         let slot_idx = all_slots.len();
 
-        if let Some((slab_idx, off_in_slab)) = slab_assignment[item_idx] {
+        // Three cases:
+        // 1. Placer owns this atom AND we're the canonical writer for it
+        //    (or it's a Literal, which is always placer-owned without a
+        //    canonical-writer check). Use the placer's (buf_id, byte_off)
+        //    verbatim; skip the FreeList. Slab assignment cannot apply —
+        //    `item_is_scratch` was false so it was excluded from union-find.
+        // 2. Span-local, slab-coalesced: FreeList-allocated via the slab,
+        //    scratch buffer_id.
+        // 3. Span-local, standalone (including non-canonical writers of
+        //    placer-owned duplicate groups): FreeList-allocated directly,
+        //    scratch buffer_id.
+        let placer_slot = if !item_is_scratch[item_idx] {
+            placement.byte_offset_of(group.base_id)
+        } else {
+            None
+        };
+
+        if let Some((buf_id, byte_off)) = placer_slot {
+            all_slots.push(SlotInfo {
+                atom_base: group.base_id,
+                count: group.count,
+                buffer_id: buf_id.0,
+                bit_offset: byte_off * 8,
+                bit_stride: (elem_bytes as u64) * 8,
+                elem_bits: elem_bits_semantic,
+                dtype: group.output_dtype,
+            });
+        } else if let Some((slab_idx, off_in_slab)) = slab_assignment[item_idx] {
             let slab_base = ensure_slab(&mut slabs, &mut slab_allocated, &mut allocator, slab_idx);
             all_slots.push(SlotInfo {
                 atom_base: group.base_id,
                 count: group.count,
-                buffer_id: 0,
+                buffer_id: scratch_buffer_id,
                 bit_offset: ((slab_base + off_in_slab) as u64) * 8,
                 bit_stride: (slabs[slab_idx].elem_bytes as u64) * 8,
                 elem_bits: elem_bits_semantic,
@@ -804,7 +980,7 @@ pub fn compute_layout(
             all_slots.push(SlotInfo {
                 atom_base: group.base_id,
                 count: group.count,
-                buffer_id: 0,
+                buffer_id: scratch_buffer_id,
                 bit_offset: (offset as u64) * 8,
                 bit_stride: (elem_bytes as u64) * 8,
                 elem_bits: elem_bits_semantic,
@@ -838,157 +1014,42 @@ pub fn compute_layout(
 
     all_slots.sort_by_key(|s| s.atom_base.0);
 
-    BufferLayout {
+    // Build the per-span BufferBases table from the distinct buffer_ids
+    // the slots actually use.
+    //
+    // If this span contains any `Literal`/`LiteralSpan` group whose
+    // primary slot is a non-literal buffer (Pad-style: the literal's
+    // atoms overlap a model output range), the JIT emits an ordinary
+    // copy from the literal buffer to that slot and needs
+    // `LITERAL_BUFFER` in the used-set. The prologue will place it
+    // in the fast pool if there's room, or the orch layer will fetch
+    // it via the overflow path at each copy iteration.
+    let mut used_ids: Vec<u8> = all_slots.iter().map(|s| s.buffer_id).collect();
+    let needs_literal_base = groups.iter().any(|g| {
+        if !matches!(&g.op, ScalarOp::Literal(_) | ScalarOp::LiteralSpan(_)) {
+            return false;
+        }
+        match placement.byte_offset_of(g.base_id) {
+            Some((buf, _)) => buf != LITERAL_BUFFER,
+            None => false,
+        }
+    });
+    if needs_literal_base {
+        used_ids.push(LITERAL_BUFFER.0);
+    }
+    used_ids.sort_unstable();
+    used_ids.dedup();
+    let buffer_bases = BufferBases::assign(&used_ids)?;
+
+    Ok(BufferLayout {
         total_bytes: allocator.watermark,
         slots: all_slots,
+        buffer_bases,
         group_use_counts: use_counts,
         inlinable,
         inlines_producer,
-    }
+    })
 }
-pub(crate) fn write_store_slice_to_buffer(
-    slice: &StoreSlice<'_>,
-    layout: &BufferLayout,
-    buffer: &mut [u8],
-) {
-    let mut written: u64 = 0;
-    let mut atom = slice.base.0;
-    let total = slice.count;
-
-    while written < total {
-        let Some((slot, elem_start)) = layout.find(AtomId(atom)) else {
-            written += 1;
-            atom += 1;
-            continue;
-        };
-        let available = slot.count - elem_start;
-        let to_write = available.min(total - written);
-
-        // Fast path: byte-natural source AND byte-aligned destination AND
-        // matching dtype → direct memcpy. Phase 1 destinations are always
-        // byte-aligned and most sources are byte-natural, so this fires
-        // for the conventional case.
-        let elem_bytes = slice.dtype.bytes_per_element();
-        if slot.dtype == slice.dtype && slice.is_byte_natural() && slot.is_byte_aligned() {
-            let src_byte_start = slice.src_byte_offset() + (written as usize) * elem_bytes;
-            let src_byte_end = src_byte_start + (to_write as usize) * elem_bytes;
-            let dst_byte_start = slot.byte_offset() + (elem_start as usize) * slot.elem_bytes();
-            let dst_byte_end = dst_byte_start + (to_write as usize) * slot.elem_bytes();
-            if src_byte_end <= slice.data.len() && dst_byte_end <= buffer.len() {
-                buffer[dst_byte_start..dst_byte_end]
-                    .copy_from_slice(&slice.data[src_byte_start..src_byte_end]);
-            }
-        } else {
-            // General path: per-element via NumericScalarView. Handles
-            // bit-strided sources (sub-byte dtype, non-zero offset_bits)
-            // and dtype conversion.
-            for i in 0..to_write {
-                let src_bit = slice.src_bit_offset + (written + i) * slice.src_bit_stride;
-                let src_view = NumericScalarView {
-                    data: slice.data,
-                    bit_offset: src_bit as usize,
-                    dtype: slice.dtype,
-                };
-                let scalar = src_view.to_owned_scalar();
-                let converted = if slot.dtype == slice.dtype {
-                    scalar
-                } else {
-                    scalar.cast_to(slot.dtype)
-                };
-
-                let dst_bit = slot.bit_offset + (elem_start + i) * slot.bit_stride;
-                if slot.is_byte_aligned() {
-                    let dst_off = (dst_bit / 8) as usize;
-                    if dst_off + slot.elem_bytes() <= buffer.len() {
-                        write_scalar(buffer, dst_off, &converted);
-                    }
-                } else {
-                    // Bit-aligned destination (phase 6); use the bit-aware
-                    // write path. Caller bears the responsibility of
-                    // ensuring the buffer is large enough.
-                    let mut view = NumericScalarViewMut {
-                        data: buffer,
-                        bit_offset: dst_bit as usize,
-                        dtype: slot.dtype,
-                    };
-                    view.write_scalar(&converted);
-                }
-            }
-        }
-
-        written += to_write;
-        atom += to_write;
-    }
-}
-
-/// Read output range from buffer into a SpanOutput.
-pub(crate) fn read_buffer_to_output(
-    range: &AtomRange,
-    layout: &BufferLayout,
-    buffer: &[u8],
-    out: &mut SpanOutput<'_>,
-) {
-    let elem_bytes = range.dtype.bytes_per_element();
-    let mut read: u64 = 0;
-    let mut atom = range.base.0;
-    let total = range.count;
-
-    while read < total {
-        let Some((slot, elem_start)) = layout.find(AtomId(atom)) else {
-            // Gap: write zeros.
-            let dst_off = (read as usize) * elem_bytes;
-            if dst_off + elem_bytes <= out.data.len() {
-                for b in &mut out.data[dst_off..dst_off + elem_bytes] {
-                    *b = 0;
-                }
-            }
-            read += 1;
-            atom += 1;
-            continue;
-        };
-
-        let available = slot.count - elem_start;
-        let to_read = available.min(total - read);
-
-        // Fast path: matching dtype AND byte-aligned slot AND
-        // byte-natural slot stride → direct memcpy. SpanOutput is always
-        // byte-natural by construction.
-        if slot.dtype == range.dtype && slot.is_byte_aligned() {
-            let src_byte_start = slot.byte_offset() + (elem_start as usize) * slot.elem_bytes();
-            let src_byte_end = src_byte_start + (to_read as usize) * slot.elem_bytes();
-            let dst_byte_start = (read as usize) * elem_bytes;
-            let dst_byte_end = dst_byte_start + (to_read as usize) * elem_bytes;
-            if src_byte_end <= buffer.len() && dst_byte_end <= out.data.len() {
-                out.data[dst_byte_start..dst_byte_end]
-                    .copy_from_slice(&buffer[src_byte_start..src_byte_end]);
-            }
-        } else {
-            // General path: per-element via NumericScalarView.
-            for i in 0..to_read {
-                let src_bit = slot.bit_offset + (elem_start + i) * slot.bit_stride;
-                let src_view = NumericScalarView {
-                    data: buffer,
-                    bit_offset: src_bit as usize,
-                    dtype: slot.dtype,
-                };
-                let scalar = src_view.to_owned_scalar();
-                let converted = if slot.dtype == range.dtype {
-                    scalar
-                } else {
-                    scalar.cast_to(range.dtype)
-                };
-                let dst_off = ((read + i) as usize) * elem_bytes;
-                if dst_off + elem_bytes <= out.data.len() {
-                    write_scalar(&mut out.data[..], dst_off, &converted);
-                }
-            }
-        }
-
-        read += to_read;
-        atom += to_read;
-    }
-}
-
 /// Read a NumericScalar from raw bytes in a given dtype.
 fn read_scalar_raw(data: &[u8], dtype: NumericDType) -> crate::numeric_scalar::NumericScalar {
     let n = dtype.bytes_per_element();
@@ -1219,16 +1280,41 @@ pub(crate) fn op_name_short(op: &ScalarOp) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::compiler::attempts::v14::placer::run_placer;
+    use crate::compiler::attempts::v14::types::{Phase, Span};
     use crate::graph::GlobalId;
     use crate::nano_graph::ops::ScalarOp;
     use crate::numeric_scalar::NumericScalar;
+
+    /// Build a trivial placement (one phase, one span containing the
+    /// whole graph) so compute_layout can run in unit tests.
+    pub(crate) fn test_placement(
+        graph: &NanoGraph<'static, crate::pool::SystemPool>,
+        outputs: &[AtomRange],
+    ) -> AtomPlacementMap {
+        let span_inputs: Vec<AtomRange> = graph
+            .input_tensors()
+            .iter()
+            .map(|it| AtomRange {
+                base: it.base_id,
+                count: it.count,
+                dtype: it.dtype,
+            })
+            .collect();
+        let phases = vec![Phase {
+            spans: vec![Span {
+                graph: graph.clone(),
+                inputs: span_inputs,
+                outputs: outputs.to_vec(),
+            }],
+        }];
+        run_placer(graph, &phases, outputs).expect("placer failed in test helper")
+    }
 
     // ─── SlotInfo helper invariants ─────────────────────────────────────────
 
     #[test]
     fn slot_info_helpers_byte_aligned_native_dtypes() {
-        // Phase 1 invariant: every slot compute_layout produces is
-        // byte-aligned and the helpers return the byte view directly.
         for dtype in [
             NumericDType::F32,
             NumericDType::F64,
@@ -1257,7 +1343,6 @@ mod tests {
 
     #[test]
     fn slot_info_bool_semantic_vs_padded_widths() {
-        // Bool: elem_bits=1 (semantic) but bit_stride=8 (phase 1 byte-padded).
         let slot = SlotInfo {
             atom_base: AtomId(7),
             count: 3,
@@ -1276,10 +1361,6 @@ mod tests {
 
     #[test]
     fn slot_info_bit_packed_phase6_shape() {
-        // Phase 6 will allow bit-packed slots: bit_stride == elem_bits.
-        // is_byte_aligned() returns false because the stride isn't a
-        // multiple of 8. Phase 1 doesn't produce these but the helper
-        // shape is forward-compatible.
         let slot = SlotInfo {
             atom_base: AtomId(0),
             count: 16,
@@ -1296,9 +1377,6 @@ mod tests {
 
     #[test]
     fn compute_layout_bool_input_slot_shape() {
-        // A graph with a Bool input + an Identity group consuming it.
-        // Phase 1 produces byte-padded Bool slots:
-        //   bit_stride = 8, elem_bits = 1.
         let mut g = NanoGraph::new();
         let bool_input = g.add_input_tensor(GlobalId(0), 5, NumericDType::BOOL);
         let identity = g.push_group(
@@ -1313,253 +1391,18 @@ mod tests {
             count: 5,
             dtype: NumericDType::BOOL,
         }];
-        let layout = compute_layout(&g, &outputs, true);
+        let placement = test_placement(&g, &outputs);
+        let layout = compute_layout(&g, &outputs, true, &placement).expect("layout");
 
         let (input_slot, _) = layout.find(bool_input).expect("bool input slot present");
         assert_eq!(input_slot.dtype, NumericDType::BOOL);
-        assert_eq!(input_slot.elem_bits, 1, "Bool semantic width is 1 bit");
-        assert_eq!(input_slot.bit_stride, 8, "phase 1 pads sub-byte to a byte");
+        assert_eq!(input_slot.elem_bits, 1);
+        assert_eq!(input_slot.bit_stride, 8);
         assert!(input_slot.is_byte_aligned());
 
         let (out_slot, _) = layout.find(identity).expect("identity slot present");
         assert_eq!(out_slot.dtype, NumericDType::BOOL);
         assert_eq!(out_slot.elem_bits, 1);
         assert_eq!(out_slot.bit_stride, 8);
-    }
-
-    // ─── populate_literals for a sub-byte dtype ─────────────────────────────
-
-    #[test]
-    fn populate_literals_bool_writes_byte_padded() {
-        // A graph with a Bool literal scalar — populate_literals should
-        // write a single 0x01 byte at the slot's byte offset.
-        let mut g = NanoGraph::new();
-        let lit = g.push_group(
-            1,
-            NumericDType::BOOL,
-            ScalarOp::Literal(NumericScalar::from_bool(true)),
-            vec![],
-            vec![],
-        );
-        let outputs = vec![AtomRange {
-            base: lit,
-            count: 1,
-            dtype: NumericDType::BOOL,
-        }];
-        let layout = compute_layout(&g, &outputs, true);
-
-        let mut buffer = vec![0u8; layout.total_bytes];
-        layout.populate_literals(&g, &mut buffer);
-
-        let (slot, _) = layout.find(lit).expect("literal slot present");
-        assert_eq!(slot.elem_bytes(), 1);
-        let byte = buffer[slot.byte_offset()];
-        assert_eq!(byte, 1, "Bool true literal stored as 0x01");
-
-        // Round-trip via read_buffer_to_output: extract back into a
-        // SpanOutput and confirm we read 1 byte = 1 (true).
-        let mut out_data = vec![0u8; 1];
-        let mut out = SpanOutput {
-            data: &mut out_data,
-            dtype: NumericDType::BOOL,
-            count: 1,
-        };
-        read_buffer_to_output(&outputs[0], &layout, &buffer, &mut out);
-        assert_eq!(out_data[0], 1);
-    }
-
-    // ─── Bit-strided source round-trip via marshalling ──────────────────────
-
-    /// Drive a `StoreSlice` whose `data` is a bit-packed source buffer
-    /// (1-bit Bool elements at consecutive bit positions, no byte padding)
-    /// through `write_store_slice_to_buffer`, then read it back via
-    /// `read_buffer_to_output`. The destination slot is byte-padded as
-    /// always in phase 1, so the round-trip exercises the bit-aware read
-    /// path on the source side.
-    #[test]
-    fn bit_strided_source_round_trip_bool_packed() {
-        let mut g = NanoGraph::new();
-        let inp = g.add_input_tensor(GlobalId(0), 9, NumericDType::BOOL);
-        // Identity group so the input has a slot in the layout.
-        let out = g.push_group(
-            9,
-            NumericDType::BOOL,
-            ScalarOp::Identity,
-            vec![],
-            vec![InputRef::affine(inp, 1)],
-        );
-        let outputs = vec![AtomRange {
-            base: out,
-            count: 9,
-            dtype: NumericDType::BOOL,
-        }];
-        let layout = compute_layout(&g, &outputs, true);
-
-        // Source: 9 Bool values packed at 1 bit per element starting at
-        // bit offset 3 (so element 0 lives at bit position 3 within byte 0).
-        // Pattern: 1, 0, 1, 0, 1, 1, 0, 0, 1
-        let src_pattern: [bool; 9] = [true, false, true, false, true, true, false, false, true];
-        // Encode the pattern starting at bit_offset=3 in a 3-byte buffer.
-        let mut packed = vec![0u8; 3];
-        for (i, &bit) in src_pattern.iter().enumerate() {
-            if bit {
-                let bit_pos = 3 + i;
-                let byte = bit_pos / 8;
-                let in_byte = bit_pos % 8;
-                packed[byte] |= 1 << in_byte;
-            }
-        }
-
-        let slice = StoreSlice {
-            base: inp,
-            data: &packed,
-            dtype: NumericDType::BOOL,
-            count: 9,
-            src_bit_offset: 3,
-            src_bit_stride: 1, // bit-packed, no byte padding
-        };
-        assert!(
-            !slice.is_byte_natural(),
-            "bit-packed source must take the slow path"
-        );
-
-        let mut buffer = vec![0u8; layout.total_bytes];
-        write_store_slice_to_buffer(&slice, &layout, &mut buffer);
-
-        // Now extract the input slot's bytes — phase 1 pads Bool to one
-        // byte per element, so we should see 0x00 / 0x01 per element in
-        // the layout's byte-padded format.
-        let (input_slot, _) = layout.find(inp).expect("bool input slot");
-        for (i, &expected) in src_pattern.iter().enumerate() {
-            let off = input_slot.byte_offset() + i * input_slot.elem_bytes();
-            let got = buffer[off];
-            assert_eq!(
-                got, expected as u8,
-                "element {i}: byte-padded bool expected {expected}, got 0x{got:02x}"
-            );
-        }
-
-        // Round-trip out via the identity group's output range. The
-        // identity copy is a no-op layout-wise (input == output) so the
-        // output bytes should match the input bytes.
-        //
-        // We can't actually run the JIT here (no compiler in this test),
-        // but we can directly read the input slot via read_buffer_to_output
-        // pointed at the input range. That exercises the byte-fast path
-        // on the read side and confirms the round-trip is bit-equal.
-        let input_range = AtomRange {
-            base: inp,
-            count: 9,
-            dtype: NumericDType::BOOL,
-        };
-        let mut out_data = vec![0u8; 9];
-        let mut out = SpanOutput {
-            data: &mut out_data,
-            dtype: NumericDType::BOOL,
-            count: 9,
-        };
-        read_buffer_to_output(&input_range, &layout, &buffer, &mut out);
-        for (i, &expected) in src_pattern.iter().enumerate() {
-            assert_eq!(out_data[i], expected as u8, "round-trip element {i}");
-        }
-    }
-
-    /// Bit-strided source with a non-zero `src_bit_offset` and a
-    /// byte-natural stride (= 8 for Bool). This is the "offset_bits != 0"
-    /// case from `TensorLayout::ElementStrided`. The source byte buffer
-    /// has 3 unrelated bytes of padding before element 0.
-    #[test]
-    fn bit_strided_source_offset_bits_byte_stride() {
-        let mut g = NanoGraph::new();
-        let inp = g.add_input_tensor(GlobalId(0), 4, NumericDType::U8);
-        let _ident = g.push_group(
-            4,
-            NumericDType::U8,
-            ScalarOp::Identity,
-            vec![],
-            vec![InputRef::affine(inp, 1)],
-        );
-        let outputs = vec![AtomRange {
-            base: inp,
-            count: 4,
-            dtype: NumericDType::U8,
-        }];
-        let layout = compute_layout(&g, &outputs, true);
-
-        // Source data: 3 bytes of padding (0xff each), then the actual U8
-        // values [10, 20, 30, 40]. src_bit_offset = 24 (3 bytes).
-        let src_data: Vec<u8> = vec![0xff, 0xff, 0xff, 10, 20, 30, 40];
-        let slice = StoreSlice {
-            base: inp,
-            data: &src_data,
-            dtype: NumericDType::U8,
-            count: 4,
-            src_bit_offset: 24, // byte-aligned but non-zero
-            src_bit_stride: 8,  // U8 byte-natural
-        };
-        // Both fields are byte-multiples, so the source IS byte-natural and
-        // the fast path memcpy handles the offset via `src_byte_offset()`.
-        // This test exercises the offset arithmetic on the fast path.
-        assert!(slice.is_byte_natural());
-        assert_eq!(slice.src_byte_offset(), 3);
-
-        let mut buffer = vec![0u8; layout.total_bytes];
-        write_store_slice_to_buffer(&slice, &layout, &mut buffer);
-
-        let (input_slot, _) = layout.find(inp).expect("u8 input slot");
-        for (i, &expected) in [10u8, 20, 30, 40].iter().enumerate() {
-            let off = input_slot.byte_offset() + i * input_slot.elem_bytes();
-            assert_eq!(buffer[off], expected, "element {i}");
-        }
-    }
-
-    /// Symmetric case: byte-natural source (the conventional executor
-    /// gather output) takes the memcpy fast path. This is what every
-    /// existing test exercises and serves as a baseline.
-    #[test]
-    fn byte_natural_source_round_trip_f32() {
-        let mut g = NanoGraph::new();
-        let inp = g.add_input_tensor(GlobalId(0), 4, NumericDType::F32);
-        let _ident = g.push_group(
-            4,
-            NumericDType::F32,
-            ScalarOp::Identity,
-            vec![],
-            vec![InputRef::affine(inp, 1)],
-        );
-        let outputs = vec![AtomRange {
-            base: inp,
-            count: 4,
-            dtype: NumericDType::F32,
-        }];
-        let layout = compute_layout(&g, &outputs, true);
-
-        let values = [1.5f32, -2.5, 3.0, 4.25];
-        let bytes: Vec<u8> = values.iter().flat_map(|f| f.to_le_bytes()).collect();
-        let slice = StoreSlice {
-            base: inp,
-            data: &bytes,
-            dtype: NumericDType::F32,
-            count: 4,
-            src_bit_offset: 0,
-            src_bit_stride: 32,
-        };
-        assert!(slice.is_byte_natural());
-
-        let mut buffer = vec![0u8; layout.total_bytes];
-        write_store_slice_to_buffer(&slice, &layout, &mut buffer);
-
-        let mut out_data = vec![0u8; 16];
-        let mut out = SpanOutput {
-            data: &mut out_data,
-            dtype: NumericDType::F32,
-            count: 4,
-        };
-        read_buffer_to_output(&outputs[0], &layout, &buffer, &mut out);
-        let recovered: Vec<f32> = out_data
-            .chunks_exact(4)
-            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-            .collect();
-        assert_eq!(recovered, values);
     }
 }

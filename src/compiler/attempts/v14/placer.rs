@@ -42,7 +42,7 @@ use super::types::Phase;
 
 // ─── Public types ─────────────────────────────────────────────────────
 
-/// Which buffer a cross-span atom lives in under the new design.
+/// Which buffer an atom lives in under the new design.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BufferKind {
     /// Model input — one dedicated buffer per input tensor, identified
@@ -52,17 +52,29 @@ pub enum BufferKind {
     Output,
     /// Cross-span working data — lives in the shared intermediate buffer.
     Intermediate,
-    /// Span-local — not placed by the global pass. Per-span codegen
-    /// handles it via its own scratch arena.
+    /// Plan-wide immutable literal data. One buffer per plan, holds
+    /// every `Literal` / `LiteralSpan` group's bytes.
+    Literal,
+    /// Per-lane scratch — not placed by the global pass. Every span's
+    /// per-lane scratch shares the same `scratch_buffer_id`; each
+    /// lane's arena lives at a distinct pointer the executor patches
+    /// in at dispatch time.
     Scratch,
 }
 
 /// Opaque buffer identifier. Stable within one `AtomPlacementMap`.
+///
+/// u8 is wide enough for every realistic model (dozens of buffers max)
+/// and the value is used directly as an index into the `buffer_ptrs`
+/// array the JIT receives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct BufferId(pub u32);
+pub struct BufferId(pub u8);
 
 /// The shared intermediate buffer always has id 0.
 pub const INTERMEDIATE_BUFFER: BufferId = BufferId(0);
+
+/// The plan-wide literal buffer always has id 1.
+pub const LITERAL_BUFFER: BufferId = BufferId(1);
 
 /// Per-buffer metadata the executor needs at allocation time.
 #[derive(Debug, Clone)]
@@ -96,10 +108,30 @@ pub struct AtomPlacementMap {
     entries: Vec<PlacementEntry>,
     /// Per-buffer metadata.
     pub buffers: Vec<BufferInfo>,
+    /// Global scratch buffer_id. Not a real entry in `buffers` — it is
+    /// the first id above every input/output/intermediate/literal
+    /// buffer. Per-lane scratch arenas all share this id; each lane's
+    /// distinct pointer is patched into `buffer_ptrs[scratch_buffer_id]`
+    /// at dispatch time.
+    pub scratch_buffer_id: u8,
     /// Peak live byte footprint in the intermediate buffer during
     /// interval packing. The intermediate buffer is sized to this
     /// high-water mark.
     pub intermediate_peak_bytes: u64,
+    /// Total bytes the plan-wide literal buffer needs. The executor
+    /// allocates this `Box<[u8]>` at plan-build time and walks the
+    /// main graph once to populate it from `Literal`/`LiteralSpan`
+    /// group bytes.
+    pub literal_buffer_size: u64,
+    /// Per-literal-group byte offset in the literal buffer where that
+    /// group's source bytes live. **Every** `Literal`/`LiteralSpan`
+    /// group has an entry here — including groups whose primary
+    /// placement is an output buffer (because their atoms overlap a
+    /// model output range). The executor reads from here when
+    /// populating the literal buffer at plan-build; the JIT reads from
+    /// here when it needs to emit a copy from the literal buffer to a
+    /// non-literal destination. Keyed by the group's `base_id`.
+    pub literal_sources: HashMap<AtomId, u64>,
     /// Number of coalescing slabs the placer built for the intermediate
     /// buffer.
     pub intermediate_slab_count: usize,
@@ -145,6 +177,13 @@ impl AtomPlacementMap {
         Some((e.buffer_id, off))
     }
 
+    /// The placement entries (read-only). Callers that need to walk
+    /// every entry — e.g. to reverse-map `buffer_id → atom_base` —
+    /// use this accessor.
+    pub fn entries(&self) -> &[PlacementEntry] {
+        &self.entries
+    }
+
     /// Print a human-readable summary to stderr. Useful under
     /// `WT_PRINT_PLACEMENT=1`.
     pub fn print_summary(&self) {
@@ -180,6 +219,12 @@ impl AtomPlacementMap {
             self.intermediate_peak_bytes,
             self.intermediate_peak_bytes as f64 / (1024.0 * 1024.0),
         );
+        eprintln!(
+            "    literal buffer:           {} bytes ({:.1} MB)",
+            self.literal_buffer_size,
+            self.literal_buffer_size as f64 / (1024.0 * 1024.0),
+        );
+        eprintln!("    scratch buffer_id:        {}", self.scratch_buffer_id);
         eprintln!("  placement entries:          {}", self.entries.len());
         eprintln!(
             "  intermediate slabs:         {}",
@@ -277,19 +322,37 @@ pub fn run_placer(
     phases: &[Phase],
     all_output_atom_ranges: &[AtomRange],
 ) -> Result<AtomPlacementMap, String> {
+    use crate::nano_graph::ops::ScalarOp;
+
     let groups = main_graph.groups();
     let input_tensors = main_graph.input_tensors();
 
     // ── Step 1: classify every group by buffer kind ──
     //
-    // Input tensors always go in their own buffers. Groups are
-    // partitioned into Output / Intermediate / Scratch based on where
-    // they appear in the phase structure.
+    // Literal/LiteralSpan groups always go in the plan-wide literal
+    // buffer regardless of their phase position. Output groups (those
+    // that overlap a model output range) go in output buffers.
+    // Everything else starts as Scratch and may be promoted to
+    // Intermediate in step 2 if it flows across spans. Input tensors
+    // always go in their own buffers.
 
     let mut group_kind = vec![BufferKind::Scratch; groups.len()];
 
+    // Literal groups take precedence — they're immutable plan data,
+    // unaffected by phase structure.
+    for (gi, g) in groups.iter().enumerate() {
+        if matches!(&g.op, ScalarOp::Literal(_) | ScalarOp::LiteralSpan(_)) {
+            group_kind[gi] = BufferKind::Literal;
+        }
+    }
+
     // Mark output groups. A model output range may straddle multiple
-    // groups (Pad-style lowering); every such group is Output.
+    // groups (Pad-style lowering); every such group is Output. If a
+    // Literal group overlaps an output range (test-only pattern: a
+    // graph that constant-folds an output), keep it as Output so the
+    // JIT emits stores for it into the output buffer on every execute
+    // — literals written to the literal buffer are immutable and
+    // can't be routed into a per-execute output allocation.
     let mut group_output_range: Vec<Option<usize>> = vec![None; groups.len()];
     for (oi, range) in all_output_atom_ranges.iter().enumerate() {
         let r_lo = range.base.0;
@@ -311,7 +374,9 @@ pub fn run_placer(
     }
 
     // Mark intermediate groups. A group that appears in any span's
-    // outputs flows between spans. Skip if already marked Output.
+    // outputs flows between spans. Skip if already marked Output or
+    // Literal (Literal groups live in the plan-wide literal buffer
+    // regardless of phase position).
     //
     // Also track `declaring_phases[gi]` for diagnostics so we can see
     // which groups got marked Intermediate and why — this is the
@@ -666,12 +731,59 @@ pub fn run_placer(
         peak = peak.max(watermark);
     }
 
-    // ── Step 6: build the placement map entries ──
+    // ── Step 6: build literal buffer layout ──
+    //
+    // Every `Literal`/`LiteralSpan` group — regardless of its final
+    // classification — gets a slot in the plan-wide literal buffer at
+    // a sequential offset aligned to its element size. The buffer is
+    // immutable at runtime: the executor pre-populates it at
+    // plan-build and links it in as a read-only source on every
+    // execute call. Literal groups whose atoms overlap a model output
+    // range were promoted to `BufferKind::Output` in step 1, but we
+    // still reserve them a literal-buffer slot here so the JIT can
+    // emit a normal copy from the literal buffer to the output buffer
+    // (with no execute-time literal-handling logic). Groups whose
+    // classification stayed `Literal` use the literal-buffer slot as
+    // their primary placement entry; Output-classified literal groups
+    // stash the offset in `literal_sources` and keep their primary
+    // entry in the output buffer (emitted in the output-entry loop
+    // below).
+    let mut literal_offsets: Vec<Option<u64>> = vec![None; groups.len()];
+    let mut literal_sources: HashMap<AtomId, u64> = HashMap::new();
+    let mut literal_watermark: u64 = 0;
+    for (gi, g) in groups.iter().enumerate() {
+        let is_literal_op = matches!(&g.op, ScalarOp::Literal(_) | ScalarOp::LiteralSpan(_));
+        if !is_literal_op {
+            continue;
+        }
+        let eb = g.output_dtype.bytes_per_element() as u64;
+        let aligned = align_up(literal_watermark, eb.max(1));
+        literal_watermark = aligned + g.count * eb;
+        literal_sources.insert(g.base_id, aligned);
+        if group_kind[gi] == BufferKind::Literal {
+            literal_offsets[gi] = Some(aligned);
+        }
+    }
+    let literal_buffer_size = literal_watermark;
+
+    // ── Step 7: build the placement map entries ──
+    //
+    // Buffer id assignment is u8-bounded:
+    //   0       = intermediate
+    //   1       = literal
+    //   2..M    = inputs (one per input tensor)
+    //   M..N    = outputs (one per output range)
+    //   N       = scratch_buffer_id (not a real BufferInfo entry)
+    //
+    // We check u8 overflow before finalizing.
+    let next_id = |count: usize, what: &str| -> Result<u8, String> {
+        u8::try_from(count).map_err(|_| format!("placer: {what} exceeds u8 buffer id range"))
+    };
 
     let mut entries: Vec<PlacementEntry> = Vec::new();
     let mut buffers: Vec<BufferInfo> = Vec::new();
 
-    // Buffer id assignment: intermediate = 0, inputs next, outputs next.
+    // Slot 0: intermediate.
     buffers.push(BufferInfo {
         id: INTERMEDIATE_BUFFER,
         kind: BufferKind::Intermediate,
@@ -679,10 +791,17 @@ pub fn run_placer(
         name: "intermediate".to_string(),
     });
 
-    // Input buffers — one per input tensor, in input_tensors() order.
-    let input_buffer_base = 1u32;
+    // Slot 1: literal.
+    buffers.push(BufferInfo {
+        id: LITERAL_BUFFER,
+        kind: BufferKind::Literal,
+        size_bytes: literal_buffer_size,
+        name: "literal".to_string(),
+    });
+
+    // Input buffers.
     for (ii, it) in input_tensors.iter().enumerate() {
-        let bid = BufferId(input_buffer_base + ii as u32);
+        let bid = BufferId(next_id(buffers.len(), "buffers (input)")?);
         let size = it.count * it.dtype.bytes_per_element() as u64;
         buffers.push(BufferInfo {
             id: bid,
@@ -699,10 +818,9 @@ pub fn run_placer(
         });
     }
 
-    // Output buffers — one per output atom range, in declaration order.
-    let output_buffer_base = input_buffer_base + input_tensors.len() as u32;
+    // Output buffers.
     for (oi, range) in all_output_atom_ranges.iter().enumerate() {
-        let bid = BufferId(output_buffer_base + oi as u32);
+        let bid = BufferId(next_id(buffers.len(), "buffers (output)")?);
         let size = range.count * range.dtype.bytes_per_element() as u64;
         buffers.push(BufferInfo {
             id: bid,
@@ -717,6 +835,23 @@ pub fn run_placer(
             buffer_id: bid,
             byte_offset: 0,
         });
+    }
+
+    // scratch_buffer_id sits above every real buffer.
+    let scratch_buffer_id = next_id(buffers.len(), "buffers (scratch slot)")?;
+
+    // Literal entries.
+    for (gi, offset_opt) in literal_offsets.iter().enumerate() {
+        if let Some(offset) = *offset_opt {
+            let g = &groups[gi];
+            entries.push(PlacementEntry {
+                atom_base: g.base_id,
+                count: g.count,
+                dtype: g.output_dtype,
+                buffer_id: LITERAL_BUFFER,
+                byte_offset: offset,
+            });
+        }
     }
 
     // Intermediate entries — one per group in each slab.
@@ -779,7 +914,10 @@ pub fn run_placer(
     Ok(AtomPlacementMap {
         entries,
         buffers,
+        scratch_buffer_id,
         intermediate_peak_bytes: peak,
+        literal_buffer_size,
+        literal_sources,
         intermediate_slab_count: slabs.len(),
         scratch_group_count: scratch_count,
         top_slabs: diag_slabs,

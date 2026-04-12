@@ -22,11 +22,21 @@
 //! here so it stays in sync with [`super::super::prologue`] and
 //! [`super::super::codec::bit_io`]:
 //!
-//! - `r12` (`BUFFER_REG`)        — buffer base, set up by the prologue.
+//! - `r12/r15/rbx/rbp`            — fast-pool buffer base registers
+//!                                 (first four distinct buffer_ids a
+//!                                 span touches). Set up by the prologue.
+//! - `r14` (`BUFFER_PTRS_REG`)    — persistent pointer to the
+//!                                 `buffer_ptrs` array. Used by the
+//!                                 overflow path of
+//!                                 [`materialize_buffer_base`] to
+//!                                 fetch buffer bases beyond the fast
+//!                                 pool (`mov scratch, [r14 + id*8]`).
 //! - `r13` (`LOOP_VAR_REG`)      — loop induction variable (intra-slab
 //!                                 absolute index, starting at
 //!                                 `group.atom_offset`).
-//! - `r14` (`LOOP_END_REG`)      — exclusive loop upper bound.
+//! - *(loop end)*                — baked as an `i32` immediate in the
+//!                                 loop-header `cmp` instruction. No
+//!                                 dedicated register.
 //! - `r10` (`BIT_OFF_REG`)       — output of [`address::emit_compute_bit_offset`],
 //!                                 input to bit_io. Reused for both src
 //!                                 and dst bit offsets within an iter.
@@ -45,6 +55,7 @@ use dynasmrt::x64::Assembler;
 use dynasmrt::{DynasmApi, DynasmLabelApi, dynasm};
 
 use crate::compiler::attempts::v14::layout::BufferLayout;
+use crate::compiler::attempts::v14::placer::{AtomPlacementMap, LITERAL_BUFFER};
 use crate::nano_graph::ScalarOp;
 use crate::nano_graph::ops::{ScalarBinOp, ScalarUnaryOp};
 use crate::nano_graph::pattern::{AtomGroup, AtomId, InputRef};
@@ -53,7 +64,7 @@ use crate::pool::SystemPool;
 
 use super::super::codec::bit_io::{emit_load_bits, emit_store_bits};
 use super::super::codec::format::{CodecSlot, CodecTables, ComputeRepr, emit_decode, emit_encode};
-use super::super::prologue::{BUFFER_REG, LOOP_END_REG, LOOP_VAR_REG};
+use super::super::prologue::{BUFFER_PTRS_REG, LOOP_VAR_REG};
 use super::address::{AddressInfo, AddressTables, IterVar, emit_compute_bit_offset};
 
 /// Address output / bit_io input.
@@ -71,26 +82,97 @@ const FLT_SLOT: u8 = 0;
 /// XMM register used as codec scratch.
 const FLT_SCRATCH: u8 = 1;
 
-/// Phase 4b shim: resolve a slot's `buffer_id` to the GP register that
-/// holds that buffer's base pointer. Phase 4 only threads one buffer
-/// through the ABI (the per-span working buffer at `BUFFER_REG` / r12);
-/// phase 5 will replace this with a `BufferBases` lookup populated by
-/// the prologue from the `buffer_ptrs` argument array, and the
-/// debug_assert turns into a real dispatch table.
+/// Default scratch register used by `materialize_buffer_base` for
+/// overflow loads in normal (non-reduce) group emission paths. `rdi`
+/// (SYSV arg 0) is free after the prologue copies it to
+/// `BUFFER_PTRS_REG` — it's distinct from every register
+/// `emit_load_bits` and `emit_store_bits` use, so it's a safe
+/// scratch at every load/store site in this file.
+pub(super) const OVERFLOW_BASE_SCRATCH: u8 = 7; // rdi
+
+/// Materialize a buffer's base pointer into a GPR ready for use by
+/// `emit_load_bits` / `emit_store_bits`.
+///
+/// If the span has `buffer_id` pinned to a fast-pool callee-saved
+/// register, return that register directly — no code emitted. If the
+/// buffer is overflow (not in the fast pool), emit a `mov scratch,
+/// QWORD [r14 + buffer_id*8]` that loads the base from the
+/// persistent `buffer_ptrs` array pointer, and return `scratch`.
+///
+/// The caller is responsible for picking a `scratch` register that
+/// is (a) distinct from every other register the subsequent bit_io
+/// call will use, and (b) dead at this point — the overflow load
+/// clobbers it. The returned register is only valid until the next
+/// call that might reuse `scratch`.
+///
+/// Most call sites in this file pass [`OVERFLOW_BASE_SCRATCH`]
+/// (`rdi`). Reduce's inner k-loop requires its source buffer to be
+/// fast-pool resident and uses [`buffer_base_reg_pub_fast`] instead.
 #[inline]
-fn buffer_base_reg(buffer_id: u8) -> u8 {
-    debug_assert_eq!(
-        buffer_id, 0,
-        "phase 4b: only single-buffer spans (buffer_id=0) supported",
+pub(super) fn materialize_buffer_base(
+    asm: &mut Assembler,
+    layout: &BufferLayout,
+    buffer_id: u8,
+    scratch_reg: u8,
+) -> u8 {
+    if let Some(reg) = layout.buffer_bases.reg_for_opt(buffer_id) {
+        return reg;
+    }
+    // Overflow path: fetch from buffer_ptrs[buffer_id] via r14.
+    dynasm!(asm
+        ; .arch x64
+        ; mov Rq(scratch_reg), QWORD [Rq(BUFFER_PTRS_REG) + (buffer_id as i32) * 8]
     );
-    BUFFER_REG
+    scratch_reg
 }
 
-/// Sibling-module accessor for [`buffer_base_reg`]. `reduce.rs` uses
-/// this so the helper's source of truth stays in `group.rs`.
+/// Convenience wrapper: `materialize_buffer_base` with the default
+/// overflow scratch register ([`OVERFLOW_BASE_SCRATCH`]). Every call
+/// site in `group.rs` that doesn't have a specific reason to pick a
+/// different scratch uses this.
 #[inline]
-pub(super) fn buffer_base_reg_pub(buffer_id: u8) -> u8 {
-    buffer_base_reg(buffer_id)
+fn bbase(asm: &mut Assembler, layout: &BufferLayout, buffer_id: u8) -> u8 {
+    materialize_buffer_base(asm, layout, buffer_id, OVERFLOW_BASE_SCRATCH)
+}
+
+/// Fast-path-only accessor for call sites that can't tolerate an
+/// overflow load per access (specifically: reduce's inner k-loop).
+/// Returns the fast-pool register, or an error the caller can bubble
+/// up to route the span to pool_eval.
+#[inline]
+pub(super) fn buffer_base_reg_pub_fast(
+    layout: &BufferLayout,
+    buffer_id: u8,
+) -> Result<u8, String> {
+    layout.buffer_bases.reg_for_opt(buffer_id).ok_or_else(|| {
+        format!(
+            "x86_jit: reduce source buffer {buffer_id} is not in the fast-pool \
+             register set (too many distinct buffers in span); falling back to \
+             pool_eval"
+        )
+    })
+}
+
+/// Emit the loop-header cmp for a count-up loop. The end value is
+/// baked in as a 32-bit immediate rather than a register, which
+/// frees `r14` for use as the `BUFFER_PTRS_REG` across the whole
+/// span.
+///
+/// Fails if `end` doesn't fit in `i32` (sign-extended). Real-model
+/// atom counts are well below 2B, so this is fine in practice; the
+/// error routes the span to pool_eval.
+#[inline]
+fn emit_loop_cmp_end(asm: &mut Assembler, end: i64) -> Result<(), String> {
+    if !(i32::MIN as i64..=i32::MAX as i64).contains(&end) {
+        return Err(format!(
+            "x86_jit: loop end {end} doesn't fit in i32 — falling back to pool_eval"
+        ));
+    }
+    dynasm!(asm
+        ; .arch x64
+        ; cmp Rq(LOOP_VAR_REG), DWORD end as i32
+    );
+    Ok(())
 }
 
 /// Emit one `AtomGroup` body. Either inlined (for `count == 1`) or
@@ -102,6 +184,7 @@ pub fn emit_group(
     asm: &mut Assembler,
     layout: &BufferLayout,
     group: &AtomGroup<'static, SystemPool>,
+    placement: &AtomPlacementMap,
     addr_tables: &mut AddressTables,
     codec_tables: &mut CodecTables,
 ) -> Result<(), String> {
@@ -109,9 +192,46 @@ pub fn emit_group(
         ScalarOp::Identity => emit_identity_group(asm, layout, group, addr_tables, codec_tables),
         ScalarOp::Cast { .. } => emit_cast_group(asm, layout, group, addr_tables, codec_tables),
         ScalarOp::Literal(_) | ScalarOp::LiteralSpan(_) => {
-            // Values are pre-populated in the buffer template by
-            // `BufferLayout::populate_literals`. No code emission.
-            Ok(())
+            // A literal group's source bytes live in the plan-wide
+            // literal buffer at `placement.literal_sources[base]`,
+            // populated once at plan-build and read-only at execute
+            // time. Its destination slot (from `compute_layout`) is
+            // either:
+            //
+            //  (a) The literal buffer itself — source == destination,
+            //      no code to emit; consumers read the bytes straight
+            //      from `buffer_ptrs[LITERAL_BUFFER]`. This is the
+            //      common case.
+            //
+            //  (b) An output buffer (Pad-style lowering where the
+            //      literal's atoms overlap a model output range).
+            //      Emit an ordinary copy loop that loads from the
+            //      literal buffer and stores into the output slot —
+            //      same shape as an Identity group with its source
+            //      synthesized from the placer's `literal_sources`
+            //      map. No special case in the executor.
+            let (dst_slot, _) = layout.find(group.base_id).ok_or_else(|| {
+                format!(
+                    "emit_group Literal: no dst slot for base={}",
+                    group.base_id
+                )
+            })?;
+            if dst_slot.buffer_id == LITERAL_BUFFER.0 {
+                return Ok(());
+            }
+            let src_byte_off = placement
+                .literal_sources
+                .get(&group.base_id)
+                .copied()
+                .ok_or_else(|| {
+                    format!(
+                        "emit_group Literal: base={} missing from literal_sources \
+                         but primary slot is in buffer {} (expected LITERAL_BUFFER or \
+                         a literal-sources entry)",
+                        group.base_id, dst_slot.buffer_id
+                    )
+                })?;
+            emit_literal_copy_group(asm, layout, group, src_byte_off)
         }
         ScalarOp::Binary { op, compute_dtype } => emit_binary_group(
             asm,
@@ -229,10 +349,19 @@ fn emit_identity_iter(
         tables,
     )?;
 
-    // 2. Load src bits → rax.
+    // 2. Load src bits → rax. Materialize src buffer base first;
+    //    for fast-pool buffers this is a no-op (returns a persistent
+    //    register), for overflow buffers it emits a mov from
+    //    `[r14 + id*8]` into `OVERFLOW_BASE_SCRATCH`.
+    let src_base = materialize_buffer_base(
+        asm,
+        layout,
+        src_info.buffer_id,
+        OVERFLOW_BASE_SCRATCH,
+    );
     emit_load_bits(
         asm,
-        buffer_base_reg(src_info.buffer_id),
+        src_base,
         BIT_OFF_REG,
         src_info.n_bits,
         RAW_REG,
@@ -258,9 +387,15 @@ fn emit_identity_iter(
     }
 
     // 4. Store rax at dst bit offset.
+    let dst_base = materialize_buffer_base(
+        asm,
+        layout,
+        dst_info.buffer_id,
+        OVERFLOW_BASE_SCRATCH,
+    );
     emit_store_bits(
         asm,
-        buffer_base_reg(dst_info.buffer_id),
+        dst_base,
         BIT_OFF_REG,
         dst_info.n_bits,
         RAW_REG,
@@ -274,13 +409,12 @@ fn emit_identity_iter(
 
 /// Emit a count-loop around `emit_identity_iter`.
 ///
-/// Loop shape (using r13 = `LOOP_VAR_REG`, r14 = `LOOP_END_REG`):
+/// Loop shape (using r13 = `LOOP_VAR_REG`, end baked as imm32):
 ///
 /// ```text
 ///     mov r13, atom_offset
-///     mov r14, atom_offset + count
 /// loop_top:
-///     cmp r13, r14
+///     cmp r13, imm32(atom_offset + count)
 ///     jge loop_end
 ///     <emit_identity_iter with IterVar::Reg(r13)>
 ///     add r13, 1
@@ -303,17 +437,14 @@ fn emit_identity_loop(
     dynasm!(asm
         ; .arch x64
         ; mov Rq(LOOP_VAR_REG), QWORD start
-        ; mov Rq(LOOP_END_REG), QWORD end
     );
 
     let loop_top = asm.new_dynamic_label();
     let loop_exit = asm.new_dynamic_label();
 
-    dynasm!(asm
-        ; =>loop_top
-        ; cmp Rq(LOOP_VAR_REG), Rq(LOOP_END_REG)
-        ; jge =>loop_exit
-    );
+    dynasm!(asm; =>loop_top);
+    emit_loop_cmp_end(asm, end)?;
+    dynasm!(asm; jge =>loop_exit);
 
     // Inside the loop, the iter register IS the absolute intra-slab
     // index — pass atom_offset so address.rs can resolve split-group slots.
@@ -335,6 +466,210 @@ fn emit_identity_loop(
     );
 
     Ok(())
+}
+
+// ─── Literal→output copy ────────────────────────────────────────────
+//
+// For `Literal`/`LiteralSpan` groups whose primary slot is a non-
+// literal buffer (Pad-style lowering where the literal's atoms
+// overlap a model output range), emit an ordinary copy loop that
+// reads from the plan-wide literal buffer at
+// `placement.literal_sources[base]` and stores into the group's
+// destination slot. Structurally identical to Identity — two bit
+// offset computations, load, store — but the source side is
+// synthesized from a constant byte offset instead of resolved via an
+// InputRef. Both bit offsets share the destination slot's
+// `bit_stride` since source and destination carry the same dtype.
+
+fn emit_literal_copy_group(
+    asm: &mut Assembler,
+    layout: &BufferLayout,
+    group: &AtomGroup<'static, SystemPool>,
+    src_byte_off: u64,
+) -> Result<(), String> {
+    if group.count == 0 {
+        return Ok(());
+    }
+    if group.count == 1 {
+        return emit_literal_copy_iter(
+            asm,
+            layout,
+            group,
+            src_byte_off,
+            IterVar::Const(group.atom_offset),
+            group.atom_offset,
+        );
+    }
+
+    let start = group.atom_offset as i64;
+    let end = (group.atom_offset + group.count) as i64;
+
+    dynasm!(asm
+        ; .arch x64
+        ; mov Rq(LOOP_VAR_REG), QWORD start
+    );
+
+    let loop_top = asm.new_dynamic_label();
+    let loop_exit = asm.new_dynamic_label();
+
+    dynasm!(asm; =>loop_top);
+    emit_loop_cmp_end(asm, end)?;
+    dynasm!(asm; jge =>loop_exit);
+
+    emit_literal_copy_iter(
+        asm,
+        layout,
+        group,
+        src_byte_off,
+        IterVar::Reg(LOOP_VAR_REG),
+        group.atom_offset,
+    )?;
+
+    dynasm!(asm
+        ; add Rq(LOOP_VAR_REG), 1
+        ; jmp =>loop_top
+        ; =>loop_exit
+    );
+
+    Ok(())
+}
+
+fn emit_literal_copy_iter(
+    asm: &mut Assembler,
+    layout: &BufferLayout,
+    group: &AtomGroup<'static, SystemPool>,
+    src_byte_off: u64,
+    iter: IterVar,
+    atom_offset: u64,
+) -> Result<(), String> {
+    // Destination slot: carries bit_stride, elem_bits, and the
+    // primary destination buffer_id. The slot's `atom_base ==
+    // group.base_id` and `elem_idx == 0` because compute_layout
+    // emitted one SlotInfo per group.
+    let (dst_slot, elem_idx) = layout
+        .find(group.base_id)
+        .ok_or_else(|| format!("emit_literal_copy: no dst slot for base={}", group.base_id))?;
+    let bit_stride = dst_slot.bit_stride as i64;
+    let n_bits = dst_slot.elem_bits as u32;
+    let dst_buffer_id = dst_slot.buffer_id;
+    let dst_slot_bit = dst_slot.bit_offset as i64 + elem_idx as i64 * bit_stride;
+    // `emit_output_bit_offset` shape: dst_bit(iter) = slot_bit +
+    // (iter - atom_offset) * bit_stride = dst_store_base_bit +
+    // iter * bit_stride.
+    let dst_store_base_bit = dst_slot_bit - atom_offset as i64 * bit_stride;
+    // Source side lives in the literal buffer starting at
+    // `src_byte_off`. The literal bytes are stored contiguously in
+    // the same dtype as the destination, so the stride matches.
+    let src_base_bit = src_byte_off as i64 * 8;
+    let src_store_base_bit = src_base_bit - atom_offset as i64 * bit_stride;
+
+    // 1. Compute src bit offset → BIT_OFF_REG.
+    emit_linear_bit_offset(
+        asm,
+        iter,
+        bit_stride,
+        src_store_base_bit,
+        BIT_OFF_REG,
+        ADDR_SCRATCH,
+    );
+
+    // 2. Load n_bits from the literal buffer → RAW_REG.
+    let src_base = materialize_buffer_base(
+        asm,
+        layout,
+        LITERAL_BUFFER.0,
+        OVERFLOW_BASE_SCRATCH,
+    );
+    emit_load_bits(
+        asm,
+        src_base,
+        BIT_OFF_REG,
+        n_bits,
+        RAW_REG,
+        ADDR_SCRATCH,
+    );
+
+    // 3. Compute dst bit offset → BIT_OFF_REG (overwrites src value
+    //    in the register, but RAW_REG still holds the loaded bits).
+    emit_linear_bit_offset(
+        asm,
+        iter,
+        bit_stride,
+        dst_store_base_bit,
+        BIT_OFF_REG,
+        ADDR_SCRATCH,
+    );
+
+    // 4. Store RAW_REG at the destination bit offset.
+    let dst_base = materialize_buffer_base(
+        asm,
+        layout,
+        dst_buffer_id,
+        OVERFLOW_BASE_SCRATCH,
+    );
+    emit_store_bits(
+        asm,
+        dst_base,
+        BIT_OFF_REG,
+        n_bits,
+        RAW_REG,
+        BIT_IO_TMP1,
+        BIT_IO_TMP2,
+        ADDR_SCRATCH,
+    );
+
+    Ok(())
+}
+
+/// Emit `dst_reg = base_bit + bit_stride * iter` for either a const
+/// or register iter. Mirrors the arithmetic in
+/// [`emit_output_bit_offset`] but takes the pre-computed `base_bit`
+/// and `bit_stride` directly — the literal-copy path doesn't have a
+/// `SlotInfo` to derive them from.
+fn emit_linear_bit_offset(
+    asm: &mut Assembler,
+    iter: IterVar,
+    bit_stride: i64,
+    base_bit: i64,
+    dst_reg: u8,
+    scratch_reg: u8,
+) {
+    match iter {
+        IterVar::Const(c) => {
+            let abs_bit = base_bit + bit_stride * c as i64;
+            dynasm!(asm
+                ; .arch x64
+                ; mov Rq(dst_reg), QWORD abs_bit
+            );
+        }
+        IterVar::Reg(iter_reg) => {
+            if (i32::MIN as i64..=i32::MAX as i64).contains(&bit_stride) {
+                dynasm!(asm
+                    ; .arch x64
+                    ; imul Rq(dst_reg), Rq(iter_reg), bit_stride as i32
+                );
+            } else {
+                dynasm!(asm
+                    ; .arch x64
+                    ; mov Rq(scratch_reg), QWORD bit_stride
+                    ; mov Rq(dst_reg), Rq(iter_reg)
+                    ; imul Rq(dst_reg), Rq(scratch_reg)
+                );
+            }
+            if (i32::MIN as i64..=i32::MAX as i64).contains(&base_bit) {
+                dynasm!(asm
+                    ; .arch x64
+                    ; add Rq(dst_reg), base_bit as i32
+                );
+            } else {
+                dynasm!(asm
+                    ; .arch x64
+                    ; mov Rq(scratch_reg), QWORD base_bit
+                    ; add Rq(dst_reg), Rq(scratch_reg)
+                );
+            }
+        }
+    }
 }
 
 // ─── Cast emission ──────────────────────────────────────────────────
@@ -419,9 +754,10 @@ fn emit_cast_iter(
     )?;
 
     // 2. Load src raw bits → rax.
+    let src_base = bbase(asm, layout, src_info.buffer_id);
     emit_load_bits(
         asm,
-        buffer_base_reg(src_info.buffer_id),
+        src_base,
         BIT_OFF_REG,
         src_info.n_bits,
         RAW_REG,
@@ -477,9 +813,10 @@ fn emit_cast_iter(
     )?;
 
     // 6. Store raw bits.
+    let dst_base = bbase(asm, layout, dst_info.buffer_id);
     emit_store_bits(
         asm,
-        buffer_base_reg(dst_info.buffer_id),
+        dst_base,
         BIT_OFF_REG,
         dst_info.n_bits,
         RAW_REG,
@@ -512,17 +849,14 @@ fn emit_cast_loop(
     dynasm!(asm
         ; .arch x64
         ; mov Rq(LOOP_VAR_REG), QWORD start
-        ; mov Rq(LOOP_END_REG), QWORD end
     );
 
     let loop_top = asm.new_dynamic_label();
     let loop_exit = asm.new_dynamic_label();
 
-    dynasm!(asm
-        ; =>loop_top
-        ; cmp Rq(LOOP_VAR_REG), Rq(LOOP_END_REG)
-        ; jge =>loop_exit
-    );
+    dynasm!(asm; =>loop_top);
+    emit_loop_cmp_end(asm, end)?;
+    dynasm!(asm; jge =>loop_exit);
 
     emit_cast_iter(
         asm,
@@ -716,9 +1050,10 @@ fn emit_binary_iter(
         ADDR_SCRATCH,
     )?;
 
+    let __bbase1 = bbase(asm, layout, dst_info.buffer_id);
     emit_store_bits(
         asm,
-        buffer_base_reg(dst_info.buffer_id),
+        __bbase1,
         BIT_OFF_REG,
         dst_info.n_bits,
         RAW_REG,
@@ -757,9 +1092,10 @@ fn emit_load_decode_input(
         ADDR_SCRATCH,
         addr_tables,
     )?;
+    let __bbase2 = bbase(asm, layout, info.buffer_id);
     emit_load_bits(
         asm,
-        buffer_base_reg(info.buffer_id),
+        __bbase2,
         BIT_OFF_REG,
         info.n_bits,
         RAW_REG,
@@ -800,17 +1136,14 @@ fn emit_binary_loop(
     dynasm!(asm
         ; .arch x64
         ; mov Rq(LOOP_VAR_REG), QWORD start
-        ; mov Rq(LOOP_END_REG), QWORD end
     );
 
     let loop_top = asm.new_dynamic_label();
     let loop_exit = asm.new_dynamic_label();
 
-    dynasm!(asm
-        ; =>loop_top
-        ; cmp Rq(LOOP_VAR_REG), Rq(LOOP_END_REG)
-        ; jge =>loop_exit
-    );
+    dynasm!(asm; =>loop_top);
+    emit_loop_cmp_end(asm, end)?;
+    dynasm!(asm; jge =>loop_exit);
 
     emit_binary_iter(
         asm,
@@ -962,9 +1295,10 @@ fn emit_unary_iter(
         ADDR_SCRATCH,
     )?;
 
+    let __bbase3 = bbase(asm, layout, dst_info.buffer_id);
     emit_store_bits(
         asm,
-        buffer_base_reg(dst_info.buffer_id),
+        __bbase3,
         BIT_OFF_REG,
         dst_info.n_bits,
         RAW_REG,
@@ -998,17 +1332,14 @@ fn emit_unary_loop(
     dynasm!(asm
         ; .arch x64
         ; mov Rq(LOOP_VAR_REG), QWORD start
-        ; mov Rq(LOOP_END_REG), QWORD end
     );
 
     let loop_top = asm.new_dynamic_label();
     let loop_exit = asm.new_dynamic_label();
 
-    dynasm!(asm
-        ; =>loop_top
-        ; cmp Rq(LOOP_VAR_REG), Rq(LOOP_END_REG)
-        ; jge =>loop_exit
-    );
+    dynasm!(asm; =>loop_top);
+    emit_loop_cmp_end(asm, end)?;
+    dynasm!(asm; jge =>loop_exit);
 
     emit_unary_iter(
         asm,
@@ -1204,9 +1535,10 @@ fn emit_select_iter(
         ADDR_SCRATCH,
         addr_tables,
     )?;
+    let __bbase4 = bbase(asm, layout, cond_info.buffer_id);
     emit_load_bits(
         asm,
-        buffer_base_reg(cond_info.buffer_id),
+        __bbase4,
         BIT_OFF_REG,
         cond_info.n_bits,
         RAW_REG,
@@ -1350,9 +1682,10 @@ fn emit_select_iter(
         BIT_OFF_REG,
         ADDR_SCRATCH,
     )?;
+    let __bbase5 = bbase(asm, layout, dst_info.buffer_id);
     emit_store_bits(
         asm,
-        buffer_base_reg(dst_info.buffer_id),
+        __bbase5,
         BIT_OFF_REG,
         dst_info.n_bits,
         RAW_REG,
@@ -1380,11 +1713,12 @@ fn emit_select_loop(
     dynasm!(asm
         ; .arch x64
         ; mov Rq(LOOP_VAR_REG), QWORD start
-        ; mov Rq(LOOP_END_REG), QWORD end
     );
     let loop_top = asm.new_dynamic_label();
     let loop_exit = asm.new_dynamic_label();
-    dynasm!(asm; =>loop_top; cmp Rq(LOOP_VAR_REG), Rq(LOOP_END_REG); jge =>loop_exit);
+    dynasm!(asm; =>loop_top);
+    emit_loop_cmp_end(asm, end)?;
+    dynasm!(asm; jge =>loop_exit);
     emit_select_iter(
         asm,
         layout,
@@ -1453,11 +1787,12 @@ fn emit_indirect_load_group(
         dynasm!(asm
             ; .arch x64
             ; mov Rq(LOOP_VAR_REG), QWORD start
-            ; mov Rq(LOOP_END_REG), QWORD end
         );
         let loop_top = asm.new_dynamic_label();
         let loop_exit = asm.new_dynamic_label();
-        dynasm!(asm; =>loop_top; cmp Rq(LOOP_VAR_REG), Rq(LOOP_END_REG); jge =>loop_exit);
+        dynasm!(asm; =>loop_top);
+        emit_loop_cmp_end(asm, end)?;
+        dynasm!(asm; jge =>loop_exit);
 
         emit_indirect_load_iter(
             asm,
@@ -1512,9 +1847,10 @@ fn emit_indirect_load_iter(
         ADDR_SCRATCH,
         addr_tables,
     )?;
+    let __bbase6 = bbase(asm, layout, idx_info.buffer_id);
     emit_load_bits(
         asm,
-        buffer_base_reg(idx_info.buffer_id),
+        __bbase6,
         BIT_OFF_REG,
         idx_info.n_bits,
         RAW_REG,
@@ -1586,9 +1922,10 @@ fn emit_indirect_load_iter(
     }
 
     // 4. Load table value → rax.
+    let __bbase7 = bbase(asm, layout, table_buffer_id);
     emit_load_bits(
         asm,
-        buffer_base_reg(table_buffer_id),
+        __bbase7,
         BIT_OFF_REG,
         table_n_bits,
         RAW_REG,
@@ -1641,9 +1978,10 @@ fn emit_indirect_load_iter(
         BIT_OFF_REG,
         ADDR_SCRATCH,
     )?;
+    let __bbase8 = bbase(asm, layout, dst_info.buffer_id);
     emit_store_bits(
         asm,
-        buffer_base_reg(dst_info.buffer_id),
+        __bbase8,
         BIT_OFF_REG,
         dst_info.n_bits,
         RAW_REG,
