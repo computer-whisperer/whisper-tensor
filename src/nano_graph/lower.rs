@@ -1616,25 +1616,51 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
             return;
         }
 
-        // Check all inputs and outputs have fully concrete shapes (no symbolic dims).
-        // Opaque ops call eval_new on concrete tensors, so every dim must be known.
-        let has_symbolic = |id: GlobalId| -> bool {
-            all_infos.get(&id).is_some_and(|info| {
-                if let Some(rank) = info.rank_if_known() {
-                    (0..rank).any(|d| info.dim_if_known(d).is_none())
-                } else {
-                    false
+        // Collect input sym GraphConstantIds — used to verify output sym dims
+        // are pass-throughs (same gc) rather than transformed.
+        let input_gcs: std::collections::HashSet<GraphConstantId> = {
+            let mut gcs = std::collections::HashSet::new();
+            for in_id in op.inputs() {
+                if let Some(tam) = self.tensor_map.get(&in_id) {
+                    for gc in tam.sym_dims() {
+                        gcs.insert(gc);
+                    }
                 }
-            })
+            }
+            gcs
         };
-        let any_symbolic = op.inputs().any(&has_symbolic) || op.outputs().any(&has_symbolic);
 
-        let all_outputs_known = !any_symbolic
-            && op.outputs().all(|out_id| {
-                all_infos
-                    .get(&out_id)
-                    .is_some_and(|i| i.rank_if_known().is_some())
-            });
+        // Check all outputs have rank info. If an output has a sym dim that
+        // doesn't appear in any input, the op transforms the dimension (e.g.
+        // concat adds, pad extends) — the opaque path can't resolve it from
+        // gc_values alone, so fall to unsupported.
+        let all_outputs_known = op.outputs().all(|out_id| {
+            let Some(info) = all_infos.get(&out_id) else {
+                return false;
+            };
+            let Some(rank) = info.rank_if_known() else {
+                return false;
+            };
+            // Check sym dims are all pass-throughs from inputs.
+            for d in 0..rank {
+                if info.dim_if_known(d).is_none() {
+                    // Symbolic dim — check it maps to an input gc.
+                    if let Some(dims) = self.classify_dims(info) {
+                        for dk in &dims {
+                            if let DimKind::Sym { gc, .. } = dk
+                                && !input_gcs.contains(gc)
+                            {
+                                return false;
+                            }
+                        }
+                    } else {
+                        return false;
+                    }
+                    break; // only need to check once
+                }
+            }
+            true
+        });
 
         if !all_outputs_known {
             // Fall back to boundary if we can't determine output shapes.
@@ -1678,55 +1704,54 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
             .iter()
             .filter_map(|&id| {
                 let tam = self.tensor_map.get(&id)?;
-                let known_dims = tam.known_dims();
 
                 if !tam.segments.is_empty() || !tam.is_contiguous() {
-                    // Non-contiguous: allocate contiguous atoms and insert identity copies.
                     let count = tam.count;
                     let dtype = tam.dtype;
                     let base = self.nano.alloc_contiguous_copy(tam, count);
                     Some(OpaqueTensorMapping {
                         base,
                         count,
-                        shape: known_dims,
+                        dims: tam.dims.clone(),
                         dtype,
                     })
                 } else {
                     Some(OpaqueTensorMapping {
                         base: tam.base_id,
                         count: tam.count,
-                        shape: known_dims,
+                        dims: tam.dims.clone(),
                         dtype: tam.dtype,
                     })
                 }
             })
             .collect();
 
-        // Build output mappings from all_infos (shape/dtype).
+        // Build output mappings from all_infos — use classify_dims to get
+        // the full dim layout including symbolic dims.
         let outputs: Vec<OpaqueTensorMapping> = output_ids
             .iter()
             .filter_map(|&id| {
                 let info = self.all_infos.get(&id)?;
                 let dtype = info.dtype();
-                let shape: Vec<u64> = if let Some(rank) = info.rank_if_known() {
-                    (0..rank)
-                        .map(|i| info.dim_if_known(i).unwrap_or(1))
-                        .collect()
-                } else {
-                    vec![1]
-                };
-                let count: u64 = shape.iter().product();
+                let dims = self.classify_dims(info)?;
+                let count: u64 = dims
+                    .iter()
+                    .filter_map(|d| match d {
+                        DimKind::Known { size, .. } => Some(*size),
+                        _ => None,
+                    })
+                    .product::<u64>()
+                    .max(1);
                 Some(OpaqueTensorMapping {
                     base: crate::nano_graph::pattern::AtomId(0), // filled by push_opaque_op
                     count,
-                    shape,
+                    dims,
                     dtype,
                 })
             })
             .collect();
 
         if inputs.len() != input_ids.len() || outputs.len() != output_ids.len() {
-            // Some inputs/outputs missing — fall back to boundary.
             for &out_id in output_ids {
                 self.register_opaque_id(out_id);
             }
@@ -1742,25 +1767,20 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
 
         let output_bases = self.nano.push_opaque_op(op);
 
-        // Register outputs in tensor_map.
+        // Register outputs in tensor_map with correct dims (including sym).
         for (i, &out_id) in output_ids.iter().enumerate() {
             let base_id = output_bases[i];
             let info = self.all_infos.get(&out_id).unwrap();
             let dtype = info.dtype();
-            let shape: Vec<u64> = if let Some(rank) = info.rank_if_known() {
-                (0..rank)
-                    .map(|i| info.dim_if_known(i).unwrap_or(1))
-                    .collect()
-            } else {
-                vec![1]
-            };
-            let strides = TensorAtomMap::compute_strides(&shape);
-            let dims: Vec<DimKind> = shape
+            let dims = self.classify_dims(info).unwrap_or_default();
+            let count: u64 = dims
                 .iter()
-                .zip(strides.iter())
-                .map(|(&size, &stride)| DimKind::Known { size, stride })
-                .collect();
-            let count: u64 = shape.iter().product();
+                .filter_map(|d| match d {
+                    DimKind::Known { size, .. } => Some(*size),
+                    _ => None,
+                })
+                .product::<u64>()
+                .max(1);
             self.tensor_map
                 .insert(out_id, TensorAtomMap::simple(base_id, count, dtype, dims));
         }

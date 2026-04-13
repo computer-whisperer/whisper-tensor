@@ -250,20 +250,66 @@ pub fn pool_eval<'p, P: Pool + 'p>(
                 let opaque_op = &graph.opaque_ops()[*opaque_idx];
 
                 // Assemble input tensors from atom buffers.
+                // Resolve symbolic dims via gc_values to build full-shaped inputs.
                 let mut op_input_tensors = Vec::with_capacity(opaque_op.inputs.len());
                 for inp in &opaque_op.inputs {
+                    let full_shape = inp.full_shape(gc_values);
+                    // If any dim resolved to 0 (unpopulated gc_value), the input
+                    // has no elements — create an empty tensor.
+                    let any_zero = full_shape.contains(&0);
+                    let full_numel: u64 = if any_zero {
+                        0
+                    } else {
+                        full_shape.iter().product::<u64>().max(1)
+                    };
+                    let inp_sym_dims = inp.sym_dims();
+                    let inp_sym_extents: Vec<u64> = inp_sym_dims
+                        .iter()
+                        .map(|gc| gc_values[gc.0 as usize])
+                        .collect();
+                    let inp_sym_prod: u64 = inp_sym_extents.iter().product::<u64>().max(1);
+
                     let inp_layout =
-                        TensorLayout::<DynRank>::row_major(inp.shape.clone(), inp.dtype);
+                        TensorLayout::<DynRank>::row_major(full_shape.clone(), inp.dtype);
                     let inp_buf = pool
                         .allocate(inp_layout.buffer_size_bytes())
                         .map_err(PoolEvalError::Allocation)?;
                     let mut inp_tensor: NumericTensor<'p, DynRank, P> =
                         NumericTensor::from_parts(inp_buf, inp_layout);
-                    for elem in 0..inp.count as usize {
-                        let atom_id = AtomId(inp.base.0 + elem as u64);
-                        let scalar =
-                            lookup_atom_scalar(atom_id, 0, 1, graph, &group_stores, &input_stores);
-                        inp_tensor.write_element(elem, scalar.cast_to(inp.dtype));
+
+                    for flat_elem in 0..full_numel {
+                        // Decompose flat_elem into per-dim coordinates.
+                        let mut remaining = flat_elem;
+                        let mut atom_idx = 0u64;
+                        let mut atom_stride = 1u64;
+                        let mut sym_flat = 0u64;
+                        let mut sym_stride = 1u64;
+
+                        for d in (0..full_shape.len()).rev() {
+                            let coord = remaining % full_shape[d];
+                            remaining /= full_shape[d];
+                            match &inp.dims[d] {
+                                super::lower::DimKind::Known { .. } => {
+                                    atom_idx += coord * atom_stride;
+                                    atom_stride *= full_shape[d];
+                                }
+                                super::lower::DimKind::Sym { .. } => {
+                                    sym_flat += coord * sym_stride;
+                                    sym_stride *= full_shape[d];
+                                }
+                            }
+                        }
+
+                        let atom_id = AtomId(inp.base.0 + atom_idx);
+                        let scalar = lookup_atom_scalar(
+                            atom_id,
+                            sym_flat,
+                            inp_sym_prod,
+                            graph,
+                            &group_stores,
+                            &input_stores,
+                        );
+                        inp_tensor.write_element(flat_elem as usize, scalar.cast_to(inp.dtype));
                     }
                     op_input_tensors.push(inp_tensor);
                 }
@@ -292,19 +338,60 @@ pub fn pool_eval<'p, P: Pool + 'p>(
             let cached = &opaque_cache[opaque_idx];
             let result_tensor = &cached[*output_idx];
 
-            // Copy result into the group store (or pre-allocated output store).
+            // Copy result into the group store. For opaque ops with sym dims,
+            // the result tensor has the full shape and we decompose each element
+            // into (atom_idx, sym_flat) for the store layout.
             let count = group.count as usize;
             let output_dtype = group.output_dtype;
+            let opaque_sym_prod = sym_product_for(&group.sym_dims, gc_values);
             let store = group_stores[gi].get_or_insert_with(|| {
-                let layout = TensorLayout::<DynRank>::row_major(vec![count as u64], output_dtype);
+                let total = count as u64 * opaque_sym_prod;
+                let layout = TensorLayout::<DynRank>::row_major(vec![total], output_dtype);
                 let buffer = pool
                     .allocate(layout.buffer_size_bytes())
                     .expect("pool alloc for opaque group");
                 AtomStore::Owned(NumericTensor::from_parts(buffer, layout))
             });
-            for i in 0..count {
-                let scalar = result_tensor.read_element(i);
-                store.write_element(i, scalar);
+
+            if group.sym_dims.is_empty() {
+                // No sym dims — simple sequential copy.
+                for i in 0..count {
+                    let scalar = result_tensor.read_element(i);
+                    store.write_element(i, scalar);
+                }
+            } else {
+                // Has sym dims — decompose result elements into atom + sym positions.
+                let opaque_op = &graph.opaque_ops()[*opaque_idx];
+                let out_mapping = &opaque_op.outputs[*output_idx];
+                let result_shape = result_tensor.shape();
+                let full_numel = result_tensor.numel();
+
+                for flat_elem in 0..full_numel {
+                    let mut remaining = flat_elem as u64;
+                    let mut atom_idx = 0u64;
+                    let mut atom_stride = 1u64;
+                    let mut sf = 0u64;
+                    let mut sf_stride = 1u64;
+
+                    for d in (0..result_shape.len()).rev() {
+                        let coord = remaining % result_shape[d];
+                        remaining /= result_shape[d];
+                        match &out_mapping.dims[d] {
+                            super::lower::DimKind::Known { .. } => {
+                                atom_idx += coord * atom_stride;
+                                atom_stride *= result_shape[d];
+                            }
+                            super::lower::DimKind::Sym { .. } => {
+                                sf += coord * sf_stride;
+                                sf_stride *= result_shape[d];
+                            }
+                        }
+                    }
+
+                    let write_idx = (atom_idx * opaque_sym_prod + sf) as usize;
+                    let scalar = result_tensor.read_element(flat_elem);
+                    store.write_element(write_idx, scalar);
+                }
             }
 
             // Free spent producers.

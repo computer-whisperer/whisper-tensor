@@ -445,6 +445,7 @@ impl<'p, P: Pool + 'p> NanoGraph<'p, P> {
                 })
                 .collect();
 
+            let out_sym_dims = mapping.sym_dims();
             self.groups.insert(
                 base_id.0,
                 mapping.count,
@@ -457,7 +458,7 @@ impl<'p, P: Pool + 'p> NanoGraph<'p, P> {
                         opaque_idx,
                         output_idx,
                     },
-                    sym_dims: vec![],
+                    sym_dims: out_sym_dims,
                     inputs: group_inputs,
                 },
             );

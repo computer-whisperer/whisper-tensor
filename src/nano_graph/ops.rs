@@ -114,8 +114,45 @@ pub struct OpaqueOp {
 pub struct OpaqueTensorMapping {
     pub base: super::pattern::AtomId,
     pub count: u64,
-    pub shape: Vec<u64>,
+    /// Full dim layout including symbolic dims. Pool_eval resolves
+    /// Sym dims via gc_values to build the concrete shape at runtime.
+    pub dims: Vec<crate::nano_graph::lower::DimKind>,
     pub dtype: NumericDType,
+}
+
+impl OpaqueTensorMapping {
+    /// Concrete known-dim shape (for backward compat / non-sym paths).
+    pub fn known_shape(&self) -> Vec<u64> {
+        self.dims
+            .iter()
+            .filter_map(|d| match d {
+                crate::nano_graph::lower::DimKind::Known { size, .. } => Some(*size),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Sym dims from the dim layout.
+    pub fn sym_dims(&self) -> Vec<super::pattern::GraphConstantId> {
+        self.dims
+            .iter()
+            .filter_map(|d| match d {
+                crate::nano_graph::lower::DimKind::Sym { gc, .. } => Some(*gc),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Build full concrete shape by resolving sym dims from gc_values.
+    pub fn full_shape(&self, gc_values: &[u64]) -> Vec<u64> {
+        self.dims
+            .iter()
+            .map(|dk| match dk {
+                crate::nano_graph::lower::DimKind::Known { size, .. } => *size,
+                crate::nano_graph::lower::DimKind::Sym { gc, .. } => gc_values[gc.0 as usize],
+            })
+            .collect()
+    }
 }
 
 /// Trait for opaque op evaluation. Operates on new pool-backed types only.
