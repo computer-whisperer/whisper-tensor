@@ -1124,6 +1124,9 @@ impl MatMul {
         }
 
         // Extract K from last dim of A and second-to-last of B.
+        // Both must be Known because the matmul addresses B through known-dim
+        // strides. When K is Sym in either input, the atom layout doesn't match
+        // what the merged Mul groups expect.
         let k = match (&a_layout[a_layout.len() - 1], &b_layout[b_layout.len() - 2]) {
             (DimKind::Known { size: ka, .. }, DimKind::Known { size: kb, .. }) if ka == kb && *ka > 0 => *ka,
             _ => {
