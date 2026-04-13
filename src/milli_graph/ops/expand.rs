@@ -3,7 +3,7 @@ use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
 use crate::nano_graph::lower::{NanoLoweringContext, TensorAtomMap};
 use crate::nano_graph::ops::ScalarOp;
-use crate::nano_graph::pattern::AtomId;
+use crate::nano_graph::pattern::{AtomId, GroupInput};
 use crate::pool::Pool;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -104,7 +104,7 @@ impl Expand {
                 dt,
                 ScalarOp::Identity,
                 sym_dims.clone(),
-                vec![input_ref],
+                vec![GroupInput::scalar(input_ref)],
             );
 
             ctx.tensor_map.insert(

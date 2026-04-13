@@ -4,7 +4,7 @@ use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
 use crate::nano_graph::lower::{NanoLoweringContext, TensorAtomMap};
 use crate::nano_graph::ops::ScalarOp;
-use crate::nano_graph::pattern::AtomId;
+use crate::nano_graph::pattern::{AtomId, GroupInput};
 use crate::pool::Pool;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -104,7 +104,7 @@ impl Where {
             dt,
             ScalarOp::Select,
             sym_dims.clone(),
-            vec![input_cond, input_x, input_y],
+            vec![GroupInput::scalar(input_cond), GroupInput::scalar(input_x), GroupInput::scalar(input_y)],
         );
 
         ctx.tensor_map.insert(

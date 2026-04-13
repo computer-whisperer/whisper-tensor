@@ -137,7 +137,7 @@ fn relayout_matmul_groups(graph: &mut NanoGraph<'static, crate::pool::SystemPool
         if rgroup.inputs.len() != 1 {
             continue;
         }
-        let (mul_base, mul_stride) = match &rgroup.inputs[0] {
+        let (mul_base, mul_stride) = match &rgroup.inputs[0].input_ref {
             InputRef::Strided {
                 base,
                 dim_strides,
@@ -180,12 +180,12 @@ fn relayout_matmul_groups(graph: &mut NanoGraph<'static, crate::pool::SystemPool
         let sb_idx = mgroup
             .inputs
             .iter()
-            .position(|inp| is_strided_broadcast_repeat(inp, n));
+            .position(|inp| is_strided_broadcast_repeat(&inp.input_ref, n));
         let Some(sb_idx) = sb_idx else {
             continue;
         };
         let other_idx = if sb_idx == 0 { 1 } else { 0 };
-        let other = &mgroup.inputs[other_idx];
+        let other = &mgroup.inputs[other_idx].input_ref;
         let other_ok =
             is_affine_strided(other).is_some() || is_strided_transposed_nk(other, n, k).is_some();
         if !other_ok {
@@ -202,7 +202,7 @@ fn relayout_matmul_groups(graph: &mut NanoGraph<'static, crate::pool::SystemPool
 
         // Transform Mul inputs from [K,N] to [N,K] layout.
         for inp in &mut mgroup.inputs {
-            match inp {
+            match &mut inp.input_ref {
                 // StridedBroadcast(A_base, a_stride, repeat=N)
                 //   → Modular(A_base, a_stride, modulus=K)
                 InputRef::Strided {
@@ -256,7 +256,7 @@ fn relayout_matmul_groups(graph: &mut NanoGraph<'static, crate::pool::SystemPool
         // Transform Reduce: stride=1→stride=K, reduce_stride=N→1.
         let rgroup = &mut groups[ri];
         if let Some(inp) = rgroup.inputs.first_mut() {
-            match inp {
+            match &mut inp.input_ref {
                 InputRef::Strided {
                     dim_strides,
                     dim_shape,
@@ -325,7 +325,7 @@ fn classify_group(
             let has_explicit = group
                 .inputs
                 .iter()
-                .any(|inp| matches!(inp, InputRef::Explicit(_)));
+                .any(|inp| matches!(inp.input_ref, InputRef::Explicit(_)));
             if has_explicit {
                 GroupKind::Whole
             } else {
@@ -365,6 +365,15 @@ fn classify_group(
                 GroupKind::Whole
             }
         }
+
+        ScalarOp::SymReduce { .. } => {
+            // SymReduce: treat like Reduce for now.
+            if group.count >= num_lanes as u64 {
+                GroupKind::Split
+            } else {
+                GroupKind::Whole
+            }
+        }
     }
 }
 
@@ -382,7 +391,7 @@ fn consumer_has_direct_ref_to_producer(
     consumer
         .inputs
         .iter()
-        .any(|inp| input_refs_group(inp, consumer.count, consumer.atom_offset, producer))
+        .any(|inp| input_refs_group(&inp.input_ref, consumer.count, consumer.atom_offset, producer))
 }
 
 fn consumer_reads_producer_modularly(
@@ -390,8 +399,8 @@ fn consumer_reads_producer_modularly(
     producer: &AtomGroup<'static, crate::pool::SystemPool>,
 ) -> bool {
     consumer.inputs.iter().any(|inp| {
-        input_is_modular_like(inp)
-            && input_refs_group(inp, consumer.count, consumer.atom_offset, producer)
+        input_is_modular_like(&inp.input_ref)
+            && input_refs_group(&inp.input_ref, consumer.count, consumer.atom_offset, producer)
     })
 }
 
@@ -703,6 +712,7 @@ fn assign_phases(
                 ScalarOp::IndirectLoad { .. } => "IndirectLoad",
                 ScalarOp::OpaqueOutput { .. } => "OpaqueOutput",
                 ScalarOp::LiteralSpan(_) => "LiteralSpan",
+                ScalarOp::SymReduce { .. } => "SymReduce",
             }
         }
 
@@ -766,7 +776,7 @@ fn describe_group_inputs(
 ) -> String {
     let mut parts: Vec<String> = Vec::new();
     for (idx, input) in group.inputs.iter().take(max_inputs).enumerate() {
-        let s = match input {
+        let s = match &input.input_ref {
             InputRef::Broadcast(id) => format!("in{idx}=Broadcast({})", id.0),
             InputRef::Explicit(ids) => format!("in{idx}=Explicit(len={})", ids.len()),
             InputRef::Strided {
@@ -788,11 +798,11 @@ fn describe_consumer_access_to_producer(
     producer: &AtomGroup<'static, crate::pool::SystemPool>,
 ) -> String {
     for input in &consumer.inputs {
-        if !input_refs_group(input, consumer.count, consumer.atom_offset, producer) {
+        if !input_refs_group(&input.input_ref, consumer.count, consumer.atom_offset, producer) {
             continue;
         }
 
-        match input {
+        match &input.input_ref {
             InputRef::Broadcast(id) => {
                 return format!(
                     "broadcast(id={}) cons_offset={} cons_count={} prod_base={} prod_count={}",
@@ -805,8 +815,8 @@ fn describe_consumer_access_to_producer(
                 dim_shape,
             } => {
                 let nd = dim_strides.len();
-                let first = input.resolve(consumer.atom_offset).0;
-                let last = input.resolve(consumer.atom_offset + consumer.count - 1).0;
+                let first = input.input_ref.resolve(consumer.atom_offset).0;
+                let last = input.input_ref.resolve(consumer.atom_offset + consumer.count - 1).0;
                 let stride_hint = if nd == 0 {
                     0
                 } else if nd == 1 {
@@ -987,12 +997,12 @@ fn lane_local_access_check(
 
     for input in &consumer.inputs {
         // Check if this input references the producer at all.
-        let refs_producer = input_refs_group(input, consumer.count, consumer.atom_offset, producer);
+        let refs_producer = input_refs_group(&input.input_ref, consumer.count, consumer.atom_offset, producer);
         if !refs_producer {
             continue;
         }
 
-        match input {
+        match &input.input_ref {
             InputRef::Broadcast(_) => {
                 // A broadcast reads a single atom. If the producer is split,
                 // that atom lives on exactly one lane. Other lanes won't have it.
@@ -1179,7 +1189,7 @@ fn is_broadcast_access(
     producer: &AtomGroup<'static, crate::pool::SystemPool>,
 ) -> Option<AtomId> {
     for input in &consumer.inputs {
-        if let InputRef::Broadcast(id) = input {
+        if let InputRef::Broadcast(id) = &input.input_ref {
             if producer.contains(*id) {
                 return Some(*id);
             }
@@ -1341,7 +1351,7 @@ fn collect_input_atom_ranges(
 
     // Also check input tensors
     for input in &group.inputs {
-        match input {
+        match &input.input_ref {
             InputRef::Broadcast(id) | InputRef::Strided { base: id, .. } => {
                 for (idx, _) in graph.find_input_idxs(*id) {
                     let it = &graph.input_tensors()[idx];
@@ -1574,8 +1584,7 @@ fn build_phase(
 
     // Copy metadata into each span graph.
     for sg in &mut span_graphs {
-        sg.sym_dim_names = graph.sym_dim_names.clone();
-        sg.sym_dim_bounds = graph.sym_dim_bounds.clone();
+        sg.graph_constants = graph.graph_constants.clone();
         sg.set_opaque_ops(graph.opaque_ops().to_vec());
     }
 
@@ -1629,7 +1638,7 @@ fn build_phase(
                 for inp in &cons.inputs {
                     if let InputRef::Strided {
                         base, dim_strides, ..
-                    } = inp
+                    } = &inp.input_ref
                     {
                         // Use innermost stride for the affine-like pattern
                         let stride = dim_strides.last().copied().unwrap_or(0);
@@ -1639,7 +1648,7 @@ fn build_phase(
                         if abs_stride > 0
                             && abs_stride * cons.count == group.count
                             && (divisible || producer_can_align)
-                            && input_refs_group(inp, cons.count, cons.atom_offset, group)
+                            && input_refs_group(&inp.input_ref, cons.count, cons.atom_offset, group)
                         {
                             aligned_splits.insert(gi, (cons.count, abs_stride));
                         }
@@ -1772,7 +1781,7 @@ fn emit_split_group(
         // Clone inputs — atom_offset handles correct resolution for all
         // non-Explicit InputRef types. Groups with Explicit inputs are
         // classified as Whole, so we should never see them here.
-        let inputs: Vec<InputRef> = group
+        let inputs: Vec<crate::nano_graph::pattern::GroupInput> = group
             .inputs
             .iter()
             .map(|inp| clone_input_for_split(inp))
@@ -1826,9 +1835,9 @@ fn emit_split_group(
 ///
 /// Explicit InputRefs should never reach here — groups with Explicit inputs
 /// are classified as Whole (not Split) to avoid the vector-slicing issue.
-fn clone_input_for_split(input: &InputRef) -> InputRef {
+fn clone_input_for_split(input: &crate::nano_graph::pattern::GroupInput) -> crate::nano_graph::pattern::GroupInput {
     debug_assert!(
-        !matches!(input, InputRef::Explicit(_)),
+        !matches!(input.input_ref, InputRef::Explicit(_)),
         "Explicit InputRef should not appear in a split group"
     );
     input.clone()
@@ -2205,7 +2214,7 @@ fn expand_segments_for_reduce(
 /// producer groups, avoiding sampling-based approaches that can miss producers.
 fn ensure_inputs_declared(
     graph: &NanoGraph<'static, crate::pool::SystemPool>,
-    inputs: &[InputRef],
+    inputs: &[crate::nano_graph::pattern::GroupInput],
     op: &ScalarOp,
     atom_offset: u64,
     count: u64,
@@ -2274,7 +2283,7 @@ fn ensure_inputs_declared(
 
     let mut segments: Vec<(u64, u64)> = Vec::new();
     for input in inputs {
-        let base_segments = input_access_segments(input, atom_offset, count);
+        let base_segments = input_access_segments(&input.input_ref, atom_offset, count);
         if let Some((reduce_count, reduce_stride)) = reduce_cfg {
             segments.extend(expand_segments_for_reduce(
                 &base_segments,
@@ -2351,9 +2360,13 @@ mod tests {
     use super::*;
     use crate::graph::GlobalId;
     use crate::nano_graph::ops::{ReduceKind, ScalarBinOp, ScalarOp, ScalarUnaryOp};
-    use crate::nano_graph::pattern::InputTensor;
+    use crate::nano_graph::pattern::{GroupInput, InputTensor};
     use crate::numeric_dtype::NumericDType;
     use crate::numeric_scalar::NumericScalar;
+
+    fn gi(ir: InputRef) -> GroupInput {
+        GroupInput::scalar(ir)
+    }
 
     /// Helper: count total atoms across all lanes in a phase.
     fn phase_total_atoms(phase: &Phase) -> u64 {
@@ -2541,7 +2554,7 @@ mod tests {
                 compute_dtype: NumericDType::F32,
             },
             vec![],
-            vec![InputRef::affine(lit, 1), InputRef::affine(lit, 1)],
+            vec![gi(InputRef::affine(lit, 1)), gi(InputRef::affine(lit, 1))],
         );
 
         let pow = g.push_group(
@@ -2553,8 +2566,8 @@ mod tests {
             },
             vec![],
             vec![
-                InputRef::affine(sub, 1),
-                InputRef::Broadcast(lit), // broadcast a literal atom
+                gi(InputRef::affine(sub, 1)),
+                gi(InputRef::Broadcast(lit)), // broadcast a literal atom
             ],
         );
 
@@ -2566,7 +2579,7 @@ mod tests {
                 compute_dtype: NumericDType::F32,
             },
             vec![],
-            vec![InputRef::affine(pow, 1), InputRef::affine(sub, 1)],
+            vec![gi(InputRef::affine(pow, 1)), gi(InputRef::affine(sub, 1))],
         );
 
         g.outputs = vec![g.atom_to_range(add)];
@@ -2632,7 +2645,7 @@ mod tests {
                 compute_dtype: NumericDType::F32,
             },
             vec![],
-            vec![InputRef::affine(a, 1)],
+            vec![gi(InputRef::affine(a, 1))],
         );
 
         let c = g.push_group(
@@ -2643,7 +2656,7 @@ mod tests {
                 compute_dtype: NumericDType::F32,
             },
             vec![],
-            vec![InputRef::affine(a, 1)],
+            vec![gi(InputRef::affine(a, 1))],
         );
 
         let d = g.push_group(
@@ -2654,7 +2667,7 @@ mod tests {
                 compute_dtype: NumericDType::F32,
             },
             vec![],
-            vec![InputRef::affine(b, 1), InputRef::affine(c, 1)],
+            vec![gi(InputRef::affine(b, 1)), gi(InputRef::affine(c, 1))],
         );
 
         g.outputs = vec![g.atom_to_range(d)];
@@ -2731,7 +2744,7 @@ mod tests {
                 compute_dtype: NumericDType::F32,
             },
             vec![],
-            vec![InputRef::affine(weights, 1), InputRef::modular(inp, 1, k)],
+            vec![gi(InputRef::affine(weights, 1)), gi(InputRef::modular(inp, 1, k))],
         );
 
         // Reduce: M output atoms, each sums K consecutive mul outputs.
@@ -2745,7 +2758,7 @@ mod tests {
                 compute_dtype: NumericDType::F32,
             },
             vec![],
-            vec![InputRef::affine(mul, k as i64)],
+            vec![gi(InputRef::affine(mul, k as i64))],
         );
 
         // Bias literal.
@@ -2766,7 +2779,7 @@ mod tests {
                 compute_dtype: NumericDType::F32,
             },
             vec![],
-            vec![InputRef::affine(reduce, 1), InputRef::affine(bias, 1)],
+            vec![gi(InputRef::affine(reduce, 1)), gi(InputRef::affine(bias, 1))],
         );
 
         g.outputs = vec![g.atom_to_range(add)];
@@ -2842,7 +2855,7 @@ mod tests {
                 compute_dtype: NumericDType::F32,
             },
             vec![],
-            vec![InputRef::affine(lit, 1)],
+            vec![gi(InputRef::affine(lit, 1))],
         );
 
         g.outputs = vec![g.atom_to_range(neg)];
@@ -2930,7 +2943,7 @@ mod tests {
                 compute_dtype: NumericDType::F32,
             },
             vec![],
-            vec![InputRef::affine(data, 1)],
+            vec![gi(InputRef::affine(data, 1))],
         );
 
         // Use the scalar result in a large group (broadcast).
@@ -2942,7 +2955,7 @@ mod tests {
                 compute_dtype: NumericDType::F32,
             },
             vec![],
-            vec![InputRef::Broadcast(reduced)],
+            vec![gi(InputRef::Broadcast(reduced))],
         );
 
         g.outputs = vec![g.atom_to_range(output)];
@@ -3005,7 +3018,7 @@ mod tests {
                 compute_dtype: NumericDType::F32,
             },
             vec![],
-            vec![InputRef::affine(data, k as i64)],
+            vec![gi(InputRef::affine(data, k as i64))],
         );
 
         g.outputs = vec![g.atom_to_range(reduced)];
@@ -3057,7 +3070,7 @@ mod tests {
                 compute_dtype: NumericDType::F32,
             },
             vec![],
-            vec![InputRef::affine(lit, 1)],
+            vec![gi(InputRef::affine(lit, 1))],
         );
 
         g.outputs = vec![g.atom_to_range(op)];
@@ -3127,7 +3140,7 @@ mod tests {
                 compute_dtype: NumericDType::F32,
             },
             vec![],
-            vec![InputRef::affine(inp, 1)],
+            vec![gi(InputRef::affine(inp, 1))],
         );
 
         g.outputs = vec![g.atom_to_range(neg)];
@@ -3223,7 +3236,7 @@ mod tests {
                 compute_dtype: NumericDType::F32,
             },
             vec![],
-            vec![InputRef::affine(lit, 1), InputRef::affine(lit, 1)],
+            vec![gi(InputRef::affine(lit, 1)), gi(InputRef::affine(lit, 1))],
         );
         let pow = g.push_group(
             8000,
@@ -3233,7 +3246,7 @@ mod tests {
                 compute_dtype: NumericDType::F32,
             },
             vec![],
-            vec![InputRef::affine(sub, 1), InputRef::Broadcast(lit)],
+            vec![gi(InputRef::affine(sub, 1)), gi(InputRef::Broadcast(lit))],
         );
         let add = g.push_group(
             8000,
@@ -3243,7 +3256,7 @@ mod tests {
                 compute_dtype: NumericDType::F32,
             },
             vec![],
-            vec![InputRef::affine(pow, 1), InputRef::affine(sub, 1)],
+            vec![gi(InputRef::affine(pow, 1)), gi(InputRef::affine(sub, 1))],
         );
         g.outputs = vec![g.atom_to_range(add)];
         let phases = plan(&g, 4, &[], &g.outputs.clone());
@@ -3272,7 +3285,7 @@ mod tests {
                 compute_dtype: NumericDType::F32,
             },
             vec![],
-            vec![InputRef::affine(weights, 1), InputRef::modular(inp, 1, k)],
+            vec![gi(InputRef::affine(weights, 1)), gi(InputRef::modular(inp, 1, k))],
         );
         let reduce = g.push_group(
             m,
@@ -3284,7 +3297,7 @@ mod tests {
                 compute_dtype: NumericDType::F32,
             },
             vec![],
-            vec![InputRef::affine(mul, k as i64)],
+            vec![gi(InputRef::affine(mul, k as i64))],
         );
         let bias = g.push_group(
             m,
@@ -3301,7 +3314,7 @@ mod tests {
                 compute_dtype: NumericDType::F32,
             },
             vec![],
-            vec![InputRef::affine(reduce, 1), InputRef::affine(bias, 1)],
+            vec![gi(InputRef::affine(reduce, 1)), gi(InputRef::affine(bias, 1))],
         );
         g.outputs = vec![g.atom_to_range(add)];
         let it = vec![InputTensor {
@@ -3347,12 +3360,12 @@ mod tests {
             },
             vec![],
             vec![
-                InputRef::strided_broadcast(a, 1, n),
-                InputRef::Strided {
+                gi(InputRef::strided_broadcast(a, 1, n)),
+                gi(InputRef::Strided {
                     base: b,
                     dim_strides: vec![1, k as i64],
                     dim_shape: vec![u64::MAX, n],
-                },
+                }),
             ],
         );
 
@@ -3366,7 +3379,7 @@ mod tests {
                 compute_dtype: NumericDType::F32,
             },
             vec![],
-            vec![InputRef::affine(mul, 1)],
+            vec![gi(InputRef::affine(mul, 1))],
         );
         g.outputs = vec![g.atom_to_range(reduce)];
 
@@ -3389,7 +3402,7 @@ mod tests {
                     "reduce_stride should be relayouted to 1 for lane-local splits"
                 );
             }
-            if let Some(InputRef::Strided { dim_strides, .. }) = rg.inputs.first() {
+            if let Some(InputRef::Strided { dim_strides, .. }) = rg.inputs.first().map(|gi| &gi.input_ref) {
                 assert_eq!(
                     dim_strides.len(),
                     1,
@@ -3432,7 +3445,7 @@ mod tests {
                 compute_dtype: NumericDType::F32,
             },
             vec![],
-            vec![InputRef::affine(a, 1), InputRef::affine(b, 1)],
+            vec![gi(InputRef::affine(a, 1)), gi(InputRef::affine(b, 1))],
         );
 
         let expanded = 131_072u64; // 8 * 16_384
@@ -3451,7 +3464,7 @@ mod tests {
                 compute_dtype: NumericDType::F32,
             },
             vec![],
-            vec![InputRef::modular(src, 1, 8), InputRef::affine(w, 1)],
+            vec![gi(InputRef::modular(src, 1, 8)), gi(InputRef::affine(w, 1))],
         );
         g.outputs = vec![g.atom_to_range(out)];
 
@@ -3509,7 +3522,7 @@ mod tests {
                 compute_dtype: NumericDType::F32,
             },
             vec![],
-            vec![InputRef::affine(x, d as i64)],
+            vec![gi(InputRef::affine(x, d as i64))],
         );
 
         // Step 2: Divide by D to get mean. Broadcast a literal 1/D.
@@ -3528,7 +3541,7 @@ mod tests {
                 compute_dtype: NumericDType::F32,
             },
             vec![],
-            vec![InputRef::affine(sum, 1), InputRef::Broadcast(inv_d)],
+            vec![gi(InputRef::affine(sum, 1)), gi(InputRef::Broadcast(inv_d))],
         );
 
         // Step 3: x - mean. Uses StridedBroadcast to broadcast each mean value across D elements.
@@ -3541,8 +3554,8 @@ mod tests {
             },
             vec![],
             vec![
-                InputRef::affine(x, 1),
-                InputRef::strided_broadcast(mean, 1, d),
+                gi(InputRef::affine(x, 1)),
+                gi(InputRef::strided_broadcast(mean, 1, d)),
             ],
         );
 
@@ -3562,7 +3575,7 @@ mod tests {
                 compute_dtype: NumericDType::F32,
             },
             vec![],
-            vec![InputRef::affine(x_centered, 1), InputRef::Broadcast(two)],
+            vec![gi(InputRef::affine(x_centered, 1)), gi(InputRef::Broadcast(two))],
         );
 
         // Step 5: ReduceSum of pow2 → M variance values.
@@ -3576,7 +3589,7 @@ mod tests {
                 compute_dtype: NumericDType::F32,
             },
             vec![],
-            vec![InputRef::affine(pow2, d as i64)],
+            vec![gi(InputRef::affine(pow2, d as i64))],
         );
 
         // Step 6: Divide by D and add epsilon, then rsqrt.
@@ -3588,7 +3601,7 @@ mod tests {
                 compute_dtype: NumericDType::F32,
             },
             vec![],
-            vec![InputRef::affine(var_sum, 1), InputRef::Broadcast(inv_d)],
+            vec![gi(InputRef::affine(var_sum, 1)), gi(InputRef::Broadcast(inv_d))],
         );
         let eps = g.push_group(
             1,
@@ -3605,7 +3618,7 @@ mod tests {
                 compute_dtype: NumericDType::F32,
             },
             vec![],
-            vec![InputRef::affine(var_mean, 1), InputRef::Broadcast(eps)],
+            vec![gi(InputRef::affine(var_mean, 1)), gi(InputRef::Broadcast(eps))],
         );
         let sqrt_var = g.push_group(
             m,
@@ -3615,7 +3628,7 @@ mod tests {
                 compute_dtype: NumericDType::F32,
             },
             vec![],
-            vec![InputRef::affine(var_eps, 1)],
+            vec![gi(InputRef::affine(var_eps, 1))],
         );
         let rsqrt = g.push_group(
             m,
@@ -3625,7 +3638,7 @@ mod tests {
                 compute_dtype: NumericDType::F32,
             },
             vec![],
-            vec![InputRef::affine(sqrt_var, 1)],
+            vec![gi(InputRef::affine(sqrt_var, 1))],
         );
 
         // Step 7: Normalize: x_centered * rsqrt (StridedBroadcast).
@@ -3638,8 +3651,8 @@ mod tests {
             },
             vec![],
             vec![
-                InputRef::affine(x_centered, 1),
-                InputRef::strided_broadcast(rsqrt, 1, d),
+                gi(InputRef::affine(x_centered, 1)),
+                gi(InputRef::strided_broadcast(rsqrt, 1, d)),
             ],
         );
 
@@ -3711,7 +3724,7 @@ mod tests {
                 compute_dtype: NumericDType::F32,
             },
             vec![],
-            vec![InputRef::strided_broadcast(source, 1, d)],
+            vec![gi(InputRef::strided_broadcast(source, 1, d))],
         );
 
         g.outputs = vec![g.atom_to_range(consumer)];
@@ -3749,7 +3762,7 @@ mod tests {
                 compute_dtype: NumericDType::F32,
             },
             vec![],
-            vec![InputRef::strided_broadcast(source, 1, d)],
+            vec![gi(InputRef::strided_broadcast(source, 1, d))],
         );
 
         g.outputs = vec![g.atom_to_range(consumer)];
@@ -3788,7 +3801,7 @@ mod tests {
                 compute_dtype: NumericDType::F32,
             },
             vec![],
-            vec![InputRef::affine(w1, 1), InputRef::modular(inp, 1, k1)],
+            vec![gi(InputRef::affine(w1, 1)), gi(InputRef::modular(inp, 1, k1))],
         );
         let red1 = g.push_group(
             m,
@@ -3800,7 +3813,7 @@ mod tests {
                 compute_dtype: NumericDType::F32,
             },
             vec![],
-            vec![InputRef::affine(mul1, k1 as i64)],
+            vec![gi(InputRef::affine(mul1, k1 as i64))],
         );
 
         // Activation (elementwise).
@@ -3812,7 +3825,7 @@ mod tests {
                 compute_dtype: NumericDType::F32,
             },
             vec![],
-            vec![InputRef::affine(red1, 1)],
+            vec![gi(InputRef::affine(red1, 1))],
         );
 
         // MatMul 2: [K2, M] @ act[M] → output[K2]
@@ -3831,7 +3844,7 @@ mod tests {
                 compute_dtype: NumericDType::F32,
             },
             vec![],
-            vec![InputRef::affine(w2, 1), InputRef::modular(act, 1, m)],
+            vec![gi(InputRef::affine(w2, 1)), gi(InputRef::modular(act, 1, m))],
         );
         let red2 = g.push_group(
             k2,
@@ -3843,7 +3856,7 @@ mod tests {
                 compute_dtype: NumericDType::F32,
             },
             vec![],
-            vec![InputRef::affine(mul2, m as i64)],
+            vec![gi(InputRef::affine(mul2, m as i64))],
         );
 
         g.outputs = vec![g.atom_to_range(red2)];
@@ -3881,7 +3894,7 @@ mod tests {
                 compute_dtype: NumericDType::F32,
             },
             vec![],
-            vec![InputRef::affine(data, 1)],
+            vec![gi(InputRef::affine(data, 1))],
         );
         // Scalar reduce: reads ALL 1000 atoms of neg.
         let reduced = g.push_group(
@@ -3894,7 +3907,7 @@ mod tests {
                 compute_dtype: NumericDType::F32,
             },
             vec![],
-            vec![InputRef::affine(neg, 1)],
+            vec![gi(InputRef::affine(neg, 1))],
         );
         // Broadcast reduced to large output.
         let output = g.push_group(
@@ -3905,7 +3918,7 @@ mod tests {
                 compute_dtype: NumericDType::F32,
             },
             vec![],
-            vec![InputRef::Broadcast(reduced)],
+            vec![gi(InputRef::Broadcast(reduced))],
         );
 
         g.outputs = vec![g.atom_to_range(output)];
@@ -3950,7 +3963,7 @@ mod tests {
                 compute_dtype: NumericDType::F32,
             },
             vec![],
-            vec![InputRef::affine(lit, 1)],
+            vec![gi(InputRef::affine(lit, 1))],
         );
 
         // Consumer: 100 atoms reading source via StridedBroadcast(repeat=10).
@@ -3964,7 +3977,7 @@ mod tests {
                 compute_dtype: NumericDType::F32,
             },
             vec![],
-            vec![InputRef::strided_broadcast(source, 1, 10)],
+            vec![gi(InputRef::strided_broadcast(source, 1, 10))],
         );
 
         g.outputs = vec![g.atom_to_range(consumer)];
@@ -3998,7 +4011,7 @@ mod tests {
                 compute_dtype: NumericDType::F32,
             },
             vec![],
-            vec![InputRef::affine(lit, 1)],
+            vec![gi(InputRef::affine(lit, 1))],
         );
         let exp = g.push_group(
             103,
@@ -4008,7 +4021,7 @@ mod tests {
                 compute_dtype: NumericDType::F32,
             },
             vec![],
-            vec![InputRef::affine(neg, 1)],
+            vec![gi(InputRef::affine(neg, 1))],
         );
 
         g.outputs = vec![g.atom_to_range(exp)];
@@ -4042,7 +4055,7 @@ mod tests {
                 compute_dtype: NumericDType::F32,
             },
             vec![],
-            vec![InputRef::affine(weights, 1), InputRef::modular(inp, 1, k)],
+            vec![gi(InputRef::affine(weights, 1)), gi(InputRef::modular(inp, 1, k))],
         );
         let reduce = g.push_group(
             m,
@@ -4054,7 +4067,7 @@ mod tests {
                 compute_dtype: NumericDType::F32,
             },
             vec![],
-            vec![InputRef::affine(mul, k as i64)],
+            vec![gi(InputRef::affine(mul, k as i64))],
         );
 
         g.outputs = vec![g.atom_to_range(reduce)];
@@ -4106,7 +4119,7 @@ mod tests {
                 compute_dtype: NumericDType::F32,
             },
             vec![],
-            vec![InputRef::strided_broadcast(src1, 1, d1)],
+            vec![gi(InputRef::strided_broadcast(src1, 1, d1))],
         );
 
         // Apply StridedBroadcast with repeat=64.
@@ -4118,7 +4131,7 @@ mod tests {
                 compute_dtype: NumericDType::F32,
             },
             vec![],
-            vec![InputRef::strided_broadcast(src2, 1, d2)],
+            vec![gi(InputRef::strided_broadcast(src2, 1, d2))],
         );
 
         g.outputs = vec![g.atom_to_range(expanded1), g.atom_to_range(expanded2)];
@@ -4152,7 +4165,7 @@ mod tests {
                 compute_dtype: NumericDType::F32,
             },
             vec![],
-            vec![InputRef::affine(data, 1)],
+            vec![gi(InputRef::affine(data, 1))],
         );
 
         // Whole group with Explicit input (reverse order).
@@ -4162,7 +4175,7 @@ mod tests {
             NumericDType::F32,
             ScalarOp::Identity,
             vec![],
-            vec![InputRef::Explicit(explicit_ids)],
+            vec![gi(InputRef::Explicit(explicit_ids))],
         );
 
         // Split output reading from whole.
@@ -4174,7 +4187,7 @@ mod tests {
                 compute_dtype: NumericDType::F32,
             },
             vec![],
-            vec![InputRef::affine(reversed, 1)],
+            vec![gi(InputRef::affine(reversed, 1))],
         );
 
         g.outputs = vec![g.atom_to_range(output)];
@@ -4197,7 +4210,7 @@ mod tests {
             NumericDType::F32,
             ScalarOp::Identity,
             vec![],
-            vec![InputRef::Explicit(explicit_ids)],
+            vec![gi(InputRef::Explicit(explicit_ids))],
         );
 
         g.outputs = vec![g.atom_to_range(out)];
@@ -4259,7 +4272,7 @@ mod tests {
                 compute_dtype: NumericDType::F32,
             },
             vec![],
-            vec![InputRef::affine(data, 1)],
+            vec![gi(InputRef::affine(data, 1))],
         );
 
         // ReduceSum: 12 outputs, each summing 64 elements with stride=1.
@@ -4275,7 +4288,7 @@ mod tests {
                 compute_dtype: NumericDType::F32,
             },
             vec![],
-            vec![InputRef::affine(processed, head_dim as i64)],
+            vec![gi(InputRef::affine(processed, head_dim as i64))],
         );
 
         // Output uses the reduced values.
@@ -4287,7 +4300,7 @@ mod tests {
                 compute_dtype: NumericDType::F32,
             },
             vec![],
-            vec![InputRef::affine(reduced, 1)],
+            vec![gi(InputRef::affine(reduced, 1))],
         );
 
         g.outputs = vec![g.atom_to_range(output)];

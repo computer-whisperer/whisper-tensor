@@ -180,7 +180,7 @@ impl MilliOp for GatherElements {
     ) -> super::LowerResult {
         use crate::nano_graph::lower::{DimKind, TensorAtomMap};
         use crate::nano_graph::ops::{ScalarBinOp, ScalarOp};
-        use crate::nano_graph::pattern::InputRef;
+        use crate::nano_graph::pattern::{GroupInput, InputRef};
         use crate::numeric_dtype::NumericDType;
         use crate::numeric_scalar::NumericScalar;
 
@@ -278,8 +278,8 @@ impl MilliOp for GatherElements {
             },
             out_sym_dims.clone(),
             vec![
-                InputRef::affine(indices_map.base_id, 1),
-                InputRef::Broadcast(zero_lit),
+                GroupInput::scalar(InputRef::affine(indices_map.base_id, 1)),
+                GroupInput::scalar(InputRef::Broadcast(zero_lit)),
             ],
         );
         let offset_base = ctx.nano.push_group(
@@ -291,8 +291,8 @@ impl MilliOp for GatherElements {
             },
             out_sym_dims.clone(),
             vec![
-                InputRef::affine(cmp_base, 1),
-                InputRef::Broadcast(axis_len_lit),
+                GroupInput::scalar(InputRef::affine(cmp_base, 1)),
+                GroupInput::scalar(InputRef::Broadcast(axis_len_lit)),
             ],
         );
         let norm_base = ctx.nano.push_group(
@@ -304,8 +304,8 @@ impl MilliOp for GatherElements {
             },
             out_sym_dims.clone(),
             vec![
-                InputRef::affine(indices_map.base_id, 1),
-                InputRef::affine(offset_base, 1),
+                GroupInput::scalar(InputRef::affine(indices_map.base_id, 1)),
+                GroupInput::scalar(InputRef::affine(offset_base, 1)),
             ],
         );
 
@@ -335,8 +335,8 @@ impl MilliOp for GatherElements {
             },
             out_sym_dims.clone(),
             vec![
-                InputRef::affine(norm_base, 1),
-                InputRef::Broadcast(stride_lit),
+                GroupInput::scalar(InputRef::affine(norm_base, 1)),
+                GroupInput::scalar(InputRef::Broadcast(stride_lit)),
             ],
         );
 
@@ -350,8 +350,8 @@ impl MilliOp for GatherElements {
             },
             out_sym_dims.clone(),
             vec![
-                InputRef::affine(mul_base, 1),
-                InputRef::modular(col_lit_base, 1, cols),
+                GroupInput::scalar(InputRef::affine(mul_base, 1)),
+                GroupInput::scalar(InputRef::modular(col_lit_base, 1, cols)),
             ],
         );
 
@@ -364,7 +364,7 @@ impl MilliOp for GatherElements {
                 index_range: data_map.count,
             },
             out_sym_dims.clone(),
-            vec![InputRef::affine(add_base, 1)],
+            vec![GroupInput::scalar(InputRef::affine(add_base, 1))],
         );
 
         let out_strides = TensorAtomMap::compute_strides(&out_known_dims);

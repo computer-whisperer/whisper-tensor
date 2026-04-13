@@ -214,7 +214,7 @@ impl SimpleBinary {
     ) -> crate::milli_graph::ops::LowerResult {
         use crate::nano_graph::lower::TensorAtomMap;
         use crate::nano_graph::ops::{ScalarBinOp, ScalarOp};
-        use crate::nano_graph::pattern::AtomId;
+        use crate::nano_graph::pattern::{AtomId, GroupInput};
 
         let all_infos = ctx.all_infos;
         let mut inputs_iter = Node::inputs(self);
@@ -363,7 +363,7 @@ impl SimpleBinary {
             out_dt,
             scalar_op,
             sym_dims.clone(),
-            vec![input_a, input_b],
+            vec![GroupInput::scalar(input_a), GroupInput::scalar(input_b)],
         );
 
         ctx.tensor_map.insert(
@@ -731,7 +731,7 @@ impl Pow {
     ) -> crate::milli_graph::ops::LowerResult {
         use crate::nano_graph::lower::TensorAtomMap;
         use crate::nano_graph::ops::{ScalarBinOp, ScalarOp};
-        use crate::nano_graph::pattern::AtomId;
+        use crate::nano_graph::pattern::{AtomId, GroupInput};
 
         let all_infos = ctx.all_infos;
         let mut inputs_iter = Node::inputs(self);
@@ -778,7 +778,7 @@ impl Pow {
                 compute_dtype: dt,
             },
             sym_dims.clone(),
-            vec![input_a, input_b],
+            vec![GroupInput::scalar(input_a), GroupInput::scalar(input_b)],
         );
 
         ctx.tensor_map.insert(
@@ -1089,7 +1089,7 @@ impl MatMul {
         use crate::nano_graph::lower::DimKind;
         use crate::nano_graph::lower::TensorAtomMap;
         use crate::nano_graph::ops::{ReduceKind, ScalarBinOp, ScalarOp};
-        use crate::nano_graph::pattern::{AtomId, InputRef};
+        use crate::nano_graph::pattern::{AtomId, GroupInput, InputRef};
 
         let all_infos = ctx.all_infos;
         let mut inputs_iter = Node::inputs(self);
@@ -1369,7 +1369,7 @@ impl MatMul {
                     compute_dtype: product_dtype,
                 },
                 out_sym_dims.clone(),
-                vec![input_a, input_b],
+                vec![GroupInput::scalar(input_a), GroupInput::scalar(input_b)],
             );
 
             if mul_base_id.is_none() {
@@ -1397,7 +1397,7 @@ impl MatMul {
                     compute_dtype: accumulate_dtype,
                 },
                 out_sym_dims.clone(),
-                vec![InputRef::affine(row_mul_base, 1)],
+                vec![GroupInput::scalar(InputRef::affine(row_mul_base, 1))],
             );
 
             if reduce_base_id.is_none() {

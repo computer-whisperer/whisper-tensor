@@ -194,6 +194,16 @@ pub enum ScalarOp<'p, P: Pool + 'p = crate::pool::SystemPool> {
         reduce_stride: i64,
         compute_dtype: NumericDType,
     },
+    /// Reduce over a symbolic dimension axis.  One input; the group's
+    /// `sym_dims[axis]` GraphConstant gives the runtime reduction extent.
+    /// The output group has one fewer sym_dim than the input (the axis
+    /// at `axis` is collapsed).
+    SymReduce {
+        kind: ReduceKind,
+        /// Index into the **input** group's `sym_dims` that is reduced.
+        axis: usize,
+        compute_dtype: NumericDType,
+    },
     // Note: if you add new ScalarOp variants, update is_reduce() and all
     // match sites in eval.rs, nano_codegen.rs, pattern.rs stats/validate.
     /// Indirect load: given a runtime-computed index (one input), read a value
@@ -258,6 +268,16 @@ impl<P: Pool> std::fmt::Debug for ScalarOp<'_, P> {
                 .field("reduce_stride", reduce_stride)
                 .field("compute_dtype", compute_dtype)
                 .finish(),
+            ScalarOp::SymReduce {
+                kind,
+                axis,
+                compute_dtype,
+            } => f
+                .debug_struct("SymReduce")
+                .field("kind", kind)
+                .field("axis", axis)
+                .field("compute_dtype", compute_dtype)
+                .finish(),
             ScalarOp::IndirectLoad {
                 table_base,
                 index_range,
@@ -310,6 +330,15 @@ where
                 reduce_stride: *reduce_stride,
                 compute_dtype: *compute_dtype,
             },
+            ScalarOp::SymReduce {
+                kind,
+                axis,
+                compute_dtype,
+            } => ScalarOp::SymReduce {
+                kind: *kind,
+                axis: *axis,
+                compute_dtype: *compute_dtype,
+            },
             ScalarOp::IndirectLoad {
                 table_base,
                 index_range,
@@ -341,12 +370,13 @@ impl<'p, P: Pool + 'p> ScalarOp<'p, P> {
             | ScalarOp::OpaqueOutput { .. } => None,
             ScalarOp::Binary { compute_dtype, .. }
             | ScalarOp::Unary { compute_dtype, .. }
-            | ScalarOp::Reduce { compute_dtype, .. } => Some(*compute_dtype),
+            | ScalarOp::Reduce { compute_dtype, .. }
+            | ScalarOp::SymReduce { compute_dtype, .. } => Some(*compute_dtype),
         }
     }
 
     /// Returns true if this is a reduce operation.
     pub fn is_reduce(&self) -> bool {
-        matches!(self, ScalarOp::Reduce { .. })
+        matches!(self, ScalarOp::Reduce { .. } | ScalarOp::SymReduce { .. })
     }
 }

@@ -11,7 +11,7 @@ use crate::graph::{GlobalId, Graph, Node};
 use crate::milli_graph::MilliOpGraph;
 use crate::milli_graph::ops::AnyMilliOp;
 use crate::nano_graph::ops::ScalarOp;
-use crate::nano_graph::pattern::{AtomId, InputRef, NanoGraph, SymDim};
+use crate::nano_graph::pattern::{AtomId, GroupInput, InputRef, NanoGraph, SymDim};
 use crate::numeric_dtype::NumericDType;
 use crate::numeric_scalar::NumericScalar;
 use crate::pool::SystemPool;
@@ -688,7 +688,7 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
     pub fn alloc_sym_dim(&mut self) -> SymDim {
         let name = format!("sym_{}", self.next_anon_sym);
         self.next_anon_sym += 1;
-        self.nano.sym_dim(&name)
+        self.nano.graph_constant(&name)
     }
 
     /// Register a known-value constant as Literal groups.
@@ -1724,7 +1724,7 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
             out_dt,
             cast_op,
             in_map.sym_dims.clone(),
-            vec![input_ref],
+            vec![GroupInput::scalar(input_ref)],
         );
 
         self.tensor_map.insert(
@@ -1787,7 +1787,7 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
                     dt,
                     ScalarOp::Identity,
                     in_map.sym_dims.clone(),
-                    vec![input_ref],
+                    vec![GroupInput::scalar(input_ref)],
                 );
                 self.tensor_map.insert(
                     out_id,
@@ -1863,7 +1863,7 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
                 dt,
                 ScalarOp::Identity,
                 sym_dims.clone(),
-                vec![input_ref],
+                vec![GroupInput::scalar(input_ref)],
             );
             self.tensor_map.insert(
                 out_id,
@@ -2044,7 +2044,7 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
             out_dt,
             reduce_op,
             out_sym_dims.clone(),
-            vec![input_ref],
+            vec![GroupInput::scalar(input_ref)],
         );
 
         self.tensor_map.insert(
@@ -2454,7 +2454,7 @@ mod tests {
                 i, g.count
             );
             // Input 0 should be StridedBroadcast with repeat=N=16.
-            match &g.inputs[0] {
+            match &g.inputs[0].input_ref {
                 InputRef::Strided {
                     dim_strides,
                     dim_shape,
@@ -2465,7 +2465,7 @@ mod tests {
                 other => panic!("Expected StridedBroadcast for input 0, got {:?}", other),
             }
             // Input 1 should be Affine with stride=1.
-            match &g.inputs[1] {
+            match &g.inputs[1].input_ref {
                 InputRef::Strided {
                     dim_strides,
                     dim_shape,

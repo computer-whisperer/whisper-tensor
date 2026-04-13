@@ -234,7 +234,7 @@ pub fn audit_slab_coalescing(
                 for (ii, input_ref) in group.inputs.iter().enumerate() {
                     report.total_input_refs += 1;
 
-                    let segments = input_access_segments(input_ref, group.atom_offset, group.count);
+                    let segments = input_access_segments(&input_ref.input_ref, group.atom_offset, group.count);
                     if segments.is_empty() {
                         continue;
                     }

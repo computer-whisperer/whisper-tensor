@@ -108,7 +108,7 @@ impl Pad {
     ) -> crate::milli_graph::ops::LowerResult {
         use crate::nano_graph::lower::{DimKind, NanoLoweringContext, TensorAtomMap};
         use crate::nano_graph::ops::ScalarOp;
-        use crate::nano_graph::pattern::InputRef;
+        use crate::nano_graph::pattern::{GroupInput, InputRef};
         use crate::numeric_scalar::NumericScalar;
 
         // Constant mode only.
@@ -286,7 +286,7 @@ impl Pad {
                     dt,
                     ScalarOp::Identity,
                     sym_dims.clone(),
-                    vec![InputRef::affine(in_row_base, in_last_stride)],
+                    vec![GroupInput::scalar(InputRef::affine(in_row_base, in_last_stride))],
                 );
                 if first_base.is_none() {
                     first_base = Some(b);

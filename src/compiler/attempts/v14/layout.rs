@@ -624,7 +624,7 @@ pub fn compute_layout(
 
     for group in groups {
         for ir in &group.inputs {
-            if let Some((lo, hi)) = input_ref_range(ir, group.count, group.atom_offset) {
+            if let Some((lo, hi)) = input_ref_range(&ir.input_ref, group.count, group.atom_offset) {
                 let items = coalescable(items_in_range(lo, hi));
                 if items.len() > 1 {
                     for i in 1..items.len() {
@@ -644,7 +644,7 @@ pub fn compute_layout(
             if *reduce_count > 1 && *reduce_stride != 0 {
                 if let Some(InputRef::Strided {
                     base, dim_strides, ..
-                }) = group.inputs.first()
+                }) = group.inputs.first().map(|gi| &gi.input_ref)
                 {
                     // Use the innermost stride (last element) for affine-like access
                     let stride = dim_strides.last().copied().unwrap_or(0);
@@ -850,7 +850,7 @@ pub fn compute_layout(
                 base,
                 dim_strides,
                 dim_shape,
-            } = &consumer.inputs[0]
+            } = &consumer.inputs[0].input_ref
             else {
                 continue;
             };
@@ -877,7 +877,7 @@ pub fn compute_layout(
             // order, all upstream inlinables have already been marked.
             let mut all_buffer_inputs = true;
             'inputs: for inp in &group.inputs {
-                let bases: &[AtomId] = match inp {
+                let bases: &[AtomId] = match &inp.input_ref {
                     InputRef::Broadcast(a) => std::slice::from_ref(a),
                     InputRef::Strided { base, .. } => std::slice::from_ref(base),
                     InputRef::Explicit(ids) => ids.as_slice(),
@@ -1107,7 +1107,7 @@ pub fn validate_layout(
     let mut errors = Vec::new();
     for (gi, group) in graph.groups().iter().enumerate() {
         for (ii, ir) in group.inputs.iter().enumerate() {
-            match ir {
+            match &ir.input_ref {
                 InputRef::Strided {
                     base, dim_strides, ..
                 // Only validate 1D Affine patterns. N-D Strided InputRefs use
@@ -1159,7 +1159,7 @@ pub fn validate_layout(
                 if *reduce_count > 1 && *reduce_stride != 0 {
                     if let InputRef::Strided {
                         base, dim_strides, ..
-                    } = ir
+                    } = &ir.input_ref
                     {
                         let stride = dim_strides.last().copied().unwrap_or(0);
                         let first = (base.0 as i64 + stride * group.atom_offset as i64) as u64;
@@ -1317,6 +1317,7 @@ pub(crate) fn op_name_short(op: &ScalarOp) -> &'static str {
         ScalarOp::IndirectLoad { .. } => "Ind",
         ScalarOp::OpaqueOutput { .. } => "Opq",
         ScalarOp::LiteralSpan(_) => "LitS",
+        ScalarOp::SymReduce { .. } => "SRed",
     }
 }
 
@@ -1327,6 +1328,7 @@ mod tests {
     use crate::compiler::attempts::v14::types::{Phase, Span};
     use crate::graph::GlobalId;
     use crate::nano_graph::ops::ScalarOp;
+    use crate::nano_graph::pattern::GroupInput;
     use crate::numeric_scalar::NumericScalar;
 
     /// Build a trivial placement (one phase, one span containing the
@@ -1427,7 +1429,7 @@ mod tests {
             NumericDType::BOOL,
             ScalarOp::Identity,
             vec![],
-            vec![InputRef::affine(bool_input, 1)],
+            vec![GroupInput::scalar(InputRef::affine(bool_input, 1))],
         );
         let outputs = vec![AtomRange {
             base: identity,

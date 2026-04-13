@@ -5,7 +5,7 @@ use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
 use crate::nano_graph::lower::{NanoLoweringContext, TensorAtomMap};
 use crate::nano_graph::ops::{ScalarBinOp, ScalarOp, ScalarUnaryOp};
-use crate::nano_graph::pattern::InputRef;
+use crate::nano_graph::pattern::{GroupInput, InputRef};
 use crate::pool::Pool;
 use crate::tensor_info::TensorInfo;
 use serde::{Deserialize, Serialize};
@@ -303,7 +303,7 @@ impl SimpleUnaryOp {
             dt,
             scalar_op,
             in_map.sym_dims.clone(),
-            vec![input_ref],
+            vec![GroupInput::scalar(input_ref)],
         );
 
         ctx.tensor_map.insert(
@@ -650,7 +650,7 @@ impl ClampMin {
                 compute_dtype: dt,
             },
             in_map.sym_dims.clone(),
-            vec![input_ref, InputRef::Broadcast(min_id)],
+            vec![GroupInput::scalar(input_ref), GroupInput::scalar(InputRef::Broadcast(min_id))],
         );
 
         ctx.tensor_map.insert(

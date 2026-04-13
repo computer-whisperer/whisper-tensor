@@ -59,7 +59,7 @@ impl Dilate {
     ) -> crate::milli_graph::ops::LowerResult {
         use crate::nano_graph::lower::{DimKind, TensorAtomMap};
         use crate::nano_graph::ops::ScalarOp;
-        use crate::nano_graph::pattern::InputRef;
+        use crate::nano_graph::pattern::{GroupInput, InputRef};
         use crate::numeric_scalar::NumericScalar;
 
         let all_infos = ctx.all_infos;
@@ -188,7 +188,7 @@ impl Dilate {
                         dt,
                         ScalarOp::Identity,
                         sym_dims.clone(),
-                        vec![InputRef::affine(in_row_base, in_strides[last] as i64)],
+                        vec![GroupInput::scalar(InputRef::affine(in_row_base, in_strides[last] as i64))],
                     );
                     if first_base.is_none() {
                         first_base = Some(b);
@@ -218,7 +218,7 @@ impl Dilate {
                             dt,
                             ScalarOp::Identity,
                             sym_dims.clone(),
-                            vec![InputRef::affine(in_map.base_id.offset(atom_offset), 1)],
+                            vec![GroupInput::scalar(InputRef::affine(in_map.base_id.offset(atom_offset), 1))],
                         );
                         if first_base.is_none() {
                             first_base = Some(b);

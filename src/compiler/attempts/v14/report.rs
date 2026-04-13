@@ -637,6 +637,7 @@ fn scalar_op_name(op: &ScalarOp) -> &'static str {
         ScalarOp::IndirectLoad { .. } => "IndirLoad",
         ScalarOp::OpaqueOutput { .. } => "Opaque",
         ScalarOp::LiteralSpan(_) => "LiteralSpan",
+        ScalarOp::SymReduce { .. } => "SymReduce",
     }
 }
 

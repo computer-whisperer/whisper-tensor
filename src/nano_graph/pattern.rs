@@ -16,12 +16,69 @@ use crate::pool::Pool;
 use crate::range_map::RangeMap;
 use std::collections::HashMap;
 
-/// A symbolic runtime dimension (batch, seq_len, etc.).
+/// Index into `NanoGraph::graph_constants`.
 ///
-/// Multiple atoms/groups can share the same SymDim, meaning they iterate
-/// over the same runtime-variable extent.
+/// Identifies a graph-level unknown scalar whose concrete value is
+/// provided at execution time.  Each symbolic dimension axis of an
+/// atom group references a GraphConstantId.  Two axes that share the
+/// same id have the same runtime extent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct SymDim(pub u16);
+pub struct GraphConstantId(pub u16);
+
+/// Metadata for a single graph constant.
+#[derive(Debug, Clone)]
+pub struct GraphConstantInfo {
+    /// Maximum value (for compile-time buffer sizing).
+    pub max_value: u64,
+    /// Debug name (e.g. "batch", "seq_len").  Optional.
+    pub name: Option<String>,
+}
+
+/// How a consumer's symbolic dimension axis maps to a producer's axes.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum SymDimMap {
+    /// Consumer axis reads from producer axis at the given index
+    /// (same loop variable).  The two axes must share the same
+    /// GraphConstantId.
+    Identity(usize),
+    /// Producer does not vary along this consumer axis (broadcast).
+    Broadcast,
+}
+
+/// An input to an atom group: atom-space addressing (InputRef) paired
+/// with a sym-dim mapping that tells the evaluator how to index the
+/// producer's symbolic dimensions for each point in the consumer's
+/// sym-dim space.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct GroupInput {
+    pub input_ref: InputRef,
+    /// Parallel to the **consumer** group's `sym_dims`.
+    /// Entry `j` says how consumer sym-dim axis `j` maps to a
+    /// producer axis.
+    pub sym_dim_map: Vec<SymDimMap>,
+}
+
+impl GroupInput {
+    /// Wrap an InputRef with no sym-dim mapping (scalar atoms, no symbolic dims).
+    pub fn scalar(input_ref: InputRef) -> Self {
+        Self {
+            input_ref,
+            sym_dim_map: vec![],
+        }
+    }
+
+    /// Wrap an InputRef with an all-Identity sym-dim mapping: consumer axis j
+    /// maps to producer axis j for all axes.
+    pub fn identity(input_ref: InputRef, num_sym_dims: usize) -> Self {
+        Self {
+            input_ref,
+            sym_dim_map: (0..num_sym_dims).map(SymDimMap::Identity).collect(),
+        }
+    }
+}
+
+/// Legacy alias — will be removed once compiler references are updated.
+pub type SymDim = GraphConstantId;
 
 /// Unique identifier for a scalar atom in the graph.
 ///
@@ -208,9 +265,11 @@ pub struct AtomGroup<'p, P: Pool + 'p = crate::pool::SystemPool> {
     /// Symbolic dimensions this group iterates over.
     /// Each atom in the group independently iterates over these dims.
     /// E.g., `[batch, seq_len]` means each atom produces a 2D tile of values.
-    pub sym_dims: Vec<SymDim>,
-    /// Inputs to the operation. Number must match what `op` expects.
-    pub inputs: Vec<InputRef>,
+    /// Each entry is a GraphConstantId whose runtime value gives the axis extent.
+    pub sym_dims: Vec<GraphConstantId>,
+    /// Inputs to the operation, each pairing an InputRef (atom-space
+    /// addressing) with a sym-dim mapping.
+    pub inputs: Vec<GroupInput>,
 }
 
 impl<'p, P: Pool + 'p> Clone for AtomGroup<'p, P>
@@ -292,11 +351,9 @@ pub struct NanoGraph<'p, P: Pool + 'p = crate::pool::SystemPool> {
     /// Opaque milli-ops that can't be decomposed into scalar nano-ops.
     /// AtomGroups with `ScalarOp::OpaqueOutput` reference these by index.
     opaque_ops: Vec<super::ops::OpaqueOp>,
-    /// Named symbolic dimensions (e.g., "batch" → SymDim(0)).
-    pub sym_dim_names: HashMap<String, SymDim>,
-    /// Known upper bounds for symbolic dimensions.
-    pub sym_dim_bounds: HashMap<SymDim, u64>,
-    next_sym_dim: u16,
+    /// Graph-level unknown scalars whose values are provided at runtime.
+    /// Indexed by `GraphConstantId`.
+    pub graph_constants: Vec<GraphConstantInfo>,
     /// Which atom ranges are final outputs of the computation.
     pub outputs: Vec<AtomRange>,
 }
@@ -311,9 +368,7 @@ where
             next_atom_id: self.next_atom_id,
             input_ranges: self.input_ranges.clone(),
             opaque_ops: self.opaque_ops.clone(),
-            sym_dim_names: self.sym_dim_names.clone(),
-            sym_dim_bounds: self.sym_dim_bounds.clone(),
-            next_sym_dim: self.next_sym_dim,
+            graph_constants: self.graph_constants.clone(),
             outputs: self.outputs.clone(),
         }
     }
@@ -326,9 +381,7 @@ impl<P: Pool> Default for NanoGraph<'_, P> {
             next_atom_id: 0,
             input_ranges: RangeMap::new(),
             opaque_ops: Vec::new(),
-            sym_dim_names: HashMap::new(),
-            sym_dim_bounds: HashMap::new(),
-            next_sym_dim: 0,
+            graph_constants: Vec::new(),
             outputs: Vec::new(),
         }
     }
@@ -351,10 +404,13 @@ impl<'p, P: Pool + 'p> NanoGraph<'p, P> {
 
             // Create an AtomGroup for this output — references the opaque op by index.
             // The group's inputs reference the opaque op's input atom bases for liveness.
-            let input_refs: Vec<InputRef> = op
+            let group_inputs: Vec<GroupInput> = op
                 .inputs
                 .iter()
-                .map(|inp| InputRef::Broadcast(inp.base))
+                .map(|inp| GroupInput {
+                    input_ref: InputRef::Broadcast(inp.base),
+                    sym_dim_map: vec![],
+                })
                 .collect();
 
             self.groups.insert(
@@ -370,7 +426,7 @@ impl<'p, P: Pool + 'p> NanoGraph<'p, P> {
                         output_idx,
                     },
                     sym_dims: vec![],
-                    inputs: input_refs,
+                    inputs: group_inputs,
                 },
             );
 
@@ -403,7 +459,10 @@ impl<'p, P: Pool + 'p> NanoGraph<'p, P> {
                 output_dtype: dtype,
                 op: ScalarOp::Identity,
                 sym_dims: vec![],
-                inputs: vec![InputRef::Explicit(source_atoms)],
+                inputs: vec![GroupInput {
+                    input_ref: InputRef::Explicit(source_atoms),
+                    sym_dim_map: vec![],
+                }],
             },
         );
         base
@@ -419,29 +478,59 @@ impl<'p, P: Pool + 'p> NanoGraph<'p, P> {
         self.opaque_ops = ops;
     }
 
-    /// Register or retrieve a symbolic dimension by name.
-    pub fn sym_dim(&mut self, name: &str) -> SymDim {
-        if let Some(&sd) = self.sym_dim_names.get(name) {
-            sd
+    /// Register or retrieve a graph constant by name.
+    ///
+    /// If a constant with this name already exists, returns its id.
+    /// Otherwise allocates a new one with `max_value = u64::MAX`
+    /// (caller should set a tighter bound via [`set_graph_constant_max`]).
+    pub fn graph_constant(&mut self, name: &str) -> GraphConstantId {
+        if let Some(idx) = self.graph_constants.iter().position(|gc| {
+            gc.name.as_deref() == Some(name)
+        }) {
+            GraphConstantId(idx as u16)
         } else {
-            let sd = SymDim(self.next_sym_dim);
-            self.next_sym_dim += 1;
-            self.sym_dim_names.insert(name.to_string(), sd);
-            sd
+            let id = GraphConstantId(self.graph_constants.len() as u16);
+            self.graph_constants.push(GraphConstantInfo {
+                max_value: u64::MAX,
+                name: Some(name.to_string()),
+            });
+            id
         }
     }
 
-    /// Look up a sym dim by name without creating it.
-    pub fn get_sym_dim(&self, name: &str) -> Option<SymDim> {
-        self.sym_dim_names.get(name).copied()
+    /// Look up a graph constant by name without creating it.
+    pub fn get_graph_constant(&self, name: &str) -> Option<GraphConstantId> {
+        self.graph_constants
+            .iter()
+            .position(|gc| gc.name.as_deref() == Some(name))
+            .map(|i| GraphConstantId(i as u16))
     }
 
-    /// Create a symbolic dimension with a known upper bound.
-    /// Used for contraction dimensions (MatMul K, reduction axes).
-    pub fn bounded_sym_dim(&mut self, name: &str, bound: u64) -> SymDim {
-        let sd = self.sym_dim(name);
-        self.sym_dim_bounds.insert(sd, bound);
-        sd
+    /// Allocate an anonymous graph constant (no name).
+    pub fn anon_graph_constant(&mut self, max_value: u64) -> GraphConstantId {
+        let id = GraphConstantId(self.graph_constants.len() as u16);
+        self.graph_constants.push(GraphConstantInfo {
+            max_value,
+            name: None,
+        });
+        id
+    }
+
+    /// Set the maximum value for a graph constant.
+    pub fn set_graph_constant_max(&mut self, id: GraphConstantId, max_value: u64) {
+        self.graph_constants[id.0 as usize].max_value = max_value;
+    }
+
+    /// Get info for a graph constant.
+    pub fn graph_constant_info(&self, id: GraphConstantId) -> &GraphConstantInfo {
+        &self.graph_constants[id.0 as usize]
+    }
+
+    /// Create a named graph constant with a known upper bound.
+    pub fn bounded_graph_constant(&mut self, name: &str, bound: u64) -> GraphConstantId {
+        let id = self.graph_constant(name);
+        self.set_graph_constant_max(id, bound);
+        id
     }
 
     /// Reserve an AtomId range for an external input tensor.
@@ -506,8 +595,8 @@ impl<'p, P: Pool + 'p> NanoGraph<'p, P> {
         count: u64,
         output_dtype: NumericDType,
         op: ScalarOp<'p, P>,
-        sym_dims: Vec<SymDim>,
-        inputs: Vec<InputRef>,
+        sym_dims: Vec<GraphConstantId>,
+        inputs: Vec<GroupInput>,
     ) {
         let idx = self
             .groups
@@ -592,8 +681,8 @@ impl<'p, P: Pool + 'p> NanoGraph<'p, P> {
         atom_offset: u64,
         output_dtype: NumericDType,
         op: ScalarOp<'p, P>,
-        sym_dims: Vec<SymDim>,
-        inputs: Vec<InputRef>,
+        sym_dims: Vec<GraphConstantId>,
+        inputs: Vec<GroupInput>,
     ) {
         self.groups.insert(
             base_id.0,
@@ -621,8 +710,8 @@ impl<'p, P: Pool + 'p> NanoGraph<'p, P> {
         count: u64,
         output_dtype: NumericDType,
         op: ScalarOp<'p, P>,
-        sym_dims: Vec<SymDim>,
-        inputs: Vec<InputRef>,
+        sym_dims: Vec<GraphConstantId>,
+        inputs: Vec<GroupInput>,
     ) -> AtomId {
         let base_id = self.alloc_ids(count);
         self.groups.insert(
@@ -646,8 +735,8 @@ impl<'p, P: Pool + 'p> NanoGraph<'p, P> {
         &mut self,
         output_dtype: NumericDType,
         op: ScalarOp<'p, P>,
-        sym_dims: Vec<SymDim>,
-        inputs: Vec<InputRef>,
+        sym_dims: Vec<GraphConstantId>,
+        inputs: Vec<GroupInput>,
     ) -> AtomId {
         self.push_group(1, output_dtype, op, sym_dims, inputs)
     }
@@ -839,6 +928,7 @@ impl<'p, P: Pool + 'p> NanoGraph<'p, P> {
                 ScalarOp::IndirectLoad { .. } => "IndirectLoad",
                 ScalarOp::OpaqueOutput { .. } => "OpaqueOutput",
                 ScalarOp::LiteralSpan(_) => "LiteralSpan",
+                ScalarOp::SymReduce { .. } => "SymReduce",
             };
             *groups_by_op.entry(op_name).or_default() += 1;
         }
@@ -909,7 +999,7 @@ impl<'p, P: Pool + 'p> NanoGraph<'p, P> {
         }
 
         for input in &group.inputs {
-            self.collect_producer_indices(input, group.count, group.atom_offset, out);
+            self.collect_producer_indices(&input.input_ref, group.count, group.atom_offset, out);
         }
 
         // Reduce ops access additional atoms via stride.
@@ -922,8 +1012,8 @@ impl<'p, P: Pool + 'p> NanoGraph<'p, P> {
             && *reduce_stride != 0
         {
             for input in &group.inputs {
-                let first = input.resolve(group.atom_offset);
-                let last = input.resolve(group.atom_offset + group.count - 1);
+                let first = input.input_ref.resolve(group.atom_offset);
+                let last = input.input_ref.resolve(group.atom_offset + group.count - 1);
                 let end_off = (*reduce_count as i64 - 1) * reduce_stride;
                 let endpoints = [
                     first.0,
@@ -1049,7 +1139,8 @@ impl<'p, P: Pool + 'p> NanoGraph<'p, P> {
                 };
 
                 // For Explicit, also check unique atoms that might span multiple groups.
-                let extra_positions: Vec<u64> = if let InputRef::Explicit(ids) = input {
+                let iref = &input.input_ref;
+                let extra_positions: Vec<u64> = if let InputRef::Explicit(ids) = iref {
                     // Find positions where the atom ID jumps (different source groups).
                     let mut extras = Vec::new();
                     let mut prev_gi = None;
@@ -1069,7 +1160,7 @@ impl<'p, P: Pool + 'p> NanoGraph<'p, P> {
                     if i >= group.count {
                         continue;
                     }
-                    let source = input.resolve(i + group.atom_offset);
+                    let source = iref.resolve(i + group.atom_offset);
 
                     // Check existence.
                     if !self.contains_atom(source) {
@@ -1104,7 +1195,7 @@ impl<'p, P: Pool + 'p> NanoGraph<'p, P> {
                 {
                     // Check from first and last consumer atom.
                     for &i in &[0u64, group.count.saturating_sub(1)] {
-                        let base_atom = input.resolve(i + group.atom_offset);
+                        let base_atom = iref.resolve(i + group.atom_offset);
                         let last_k_atom = AtomId(
                             (base_atom.0 as i64 + (*reduce_count as i64 - 1) * reduce_stride)
                                 as u64,
@@ -1126,7 +1217,7 @@ impl<'p, P: Pool + 'p> NanoGraph<'p, P> {
                 }
 
                 // Explicit refs must have correct length.
-                if let InputRef::Explicit(ids) = input
+                if let InputRef::Explicit(ids) = iref
                     && ids.len() != group.count as usize
                 {
                     errors.push(format!(
@@ -1148,7 +1239,7 @@ impl<'p, P: Pool + 'p> NanoGraph<'p, P> {
                 | ScalarOp::IndirectLoad { .. } => 1,
                 ScalarOp::Binary { .. } => 2,
                 ScalarOp::Select => 3,
-                ScalarOp::Reduce { .. } => 1,
+                ScalarOp::Reduce { .. } | ScalarOp::SymReduce { .. } => 1,
                 // OpaqueOutput inputs are Broadcast refs to opaque op's input bases (for liveness).
                 // The count varies — skip the check.
                 ScalarOp::OpaqueOutput { .. } => {
@@ -1238,7 +1329,7 @@ mod tests {
                 compute_dtype: NumericDType::F32,
             },
             vec![],
-            vec![InputRef::affine(a, 1), InputRef::affine(b, 1)],
+            vec![GroupInput::scalar(InputRef::affine(a, 1)), GroupInput::scalar(InputRef::affine(b, 1))],
         );
 
         assert!(g.validate().is_empty(), "{:?}", g.validate());
@@ -1277,7 +1368,7 @@ mod tests {
                 compute_dtype: NumericDType::F32,
             },
             vec![],
-            vec![InputRef::affine(a, 1), InputRef::Broadcast(b)],
+            vec![GroupInput::scalar(InputRef::affine(a, 1)), GroupInput::scalar(InputRef::Broadcast(b))],
         );
 
         assert!(g.validate().is_empty(), "{:?}", g.validate());
@@ -1288,7 +1379,7 @@ mod tests {
     #[test]
     fn test_symbolic_dim() {
         let mut g = TestGraph::new();
-        let batch = g.sym_dim("batch");
+        let batch = g.graph_constant("batch");
 
         let a = g.push_group(
             1024,
@@ -1312,7 +1403,10 @@ mod tests {
                 compute_dtype: NumericDType::F32,
             },
             vec![batch],
-            vec![InputRef::affine(a, 1), InputRef::affine(b, 1)],
+            vec![
+                GroupInput::identity(InputRef::affine(a, 1), 1),
+                GroupInput::identity(InputRef::affine(b, 1), 1),
+            ],
         );
 
         assert!(g.validate().is_empty(), "{:?}", g.validate());
@@ -1324,7 +1418,7 @@ mod tests {
     #[test]
     fn test_reduce_symbolic() {
         let mut g = TestGraph::new();
-        let seq = g.sym_dim("seq_len");
+        let seq = g.graph_constant("seq_len");
 
         let input = g.push_group(
             768,
@@ -1335,18 +1429,16 @@ mod tests {
         );
 
         // Reduce over seq_len: each of 768 hidden atoms accumulates over seq.
-        // reduce_count=0 signals "driven by SymDim" rather than a known count.
         let _reduced = g.push_group(
             768,
             NumericDType::F32,
-            ScalarOp::Reduce {
+            ScalarOp::SymReduce {
                 kind: ReduceKind::Sum,
-                reduce_count: 0,
-                reduce_stride: 0,
+                axis: 0,
                 compute_dtype: NumericDType::F32,
             },
             vec![], // seq is reduced away
-            vec![InputRef::affine(input, 1)],
+            vec![GroupInput::identity(InputRef::affine(input, 1), 1)],
         );
 
         assert!(g.validate().is_empty(), "{:?}", g.validate());
@@ -1357,8 +1449,8 @@ mod tests {
     #[test]
     fn test_singleton_boundary() {
         let mut g = TestGraph::new();
-        let batch = g.sym_dim("batch");
-        let seq = g.sym_dim("seq_len");
+        let batch = g.graph_constant("batch");
+        let seq = g.graph_constant("seq_len");
 
         // A Gather boundary: single atom, runtime-variable dims.
         let _gather = g.push_atom(
@@ -1397,11 +1489,11 @@ mod tests {
                 compute_dtype: NumericDType::F32,
             },
             vec![],
-            vec![InputRef::Explicit(vec![
+            vec![GroupInput::scalar(InputRef::Explicit(vec![
                 src.offset(2),
                 src.offset(0),
                 src.offset(3),
-            ])],
+            ]))],
         );
 
         assert!(g.validate().is_empty(), "{:?}", g.validate());

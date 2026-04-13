@@ -16,7 +16,7 @@
 use super::ab_harness::ab_test_bytes;
 use crate::graph::GlobalId;
 use crate::nano_graph::ops::ScalarOp;
-use crate::nano_graph::pattern::{AtomRange, InputRef, NanoGraph};
+use crate::nano_graph::pattern::{AtomRange, GroupInput, InputRef, NanoGraph};
 use crate::numeric_dtype::NumericDType;
 use crate::pool::SystemPool;
 
@@ -36,7 +36,7 @@ fn identity_chain_f32(count: u64) -> (NanoGraph<'static, SystemPool>, AtomRange,
         NumericDType::F32,
         ScalarOp::Identity,
         vec![],
-        vec![InputRef::affine(inp, 1)],
+        vec![GroupInput::scalar(InputRef::affine(inp, 1))],
     );
     let in_range = AtomRange {
         base: inp,
@@ -102,7 +102,7 @@ fn identity_i64_count_eight() {
         NumericDType::I64,
         ScalarOp::Identity,
         vec![],
-        vec![InputRef::affine(inp, 1)],
+        vec![GroupInput::scalar(InputRef::affine(inp, 1))],
     );
     let values: [i64; 8] = [
         0,
@@ -138,7 +138,7 @@ fn identity_u8_count_seventeen() {
         NumericDType::U8,
         ScalarOp::Identity,
         vec![],
-        vec![InputRef::affine(inp, 1)],
+        vec![GroupInput::scalar(InputRef::affine(inp, 1))],
     );
     let bytes: Vec<u8> = (0..n as u8).collect();
     let outs = ab_test_bytes(
@@ -163,7 +163,7 @@ fn identity_bf16_count_four() {
         NumericDType::BF16,
         ScalarOp::Identity,
         vec![],
-        vec![InputRef::affine(inp, 1)],
+        vec![GroupInput::scalar(InputRef::affine(inp, 1))],
     );
     // BF16 raw bit patterns: 1.0, -1.0, +inf, -0.
     let raw: [u16; 4] = [0x3f80, 0xbf80, 0x7f80, 0x8000];
@@ -201,7 +201,7 @@ fn identity_f32_broadcast_input() {
         NumericDType::F32,
         ScalarOp::Identity,
         vec![],
-        vec![InputRef::Broadcast(inp)],
+        vec![GroupInput::scalar(InputRef::Broadcast(inp))],
     );
     let bytes = f32_input_bytes(&[2.5]);
     let outs = ab_test_bytes(
@@ -231,7 +231,7 @@ fn identity_f32_explicit_single() {
         NumericDType::F32,
         ScalarOp::Identity,
         vec![],
-        vec![InputRef::Explicit(vec![inp])],
+        vec![GroupInput::scalar(InputRef::Explicit(vec![inp]))],
     );
     let bytes = f32_input_bytes(&[-7.25]);
     let outs = ab_test_bytes(
@@ -259,7 +259,7 @@ fn identity_f32_modular_input() {
         NumericDType::F32,
         ScalarOp::Identity,
         vec![],
-        vec![InputRef::modular(inp, 1, 4)],
+        vec![GroupInput::scalar(InputRef::modular(inp, 1, 4))],
     );
     let src = [1.0_f32, 2.0, 3.0, 4.0];
     let bytes = f32_input_bytes(&src);
@@ -286,7 +286,7 @@ fn identity_f32_modular_non_power_of_two() {
         NumericDType::F32,
         ScalarOp::Identity,
         vec![],
-        vec![InputRef::modular(inp, 1, 3)],
+        vec![GroupInput::scalar(InputRef::modular(inp, 1, 3))],
     );
     let src = [10.0_f32, 20.0, 30.0];
     let bytes = f32_input_bytes(&src);
@@ -314,7 +314,7 @@ fn identity_f32_strided_broadcast_input() {
         NumericDType::F32,
         ScalarOp::Identity,
         vec![],
-        vec![InputRef::strided_broadcast(inp, 1, 4)],
+        vec![GroupInput::scalar(InputRef::strided_broadcast(inp, 1, 4))],
     );
     let src = [5.0_f32, 9.0];
     let bytes = f32_input_bytes(&src);
@@ -350,7 +350,7 @@ fn identity_f32_explicit_multi() {
         NumericDType::F32,
         ScalarOp::Identity,
         vec![],
-        vec![InputRef::Explicit(ids)],
+        vec![GroupInput::scalar(InputRef::Explicit(ids))],
     );
     let src = [100.0_f32, 200.0, 300.0, 400.0];
     let bytes = f32_input_bytes(&src);
@@ -380,7 +380,7 @@ fn cast_f32_to_bf16() {
         NumericDType::BF16,
         ScalarOp::Cast { saturating: false },
         vec![],
-        vec![InputRef::affine(inp, 1)],
+        vec![GroupInput::scalar(InputRef::affine(inp, 1))],
     );
     let src = [1.0_f32, -1.0, 0.0, 3.140625]; // values exact in BF16
     let bytes = f32_input_bytes(&src);
@@ -407,7 +407,7 @@ fn cast_bf16_to_f32() {
         NumericDType::F32,
         ScalarOp::Cast { saturating: false },
         vec![],
-        vec![InputRef::affine(inp, 1)],
+        vec![GroupInput::scalar(InputRef::affine(inp, 1))],
     );
     // BF16 for 1.0, -1.0, +inf, -0.0
     let raw: [u16; 4] = [0x3f80, 0xbf80, 0x7f80, 0x8000];
@@ -435,7 +435,7 @@ fn cast_f32_to_f16_count_eight() {
         NumericDType::F16,
         ScalarOp::Cast { saturating: false },
         vec![],
-        vec![InputRef::affine(inp, 1)],
+        vec![GroupInput::scalar(InputRef::affine(inp, 1))],
     );
     let src: Vec<f32> = vec![
         0.0,
@@ -470,7 +470,7 @@ fn cast_i32_to_i8_saturating() {
         NumericDType::I8,
         ScalarOp::Cast { saturating: false },
         vec![],
-        vec![InputRef::affine(inp, 1)],
+        vec![GroupInput::scalar(InputRef::affine(inp, 1))],
     );
     let values: [i32; 6] = [0, 127, -128, 200, -200, 42];
     let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
@@ -496,7 +496,7 @@ fn cast_u8_to_i32_widening() {
         NumericDType::I32,
         ScalarOp::Cast { saturating: false },
         vec![],
-        vec![InputRef::affine(inp, 1)],
+        vec![GroupInput::scalar(InputRef::affine(inp, 1))],
     );
     let bytes: Vec<u8> = vec![0, 127, 128, 255];
     let outs = ab_test_bytes(
@@ -538,7 +538,7 @@ fn literal_f32_group() {
         NumericDType::F32,
         ScalarOp::Identity,
         vec![],
-        vec![InputRef::affine(lit, 1)],
+        vec![GroupInput::scalar(InputRef::affine(lit, 1))],
     );
     let outs = ab_test_bytes(
         &g,
@@ -565,7 +565,7 @@ fn cast_f32_to_i32() {
         NumericDType::I32,
         ScalarOp::Cast { saturating: false },
         vec![],
-        vec![InputRef::affine(inp, 1)],
+        vec![GroupInput::scalar(InputRef::affine(inp, 1))],
     );
     let src = [1.5_f32, -2.7, 0.0, 127.9, -128.1, f32::NAN];
     let bytes = f32_input_bytes(&src);
@@ -591,7 +591,7 @@ fn cast_i32_to_f32() {
         NumericDType::F32,
         ScalarOp::Cast { saturating: false },
         vec![],
-        vec![InputRef::affine(inp, 1)],
+        vec![GroupInput::scalar(InputRef::affine(inp, 1))],
     );
     let values: [i32; 4] = [0, 1, -1, 42];
     let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
@@ -624,7 +624,7 @@ fn binary_f32_test(op: ScalarBinOp, a_vals: &[f32], b_vals: &[f32]) -> Vec<Vec<u
             compute_dtype: NumericDType::F32,
         },
         vec![],
-        vec![InputRef::affine(inp_a, 1), InputRef::affine(inp_b, 1)],
+        vec![GroupInput::scalar(InputRef::affine(inp_a, 1)), GroupInput::scalar(InputRef::affine(inp_b, 1))],
     );
     let a_bytes = f32_input_bytes(a_vals);
     let b_bytes = f32_input_bytes(b_vals);
@@ -746,7 +746,7 @@ fn unary_f32_test(op: ScalarUnaryOp, vals: &[f32]) -> Vec<Vec<u8>> {
             compute_dtype: NumericDType::F32,
         },
         vec![],
-        vec![InputRef::affine(inp, 1)],
+        vec![GroupInput::scalar(InputRef::affine(inp, 1))],
     );
     let bytes = f32_input_bytes(vals);
     ab_test_bytes(
@@ -825,7 +825,7 @@ fn binary_i32_test(op: ScalarBinOp, a_vals: &[i32], b_vals: &[i32]) -> Vec<Vec<u
             compute_dtype: NumericDType::I32,
         },
         vec![],
-        vec![InputRef::affine(inp_a, 1), InputRef::affine(inp_b, 1)],
+        vec![GroupInput::scalar(InputRef::affine(inp_a, 1)), GroupInput::scalar(InputRef::affine(inp_b, 1))],
     );
     let a_bytes: Vec<u8> = a_vals.iter().flat_map(|v| v.to_le_bytes()).collect();
     let b_bytes: Vec<u8> = b_vals.iter().flat_map(|v| v.to_le_bytes()).collect();
@@ -902,7 +902,7 @@ fn binary_i32_greater() {
             compute_dtype: NumericDType::I32,
         },
         vec![],
-        vec![InputRef::affine(inp_a, 1), InputRef::affine(inp_b, 1)],
+        vec![GroupInput::scalar(InputRef::affine(inp_a, 1)), GroupInput::scalar(InputRef::affine(inp_b, 1))],
     );
     let a: Vec<u8> = [5i32, 3, 3, -1]
         .iter()
@@ -952,9 +952,9 @@ fn select_f32_with_float_cond() {
         ScalarOp::Select,
         vec![],
         vec![
-            InputRef::affine(cond, 1),
-            InputRef::affine(x, 1),
-            InputRef::affine(y, 1),
+            GroupInput::scalar(InputRef::affine(cond, 1)),
+            GroupInput::scalar(InputRef::affine(x, 1)),
+            GroupInput::scalar(InputRef::affine(y, 1)),
         ],
     );
     let c_bytes = f32_input_bytes(&[1.0, 0.0, -0.0, f32::NAN]);
@@ -991,9 +991,9 @@ fn select_f32_with_int_cond() {
         ScalarOp::Select,
         vec![],
         vec![
-            InputRef::affine(cond, 1),
-            InputRef::affine(x, 1),
-            InputRef::affine(y, 1),
+            GroupInput::scalar(InputRef::affine(cond, 1)),
+            GroupInput::scalar(InputRef::affine(x, 1)),
+            GroupInput::scalar(InputRef::affine(y, 1)),
         ],
     );
     let c_bytes: Vec<u8> = [1i32, 0, -1, 42]
@@ -1033,7 +1033,7 @@ fn unary_i32_neg() {
             compute_dtype: NumericDType::I32,
         },
         vec![],
-        vec![InputRef::affine(inp, 1)],
+        vec![GroupInput::scalar(InputRef::affine(inp, 1))],
     );
     let bytes: Vec<u8> = [1i32, -1, 0, i32::MAX]
         .iter()
@@ -1063,7 +1063,7 @@ fn unary_i32_abs() {
             compute_dtype: NumericDType::I32,
         },
         vec![],
-        vec![InputRef::affine(inp, 1)],
+        vec![GroupInput::scalar(InputRef::affine(inp, 1))],
     );
     let bytes: Vec<u8> = [5i32, -5, 0, -1]
         .iter()
@@ -1093,7 +1093,7 @@ fn unary_i32_bitwise_not() {
             compute_dtype: NumericDType::I32,
         },
         vec![],
-        vec![InputRef::affine(inp, 1)],
+        vec![GroupInput::scalar(InputRef::affine(inp, 1))],
     );
     let bytes: Vec<u8> = [0i32, -1, 0x55555555]
         .iter()
@@ -1130,7 +1130,7 @@ fn reduce_sum_f32() {
             compute_dtype: NumericDType::F32,
         },
         vec![],
-        vec![InputRef::affine(inp, 1)],
+        vec![GroupInput::scalar(InputRef::affine(inp, 1))],
     );
     let bytes = f32_input_bytes(&[1.0, 2.0, 3.0, 4.0]);
     let outs = ab_test_bytes(
@@ -1161,7 +1161,7 @@ fn reduce_max_f32_with_nan() {
             compute_dtype: NumericDType::F32,
         },
         vec![],
-        vec![InputRef::affine(inp, 1)],
+        vec![GroupInput::scalar(InputRef::affine(inp, 1))],
     );
     let bytes = f32_input_bytes(&[1.0, f32::NAN, 3.0, 2.0]);
     let outs = ab_test_bytes(
@@ -1194,7 +1194,7 @@ fn reduce_sum_f32_multiple_outputs() {
             compute_dtype: NumericDType::F32,
         },
         vec![],
-        vec![InputRef::affine(inp, 1)],
+        vec![GroupInput::scalar(InputRef::affine(inp, 1))],
     );
     let bytes = f32_input_bytes(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
     let outs = ab_test_bytes(
@@ -1226,7 +1226,7 @@ fn reduce_prod_f32() {
             compute_dtype: NumericDType::F32,
         },
         vec![],
-        vec![InputRef::affine(inp, 1)],
+        vec![GroupInput::scalar(InputRef::affine(inp, 1))],
     );
     let bytes = f32_input_bytes(&[1.0, 2.0, 3.0, 4.0]);
     let outs = ab_test_bytes(
@@ -1291,7 +1291,7 @@ fn indirect_load_f32_gather() {
             index_range: 4,
         },
         vec![],
-        vec![InputRef::affine(idx, 1)],
+        vec![GroupInput::scalar(InputRef::affine(idx, 1))],
     );
 
     let idx_bytes: Vec<u8> = [2i32, 0, 3, 1]

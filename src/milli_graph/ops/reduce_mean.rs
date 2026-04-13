@@ -4,7 +4,7 @@ use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
 use crate::nano_graph::lower::{NanoLoweringContext, TensorAtomMap};
 use crate::nano_graph::ops::{ReduceKind, ScalarBinOp, ScalarOp};
-use crate::nano_graph::pattern::InputRef;
+use crate::nano_graph::pattern::{GroupInput, InputRef};
 use crate::numeric_dtype::NumericDType;
 use crate::numeric_scalar::NumericScalar;
 use crate::pool::Pool;
@@ -162,8 +162,8 @@ impl ReduceMean {
             },
             sum_map.sym_dims.clone(),
             vec![
-                InputRef::affine(sum_map.base_id, 1),
-                InputRef::Broadcast(extent_lit),
+                GroupInput::scalar(InputRef::affine(sum_map.base_id, 1)),
+                GroupInput::scalar(InputRef::Broadcast(extent_lit)),
             ],
         );
 

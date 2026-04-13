@@ -82,8 +82,7 @@ fn try_merge_phases(a: &Phase, b: &Phase) -> Option<Phase> {
 
 fn build_merged_span(a: &Span, b: &Span) -> Option<Span> {
     let mut graph = NanoGraph::new();
-    graph.sym_dim_names = a.graph.sym_dim_names.clone();
-    graph.sym_dim_bounds = a.graph.sym_dim_bounds.clone();
+    graph.graph_constants = a.graph.graph_constants.clone();
     graph.set_opaque_ops(a.graph.opaque_ops().to_vec());
 
     let mut groups: Vec<_> = a
@@ -276,6 +275,7 @@ fn validate_phase_cross_lane(phase: &Phase) -> bool {
 mod tests {
     use super::*;
     use crate::nano_graph::ops::ScalarBinOp;
+    use crate::nano_graph::pattern::GroupInput;
     use crate::nano_graph::{InputRef, ScalarOp};
     use crate::numeric_dtype::NumericDType;
     use crate::numeric_scalar::NumericScalar;
@@ -298,7 +298,7 @@ mod tests {
                 compute_dtype: NumericDType::F32,
             },
             vec![],
-            vec![InputRef::affine(lit, 1), InputRef::affine(lit, 1)],
+            vec![GroupInput::scalar(InputRef::affine(lit, 1)), GroupInput::scalar(InputRef::affine(lit, 1))],
         );
         let add = g.push_group(
             4096,
@@ -308,7 +308,7 @@ mod tests {
                 compute_dtype: NumericDType::F32,
             },
             vec![],
-            vec![InputRef::affine(mul, 1), InputRef::affine(lit, 1)],
+            vec![GroupInput::scalar(InputRef::affine(mul, 1)), GroupInput::scalar(InputRef::affine(lit, 1))],
         );
         g.outputs = vec![g.atom_to_range(add)];
 

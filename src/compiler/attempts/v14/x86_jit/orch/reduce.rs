@@ -88,7 +88,7 @@ pub fn emit_reduce_group(
     } else {
         Some(resolve_reduce_source_info(
             layout,
-            &group.inputs[0],
+            &group.inputs[0].input_ref,
             group.atom_offset,
         )?)
     };
@@ -107,7 +107,7 @@ pub fn emit_reduce_group(
         emit_reduce_body(
             asm,
             layout,
-            &group.inputs[0],
+            &group.inputs[0].input_ref,
             group.base_id,
             group.atom_offset,
             kind,
@@ -148,7 +148,7 @@ pub fn emit_reduce_group(
         emit_reduce_body(
             asm,
             layout,
-            &group.inputs[0],
+            &group.inputs[0].input_ref,
             group.base_id,
             group.atom_offset,
             kind,

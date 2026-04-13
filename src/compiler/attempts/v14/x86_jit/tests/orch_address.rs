@@ -24,7 +24,7 @@ use crate::compiler::attempts::v14::x86_jit::orch::address::{
 };
 use crate::graph::GlobalId;
 use crate::nano_graph::ops::ScalarOp;
-use crate::nano_graph::pattern::{AtomId, AtomRange, InputRef, NanoGraph};
+use crate::nano_graph::pattern::{AtomId, AtomRange, GroupInput, InputRef, NanoGraph};
 use crate::numeric_dtype::NumericDType;
 use crate::pool::SystemPool;
 
@@ -81,7 +81,7 @@ fn flat_layout(count: u64, dtype: NumericDType) -> (BufferLayout, AtomId, AtomId
         dtype,
         ScalarOp::Identity,
         vec![],
-        vec![InputRef::affine(inp, 1)],
+        vec![GroupInput::scalar(InputRef::affine(inp, 1))],
     );
     let out = AtomRange {
         base: ident,
@@ -361,7 +361,7 @@ fn modular_layout(
         dtype,
         ScalarOp::Identity,
         vec![],
-        vec![InputRef::modular(inp, stride, modulus)],
+        vec![GroupInput::scalar(InputRef::modular(inp, stride, modulus))],
     );
     let out = AtomRange {
         base: ident,
@@ -485,7 +485,7 @@ fn strided_2d_broadcast_reg() {
         NumericDType::F32,
         ScalarOp::Identity,
         vec![],
-        vec![InputRef::strided_broadcast(inp, 1, 4)],
+        vec![GroupInput::scalar(InputRef::strided_broadcast(inp, 1, 4))],
     );
     let out = AtomRange {
         base: ident,

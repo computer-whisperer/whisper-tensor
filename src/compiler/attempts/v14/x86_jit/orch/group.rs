@@ -200,8 +200,8 @@ pub(super) fn emit_op_compute(
         ScalarOp::Binary { op, compute_dtype } => emit_binary_compute(
             asm,
             layout,
-            &group.inputs[0],
-            &group.inputs[1],
+            &group.inputs[0].input_ref,
+            &group.inputs[1].input_ref,
             *op,
             *compute_dtype,
             iter,
@@ -212,7 +212,7 @@ pub(super) fn emit_op_compute(
         ScalarOp::Unary { op, compute_dtype } => emit_unary_compute(
             asm,
             layout,
-            &group.inputs[0],
+            &group.inputs[0].input_ref,
             *op,
             *compute_dtype,
             iter,
@@ -241,7 +241,7 @@ pub(super) fn emit_op_compute(
             emit_load_decode_input(
                 asm,
                 layout,
-                &group.inputs[0],
+                &group.inputs[0].input_ref,
                 iter,
                 atom_offset,
                 addr_tables,
@@ -251,11 +251,11 @@ pub(super) fn emit_op_compute(
             Ok(slot)
         }
         ScalarOp::Cast { .. } => {
-            let src_dtype = lookup_input_dtype(layout, &group.inputs[0], atom_offset)?;
+            let src_dtype = lookup_input_dtype(layout, &group.inputs[0].input_ref, atom_offset)?;
             emit_cast_compute(
                 asm,
                 layout,
-                &group.inputs[0],
+                &group.inputs[0].input_ref,
                 src_dtype,
                 group.output_dtype,
                 iter,
@@ -387,7 +387,7 @@ fn emit_identity_group(
 
     // If src and output dtypes differ, this is effectively a Cast —
     // route through the Cast path which does decode(src) → encode(dst).
-    let src_dtype = lookup_input_dtype(layout, &group.inputs[0], group.atom_offset)?;
+    let src_dtype = lookup_input_dtype(layout, &group.inputs[0].input_ref, group.atom_offset)?;
     if src_dtype != group.output_dtype {
         return emit_cast_group(asm, layout, group, tables, codec_tables);
     }
@@ -396,7 +396,7 @@ fn emit_identity_group(
         emit_identity_iter(
             asm,
             layout,
-            &group.inputs[0],
+            &group.inputs[0].input_ref,
             group.base_id,
             group.atom_offset,
             IterVar::Const(group.atom_offset),
@@ -407,7 +407,7 @@ fn emit_identity_group(
         emit_identity_loop(
             asm,
             layout,
-            &group.inputs[0],
+            &group.inputs[0].input_ref,
             group.base_id,
             group.atom_offset,
             group.atom_offset,
@@ -774,14 +774,14 @@ fn emit_cast_group(
         ));
     }
 
-    let src_dtype = lookup_input_dtype(layout, &group.inputs[0], group.atom_offset)?;
+    let src_dtype = lookup_input_dtype(layout, &group.inputs[0].input_ref, group.atom_offset)?;
     let dst_dtype = group.output_dtype;
 
     if group.count == 1 {
         emit_cast_iter(
             asm,
             layout,
-            &group.inputs[0],
+            &group.inputs[0].input_ref,
             group.base_id,
             group.atom_offset,
             src_dtype,
@@ -795,7 +795,7 @@ fn emit_cast_group(
         emit_cast_loop(
             asm,
             layout,
-            &group.inputs[0],
+            &group.inputs[0].input_ref,
             group.base_id,
             group.atom_offset,
             src_dtype,
@@ -987,8 +987,8 @@ fn emit_binary_group(
         emit_binary_iter(
             asm,
             layout,
-            &group.inputs[0],
-            &group.inputs[1],
+            &group.inputs[0].input_ref,
+            &group.inputs[1].input_ref,
             group.base_id,
             group.atom_offset,
             op,
@@ -1003,8 +1003,8 @@ fn emit_binary_group(
         emit_binary_loop(
             asm,
             layout,
-            &group.inputs[0],
-            &group.inputs[1],
+            &group.inputs[0].input_ref,
+            &group.inputs[1].input_ref,
             group.base_id,
             group.atom_offset,
             op,
@@ -1557,7 +1557,7 @@ fn emit_unary_group(
         emit_unary_iter(
             asm,
             layout,
-            &group.inputs[0],
+            &group.inputs[0].input_ref,
             group.base_id,
             group.atom_offset,
             op,
@@ -1572,7 +1572,7 @@ fn emit_unary_group(
         emit_unary_loop(
             asm,
             layout,
-            &group.inputs[0],
+            &group.inputs[0].input_ref,
             group.base_id,
             group.atom_offset,
             op,
@@ -1896,7 +1896,7 @@ fn emit_select_compute(
     let cond_info = emit_compute_bit_offset(
         asm,
         layout,
-        &group.inputs[0],
+        &group.inputs[0].input_ref,
         iter,
         atom_offset,
         BIT_OFF_REG,
@@ -1970,7 +1970,7 @@ fn emit_select_compute(
     let _x_info = emit_load_decode_input(
         asm,
         layout,
-        &group.inputs[1],
+        &group.inputs[1].input_ref,
         iter,
         atom_offset,
         addr_tables,
@@ -1990,7 +1990,7 @@ fn emit_select_compute(
     let _y_info = emit_load_decode_input(
         asm,
         layout,
-        &group.inputs[2],
+        &group.inputs[2].input_ref,
         iter,
         atom_offset,
         addr_tables,
@@ -2152,7 +2152,7 @@ fn emit_indirect_load_group(
         emit_indirect_load_iter(
             asm,
             layout,
-            &group.inputs[0],
+            &group.inputs[0].input_ref,
             group.base_id,
             group.atom_offset,
             table_offset,
@@ -2183,7 +2183,7 @@ fn emit_indirect_load_group(
         emit_indirect_load_iter(
             asm,
             layout,
-            &group.inputs[0],
+            &group.inputs[0].input_ref,
             group.base_id,
             group.atom_offset,
             table_offset,

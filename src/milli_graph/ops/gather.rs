@@ -4,7 +4,7 @@ use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
 use crate::nano_graph::NanoLoweringContext;
 use crate::nano_graph::lower::{DimKind, TensorAtomMap};
 use crate::nano_graph::ops::{ScalarBinOp, ScalarOp};
-use crate::nano_graph::pattern::InputRef;
+use crate::nano_graph::pattern::{GroupInput, InputRef};
 use crate::numeric_dtype::NumericDType;
 use crate::numeric_scalar::NumericScalar;
 use crate::pool::Pool;
@@ -212,8 +212,8 @@ impl Gather {
                 },
                 indices_map.sym_dims.clone(),
                 vec![
-                    InputRef::Broadcast(indices_map.base_id),
-                    InputRef::Broadcast(zero_lit),
+                    GroupInput::scalar(InputRef::Broadcast(indices_map.base_id)),
+                    GroupInput::scalar(InputRef::Broadcast(zero_lit)),
                 ],
             );
             let offset_id = ctx.nano.push_atom(
@@ -224,8 +224,8 @@ impl Gather {
                 },
                 indices_map.sym_dims.clone(),
                 vec![
-                    InputRef::Broadcast(cmp_id),
-                    InputRef::Broadcast(axis_len_lit),
+                    GroupInput::scalar(InputRef::Broadcast(cmp_id)),
+                    GroupInput::scalar(InputRef::Broadcast(axis_len_lit)),
                 ],
             );
             let norm_idx = ctx.nano.push_atom(
@@ -236,8 +236,8 @@ impl Gather {
                 },
                 indices_map.sym_dims.clone(),
                 vec![
-                    InputRef::Broadcast(indices_map.base_id),
-                    InputRef::Broadcast(offset_id),
+                    GroupInput::scalar(InputRef::Broadcast(indices_map.base_id)),
+                    GroupInput::scalar(InputRef::Broadcast(offset_id)),
                 ],
             );
 
@@ -250,8 +250,8 @@ impl Gather {
                 },
                 indices_map.sym_dims.clone(),
                 vec![
-                    InputRef::Broadcast(norm_idx),
-                    InputRef::Broadcast(stride_lit),
+                    GroupInput::scalar(InputRef::Broadcast(norm_idx)),
+                    GroupInput::scalar(InputRef::Broadcast(stride_lit)),
                 ],
             );
 
@@ -280,8 +280,8 @@ impl Gather {
                 },
                 indices_map.sym_dims.clone(),
                 vec![
-                    InputRef::Broadcast(mul_id),
-                    InputRef::affine(col_offsets_base, 1),
+                    GroupInput::scalar(InputRef::Broadcast(mul_id)),
+                    GroupInput::scalar(InputRef::affine(col_offsets_base, 1)),
                 ],
             );
 
@@ -294,7 +294,7 @@ impl Gather {
                     index_range: data_map.count,
                 },
                 indices_map.sym_dims.clone(),
-                vec![InputRef::affine(add_id, 1)],
+                vec![GroupInput::scalar(InputRef::affine(add_id, 1))],
             );
 
             let out_strides = TensorAtomMap::compute_strides(&out_known_dims);
@@ -323,8 +323,8 @@ impl Gather {
                 },
                 vec![],
                 vec![
-                    InputRef::affine(indices_map.base_id, 1),
-                    InputRef::Broadcast(zero_lit),
+                    GroupInput::scalar(InputRef::affine(indices_map.base_id, 1)),
+                    GroupInput::scalar(InputRef::Broadcast(zero_lit)),
                 ],
             );
             let offset_base = ctx.nano.push_group(
@@ -336,8 +336,8 @@ impl Gather {
                 },
                 vec![],
                 vec![
-                    InputRef::affine(cmp_base, 1),
-                    InputRef::Broadcast(axis_len_lit),
+                    GroupInput::scalar(InputRef::affine(cmp_base, 1)),
+                    GroupInput::scalar(InputRef::Broadcast(axis_len_lit)),
                 ],
             );
             let norm_base = ctx.nano.push_group(
@@ -349,8 +349,8 @@ impl Gather {
                 },
                 vec![],
                 vec![
-                    InputRef::affine(indices_map.base_id, 1),
-                    InputRef::affine(offset_base, 1),
+                    GroupInput::scalar(InputRef::affine(indices_map.base_id, 1)),
+                    GroupInput::scalar(InputRef::affine(offset_base, 1)),
                 ],
             );
 
@@ -375,7 +375,7 @@ impl Gather {
                     compute_dtype: NumericDType::I64,
                 },
                 vec![],
-                vec![indices_ref, InputRef::Broadcast(stride_lit)],
+                vec![GroupInput::scalar(indices_ref), GroupInput::scalar(InputRef::Broadcast(stride_lit))],
             );
 
             // Column offset literals: d_total singletons with values [0, 1, ..., d_total-1].
@@ -404,8 +404,8 @@ impl Gather {
                 },
                 vec![],
                 vec![
-                    InputRef::affine(mul_base, 1),
-                    InputRef::modular(col_lit_base, 1, d_total),
+                    GroupInput::scalar(InputRef::affine(mul_base, 1)),
+                    GroupInput::scalar(InputRef::modular(col_lit_base, 1, d_total)),
                 ],
             );
 
@@ -418,7 +418,7 @@ impl Gather {
                     index_range: data_map.count,
                 },
                 vec![],
-                vec![InputRef::affine(add_base, 1)],
+                vec![GroupInput::scalar(InputRef::affine(add_base, 1))],
             );
 
             let out_strides = TensorAtomMap::compute_strides(&out_known_dims);

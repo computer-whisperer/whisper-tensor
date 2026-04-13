@@ -291,7 +291,7 @@ pub fn pool_eval<'p, P: Pool + 'p>(
                         ReduceKind::Prod => compute_dtype.encode_from_f64(1.0),
                     };
 
-                    let base_atom = group.inputs[0].resolve(ri);
+                    let base_atom = group.inputs[0].input_ref.resolve(ri);
                     for k in 0..*reduce_count {
                         let src_id = AtomId((base_atom.0 as i64 + k as i64 * reduce_stride) as u64);
                         let (val, val_dtype) =
@@ -315,13 +315,13 @@ pub fn pool_eval<'p, P: Pool + 'p>(
                             scalar.dtype().cast_raw(raw, output_dtype)
                         }
                         ScalarOp::Identity => {
-                            let src = group.inputs[0].resolve(ri);
+                            let src = group.inputs[0].input_ref.resolve(ri);
                             let (val, val_dtype) =
                                 lookup_atom_raw_dtype(src, graph, &group_stores, &input_stores);
                             val_dtype.cast_raw(val, output_dtype)
                         }
                         ScalarOp::Cast { saturating } => {
-                            let src = group.inputs[0].resolve(ri);
+                            let src = group.inputs[0].input_ref.resolve(ri);
                             let (val, val_dtype) =
                                 lookup_atom_raw_dtype(src, graph, &group_stores, &input_stores);
                             let raw = val_dtype.cast_raw(val, output_dtype);
@@ -332,8 +332,8 @@ pub fn pool_eval<'p, P: Pool + 'p>(
                             }
                         }
                         ScalarOp::Binary { op, compute_dtype } => {
-                            let a_src = group.inputs[0].resolve(ri);
-                            let b_src = group.inputs[1].resolve(ri);
+                            let a_src = group.inputs[0].input_ref.resolve(ri);
+                            let b_src = group.inputs[1].input_ref.resolve(ri);
                             let (a_raw, a_dtype) =
                                 lookup_atom_raw_dtype(a_src, graph, &group_stores, &input_stores);
                             let (b_raw, b_dtype) =
@@ -344,7 +344,7 @@ pub fn pool_eval<'p, P: Pool + 'p>(
                             compute_dtype.cast_raw(result, output_dtype)
                         }
                         ScalarOp::Unary { op, compute_dtype } => {
-                            let src = group.inputs[0].resolve(ri);
+                            let src = group.inputs[0].input_ref.resolve(ri);
                             let (val, val_dtype) =
                                 lookup_atom_raw_dtype(src, graph, &group_stores, &input_stores);
                             let x = val_dtype.cast_raw(val, *compute_dtype);
@@ -352,15 +352,15 @@ pub fn pool_eval<'p, P: Pool + 'p>(
                             compute_dtype.cast_raw(result, output_dtype)
                         }
                         ScalarOp::Select => {
-                            let cond_src = group.inputs[0].resolve(ri);
+                            let cond_src = group.inputs[0].input_ref.resolve(ri);
                             let cond_scalar =
                                 lookup_atom_scalar(cond_src, graph, &group_stores, &input_stores);
                             let cond_raw = cond_scalar.view().read_raw();
                             let is_true = cond_scalar.dtype().decode_to_f64(cond_raw) != 0.0;
                             let chosen_src = if is_true {
-                                group.inputs[1].resolve(ri)
+                                group.inputs[1].input_ref.resolve(ri)
                             } else {
-                                group.inputs[2].resolve(ri)
+                                group.inputs[2].input_ref.resolve(ri)
                             };
                             let val =
                                 lookup_atom_raw(chosen_src, graph, &group_stores, &input_stores);
@@ -369,7 +369,7 @@ pub fn pool_eval<'p, P: Pool + 'p>(
                             val_dtype.cast_raw(val, output_dtype)
                         }
                         ScalarOp::IndirectLoad { table_base, .. } => {
-                            let idx_src = group.inputs[0].resolve(ri);
+                            let idx_src = group.inputs[0].input_ref.resolve(ri);
                             let idx_scalar =
                                 lookup_atom_scalar(idx_src, graph, &group_stores, &input_stores);
                             let index = idx_scalar
@@ -390,6 +390,7 @@ pub fn pool_eval<'p, P: Pool + 'p>(
                             scalar.dtype().cast_raw(raw, output_dtype)
                         }
                         ScalarOp::Reduce { .. } | ScalarOp::OpaqueOutput { .. } => unreachable!(),
+                        ScalarOp::SymReduce { .. } => todo!("SymReduce evaluation"),
                     };
                     write_atom(&mut store, i as usize, result_raw, output_dtype);
                 }

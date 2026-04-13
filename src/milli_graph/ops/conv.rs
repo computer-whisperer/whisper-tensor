@@ -289,7 +289,7 @@ impl Conv {
         use crate::nano_graph::lower::DimKind;
         use crate::nano_graph::lower::TensorAtomMap;
         use crate::nano_graph::ops::{ReduceKind, ScalarBinOp, ScalarOp};
-        use crate::nano_graph::pattern::InputRef;
+        use crate::nano_graph::pattern::{GroupInput, InputRef};
         use crate::numeric_scalar::NumericScalar;
 
         let all_infos = ctx.all_infos;
@@ -528,10 +528,10 @@ impl Conv {
                                 original_dtype,
                                 ScalarOp::Identity,
                                 sym_dims.clone(),
-                                vec![InputRef::affine(
+                                vec![GroupInput::scalar(InputRef::affine(
                                     in_map.base_id.offset(in_offset),
                                     in_spatial_strides[last] as i64,
-                                )],
+                                ))],
                             );
                             if first_base.is_none() {
                                 first_base = Some(b);
@@ -664,7 +664,7 @@ impl Conv {
                                 compute_dtype: original_dtype,
                             },
                             out_sym_dims.clone(),
-                            vec![InputRef::Broadcast(w_atom), input_ref],
+                            vec![GroupInput::scalar(InputRef::Broadcast(w_atom)), GroupInput::scalar(input_ref)],
                         );
                         if first_mul_base.is_none() {
                             first_mul_base = Some(b);
@@ -691,7 +691,7 @@ impl Conv {
                         compute_dtype: original_dtype,
                     },
                     out_sym_dims.clone(),
-                    vec![InputRef::affine(mul_base, 1)],
+                    vec![GroupInput::scalar(InputRef::affine(mul_base, 1))],
                 );
                 if first_output_base.is_none() {
                     first_output_base = Some(b);
@@ -722,8 +722,8 @@ impl Conv {
                         },
                         out_sym_dims.clone(),
                         vec![
-                            InputRef::affine(reduce_co_base, 1),
-                            InputRef::Broadcast(bias_atom),
+                            GroupInput::scalar(InputRef::affine(reduce_co_base, 1)),
+                            GroupInput::scalar(InputRef::Broadcast(bias_atom)),
                         ],
                     );
                     if first_bias_base.is_none() {

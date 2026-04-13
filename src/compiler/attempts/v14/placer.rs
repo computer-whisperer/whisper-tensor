@@ -510,7 +510,7 @@ pub fn run_placer(
             for group in span.graph.groups() {
                 for input_ref in &group.inputs {
                     let mut segments =
-                        input_access_segments(input_ref, group.atom_offset, group.count);
+                        input_access_segments(&input_ref.input_ref, group.atom_offset, group.count);
 
                     // Reduce groups iterate an inner k-loop that reads
                     // `k * reduce_stride` atoms beyond each nominal
@@ -1067,6 +1067,7 @@ fn op_tag(op: &crate::nano_graph::ops::ScalarOp<'_, SystemPool>) -> &'static str
         ScalarOp::Reduce { .. } => "Reduce",
         ScalarOp::IndirectLoad { .. } => "IndirectLoad",
         ScalarOp::OpaqueOutput { .. } => "OpaqueOutput",
+        ScalarOp::SymReduce { .. } => "SymReduce",
     }
 }
 
