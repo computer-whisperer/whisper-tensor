@@ -101,7 +101,7 @@ impl Expand {
                 dt,
                 ScalarOp::Identity,
                 sym_dims.clone(),
-                vec![GroupInput::identity(input_ref, sym_dims.len())],
+                vec![GroupInput::mapped(input_ref, &sym_dims, &in_map.sym_dims())],
             );
 
             ctx.tensor_map.insert(

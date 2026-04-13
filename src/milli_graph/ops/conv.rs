@@ -667,7 +667,7 @@ impl Conv {
                                 compute_dtype: original_dtype,
                             },
                             out_sym_dims.clone(),
-                            vec![GroupInput::identity(InputRef::Broadcast(w_atom), n_sym_out), GroupInput::identity(input_ref, n_sym_out)],
+                            vec![GroupInput::mapped(InputRef::Broadcast(w_atom), &out_sym_dims, &[]), GroupInput::mapped(input_ref, &out_sym_dims, &in_map.sym_dims())],
                         );
                         if first_mul_base.is_none() {
                             first_mul_base = Some(b);
@@ -726,7 +726,7 @@ impl Conv {
                         out_sym_dims.clone(),
                         vec![
                             GroupInput::identity(InputRef::affine(reduce_co_base, 1), n_sym_out),
-                            GroupInput::identity(InputRef::Broadcast(bias_atom), n_sym_out),
+                            GroupInput::mapped(InputRef::Broadcast(bias_atom), &out_sym_dims, &[]),
                         ],
                     );
                     if first_bias_base.is_none() {

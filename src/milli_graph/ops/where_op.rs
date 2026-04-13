@@ -97,15 +97,18 @@ impl Where {
         let input_x = ctx.compute_input_ref(&out_tmp, &x_map, out_info, x_info.unwrap_or(out_info));
         let input_y = ctx.compute_input_ref(&out_tmp, &y_map, out_info, y_info.unwrap_or(out_info));
 
+        let cond_sym = cond_map.sym_dims();
+        let x_sym = x_map.sym_dims();
+        let y_sym = y_map.sym_dims();
         let base_id = ctx.nano.push_group(
             count,
             dt,
             ScalarOp::Select,
             sym_dims.clone(),
             vec![
-                GroupInput::identity(input_cond, sym_dims.len()),
-                GroupInput::identity(input_x, sym_dims.len()),
-                GroupInput::identity(input_y, sym_dims.len()),
+                GroupInput::mapped(input_cond, &sym_dims, &cond_sym),
+                GroupInput::mapped(input_x, &sym_dims, &x_sym),
+                GroupInput::mapped(input_y, &sym_dims, &y_sym),
             ],
         );
 

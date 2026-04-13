@@ -356,14 +356,16 @@ impl SimpleBinary {
         let input_a = ctx.compute_input_ref(&out_tmp, &a_map, out_info, a_info.unwrap_or(out_info));
         let input_b = ctx.compute_input_ref(&out_tmp, &b_map, out_info, b_info.unwrap_or(out_info));
 
+        let a_sym = a_map.sym_dims();
+        let b_sym = b_map.sym_dims();
         let base_id = ctx.nano.push_group(
             count,
             out_dt,
             scalar_op,
             sym_dims.clone(),
             vec![
-                GroupInput::identity(input_a, sym_dims.len()),
-                GroupInput::identity(input_b, sym_dims.len()),
+                GroupInput::mapped(input_a, &sym_dims, &a_sym),
+                GroupInput::mapped(input_b, &sym_dims, &b_sym),
             ],
         );
 
@@ -769,6 +771,8 @@ impl Pow {
         let input_a = ctx.compute_input_ref(&out_tmp, &a_map, out_info, a_info.unwrap_or(out_info));
         let input_b = ctx.compute_input_ref(&out_tmp, &b_map, out_info, b_info.unwrap_or(out_info));
 
+        let a_sym = a_map.sym_dims();
+        let b_sym = b_map.sym_dims();
         let base_id = ctx.nano.push_group(
             count,
             dt,
@@ -778,8 +782,8 @@ impl Pow {
             },
             sym_dims.clone(),
             vec![
-                GroupInput::identity(input_a, sym_dims.len()),
-                GroupInput::identity(input_b, sym_dims.len()),
+                GroupInput::mapped(input_a, &sym_dims, &a_sym),
+                GroupInput::mapped(input_b, &sym_dims, &b_sym),
             ],
         );
 
@@ -1374,8 +1378,8 @@ impl MatMul {
                 },
                 out_sym_dims.clone(),
                 vec![
-                    GroupInput::identity(input_a, out_sym_dims.len()),
-                    GroupInput::identity(input_b, out_sym_dims.len()),
+                    GroupInput::mapped(input_a, &out_sym_dims, &a_map.sym_dims()),
+                    GroupInput::mapped(input_b, &out_sym_dims, &b_map.sym_dims()),
                 ],
             );
 

@@ -75,6 +75,32 @@ impl GroupInput {
             sym_dim_map: (0..num_sym_dims).map(SymDimMap::Identity).collect(),
         }
     }
+
+    /// Build the correct sym-dim mapping by matching GraphConstantIds.
+    ///
+    /// For each consumer sym axis, finds the corresponding producer axis
+    /// (same GraphConstantId) and creates an Identity entry, or Broadcast
+    /// if the producer doesn't have that axis.
+    pub fn mapped(
+        input_ref: InputRef,
+        consumer_sym_dims: &[GraphConstantId],
+        producer_sym_dims: &[GraphConstantId],
+    ) -> Self {
+        let sym_dim_map = consumer_sym_dims
+            .iter()
+            .map(|c_gc| {
+                if let Some(p_idx) = producer_sym_dims.iter().position(|p_gc| p_gc == c_gc) {
+                    SymDimMap::Identity(p_idx)
+                } else {
+                    SymDimMap::Broadcast
+                }
+            })
+            .collect();
+        Self {
+            input_ref,
+            sym_dim_map,
+        }
+    }
 }
 
 /// Legacy alias — will be removed once compiler references are updated.
