@@ -17,7 +17,7 @@ use crate::tensor_rank::DynRank;
 
 use super::lower::TensorAtomMapInfo;
 use super::ops::{ReduceKind, ScalarBinOp, ScalarOp, ScalarUnaryOp};
-use super::pattern::{AtomId, NanoGraph};
+use super::pattern::{AtomId, NanoGraph, SymDimMap};
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -33,6 +33,7 @@ pub fn pool_eval<'p, P: Pool + 'p>(
     graph: &NanoGraph<'_, impl Pool>,
     inputs: &[(&TensorAtomMapInfo, &NumericTensorView<'_, DynRank>)],
     outputs: &[&TensorAtomMapInfo],
+    gc_values: &[u64],
     pool: &'p P,
 ) -> Result<Vec<NumericTensor<'p, DynRank, P>>, PoolEvalError> {
     let groups = graph.groups();
@@ -173,7 +174,7 @@ pub fn pool_eval<'p, P: Pool + 'p>(
                     for elem in 0..inp.count as usize {
                         let atom_id = AtomId(inp.base.0 + elem as u64);
                         let scalar =
-                            lookup_atom_scalar(atom_id, graph, &group_stores, &input_stores);
+                            lookup_atom_scalar(atom_id, 0, 1, graph, &group_stores, &input_stores);
                         inp_tensor.write_element(elem, scalar.cast_to(inp.dtype));
                     }
                     op_input_tensors.push(inp_tensor);
@@ -246,10 +247,17 @@ pub fn pool_eval<'p, P: Pool + 'p>(
 
         let count = group.count as usize;
         let output_dtype = group.output_dtype;
+        let sym_prod = sym_product_for(&group.sym_dims, gc_values);
+        let total_elems = count as u64 * sym_prod;
+
+        // Compute sym_dim extents for this group.
+        let sym_extents: Vec<u64> = group.sym_dims.iter()
+            .map(|gc| gc_values[gc.0 as usize])
+            .collect();
 
         // Take the store out so we can mutate it while reading other stores.
         let mut store = group_stores[gi].take().unwrap_or_else(|| {
-            let layout = TensorLayout::<DynRank>::row_major(vec![count as u64], output_dtype);
+            let layout = TensorLayout::<DynRank>::row_major(vec![total_elems], output_dtype);
             let buffer = pool
                 .allocate(layout.buffer_size_bytes())
                 .expect("pool alloc for group");
@@ -273,30 +281,103 @@ pub fn pool_eval<'p, P: Pool + 'p>(
             continue;
         }
 
+        // Helper: resolve an input's producer sym_flat given a consumer sym_flat.
+        let resolve_producer_sym = |input: &super::pattern::GroupInput, consumer_sf: u64| -> (u64, u64) {
+            if input.sym_dim_map.is_empty() {
+                return (0, 1);
+            }
+            let src_atom = input.input_ref.resolve(group.atom_offset);
+            let producer_sym_dims = if let Some(pgi) = graph.find_group_idx(src_atom) {
+                &graph.groups()[pgi].sym_dims
+            } else {
+                // Input tensor — no sym_dims in current design.
+                return (0, 1);
+            };
+            let p_sym_prod = sym_product_for(producer_sym_dims, gc_values);
+            let p_sf = map_sym_flat(
+                consumer_sf,
+                &sym_extents,
+                &input.sym_dim_map,
+                producer_sym_dims,
+                gc_values,
+            );
+            (p_sf, p_sym_prod)
+        };
+
         {
             for i in 0..group.count {
                 let ri = i + group.atom_offset;
 
-                if let ScalarOp::Reduce {
-                    kind,
-                    reduce_count,
-                    reduce_stride,
-                    compute_dtype,
-                } = &group.op
-                {
-                    let mut acc_raw = match kind {
-                        ReduceKind::Sum => compute_dtype.encode_from_f64(0.0),
-                        ReduceKind::Max => compute_dtype.encode_from_f64(f64::NEG_INFINITY),
-                        ReduceKind::Min => compute_dtype.encode_from_f64(f64::INFINITY),
-                        ReduceKind::Prod => compute_dtype.encode_from_f64(1.0),
-                    };
+                for sym_flat in 0..sym_prod {
+                    let write_idx = (i * sym_prod + sym_flat) as usize;
 
-                    let base_atom = group.inputs[0].input_ref.resolve(ri);
-                    for k in 0..*reduce_count {
-                        let src_id = AtomId((base_atom.0 as i64 + k as i64 * reduce_stride) as u64);
-                        let (val, val_dtype) =
-                            lookup_atom_raw_dtype(src_id, graph, &group_stores, &input_stores);
-                        let cast_raw = val_dtype.cast_raw(val, *compute_dtype);
+                    if let ScalarOp::Reduce {
+                        kind,
+                        reduce_count,
+                        reduce_stride,
+                        compute_dtype,
+                    } = &group.op
+                    {
+                        // Known-dim reduce: sym_flat passes through to producer.
+                        let (p_sf, p_sp) = if !group.inputs[0].sym_dim_map.is_empty() {
+                            resolve_producer_sym(&group.inputs[0], sym_flat)
+                        } else {
+                            (0, 1)
+                        };
+
+                        let mut acc_raw = match kind {
+                            ReduceKind::Sum => compute_dtype.encode_from_f64(0.0),
+                            ReduceKind::Max => compute_dtype.encode_from_f64(f64::NEG_INFINITY),
+                            ReduceKind::Min => compute_dtype.encode_from_f64(f64::INFINITY),
+                            ReduceKind::Prod => compute_dtype.encode_from_f64(1.0),
+                        };
+
+                        let base_atom = group.inputs[0].input_ref.resolve(ri);
+                        for k in 0..*reduce_count {
+                            let src_id =
+                                AtomId((base_atom.0 as i64 + k as i64 * reduce_stride) as u64);
+                            let (val, val_dtype) = lookup_atom_raw_dtype(
+                                src_id, p_sf, p_sp, graph, &group_stores, &input_stores,
+                            );
+                            let cast_raw = val_dtype.cast_raw(val, *compute_dtype);
+                            let binop = match kind {
+                                ReduceKind::Sum => ScalarBinOp::Add,
+                                ReduceKind::Max => ScalarBinOp::Max,
+                                ReduceKind::Min => ScalarBinOp::Min,
+                                ReduceKind::Prod => ScalarBinOp::Mul,
+                            };
+                            acc_raw = eval_binop(&binop, acc_raw, cast_raw, *compute_dtype);
+                        }
+                        let result = compute_dtype.cast_raw(acc_raw, output_dtype);
+                        write_atom(&mut store, write_idx, result, output_dtype);
+                    } else if let ScalarOp::SymReduce {
+                        kind,
+                        axis,
+                        compute_dtype,
+                    } = &group.op
+                    {
+                        // SymReduce: iterate over one axis of the input's sym_dims.
+                        // The output group has one fewer sym_dim than the input.
+                        let input = &group.inputs[0];
+                        let src_atom = input.input_ref.resolve(ri);
+                        let producer_sym_dims = if let Some(pgi) = graph.find_group_idx(src_atom) {
+                            graph.groups()[pgi].sym_dims.clone()
+                        } else {
+                            vec![]
+                        };
+                        let reduce_extent = if *axis < producer_sym_dims.len() {
+                            gc_values[producer_sym_dims[*axis].0 as usize]
+                        } else {
+                            1
+                        };
+                        let p_sp = sym_product_for(&producer_sym_dims, gc_values);
+
+                        let mut acc_raw = match kind {
+                            ReduceKind::Sum => compute_dtype.encode_from_f64(0.0),
+                            ReduceKind::Max => compute_dtype.encode_from_f64(f64::NEG_INFINITY),
+                            ReduceKind::Min => compute_dtype.encode_from_f64(f64::INFINITY),
+                            ReduceKind::Prod => compute_dtype.encode_from_f64(1.0),
+                        };
 
                         let binop = match kind {
                             ReduceKind::Sum => ScalarBinOp::Add,
@@ -304,95 +385,175 @@ pub fn pool_eval<'p, P: Pool + 'p>(
                             ReduceKind::Min => ScalarBinOp::Min,
                             ReduceKind::Prod => ScalarBinOp::Mul,
                         };
-                        acc_raw = eval_binop(&binop, acc_raw, cast_raw, *compute_dtype);
-                    }
-                    let result = compute_dtype.cast_raw(acc_raw, output_dtype);
-                    write_atom(&mut store, i as usize, result, output_dtype);
-                } else {
-                    let result_raw = match &group.op {
-                        ScalarOp::Literal(scalar) => {
-                            let raw = scalar.view().read_raw();
-                            scalar.dtype().cast_raw(raw, output_dtype)
+
+                        for k in 0..reduce_extent {
+                            // Build producer sym_flat: same as consumer point but
+                            // with the reduced axis set to k.
+                            // Consumer has N-1 sym_dims, producer has N.
+                            // The sym_dim_map tells us how consumer axes map to
+                            // producer axes; the reduced axis is the one NOT covered.
+                            let p_sf = map_sym_flat_with_reduce(
+                                sym_flat,
+                                &sym_extents,
+                                &input.sym_dim_map,
+                                &producer_sym_dims,
+                                gc_values,
+                                *axis,
+                                k,
+                            );
+                            let (val, val_dtype) = lookup_atom_raw_dtype(
+                                src_atom, p_sf, p_sp, graph, &group_stores, &input_stores,
+                            );
+                            let cast_raw = val_dtype.cast_raw(val, *compute_dtype);
+                            acc_raw = eval_binop(&binop, acc_raw, cast_raw, *compute_dtype);
                         }
-                        ScalarOp::Identity => {
-                            let src = group.inputs[0].input_ref.resolve(ri);
-                            let (val, val_dtype) =
-                                lookup_atom_raw_dtype(src, graph, &group_stores, &input_stores);
-                            val_dtype.cast_raw(val, output_dtype)
-                        }
-                        ScalarOp::Cast { saturating } => {
-                            let src = group.inputs[0].input_ref.resolve(ri);
-                            let (val, val_dtype) =
-                                lookup_atom_raw_dtype(src, graph, &group_stores, &input_stores);
-                            let raw = val_dtype.cast_raw(val, output_dtype);
-                            if *saturating {
-                                output_dtype.saturate_inf(raw)
-                            } else {
-                                raw
+                        let result = compute_dtype.cast_raw(acc_raw, output_dtype);
+                        write_atom(&mut store, write_idx, result, output_dtype);
+                    } else {
+                        let result_raw = match &group.op {
+                            ScalarOp::Literal(scalar) => {
+                                let raw = scalar.view().read_raw();
+                                scalar.dtype().cast_raw(raw, output_dtype)
                             }
-                        }
-                        ScalarOp::Binary { op, compute_dtype } => {
-                            let a_src = group.inputs[0].input_ref.resolve(ri);
-                            let b_src = group.inputs[1].input_ref.resolve(ri);
-                            let (a_raw, a_dtype) =
-                                lookup_atom_raw_dtype(a_src, graph, &group_stores, &input_stores);
-                            let (b_raw, b_dtype) =
-                                lookup_atom_raw_dtype(b_src, graph, &group_stores, &input_stores);
-                            let a_cast = a_dtype.cast_raw(a_raw, *compute_dtype);
-                            let b_cast = b_dtype.cast_raw(b_raw, *compute_dtype);
-                            let result = eval_binop(op, a_cast, b_cast, *compute_dtype);
-                            compute_dtype.cast_raw(result, output_dtype)
-                        }
-                        ScalarOp::Unary { op, compute_dtype } => {
-                            let src = group.inputs[0].input_ref.resolve(ri);
-                            let (val, val_dtype) =
-                                lookup_atom_raw_dtype(src, graph, &group_stores, &input_stores);
-                            let x = val_dtype.cast_raw(val, *compute_dtype);
-                            let result = eval_unaryop(op, x, *compute_dtype);
-                            compute_dtype.cast_raw(result, output_dtype)
-                        }
-                        ScalarOp::Select => {
-                            let cond_src = group.inputs[0].input_ref.resolve(ri);
-                            let cond_scalar =
-                                lookup_atom_scalar(cond_src, graph, &group_stores, &input_stores);
-                            let cond_raw = cond_scalar.view().read_raw();
-                            let is_true = cond_scalar.dtype().decode_to_f64(cond_raw) != 0.0;
-                            let chosen_src = if is_true {
-                                group.inputs[1].input_ref.resolve(ri)
-                            } else {
-                                group.inputs[2].input_ref.resolve(ri)
-                            };
-                            let val =
-                                lookup_atom_raw(chosen_src, graph, &group_stores, &input_stores);
-                            let val_dtype =
-                                lookup_atom_dtype(chosen_src, graph, &group_stores, &input_stores);
-                            val_dtype.cast_raw(val, output_dtype)
-                        }
-                        ScalarOp::IndirectLoad { table_base, .. } => {
-                            let idx_src = group.inputs[0].input_ref.resolve(ri);
-                            let idx_scalar =
-                                lookup_atom_scalar(idx_src, graph, &group_stores, &input_stores);
-                            let index = idx_scalar
-                                .dtype()
-                                .decode_to_f64(idx_scalar.view().read_raw())
-                                as u64;
-                            let table_atom = AtomId(table_base.0 + index);
-                            let val =
-                                lookup_atom_raw(table_atom, graph, &group_stores, &input_stores);
-                            let val_dtype =
-                                lookup_atom_dtype(table_atom, graph, &group_stores, &input_stores);
-                            val_dtype.cast_raw(val, output_dtype)
-                        }
-                        ScalarOp::LiteralSpan(tensor) => {
-                            // Fallback for non-flattenable LiteralSpan.
-                            let scalar = tensor.read_element(i as usize);
-                            let raw = scalar.view().read_raw();
-                            scalar.dtype().cast_raw(raw, output_dtype)
-                        }
-                        ScalarOp::Reduce { .. } | ScalarOp::OpaqueOutput { .. } => unreachable!(),
-                        ScalarOp::SymReduce { .. } => todo!("SymReduce evaluation"),
-                    };
-                    write_atom(&mut store, i as usize, result_raw, output_dtype);
+                            ScalarOp::Identity => {
+                                let src = group.inputs[0].input_ref.resolve(ri);
+                                let (p_sf, p_sp) = if !group.inputs[0].sym_dim_map.is_empty() {
+                                    resolve_producer_sym(&group.inputs[0], sym_flat)
+                                } else {
+                                    (0, 1)
+                                };
+                                let (val, val_dtype) = lookup_atom_raw_dtype(
+                                    src, p_sf, p_sp, graph, &group_stores, &input_stores,
+                                );
+                                val_dtype.cast_raw(val, output_dtype)
+                            }
+                            ScalarOp::Cast { saturating } => {
+                                let src = group.inputs[0].input_ref.resolve(ri);
+                                let (p_sf, p_sp) = if !group.inputs[0].sym_dim_map.is_empty() {
+                                    resolve_producer_sym(&group.inputs[0], sym_flat)
+                                } else {
+                                    (0, 1)
+                                };
+                                let (val, val_dtype) = lookup_atom_raw_dtype(
+                                    src, p_sf, p_sp, graph, &group_stores, &input_stores,
+                                );
+                                let raw = val_dtype.cast_raw(val, output_dtype);
+                                if *saturating {
+                                    output_dtype.saturate_inf(raw)
+                                } else {
+                                    raw
+                                }
+                            }
+                            ScalarOp::Binary { op, compute_dtype } => {
+                                let a_src = group.inputs[0].input_ref.resolve(ri);
+                                let b_src = group.inputs[1].input_ref.resolve(ri);
+                                let (a_sf, a_sp) = if !group.inputs[0].sym_dim_map.is_empty() {
+                                    resolve_producer_sym(&group.inputs[0], sym_flat)
+                                } else {
+                                    (0, 1)
+                                };
+                                let (b_sf, b_sp) = if !group.inputs[1].sym_dim_map.is_empty() {
+                                    resolve_producer_sym(&group.inputs[1], sym_flat)
+                                } else {
+                                    (0, 1)
+                                };
+                                let (a_raw, a_dtype) = lookup_atom_raw_dtype(
+                                    a_src, a_sf, a_sp, graph, &group_stores, &input_stores,
+                                );
+                                let (b_raw, b_dtype) = lookup_atom_raw_dtype(
+                                    b_src, b_sf, b_sp, graph, &group_stores, &input_stores,
+                                );
+                                let a_cast = a_dtype.cast_raw(a_raw, *compute_dtype);
+                                let b_cast = b_dtype.cast_raw(b_raw, *compute_dtype);
+                                let result = eval_binop(op, a_cast, b_cast, *compute_dtype);
+                                compute_dtype.cast_raw(result, output_dtype)
+                            }
+                            ScalarOp::Unary { op, compute_dtype } => {
+                                let src = group.inputs[0].input_ref.resolve(ri);
+                                let (p_sf, p_sp) = if !group.inputs[0].sym_dim_map.is_empty() {
+                                    resolve_producer_sym(&group.inputs[0], sym_flat)
+                                } else {
+                                    (0, 1)
+                                };
+                                let (val, val_dtype) = lookup_atom_raw_dtype(
+                                    src, p_sf, p_sp, graph, &group_stores, &input_stores,
+                                );
+                                let x = val_dtype.cast_raw(val, *compute_dtype);
+                                let result = eval_unaryop(op, x, *compute_dtype);
+                                compute_dtype.cast_raw(result, output_dtype)
+                            }
+                            ScalarOp::Select => {
+                                let cond_src = group.inputs[0].input_ref.resolve(ri);
+                                let (c_sf, c_sp) = if !group.inputs[0].sym_dim_map.is_empty() {
+                                    resolve_producer_sym(&group.inputs[0], sym_flat)
+                                } else {
+                                    (0, 1)
+                                };
+                                let cond_scalar = lookup_atom_scalar(
+                                    cond_src, c_sf, c_sp, graph, &group_stores, &input_stores,
+                                );
+                                let cond_raw = cond_scalar.view().read_raw();
+                                let is_true =
+                                    cond_scalar.dtype().decode_to_f64(cond_raw) != 0.0;
+                                let (chosen_inp_idx, chosen_src) = if is_true {
+                                    (1, group.inputs[1].input_ref.resolve(ri))
+                                } else {
+                                    (2, group.inputs[2].input_ref.resolve(ri))
+                                };
+                                let (ch_sf, ch_sp) =
+                                    if !group.inputs[chosen_inp_idx].sym_dim_map.is_empty() {
+                                        resolve_producer_sym(
+                                            &group.inputs[chosen_inp_idx],
+                                            sym_flat,
+                                        )
+                                    } else {
+                                        (0, 1)
+                                    };
+                                let val = lookup_atom_raw(
+                                    chosen_src, ch_sf, ch_sp, graph, &group_stores, &input_stores,
+                                );
+                                let val_dtype = lookup_atom_dtype(
+                                    chosen_src, graph, &group_stores, &input_stores,
+                                );
+                                val_dtype.cast_raw(val, output_dtype)
+                            }
+                            ScalarOp::IndirectLoad { table_base, .. } => {
+                                // IndirectLoad: index input may have sym_dims but
+                                // the table itself is atom-addressed with no sym_dims.
+                                let idx_src = group.inputs[0].input_ref.resolve(ri);
+                                let (p_sf, p_sp) = if !group.inputs[0].sym_dim_map.is_empty() {
+                                    resolve_producer_sym(&group.inputs[0], sym_flat)
+                                } else {
+                                    (0, 1)
+                                };
+                                let idx_scalar = lookup_atom_scalar(
+                                    idx_src, p_sf, p_sp, graph, &group_stores, &input_stores,
+                                );
+                                let index = idx_scalar
+                                    .dtype()
+                                    .decode_to_f64(idx_scalar.view().read_raw())
+                                    as u64;
+                                let table_atom = AtomId(table_base.0 + index);
+                                let val = lookup_atom_raw(
+                                    table_atom, 0, 1, graph, &group_stores, &input_stores,
+                                );
+                                let val_dtype = lookup_atom_dtype(
+                                    table_atom, graph, &group_stores, &input_stores,
+                                );
+                                val_dtype.cast_raw(val, output_dtype)
+                            }
+                            ScalarOp::LiteralSpan(tensor) => {
+                                // LiteralSpan: no sym_dims, read by atom index.
+                                let scalar = tensor.read_element(i as usize);
+                                let raw = scalar.view().read_raw();
+                                scalar.dtype().cast_raw(raw, output_dtype)
+                            }
+                            ScalarOp::Reduce { .. }
+                            | ScalarOp::SymReduce { .. }
+                            | ScalarOp::OpaqueOutput { .. } => unreachable!(),
+                        };
+                        write_atom(&mut store, write_idx, result_raw, output_dtype);
+                    }
                 }
             }
         }
@@ -458,7 +619,7 @@ pub fn pool_eval<'p, P: Pool + 'p>(
         let mut out_tensor = NumericTensor::from_parts(buffer, target_layout);
         for elem in 0..tam.count {
             let atom = tam.atom_id_for_element(elem);
-            let scalar = lookup_atom_scalar(atom, graph, &group_stores, &input_stores);
+            let scalar = lookup_atom_scalar(atom, 0, 1, graph, &group_stores, &input_stores);
             out_tensor.write_element(elem as usize, scalar.cast_to(tam.dtype));
         }
         result_tensors.push(out_tensor);
@@ -519,9 +680,142 @@ impl<'a, 'p, P: Pool + 'p> AtomStore<'a, 'p, P> {
 // Atom access
 // ---------------------------------------------------------------------------
 
+/// Compute the flat element index for an atom with sym_dim coordinates.
+///
+/// `atom_id` identifies the atom within its group/input.
+/// `sym_flat` is the row-major flat index within the sym_dim space
+/// (0 for groups with no sym_dims).
+/// `sym_product` is the product of all sym_dim extents (1 for no sym_dims).
+fn elem_index(
+    atom_id: AtomId,
+    base_id: AtomId,
+    sym_flat: u64,
+    sym_product: u64,
+) -> usize {
+    let atom_offset = (atom_id.0 - base_id.0) as u64;
+    (atom_offset * sym_product + sym_flat) as usize
+}
+
+/// Compute sym_product for a group's sym_dims given gc_values.
+fn sym_product_for(sym_dims: &[super::pattern::GraphConstantId], gc_values: &[u64]) -> u64 {
+    sym_dims.iter().map(|gc| gc_values[gc.0 as usize]).product::<u64>().max(1)
+}
+
+/// Map consumer sym_dim coordinates to a producer's flat sym_dim index.
+///
+/// `consumer_sym_flat` is decomposed into coordinates using `consumer_extents`,
+/// then mapped through `sym_dim_map` to the producer's space, and flattened
+/// using `producer_extents`.
+fn map_sym_flat(
+    consumer_sym_flat: u64,
+    consumer_extents: &[u64],
+    sym_dim_map: &[SymDimMap],
+    producer_sym_dims: &[super::pattern::GraphConstantId],
+    gc_values: &[u64],
+) -> u64 {
+    if consumer_extents.is_empty() || producer_sym_dims.is_empty() {
+        return 0;
+    }
+    // Decompose consumer_sym_flat into coordinates.
+    let mut remaining = consumer_sym_flat;
+    let mut consumer_coords = vec![0u64; consumer_extents.len()];
+    for d in (0..consumer_extents.len()).rev() {
+        if d == 0 {
+            consumer_coords[0] = remaining;
+        } else {
+            consumer_coords[d] = remaining % consumer_extents[d];
+            remaining /= consumer_extents[d];
+        }
+    }
+    // Map to producer coordinates.
+    let num_producer_axes = producer_sym_dims.len();
+    let mut producer_coords = vec![0u64; num_producer_axes];
+    for (j, mapping) in sym_dim_map.iter().enumerate() {
+        if let SymDimMap::Identity(k) = mapping {
+            if *k < num_producer_axes {
+                producer_coords[*k] = consumer_coords[j];
+            }
+        }
+    }
+    // Flatten producer coordinates.
+    let producer_extents: Vec<u64> = producer_sym_dims
+        .iter()
+        .map(|gc| gc_values[gc.0 as usize])
+        .collect();
+    let mut flat = 0u64;
+    let mut stride = 1u64;
+    for d in (0..num_producer_axes).rev() {
+        flat += producer_coords[d] * stride;
+        stride *= producer_extents[d];
+    }
+    flat
+}
+
+/// Like `map_sym_flat` but for SymReduce: inserts the reduce coordinate
+/// at `reduce_axis` in the producer's sym_dim space.
+///
+/// The consumer has N-1 sym_dims (the reduced axis is absent).
+/// The producer has N sym_dims. The sym_dim_map has N-1 entries
+/// (parallel to consumer). We build producer_coords as usual from the
+/// map, then set producer_coords[reduce_axis] = reduce_k.
+fn map_sym_flat_with_reduce(
+    consumer_sym_flat: u64,
+    consumer_extents: &[u64],
+    sym_dim_map: &[SymDimMap],
+    producer_sym_dims: &[super::pattern::GraphConstantId],
+    gc_values: &[u64],
+    reduce_axis: usize,
+    reduce_k: u64,
+) -> u64 {
+    let num_producer_axes = producer_sym_dims.len();
+    let producer_extents: Vec<u64> = producer_sym_dims
+        .iter()
+        .map(|gc| gc_values[gc.0 as usize])
+        .collect();
+
+    // Decompose consumer_sym_flat into coordinates.
+    let mut consumer_coords = vec![0u64; consumer_extents.len()];
+    if !consumer_extents.is_empty() {
+        let mut remaining = consumer_sym_flat;
+        for d in (0..consumer_extents.len()).rev() {
+            if d == 0 {
+                consumer_coords[0] = remaining;
+            } else {
+                consumer_coords[d] = remaining % consumer_extents[d];
+                remaining /= consumer_extents[d];
+            }
+        }
+    }
+
+    // Map to producer coordinates via sym_dim_map.
+    let mut producer_coords = vec![0u64; num_producer_axes];
+    for (j, mapping) in sym_dim_map.iter().enumerate() {
+        if let SymDimMap::Identity(k) = mapping {
+            if *k < num_producer_axes {
+                producer_coords[*k] = consumer_coords[j];
+            }
+        }
+    }
+    // Insert the reduce coordinate.
+    if reduce_axis < num_producer_axes {
+        producer_coords[reduce_axis] = reduce_k;
+    }
+
+    // Flatten.
+    let mut flat = 0u64;
+    let mut stride = 1u64;
+    for d in (0..num_producer_axes).rev() {
+        flat += producer_coords[d] * stride;
+        stride *= producer_extents[d];
+    }
+    flat
+}
+
 /// Read an atom as a NumericScalar from group stores or input stores.
 fn lookup_atom_scalar<P: Pool>(
     atom_id: AtomId,
+    sym_flat: u64,
+    sym_product: u64,
     graph: &NanoGraph<'_, impl Pool>,
     group_stores: &[Option<AtomStore<'_, '_, P>>],
     input_stores: &[AtomStore<'_, '_, P>],
@@ -531,11 +825,12 @@ fn lookup_atom_scalar<P: Pool>(
             .as_ref()
             .unwrap_or_else(|| panic!("group {gi} buffer freed when reading atom {atom_id}"));
         let group = &graph.groups()[gi];
-        let offset = (atom_id.0 - group.base_id.0) as usize;
-        return store.read_element(offset);
+        let idx = elem_index(atom_id, group.base_id, sym_flat, sym_product);
+        return store.read_element(idx);
     }
     if let Some((ti, offset)) = graph.find_input_idx(atom_id) {
-        return input_stores[ti].read_element(offset as usize);
+        let idx = offset as u64 * sym_product + sym_flat;
+        return input_stores[ti].read_element(idx as usize);
     }
     panic!("atom {atom_id} not found in any group or input");
 }
@@ -543,17 +838,21 @@ fn lookup_atom_scalar<P: Pool>(
 /// Read an atom's raw bits from group stores or input stores.
 fn lookup_atom_raw<P: Pool>(
     atom_id: AtomId,
+    sym_flat: u64,
+    sym_product: u64,
     graph: &NanoGraph<'_, impl Pool>,
     group_stores: &[Option<AtomStore<'_, '_, P>>],
     input_stores: &[AtomStore<'_, '_, P>],
 ) -> u64 {
-    let scalar = lookup_atom_scalar(atom_id, graph, group_stores, input_stores);
+    let scalar = lookup_atom_scalar(atom_id, sym_flat, sym_product, graph, group_stores, input_stores);
     scalar.view().read_raw()
 }
 
 /// Read an atom's raw bits and dtype in a single lookup (one binary search).
 fn lookup_atom_raw_dtype<P: Pool>(
     atom_id: AtomId,
+    sym_flat: u64,
+    sym_product: u64,
     graph: &NanoGraph<'_, impl Pool>,
     group_stores: &[Option<AtomStore<'_, '_, P>>],
     input_stores: &[AtomStore<'_, '_, P>],
@@ -563,12 +862,13 @@ fn lookup_atom_raw_dtype<P: Pool>(
             .as_ref()
             .unwrap_or_else(|| panic!("group {gi} buffer freed when reading atom {atom_id}"));
         let group = &graph.groups()[gi];
-        let offset = (atom_id.0 - group.base_id.0) as usize;
-        let scalar = store.read_element(offset);
+        let idx = elem_index(atom_id, group.base_id, sym_flat, sym_product);
+        let scalar = store.read_element(idx);
         return (scalar.view().read_raw(), scalar.dtype());
     }
     if let Some((ti, offset)) = graph.find_input_idx(atom_id) {
-        let scalar = input_stores[ti].read_element(offset as usize);
+        let idx = offset as u64 * sym_product + sym_flat;
+        let scalar = input_stores[ti].read_element(idx as usize);
         return (scalar.view().read_raw(), scalar.dtype());
     }
     panic!("atom {atom_id} not found in any group or input");

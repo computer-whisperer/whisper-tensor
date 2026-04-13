@@ -307,7 +307,7 @@ pub fn constant_fold<'a, 'p: 'a, P: Pool + 'p>(
 
     // 5. Run pool_eval — assembles correctly-shaped output tensors directly.
     let t_s5 = std::time::Instant::now();
-    let eval_results = pool_eval::pool_eval(&ctx.nano, &[], &output_tami_refs, pool).ok()?;
+    let eval_results = pool_eval::pool_eval(&ctx.nano, &[], &output_tami_refs, &[], pool).ok()?;
     let dt_s5 = t_s5.elapsed();
 
     // 6. Wrap results as TensorInfos.

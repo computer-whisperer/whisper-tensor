@@ -631,7 +631,7 @@ pub fn execute_lowered<'p, P: Pool + 'p>(
     // Run pool_eval.
     let t0 = std::time::Instant::now();
     let eval_results =
-        pool_eval::pool_eval(&cached.graph, &eval_inputs, &output_tami_refs, pool)
+        pool_eval::pool_eval(&cached.graph, &eval_inputs, &output_tami_refs, &[], pool)
             .map_err(|e| super::SuperGraphError::InvalidGraph(format!("lowered pool_eval: {e}")))?;
     let dt = t0.elapsed();
     if dt.as_millis() > 10 {

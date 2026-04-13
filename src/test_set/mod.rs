@@ -357,7 +357,7 @@ pub fn run_case_via_pool_eval(case: &TestCase) -> Result<(), String> {
         // Run pool_eval — returns correctly-shaped output tensors.
         let pool = TrackedPool::new(None);
         let eval_results =
-            pool_eval::pool_eval(&lower_result.graph, &eval_inputs, &output_tamis, &pool)
+            pool_eval::pool_eval(&lower_result.graph, &eval_inputs, &output_tamis, &[], &pool)
                 .map_err(|e| format!("{}[{}]: pool_eval failed: {e}", case.name, ds.label))?;
 
         // Compare outputs — pool_eval returns tensors in the same order as output_tamis,

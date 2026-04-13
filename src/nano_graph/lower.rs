@@ -2292,7 +2292,7 @@ mod tests {
         // Eval NanoGraph via pool_eval — returns correctly-shaped tensors.
         let pool = TrackedPool::new(None);
         let nano_results =
-            pool_eval::pool_eval(&result.graph, &eval_inputs, &output_tamis, &pool).unwrap();
+            pool_eval::pool_eval(&result.graph, &eval_inputs, &output_tamis, &[], &pool).unwrap();
 
         // Compare outputs — results are in output_ids order, already shaped.
         for (out_id, nano_tensor) in output_ids.iter().zip(nano_results.iter()) {
