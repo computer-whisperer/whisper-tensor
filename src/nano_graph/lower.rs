@@ -1998,10 +1998,9 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
             }
         }
 
-        // ── SymReduce path: exactly one symbolic reduce axis, no known axes ──
-        if reduce_sym_axes.len() == 1 && reduce_known_indices.is_empty() {
+        // ── SymReduce path: one symbolic reduce axis, optionally chained with one known axis ──
+        if reduce_sym_axes.len() == 1 && reduce_known_indices.len() <= 1 {
             let (_tensor_axis, sym_axis) = reduce_sym_axes[0];
-
 
             let Some(out_info) = all_infos.get(&out_id) else {
                 return crate::milli_graph::ops::LowerResult::Unsupported;
@@ -2010,8 +2009,6 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
                 return crate::milli_graph::ops::LowerResult::Unsupported;
             };
             let out_sym_dims: Vec<GraphConstantId> = out_dims.iter().filter_map(|d| match d { DimKind::Sym { gc, .. } => Some(*gc), _ => None }).collect();
-            let out_known: Vec<u64> = out_dims.iter().filter_map(|d| match d { DimKind::Known { size, .. } => Some(*size), _ => None }).collect();
-            let out_count = out_known.iter().product::<u64>().max(1);
 
             let out_dt = Self::ndt(out_info);
             let in_dt = all_infos.get(&in_id).map(Self::ndt).unwrap_or(out_dt);
@@ -2020,16 +2017,20 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
                 other => other,
             };
 
+            let reduce_kind = match make_reduce_op(compute_dt, 1, 1) {
+                ScalarOp::Reduce { kind, .. } => kind,
+                _ => return crate::milli_graph::ops::LowerResult::Unsupported,
+            };
+
             let input_ref = Self::pointwise_input_ref(&in_map);
 
-            // Build sym_dim_map: consumer sym axes map to producer sym axes,
+            // Build sym_dim_map for SymReduce: consumer sym axes map to producer sym axes,
             // skipping the reduced axis.
             let n_out_sym = out_sym_dims.len();
             let sym_dim_map: Vec<crate::nano_graph::pattern::SymDimMap> = {
                 let mut map = Vec::with_capacity(n_out_sym);
                 let mut producer_idx = 0;
                 for _ in 0..n_out_sym {
-                    // Skip the reduced axis in the producer's sym_dims.
                     if producer_idx == sym_axis {
                         producer_idx += 1;
                     }
@@ -2039,36 +2040,129 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
                 map
             };
 
-            let sym_reduce_op = ScalarOp::SymReduce {
-                kind: match make_reduce_op(compute_dt, 1, 1) {
-                    ScalarOp::Reduce { kind, .. } => kind,
-                    _ => return crate::milli_graph::ops::LowerResult::Unsupported,
-                },
-                axis: sym_axis,
-                compute_dtype: compute_dt,
-            };
+            // SymReduce output has all input known dims but one fewer sym dim.
+            // If no known reduce axes, this IS the final output.
+            // If one known reduce axis, this is an intermediate that feeds into Reduce.
+            let sym_reduce_count = in_map.count; // product of all known dims
+            let sym_reduce_sym_dims = out_sym_dims.clone();
 
-            let base_id = self.nano.push_group(
-                out_count,
+            let sym_reduce_base = self.nano.push_group(
+                sym_reduce_count,
                 out_dt,
-                sym_reduce_op,
-                out_sym_dims.clone(),
+                ScalarOp::SymReduce {
+                    kind: reduce_kind,
+                    axis: sym_axis,
+                    compute_dtype: compute_dt,
+                },
+                sym_reduce_sym_dims.clone(),
                 vec![GroupInput {
                     input_ref,
                     sym_dim_map,
                 }],
             );
 
-            self.tensor_map.insert(
-                out_id,
-                TensorAtomMap::simple(base_id, out_count, out_dt, out_dims),
+            if reduce_known_indices.is_empty() {
+                // No known axes to reduce — SymReduce output is final.
+                let out_known: Vec<u64> = out_dims.iter().filter_map(|d| match d { DimKind::Known { size, .. } => Some(*size), _ => None }).collect();
+                let out_count = out_known.iter().product::<u64>().max(1);
+                self.tensor_map.insert(
+                    out_id,
+                    TensorAtomMap::simple(sym_reduce_base, out_count, out_dt, out_dims),
+                );
+                return crate::milli_graph::ops::LowerResult::Lowered;
+            }
+
+            // Chain a known-dim Reduce on the SymReduce output.
+            let rki = reduce_known_indices[0];
+            let in_strides = in_map.known_strides();
+            let reduce_stride = in_strides[rki] as i64;
+            let reduce_extent = in_known[rki];
+            if reduce_extent == 0 {
+                return crate::milli_graph::ops::LowerResult::Unsupported;
+            }
+
+            // Intermediate known dims = input known dims (SymReduce preserves them).
+            // Final known dims = intermediate minus the reduced known axis.
+            let final_known: Vec<u64> = in_known
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| *i != rki)
+                .map(|(_, &v)| v)
+                .collect();
+            let final_count = final_known.iter().product::<u64>().max(1);
+
+            // Build InputRef from SymReduce output to final Reduce.
+            // Same logic as the existing single-axis code.
+            let inter_strides = &in_strides; // SymReduce preserves strides
+            let final_strides = TensorAtomMap::compute_strides(&final_known);
+
+            let mut base_ids = Vec::with_capacity(final_count as usize);
+            for flat_out in 0..final_count {
+                let mut out_indices = vec![0u64; final_known.len()];
+                let mut rem = flat_out;
+                for (i, &stride) in final_strides.iter().enumerate() {
+                    if stride > 0 {
+                        out_indices[i] = rem / stride;
+                        rem %= stride;
+                    }
+                }
+                let mut in_indices = Vec::with_capacity(in_known.len());
+                let mut oi = 0;
+                for ki in 0..in_known.len() {
+                    if ki == rki {
+                        in_indices.push(0u64);
+                    } else {
+                        in_indices.push(out_indices[oi]);
+                        oi += 1;
+                    }
+                }
+                let mut in_flat = 0u64;
+                for (i, &stride) in inter_strides.iter().enumerate() {
+                    in_flat += in_indices[i] * stride;
+                }
+                base_ids.push(in_flat);
+            }
+
+            let is_affine = final_count <= 1
+                || base_ids
+                    .windows(2)
+                    .all(|w| (w[1] as i64 - w[0] as i64) == (base_ids[1] as i64 - base_ids[0] as i64));
+
+            let chain_ref = if is_affine && final_count > 0 {
+                let stride_i = if final_count > 1 {
+                    base_ids[1] as i64 - base_ids[0] as i64
+                } else {
+                    1
+                };
+                InputRef::affine(sym_reduce_base.offset(base_ids[0]), stride_i)
+            } else if final_count > 0 {
+                InputRef::Explicit(
+                    base_ids
+                        .iter()
+                        .map(|&offset| sym_reduce_base.offset(offset))
+                        .collect(),
+                )
+            } else {
+                return crate::milli_graph::ops::LowerResult::Unsupported;
+            };
+
+            let n_final_sym = out_sym_dims.len();
+            let final_base = self.nano.push_group(
+                final_count,
+                out_dt,
+                make_reduce_op(compute_dt, reduce_extent, reduce_stride),
+                out_sym_dims.clone(),
+                vec![GroupInput::identity(chain_ref, n_final_sym)],
             );
 
+            self.tensor_map.insert(
+                out_id,
+                TensorAtomMap::simple(final_base, final_count, out_dt, out_dims),
+            );
             return crate::milli_graph::ops::LowerResult::Lowered;
         }
 
         // ── Known-dim reduce path (existing) ──
-        // Mixed sym+known axes or multiple sym axes: unsupported for now.
         if !reduce_sym_axes.is_empty() {
             return crate::milli_graph::ops::LowerResult::Unsupported;
         }
