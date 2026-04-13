@@ -111,19 +111,18 @@ that when the compiler partitions work across known dims (assigning
 atoms to lanes), each lane gets a contiguous sym\_dim block with good
 cache locality.
 
-**Buffer sizing is compile-time, strides are runtime.**
+**Compiled path: buffer sizing is compile-time, strides are runtime.**
 
-Buffers are allocated at compile time using GraphConstant maximum
-values:
+In the compiled/JIT path, the placer assigns fixed buffer offsets
+at compile time using GraphConstant maximum values:
 
 ```
 slot_max_bytes = count * product(gc.max for gc in sym_dims) * elem_size
 ```
 
-Slot byte offsets within the buffer are assigned by the placer at
-compile time, spaced apart by worst-case sizes.  Unused capacity
-between slots (when runtime values are smaller than maximums) is
-acceptable — it is wasted buffer space, not wasted data stride.
+Slot byte offsets within the buffer are spaced apart by worst-case
+sizes.  Unused capacity (when runtime values are smaller than
+maximums) is wasted buffer space, not wasted data stride.
 
 Data strides within a slot are computed at **runtime** from actual
 GraphConstant values:
@@ -146,6 +145,10 @@ over-allocation.
 Two spans sharing a buffer naturally agree on layout because they
 reference the same GraphConstants and compute the same runtime
 strides.
+
+**Interpreter path (pool\_eval)**: buffers are allocated at runtime
+using actual GraphConstant values — no over-allocation needed since
+the interpreter has no compile-time placement constraints.
 
 ## Evaluation Model
 

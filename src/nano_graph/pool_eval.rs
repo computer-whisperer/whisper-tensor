@@ -256,8 +256,13 @@ pub fn pool_eval<'p, P: Pool + 'p>(
             .collect();
 
         // Take the store out so we can mutate it while reading other stores.
+        // Shape is [count, ext0, ext1, ...] — dim 0 is atom_id, remaining
+        // dims are sym_dim axes in order.
         let mut store = group_stores[gi].take().unwrap_or_else(|| {
-            let layout = TensorLayout::<DynRank>::row_major(vec![total_elems], output_dtype);
+            let mut shape = Vec::with_capacity(1 + sym_extents.len());
+            shape.push(count as u64);
+            shape.extend_from_slice(&sym_extents);
+            let layout = TensorLayout::<DynRank>::row_major(shape, output_dtype);
             let buffer = pool
                 .allocate(layout.buffer_size_bytes())
                 .expect("pool alloc for group");
