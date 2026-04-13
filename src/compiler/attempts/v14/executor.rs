@@ -121,7 +121,7 @@ impl CompiledSpanFn for PoolEvalSpan {
     }
 
     fn execute(&self, buffer_ptrs: &[*mut u8]) {
-        use crate::nano_graph::lower::TensorAtomMapInfo;
+        use crate::nano_graph::lower::{TensorAtomMapInfo, TensorDimKind};
         use crate::nano_graph::pool_eval;
         use crate::numeric_tensor::{NumericTensor, NumericTensorView};
         use crate::pool::SystemPool;
@@ -172,6 +172,7 @@ impl CompiledSpanFn for PoolEvalSpan {
                 sym_dims: vec![],
                 known_strides: vec![1],
                 known_dims: vec![range.count],
+                dim_layout: vec![TensorDimKind::Known(0)],
                 segments: vec![],
             };
             input_tamis.push(tami);
@@ -193,6 +194,7 @@ impl CompiledSpanFn for PoolEvalSpan {
                 sym_dims: vec![],
                 known_strides: vec![1],
                 known_dims: vec![pr.range.count],
+                dim_layout: vec![TensorDimKind::Known(0)],
                 segments: vec![],
             })
             .collect();

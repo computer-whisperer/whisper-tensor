@@ -888,6 +888,18 @@ impl<'a, 'p, P: Pool + 'p> TensorInfo<'a, 'p, P> {
         }
     }
 
+    /// Returns the raw ScalarInfoTyped for dimension `i`.
+    /// Returns `None` if the rank is unknown or `i` is out of bounds.
+    pub fn dim_scalar(&self, i: usize) -> Option<ScalarInfoTyped<u64>> {
+        match self {
+            TensorInfo::Ranked(tensor) => {
+                let shape = tensor.shape();
+                shape.get(i).cloned()
+            }
+            TensorInfo::Minimal(_) => None,
+        }
+    }
+
     /// Create a TensorInfo from ScalarInfoTyped<u64> dims (as stored in ONNXTensorInfo).
     /// Dims that are Numeric become known; Symbolic dims remain unknown.
     pub fn from_shape_scalars(shape: &[ScalarInfoTyped<u64>]) -> Self {

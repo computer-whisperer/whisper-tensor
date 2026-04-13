@@ -287,6 +287,7 @@ pub fn constant_fold<'a, 'p: 'a, P: Pool + 'p>(
             sym_dims: tam.sym_dims.clone(),
             known_strides: tam.known_strides.clone(),
             known_dims: tam.known_dims(),
+            dim_layout: tam.dim_layout(),
             segments: tam
                 .segments
                 .iter()

@@ -11,7 +11,7 @@ use crate::graph::{GlobalId, Graph, Node};
 use crate::milli_graph::MilliOpGraph;
 use crate::milli_graph::ops::AnyMilliOp;
 use crate::nano_graph::ops::ScalarOp;
-use crate::nano_graph::pattern::{AtomId, GroupInput, InputRef, NanoGraph, SymDim};
+use crate::nano_graph::pattern::{AtomId, GraphConstantId, GroupInput, InputRef, NanoGraph, SymDim};
 use crate::numeric_dtype::NumericDType;
 use crate::numeric_scalar::NumericScalar;
 use crate::pool::SystemPool;
@@ -152,15 +152,28 @@ pub struct LowerResult<'a, 'p, P: crate::pool::Pool + 'p = crate::pool::SystemPo
     pub all_infos: HashMap<GlobalId, LowerTensorInfo<'a, 'p, P>>,
 }
 
+/// Which kind of dimension a position in the original tensor shape represents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TensorDimKind {
+    /// Index into known_dims.
+    Known(usize),
+    /// Index into sym_dims.
+    Sym(usize),
+}
+
 /// Public view of how a milli tensor maps to nano atoms.
 #[derive(Debug, Clone)]
 pub struct TensorAtomMapInfo {
     pub base_id: AtomId,
     pub count: u64,
     pub dtype: NumericDType,
-    pub sym_dims: Vec<SymDim>,
+    pub sym_dims: Vec<GraphConstantId>,
     pub known_strides: Vec<u64>,
     pub known_dims: Vec<u64>,
+    /// Original shape interleaving: which positions are known vs symbolic.
+    /// Length equals the original tensor rank. Used by the executor to map
+    /// flat tensor elements to `(atom_idx, sym_dim_point)` pairs.
+    pub dim_layout: Vec<TensorDimKind>,
     /// Concat segments (empty for simple views).
     pub segments: Vec<(usize, u64, u64, AtomId, Vec<u64>)>, // (concat_dim, start, size, base_id, strides)
 }
@@ -396,6 +409,27 @@ impl TensorAtomMap {
             .collect()
     }
 
+    /// Build the dim_layout interleaving for TensorAtomMapInfo.
+    pub fn dim_layout(&self) -> Vec<TensorDimKind> {
+        let mut known_idx = 0usize;
+        let mut sym_idx = 0usize;
+        self.layout
+            .iter()
+            .map(|d| match d {
+                DimKind::Known(_) => {
+                    let idx = known_idx;
+                    known_idx += 1;
+                    TensorDimKind::Known(idx)
+                }
+                DimKind::Symbolic(_) => {
+                    let idx = sym_idx;
+                    sym_idx += 1;
+                    TensorDimKind::Sym(idx)
+                }
+            })
+            .collect()
+    }
+
     /// Return the atom ranges that compose this tensor.
     ///
     /// For simple contiguous tensors: a single range `[base, base+count)`.
@@ -583,6 +617,7 @@ pub fn lower<'a, 'p: 'a, P: crate::pool::Pool + 'p>(
                     sym_dims: tam.sym_dims.clone(),
                     known_strides: tam.known_strides.clone(),
                     known_dims: tam.known_dims(),
+                    dim_layout: tam.dim_layout(),
                     segments: tam
                         .segments
                         .iter()
@@ -632,6 +667,9 @@ pub struct NanoLoweringContext<'a, 'p, P: crate::pool::Pool + 'p = SystemPool> {
     pub all_infos: &'a HashMap<GlobalId, LowerTensorInfo<'a, 'p, P>>,
     pub pool: &'p P,
     next_anon_sym: usize,
+    /// Maps SymbolicScalarTyped symbol_id → GraphConstantId so that two
+    /// tensors sharing the same symbolic dim get the same graph constant.
+    symbol_id_map: HashMap<u64, GraphConstantId>,
     pub unsupported: Vec<(GlobalId, String)>,
     pub unsupported_details: Vec<String>,
     /// Provenance: maps each nano group index to the milli op that produced it.
@@ -647,6 +685,7 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
             all_infos,
             pool,
             next_anon_sym: 0,
+            symbol_id_map: HashMap::new(),
             unsupported: Vec::new(),
             unsupported_details: Vec::new(),
             group_provenance: Vec::new(),
@@ -659,24 +698,46 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
     }
 
     /// Classify tensor dims and return layout info.
-    /// Returns None if rank is unknown or atom count overflows u32.
+    /// Returns None if rank is unknown.
+    ///
+    /// For symbolic dims, preserves identity: two dims with the same
+    /// `symbol_id` map to the same `GraphConstantId`.
     pub fn classify_dims(
         &mut self,
         info: &LowerTensorInfo<'_, 'p, P>,
     ) -> Option<DimClassification> {
+        use crate::scalar_info::ScalarInfoTyped;
+
         let rank = info.rank_if_known()?;
         let mut layout = Vec::with_capacity(rank);
         let mut known_dims = Vec::new();
         let mut sym_dims = Vec::new();
 
         for i in 0..rank {
-            if let Some(size) = info.dim_if_known(i) {
-                layout.push(DimKind::Known(size));
-                known_dims.push(size);
-            } else {
-                let sd = self.alloc_sym_dim();
-                layout.push(DimKind::Symbolic(sd));
-                sym_dims.push(sd);
+            match info.dim_scalar(i) {
+                Some(ScalarInfoTyped::Numeric(size)) => {
+                    layout.push(DimKind::Known(size));
+                    known_dims.push(size);
+                }
+                Some(ScalarInfoTyped::Symbolic(sym)) => {
+                    let sid = sym.symbol_id();
+                    let gc = if let Some(&existing) = self.symbol_id_map.get(&sid) {
+                        existing
+                    } else {
+                        let gc = self.alloc_sym_dim();
+                        self.symbol_id_map.insert(sid, gc);
+                        gc
+                    };
+                    layout.push(DimKind::Symbolic(gc));
+                    sym_dims.push(gc);
+                }
+                None => {
+                    // Rank known but dim info unavailable (shouldn't happen
+                    // for Ranked tensors, but handle gracefully).
+                    let gc = self.alloc_sym_dim();
+                    layout.push(DimKind::Symbolic(gc));
+                    sym_dims.push(gc);
+                }
             }
         }
 

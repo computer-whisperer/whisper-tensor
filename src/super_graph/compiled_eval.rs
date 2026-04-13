@@ -24,7 +24,7 @@ use crate::compiler::attempts::v14::report::{self, PlanSummary};
 use crate::compiler::{CodegenKind, CompileOptions, PartitionerKind};
 use crate::graph::GlobalId;
 use crate::nano_graph::AtomId;
-use crate::nano_graph::lower::TensorAtomMapInfo;
+use crate::nano_graph::lower::{TensorAtomMapInfo, TensorDimKind};
 use crate::nano_graph::pattern::{AtomRange, NanoGraph};
 use crate::numeric_tensor::{NumericTensor, NumericTensorCOW, NumericTensorView, TensorLayout};
 use crate::pool::{Pool, SystemPool};
@@ -657,6 +657,7 @@ pub(crate) fn prepare_compiled_inputs<'a, 'p, P: Pool + 'p>(
                     dtype: tami.dtype,
                     sym_dims: vec![],
                     known_strides: seg_strides.clone(),
+                    dim_layout: (0..seg_dims.len()).map(|i| TensorDimKind::Known(i)).collect(),
                     known_dims: seg_dims,
                     segments: vec![],
                 };
