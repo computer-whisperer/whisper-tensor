@@ -2,7 +2,7 @@ use rand::Rng;
 use crate::graph::{GlobalId, Node};
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
-use crate::nano_graph::lower::{NanoLoweringContext, TensorAtomMap};
+use crate::nano_graph::lower::{DimKind, NanoLoweringContext, TensorAtomMap};
 use crate::nano_graph::ops::ScalarOp;
 use crate::nano_graph::pattern::{AtomId, GroupInput};
 use crate::pool::Pool;
@@ -75,20 +75,18 @@ impl Where {
             return crate::milli_graph::ops::LowerResult::Unsupported;
         };
 
-        let Some((layout, known_dims, sym_dims, count)) = ctx.classify_dims(out_info) else {
+        let Some(dims) = ctx.classify_dims(out_info) else {
             return crate::milli_graph::ops::LowerResult::Unsupported;
         };
-        let count = count.max(1);
-        let strides = TensorAtomMap::compute_strides(&known_dims);
+        let count: u64 = dims.iter().filter_map(|d| match d { DimKind::Known { size, .. } => Some(*size), _ => None }).product::<u64>().max(1);
+        let sym_dims: Vec<_> = dims.iter().filter_map(|d| match d { DimKind::Sym { gc, .. } => Some(*gc), _ => None }).collect();
 
         let dt = NanoLoweringContext::ndt(out_info);
         let out_tmp = TensorAtomMap::simple(
             AtomId(0),
             count,
             dt,
-            layout.clone(),
-            strides.clone(),
-            sym_dims.clone(),
+            dims.clone(),
         );
 
         let cond_info = all_infos.get(&cond_id);
@@ -104,12 +102,16 @@ impl Where {
             dt,
             ScalarOp::Select,
             sym_dims.clone(),
-            vec![GroupInput::scalar(input_cond), GroupInput::scalar(input_x), GroupInput::scalar(input_y)],
+            vec![
+                GroupInput::identity(input_cond, sym_dims.len()),
+                GroupInput::identity(input_x, sym_dims.len()),
+                GroupInput::identity(input_y, sym_dims.len()),
+            ],
         );
 
         ctx.tensor_map.insert(
             out_id,
-            TensorAtomMap::simple(base_id, count, dt, layout, strides, sym_dims),
+            TensorAtomMap::simple(base_id, count, dt, dims),
         );
         crate::milli_graph::ops::LowerResult::Lowered
     }

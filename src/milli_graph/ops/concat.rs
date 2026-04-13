@@ -69,15 +69,14 @@ impl Concat {
             return crate::milli_graph::ops::LowerResult::Unsupported;
         };
 
-        let Some((out_layout, out_known_dims, out_sym_dims, out_count)) =
-            ctx.classify_dims(out_info)
-        else {
+        let Some(out_dims) = ctx.classify_dims(out_info) else {
             return crate::milli_graph::ops::LowerResult::Unsupported;
         };
-        let out_count = out_count.max(1);
+        let out_count: u64 = out_dims.iter().filter_map(|d| match d { DimKind::Known { size, .. } => Some(*size), _ => None }).product::<u64>().max(1);
+        let out_known_dims: Vec<u64> = out_dims.iter().filter_map(|d| match d { DimKind::Known { size, .. } => Some(*size), _ => None }).collect();
 
         // Normalize axis.
-        let rank = out_layout.len();
+        let rank = out_dims.len();
         let axis = if axis_raw < 0 {
             (axis_raw + rank as i64) as usize
         } else {
@@ -85,14 +84,14 @@ impl Concat {
         };
 
         // Concat axis must be a known dim.
-        if axis >= rank || !matches!(out_layout[axis], DimKind::Known(_)) {
+        if axis >= rank || !matches!(out_dims[axis], DimKind::Known { .. }) {
             return crate::milli_graph::ops::LowerResult::Unsupported;
         }
 
         // Known-dim index of the concat axis.
-        let concat_known_idx = out_layout[..=axis]
+        let concat_known_idx = out_dims[..=axis]
             .iter()
-            .filter(|d| matches!(d, DimKind::Known(_)))
+            .filter(|d| matches!(d, DimKind::Known { .. }))
             .count()
             - 1;
 
@@ -104,10 +103,10 @@ impl Concat {
                 return crate::milli_graph::ops::LowerResult::Unsupported;
             };
             let inp_known: Vec<u64> = inp_map
-                .layout
+                .dims
                 .iter()
                 .filter_map(|d| {
-                    if let DimKind::Known(s) = d {
+                    if let DimKind::Known { size: s, .. } = d {
                         Some(*s)
                     } else {
                         None
@@ -124,13 +123,13 @@ impl Concat {
         // Zero-cost concat: check if all inputs have row-major strides and
         // are laid out contiguously along the concat axis in atom space.
         // If so, the output is just a wider view of the same atoms.
-        let ref_strides = &input_maps[0].known_strides;
+        let ref_strides = input_maps[0].known_strides();
         let concat_stride = ref_strides[concat_known_idx];
         let inp0_known: Vec<u64> = input_maps[0]
-            .layout
+            .dims
             .iter()
             .filter_map(|d| {
-                if let DimKind::Known(s) = d {
+                if let DimKind::Known { size: s, .. } = d {
                     Some(*s)
                 } else {
                     None
@@ -144,7 +143,7 @@ impl Concat {
             let mut contiguous = true;
             let mut expected_base = input_maps[0].base_id;
             for (i, inp_map) in input_maps.iter().enumerate() {
-                if inp_map.known_strides != *ref_strides || inp_map.base_id != expected_base {
+                if inp_map.known_strides() != ref_strides || inp_map.base_id != expected_base {
                     contiguous = false;
                     break;
                 }
@@ -157,9 +156,7 @@ impl Concat {
                         input_maps[0].base_id,
                         out_count,
                         crate::nano_graph::NanoLoweringContext::ndt(out_info),
-                        out_layout,
-                        TensorAtomMap::compute_strides(&out_known_dims),
-                        out_sym_dims,
+                        out_dims,
                     ),
                 );
                 return crate::milli_graph::ops::LowerResult::Lowered;
@@ -195,7 +192,7 @@ impl Concat {
                     start: cum,
                     size: concat_dim_sizes[i],
                     base_id: inp_map.base_id,
-                    known_strides: inp_map.known_strides.clone(),
+                    known_strides: inp_map.known_strides(),
                 });
             }
             cum += concat_dim_sizes[i];
@@ -203,7 +200,7 @@ impl Concat {
 
         ctx.tensor_map.insert(
             out_id,
-            TensorAtomMap::segmented(out_count, out_dt, out_layout, out_sym_dims, segments),
+            TensorAtomMap::segmented(out_count, out_dt, out_dims, segments),
         );
         crate::milli_graph::ops::LowerResult::Lowered
     }
@@ -288,15 +285,20 @@ impl MilliOp for Concat {
                         ))),
                     }
                 } else {
-                    let known_dim = input_infos
-                        .iter()
-                        .filter_map(|info| info.dim_if_known(d))
-                        .next();
-                    match known_dim {
-                        Some(v) => out_dims.push(ScalarInfoTyped::Numeric(v)),
-                        None => out_dims.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(
-                            rng,
-                        ))),
+                    // Non-concat dim: propagate from inputs. Prefer concrete,
+                    // then reuse an existing symbolic scalar so that the same
+                    // GraphConstant is shared between input and output TAMIs.
+                    if let Some(v) = input_infos.iter().filter_map(|info| info.dim_if_known(d)).next() {
+                        out_dims.push(ScalarInfoTyped::Numeric(v));
+                    } else if let Some(sym) = input_infos.iter().filter_map(|info| {
+                        match info.dim_scalar(d)? {
+                            ScalarInfoTyped::Symbolic(s) => Some(s),
+                            _ => None,
+                        }
+                    }).next() {
+                        out_dims.push(ScalarInfoTyped::Symbolic(sym));
+                    } else {
+                        out_dims.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(rng)));
                     }
                 }
             }
@@ -349,16 +351,18 @@ impl MilliOp for Concat {
                         ))),
                     }
                 } else {
-                    // Non-concat axis: take from any input that has a known dim.
-                    let known_dim = input_infos
-                        .iter()
-                        .filter_map(|info| info.dim_if_known(d))
-                        .next();
-                    match known_dim {
-                        Some(v) => out_dims.push(ScalarInfoTyped::Numeric(v)),
-                        None => out_dims.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(
-                            rng,
-                        ))),
+                    // Non-concat axis: propagate from inputs.
+                    if let Some(v) = input_infos.iter().filter_map(|info| info.dim_if_known(d)).next() {
+                        out_dims.push(ScalarInfoTyped::Numeric(v));
+                    } else if let Some(sym) = input_infos.iter().filter_map(|info| {
+                        match info.dim_scalar(d)? {
+                            ScalarInfoTyped::Symbolic(s) => Some(s),
+                            _ => None,
+                        }
+                    }).next() {
+                        out_dims.push(ScalarInfoTyped::Symbolic(sym));
+                    } else {
+                        out_dims.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(rng)));
                     }
                 }
             }

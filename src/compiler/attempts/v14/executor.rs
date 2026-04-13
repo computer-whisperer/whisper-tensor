@@ -121,7 +121,7 @@ impl CompiledSpanFn for PoolEvalSpan {
     }
 
     fn execute(&self, buffer_ptrs: &[*mut u8]) {
-        use crate::nano_graph::lower::{TensorAtomMapInfo, TensorDimKind};
+        use crate::nano_graph::lower::TensorAtomMapInfo;
         use crate::nano_graph::pool_eval;
         use crate::numeric_tensor::{NumericTensor, NumericTensorView};
         use crate::pool::SystemPool;
@@ -165,16 +165,7 @@ impl CompiledSpanFn for PoolEvalSpan {
                 }
             }
 
-            let tami = TensorAtomMapInfo {
-                base_id: range.base,
-                count: range.count,
-                dtype: range.dtype,
-                sym_dims: vec![],
-                known_strides: vec![1],
-                known_dims: vec![range.count],
-                dim_layout: vec![TensorDimKind::Known(0)],
-                segments: vec![],
-            };
+            let tami = TensorAtomMapInfo::flat(range.base, range.count, range.dtype);
             input_tamis.push(tami);
             input_tensors.push(NumericTensor::from_parts(buf, layout));
         }
@@ -187,16 +178,7 @@ impl CompiledSpanFn for PoolEvalSpan {
         let output_tamis: Vec<TensorAtomMapInfo> = self
             .outputs
             .iter()
-            .map(|pr| TensorAtomMapInfo {
-                base_id: pr.range.base,
-                count: pr.range.count,
-                dtype: pr.range.dtype,
-                sym_dims: vec![],
-                known_strides: vec![1],
-                known_dims: vec![pr.range.count],
-                dim_layout: vec![TensorDimKind::Known(0)],
-                segments: vec![],
-            })
+            .map(|pr| TensorAtomMapInfo::flat(pr.range.base, pr.range.count, pr.range.dtype))
             .collect();
         let output_tami_refs: Vec<&TensorAtomMapInfo> = output_tamis.iter().collect();
 

@@ -122,10 +122,10 @@ impl Gather {
 
         // data shape must be fully known (it's an embedding table).
         let data_known: Vec<u64> = data_map
-            .layout
+            .dims
             .iter()
             .filter_map(|d| {
-                if let DimKind::Known(s) = d {
+                if let DimKind::Known { size: s, .. } = d {
                     Some(*s)
                 } else {
                     None
@@ -142,15 +142,13 @@ impl Gather {
         let d_total = d_total.max(1); // handle scalar gather (data_rank == 1)
 
         // Check if indices are symbolic (runtime) or known.
-        let indices_sym = !indices_map.sym_dims.is_empty();
+        let indices_sym = !indices_map.sym_dims().is_empty();
 
         // Output classification.
-        let Some((out_layout, out_known_dims, out_sym_dims, out_count)) =
-            ctx.classify_dims(out_info)
-        else {
+        let Some(out_dims_v) = ctx.classify_dims(out_info) else {
             return crate::milli_graph::ops::LowerResult::Unsupported;
         };
-        let out_count = out_count.max(1);
+        let out_count: u64 = out_dims_v.iter().filter_map(|d| match d { DimKind::Known { size, .. } => Some(*size), _ => None }).product::<u64>().max(1);
 
         let out_dt = NanoLoweringContext::ndt(out_info);
 
@@ -204,16 +202,17 @@ impl Gather {
             }
 
             // Normalize negative indices: normalized = index + (index < 0) * axis_len
+            let n_sym = indices_map.sym_dims().len();
             let cmp_id = ctx.nano.push_atom(
                 NumericDType::I64,
                 ScalarOp::Binary {
                     op: ScalarBinOp::Less,
                     compute_dtype: NumericDType::I64,
                 },
-                indices_map.sym_dims.clone(),
+                indices_map.sym_dims(),
                 vec![
-                    GroupInput::scalar(InputRef::Broadcast(indices_map.base_id)),
-                    GroupInput::scalar(InputRef::Broadcast(zero_lit)),
+                    GroupInput::identity(InputRef::Broadcast(indices_map.base_id), n_sym),
+                    GroupInput::identity(InputRef::Broadcast(zero_lit), n_sym),
                 ],
             );
             let offset_id = ctx.nano.push_atom(
@@ -222,10 +221,10 @@ impl Gather {
                     op: ScalarBinOp::Mul,
                     compute_dtype: NumericDType::I64,
                 },
-                indices_map.sym_dims.clone(),
+                indices_map.sym_dims(),
                 vec![
-                    GroupInput::scalar(InputRef::Broadcast(cmp_id)),
-                    GroupInput::scalar(InputRef::Broadcast(axis_len_lit)),
+                    GroupInput::identity(InputRef::Broadcast(cmp_id), n_sym),
+                    GroupInput::identity(InputRef::Broadcast(axis_len_lit), n_sym),
                 ],
             );
             let norm_idx = ctx.nano.push_atom(
@@ -234,10 +233,10 @@ impl Gather {
                     op: ScalarBinOp::Add,
                     compute_dtype: NumericDType::I64,
                 },
-                indices_map.sym_dims.clone(),
+                indices_map.sym_dims(),
                 vec![
-                    GroupInput::scalar(InputRef::Broadcast(indices_map.base_id)),
-                    GroupInput::scalar(InputRef::Broadcast(offset_id)),
+                    GroupInput::identity(InputRef::Broadcast(indices_map.base_id), n_sym),
+                    GroupInput::identity(InputRef::Broadcast(offset_id), n_sym),
                 ],
             );
 
@@ -248,10 +247,10 @@ impl Gather {
                     op: ScalarBinOp::Mul,
                     compute_dtype: NumericDType::I64,
                 },
-                indices_map.sym_dims.clone(),
+                indices_map.sym_dims(),
                 vec![
-                    GroupInput::scalar(InputRef::Broadcast(norm_idx)),
-                    GroupInput::scalar(InputRef::Broadcast(stride_lit)),
+                    GroupInput::identity(InputRef::Broadcast(norm_idx), n_sym),
+                    GroupInput::identity(InputRef::Broadcast(stride_lit), n_sym),
                 ],
             );
 
@@ -278,10 +277,10 @@ impl Gather {
                     op: ScalarBinOp::Add,
                     compute_dtype: NumericDType::I64,
                 },
-                indices_map.sym_dims.clone(),
+                indices_map.sym_dims(),
                 vec![
-                    GroupInput::scalar(InputRef::Broadcast(mul_id)),
-                    GroupInput::scalar(InputRef::affine(col_offsets_base, 1)),
+                    GroupInput::identity(InputRef::Broadcast(mul_id), n_sym),
+                    GroupInput::identity(InputRef::affine(col_offsets_base, 1), n_sym),
                 ],
             );
 
@@ -293,20 +292,17 @@ impl Gather {
                     table_base: data_map.base_id,
                     index_range: data_map.count,
                 },
-                indices_map.sym_dims.clone(),
-                vec![GroupInput::scalar(InputRef::affine(add_id, 1))],
+                indices_map.sym_dims(),
+                vec![GroupInput::identity(InputRef::affine(add_id, 1), n_sym)],
             );
 
-            let out_strides = TensorAtomMap::compute_strides(&out_known_dims);
             ctx.tensor_map.insert(
                 out_id,
                 TensorAtomMap::simple(
                     base_id,
                     d_total,
                     out_dt,
-                    out_layout,
-                    out_strides,
-                    out_sym_dims,
+                    out_dims_v,
                 ),
             );
         } else {
@@ -421,16 +417,13 @@ impl Gather {
                 vec![GroupInput::scalar(InputRef::affine(add_base, 1))],
             );
 
-            let out_strides = TensorAtomMap::compute_strides(&out_known_dims);
             ctx.tensor_map.insert(
                 out_id,
                 TensorAtomMap::simple(
                     base_id,
                     out_count,
                     out_dt,
-                    out_layout,
-                    out_strides,
-                    out_sym_dims,
+                    out_dims_v,
                 ),
             );
         }

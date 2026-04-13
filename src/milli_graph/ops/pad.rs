@@ -137,14 +137,14 @@ impl Pad {
 
         // All input dims must be known.
         let in_known: Vec<u64> = in_map
-            .layout
+            .dims
             .iter()
             .filter_map(|d| match d {
-                DimKind::Known(s) => Some(*s),
+                DimKind::Known { size: s, .. } => Some(*s),
                 _ => None,
             })
             .collect();
-        if in_known.len() != in_map.layout.len() {
+        if in_known.len() != in_map.dims.len() {
             return crate::milli_graph::ops::LowerResult::Unsupported;
         }
         let rank = in_known.len();
@@ -196,8 +196,9 @@ impl Pad {
             return crate::milli_graph::ops::LowerResult::Unsupported;
         }
 
-        let in_strides = &in_map.known_strides;
-        let sym_dims = in_map.sym_dims.clone();
+        let in_strides = in_map.known_strides();
+        let sym_dims = in_map.sym_dims();
+        let n_sym = sym_dims.len();
         let dt = in_map.dtype;
 
         // Extract constant fill value (default 0 in the input's dtype).
@@ -286,7 +287,7 @@ impl Pad {
                     dt,
                     ScalarOp::Identity,
                     sym_dims.clone(),
-                    vec![GroupInput::scalar(InputRef::affine(in_row_base, in_last_stride))],
+                    vec![GroupInput::identity(InputRef::affine(in_row_base, in_last_stride), n_sym)],
                 );
                 if first_base.is_none() {
                     first_base = Some(b);
@@ -315,8 +316,7 @@ impl Pad {
         }
 
         // Register output.
-        let Some((out_layout, out_known_dims, out_sym_dims, _)) = ctx.classify_dims(out_info)
-        else {
+        let Some(out_dims) = ctx.classify_dims(out_info) else {
             return crate::milli_graph::ops::LowerResult::Unsupported;
         };
         ctx.tensor_map.insert(
@@ -325,9 +325,7 @@ impl Pad {
                 first_base.unwrap(),
                 out_total,
                 dt,
-                out_layout,
-                TensorAtomMap::compute_strides(&out_known_dims),
-                out_sym_dims,
+                out_dims,
             ),
         );
         crate::milli_graph::ops::LowerResult::Lowered

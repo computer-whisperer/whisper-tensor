@@ -84,9 +84,8 @@ pub struct CachedLoweredModel {
     /// different weight data for small constants, etc.).
     pub info_inputs_hash: u64,
     /// The lowered nano graph, ready for pool_eval.
+    /// Contains `tensor_map` for GlobalId → atom layout mapping.
     pub graph: NanoGraph<'static, SystemPool>,
-    /// Mapping from milli-internal tensor GlobalId → nano atom layout.
-    pub tensor_map: HashMap<GlobalId, TensorAtomMapInfo>,
     /// Milli graph input_map: external ID → internal ID.
     pub input_map: HashMap<GlobalId, GlobalId>,
     /// Milli graph output_map: internal ID → external ID.
@@ -379,7 +378,6 @@ pub fn lower_symbolic_graph(
     Some(CachedLoweredModel {
         info_inputs_hash,
         graph: lower_result.graph,
-        tensor_map: lower_result.tensor_map,
         input_map: milli_graph.input_map.clone(),
         output_map,
         sym_to_internal,
@@ -569,7 +567,7 @@ pub fn execute_lowered<'p, P: Pool + 'p>(
     let mut n_skipped = 0usize;
     for &(ext_id, view) in &all_views {
         let internal_id = cached.input_map.get(&ext_id).copied().unwrap_or(ext_id);
-        if let Some(tami) = cached.tensor_map.get(&internal_id) {
+        if let Some(tami) = cached.graph.tensor_map.get(&internal_id) {
             eval_inputs.push((tami, view));
             n_matched += 1;
         } else {
@@ -607,7 +605,7 @@ pub fn execute_lowered<'p, P: Pool + 'p>(
         .filter_map(|ext_id| {
             let internal_id = resolve(ext_id).unwrap_or(*ext_id);
             cached
-                .tensor_map
+                .graph.tensor_map
                 .get(&internal_id)
                 .map(|tami| (*ext_id, tami))
         })
@@ -619,7 +617,7 @@ pub fn execute_lowered<'p, P: Pool + 'p>(
     for sym_id in intermediate_sym_ids {
         if !output_sym_ids.contains(sym_id) {
             let internal_id = resolve(sym_id).unwrap_or(*sym_id);
-            if let Some(tami) = cached.tensor_map.get(&internal_id) {
+            if let Some(tami) = cached.graph.tensor_map.get(&internal_id) {
                 output_tamis.push((*sym_id, tami));
             }
         }

@@ -12,7 +12,7 @@ pub mod pattern;
 pub mod pool_eval;
 
 pub use lower::{
-    ConcatSegment, DimClassification, DimKind, NanoLoweringContext, ReduceAccessors, TensorAtomMap,
+    ConcatSegment, DimKind, NanoLoweringContext, ReduceAccessors, TensorAtomMap,
 };
 pub use ops::{ReduceKind, ScalarBinOp, ScalarOp, ScalarUnaryOp};
 pub use pattern::{

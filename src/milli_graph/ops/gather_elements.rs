@@ -218,10 +218,10 @@ impl MilliOp for GatherElements {
         }
 
         let data_known: Vec<u64> = data_map
-            .layout
+            .dims
             .iter()
             .filter_map(|d| {
-                if let DimKind::Known(s) = d {
+                if let DimKind::Known { size: s, .. } = d {
                     Some(*s)
                 } else {
                     None
@@ -234,12 +234,12 @@ impl MilliOp for GatherElements {
 
         let cols = data_known[1];
 
-        let Some((out_layout, out_known_dims, out_sym_dims, out_count)) =
-            ctx.classify_dims(out_info)
-        else {
+        let Some(out_dims_v) = ctx.classify_dims(out_info) else {
             return super::LowerResult::Unsupported;
         };
-        let out_count = out_count.max(1);
+        let out_count: u64 = out_dims_v.iter().filter_map(|d| match d { DimKind::Known { size, .. } => Some(*size), _ => None }).product::<u64>().max(1);
+        let out_sym_dims: Vec<_> = out_dims_v.iter().filter_map(|d| match d { DimKind::Sym { gc, .. } => Some(*gc), _ => None }).collect();
+        let n_sym = out_sym_dims.len();
         let out_dt = crate::nano_graph::NanoLoweringContext::ndt(out_info);
 
         // For axis=0, 2D data: flat_index_into_data = indices[i] * cols + (i % cols)
@@ -278,8 +278,8 @@ impl MilliOp for GatherElements {
             },
             out_sym_dims.clone(),
             vec![
-                GroupInput::scalar(InputRef::affine(indices_map.base_id, 1)),
-                GroupInput::scalar(InputRef::Broadcast(zero_lit)),
+                GroupInput::identity(InputRef::affine(indices_map.base_id, 1), n_sym),
+                GroupInput::identity(InputRef::Broadcast(zero_lit), n_sym),
             ],
         );
         let offset_base = ctx.nano.push_group(
@@ -291,8 +291,8 @@ impl MilliOp for GatherElements {
             },
             out_sym_dims.clone(),
             vec![
-                GroupInput::scalar(InputRef::affine(cmp_base, 1)),
-                GroupInput::scalar(InputRef::Broadcast(axis_len_lit)),
+                GroupInput::identity(InputRef::affine(cmp_base, 1), n_sym),
+                GroupInput::identity(InputRef::Broadcast(axis_len_lit), n_sym),
             ],
         );
         let norm_base = ctx.nano.push_group(
@@ -304,8 +304,8 @@ impl MilliOp for GatherElements {
             },
             out_sym_dims.clone(),
             vec![
-                GroupInput::scalar(InputRef::affine(indices_map.base_id, 1)),
-                GroupInput::scalar(InputRef::affine(offset_base, 1)),
+                GroupInput::identity(InputRef::affine(indices_map.base_id, 1), n_sym),
+                GroupInput::identity(InputRef::affine(offset_base, 1), n_sym),
             ],
         );
 
@@ -335,8 +335,8 @@ impl MilliOp for GatherElements {
             },
             out_sym_dims.clone(),
             vec![
-                GroupInput::scalar(InputRef::affine(norm_base, 1)),
-                GroupInput::scalar(InputRef::Broadcast(stride_lit)),
+                GroupInput::identity(InputRef::affine(norm_base, 1), n_sym),
+                GroupInput::identity(InputRef::Broadcast(stride_lit), n_sym),
             ],
         );
 
@@ -350,8 +350,8 @@ impl MilliOp for GatherElements {
             },
             out_sym_dims.clone(),
             vec![
-                GroupInput::scalar(InputRef::affine(mul_base, 1)),
-                GroupInput::scalar(InputRef::modular(col_lit_base, 1, cols)),
+                GroupInput::identity(InputRef::affine(mul_base, 1), n_sym),
+                GroupInput::identity(InputRef::modular(col_lit_base, 1, cols), n_sym),
             ],
         );
 
@@ -364,19 +364,16 @@ impl MilliOp for GatherElements {
                 index_range: data_map.count,
             },
             out_sym_dims.clone(),
-            vec![GroupInput::scalar(InputRef::affine(add_base, 1))],
+            vec![GroupInput::identity(InputRef::affine(add_base, 1), n_sym)],
         );
 
-        let out_strides = TensorAtomMap::compute_strides(&out_known_dims);
         ctx.tensor_map.insert(
             out_id,
             TensorAtomMap::simple(
                 base_id,
                 out_count,
                 out_dt,
-                out_layout,
-                out_strides,
-                out_sym_dims,
+                out_dims_v,
             ),
         );
         super::LowerResult::Lowered

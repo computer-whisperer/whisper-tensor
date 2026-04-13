@@ -295,15 +295,14 @@ impl SimpleUnaryOp {
             },
         };
 
-        let known_dims = in_map.known_dims();
         let input_ref = NanoLoweringContext::<'_, '_, P>::pointwise_input_ref(&in_map);
 
         let base_id = ctx.nano.push_group(
             in_map.count,
             dt,
             scalar_op,
-            in_map.sym_dims.clone(),
-            vec![GroupInput::scalar(input_ref)],
+            in_map.sym_dims(),
+            vec![GroupInput::identity(input_ref, in_map.sym_dims().len())],
         );
 
         ctx.tensor_map.insert(
@@ -312,9 +311,7 @@ impl SimpleUnaryOp {
                 base_id,
                 in_map.count,
                 dt,
-                in_map.layout.clone(),
-                TensorAtomMap::compute_strides(&known_dims),
-                in_map.sym_dims.clone(),
+                in_map.dims.clone(),
             ),
         );
         crate::milli_graph::ops::LowerResult::Lowered
@@ -639,8 +636,8 @@ impl ClampMin {
             vec![],
         );
 
-        let known_dims = in_map.known_dims();
         let input_ref = NanoLoweringContext::<'_, '_, P>::pointwise_input_ref(&in_map);
+        let sym_dims = in_map.sym_dims();
 
         let base_id = ctx.nano.push_group(
             in_map.count,
@@ -649,8 +646,11 @@ impl ClampMin {
                 op: ScalarBinOp::Max,
                 compute_dtype: dt,
             },
-            in_map.sym_dims.clone(),
-            vec![GroupInput::scalar(input_ref), GroupInput::scalar(InputRef::Broadcast(min_id))],
+            sym_dims.clone(),
+            vec![
+                GroupInput::identity(input_ref, sym_dims.len()),
+                GroupInput::identity(InputRef::Broadcast(min_id), sym_dims.len()),
+            ],
         );
 
         ctx.tensor_map.insert(
@@ -659,9 +659,7 @@ impl ClampMin {
                 base_id,
                 in_map.count,
                 dt,
-                in_map.layout.clone(),
-                TensorAtomMap::compute_strides(&known_dims),
-                in_map.sym_dims.clone(),
+                in_map.dims.clone(),
             ),
         );
         crate::milli_graph::ops::LowerResult::Lowered

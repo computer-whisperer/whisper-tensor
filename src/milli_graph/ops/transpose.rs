@@ -77,12 +77,6 @@ impl Transpose {
             }
         };
 
-        let Some((out_layout, out_known_dims, _out_sym_dims, _out_count)) =
-            ctx.classify_dims(out_info)
-        else {
-            return crate::milli_graph::ops::LowerResult::Unsupported;
-        };
-
         // Build full permutation (handling None=reverse, partial perms, negative indices).
         let full_perm: Vec<usize> = match self.perm() {
             None => (0..in_rank).rev().collect(),
@@ -111,36 +105,6 @@ impl Transpose {
             }
         };
 
-        // Get input known dim sizes (only the Known dims, in original order).
-        let _in_known_sizes: Vec<u64> = in_map
-            .layout
-            .iter()
-            .filter_map(|d| {
-                if let DimKind::Known(s) = d {
-                    Some(*s)
-                } else {
-                    None
-                }
-            })
-            .collect();
-        // Use the input's actual physical strides (may already be non-row-major
-        // from a prior Transpose). Do NOT recompute row-major — that loses the
-        // physical layout.
-        let in_strides = &in_map.known_strides;
-        let _out_strides = TensorAtomMap::compute_strides(&out_known_dims);
-
-        // We need to map between original dim indices and known-dim indices.
-        // For now, assume all dims are known (symbolic dims in transpose would
-        // be unusual). If any dim is symbolic, fall back to boundary.
-        if in_map
-            .layout
-            .iter()
-            .any(|d| matches!(d, DimKind::Symbolic(_)))
-            || out_layout.iter().any(|d| matches!(d, DimKind::Symbolic(_)))
-        {
-            return crate::milli_graph::ops::LowerResult::Unsupported;
-        }
-
         // Zero-cost transpose: reuse the input's atoms with permuted strides.
         //
         // The input atoms are laid out in row-major order with `in_strides`.
@@ -150,15 +114,10 @@ impl Transpose {
         //
         // This means downstream ops will decompose their flat index using
         // the output strides and arrive at the correct input atom.
-        let mut transposed_strides = vec![0u64; full_perm.len()];
+        // Permute the layout (which includes strides) according to the transpose perm.
+        let mut transposed_layout: Vec<DimKind> = vec![DimKind::Known { size: 0, stride: 0 }; full_perm.len()];
         for (out_dim, &in_dim) in full_perm.iter().enumerate() {
-            transposed_strides[out_dim] = in_strides[in_dim];
-        }
-
-        // Permute the layout as well.
-        let mut transposed_layout = vec![DimKind::Known(0); full_perm.len()];
-        for (out_dim, &in_dim) in full_perm.iter().enumerate() {
-            transposed_layout[out_dim] = in_map.layout[in_dim].clone();
+            transposed_layout[out_dim] = in_map.dims[in_dim].clone();
         }
 
         let out_dt = NanoLoweringContext::ndt(out_info);
@@ -191,7 +150,6 @@ impl Transpose {
                     in_map.count,
                     out_dt,
                     transposed_layout,
-                    in_map.sym_dims.clone(),
                     permuted_segments,
                 ),
             );
@@ -203,8 +161,6 @@ impl Transpose {
                     in_map.count,
                     out_dt,
                     transposed_layout,
-                    transposed_strides,
-                    in_map.sym_dims.clone(),
                 ),
             );
         }

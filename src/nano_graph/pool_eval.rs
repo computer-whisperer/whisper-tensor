@@ -40,10 +40,25 @@ pub fn pool_eval<'p, P: Pool + 'p>(
     let n = groups.len();
     let input_tensors = graph.input_tensors();
 
-    // --- Step 1: Populate input stores via relayout ---
+    // Build a lookup from input tensor index → sym_dims (from TAMIs).
+    // This lets resolve_producer_sym determine sym_dims for input atoms.
+    let mut input_sym_dims: Vec<Vec<super::pattern::GraphConstantId>> =
+        (0..input_tensors.len()).map(|_| vec![]).collect();
+    for &(tam, _) in inputs {
+        let input_index = graph
+            .find_input_idx_by_base(tam.base_id)
+            .or_else(|| graph.find_input_idx(tam.base_id).map(|(ti, _)| ti));
+        if let Some(ti) = input_index {
+            input_sym_dims[ti] = tam.sym_dims();
+        }
+    }
+
+    // --- Step 1: Populate input stores ---
     //
-    // Build the TensorLayout the TAMI expects, then relayout the view to match.
-    // If strides already agree, relayout borrows (zero-copy). Otherwise it copies.
+    // If the input has no symbolic dims, relayout to the TAMI's known_dims layout
+    // (zero-copy when strides agree). If the input has symbolic dims, decompose
+    // each element via dim_layout into (atom_idx, sym_point) and write into an
+    // n-d atom store shaped [count, ext0, ext1, ...].
     let mut input_stores: Vec<Option<AtomStore<'_, 'p, P>>> =
         (0..input_tensors.len()).map(|_| None).collect();
 
@@ -52,28 +67,100 @@ pub fn pool_eval<'p, P: Pool + 'p>(
             .find_input_idx_by_base(tam.base_id)
             .or_else(|| graph.find_input_idx(tam.base_id).map(|(ti, _)| ti));
         if let Some(ti) = input_index {
-            let element_bits = tam.dtype.total_bits() as u64;
-            let strides_bits: Vec<u64> = tam
-                .known_strides
-                .iter()
-                .map(|&s| s * element_bits)
-                .collect();
-            let target = TensorLayout::<DynRank>::ElementStrided {
-                shape: tam.known_dims.clone(),
-                dtype: tam.dtype,
-                strides: strides_bits,
-                offset_bits: 0,
-            };
-            let cow = view
-                .relayout(target, pool)
-                .expect("pool alloc for input relayout");
-            match cow {
-                crate::numeric_tensor::NumericTensorCOW::Borrowed(flat) => {
-                    input_stores[ti] = Some(AtomStore::View(flat));
+            let sym_dims_v = tam.sym_dims();
+            if sym_dims_v.is_empty() {
+                // No symbolic dims — relayout to TAMI's known_dims shape.
+                let element_bits = tam.dtype.total_bits() as u64;
+                let known_strides_v = tam.known_strides();
+                let strides_bits: Vec<u64> = known_strides_v
+                    .iter()
+                    .map(|&s| s * element_bits)
+                    .collect();
+                let target = TensorLayout::<DynRank>::ElementStrided {
+                    shape: tam.known_dims(),
+                    dtype: tam.dtype,
+                    strides: strides_bits,
+                    offset_bits: 0,
+                };
+                let cow = view
+                    .relayout(target, pool)
+                    .expect("pool alloc for input relayout");
+                match cow {
+                    crate::numeric_tensor::NumericTensorCOW::Borrowed(flat) => {
+                        input_stores[ti] = Some(AtomStore::View(flat));
+                    }
+                    crate::numeric_tensor::NumericTensorCOW::Owned(tensor) => {
+                        input_stores[ti] = Some(AtomStore::Owned(tensor));
+                    }
                 }
-                crate::numeric_tensor::NumericTensorCOW::Owned(tensor) => {
-                    input_stores[ti] = Some(AtomStore::Owned(tensor));
+            } else {
+                // Symbolic dims present — decompose input tensor elements
+                // into (atom_idx, sym_point) via dims and populate
+                // an n-d atom store.
+                let sym_extents: Vec<u64> = sym_dims_v.iter()
+                    .map(|gc| gc_values[gc.0 as usize])
+                    .collect();
+                let sym_prod: u64 = sym_extents.iter().product::<u64>().max(1);
+                let _total = tam.count * sym_prod;
+
+                let mut store_shape = Vec::with_capacity(1 + sym_extents.len());
+                store_shape.push(tam.count);
+                store_shape.extend_from_slice(&sym_extents);
+                let layout = TensorLayout::<DynRank>::row_major(store_shape, tam.dtype);
+                let buffer = pool
+                    .allocate(layout.buffer_size_bytes())
+                    .expect("pool alloc for sym input");
+                let mut store = NumericTensor::from_parts(buffer, layout);
+
+                // Build the full shape from dims: Known → size, Sym → extent.
+                let full_shape: Vec<u64> = tam.dims.iter().map(|dk| {
+                    match dk {
+                        super::lower::DimKind::Known { size, .. } => *size,
+                        super::lower::DimKind::Sym { axis, .. } => sym_extents[*axis],
+                    }
+                }).collect();
+
+                // Iterate over all elements using the full shape.
+                let full_numel: u64 = full_shape.iter().product();
+                for flat_elem in 0..full_numel {
+                    // Decompose flat_elem into per-dim coordinates.
+                    let mut remaining = flat_elem;
+                    let mut coords = vec![0u64; full_shape.len()];
+                    for d in (0..full_shape.len()).rev() {
+                        if d == 0 {
+                            coords[0] = remaining;
+                        } else {
+                            coords[d] = remaining % full_shape[d];
+                            remaining /= full_shape[d];
+                        }
+                    }
+
+                    // Split into atom_idx (from known dims) and sym_point (from sym dims).
+                    let mut atom_idx = 0u64;
+                    let mut atom_stride = 1u64;
+                    let mut sym_flat = 0u64;
+                    let mut sym_stride = 1u64;
+
+                    // Build atom_idx from known dims (row-major) and sym_flat from sym dims.
+                    for d in (0..full_shape.len()).rev() {
+                        match &tam.dims[d] {
+                            super::lower::DimKind::Known { .. } => {
+                                atom_idx += coords[d] * atom_stride;
+                                atom_stride *= full_shape[d];
+                            }
+                            super::lower::DimKind::Sym { .. } => {
+                                sym_flat += coords[d] * sym_stride;
+                                sym_stride *= full_shape[d];
+                            }
+                        }
+                    }
+
+                    let write_idx = (atom_idx * sym_prod + sym_flat) as usize;
+                    let scalar = view.read_element(flat_elem as usize);
+                    store.write_element(write_idx, scalar.cast_to(tam.dtype));
                 }
+
+                input_stores[ti] = Some(AtomStore::Owned(store));
             }
         }
     }
@@ -248,7 +335,6 @@ pub fn pool_eval<'p, P: Pool + 'p>(
         let count = group.count as usize;
         let output_dtype = group.output_dtype;
         let sym_prod = sym_product_for(&group.sym_dims, gc_values);
-        let total_elems = count as u64 * sym_prod;
 
         // Compute sym_dim extents for this group.
         let sym_extents: Vec<u64> = group.sym_dims.iter()
@@ -292,12 +378,14 @@ pub fn pool_eval<'p, P: Pool + 'p>(
                 return (0, 1);
             }
             let src_atom = input.input_ref.resolve(group.atom_offset);
-            let producer_sym_dims = if let Some(pgi) = graph.find_group_idx(src_atom) {
-                &graph.groups()[pgi].sym_dims
-            } else {
-                // Input tensor — no sym_dims in current design.
-                return (0, 1);
-            };
+            let producer_sym_dims: &[super::pattern::GraphConstantId] =
+                if let Some(pgi) = graph.find_group_idx(src_atom) {
+                    &graph.groups()[pgi].sym_dims
+                } else if let Some((ti, _)) = graph.find_input_idx(src_atom) {
+                    &input_sym_dims[ti]
+                } else {
+                    return (0, 1);
+                };
             let p_sym_prod = sym_product_for(producer_sym_dims, gc_values);
             let p_sf = map_sym_flat(
                 consumer_sf,
@@ -367,6 +455,8 @@ pub fn pool_eval<'p, P: Pool + 'p>(
                         let src_atom = input.input_ref.resolve(ri);
                         let producer_sym_dims = if let Some(pgi) = graph.find_group_idx(src_atom) {
                             graph.groups()[pgi].sym_dims.clone()
+                        } else if let Some((ti, _)) = graph.find_input_idx(src_atom) {
+                            input_sym_dims[ti].clone()
                         } else {
                             vec![]
                         };
@@ -583,9 +673,11 @@ pub fn pool_eval<'p, P: Pool + 'p>(
     let mut result_tensors: Vec<NumericTensor<'p, DynRank, P>> = Vec::with_capacity(outputs.len());
 
     for tam in outputs {
-        // Fast path: non-segmented, all atoms in a single group → take store + set layout.
-        // Works for both contiguous (row-major strides) and strided (transpose) cases.
-        if tam.segments.is_empty()
+        // Fast path: non-segmented, no sym_dims, all atoms in a single group → take
+        // store + set layout.  Sym_dim outputs go through the general path below.
+        let sym_dims_v = tam.sym_dims();
+        if sym_dims_v.is_empty()
+            && tam.segments.is_empty()
             && let Some(gi) = graph.find_group_idx(tam.base_id)
             && groups[gi].base_id == tam.base_id
             && groups[gi].count == tam.count
@@ -593,13 +685,13 @@ pub fn pool_eval<'p, P: Pool + 'p>(
         {
             // Build a strided layout using the TAMI's strides (atom units → bits).
             let element_bits = tam.dtype.total_bits() as u64;
-            let strides_bits: Vec<u64> = tam
-                .known_strides
+            let known_strides_v = tam.known_strides();
+            let strides_bits: Vec<u64> = known_strides_v
                 .iter()
                 .map(|&s| s * element_bits)
                 .collect();
             let strided_layout = TensorLayout::<DynRank>::ElementStrided {
-                shape: tam.known_dims.clone(),
+                shape: tam.known_dims(),
                 dtype: tam.dtype,
                 strides: strides_bits,
                 offset_bits: 0,
@@ -615,9 +707,73 @@ pub fn pool_eval<'p, P: Pool + 'p>(
             continue;
         }
 
-        // General path: iterate elements, use TAMI to map each to an atom,
-        // read from group/input stores.
-        let target_layout = TensorLayout::<DynRank>::row_major(tam.known_dims.clone(), tam.dtype);
+        if !sym_dims_v.is_empty() {
+            // Output has symbolic dims — reconstruct full tensor shape from
+            // dims and read each element from the n-d atom store.
+            let sym_extents: Vec<u64> = sym_dims_v.iter()
+                .map(|gc| gc_values[gc.0 as usize])
+                .collect();
+            let sym_prod: u64 = sym_extents.iter().product::<u64>().max(1);
+
+            let full_shape: Vec<u64> = tam.dims.iter().map(|dk| {
+                match dk {
+                    super::lower::DimKind::Known { size, .. } => *size,
+                    super::lower::DimKind::Sym { axis, .. } => sym_extents[*axis],
+                }
+            }).collect();
+            let full_numel: u64 = full_shape.iter().product();
+
+            let target_layout = TensorLayout::<DynRank>::row_major(full_shape.clone(), tam.dtype);
+            let buffer = pool
+                .allocate(target_layout.buffer_size_bytes())
+                .map_err(PoolEvalError::Allocation)?;
+            let mut out_tensor = NumericTensor::from_parts(buffer, target_layout);
+
+            for flat_elem in 0..full_numel {
+                // Decompose flat_elem into coordinates.
+                let mut remaining = flat_elem;
+                let mut coords = vec![0u64; full_shape.len()];
+                for d in (0..full_shape.len()).rev() {
+                    if d == 0 {
+                        coords[0] = remaining;
+                    } else {
+                        coords[d] = remaining % full_shape[d];
+                        remaining /= full_shape[d];
+                    }
+                }
+
+                // Split into atom_idx and sym_flat.
+                let mut atom_idx = 0u64;
+                let mut atom_stride = 1u64;
+                let mut sym_flat = 0u64;
+                let mut sym_stride = 1u64;
+
+                for d in (0..full_shape.len()).rev() {
+                    match &tam.dims[d] {
+                        super::lower::DimKind::Known { .. } => {
+                            atom_idx += coords[d] * atom_stride;
+                            atom_stride *= full_shape[d];
+                        }
+                        super::lower::DimKind::Sym { .. } => {
+                            sym_flat += coords[d] * sym_stride;
+                            sym_stride *= full_shape[d];
+                        }
+                    }
+                }
+
+                let atom = tam.atom_id_for_element(atom_idx);
+                let scalar = lookup_atom_scalar(
+                    atom, sym_flat, sym_prod, graph, &group_stores, &input_stores,
+                );
+                out_tensor.write_element(flat_elem as usize, scalar.cast_to(tam.dtype));
+            }
+            result_tensors.push(out_tensor);
+            continue;
+        }
+
+        // General path (no sym_dims): iterate elements, use TAMI to map each
+        // to an atom, read from group/input stores.
+        let target_layout = TensorLayout::<DynRank>::row_major(tam.known_dims(), tam.dtype);
         let buffer = pool
             .allocate(target_layout.buffer_size_bytes())
             .map_err(PoolEvalError::Allocation)?;

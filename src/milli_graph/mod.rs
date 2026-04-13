@@ -1115,7 +1115,7 @@ impl MilliOpGraph {
             .iter()
             .filter_map(|(&ext_id, view)| {
                 let &internal_id = self.input_map.get(&ext_id)?;
-                let tam = lower_result.tensor_map.get(&internal_id)?;
+                let tam = lower_result.graph.tensor_map.get(&internal_id)?;
                 Some((tam, *view))
             })
             .collect();
@@ -1142,7 +1142,7 @@ impl MilliOpGraph {
             Vec::new();
         for ext_id in &output_ids {
             let internal_id = reverse_output.get(ext_id).copied().unwrap_or(*ext_id);
-            if let Some(tam) = lower_result.tensor_map.get(&internal_id) {
+            if let Some(tam) = lower_result.graph.tensor_map.get(&internal_id) {
                 output_tamis.push((ext_id, tam));
             }
         }

@@ -212,7 +212,7 @@ impl SimpleBinary {
         &self,
         ctx: &mut crate::nano_graph::NanoLoweringContext<'_, 'p, P>,
     ) -> crate::milli_graph::ops::LowerResult {
-        use crate::nano_graph::lower::TensorAtomMap;
+        use crate::nano_graph::lower::{DimKind, TensorAtomMap};
         use crate::nano_graph::ops::{ScalarBinOp, ScalarOp};
         use crate::nano_graph::pattern::{AtomId, GroupInput};
 
@@ -338,19 +338,17 @@ impl SimpleBinary {
             },
         };
 
-        let Some((layout, known_dims, sym_dims, count)) = ctx.classify_dims(out_info) else {
+        let Some(dims) = ctx.classify_dims(out_info) else {
             return crate::milli_graph::ops::LowerResult::Unsupported;
         };
-        let count = count.max(1);
-        let strides = TensorAtomMap::compute_strides(&known_dims);
+        let count: u64 = dims.iter().filter_map(|d| match d { DimKind::Known { size, .. } => Some(*size), _ => None }).product::<u64>().max(1);
+        let sym_dims: Vec<_> = dims.iter().filter_map(|d| match d { DimKind::Sym { gc, .. } => Some(*gc), _ => None }).collect();
 
         let out_tmp = TensorAtomMap::simple(
             AtomId(0),
             count,
             out_dt,
-            layout.clone(),
-            strides.clone(),
-            sym_dims.clone(),
+            dims.clone(),
         );
 
         let a_info = all_infos.get(&a_id);
@@ -363,12 +361,15 @@ impl SimpleBinary {
             out_dt,
             scalar_op,
             sym_dims.clone(),
-            vec![GroupInput::scalar(input_a), GroupInput::scalar(input_b)],
+            vec![
+                GroupInput::identity(input_a, sym_dims.len()),
+                GroupInput::identity(input_b, sym_dims.len()),
+            ],
         );
 
         ctx.tensor_map.insert(
             out_id,
-            TensorAtomMap::simple(base_id, count, out_dt, layout, strides, sym_dims),
+            TensorAtomMap::simple(base_id, count, out_dt, dims),
         );
         crate::milli_graph::ops::LowerResult::Lowered
     }
@@ -729,7 +730,7 @@ impl Pow {
         &self,
         ctx: &mut crate::nano_graph::NanoLoweringContext<'_, 'p, P>,
     ) -> crate::milli_graph::ops::LowerResult {
-        use crate::nano_graph::lower::TensorAtomMap;
+        use crate::nano_graph::lower::{DimKind, TensorAtomMap};
         use crate::nano_graph::ops::{ScalarBinOp, ScalarOp};
         use crate::nano_graph::pattern::{AtomId, GroupInput};
 
@@ -749,20 +750,18 @@ impl Pow {
             return crate::milli_graph::ops::LowerResult::Unsupported;
         };
 
-        let Some((layout, known_dims, sym_dims, count)) = ctx.classify_dims(out_info) else {
+        let Some(dims) = ctx.classify_dims(out_info) else {
             return crate::milli_graph::ops::LowerResult::Unsupported;
         };
-        let count = count.max(1);
-        let strides = TensorAtomMap::compute_strides(&known_dims);
+        let count: u64 = dims.iter().filter_map(|d| match d { DimKind::Known { size, .. } => Some(*size), _ => None }).product::<u64>().max(1);
+        let sym_dims: Vec<_> = dims.iter().filter_map(|d| match d { DimKind::Sym { gc, .. } => Some(*gc), _ => None }).collect();
 
         let dt = crate::nano_graph::NanoLoweringContext::ndt(out_info);
         let out_tmp = TensorAtomMap::simple(
             AtomId(0),
             count,
             dt,
-            layout.clone(),
-            strides.clone(),
-            sym_dims.clone(),
+            dims.clone(),
         );
 
         let a_info = all_infos.get(&a_id);
@@ -778,12 +777,15 @@ impl Pow {
                 compute_dtype: dt,
             },
             sym_dims.clone(),
-            vec![GroupInput::scalar(input_a), GroupInput::scalar(input_b)],
+            vec![
+                GroupInput::identity(input_a, sym_dims.len()),
+                GroupInput::identity(input_b, sym_dims.len()),
+            ],
         );
 
         ctx.tensor_map.insert(
             out_id,
-            TensorAtomMap::simple(base_id, count, dt, layout, strides, sym_dims),
+            TensorAtomMap::simple(base_id, count, dt, dims),
         );
         crate::milli_graph::ops::LowerResult::Lowered
     }
@@ -1114,8 +1116,8 @@ impl MatMul {
         //   - N (last dim of B): must be Known
         //   - M (second-to-last of A): can be Known or Symbolic
         //   - Known batch dims must match between A and B
-        let a_layout = &a_map.layout;
-        let b_layout = &b_map.layout;
+        let a_layout = &a_map.dims;
+        let b_layout = &b_map.dims;
 
         if a_layout.len() < 2 || b_layout.len() < 2 {
             return crate::milli_graph::ops::LowerResult::Unsupported;
@@ -1123,7 +1125,7 @@ impl MatMul {
 
         // Extract K from last dim of A and second-to-last of B.
         let k = match (&a_layout[a_layout.len() - 1], &b_layout[b_layout.len() - 2]) {
-            (DimKind::Known(ka), DimKind::Known(kb)) if ka == kb && *ka > 0 => *ka,
+            (DimKind::Known { size: ka, .. }, DimKind::Known { size: kb, .. }) if ka == kb && *ka > 0 => *ka,
             _ => {
                 return crate::milli_graph::ops::LowerResult::Unsupported;
             }
@@ -1131,7 +1133,7 @@ impl MatMul {
 
         // Extract N from last dim of B.
         let n = match &b_layout[b_layout.len() - 1] {
-            DimKind::Known(n) if *n > 0 => *n,
+            DimKind::Known { size: n, .. } if *n > 0 => *n,
             _ => {
                 return crate::milli_graph::ops::LowerResult::Unsupported;
             }
@@ -1139,8 +1141,8 @@ impl MatMul {
 
         // M from second-to-last of A: can be known or symbolic.
         let m_known: Option<u64> = match &a_layout[a_layout.len() - 2] {
-            DimKind::Known(m) => Some(*m),
-            DimKind::Symbolic(_) => None,
+            DimKind::Known { size: m, .. } => Some(*m),
+            DimKind::Sym { .. } => None,
         };
 
         // Extract known batch dims from A and B (everything except last 2).
@@ -1150,7 +1152,7 @@ impl MatMul {
         let a_batch_known: Vec<u64> = a_batch_layout
             .iter()
             .filter_map(|d| {
-                if let DimKind::Known(s) = d {
+                if let DimKind::Known { size: s, .. } = d {
                     Some(*s)
                 } else {
                     None
@@ -1160,7 +1162,7 @@ impl MatMul {
         let b_batch_known: Vec<u64> = b_batch_layout
             .iter()
             .filter_map(|d| {
-                if let DimKind::Known(s) = d {
+                if let DimKind::Known { size: s, .. } = d {
                     Some(*s)
                 } else {
                     None
@@ -1176,12 +1178,11 @@ impl MatMul {
         let batch_known_product: u64 = a_batch_known.iter().product::<u64>().max(1);
 
         // Classify output dims.
-        let Some((out_layout, out_known_dims, out_sym_dims, out_count)) =
-            ctx.classify_dims(out_info)
-        else {
+        let Some(out_dims) = ctx.classify_dims(out_info) else {
             return crate::milli_graph::ops::LowerResult::Unsupported;
         };
-        let out_count = out_count.max(1);
+        let out_count: u64 = out_dims.iter().filter_map(|d| match d { DimKind::Known { size, .. } => Some(*size), _ => None }).product::<u64>().max(1);
+        let out_sym_dims: Vec<_> = out_dims.iter().filter_map(|d| match d { DimKind::Sym { gc, .. } => Some(*gc), _ => None }).collect();
 
         if out_count > 64_000_000 {
             return crate::milli_graph::ops::LowerResult::Unsupported;
@@ -1199,26 +1200,26 @@ impl MatMul {
         let a_known_dims: Vec<u64> = a_layout
             .iter()
             .filter_map(|d| {
-                if let DimKind::Known(s) = d {
+                if let DimKind::Known { size: s, .. } = d {
                     Some(*s)
                 } else {
                     None
                 }
             })
             .collect();
-        let a_strides = &a_map.known_strides;
+        let a_strides = a_map.known_strides();
 
         let b_known_dims: Vec<u64> = b_layout
             .iter()
             .filter_map(|d| {
-                if let DimKind::Known(s) = d {
+                if let DimKind::Known { size: s, .. } = d {
                     Some(*s)
                 } else {
                     None
                 }
             })
             .collect();
-        let b_strides = &b_map.known_strides;
+        let b_strides = b_map.known_strides();
 
         // A's K dim is the last known dim. B's K dim is second-to-last known dim.
         // B's N dim is the last known dim.
@@ -1369,7 +1370,10 @@ impl MatMul {
                     compute_dtype: product_dtype,
                 },
                 out_sym_dims.clone(),
-                vec![GroupInput::scalar(input_a), GroupInput::scalar(input_b)],
+                vec![
+                    GroupInput::identity(input_a, out_sym_dims.len()),
+                    GroupInput::identity(input_b, out_sym_dims.len()),
+                ],
             );
 
             if mul_base_id.is_none() {
@@ -1397,7 +1401,7 @@ impl MatMul {
                     compute_dtype: accumulate_dtype,
                 },
                 out_sym_dims.clone(),
-                vec![GroupInput::scalar(InputRef::affine(row_mul_base, 1))],
+                vec![GroupInput::identity(InputRef::affine(row_mul_base, 1), out_sym_dims.len())],
             );
 
             if reduce_base_id.is_none() {
@@ -1413,9 +1417,7 @@ impl MatMul {
                 base_id,
                 out_count,
                 out_dtype,
-                out_layout,
-                TensorAtomMap::compute_strides(&out_known_dims),
-                out_sym_dims,
+                out_dims,
             ),
         );
         crate::milli_graph::ops::LowerResult::Lowered

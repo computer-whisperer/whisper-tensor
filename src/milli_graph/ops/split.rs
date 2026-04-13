@@ -93,15 +93,14 @@ impl Split {
             return crate::milli_graph::ops::LowerResult::Unsupported;
         };
 
-        let Some((out_layout, out_known_dims, out_sym_dims, out_count)) =
-            ctx.classify_dims(out_info)
-        else {
+        let Some(out_dims) = ctx.classify_dims(out_info) else {
             return crate::milli_graph::ops::LowerResult::Unsupported;
         };
-        let out_count = out_count.max(1);
+        let out_count: u64 = out_dims.iter().filter_map(|d| match d { DimKind::Known { size, .. } => Some(*size), _ => None }).product::<u64>().max(1);
+        let out_known_dims: Vec<u64> = out_dims.iter().filter_map(|d| match d { DimKind::Known { size, .. } => Some(*size), _ => None }).collect();
 
         // Normalize axis.
-        let rank = in_map.layout.len();
+        let rank = in_map.dims.len();
         let axis_raw = self.axis();
         let axis = if axis_raw < 0 {
             (axis_raw + rank as i64) as usize
@@ -109,25 +108,25 @@ impl Split {
             axis_raw as usize
         };
 
-        if axis >= rank || !matches!(in_map.layout[axis], DimKind::Known(_)) {
+        if axis >= rank || !matches!(in_map.dims[axis], DimKind::Known { .. }) {
             return crate::milli_graph::ops::LowerResult::Unsupported;
         }
 
         // Determine the offset along the split axis for this output_id.
         // We need the split sizes. If all outputs have known dims, compute from the
         // input dim and output sizes. Otherwise use the output info directly.
-        let split_known_idx = in_map.layout[..=axis]
+        let split_known_idx = in_map.dims[..=axis]
             .iter()
-            .filter(|d| matches!(d, DimKind::Known(_)))
+            .filter(|d| matches!(d, DimKind::Known { .. }))
             .count()
             - 1;
 
         // Get the input's full dim along split axis.
         let in_known: Vec<u64> = in_map
-            .layout
+            .dims
             .iter()
             .filter_map(|d| {
-                if let DimKind::Known(s) = d {
+                if let DimKind::Known { size: s, .. } = d {
                     Some(*s)
                 } else {
                     None
@@ -140,8 +139,8 @@ impl Split {
         // The output_id tells us which chunk we are. We need the sizes of all prior chunks.
         // We can compute this from the axis dim of the output info and output_id index.
         let output_id_idx = self.output_id();
-        let out_split_size = match &out_layout[axis] {
-            DimKind::Known(s) => *s,
+        let out_split_size = match &out_dims[axis] {
+            DimKind::Known { size: s, .. } => *s,
             _ => {
                 return crate::milli_graph::ops::LowerResult::Unsupported;
             }
@@ -160,18 +159,17 @@ impl Split {
         // Zero-cost split for outermost axis with row-major strides:
         // output atoms are a contiguous sub-range.
         let out_dt = NanoLoweringContext::ndt(out_info);
+        let in_known_strides = in_map.known_strides();
         let in_rowmajor = TensorAtomMap::compute_strides(&in_known);
-        if split_known_idx == 0 && in_map.known_strides == in_rowmajor {
-            let base_offset = offset_along_axis * in_map.known_strides[split_known_idx];
+        if split_known_idx == 0 && in_known_strides == in_rowmajor {
+            let base_offset = offset_along_axis * in_known_strides[split_known_idx];
             ctx.tensor_map.insert(
                 out_id,
                 TensorAtomMap::simple(
                     in_map.base_id.offset(base_offset),
                     out_count,
                     out_dt,
-                    out_layout,
-                    TensorAtomMap::compute_strides(&out_known_dims),
-                    out_sym_dims,
+                    out_dims,
                 ),
             );
             return crate::milli_graph::ops::LowerResult::Lowered;
@@ -180,16 +178,24 @@ impl Split {
         // Non-outermost split: zero-cost view with input's strides.
         // The strides address the input's atom space with gaps between chunks.
         // build_input_ref handles this correctly via stride decomposition.
-        let base_offset = offset_along_axis * in_map.known_strides[split_known_idx];
+        let base_offset = offset_along_axis * in_known_strides[split_known_idx];
+        // Build output dims with input's physical strides (not row-major).
+        let mut ki = 0;
+        let out_dims_with_in_strides: Vec<DimKind> = out_dims.iter().map(|d| match d {
+            DimKind::Known { size, .. } => {
+                let stride = in_known_strides[ki];
+                ki += 1;
+                DimKind::Known { size: *size, stride }
+            },
+            other => other.clone(),
+        }).collect();
         ctx.tensor_map.insert(
             out_id,
             TensorAtomMap::simple(
                 in_map.base_id.offset(base_offset),
                 out_count,
                 out_dt,
-                out_layout,
-                in_map.known_strides.clone(),
-                out_sym_dims,
+                out_dims_with_in_strides,
             ),
         );
         crate::milli_graph::ops::LowerResult::Lowered
@@ -219,7 +225,7 @@ impl Split {
                 let rank = ctx
                     .tensor_map
                     .get(&in_id)
-                    .map(|m| m.layout.len())
+                    .map(|m| m.dims.len())
                     .unwrap_or(1);
                 (self.axis + rank as i64) as usize
             } else {

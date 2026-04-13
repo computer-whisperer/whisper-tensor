@@ -153,6 +153,7 @@ impl ReduceMean {
         );
 
         // Divide sum by extent in compute_dt, then cast to output dtype.
+        let n_sym = sum_map.sym_dims().len();
         let base_id = ctx.nano.push_group(
             sum_map.count,
             out_dt,
@@ -160,10 +161,10 @@ impl ReduceMean {
                 op: ScalarBinOp::Div,
                 compute_dtype: compute_dt,
             },
-            sum_map.sym_dims.clone(),
+            sum_map.sym_dims(),
             vec![
-                GroupInput::scalar(InputRef::affine(sum_map.base_id, 1)),
-                GroupInput::scalar(InputRef::Broadcast(extent_lit)),
+                GroupInput::identity(InputRef::affine(sum_map.base_id, 1), n_sym),
+                GroupInput::identity(InputRef::Broadcast(extent_lit), n_sym),
             ],
         );
 
@@ -174,9 +175,7 @@ impl ReduceMean {
                 base_id,
                 sum_map.count,
                 out_dt,
-                sum_map.layout,
-                sum_map.known_strides,
-                sum_map.sym_dims,
+                sum_map.dims,
             ),
         );
         crate::milli_graph::ops::LowerResult::Lowered

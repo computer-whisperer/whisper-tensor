@@ -356,6 +356,10 @@ pub struct NanoGraph<'p, P: Pool + 'p = crate::pool::SystemPool> {
     pub graph_constants: Vec<GraphConstantInfo>,
     /// Which atom ranges are final outputs of the computation.
     pub outputs: Vec<AtomRange>,
+    /// How milli-graph tensors map to atoms. Populated by lowering.
+    /// Covers both inputs and outputs. This is the single source of truth
+    /// for tensor→atom mapping including symbolic dimension info.
+    pub tensor_map: HashMap<crate::graph::GlobalId, super::lower::TensorAtomMapInfo>,
 }
 
 impl<'p, P: Pool + 'p> Clone for NanoGraph<'p, P>
@@ -370,6 +374,7 @@ where
             opaque_ops: self.opaque_ops.clone(),
             graph_constants: self.graph_constants.clone(),
             outputs: self.outputs.clone(),
+            tensor_map: self.tensor_map.clone(),
         }
     }
 }
@@ -383,6 +388,7 @@ impl<P: Pool> Default for NanoGraph<'_, P> {
             opaque_ops: Vec::new(),
             graph_constants: Vec::new(),
             outputs: Vec::new(),
+            tensor_map: HashMap::new(),
         }
     }
 }

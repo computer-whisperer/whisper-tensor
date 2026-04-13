@@ -96,12 +96,11 @@ impl Slice {
             return crate::milli_graph::ops::LowerResult::Unsupported;
         };
 
-        let Some((out_layout, out_known_dims, out_sym_dims, out_count)) =
-            ctx.classify_dims(out_info)
-        else {
+        let Some(out_dims) = ctx.classify_dims(out_info) else {
             return crate::milli_graph::ops::LowerResult::Unsupported;
         };
-        let out_count = out_count.max(1);
+        let out_count: u64 = out_dims.iter().filter_map(|d| match d { DimKind::Known { size, .. } => Some(*size), _ => None }).product::<u64>().max(1);
+        let out_known_dims: Vec<u64> = out_dims.iter().filter_map(|d| match d { DimKind::Known { size, .. } => Some(*size), _ => None }).collect();
 
         // Extract concrete slice parameters.
         let extract_i64 = |id: &GlobalId| -> Option<Vec<i64>> {
@@ -117,7 +116,7 @@ impl Slice {
             starts.as_ref().map(|s| s.iter().map(|_| 1i64).collect())
         };
 
-        let in_rank = in_map.layout.len();
+        let in_rank = in_map.dims.len();
         let axes: Option<Vec<usize>> = if let Some(axes_id) = self.axes_id() {
             extract_i64(&axes_id).map(|a| {
                 a.iter()
@@ -142,10 +141,10 @@ impl Slice {
         // Build per-axis (start, step) for known dims.
         // The input's known dims define the coordinate space.
         let in_known: Vec<u64> = in_map
-            .layout
+            .dims
             .iter()
             .filter_map(|d| {
-                if let DimKind::Known(s) = d {
+                if let DimKind::Known { size: s, .. } = d {
                     Some(*s)
                 } else {
                     None
@@ -157,10 +156,10 @@ impl Slice {
         let axis_to_known_idx: Vec<Option<usize>> = {
             let mut ki = 0;
             in_map
-                .layout
+                .dims
                 .iter()
                 .map(|d| {
-                    if matches!(d, DimKind::Known(_)) {
+                    if matches!(d, DimKind::Known { .. }) {
                         let idx = ki;
                         ki += 1;
                         Some(idx)
@@ -213,9 +212,10 @@ impl Slice {
         // Contiguity requires that the output row-major strides match the
         // input strides scaled by steps. This fails when inner dims are
         // sliced (shrunk) because outer strides then differ.
+        let in_known_strides = in_map.known_strides();
         let out_rowmajor = TensorAtomMap::compute_strides(&out_known_dims);
         let contiguous = (0..in_known.len()).all(|k| {
-            let expected = (in_map.known_strides[k] as i64 * known_steps[k]) as u64;
+            let expected = (in_known_strides[k] as i64 * known_steps[k]) as u64;
             out_rowmajor[k] == expected
         });
 
@@ -225,7 +225,7 @@ impl Slice {
             let all_positive_steps = known_steps.iter().all(|&s| s > 0);
             if all_positive_steps {
                 let mut base_offset: u64 = 0;
-                for (&start, &stride) in known_starts.iter().zip(in_map.known_strides.iter()) {
+                for (&start, &stride) in known_starts.iter().zip(in_known_strides.iter()) {
                     base_offset += start as u64 * stride;
                 }
                 ctx.tensor_map.insert(
@@ -234,9 +234,7 @@ impl Slice {
                         in_map.base_id.offset(base_offset),
                         out_count,
                         slice_dt,
-                        out_layout,
-                        TensorAtomMap::compute_strides(&out_known_dims),
-                        out_sym_dims,
+                        out_dims.clone(),
                     ),
                 );
                 return crate::milli_graph::ops::LowerResult::Lowered;
@@ -250,18 +248,26 @@ impl Slice {
             let mut base_offset: u64 = 0;
             let mut out_phys_strides = Vec::with_capacity(in_known.len());
             for ki in 0..in_known.len() {
-                base_offset += known_starts[ki] as u64 * in_map.known_strides[ki];
-                out_phys_strides.push((in_map.known_strides[ki] as i64 * known_steps[ki]) as u64);
+                base_offset += known_starts[ki] as u64 * in_known_strides[ki];
+                out_phys_strides.push((in_known_strides[ki] as i64 * known_steps[ki]) as u64);
             }
+            // Build dims with physical strides from the slice
+            let mut ki2 = 0;
+            let out_dims_phys: Vec<DimKind> = out_dims.iter().map(|d| match d {
+                DimKind::Known { size, .. } => {
+                    let stride = out_phys_strides[ki2];
+                    ki2 += 1;
+                    DimKind::Known { size: *size, stride }
+                },
+                other => other.clone(),
+            }).collect();
             ctx.tensor_map.insert(
                 out_id,
                 TensorAtomMap::simple(
                     in_map.base_id.offset(base_offset),
                     out_count,
                     slice_dt,
-                    out_layout,
-                    out_phys_strides,
-                    out_sym_dims,
+                    out_dims_phys,
                 ),
             );
             return crate::milli_graph::ops::LowerResult::Lowered;

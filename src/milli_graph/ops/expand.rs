@@ -1,7 +1,7 @@
 use crate::graph::{GlobalId, Node};
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
-use crate::nano_graph::lower::{NanoLoweringContext, TensorAtomMap};
+use crate::nano_graph::lower::{DimKind, NanoLoweringContext, TensorAtomMap};
 use crate::nano_graph::ops::ScalarOp;
 use crate::nano_graph::pattern::{AtomId, GroupInput};
 use crate::pool::Pool;
@@ -69,10 +69,11 @@ impl Expand {
         };
         let in_info = all_infos.get(&in_id);
 
-        let Some((layout, known_dims, sym_dims, count)) = ctx.classify_dims(out_info) else {
+        let Some(dims) = ctx.classify_dims(out_info) else {
             return crate::milli_graph::ops::LowerResult::Unsupported;
         };
-        let count = count.max(1);
+        let count: u64 = dims.iter().filter_map(|d| match d { DimKind::Known { size, .. } => Some(*size), _ => None }).product::<u64>().max(1);
+        let sym_dims: Vec<_> = dims.iter().filter_map(|d| match d { DimKind::Sym { gc, .. } => Some(*gc), _ => None }).collect();
 
         let dt = NanoLoweringContext::ndt(out_info);
         if count == in_map.count {
@@ -82,9 +83,7 @@ impl Expand {
                     in_map.base_id,
                     count,
                     dt,
-                    layout,
-                    TensorAtomMap::compute_strides(&known_dims),
-                    sym_dims,
+                    dims,
                 ),
             );
         } else {
@@ -92,9 +91,7 @@ impl Expand {
                 AtomId(0),
                 count,
                 dt,
-                layout.clone(),
-                TensorAtomMap::compute_strides(&known_dims),
-                sym_dims.clone(),
+                dims.clone(),
             );
             let input_ref =
                 ctx.compute_input_ref(&out_tmp, &in_map, out_info, in_info.unwrap_or(out_info));
@@ -104,7 +101,7 @@ impl Expand {
                 dt,
                 ScalarOp::Identity,
                 sym_dims.clone(),
-                vec![GroupInput::scalar(input_ref)],
+                vec![GroupInput::identity(input_ref, sym_dims.len())],
             );
 
             ctx.tensor_map.insert(
@@ -113,9 +110,7 @@ impl Expand {
                     base_id,
                     count,
                     dt,
-                    layout,
-                    TensorAtomMap::compute_strides(&known_dims),
-                    sym_dims,
+                    dims,
                 ),
             );
         }

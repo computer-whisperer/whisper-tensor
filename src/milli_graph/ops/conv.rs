@@ -313,8 +313,8 @@ impl Conv {
             return crate::milli_graph::ops::LowerResult::Unsupported;
         };
 
-        let in_layout = &in_map.layout;
-        let w_layout = &w_map.layout;
+        let in_layout = &in_map.dims;
+        let w_layout = &w_map.dims;
 
         // Need at least [N, C, spatial...] with at least 1 spatial dim.
         let n_spatial = in_layout.len().saturating_sub(2);
@@ -338,7 +338,7 @@ impl Conv {
         let in_known: Vec<u64> = in_layout
             .iter()
             .filter_map(|d| match d {
-                DimKind::Known(s) => Some(*s),
+                DimKind::Known { size: s, .. } => Some(*s),
                 _ => None,
             })
             .collect();
@@ -356,7 +356,7 @@ impl Conv {
         let w_known: Vec<u64> = w_layout
             .iter()
             .filter_map(|d| match d {
-                DimKind::Known(s) => Some(*s),
+                DimKind::Known { size: s, .. } => Some(*s),
                 _ => None,
             })
             .collect();
@@ -423,7 +423,7 @@ impl Conv {
             .iter()
             .take(in_layout.len() - 1 - n_spatial)
             .filter_map(|d| match d {
-                DimKind::Known(s) => Some(*s),
+                DimKind::Known { size: s, .. } => Some(*s),
                 _ => None,
             })
             .product::<u64>()
@@ -435,14 +435,17 @@ impl Conv {
         }
 
         // Classify output dims.
-        let Some((out_layout, out_known_dims, out_sym_dims, _)) = ctx.classify_dims(out_info)
-        else {
+        let Some(out_dims_v) = ctx.classify_dims(out_info) else {
             return crate::milli_graph::ops::LowerResult::Unsupported;
         };
+        let out_known_dims: Vec<u64> = out_dims_v.iter().filter_map(|d| match d { DimKind::Known { size, .. } => Some(*size), _ => None }).collect();
+        let out_sym_dims: Vec<_> = out_dims_v.iter().filter_map(|d| match d { DimKind::Sym { gc, .. } => Some(*gc), _ => None }).collect();
 
-        let sym_dims = in_map.sym_dims.clone();
-        let in_strides = &in_map.known_strides;
-        let w_strides = &w_map.known_strides;
+        let sym_dims = in_map.sym_dims();
+        let n_sym_in = sym_dims.len();
+        let n_sym_out = out_sym_dims.len();
+        let in_strides = in_map.known_strides();
+        let w_strides = w_map.known_strides();
         let original_dtype = in_map.dtype;
 
         // --- Phase 1: Emit padded input atoms ---
@@ -528,10 +531,10 @@ impl Conv {
                                 original_dtype,
                                 ScalarOp::Identity,
                                 sym_dims.clone(),
-                                vec![GroupInput::scalar(InputRef::affine(
+                                vec![GroupInput::identity(InputRef::affine(
                                     in_map.base_id.offset(in_offset),
                                     in_spatial_strides[last] as i64,
-                                ))],
+                                ), n_sym_in)],
                             );
                             if first_base.is_none() {
                                 first_base = Some(b);
@@ -664,7 +667,7 @@ impl Conv {
                                 compute_dtype: original_dtype,
                             },
                             out_sym_dims.clone(),
-                            vec![GroupInput::scalar(InputRef::Broadcast(w_atom)), GroupInput::scalar(input_ref)],
+                            vec![GroupInput::identity(InputRef::Broadcast(w_atom), n_sym_out), GroupInput::identity(input_ref, n_sym_out)],
                         );
                         if first_mul_base.is_none() {
                             first_mul_base = Some(b);
@@ -691,7 +694,7 @@ impl Conv {
                         compute_dtype: original_dtype,
                     },
                     out_sym_dims.clone(),
-                    vec![GroupInput::scalar(InputRef::affine(mul_base, 1))],
+                    vec![GroupInput::identity(InputRef::affine(mul_base, 1), n_sym_out)],
                 );
                 if first_output_base.is_none() {
                     first_output_base = Some(b);
@@ -711,7 +714,7 @@ impl Conv {
                     let reduce_co_base = reduce_base.offset(reduce_offset);
                     let bias_atom = bm
                         .base_id
-                        .offset(co * bm.known_strides.first().copied().unwrap_or(1));
+                        .offset(co * bm.known_strides().first().copied().unwrap_or(1));
 
                     let b = ctx.nano.push_group(
                         spatial_size,
@@ -722,8 +725,8 @@ impl Conv {
                         },
                         out_sym_dims.clone(),
                         vec![
-                            GroupInput::scalar(InputRef::affine(reduce_co_base, 1)),
-                            GroupInput::scalar(InputRef::Broadcast(bias_atom)),
+                            GroupInput::identity(InputRef::affine(reduce_co_base, 1), n_sym_out),
+                            GroupInput::identity(InputRef::Broadcast(bias_atom), n_sym_out),
                         ],
                     );
                     if first_bias_base.is_none() {
@@ -743,9 +746,7 @@ impl Conv {
                 output_base,
                 out_known_dims.iter().product::<u64>().max(1),
                 original_dtype,
-                out_layout,
-                TensorAtomMap::compute_strides(&out_known_dims),
-                out_sym_dims,
+                out_dims_v,
             ),
         );
         crate::milli_graph::ops::LowerResult::Lowered

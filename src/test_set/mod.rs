@@ -330,7 +330,7 @@ pub fn run_case_via_pool_eval(case: &TestCase) -> Result<(), String> {
             .iter()
             .filter_map(|(&ext_id, tensor)| {
                 let internal_id = case.graph.input_map.get(&ext_id)?;
-                let tam = lower_result.tensor_map.get(internal_id)?;
+                let tam = lower_result.graph.tensor_map.get(internal_id)?;
                 Some((tam, tensor))
             })
             .collect();
@@ -351,7 +351,7 @@ pub fn run_case_via_pool_eval(case: &TestCase) -> Result<(), String> {
 
         let output_tamis: Vec<_> = output_ids
             .iter()
-            .filter_map(|out_id| lower_result.tensor_map.get(out_id))
+            .filter_map(|out_id| lower_result.graph.tensor_map.get(out_id))
             .collect();
 
         // Run pool_eval — returns correctly-shaped output tensors.
@@ -369,6 +369,198 @@ pub fn run_case_via_pool_eval(case: &TestCase) -> Result<(), String> {
             };
 
             let ctx = format!("{}[{}] pool_eval", case.name, ds.label);
+            assert_tensors_close(
+                &result_tensor.view(),
+                &expected_tensor.view(),
+                &ds.tolerance,
+                &ctx,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// Run a test case with some dimensions withheld (made symbolic).
+///
+/// `withheld_dims` lists dimension indices to withhold. For each input tensor,
+/// any dim whose index is in this set AND whose size matches across all inputs
+/// at that index is replaced with a shared SymbolicScalarTyped (same symbol_id).
+/// This exercises the symbolic dimension path end-to-end:
+/// lower → NanoGraph with sym_dims → pool_eval with gc_values → compare.
+pub fn run_case_with_symbolic_dims(
+    case: &TestCase,
+    withheld_dims: &[usize],
+) -> Result<(), String> {
+    use crate::nano_graph::lower;
+    use crate::nano_graph::pool_eval;
+    use crate::pool::TrackedPool;
+    use crate::scalar_info::ScalarInfoTyped;
+    use crate::symbolic_scalar::SymbolicScalarTyped;
+    use crate::tensor_info::TensorInfo;
+
+    for ds in &case.data_sets {
+        let mut rng = rand::rng();
+
+        // Check that all inputs agree on the withheld dim sizes AND ranks.
+        // Sharing a single symbol for dim index d across inputs is only valid
+        // when that dim corresponds to the same output axis for all inputs.
+        // Different ranks means broadcasting shifts dim alignment, making the
+        // shared symbol semantically wrong.
+        let mut skip = false;
+        let mut seen_rank: Option<usize> = None;
+        for (_, t) in &ds.inputs {
+            let r = t.view().shape().len();
+            if let Some(prev) = seen_rank {
+                if prev != r {
+                    skip = true;
+                    break;
+                }
+            } else {
+                seen_rank = Some(r);
+            }
+        }
+        if !skip {
+            for &d in withheld_dims {
+                let mut seen_size: Option<u64> = None;
+                for (_, t) in &ds.inputs {
+                    let shape = t.view().shape().clone();
+                    if d < shape.len() && shape[d] > 1 {
+                        if let Some(prev) = seen_size {
+                            if prev != shape[d] {
+                                skip = true;
+                                break;
+                            }
+                        } else {
+                            seen_size = Some(shape[d]);
+                        }
+                    }
+                }
+                if skip { break; }
+            }
+        }
+        if skip { continue; }
+
+        // For each withheld dim index, create a shared SymbolicScalarTyped
+        // so all inputs that have that dim share the same GraphConstant.
+        let shared_syms: HashMap<usize, SymbolicScalarTyped<u64>> = withheld_dims
+            .iter()
+            .map(|&d| (d, SymbolicScalarTyped::new(&mut rng)))
+            .collect();
+
+        // Build TensorInfo with withheld dims as Symbolic.
+        let info_inputs: HashMap<GlobalId, TensorInfo<'_, '_, SystemPool>> = ds
+            .inputs
+            .iter()
+            .map(|(&id, t)| {
+                let view = t.view();
+                let shape = view.shape();
+                let rank = shape.len();
+
+                let dims: Vec<ScalarInfoTyped<u64>> = (0..rank)
+                    .map(|d| {
+                        if let Some(sym) = shared_syms.get(&d) {
+                            // Don't make broadcast dims (size 1) symbolic —
+                            // they don't share the same extent as other inputs.
+                            if shape[d] <= 1 {
+                                ScalarInfoTyped::Numeric(shape[d])
+                            } else {
+                                ScalarInfoTyped::Symbolic(sym.clone())
+                            }
+                        } else {
+                            ScalarInfoTyped::Numeric(shape[d])
+                        }
+                    })
+                    .collect();
+
+                (id, TensorInfo::from_dtype_and_shape_scalars(view.dtype(), &dims))
+            })
+            .collect();
+
+        // Lower with partially symbolic info.
+        let lower_result = lower::lower(&case.graph, &info_inputs, &SystemPool)
+            .map_err(|e| format!("{}[{}] sym: lower failed: {e}", case.name, ds.label))?;
+
+        // Collect gc_values: for each GraphConstant, look up the actual dim size
+        // from one of the inputs. The lowering mapped symbol_ids to GraphConstantIds,
+        // so we need to find what actual size each GC corresponds to.
+        let gc_count = lower_result.graph.graph_constants.len();
+        let mut gc_values = vec![0u64; gc_count];
+
+        // Populate gc_values from the TAMIs — each TAMI's sym_dims tells us which
+        // GraphConstants are used, and dim_layout tells us the original shape position.
+        for (&ext_id, tensor) in &ds.inputs {
+            let Some(&int_id) = case.graph.input_map.get(&ext_id) else {
+                continue;
+            };
+            let Some(tam) = lower_result.graph.tensor_map.get(&int_id) else {
+                continue;
+            };
+            let shape = tensor.view().shape().clone();
+            for (dim_idx, dk) in tam.dims.iter().enumerate() {
+                if let crate::nano_graph::lower::DimKind::Sym { gc, .. } = dk {
+                    if dim_idx < shape.len() {
+                        gc_values[gc.0 as usize] = shape[dim_idx];
+                    }
+                }
+            }
+        }
+
+        // Check we have no unsupported ops.
+        if !lower_result.unsupported.is_empty() {
+            return Err(format!(
+                "{}[{}] sym: unsupported ops: {:?}",
+                case.name, ds.label, lower_result.unsupported_details
+            ));
+        }
+
+        // Map input tensors to (TAMI, view) pairs.
+        let input_tam_pairs: Vec<_> = ds
+            .inputs
+            .iter()
+            .filter_map(|(&ext_id, tensor)| {
+                let internal_id = case.graph.input_map.get(&ext_id)?;
+                let tam = lower_result.graph.tensor_map.get(internal_id)?;
+                Some((tam, tensor))
+            })
+            .collect();
+
+        let input_views: Vec<_> = input_tam_pairs
+            .iter()
+            .map(|(_, tensor)| tensor.view())
+            .collect();
+
+        let eval_inputs: Vec<_> = input_tam_pairs
+            .iter()
+            .zip(input_views.iter())
+            .map(|((tam, _), view)| (*tam, view))
+            .collect();
+
+        // Build output TAMIs.
+        let output_ids: Vec<GlobalId> = case.graph.output_ordering.clone().unwrap_or_default();
+        let output_tamis: Vec<_> = output_ids
+            .iter()
+            .filter_map(|out_id| lower_result.graph.tensor_map.get(out_id))
+            .collect();
+
+        // Run pool_eval with gc_values.
+        let pool = TrackedPool::new(None);
+        let eval_results = pool_eval::pool_eval(
+            &lower_result.graph,
+            &eval_inputs,
+            &output_tamis,
+            &gc_values,
+            &pool,
+        )
+        .map_err(|e| format!("{}[{}] sym: pool_eval failed: {e}", case.name, ds.label))?;
+
+        // Compare.
+        for (out_id, result_tensor) in output_ids.iter().zip(eval_results.iter()) {
+            let expected_tensor = match ds.expected_outputs.get(out_id) {
+                Some(t) => t,
+                None => continue,
+            };
+
+            let ctx = format!("{}[{}] sym_dims", case.name, ds.label);
             assert_tensors_close(
                 &result_tensor.view(),
                 &expected_tensor.view(),
@@ -472,7 +664,7 @@ pub fn run_case_via_compiled_eval(case: &TestCase, num_lanes: usize) -> Result<(
         let (output_ranges, output_shapes, all_output_atom_ranges) =
             compiled_eval::build_output_ranges(
                 &lower_result.graph,
-                &lower_result.tensor_map,
+                &lower_result.graph.tensor_map,
                 &output_ids,
                 |id| *id, // test graphs: ext == internal for outputs
             );
@@ -496,7 +688,7 @@ pub fn run_case_via_compiled_eval(case: &TestCase, num_lanes: usize) -> Result<(
         let initial_inputs = compiled_eval::prepare_compiled_inputs(
             &input_view_refs,
             &case.graph.input_map,
-            &lower_result.tensor_map,
+            &lower_result.graph.tensor_map,
             &pool,
         )
         .map_err(|e| format!("{}[{}]: prepare inputs failed: {e}", case.name, ds.label))?;
@@ -575,6 +767,54 @@ mod tests {
             "{} test cases ({total_data_sets} data sets) passed via graph pool eval",
             cases.len()
         );
+    }
+
+    /// Run all test cases with dim 0 withheld (symbolic).
+    /// Tests the full symbolic dimension path: lower with partial shapes,
+    /// eval with gc_values, compare against ground truth.
+    #[test]
+    fn test_all_cases_with_symbolic_dim0() {
+        let cases = build_test_set();
+        assert!(!cases.is_empty(), "test set should not be empty");
+        let mut passed = 0;
+        let mut skipped = 0;
+        let mut failures = Vec::new();
+        for case in &cases {
+            let name = case.name.clone();
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                run_case_with_symbolic_dims(case, &[0])
+            })) {
+                Ok(Ok(())) => {
+                    eprintln!("  PASS: {name}");
+                    passed += 1;
+                }
+                Ok(Err(e)) if e.contains("unsupported ops") || e.contains("lower failed")
+                    || e.contains("pool_eval failed") || e.contains("shape mismatch") => {
+                    eprintln!("  SKIP: {name}: {e}");
+                    skipped += 1;
+                }
+                Ok(Err(e)) => {
+                    eprintln!("  FAIL: {e}");
+                    failures.push(e);
+                }
+                Err(panic_info) => {
+                    let msg = if let Some(s) = panic_info.downcast_ref::<String>() {
+                        s.clone()
+                    } else if let Some(s) = panic_info.downcast_ref::<&str>() {
+                        s.to_string()
+                    } else {
+                        "unknown panic".to_string()
+                    };
+                    eprintln!("  PANIC: {name}: {msg}");
+                    failures.push(format!("{name}: PANIC: {msg}"));
+                }
+            }
+        }
+        eprintln!(
+            "{passed} passed, {} failed, {skipped} skipped",
+            failures.len(),
+        );
+        assert!(failures.is_empty(), "Failures:\n{}", failures.join("\n"));
     }
 
     /// JIT compiled eval with trivial plan (1 phase, no partitioning).

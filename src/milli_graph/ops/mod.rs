@@ -280,28 +280,7 @@ pub fn constant_fold<'a, 'p: 'a, P: Pool + 'p>(
     let mut output_tamis: Vec<TensorAtomMapInfo> = Vec::new();
     for &out_id in &output_ids {
         let tam = ctx.tensor_map.get(&out_id)?;
-        output_tamis.push(TensorAtomMapInfo {
-            base_id: tam.base_id,
-            count: tam.count,
-            dtype: tam.dtype,
-            sym_dims: tam.sym_dims.clone(),
-            known_strides: tam.known_strides.clone(),
-            known_dims: tam.known_dims(),
-            dim_layout: tam.dim_layout(),
-            segments: tam
-                .segments
-                .iter()
-                .map(|s| {
-                    (
-                        s.concat_dim,
-                        s.start,
-                        s.size,
-                        s.base_id,
-                        s.known_strides.clone(),
-                    )
-                })
-                .collect(),
-        });
+        output_tamis.push(tam.to_info());
     }
     let output_tami_refs: Vec<&TensorAtomMapInfo> = output_tamis.iter().collect();
 

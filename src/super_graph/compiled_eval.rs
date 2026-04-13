@@ -24,7 +24,7 @@ use crate::compiler::attempts::v14::report::{self, PlanSummary};
 use crate::compiler::{CodegenKind, CompileOptions, PartitionerKind};
 use crate::graph::GlobalId;
 use crate::nano_graph::AtomId;
-use crate::nano_graph::lower::{TensorAtomMapInfo, TensorDimKind};
+use crate::nano_graph::lower::{DimKind, TensorAtomMapInfo};
 use crate::nano_graph::pattern::{AtomRange, NanoGraph};
 use crate::numeric_tensor::{NumericTensor, NumericTensorCOW, NumericTensorView, TensorLayout};
 use crate::pool::{Pool, SystemPool};
@@ -145,7 +145,7 @@ pub(crate) fn build_output_ranges(
         if let Some(tami) = tensor_map.get(&internal_id) {
             let ranges = tami.atom_ranges(graph);
             all_output_atom_ranges.extend(ranges.iter().cloned());
-            output_shapes.push((*ext_id, tami.known_dims.clone()));
+            output_shapes.push((*ext_id, tami.known_dims()));
             output_ranges.push((*ext_id, ranges));
         }
     }
@@ -564,13 +564,13 @@ pub(crate) fn relayout_to_flat<'a, 'p, P: Pool + 'p>(
     pool: &'p P,
 ) -> Result<NumericTensorCOW<'a, 'p, DynRank, P>, String> {
     let element_bits = tami.dtype.total_bits() as u64;
-    let strides_bits: Vec<u64> = tami
-        .known_strides
+    let known_strides_v = tami.known_strides();
+    let strides_bits: Vec<u64> = known_strides_v
         .iter()
         .map(|&s| s * element_bits)
         .collect();
     let target = TensorLayout::<DynRank>::ElementStrided {
-        shape: tami.known_dims.clone(),
+        shape: tami.known_dims(),
         dtype: tami.dtype,
         strides: strides_bits,
         offset_bits: 0,
@@ -629,14 +629,20 @@ pub(crate) fn prepare_compiled_inputs<'a, 'p, P: Pool + 'p>(
             initial_inputs.push((tami.base_id, flat));
         } else {
             // Segmented tensor: process each segment separately.
-            for &(concat_dim, start, size, seg_base, ref seg_strides) in &tami.segments {
-                let mut seg_dims = tami.known_dims.clone();
-                seg_dims[concat_dim] = size;
-                let seg_count: u64 = seg_dims.iter().product();
+            let known_dims_v = tami.known_dims();
+            for seg in &tami.segments {
+                let concat_dim = seg.concat_dim;
+                let start = seg.start;
+                let size = seg.size;
+                let seg_base = seg.base_id;
+                let seg_strides = &seg.known_strides;
+
+                let mut seg_dim_sizes = known_dims_v.clone();
+                seg_dim_sizes[concat_dim] = size;
+                let seg_count: u64 = seg_dim_sizes.iter().product();
 
                 // Slice the view along the concat dimension.
-                let ranges: Vec<(u64, u64)> = tami
-                    .known_dims
+                let ranges: Vec<(u64, u64)> = known_dims_v
                     .iter()
                     .enumerate()
                     .map(|(d, &dim)| {
@@ -651,14 +657,15 @@ pub(crate) fn prepare_compiled_inputs<'a, 'p, P: Pool + 'p>(
                     .slice(&ranges)
                     .map_err(|e| format!("slice failed for segment: {e:?}"))?;
 
+                // Build DimKind entries with segment strides.
+                let seg_dim_kinds: Vec<DimKind> = seg_dim_sizes.iter().zip(seg_strides.iter())
+                    .map(|(&sz, &st)| DimKind::Known { size: sz, stride: st })
+                    .collect();
                 let seg_tami = TensorAtomMapInfo {
                     base_id: seg_base,
                     count: seg_count,
                     dtype: tami.dtype,
-                    sym_dims: vec![],
-                    known_strides: seg_strides.clone(),
-                    dim_layout: (0..seg_dims.len()).map(|i| TensorDimKind::Known(i)).collect(),
-                    known_dims: seg_dims,
+                    dims: seg_dim_kinds,
                     segments: vec![],
                 };
                 // `sliced` is a stack-local NumericTensorView whose data
@@ -800,7 +807,7 @@ pub fn compile_lowered_model(
 
     let ordered_outputs = sym_graph.get_ordered_outputs();
     let (output_ranges, output_shapes, all_output_atom_ranges) =
-        build_output_ranges(graph, &cached.tensor_map, ordered_outputs, |ext_id| {
+        build_output_ranges(graph, &cached.graph.tensor_map, ordered_outputs, |ext_id| {
             reverse_output
                 .get(ext_id)
                 .copied()
@@ -885,7 +892,7 @@ pub fn execute_compiled<'p, P: Pool + 'p>(
     let initial_inputs = prepare_compiled_inputs(
         &all_views,
         &cached_lower.input_map,
-        &cached_lower.tensor_map,
+        &cached_lower.graph.tensor_map,
         pool,
     )
     .map_err(|e| super::SuperGraphError::InvalidGraph(format!("compiled_eval: {e}")))?;

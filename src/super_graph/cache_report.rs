@@ -86,7 +86,7 @@ impl SuperGraphCache {
                     .into_iter()
                     .map(|(k, v)| (k.to_string(), v))
                     .collect(),
-                num_tensors: cached.tensor_map.len() as u64,
+                num_tensors: cached.graph.tensor_map.len() as u64,
                 num_inputs: cached.input_map.len() as u64,
                 num_outputs: cached.output_map.len() as u64,
                 milli_op_census,

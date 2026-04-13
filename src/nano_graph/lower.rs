@@ -142,8 +142,6 @@ pub struct LowerResult<'a, 'p, P: crate::pool::Pool + 'p = crate::pool::SystemPo
     pub unsupported: Vec<(GlobalId, String)>,
     /// Human-readable detail for each unsupported op (input/output shapes).
     pub unsupported_details: Vec<String>,
-    /// Mapping from milli tensor GlobalId to nano atom group.
-    pub tensor_map: HashMap<GlobalId, TensorAtomMapInfo>,
     /// Provenance: for each nano group index, the (milli_op_id, op_kind) that produced it.
     /// Length equals graph.num_groups(). Used by reporting/visualization.
     pub group_provenance: Vec<(GlobalId, String)>,
@@ -152,37 +150,100 @@ pub struct LowerResult<'a, 'p, P: crate::pool::Pool + 'p = crate::pool::SystemPo
     pub all_infos: HashMap<GlobalId, LowerTensorInfo<'a, 'p, P>>,
 }
 
-/// Which kind of dimension a position in the original tensor shape represents.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TensorDimKind {
-    /// Index into known_dims.
-    Known(usize),
-    /// Index into sym_dims.
-    Sym(usize),
+impl<'a, 'p, P: crate::pool::Pool + 'p> LowerResult<'a, 'p, P> {
+    /// Access the tensor map (lives on the NanoGraph).
+    pub fn tensor_map(&self) -> &HashMap<GlobalId, TensorAtomMapInfo> {
+        &self.graph.tensor_map
+    }
 }
 
+/// Classification of one tensor dimension in the tensor→atom mapping.
+///
+/// Each dimension of the original tensor is either:
+/// - `Known`: fully expanded into atom-id space with a concrete size and stride
+/// - `Sym`: a symbolic iteration parameter, identified by a GraphConstantId and
+///   the positional index into the atom group's sym_dims list
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DimKind {
+    /// A dimension expanded into atom-id space.
+    Known { size: u64, stride: u64 },
+    /// A symbolic dimension. `gc` identifies the graph constant (runtime extent),
+    /// `axis` is the index into the atom group's `sym_dims` vector.
+    Sym { gc: GraphConstantId, axis: usize },
+}
+
+/// Legacy alias — used by compiled_eval and executor during migration.
+pub type TensorDimKind = DimKind;
+
 /// Public view of how a milli tensor maps to nano atoms.
+///
+/// `dims` describes the original tensor's shape: one entry per dimension,
+/// preserving the original order. Known dims have concrete sizes and strides
+/// into atom-id space; symbolic dims reference a GraphConstant for their
+/// runtime extent.
+///
+/// `count` is the product of all Known dim sizes (the number of atoms).
+/// `base_id` is the first atom in the range (for simple views).
 #[derive(Debug, Clone)]
 pub struct TensorAtomMapInfo {
     pub base_id: AtomId,
     pub count: u64,
     pub dtype: NumericDType,
-    pub sym_dims: Vec<GraphConstantId>,
-    pub known_strides: Vec<u64>,
-    pub known_dims: Vec<u64>,
-    /// Original shape interleaving: which positions are known vs symbolic.
-    /// Length equals the original tensor rank. Used by the executor to map
-    /// flat tensor elements to `(atom_idx, sym_dim_point)` pairs.
-    pub dim_layout: Vec<TensorDimKind>,
+    /// One entry per original tensor dimension, preserving order.
+    pub dims: Vec<DimKind>,
     /// Concat segments (empty for simple views).
-    pub segments: Vec<(usize, u64, u64, AtomId, Vec<u64>)>, // (concat_dim, start, size, base_id, strides)
+    pub segments: Vec<ConcatSegment>,
 }
 
 impl TensorAtomMapInfo {
+    /// Construct a flat 1-D TAMI with row-major stride (count elements, no sym dims).
+    pub fn flat(base_id: AtomId, count: u64, dtype: NumericDType) -> Self {
+        Self {
+            base_id,
+            count,
+            dtype,
+            dims: vec![DimKind::Known { size: count, stride: 1 }],
+            segments: vec![],
+        }
+    }
+
+    /// Extract just the known dim sizes, in order.
+    pub fn known_dims(&self) -> Vec<u64> {
+        self.dims.iter().filter_map(|d| match d {
+            DimKind::Known { size, .. } => Some(*size),
+            DimKind::Sym { .. } => None,
+        }).collect()
+    }
+
+    /// Extract just the known dim strides, in order.
+    pub fn known_strides(&self) -> Vec<u64> {
+        self.dims.iter().filter_map(|d| match d {
+            DimKind::Known { stride, .. } => Some(*stride),
+            DimKind::Sym { .. } => None,
+        }).collect()
+    }
+
+    /// Extract the GraphConstantIds for symbolic dims, in order.
+    pub fn sym_dims(&self) -> Vec<GraphConstantId> {
+        self.dims.iter().filter_map(|d| match d {
+            DimKind::Sym { gc, .. } => Some(*gc),
+            DimKind::Known { .. } => None,
+        }).collect()
+    }
+
+    /// Number of symbolic dimensions.
+    pub fn sym_dim_count(&self) -> usize {
+        self.dims.iter().filter(|d| matches!(d, DimKind::Sym { .. })).count()
+    }
+
     /// Returns true if this tensor's atoms are contiguous with row-major strides.
     pub fn is_contiguous(&self) -> bool {
-        self.segments.is_empty()
-            && self.known_strides == TensorAtomMap::compute_strides(&self.known_dims)
+        if !self.segments.is_empty() {
+            return false;
+        }
+        let known_dims = self.known_dims();
+        let row_major = TensorAtomMap::compute_strides(&known_dims);
+        self.known_strides() == row_major
     }
 
     /// Return the atom ranges that compose this tensor.
@@ -194,9 +255,7 @@ impl TensorAtomMapInfo {
         graph: &super::pattern::NanoGraph<'p, P>,
     ) -> Vec<super::pattern::AtomRange> {
         use super::pattern::AtomRange;
-        let is_contiguous = self.segments.is_empty()
-            && self.known_strides == TensorAtomMap::compute_strides(&self.known_dims);
-        if is_contiguous {
+        if self.is_contiguous() {
             return vec![AtomRange {
                 base: self.base_id,
                 count: self.count,
@@ -235,8 +294,10 @@ impl TensorAtomMapInfo {
 
     /// Map logical element index to AtomId using strides.
     pub fn atom_id_for_element(&self, flat: u64) -> AtomId {
-        let row_major = TensorAtomMap::compute_strides(&self.known_dims);
-        let mut indices = vec![0u64; self.known_dims.len()];
+        let known_dims = self.known_dims();
+        let known_strides = self.known_strides();
+        let row_major = TensorAtomMap::compute_strides(&known_dims);
+        let mut indices = vec![0u64; known_dims.len()];
         let mut rem = flat;
         for (i, &rm_stride) in row_major.iter().enumerate() {
             if rm_stride > 0 {
@@ -245,52 +306,42 @@ impl TensorAtomMapInfo {
             }
         }
         if !self.segments.is_empty() {
-            let (concat_dim, _, _, _, _) = &self.segments[0];
-            let concat_idx = indices[*concat_dim];
-            for &(_, start, size, seg_base, ref seg_strides) in &self.segments {
-                if concat_idx >= start && concat_idx < start + size {
+            let concat_dim = self.segments[0].concat_dim;
+            let concat_idx = indices[concat_dim];
+            for seg in &self.segments {
+                if concat_idx >= seg.start && concat_idx < seg.start + seg.size {
                     let mut seg_indices = indices.clone();
-                    seg_indices[*concat_dim] = concat_idx - start;
+                    seg_indices[concat_dim] = concat_idx - seg.start;
                     let mut offset = 0u64;
-                    for (i, &stride) in seg_strides.iter().enumerate() {
+                    for (i, &stride) in seg.known_strides.iter().enumerate() {
                         offset += seg_indices[i] * stride;
                     }
-                    return seg_base.offset(offset);
+                    return seg.base_id.offset(offset);
                 }
             }
         }
         let mut offset = 0u64;
-        for (i, &stride) in self.known_strides.iter().enumerate() {
+        for (i, &stride) in known_strides.iter().enumerate() {
             offset += indices[i] * stride;
         }
         self.base_id.offset(offset)
     }
 }
 
-/// How a milli tensor maps to atoms in the nano graph.
+/// How a milli tensor maps to atoms in the nano graph (lowering-internal).
 ///
-/// The tensor's dimensions are split into known (expanded to atoms) and
-/// symbolic (iteration parameters). Atoms are indexed by their position
-/// in the flattened known dims (row-major order).
-///
-/// For simple tensors (most ops), `base_id` + `known_strides` is sufficient.
-/// For concatenated tensors, `segments` describes how the concat axis is
-/// split across multiple source atom ranges, each with its own base_id and strides.
+/// Uses the same `DimKind` as the public `TensorAtomMapInfo`. At the end of
+/// lowering this is converted to `TensorAtomMapInfo` by copying `dims`.
 #[derive(Debug, Clone)]
 pub struct TensorAtomMap {
     /// First atom id in the group (for simple views).
     pub base_id: AtomId,
-    /// Total number of atoms (product of known dims).
+    /// Total number of atoms (product of known dim sizes).
     pub count: u64,
     /// Data type of this tensor.
     pub dtype: NumericDType,
-    /// The full tensor layout: one entry per dim, preserving original order.
-    pub layout: Vec<DimKind>,
-    /// Physical strides for the known dims into the atom buffer.
-    /// May be non-row-major for transposed or strided views.
-    pub known_strides: Vec<u64>,
-    /// Symbolic dims attached to each atom.
-    pub sym_dims: Vec<SymDim>,
+    /// One entry per original tensor dimension, preserving order.
+    pub dims: Vec<DimKind>,
     /// For concatenated tensors: segments along a specific known dim.
     /// If empty, this is a simple single-range view.
     pub segments: Vec<ConcatSegment>,
@@ -311,33 +362,19 @@ pub struct ConcatSegment {
     pub known_strides: Vec<u64>,
 }
 
-/// Classification of one tensor dimension.
-#[derive(Debug, Clone)]
-pub enum DimKind {
-    Known(u64),
-    Symbolic(#[allow(dead_code)] SymDim),
-}
-
-/// (layout, known_dims, sym_dims, atom_count)
-pub type DimClassification = (Vec<DimKind>, Vec<u64>, Vec<SymDim>, u64);
-
 impl TensorAtomMap {
     /// Create a simple (non-segmented) tensor atom map.
     pub fn simple(
         base_id: AtomId,
         count: u64,
         dtype: NumericDType,
-        layout: Vec<DimKind>,
-        known_strides: Vec<u64>,
-        sym_dims: Vec<SymDim>,
+        dims: Vec<DimKind>,
     ) -> Self {
         Self {
             base_id,
             count,
             dtype,
-            layout,
-            known_strides,
-            sym_dims,
+            dims,
             segments: vec![],
         }
     }
@@ -346,8 +383,7 @@ impl TensorAtomMap {
     pub fn segmented(
         count: u64,
         dtype: NumericDType,
-        layout: Vec<DimKind>,
-        sym_dims: Vec<SymDim>,
+        dims: Vec<DimKind>,
         segments: Vec<ConcatSegment>,
     ) -> Self {
         let base_id = if segments.is_empty() {
@@ -355,34 +391,64 @@ impl TensorAtomMap {
         } else {
             segments[0].base_id
         };
-        let known_strides = if segments.is_empty() {
-            vec![]
-        } else {
-            segments[0].known_strides.clone()
-        };
         Self {
             base_id,
             count,
             dtype,
-            layout,
-            known_strides,
-            sym_dims,
+            dims,
             segments,
         }
     }
 
-    /// Compute row-major strides from known dim sizes.
-    pub fn compute_strides(known_dims: &[u64]) -> Vec<u64> {
-        let mut strides = vec![0u64; known_dims.len()];
-        if known_dims.is_empty() {
+    /// Compute row-major strides from dim sizes.
+    pub fn compute_strides(dims: &[u64]) -> Vec<u64> {
+        let mut strides = vec![0u64; dims.len()];
+        if dims.is_empty() {
             return strides;
         }
         let mut stride = 1u64;
-        for i in (0..known_dims.len()).rev() {
+        for i in (0..dims.len()).rev() {
             strides[i] = stride;
-            stride *= known_dims[i];
+            stride *= dims[i];
         }
         strides
+    }
+
+    /// Build a `Vec<DimKind>` with row-major strides for the known dims.
+    pub fn dims_row_major(known_dims: &[u64], sym_dims: &[GraphConstantId], dim_positions: &[(bool, usize)]) -> Vec<DimKind> {
+        // Compute row-major strides for known dims.
+        let strides = Self::compute_strides(known_dims);
+        dim_positions.iter().map(|&(is_sym, idx)| {
+            if is_sym {
+                DimKind::Sym { gc: sym_dims[idx], axis: idx }
+            } else {
+                DimKind::Known { size: known_dims[idx], stride: strides[idx] }
+            }
+        }).collect()
+    }
+
+    /// Extract known dim sizes from dims.
+    pub fn known_dims(&self) -> Vec<u64> {
+        self.dims.iter().filter_map(|d| match d {
+            DimKind::Known { size, .. } => Some(*size),
+            DimKind::Sym { .. } => None,
+        }).collect()
+    }
+
+    /// Extract known dim strides from dims.
+    pub fn known_strides(&self) -> Vec<u64> {
+        self.dims.iter().filter_map(|d| match d {
+            DimKind::Known { stride, .. } => Some(*stride),
+            DimKind::Sym { .. } => None,
+        }).collect()
+    }
+
+    /// Extract GraphConstantIds for symbolic dims.
+    pub fn sym_dims(&self) -> Vec<GraphConstantId> {
+        self.dims.iter().filter_map(|d| match d {
+            DimKind::Sym { gc, .. } => Some(*gc),
+            DimKind::Known { .. } => None,
+        }).collect()
     }
 
     /// Returns true if this tensor's atoms are a contiguous range base..base+count
@@ -392,64 +458,22 @@ impl TensorAtomMap {
             return false;
         }
         let known_dims = self.known_dims();
-        self.known_strides == Self::compute_strides(&known_dims)
-    }
-
-    /// Get the known dim sizes from the layout.
-    pub fn known_dims(&self) -> Vec<u64> {
-        self.layout
-            .iter()
-            .filter_map(|d| {
-                if let DimKind::Known(s) = d {
-                    Some(*s)
-                } else {
-                    None
-                }
-            })
-            .collect()
-    }
-
-    /// Build the dim_layout interleaving for TensorAtomMapInfo.
-    pub fn dim_layout(&self) -> Vec<TensorDimKind> {
-        let mut known_idx = 0usize;
-        let mut sym_idx = 0usize;
-        self.layout
-            .iter()
-            .map(|d| match d {
-                DimKind::Known(_) => {
-                    let idx = known_idx;
-                    known_idx += 1;
-                    TensorDimKind::Known(idx)
-                }
-                DimKind::Symbolic(_) => {
-                    let idx = sym_idx;
-                    sym_idx += 1;
-                    TensorDimKind::Sym(idx)
-                }
-            })
-            .collect()
+        self.known_strides() == Self::compute_strides(&known_dims)
     }
 
     /// Return the atom ranges that compose this tensor.
-    ///
-    /// For simple contiguous tensors: a single range `[base, base+count)`.
-    /// For non-contiguous views (transposed strides): falls back to per-element
-    /// enumeration to discover the distinct groups.
-    /// For segmented tensors (concat): one range per segment.
     pub fn atom_ranges<'p, P: crate::pool::Pool + 'p>(
         &self,
         graph: &super::pattern::NanoGraph<'p, P>,
     ) -> Vec<super::pattern::AtomRange> {
         use super::pattern::AtomRange;
         if self.segments.is_empty() && self.is_contiguous() {
-            // Single contiguous range.
             return vec![AtomRange {
                 base: self.base_id,
                 count: self.count,
                 dtype: self.dtype,
             }];
         }
-        // Non-contiguous or segmented: enumerate to find distinct ranges.
         let mut ranges = Vec::new();
         let mut seen = std::collections::HashSet::new();
         for i in 0..self.count {
@@ -480,12 +504,11 @@ impl TensorAtomMap {
     }
 
     /// Map logical element index to AtomId using strides.
-    /// Handles simple views, transposed/strided views, and segmented (concat) views.
     pub fn atom_id_for_element(&self, flat: u64) -> AtomId {
         let known_dims = self.known_dims();
+        let known_strides = self.known_strides();
         let row_major = Self::compute_strides(&known_dims);
 
-        // Decompose flat index into per-dim indices using row-major strides.
         let mut indices = vec![0u64; known_dims.len()];
         let mut rem = flat;
         for (i, &rm_stride) in row_major.iter().enumerate() {
@@ -495,13 +518,11 @@ impl TensorAtomMap {
             }
         }
 
-        // If segmented (concat), find the right segment for the concat dim index.
         if !self.segments.is_empty() {
             let concat_dim = self.segments[0].concat_dim;
             let concat_idx = indices[concat_dim];
             for seg in &self.segments {
                 if concat_idx >= seg.start && concat_idx < seg.start + seg.size {
-                    // Remap the concat dim index to be relative to this segment.
                     let mut seg_indices = indices.clone();
                     seg_indices[concat_dim] = concat_idx - seg.start;
                     let mut offset = 0u64;
@@ -511,19 +532,25 @@ impl TensorAtomMap {
                     return seg.base_id.offset(offset);
                 }
             }
-            // Shouldn't happen if segments cover the full concat dim.
-            panic!(
-                "Concat segment not found for index {} on dim {}",
-                concat_idx, concat_dim
-            );
+            panic!("Concat segment not found for index {} on dim {}", concat_idx, concat_dim);
         }
 
-        // Simple view: use base_id + physical strides.
         let mut offset = 0u64;
-        for (i, &stride) in self.known_strides.iter().enumerate() {
+        for (i, &stride) in known_strides.iter().enumerate() {
             offset += indices[i] * stride;
         }
         self.base_id.offset(offset)
+    }
+
+    /// Convert to the public TensorAtomMapInfo.
+    pub fn to_info(&self) -> TensorAtomMapInfo {
+        TensorAtomMapInfo {
+            base_id: self.base_id,
+            count: self.count,
+            dtype: self.dtype,
+            dims: self.dims.clone(),
+            segments: self.segments.clone(),
+        }
     }
 }
 
@@ -604,43 +631,17 @@ pub fn lower<'a, 'p: 'a, P: crate::pool::Pool + 'p>(
         }
     }
 
-    let tensor_map: HashMap<GlobalId, TensorAtomMapInfo> = ctx
+    // Move tensor_map onto the NanoGraph — it's the single source of truth.
+    ctx.nano.tensor_map = ctx
         .tensor_map
         .iter()
-        .map(|(id, tam)| {
-            (
-                *id,
-                TensorAtomMapInfo {
-                    base_id: tam.base_id,
-                    count: tam.count,
-                    dtype: tam.dtype,
-                    sym_dims: tam.sym_dims.clone(),
-                    known_strides: tam.known_strides.clone(),
-                    known_dims: tam.known_dims(),
-                    dim_layout: tam.dim_layout(),
-                    segments: tam
-                        .segments
-                        .iter()
-                        .map(|s| {
-                            (
-                                s.concat_dim,
-                                s.start,
-                                s.size,
-                                s.base_id,
-                                s.known_strides.clone(),
-                            )
-                        })
-                        .collect(),
-                },
-            )
-        })
+        .map(|(id, tam)| (*id, tam.to_info()))
         .collect();
 
     Ok(LowerResult {
         graph: ctx.nano,
         unsupported: ctx.unsupported,
         unsupported_details: ctx.unsupported_details,
-        tensor_map,
         group_provenance: ctx.group_provenance,
         all_infos,
     })
@@ -697,7 +698,7 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
         info.dtype()
     }
 
-    /// Classify tensor dims and return layout info.
+    /// Classify tensor dims into `DimKind` entries with row-major strides.
     /// Returns None if rank is unknown.
     ///
     /// For symbolic dims, preserves identity: two dims with the same
@@ -705,19 +706,29 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
     pub fn classify_dims(
         &mut self,
         info: &LowerTensorInfo<'_, 'p, P>,
-    ) -> Option<DimClassification> {
+    ) -> Option<Vec<DimKind>> {
         use crate::scalar_info::ScalarInfoTyped;
 
         let rank = info.rank_if_known()?;
-        let mut layout = Vec::with_capacity(rank);
-        let mut known_dims = Vec::new();
-        let mut sym_dims = Vec::new();
+        let mut known_sizes = Vec::new();
+        let mut sym_count = 0usize;
+
+        // First pass: collect sizes and sym info.
+        struct DimEntry {
+            is_sym: bool,
+            known_idx: usize,
+            sym_axis: usize,
+            gc: Option<GraphConstantId>,
+            size: u64,
+        }
+        let mut entries = Vec::with_capacity(rank);
 
         for i in 0..rank {
             match info.dim_scalar(i) {
                 Some(ScalarInfoTyped::Numeric(size)) => {
-                    layout.push(DimKind::Known(size));
-                    known_dims.push(size);
+                    let ki = known_sizes.len();
+                    known_sizes.push(size);
+                    entries.push(DimEntry { is_sym: false, known_idx: ki, sym_axis: 0, gc: None, size });
                 }
                 Some(ScalarInfoTyped::Symbolic(sym)) => {
                     let sid = sym.symbol_id();
@@ -728,22 +739,31 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
                         self.symbol_id_map.insert(sid, gc);
                         gc
                     };
-                    layout.push(DimKind::Symbolic(gc));
-                    sym_dims.push(gc);
+                    let axis = sym_count;
+                    sym_count += 1;
+                    entries.push(DimEntry { is_sym: true, known_idx: 0, sym_axis: axis, gc: Some(gc), size: 0 });
                 }
                 None => {
-                    // Rank known but dim info unavailable (shouldn't happen
-                    // for Ranked tensors, but handle gracefully).
                     let gc = self.alloc_sym_dim();
-                    layout.push(DimKind::Symbolic(gc));
-                    sym_dims.push(gc);
+                    let axis = sym_count;
+                    sym_count += 1;
+                    entries.push(DimEntry { is_sym: true, known_idx: 0, sym_axis: axis, gc: Some(gc), size: 0 });
                 }
             }
         }
 
-        let count: u64 = known_dims.iter().product();
+        // Compute row-major strides for known dims.
+        let strides = TensorAtomMap::compute_strides(&known_sizes);
 
-        Some((layout, known_dims, sym_dims, count))
+        let dims: Vec<DimKind> = entries.iter().map(|e| {
+            if e.is_sym {
+                DimKind::Sym { gc: e.gc.unwrap(), axis: e.sym_axis }
+            } else {
+                DimKind::Known { size: e.size, stride: strides[e.known_idx] }
+            }
+        }).collect();
+
+        Some(dims)
     }
 
     pub fn alloc_sym_dim(&mut self) -> SymDim {
@@ -763,12 +783,25 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
             return;
         };
 
-        let Some((layout, known_dims, sym_dims, count)) = self.classify_dims(info) else {
+        let Some(dims) = self.classify_dims(info) else {
             self.register_input(id, info);
             return;
         };
 
-        let strides = TensorAtomMap::compute_strides(&known_dims);
+        // If any dims are symbolic, concrete data varies along those axes
+        // and can't be inlined as scalar literals. Fall through to InputTensor.
+        let has_sym = dims.iter().any(|d| matches!(d, DimKind::Sym { .. }));
+        if has_sym {
+            // Undo the classify_dims side effects (graph constants were allocated)
+            // — they'll be re-allocated by register_input's classify_dims call.
+            // Actually, classify_dims is idempotent for the same symbol_ids,
+            // so calling it again in register_input is fine.
+            self.register_input(id, info);
+            return;
+        }
+
+        // At this point all dims are Known (we early-returned for sym dims above).
+        let count: u64 = dims.iter().filter_map(|d| match d { DimKind::Known { size, .. } => Some(*size), _ => None }).product();
         let count = count.max(1) as usize;
         let dt = Self::ndt(info);
 
@@ -780,20 +813,16 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
 
         let n = n_elems.min(count);
 
-        // For single-element constants, use a broadcast Literal (no allocation).
-        // For multi-element constants, copy into a pool tensor and emit one
-        // LiteralSpan group — O(1) groups instead of O(n).
         if n == 1 {
             let scalar = concrete.read_element(0);
             let base_id =
                 self.nano
-                    .push_group(1, dt, ScalarOp::Literal(scalar), sym_dims.clone(), vec![]);
+                    .push_group(1, dt, ScalarOp::Literal(scalar), vec![], vec![]);
             self.tensor_map.insert(
                 id,
-                TensorAtomMap::simple(base_id, 1, dt, layout, strides, sym_dims),
+                TensorAtomMap::simple(base_id, 1, dt, dims),
             );
         } else {
-            // Check if all elements are identical — use broadcast Literal.
             let first = concrete.read_element(0);
             let all_same = (1..n).all(|i| concrete.read_element(i) == first);
             if all_same {
@@ -801,21 +830,19 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
                     n as u64,
                     dt,
                     ScalarOp::Literal(first),
-                    sym_dims.clone(),
+                    vec![],
                     vec![],
                 );
                 self.tensor_map.insert(
                     id,
-                    TensorAtomMap::simple(base_id, n as u64, dt, layout, strides, sym_dims),
+                    TensorAtomMap::simple(base_id, n as u64, dt, dims),
                 );
             } else {
-                // Copy into a 1D pool tensor backing the LiteralSpan.
                 use crate::numeric_tensor::TensorLayout;
                 let span_layout =
                     TensorLayout::<crate::tensor_rank::DynRank>::row_major(vec![n as u64], dt);
                 let cv = concrete.view();
                 let tensor = if cv.layout().is_contiguous() && cv.numel() == n {
-                    // Fast path: memcpy raw bytes into 1D layout.
                     let size = span_layout.buffer_size_bytes();
                     let mut buf = self
                         .pool
@@ -824,7 +851,6 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
                     buf[..size].copy_from_slice(&cv.data()[..size]);
                     crate::numeric_tensor::NumericTensor::from_parts(buf, span_layout)
                 } else {
-                    // Slow path: element-wise copy for non-contiguous views.
                     let buf = self
                         .pool
                         .allocate(span_layout.buffer_size_bytes())
@@ -840,12 +866,12 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
                     n as u64,
                     dt,
                     ScalarOp::LiteralSpan(tensor),
-                    sym_dims.clone(),
+                    vec![],
                     vec![],
                 );
                 self.tensor_map.insert(
                     id,
-                    TensorAtomMap::simple(base_id, n as u64, dt, layout, strides, sym_dims),
+                    TensorAtomMap::simple(base_id, n as u64, dt, dims.clone()),
                 );
             }
         }
@@ -859,26 +885,26 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
     /// Literal(0.0) placeholder is similarly overridden by the executor using
     /// the tensor data from `all_infos`.
     pub fn register_input(&mut self, id: GlobalId, info: &LowerTensorInfo<'_, 'p, P>) {
-        let Some((layout, known_dims, sym_dims, count)) = self.classify_dims(info) else {
+        let Some(dims) = self.classify_dims(info) else {
             // Unknown rank — register a single atom.
             let dt = Self::ndt(info);
             let base_id = self.nano.add_input_tensor(id, 1, dt);
             self.tensor_map.insert(
                 id,
-                TensorAtomMap::simple(base_id, 1, dt, vec![], vec![], vec![]),
+                TensorAtomMap::simple(base_id, 1, dt, vec![]),
             );
             return;
         };
 
-        let strides = TensorAtomMap::compute_strides(&known_dims);
-        let count = count.max(1);
+        let known_dims: Vec<u64> = dims.iter().filter_map(|d| match d { DimKind::Known { size, .. } => Some(*size), _ => None }).collect();
+        let count: u64 = known_dims.iter().product::<u64>().max(1);
         let dt = Self::ndt(info);
 
         let base_id = self.nano.add_input_tensor(id, count, dt);
 
         self.tensor_map.insert(
             id,
-            TensorAtomMap::simple(base_id, count, dt, layout, strides, sym_dims),
+            TensorAtomMap::simple(base_id, count, dt, dims),
         );
     }
 
@@ -891,7 +917,7 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
         _op_kind: &str,
     ) {
         let dt = Self::ndt(info);
-        let Some((layout, known_dims, sym_dims, count)) = self.classify_dims(info) else {
+        let Some(dims) = self.classify_dims(info) else {
             let base_id = self.nano.push_atom(
                 dt,
                 ScalarOp::Literal(NumericScalar::zero(dt)),
@@ -900,25 +926,26 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
             );
             self.tensor_map.insert(
                 output_id,
-                TensorAtomMap::simple(base_id, 1, dt, vec![], vec![], vec![]),
+                TensorAtomMap::simple(base_id, 1, dt, vec![]),
             );
             return;
         };
 
-        let strides = TensorAtomMap::compute_strides(&known_dims);
-        let count = count.max(1);
+        let sym_dims: Vec<GraphConstantId> = dims.iter().filter_map(|d| match d { DimKind::Sym { gc, .. } => Some(*gc), _ => None }).collect();
+        let known_dims: Vec<u64> = dims.iter().filter_map(|d| match d { DimKind::Known { size, .. } => Some(*size), _ => None }).collect();
+        let count: u64 = known_dims.iter().product::<u64>().max(1);
 
         let base_id = self.nano.push_group(
             count,
             dt,
             ScalarOp::Literal(NumericScalar::zero(dt)),
-            sym_dims.clone(),
+            sym_dims,
             vec![],
         );
 
         self.tensor_map.insert(
             output_id,
-            TensorAtomMap::simple(base_id, count, dt, layout, strides, sym_dims),
+            TensorAtomMap::simple(base_id, count, dt, dims),
         );
     }
 
@@ -943,29 +970,9 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
 
         // Same count + same known shape → stride 1.
         if consumer.count == producer.count && consumer.count > 0 {
-            let c_known: Vec<u64> = consumer
-                .layout
-                .iter()
-                .filter_map(|d| {
-                    if let DimKind::Known(s) = d {
-                        Some(*s)
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            let p_known: Vec<u64> = producer
-                .layout
-                .iter()
-                .filter_map(|d| {
-                    if let DimKind::Known(s) = d {
-                        Some(*s)
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            if c_known == p_known && consumer.known_strides == producer.known_strides {
+            let c_known = consumer.known_dims();
+            let p_known = producer.known_dims();
+            if c_known == p_known && consumer.known_strides() == producer.known_strides() {
                 return InputRef::affine(producer.base_id, 1);
             }
         }
@@ -1017,8 +1024,8 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
 
         let c_known_sizes = consumer.known_dims();
         let p_known_sizes = producer.known_dims();
-        let c_strides = &consumer.known_strides;
-        let p_strides = &producer.known_strides;
+        let c_strides = consumer.known_strides();
+        let p_strides = producer.known_strides();
 
         if c_strides.len() != c_known_sizes.len() {
             return None;
@@ -1029,7 +1036,7 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
 
         // Bail out for non-row-major consumers — see the doc comment for why.
         let c_row_major = TensorAtomMap::compute_strides(&c_known_sizes);
-        if c_strides != &c_row_major {
+        if c_strides != c_row_major {
             return None;
         }
 
@@ -1040,10 +1047,10 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
         let c_known_indices: Vec<Option<usize>> = {
             let mut ki = 0;
             consumer
-                .layout
+                .dims
                 .iter()
                 .map(|d| {
-                    if matches!(d, DimKind::Known(_)) {
+                    if matches!(d, DimKind::Known { .. }) {
                         let idx = ki;
                         ki += 1;
                         Some(idx)
@@ -1056,10 +1063,10 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
         let p_known_indices: Vec<Option<usize>> = {
             let mut ki = 0;
             producer
-                .layout
+                .dims
                 .iter()
                 .map(|d| {
-                    if matches!(d, DimKind::Known(_)) {
+                    if matches!(d, DimKind::Known { .. }) {
                         let idx = ki;
                         ki += 1;
                         Some(idx)
@@ -1174,30 +1181,10 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
         let c_rank = consumer_info.rank_if_known().unwrap_or(0);
         let p_rank = producer_info.rank_if_known().unwrap_or(0);
 
-        let c_known_sizes: Vec<u64> = consumer
-            .layout
-            .iter()
-            .filter_map(|d| {
-                if let DimKind::Known(s) = d {
-                    Some(*s)
-                } else {
-                    None
-                }
-            })
-            .collect();
-        let p_known_sizes: Vec<u64> = producer
-            .layout
-            .iter()
-            .filter_map(|d| {
-                if let DimKind::Known(s) = d {
-                    Some(*s)
-                } else {
-                    None
-                }
-            })
-            .collect();
+        let c_known_sizes = consumer.known_dims();
+        let p_known_sizes = producer.known_dims();
         // Use the producer's actual strides (may be non-row-major after Transpose).
-        let p_strides = &producer.known_strides;
+        let p_strides = producer.known_strides();
 
         // Build mapping from consumer known-dim index to producer known-dim
         // index using right-aligned broadcasting.
@@ -1207,10 +1194,10 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
         let c_known_indices: Vec<Option<usize>> = {
             let mut ki = 0;
             consumer
-                .layout
+                .dims
                 .iter()
                 .map(|d| {
-                    if matches!(d, DimKind::Known(_)) {
+                    if matches!(d, DimKind::Known { .. }) {
                         let idx = ki;
                         ki += 1;
                         Some(idx)
@@ -1223,10 +1210,10 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
         let p_known_indices: Vec<Option<usize>> = {
             let mut ki = 0;
             producer
-                .layout
+                .dims
                 .iter()
                 .map(|d| {
-                    if matches!(d, DimKind::Known(_)) {
+                    if matches!(d, DimKind::Known { .. }) {
                         let idx = ki;
                         ki += 1;
                         Some(idx)
@@ -1256,7 +1243,7 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
         }
 
         let mut ids = Vec::with_capacity(consumer.count as usize);
-        let c_strides = &consumer.known_strides;
+        let c_strides = consumer.known_strides();
         let p_row_major = TensorAtomMap::compute_strides(&p_known_sizes);
 
         for flat_c in 0..consumer.count {
@@ -1405,17 +1392,7 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
         let c_rank = consumer_info.rank_if_known().unwrap_or(0);
         let p_rank = producer_info.rank_if_known().unwrap_or(0);
 
-        let c_known_sizes: Vec<u64> = consumer
-            .layout
-            .iter()
-            .filter_map(|d| {
-                if let DimKind::Known(s) = d {
-                    Some(*s)
-                } else {
-                    None
-                }
-            })
-            .collect();
+        let c_known_sizes = consumer.known_dims();
         let p_known_sizes = producer.known_dims();
 
         let offset = c_rank.saturating_sub(p_rank);
@@ -1423,10 +1400,10 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
         let c_known_indices: Vec<Option<usize>> = {
             let mut ki = 0;
             consumer
-                .layout
+                .dims
                 .iter()
                 .map(|d| {
-                    if matches!(d, DimKind::Known(_)) {
+                    if matches!(d, DimKind::Known { .. }) {
                         let idx = ki;
                         ki += 1;
                         Some(idx)
@@ -1439,10 +1416,10 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
         let p_known_indices: Vec<Option<usize>> = {
             let mut ki = 0;
             producer
-                .layout
+                .dims
                 .iter()
                 .map(|d| {
-                    if matches!(d, DimKind::Known(_)) {
+                    if matches!(d, DimKind::Known { .. }) {
                         let idx = ki;
                         ki += 1;
                         Some(idx)
@@ -1468,7 +1445,7 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
             }
         }
 
-        let c_strides = &consumer.known_strides;
+        let c_strides = consumer.known_strides();
         let mut ids = Vec::with_capacity(consumer.count as usize);
 
         for flat_c in 0..consumer.count {
@@ -1570,12 +1547,26 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
             return;
         }
 
-        // Check all outputs have shape info (needed for opaque op registration).
-        let all_outputs_known = op.outputs().all(|out_id| {
-            all_infos
-                .get(&out_id)
-                .is_some_and(|i| i.rank_if_known().is_some())
-        });
+        // Check all inputs and outputs have fully concrete shapes (no symbolic dims).
+        // Opaque ops call eval_new on concrete tensors, so every dim must be known.
+        let has_symbolic = |id: GlobalId| -> bool {
+            all_infos.get(&id).is_some_and(|info| {
+                if let Some(rank) = info.rank_if_known() {
+                    (0..rank).any(|d| info.dim_if_known(d).is_none())
+                } else {
+                    false
+                }
+            })
+        };
+        let any_symbolic = op.inputs().any(|id| has_symbolic(id))
+            || op.outputs().any(|id| has_symbolic(id));
+
+        let all_outputs_known = !any_symbolic
+            && op.outputs().all(|out_id| {
+                all_infos
+                    .get(&out_id)
+                    .is_some_and(|i| i.rank_if_known().is_some())
+            });
 
         if !all_outputs_known {
             // Fall back to boundary if we can't determine output shapes.
@@ -1696,11 +1687,11 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
                 vec![1]
             };
             let strides = TensorAtomMap::compute_strides(&shape);
-            let layout: Vec<DimKind> = shape.iter().map(|&d| DimKind::Known(d)).collect();
+            let dims: Vec<DimKind> = shape.iter().zip(strides.iter()).map(|(&size, &stride)| DimKind::Known { size, stride }).collect();
             let count: u64 = shape.iter().product();
             self.tensor_map.insert(
                 out_id,
-                TensorAtomMap::simple(base_id, count, dtype, layout, strides, vec![]),
+                TensorAtomMap::simple(base_id, count, dtype, dims),
             );
         }
     }
@@ -1719,7 +1710,7 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
     pub fn pointwise_input_ref(in_map: &TensorAtomMap) -> InputRef {
         let known_dims = in_map.known_dims();
         let row_major = TensorAtomMap::compute_strides(&known_dims);
-        if in_map.known_strides == row_major || in_map.count <= 1 {
+        if in_map.known_strides() == row_major || in_map.count <= 1 {
             InputRef::affine(in_map.base_id, 1)
         } else {
             let mut ids = Vec::with_capacity(in_map.count as usize);
@@ -1777,16 +1768,29 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
         }
 
         // Dtype differs — emit a cast group.
-        let known_dims = in_map.known_dims();
         let input_ref = Self::pointwise_input_ref(&in_map);
+        let n_sym = in_map.sym_dims().len();
 
         let base_id = self.nano.push_group(
             in_map.count,
             out_dt,
             cast_op,
-            in_map.sym_dims.clone(),
-            vec![GroupInput::scalar(input_ref)],
+            in_map.sym_dims(),
+            vec![GroupInput::identity(input_ref, n_sym)],
         );
+
+        // Build output dims with row-major strides for the known dims.
+        let known_dims = in_map.known_dims();
+        let out_strides = TensorAtomMap::compute_strides(&known_dims);
+        let mut ki = 0;
+        let out_dims: Vec<DimKind> = in_map.dims.iter().map(|d| match d {
+            DimKind::Known { size, .. } => {
+                let s = out_strides[ki];
+                ki += 1;
+                DimKind::Known { size: *size, stride: s }
+            }
+            other => *other,
+        }).collect();
 
         self.tensor_map.insert(
             out_id,
@@ -1794,9 +1798,7 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
                 base_id,
                 in_map.count,
                 out_dt,
-                in_map.layout.clone(),
-                TensorAtomMap::compute_strides(&known_dims),
-                in_map.sym_dims.clone(),
+                out_dims,
             ),
         );
 
@@ -1816,17 +1818,19 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
             return crate::milli_graph::ops::LowerResult::Unsupported;
         };
 
-        let Some((layout, known_dims, sym_dims, count)) = self.classify_dims(out_info) else {
+        let Some(dims) = self.classify_dims(out_info) else {
             return crate::milli_graph::ops::LowerResult::Unsupported;
         };
-        let count = count.max(1);
+        let known_dims: Vec<u64> = dims.iter().filter_map(|d| match d { DimKind::Known { size, .. } => Some(*size), _ => None }).collect();
+        let count: u64 = known_dims.iter().product::<u64>().max(1);
 
         if count == in_map.count {
             let in_known = in_map.known_dims();
             let in_rowmajor = TensorAtomMap::compute_strides(&in_known);
-            let is_row_major = in_map.known_strides == in_rowmajor
+            let in_strides = in_map.known_strides();
+            let is_row_major = in_strides == in_rowmajor
                 || in_map.count <= 1
-                || in_map.segments.is_empty() && in_map.known_strides.iter().all(|&s| s <= 1);
+                || in_map.segments.is_empty() && in_strides.iter().all(|&s| s <= 1);
 
             if is_row_major && in_map.segments.is_empty() {
                 self.tensor_map.insert(
@@ -1835,20 +1839,19 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
                         in_map.base_id,
                         count,
                         Self::ndt(out_info),
-                        layout,
-                        TensorAtomMap::compute_strides(&known_dims),
-                        sym_dims,
+                        dims,
                     ),
                 );
             } else {
                 let dt = Self::ndt(out_info);
                 let input_ref = Self::pointwise_input_ref(&in_map);
+                let n_sym = in_map.sym_dims().len();
                 let base_id = self.nano.push_group(
                     count,
                     dt,
                     ScalarOp::Identity,
-                    in_map.sym_dims.clone(),
-                    vec![GroupInput::scalar(input_ref)],
+                    in_map.sym_dims(),
+                    vec![GroupInput::identity(input_ref, n_sym)],
                 );
                 self.tensor_map.insert(
                     out_id,
@@ -1856,9 +1859,7 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
                         base_id,
                         count,
                         dt,
-                        layout,
-                        TensorAtomMap::compute_strides(&known_dims),
-                        sym_dims,
+                        dims,
                     ),
                 );
             }
@@ -1913,18 +1914,21 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
             vals
         } else if reduce.noop_with_empty_axes() {
             // No axes + noop = identity.
-            let Some((layout, known_dims, sym_dims, count)) = self.classify_dims(out_info) else {
+            let Some(dims) = self.classify_dims(out_info) else {
                 return crate::milli_graph::ops::LowerResult::Unsupported;
             };
-            let count = count.max(1);
+            let known_dims: Vec<u64> = dims.iter().filter_map(|d| match d { DimKind::Known { size, .. } => Some(*size), _ => None }).collect();
+            let sym_dims: Vec<GraphConstantId> = dims.iter().filter_map(|d| match d { DimKind::Sym { gc, .. } => Some(*gc), _ => None }).collect();
+            let count: u64 = known_dims.iter().product::<u64>().max(1);
             let dt = Self::ndt(out_info);
             let input_ref = Self::pointwise_input_ref(&in_map);
+            let n_sym = sym_dims.len();
             let base_id = self.nano.push_group(
                 count,
                 dt,
                 ScalarOp::Identity,
-                sym_dims.clone(),
-                vec![GroupInput::scalar(input_ref)],
+                sym_dims,
+                vec![GroupInput::identity(input_ref, n_sym)],
             );
             self.tensor_map.insert(
                 out_id,
@@ -1932,19 +1936,17 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
                     base_id,
                     count,
                     dt,
-                    layout,
-                    TensorAtomMap::compute_strides(&known_dims),
-                    sym_dims,
+                    dims,
                 ),
             );
             return crate::milli_graph::ops::LowerResult::Lowered;
         } else {
             // No axes tensor and not noop → reduce all axes.
-            let in_rank = in_map.layout.len();
+            let in_rank = in_map.dims.len();
             (0..in_rank as i64).collect()
         };
 
-        let in_rank = in_map.layout.len();
+        let in_rank = in_map.dims.len();
 
         // Normalize axes and check they're all known dims.
         let norm_axes: Vec<usize> = axes
@@ -1962,10 +1964,10 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
         let axis_to_known_idx: Vec<Option<usize>> = {
             let mut ki = 0;
             in_map
-                .layout
+                .dims
                 .iter()
                 .map(|d| {
-                    if matches!(d, DimKind::Known(_)) {
+                    if matches!(d, DimKind::Known { .. }) {
                         let idx = ki;
                         ki += 1;
                         Some(idx)
@@ -1976,28 +1978,99 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
                 .collect()
         };
 
-        let in_known: Vec<u64> = in_map
-            .layout
-            .iter()
-            .filter_map(|d| {
-                if let DimKind::Known(s) = d {
-                    Some(*s)
-                } else {
-                    None
-                }
-            })
-            .collect();
+        let in_known = in_map.known_dims();
 
-        // Check all reduction axes are known dims.
+        // Classify reduction axes as known or symbolic.
         let mut reduce_known_indices = Vec::new();
+        // (tensor_axis, sym_dim_axis) for symbolic reduce axes
+        let mut reduce_sym_axes: Vec<(usize, usize)> = Vec::new();
         for &ax in &norm_axes {
             if ax >= in_rank {
                 return crate::milli_graph::ops::LowerResult::Unsupported;
             }
-            let Some(ki) = axis_to_known_idx[ax] else {
+            match &in_map.dims[ax] {
+                DimKind::Known { .. } => {
+                    reduce_known_indices.push(axis_to_known_idx[ax].unwrap());
+                }
+                DimKind::Sym { axis: sym_axis, .. } => {
+                    reduce_sym_axes.push((ax, *sym_axis));
+                }
+            }
+        }
+
+        // ── SymReduce path: exactly one symbolic reduce axis, no known axes ──
+        if reduce_sym_axes.len() == 1 && reduce_known_indices.is_empty() {
+            let (_tensor_axis, sym_axis) = reduce_sym_axes[0];
+
+
+            let Some(out_info) = all_infos.get(&out_id) else {
                 return crate::milli_graph::ops::LowerResult::Unsupported;
             };
-            reduce_known_indices.push(ki);
+            let Some(out_dims) = self.classify_dims(out_info) else {
+                return crate::milli_graph::ops::LowerResult::Unsupported;
+            };
+            let out_sym_dims: Vec<GraphConstantId> = out_dims.iter().filter_map(|d| match d { DimKind::Sym { gc, .. } => Some(*gc), _ => None }).collect();
+            let out_known: Vec<u64> = out_dims.iter().filter_map(|d| match d { DimKind::Known { size, .. } => Some(*size), _ => None }).collect();
+            let out_count = out_known.iter().product::<u64>().max(1);
+
+            let out_dt = Self::ndt(out_info);
+            let in_dt = all_infos.get(&in_id).map(Self::ndt).unwrap_or(out_dt);
+            let compute_dt = match in_dt {
+                NumericDType::BF16 | NumericDType::F16 => NumericDType::F32,
+                other => other,
+            };
+
+            let input_ref = Self::pointwise_input_ref(&in_map);
+
+            // Build sym_dim_map: consumer sym axes map to producer sym axes,
+            // skipping the reduced axis.
+            let n_out_sym = out_sym_dims.len();
+            let sym_dim_map: Vec<crate::nano_graph::pattern::SymDimMap> = {
+                let mut map = Vec::with_capacity(n_out_sym);
+                let mut producer_idx = 0;
+                for _ in 0..n_out_sym {
+                    // Skip the reduced axis in the producer's sym_dims.
+                    if producer_idx == sym_axis {
+                        producer_idx += 1;
+                    }
+                    map.push(crate::nano_graph::pattern::SymDimMap::Identity(producer_idx));
+                    producer_idx += 1;
+                }
+                map
+            };
+
+            let sym_reduce_op = ScalarOp::SymReduce {
+                kind: match make_reduce_op(compute_dt, 1, 1) {
+                    ScalarOp::Reduce { kind, .. } => kind,
+                    _ => return crate::milli_graph::ops::LowerResult::Unsupported,
+                },
+                axis: sym_axis,
+                compute_dtype: compute_dt,
+            };
+
+            let base_id = self.nano.push_group(
+                out_count,
+                out_dt,
+                sym_reduce_op,
+                out_sym_dims.clone(),
+                vec![GroupInput {
+                    input_ref,
+                    sym_dim_map,
+                }],
+            );
+
+            self.tensor_map.insert(
+                out_id,
+                TensorAtomMap::simple(base_id, out_count, out_dt, out_dims),
+            );
+
+            return crate::milli_graph::ops::LowerResult::Lowered;
+        }
+
+        // ── Known-dim reduce path (existing) ──
+        // Mixed sym+known axes or multiple sym axes: unsupported for now.
+        if !reduce_sym_axes.is_empty() {
+            return crate::milli_graph::ops::LowerResult::Unsupported;
         }
 
         // Compute the reduction extent (product of reduced known dims).
@@ -2006,8 +2079,6 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
             .map(|&ki| in_known[ki])
             .product();
         if reduce_extent == 0 {
-            // Reducing over 0 elements produces the identity value.
-            // This can't be expressed as a Reduce nano-op; fall to opaque.
             return crate::milli_graph::ops::LowerResult::Unsupported;
         }
 
@@ -2026,7 +2097,7 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
         }
 
         let rki = reduce_known_indices[0];
-        let in_strides = &in_map.known_strides;
+        let in_strides = in_map.known_strides();
         let reduce_stride = in_strides[rki] as i64;
 
         let out_strides_local = TensorAtomMap::compute_strides(&out_known);
@@ -2094,18 +2165,19 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
             other => other,
         };
 
-        let Some((out_layout, out_known_dims_full, out_sym_dims, _)) = self.classify_dims(out_info)
-        else {
+        let Some(out_dims) = self.classify_dims(out_info) else {
             return crate::milli_graph::ops::LowerResult::Unsupported;
         };
+        let out_sym_dims: Vec<GraphConstantId> = out_dims.iter().filter_map(|d| match d { DimKind::Sym { gc, .. } => Some(*gc), _ => None }).collect();
 
         let reduce_op = make_reduce_op(compute_dt, reduce_extent, reduce_stride);
+        let n_sym = out_sym_dims.len();
         let base_id = self.nano.push_group(
             out_count,
             out_dt,
             reduce_op,
-            out_sym_dims.clone(),
-            vec![GroupInput::scalar(input_ref)],
+            out_sym_dims,
+            vec![GroupInput::identity(input_ref, n_sym)],
         );
 
         self.tensor_map.insert(
@@ -2114,9 +2186,7 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
                 base_id,
                 out_count,
                 out_dt,
-                out_layout,
-                TensorAtomMap::compute_strides(&out_known_dims_full),
-                out_sym_dims,
+                out_dims,
             ),
         );
 
@@ -2176,7 +2246,7 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
         );
         self.tensor_map.insert(
             id,
-            TensorAtomMap::simple(base_id, 1, NumericDType::F32, vec![], vec![], vec![]),
+            TensorAtomMap::simple(base_id, 1, NumericDType::F32, vec![]),
         );
     }
 }
@@ -2265,7 +2335,7 @@ mod tests {
                 let idx = input_ids.iter().position(|&id| id == it.tensor_id)?;
                 // Build a contiguous TAMI for the input.
                 let tam_info = result
-                    .tensor_map
+                    .graph.tensor_map
                     .values()
                     .find(|t| t.base_id == it.base_id)?;
                 Some((tam_info, idx))
@@ -2280,9 +2350,9 @@ mod tests {
         let output_tamis: Vec<_> = output_ids
             .iter()
             .map(|out_id| {
-                let tam = result.tensor_map.get(out_id).unwrap();
+                let tam = result.graph.tensor_map.get(out_id).unwrap();
                 assert!(
-                    tam.sym_dims.is_empty(),
+                    tam.sym_dims().is_empty(),
                     "Sym dims not yet supported in test"
                 );
                 tam
@@ -2301,7 +2371,7 @@ mod tests {
             let milli_flat: Vec<f64> = (0..milli_numel)
                 .map(|i| milli_tensor.read_element(i).to_f64())
                 .collect();
-            let tam = result.tensor_map.get(out_id).unwrap();
+            let tam = result.graph.tensor_map.get(out_id).unwrap();
 
             let nano_flat: Vec<f64> = (0..nano_tensor.numel())
                 .map(|i| nano_tensor.read_element(i).to_f64())
