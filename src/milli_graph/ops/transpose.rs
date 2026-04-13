@@ -1,9 +1,9 @@
-use rand::Rng;
 use crate::graph::{GlobalId, Node};
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
 use crate::nano_graph::lower::{DimKind, NanoLoweringContext, TensorAtomMap};
 use crate::pool::Pool;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -115,9 +115,10 @@ impl Transpose {
         // This means downstream ops will decompose their flat index using
         // the output strides and arrive at the correct input atom.
         // Permute the layout (which includes strides) according to the transpose perm.
-        let mut transposed_layout: Vec<DimKind> = vec![DimKind::Known { size: 0, stride: 0 }; full_perm.len()];
+        let mut transposed_layout: Vec<DimKind> =
+            vec![DimKind::Known { size: 0, stride: 0 }; full_perm.len()];
         for (out_dim, &in_dim) in full_perm.iter().enumerate() {
-            transposed_layout[out_dim] = in_map.dims[in_dim].clone();
+            transposed_layout[out_dim] = in_map.dims[in_dim];
         }
 
         let out_dt = NanoLoweringContext::ndt(out_info);
@@ -156,12 +157,7 @@ impl Transpose {
         } else {
             ctx.tensor_map.insert(
                 out_id,
-                TensorAtomMap::simple(
-                    in_map.base_id,
-                    in_map.count,
-                    out_dt,
-                    transposed_layout,
-                ),
+                TensorAtomMap::simple(in_map.base_id, in_map.count, out_dt, transposed_layout),
             );
         }
         crate::milli_graph::ops::LowerResult::Lowered

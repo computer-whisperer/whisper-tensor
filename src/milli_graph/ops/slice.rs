@@ -1,9 +1,9 @@
-use rand::Rng;
 use crate::graph::{GlobalId, Node};
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
 use crate::nano_graph::lower::{DimKind, NanoLoweringContext, TensorAtomMap};
 use crate::pool::Pool;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -99,8 +99,21 @@ impl Slice {
         let Some(out_dims) = ctx.classify_dims(out_info) else {
             return crate::milli_graph::ops::LowerResult::Unsupported;
         };
-        let out_count: u64 = out_dims.iter().filter_map(|d| match d { DimKind::Known { size, .. } => Some(*size), _ => None }).product::<u64>().max(1);
-        let out_known_dims: Vec<u64> = out_dims.iter().filter_map(|d| match d { DimKind::Known { size, .. } => Some(*size), _ => None }).collect();
+        let out_count: u64 = out_dims
+            .iter()
+            .filter_map(|d| match d {
+                DimKind::Known { size, .. } => Some(*size),
+                _ => None,
+            })
+            .product::<u64>()
+            .max(1);
+        let out_known_dims: Vec<u64> = out_dims
+            .iter()
+            .filter_map(|d| match d {
+                DimKind::Known { size, .. } => Some(*size),
+                _ => None,
+            })
+            .collect();
 
         // Extract concrete slice parameters.
         let extract_i64 = |id: &GlobalId| -> Option<Vec<i64>> {
@@ -253,14 +266,20 @@ impl Slice {
             }
             // Build dims with physical strides from the slice
             let mut ki2 = 0;
-            let out_dims_phys: Vec<DimKind> = out_dims.iter().map(|d| match d {
-                DimKind::Known { size, .. } => {
-                    let stride = out_phys_strides[ki2];
-                    ki2 += 1;
-                    DimKind::Known { size: *size, stride }
-                },
-                other => other.clone(),
-            }).collect();
+            let out_dims_phys: Vec<DimKind> = out_dims
+                .iter()
+                .map(|d| match d {
+                    DimKind::Known { size, .. } => {
+                        let stride = out_phys_strides[ki2];
+                        ki2 += 1;
+                        DimKind::Known {
+                            size: *size,
+                            stride,
+                        }
+                    }
+                    other => *other,
+                })
+                .collect();
             ctx.tensor_map.insert(
                 out_id,
                 TensorAtomMap::simple(

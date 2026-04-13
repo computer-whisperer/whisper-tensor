@@ -1,4 +1,3 @@
-use rand::Rng;
 use crate::graph::{GlobalId, Node};
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
@@ -6,6 +5,7 @@ use crate::pool::Pool;
 use crate::scalar_info::ScalarInfo;
 use crate::symbolic_scalar::{SymbolicScalar, SymbolicScalarTyped};
 use crate::tensor_info::{MinimalTensor, TensorInfo};
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 

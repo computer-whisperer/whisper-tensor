@@ -237,8 +237,21 @@ impl MilliOp for GatherElements {
         let Some(out_dims_v) = ctx.classify_dims(out_info) else {
             return super::LowerResult::Unsupported;
         };
-        let out_count: u64 = out_dims_v.iter().filter_map(|d| match d { DimKind::Known { size, .. } => Some(*size), _ => None }).product::<u64>().max(1);
-        let out_sym_dims: Vec<_> = out_dims_v.iter().filter_map(|d| match d { DimKind::Sym { gc, .. } => Some(*gc), _ => None }).collect();
+        let out_count: u64 = out_dims_v
+            .iter()
+            .filter_map(|d| match d {
+                DimKind::Known { size, .. } => Some(*size),
+                _ => None,
+            })
+            .product::<u64>()
+            .max(1);
+        let out_sym_dims: Vec<_> = out_dims_v
+            .iter()
+            .filter_map(|d| match d {
+                DimKind::Sym { gc, .. } => Some(*gc),
+                _ => None,
+            })
+            .collect();
         let n_sym = out_sym_dims.len();
         let out_dt = crate::nano_graph::NanoLoweringContext::ndt(out_info);
 
@@ -369,12 +382,7 @@ impl MilliOp for GatherElements {
 
         ctx.tensor_map.insert(
             out_id,
-            TensorAtomMap::simple(
-                base_id,
-                out_count,
-                out_dt,
-                out_dims_v,
-            ),
+            TensorAtomMap::simple(base_id, out_count, out_dt, out_dims_v),
         );
         super::LowerResult::Lowered
     }

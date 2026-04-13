@@ -127,11 +127,7 @@ impl MilliOp for Cast {
             let first_elem = crate::scalar_info::ScalarInfo::Symbolic(
                 crate::symbolic_scalar::SymbolicScalar::new(out_ndt, rng),
             );
-            TensorInfo::new_from_first_element_and_rank(
-                first_elem,
-                input_info.rank(),
-                rng,
-            )
+            TensorInfo::new_from_first_element_and_rank(first_elem, input_info.rank(), rng)
         };
 
         // If input is concrete, try constant fold via nano+pool_eval path.

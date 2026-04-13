@@ -129,9 +129,7 @@ impl MilliOp for TopK {
                     if let Some(k) = k_val {
                         out_dims.push(ScalarInfoTyped::Numeric(k as u64));
                     } else {
-                        out_dims.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(
-                            rng,
-                        )));
+                        out_dims.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(rng)));
                     }
                 } else {
                     out_dims.push(dim.clone());

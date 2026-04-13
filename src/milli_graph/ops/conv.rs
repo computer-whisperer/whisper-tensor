@@ -268,9 +268,7 @@ fn make_symbolic_output<'a, 'p, P: Pool + 'p>(
     out_dims.push(batch.clone());
     out_dims.push(out_channels.clone());
     for _ in 0..n_spatial {
-        out_dims.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(
-            rng,
-        )));
+        out_dims.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(rng)));
     }
     Ok(vec![(
         output_id,
@@ -438,8 +436,20 @@ impl Conv {
         let Some(out_dims_v) = ctx.classify_dims(out_info) else {
             return crate::milli_graph::ops::LowerResult::Unsupported;
         };
-        let out_known_dims: Vec<u64> = out_dims_v.iter().filter_map(|d| match d { DimKind::Known { size, .. } => Some(*size), _ => None }).collect();
-        let out_sym_dims: Vec<_> = out_dims_v.iter().filter_map(|d| match d { DimKind::Sym { gc, .. } => Some(*gc), _ => None }).collect();
+        let out_known_dims: Vec<u64> = out_dims_v
+            .iter()
+            .filter_map(|d| match d {
+                DimKind::Known { size, .. } => Some(*size),
+                _ => None,
+            })
+            .collect();
+        let out_sym_dims: Vec<_> = out_dims_v
+            .iter()
+            .filter_map(|d| match d {
+                DimKind::Sym { gc, .. } => Some(*gc),
+                _ => None,
+            })
+            .collect();
 
         let sym_dims = in_map.sym_dims();
         let n_sym_in = sym_dims.len();
@@ -531,10 +541,13 @@ impl Conv {
                                 original_dtype,
                                 ScalarOp::Identity,
                                 sym_dims.clone(),
-                                vec![GroupInput::identity(InputRef::affine(
-                                    in_map.base_id.offset(in_offset),
-                                    in_spatial_strides[last] as i64,
-                                ), n_sym_in)],
+                                vec![GroupInput::identity(
+                                    InputRef::affine(
+                                        in_map.base_id.offset(in_offset),
+                                        in_spatial_strides[last] as i64,
+                                    ),
+                                    n_sym_in,
+                                )],
                             );
                             if first_base.is_none() {
                                 first_base = Some(b);
@@ -667,7 +680,10 @@ impl Conv {
                                 compute_dtype: original_dtype,
                             },
                             out_sym_dims.clone(),
-                            vec![GroupInput::mapped(InputRef::Broadcast(w_atom), &out_sym_dims, &[]), GroupInput::mapped(input_ref, &out_sym_dims, &in_map.sym_dims())],
+                            vec![
+                                GroupInput::mapped(InputRef::Broadcast(w_atom), &out_sym_dims, &[]),
+                                GroupInput::mapped(input_ref, &out_sym_dims, &in_map.sym_dims()),
+                            ],
                         );
                         if first_mul_base.is_none() {
                             first_mul_base = Some(b);
@@ -694,7 +710,10 @@ impl Conv {
                         compute_dtype: original_dtype,
                     },
                     out_sym_dims.clone(),
-                    vec![GroupInput::identity(InputRef::affine(mul_base, 1), n_sym_out)],
+                    vec![GroupInput::identity(
+                        InputRef::affine(mul_base, 1),
+                        n_sym_out,
+                    )],
                 );
                 if first_output_base.is_none() {
                     first_output_base = Some(b);

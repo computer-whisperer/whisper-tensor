@@ -298,7 +298,10 @@ mod tests {
                 compute_dtype: NumericDType::F32,
             },
             vec![],
-            vec![GroupInput::scalar(InputRef::affine(lit, 1)), GroupInput::scalar(InputRef::affine(lit, 1))],
+            vec![
+                GroupInput::scalar(InputRef::affine(lit, 1)),
+                GroupInput::scalar(InputRef::affine(lit, 1)),
+            ],
         );
         let add = g.push_group(
             4096,
@@ -308,7 +311,10 @@ mod tests {
                 compute_dtype: NumericDType::F32,
             },
             vec![],
-            vec![GroupInput::scalar(InputRef::affine(mul, 1)), GroupInput::scalar(InputRef::affine(lit, 1))],
+            vec![
+                GroupInput::scalar(InputRef::affine(mul, 1)),
+                GroupInput::scalar(InputRef::affine(lit, 1)),
+            ],
         );
         g.outputs = vec![g.atom_to_range(add)];
 

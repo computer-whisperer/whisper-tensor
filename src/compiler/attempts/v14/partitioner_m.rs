@@ -388,10 +388,14 @@ fn consumer_has_direct_ref_to_producer(
     consumer: &AtomGroup<'static, crate::pool::SystemPool>,
     producer: &AtomGroup<'static, crate::pool::SystemPool>,
 ) -> bool {
-    consumer
-        .inputs
-        .iter()
-        .any(|inp| input_refs_group(&inp.input_ref, consumer.count, consumer.atom_offset, producer))
+    consumer.inputs.iter().any(|inp| {
+        input_refs_group(
+            &inp.input_ref,
+            consumer.count,
+            consumer.atom_offset,
+            producer,
+        )
+    })
 }
 
 fn consumer_reads_producer_modularly(
@@ -400,7 +404,12 @@ fn consumer_reads_producer_modularly(
 ) -> bool {
     consumer.inputs.iter().any(|inp| {
         input_is_modular_like(&inp.input_ref)
-            && input_refs_group(&inp.input_ref, consumer.count, consumer.atom_offset, producer)
+            && input_refs_group(
+                &inp.input_ref,
+                consumer.count,
+                consumer.atom_offset,
+                producer,
+            )
     })
 }
 
@@ -798,7 +807,12 @@ fn describe_consumer_access_to_producer(
     producer: &AtomGroup<'static, crate::pool::SystemPool>,
 ) -> String {
     for input in &consumer.inputs {
-        if !input_refs_group(&input.input_ref, consumer.count, consumer.atom_offset, producer) {
+        if !input_refs_group(
+            &input.input_ref,
+            consumer.count,
+            consumer.atom_offset,
+            producer,
+        ) {
             continue;
         }
 
@@ -816,7 +830,10 @@ fn describe_consumer_access_to_producer(
             } => {
                 let nd = dim_strides.len();
                 let first = input.input_ref.resolve(consumer.atom_offset).0;
-                let last = input.input_ref.resolve(consumer.atom_offset + consumer.count - 1).0;
+                let last = input
+                    .input_ref
+                    .resolve(consumer.atom_offset + consumer.count - 1)
+                    .0;
                 let stride_hint = if nd == 0 {
                     0
                 } else if nd == 1 {
@@ -997,7 +1014,12 @@ fn lane_local_access_check(
 
     for input in &consumer.inputs {
         // Check if this input references the producer at all.
-        let refs_producer = input_refs_group(&input.input_ref, consumer.count, consumer.atom_offset, producer);
+        let refs_producer = input_refs_group(
+            &input.input_ref,
+            consumer.count,
+            consumer.atom_offset,
+            producer,
+        );
         if !refs_producer {
             continue;
         }
@@ -1835,7 +1857,9 @@ fn emit_split_group(
 ///
 /// Explicit InputRefs should never reach here — groups with Explicit inputs
 /// are classified as Whole (not Split) to avoid the vector-slicing issue.
-fn clone_input_for_split(input: &crate::nano_graph::pattern::GroupInput) -> crate::nano_graph::pattern::GroupInput {
+fn clone_input_for_split(
+    input: &crate::nano_graph::pattern::GroupInput,
+) -> crate::nano_graph::pattern::GroupInput {
     debug_assert!(
         !matches!(input.input_ref, InputRef::Explicit(_)),
         "Explicit InputRef should not appear in a split group"
@@ -2744,7 +2768,10 @@ mod tests {
                 compute_dtype: NumericDType::F32,
             },
             vec![],
-            vec![gi(InputRef::affine(weights, 1)), gi(InputRef::modular(inp, 1, k))],
+            vec![
+                gi(InputRef::affine(weights, 1)),
+                gi(InputRef::modular(inp, 1, k)),
+            ],
         );
 
         // Reduce: M output atoms, each sums K consecutive mul outputs.
@@ -2779,7 +2806,10 @@ mod tests {
                 compute_dtype: NumericDType::F32,
             },
             vec![],
-            vec![gi(InputRef::affine(reduce, 1)), gi(InputRef::affine(bias, 1))],
+            vec![
+                gi(InputRef::affine(reduce, 1)),
+                gi(InputRef::affine(bias, 1)),
+            ],
         );
 
         g.outputs = vec![g.atom_to_range(add)];
@@ -3285,7 +3315,10 @@ mod tests {
                 compute_dtype: NumericDType::F32,
             },
             vec![],
-            vec![gi(InputRef::affine(weights, 1)), gi(InputRef::modular(inp, 1, k))],
+            vec![
+                gi(InputRef::affine(weights, 1)),
+                gi(InputRef::modular(inp, 1, k)),
+            ],
         );
         let reduce = g.push_group(
             m,
@@ -3314,7 +3347,10 @@ mod tests {
                 compute_dtype: NumericDType::F32,
             },
             vec![],
-            vec![gi(InputRef::affine(reduce, 1)), gi(InputRef::affine(bias, 1))],
+            vec![
+                gi(InputRef::affine(reduce, 1)),
+                gi(InputRef::affine(bias, 1)),
+            ],
         );
         g.outputs = vec![g.atom_to_range(add)];
         let it = vec![InputTensor {
@@ -3402,7 +3438,9 @@ mod tests {
                     "reduce_stride should be relayouted to 1 for lane-local splits"
                 );
             }
-            if let Some(InputRef::Strided { dim_strides, .. }) = rg.inputs.first().map(|gi| &gi.input_ref) {
+            if let Some(InputRef::Strided { dim_strides, .. }) =
+                rg.inputs.first().map(|gi| &gi.input_ref)
+            {
                 assert_eq!(
                     dim_strides.len(),
                     1,
@@ -3575,7 +3613,10 @@ mod tests {
                 compute_dtype: NumericDType::F32,
             },
             vec![],
-            vec![gi(InputRef::affine(x_centered, 1)), gi(InputRef::Broadcast(two))],
+            vec![
+                gi(InputRef::affine(x_centered, 1)),
+                gi(InputRef::Broadcast(two)),
+            ],
         );
 
         // Step 5: ReduceSum of pow2 → M variance values.
@@ -3601,7 +3642,10 @@ mod tests {
                 compute_dtype: NumericDType::F32,
             },
             vec![],
-            vec![gi(InputRef::affine(var_sum, 1)), gi(InputRef::Broadcast(inv_d))],
+            vec![
+                gi(InputRef::affine(var_sum, 1)),
+                gi(InputRef::Broadcast(inv_d)),
+            ],
         );
         let eps = g.push_group(
             1,
@@ -3618,7 +3662,10 @@ mod tests {
                 compute_dtype: NumericDType::F32,
             },
             vec![],
-            vec![gi(InputRef::affine(var_mean, 1)), gi(InputRef::Broadcast(eps))],
+            vec![
+                gi(InputRef::affine(var_mean, 1)),
+                gi(InputRef::Broadcast(eps)),
+            ],
         );
         let sqrt_var = g.push_group(
             m,
@@ -3801,7 +3848,10 @@ mod tests {
                 compute_dtype: NumericDType::F32,
             },
             vec![],
-            vec![gi(InputRef::affine(w1, 1)), gi(InputRef::modular(inp, 1, k1))],
+            vec![
+                gi(InputRef::affine(w1, 1)),
+                gi(InputRef::modular(inp, 1, k1)),
+            ],
         );
         let red1 = g.push_group(
             m,
@@ -3844,7 +3894,10 @@ mod tests {
                 compute_dtype: NumericDType::F32,
             },
             vec![],
-            vec![gi(InputRef::affine(w2, 1)), gi(InputRef::modular(act, 1, m))],
+            vec![
+                gi(InputRef::affine(w2, 1)),
+                gi(InputRef::modular(act, 1, m)),
+            ],
         );
         let red2 = g.push_group(
             k2,
@@ -4055,7 +4108,10 @@ mod tests {
                 compute_dtype: NumericDType::F32,
             },
             vec![],
-            vec![gi(InputRef::affine(weights, 1)), gi(InputRef::modular(inp, 1, k))],
+            vec![
+                gi(InputRef::affine(weights, 1)),
+                gi(InputRef::modular(inp, 1, k)),
+            ],
         );
         let reduce = g.push_group(
             m,

@@ -106,11 +106,7 @@ impl MilliOp for CastLike {
             let first_elem = crate::scalar_info::ScalarInfo::Symbolic(
                 crate::symbolic_scalar::SymbolicScalar::new(out_dtype, rng),
             );
-            TensorInfo::new_from_first_element_and_rank(
-                first_elem,
-                data_info.rank(),
-                rng,
-            )
+            TensorInfo::new_from_first_element_and_rank(first_elem, data_info.rank(), rng)
         };
 
         // If data is concrete and we know target dtype, try constant fold via nano+pool_eval path.

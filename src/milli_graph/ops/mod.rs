@@ -88,7 +88,7 @@ use crate::graph::{GlobalId, Node, NodeMetadata, NodeSlotEditError, SlotDirectio
 use crate::milli_graph::MilliOpGraphError;
 use crate::pool::Pool;
 use crate::scalar_info::ScalarInfoTyped;
-use crate::symbolic_scalar::{SymbolicScalarTyped};
+use crate::symbolic_scalar::SymbolicScalarTyped;
 use crate::tensor_info::{TensorInfo, TensorInfoTypedRanked};
 use crate::tensor_rank::DynRank;
 use rand::Rng;
@@ -233,9 +233,7 @@ pub fn constant_fold<'a, 'p: 'a, P: Pool + 'p>(
                 .map(|i| match hint.dim_if_known(i) {
                     Some(d) => crate::scalar_info::ScalarInfoTyped::Numeric(d),
                     None => crate::scalar_info::ScalarInfoTyped::Symbolic(
-                        crate::symbolic_scalar::SymbolicScalarTyped::new(
-                            &mut rand::rng(),
-                        ),
+                        crate::symbolic_scalar::SymbolicScalarTyped::new(&mut rand::rng()),
                     ),
                 })
                 .collect();
@@ -247,9 +245,7 @@ pub fn constant_fold<'a, 'p: 'a, P: Pool + 'p>(
                     crate::scalar_info::ScalarInfo::Numeric(
                         crate::numeric_scalar::NumericScalar::zero(dtype),
                     ),
-                    crate::symbolic_scalar::SymbolicScalarTyped::new(
-                        &mut rand::rng(),
-                    ),
+                    crate::symbolic_scalar::SymbolicScalarTyped::new(&mut rand::rng()),
                 )),
             );
         }
@@ -556,9 +552,7 @@ fn infer_multidirectional_broadcasting_rank(
     }
     match output_rank {
         Some(x) => Ok(ScalarInfoTyped::Numeric(x as u32)),
-        None => Ok(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(
-            rng,
-        ))),
+        None => Ok(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(rng))),
     }
 }
 
@@ -623,9 +617,8 @@ fn infer_multidirectional_broadcasting_shape(
                                 match dim.try_eq(&local_dim) {
                                     None => {
                                         // Must use new unknown dimension
-                                        dim = ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(
-                                            rng,
-                                        ))
+                                        dim =
+                                            ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(rng))
                                     }
                                     Some(is_same) => {
                                         if is_same {

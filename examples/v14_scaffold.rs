@@ -450,7 +450,7 @@ fn main() {
     profiler.phase("plan_setup");
 
     let tensor_map = build_tensor_map(
-        &result.tensor_map,
+        &result.graph.tensor_map,
         &milli_graph.input_map,
         &input_info,
         &tensors_by_name,
@@ -489,7 +489,7 @@ fn main() {
 
     // ── Step 6: Build model outputs ──────────────────────────────────────────
 
-    let model_outputs = build_model_outputs(&milli_graph, &result.tensor_map);
+    let model_outputs = build_model_outputs(&milli_graph, &result.graph.tensor_map);
     println!("\n=== Model Outputs ({}) ===", model_outputs.len());
     for out in &model_outputs {
         println!(
@@ -732,7 +732,7 @@ fn main() {
                 .get(&om.tensor_id)
                 .copied()
                 .unwrap_or(om.tensor_id);
-            if let Some(tam) = result.tensor_map.get(&int_id) {
+            if let Some(tam) = result.graph.tensor_map.get(&int_id) {
                 ranges.extend(tam.atom_ranges(&result.graph));
             }
         }
@@ -829,7 +829,7 @@ fn main() {
     }
 
     // Save tensor_map and graph for output comparison before trivial plan consumes result.
-    let lower_tensor_map_for_compare = result.tensor_map.clone();
+    let lower_tensor_map_for_compare = result.graph.tensor_map.clone();
     let graph_for_compare = result.graph.clone();
 
     // ── Step 8: Build trivial execution plan (1 phase, 1 lane) ─────────────
@@ -1097,7 +1097,7 @@ fn build_tensor_map(
                     count: tam.count,
                     dtype,
                 },
-                sym_dims: tam.sym_dims.clone(),
+                sym_dims: tam.sym_dims(),
                 kind,
             },
         );
@@ -1124,7 +1124,7 @@ fn build_model_outputs(
                         count: tam.count,
                         dtype: tam.dtype,
                     },
-                    sym_dims: tam.sym_dims.clone(),
+                    sym_dims: tam.sym_dims(),
                 });
             }
         }

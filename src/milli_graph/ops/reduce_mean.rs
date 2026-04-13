@@ -1,4 +1,3 @@
-use rand::Rng;
 use crate::graph::{GlobalId, Node};
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
@@ -8,6 +7,7 @@ use crate::nano_graph::pattern::{GroupInput, InputRef};
 use crate::numeric_dtype::NumericDType;
 use crate::numeric_scalar::NumericScalar;
 use crate::pool::Pool;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -171,12 +171,7 @@ impl ReduceMean {
         // Update tensor_map to point to the divided result.
         ctx.tensor_map.insert(
             out_id,
-            TensorAtomMap::simple(
-                base_id,
-                sum_map.count,
-                out_dt,
-                sum_map.dims,
-            ),
+            TensorAtomMap::simple(base_id, sum_map.count, out_dt, sum_map.dims),
         );
         crate::milli_graph::ops::LowerResult::Lowered
     }
@@ -271,9 +266,9 @@ impl MilliOp for ReduceMean {
                         ))
                     }
                 }
-                _ => ScalarInfoTyped::Symbolic(crate::symbolic_scalar::SymbolicScalarTyped::new(
-                    rng,
-                )),
+                _ => {
+                    ScalarInfoTyped::Symbolic(crate::symbolic_scalar::SymbolicScalarTyped::new(rng))
+                }
             };
 
             let first_elem = crate::scalar_info::ScalarInfo::Symbolic(

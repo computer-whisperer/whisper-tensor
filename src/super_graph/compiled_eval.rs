@@ -565,10 +565,7 @@ pub(crate) fn relayout_to_flat<'a, 'p, P: Pool + 'p>(
 ) -> Result<NumericTensorCOW<'a, 'p, DynRank, P>, String> {
     let element_bits = tami.dtype.total_bits() as u64;
     let known_strides_v = tami.known_strides();
-    let strides_bits: Vec<u64> = known_strides_v
-        .iter()
-        .map(|&s| s * element_bits)
-        .collect();
+    let strides_bits: Vec<u64> = known_strides_v.iter().map(|&s| s * element_bits).collect();
     let target = TensorLayout::<DynRank>::ElementStrided {
         shape: tami.known_dims(),
         dtype: tami.dtype,
@@ -658,8 +655,13 @@ pub(crate) fn prepare_compiled_inputs<'a, 'p, P: Pool + 'p>(
                     .map_err(|e| format!("slice failed for segment: {e:?}"))?;
 
                 // Build DimKind entries with segment strides.
-                let seg_dim_kinds: Vec<DimKind> = seg_dim_sizes.iter().zip(seg_strides.iter())
-                    .map(|(&sz, &st)| DimKind::Known { size: sz, stride: st })
+                let seg_dim_kinds: Vec<DimKind> = seg_dim_sizes
+                    .iter()
+                    .zip(seg_strides.iter())
+                    .map(|(&sz, &st)| DimKind::Known {
+                        size: sz,
+                        stride: st,
+                    })
                     .collect();
                 let seg_tami = TensorAtomMapInfo {
                     base_id: seg_base,

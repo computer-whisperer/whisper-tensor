@@ -624,7 +624,10 @@ fn binary_f32_test(op: ScalarBinOp, a_vals: &[f32], b_vals: &[f32]) -> Vec<Vec<u
             compute_dtype: NumericDType::F32,
         },
         vec![],
-        vec![GroupInput::scalar(InputRef::affine(inp_a, 1)), GroupInput::scalar(InputRef::affine(inp_b, 1))],
+        vec![
+            GroupInput::scalar(InputRef::affine(inp_a, 1)),
+            GroupInput::scalar(InputRef::affine(inp_b, 1)),
+        ],
     );
     let a_bytes = f32_input_bytes(a_vals);
     let b_bytes = f32_input_bytes(b_vals);
@@ -825,7 +828,10 @@ fn binary_i32_test(op: ScalarBinOp, a_vals: &[i32], b_vals: &[i32]) -> Vec<Vec<u
             compute_dtype: NumericDType::I32,
         },
         vec![],
-        vec![GroupInput::scalar(InputRef::affine(inp_a, 1)), GroupInput::scalar(InputRef::affine(inp_b, 1))],
+        vec![
+            GroupInput::scalar(InputRef::affine(inp_a, 1)),
+            GroupInput::scalar(InputRef::affine(inp_b, 1)),
+        ],
     );
     let a_bytes: Vec<u8> = a_vals.iter().flat_map(|v| v.to_le_bytes()).collect();
     let b_bytes: Vec<u8> = b_vals.iter().flat_map(|v| v.to_le_bytes()).collect();
@@ -902,7 +908,10 @@ fn binary_i32_greater() {
             compute_dtype: NumericDType::I32,
         },
         vec![],
-        vec![GroupInput::scalar(InputRef::affine(inp_a, 1)), GroupInput::scalar(InputRef::affine(inp_b, 1))],
+        vec![
+            GroupInput::scalar(InputRef::affine(inp_a, 1)),
+            GroupInput::scalar(InputRef::affine(inp_b, 1)),
+        ],
     );
     let a: Vec<u8> = [5i32, 3, 3, -1]
         .iter()

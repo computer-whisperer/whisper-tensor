@@ -1,8 +1,8 @@
-use rand::Rng;
 use crate::graph::{GlobalId, Node};
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
 use crate::pool::Pool;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -170,26 +170,19 @@ impl MilliOp for Reshape {
                         if let Some(Some(d)) = ds.get(i) {
                             hint_dims.push(ScalarInfoTyped::Numeric(*d));
                         } else {
-                            hint_dims.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(
-                                rng,
-                            )));
+                            hint_dims
+                                .push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(rng)));
                         }
                     } else {
-                        hint_dims.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(
-                            rng,
-                        )));
+                        hint_dims.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(rng)));
                     }
                 } else if sv == -1 {
                     has_minus_one = true;
-                    hint_dims.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(
-                        rng,
-                    )));
+                    hint_dims.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(rng)));
                 } else if sv > 0 {
                     hint_dims.push(ScalarInfoTyped::Numeric(sv as u64));
                 } else {
-                    hint_dims.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(
-                        rng,
-                    )));
+                    hint_dims.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(rng)));
                 }
             }
             // Try to resolve -1 dimension
@@ -245,21 +238,16 @@ impl MilliOp for Reshape {
                         if let Some(Some(d)) = ds.get(i) {
                             output_dims.push(ScalarInfoTyped::Numeric(*d));
                         } else {
-                            output_dims.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(
-                                rng,
-                            )));
+                            output_dims
+                                .push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(rng)));
                         }
                     } else {
-                        output_dims.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(
-                            rng,
-                        )));
+                        output_dims.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(rng)));
                     }
                 } else if sv == -1 {
                     has_minus_one = true;
                     // Placeholder, will try to resolve below
-                    output_dims.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(
-                        rng,
-                    )));
+                    output_dims.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(rng)));
                 } else if sv > 0 {
                     output_dims.push(ScalarInfoTyped::Numeric(sv as u64));
                 } else {

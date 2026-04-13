@@ -13,9 +13,9 @@ use crate::numeric_tensor::{NumericTensor as NewNumericTensor, NumericTensorView
 use crate::pool::{Pool, SystemPool};
 use crate::scalar_info::{ScalarInfo, ScalarInfoTyped};
 use crate::symbolic_scalar::{SymbolicScalar, SymbolicScalarTyped};
-use rand::Rng;
 use crate::tensor_info::{MinimalTensor, ShapedTensor, TensorInfo, TensorInfoRanked};
 use crate::tensor_rank::DynRank;
+use rand::Rng;
 use std::collections::HashMap;
 use std::fmt;
 
@@ -134,11 +134,7 @@ fn ablate_view<'a, 'p, P: Pool + 'p>(
             let symbolic_dims: Vec<ScalarInfoTyped<u64>> = (0..rank)
                 .map(|_| ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(rng)))
                 .collect();
-            TensorInfo::Ranked(TensorInfoRanked::new(
-                first_element,
-                symbolic_dims,
-                rng,
-            ))
+            TensorInfo::Ranked(TensorInfoRanked::new(first_element, symbolic_dims, rng))
         }
         AblationLevel::Minimal => {
             let first_element = ScalarInfo::Symbolic(SymbolicScalar::new(dtype, rng));

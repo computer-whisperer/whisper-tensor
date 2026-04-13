@@ -148,7 +148,14 @@ impl Gather {
         let Some(out_dims_v) = ctx.classify_dims(out_info) else {
             return crate::milli_graph::ops::LowerResult::Unsupported;
         };
-        let out_count: u64 = out_dims_v.iter().filter_map(|d| match d { DimKind::Known { size, .. } => Some(*size), _ => None }).product::<u64>().max(1);
+        let out_count: u64 = out_dims_v
+            .iter()
+            .filter_map(|d| match d {
+                DimKind::Known { size, .. } => Some(*size),
+                _ => None,
+            })
+            .product::<u64>()
+            .max(1);
 
         let out_dt = NanoLoweringContext::ndt(out_info);
 
@@ -298,12 +305,7 @@ impl Gather {
 
             ctx.tensor_map.insert(
                 out_id,
-                TensorAtomMap::simple(
-                    base_id,
-                    d_total,
-                    out_dt,
-                    out_dims_v,
-                ),
+                TensorAtomMap::simple(base_id, d_total, out_dt, out_dims_v),
             );
         } else {
             // Indices are fully known (constant). out_count = indices_count * D_total.
@@ -371,7 +373,10 @@ impl Gather {
                     compute_dtype: NumericDType::I64,
                 },
                 vec![],
-                vec![GroupInput::scalar(indices_ref), GroupInput::scalar(InputRef::Broadcast(stride_lit))],
+                vec![
+                    GroupInput::scalar(indices_ref),
+                    GroupInput::scalar(InputRef::Broadcast(stride_lit)),
+                ],
             );
 
             // Column offset literals: d_total singletons with values [0, 1, ..., d_total-1].
@@ -419,12 +424,7 @@ impl Gather {
 
             ctx.tensor_map.insert(
                 out_id,
-                TensorAtomMap::simple(
-                    base_id,
-                    out_count,
-                    out_dt,
-                    out_dims_v,
-                ),
+                TensorAtomMap::simple(base_id, out_count, out_dt, out_dims_v),
             );
         }
         crate::milli_graph::ops::LowerResult::Lowered

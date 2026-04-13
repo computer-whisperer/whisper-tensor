@@ -72,8 +72,21 @@ impl Concat {
         let Some(out_dims) = ctx.classify_dims(out_info) else {
             return crate::milli_graph::ops::LowerResult::Unsupported;
         };
-        let out_count: u64 = out_dims.iter().filter_map(|d| match d { DimKind::Known { size, .. } => Some(*size), _ => None }).product::<u64>().max(1);
-        let out_known_dims: Vec<u64> = out_dims.iter().filter_map(|d| match d { DimKind::Known { size, .. } => Some(*size), _ => None }).collect();
+        let out_count: u64 = out_dims
+            .iter()
+            .filter_map(|d| match d {
+                DimKind::Known { size, .. } => Some(*size),
+                _ => None,
+            })
+            .product::<u64>()
+            .max(1);
+        let out_known_dims: Vec<u64> = out_dims
+            .iter()
+            .filter_map(|d| match d {
+                DimKind::Known { size, .. } => Some(*size),
+                _ => None,
+            })
+            .collect();
 
         // Normalize axis.
         let rank = out_dims.len();
@@ -280,22 +293,28 @@ impl MilliOp for Concat {
                     }
                     match total {
                         Some(v) => out_dims.push(ScalarInfoTyped::Numeric(v)),
-                        None => out_dims.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(
-                            rng,
-                        ))),
+                        None => {
+                            out_dims.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(rng)))
+                        }
                     }
                 } else {
                     // Non-concat dim: propagate from inputs. Prefer concrete,
                     // then reuse an existing symbolic scalar so that the same
                     // GraphConstant is shared between input and output TAMIs.
-                    if let Some(v) = input_infos.iter().filter_map(|info| info.dim_if_known(d)).next() {
+                    if let Some(v) = input_infos
+                        .iter()
+                        .filter_map(|info| info.dim_if_known(d))
+                        .next()
+                    {
                         out_dims.push(ScalarInfoTyped::Numeric(v));
-                    } else if let Some(sym) = input_infos.iter().filter_map(|info| {
-                        match info.dim_scalar(d)? {
+                    } else if let Some(sym) = input_infos
+                        .iter()
+                        .filter_map(|info| match info.dim_scalar(d)? {
                             ScalarInfoTyped::Symbolic(s) => Some(s),
                             _ => None,
-                        }
-                    }).next() {
+                        })
+                        .next()
+                    {
                         out_dims.push(ScalarInfoTyped::Symbolic(sym));
                     } else {
                         out_dims.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(rng)));
@@ -346,20 +365,26 @@ impl MilliOp for Concat {
                     }
                     match total {
                         Some(v) => out_dims.push(ScalarInfoTyped::Numeric(v)),
-                        None => out_dims.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(
-                            rng,
-                        ))),
+                        None => {
+                            out_dims.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(rng)))
+                        }
                     }
                 } else {
                     // Non-concat axis: propagate from inputs.
-                    if let Some(v) = input_infos.iter().filter_map(|info| info.dim_if_known(d)).next() {
+                    if let Some(v) = input_infos
+                        .iter()
+                        .filter_map(|info| info.dim_if_known(d))
+                        .next()
+                    {
                         out_dims.push(ScalarInfoTyped::Numeric(v));
-                    } else if let Some(sym) = input_infos.iter().filter_map(|info| {
-                        match info.dim_scalar(d)? {
+                    } else if let Some(sym) = input_infos
+                        .iter()
+                        .filter_map(|info| match info.dim_scalar(d)? {
                             ScalarInfoTyped::Symbolic(s) => Some(s),
                             _ => None,
-                        }
-                    }).next() {
+                        })
+                        .next()
+                    {
                         out_dims.push(ScalarInfoTyped::Symbolic(sym));
                     } else {
                         out_dims.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(rng)));
@@ -375,11 +400,7 @@ impl MilliOp for Concat {
                 crate::symbolic_scalar::SymbolicScalar::new(out_dtype, rng),
             );
             let out_rank = input_infos[0].rank();
-            let out_info = TensorInfo::new_from_first_element_and_rank(
-                first_elem,
-                out_rank,
-                rng,
-            );
+            let out_info = TensorInfo::new_from_first_element_and_rank(first_elem, out_rank, rng);
             Ok(vec![(self.output, out_info)])
         }
     }

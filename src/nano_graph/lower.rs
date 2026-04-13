@@ -11,7 +11,9 @@ use crate::graph::{GlobalId, Graph, Node};
 use crate::milli_graph::MilliOpGraph;
 use crate::milli_graph::ops::AnyMilliOp;
 use crate::nano_graph::ops::ScalarOp;
-use crate::nano_graph::pattern::{AtomId, GraphConstantId, GroupInput, InputRef, NanoGraph, SymDim};
+use crate::nano_graph::pattern::{
+    AtomId, GraphConstantId, GroupInput, InputRef, NanoGraph, SymDim,
+};
 use crate::numeric_dtype::NumericDType;
 use crate::numeric_scalar::NumericScalar;
 use crate::pool::SystemPool;
@@ -202,38 +204,53 @@ impl TensorAtomMapInfo {
             base_id,
             count,
             dtype,
-            dims: vec![DimKind::Known { size: count, stride: 1 }],
+            dims: vec![DimKind::Known {
+                size: count,
+                stride: 1,
+            }],
             segments: vec![],
         }
     }
 
     /// Extract just the known dim sizes, in order.
     pub fn known_dims(&self) -> Vec<u64> {
-        self.dims.iter().filter_map(|d| match d {
-            DimKind::Known { size, .. } => Some(*size),
-            DimKind::Sym { .. } => None,
-        }).collect()
+        self.dims
+            .iter()
+            .filter_map(|d| match d {
+                DimKind::Known { size, .. } => Some(*size),
+                DimKind::Sym { .. } => None,
+            })
+            .collect()
     }
 
     /// Extract just the known dim strides, in order.
     pub fn known_strides(&self) -> Vec<u64> {
-        self.dims.iter().filter_map(|d| match d {
-            DimKind::Known { stride, .. } => Some(*stride),
-            DimKind::Sym { .. } => None,
-        }).collect()
+        self.dims
+            .iter()
+            .filter_map(|d| match d {
+                DimKind::Known { stride, .. } => Some(*stride),
+                DimKind::Sym { .. } => None,
+            })
+            .collect()
     }
 
     /// Extract the GraphConstantIds for symbolic dims, in order.
     pub fn sym_dims(&self) -> Vec<GraphConstantId> {
-        self.dims.iter().filter_map(|d| match d {
-            DimKind::Sym { gc, .. } => Some(*gc),
-            DimKind::Known { .. } => None,
-        }).collect()
+        self.dims
+            .iter()
+            .filter_map(|d| match d {
+                DimKind::Sym { gc, .. } => Some(*gc),
+                DimKind::Known { .. } => None,
+            })
+            .collect()
     }
 
     /// Number of symbolic dimensions.
     pub fn sym_dim_count(&self) -> usize {
-        self.dims.iter().filter(|d| matches!(d, DimKind::Sym { .. })).count()
+        self.dims
+            .iter()
+            .filter(|d| matches!(d, DimKind::Sym { .. }))
+            .count()
     }
 
     /// Returns true if this tensor's atoms are contiguous with row-major strides.
@@ -364,12 +381,7 @@ pub struct ConcatSegment {
 
 impl TensorAtomMap {
     /// Create a simple (non-segmented) tensor atom map.
-    pub fn simple(
-        base_id: AtomId,
-        count: u64,
-        dtype: NumericDType,
-        dims: Vec<DimKind>,
-    ) -> Self {
+    pub fn simple(base_id: AtomId, count: u64, dtype: NumericDType, dims: Vec<DimKind>) -> Self {
         Self {
             base_id,
             count,
@@ -415,40 +427,62 @@ impl TensorAtomMap {
     }
 
     /// Build a `Vec<DimKind>` with row-major strides for the known dims.
-    pub fn dims_row_major(known_dims: &[u64], sym_dims: &[GraphConstantId], dim_positions: &[(bool, usize)]) -> Vec<DimKind> {
+    pub fn dims_row_major(
+        known_dims: &[u64],
+        sym_dims: &[GraphConstantId],
+        dim_positions: &[(bool, usize)],
+    ) -> Vec<DimKind> {
         // Compute row-major strides for known dims.
         let strides = Self::compute_strides(known_dims);
-        dim_positions.iter().map(|&(is_sym, idx)| {
-            if is_sym {
-                DimKind::Sym { gc: sym_dims[idx], axis: idx }
-            } else {
-                DimKind::Known { size: known_dims[idx], stride: strides[idx] }
-            }
-        }).collect()
+        dim_positions
+            .iter()
+            .map(|&(is_sym, idx)| {
+                if is_sym {
+                    DimKind::Sym {
+                        gc: sym_dims[idx],
+                        axis: idx,
+                    }
+                } else {
+                    DimKind::Known {
+                        size: known_dims[idx],
+                        stride: strides[idx],
+                    }
+                }
+            })
+            .collect()
     }
 
     /// Extract known dim sizes from dims.
     pub fn known_dims(&self) -> Vec<u64> {
-        self.dims.iter().filter_map(|d| match d {
-            DimKind::Known { size, .. } => Some(*size),
-            DimKind::Sym { .. } => None,
-        }).collect()
+        self.dims
+            .iter()
+            .filter_map(|d| match d {
+                DimKind::Known { size, .. } => Some(*size),
+                DimKind::Sym { .. } => None,
+            })
+            .collect()
     }
 
     /// Extract known dim strides from dims.
     pub fn known_strides(&self) -> Vec<u64> {
-        self.dims.iter().filter_map(|d| match d {
-            DimKind::Known { stride, .. } => Some(*stride),
-            DimKind::Sym { .. } => None,
-        }).collect()
+        self.dims
+            .iter()
+            .filter_map(|d| match d {
+                DimKind::Known { stride, .. } => Some(*stride),
+                DimKind::Sym { .. } => None,
+            })
+            .collect()
     }
 
     /// Extract GraphConstantIds for symbolic dims.
     pub fn sym_dims(&self) -> Vec<GraphConstantId> {
-        self.dims.iter().filter_map(|d| match d {
-            DimKind::Sym { gc, .. } => Some(*gc),
-            DimKind::Known { .. } => None,
-        }).collect()
+        self.dims
+            .iter()
+            .filter_map(|d| match d {
+                DimKind::Sym { gc, .. } => Some(*gc),
+                DimKind::Known { .. } => None,
+            })
+            .collect()
     }
 
     /// Returns true if this tensor's atoms are a contiguous range base..base+count
@@ -532,7 +566,10 @@ impl TensorAtomMap {
                     return seg.base_id.offset(offset);
                 }
             }
-            panic!("Concat segment not found for index {} on dim {}", concat_idx, concat_dim);
+            panic!(
+                "Concat segment not found for index {} on dim {}",
+                concat_idx, concat_dim
+            );
         }
 
         let mut offset = 0u64;
@@ -703,10 +740,7 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
     ///
     /// For symbolic dims, preserves identity: two dims with the same
     /// `symbol_id` map to the same `GraphConstantId`.
-    pub fn classify_dims(
-        &mut self,
-        info: &LowerTensorInfo<'_, 'p, P>,
-    ) -> Option<Vec<DimKind>> {
+    pub fn classify_dims(&mut self, info: &LowerTensorInfo<'_, 'p, P>) -> Option<Vec<DimKind>> {
         use crate::scalar_info::ScalarInfoTyped;
 
         let rank = info.rank_if_known()?;
@@ -728,7 +762,13 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
                 Some(ScalarInfoTyped::Numeric(size)) => {
                     let ki = known_sizes.len();
                     known_sizes.push(size);
-                    entries.push(DimEntry { is_sym: false, known_idx: ki, sym_axis: 0, gc: None, size });
+                    entries.push(DimEntry {
+                        is_sym: false,
+                        known_idx: ki,
+                        sym_axis: 0,
+                        gc: None,
+                        size,
+                    });
                 }
                 Some(ScalarInfoTyped::Symbolic(sym)) => {
                     let sid = sym.symbol_id();
@@ -741,13 +781,25 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
                     };
                     let axis = sym_count;
                     sym_count += 1;
-                    entries.push(DimEntry { is_sym: true, known_idx: 0, sym_axis: axis, gc: Some(gc), size: 0 });
+                    entries.push(DimEntry {
+                        is_sym: true,
+                        known_idx: 0,
+                        sym_axis: axis,
+                        gc: Some(gc),
+                        size: 0,
+                    });
                 }
                 None => {
                     let gc = self.alloc_sym_dim();
                     let axis = sym_count;
                     sym_count += 1;
-                    entries.push(DimEntry { is_sym: true, known_idx: 0, sym_axis: axis, gc: Some(gc), size: 0 });
+                    entries.push(DimEntry {
+                        is_sym: true,
+                        known_idx: 0,
+                        sym_axis: axis,
+                        gc: Some(gc),
+                        size: 0,
+                    });
                 }
             }
         }
@@ -755,13 +807,22 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
         // Compute row-major strides for known dims.
         let strides = TensorAtomMap::compute_strides(&known_sizes);
 
-        let dims: Vec<DimKind> = entries.iter().map(|e| {
-            if e.is_sym {
-                DimKind::Sym { gc: e.gc.unwrap(), axis: e.sym_axis }
-            } else {
-                DimKind::Known { size: e.size, stride: strides[e.known_idx] }
-            }
-        }).collect();
+        let dims: Vec<DimKind> = entries
+            .iter()
+            .map(|e| {
+                if e.is_sym {
+                    DimKind::Sym {
+                        gc: e.gc.unwrap(),
+                        axis: e.sym_axis,
+                    }
+                } else {
+                    DimKind::Known {
+                        size: e.size,
+                        stride: strides[e.known_idx],
+                    }
+                }
+            })
+            .collect();
 
         Some(dims)
     }
@@ -801,7 +862,13 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
         }
 
         // At this point all dims are Known (we early-returned for sym dims above).
-        let count: u64 = dims.iter().filter_map(|d| match d { DimKind::Known { size, .. } => Some(*size), _ => None }).product();
+        let count: u64 = dims
+            .iter()
+            .filter_map(|d| match d {
+                DimKind::Known { size, .. } => Some(*size),
+                _ => None,
+            })
+            .product();
         let count = count.max(1) as usize;
         let dt = Self::ndt(info);
 
@@ -815,28 +882,20 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
 
         if n == 1 {
             let scalar = concrete.read_element(0);
-            let base_id =
-                self.nano
-                    .push_group(1, dt, ScalarOp::Literal(scalar), vec![], vec![]);
-            self.tensor_map.insert(
-                id,
-                TensorAtomMap::simple(base_id, 1, dt, dims),
-            );
+            let base_id = self
+                .nano
+                .push_group(1, dt, ScalarOp::Literal(scalar), vec![], vec![]);
+            self.tensor_map
+                .insert(id, TensorAtomMap::simple(base_id, 1, dt, dims));
         } else {
             let first = concrete.read_element(0);
             let all_same = (1..n).all(|i| concrete.read_element(i) == first);
             if all_same {
-                let base_id = self.nano.push_group(
-                    n as u64,
-                    dt,
-                    ScalarOp::Literal(first),
-                    vec![],
-                    vec![],
-                );
-                self.tensor_map.insert(
-                    id,
-                    TensorAtomMap::simple(base_id, n as u64, dt, dims),
-                );
+                let base_id =
+                    self.nano
+                        .push_group(n as u64, dt, ScalarOp::Literal(first), vec![], vec![]);
+                self.tensor_map
+                    .insert(id, TensorAtomMap::simple(base_id, n as u64, dt, dims));
             } else {
                 use crate::numeric_tensor::TensorLayout;
                 let span_layout =
@@ -889,23 +948,25 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
             // Unknown rank — register a single atom.
             let dt = Self::ndt(info);
             let base_id = self.nano.add_input_tensor(id, 1, dt);
-            self.tensor_map.insert(
-                id,
-                TensorAtomMap::simple(base_id, 1, dt, vec![]),
-            );
+            self.tensor_map
+                .insert(id, TensorAtomMap::simple(base_id, 1, dt, vec![]));
             return;
         };
 
-        let known_dims: Vec<u64> = dims.iter().filter_map(|d| match d { DimKind::Known { size, .. } => Some(*size), _ => None }).collect();
+        let known_dims: Vec<u64> = dims
+            .iter()
+            .filter_map(|d| match d {
+                DimKind::Known { size, .. } => Some(*size),
+                _ => None,
+            })
+            .collect();
         let count: u64 = known_dims.iter().product::<u64>().max(1);
         let dt = Self::ndt(info);
 
         let base_id = self.nano.add_input_tensor(id, count, dt);
 
-        self.tensor_map.insert(
-            id,
-            TensorAtomMap::simple(base_id, count, dt, dims),
-        );
+        self.tensor_map
+            .insert(id, TensorAtomMap::simple(base_id, count, dt, dims));
     }
 
     /// Register a tensor as a boundary (opaque) group.
@@ -924,15 +985,25 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
                 vec![],
                 vec![],
             );
-            self.tensor_map.insert(
-                output_id,
-                TensorAtomMap::simple(base_id, 1, dt, vec![]),
-            );
+            self.tensor_map
+                .insert(output_id, TensorAtomMap::simple(base_id, 1, dt, vec![]));
             return;
         };
 
-        let sym_dims: Vec<GraphConstantId> = dims.iter().filter_map(|d| match d { DimKind::Sym { gc, .. } => Some(*gc), _ => None }).collect();
-        let known_dims: Vec<u64> = dims.iter().filter_map(|d| match d { DimKind::Known { size, .. } => Some(*size), _ => None }).collect();
+        let sym_dims: Vec<GraphConstantId> = dims
+            .iter()
+            .filter_map(|d| match d {
+                DimKind::Sym { gc, .. } => Some(*gc),
+                _ => None,
+            })
+            .collect();
+        let known_dims: Vec<u64> = dims
+            .iter()
+            .filter_map(|d| match d {
+                DimKind::Known { size, .. } => Some(*size),
+                _ => None,
+            })
+            .collect();
         let count: u64 = known_dims.iter().product::<u64>().max(1);
 
         let base_id = self.nano.push_group(
@@ -943,10 +1014,8 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
             vec![],
         );
 
-        self.tensor_map.insert(
-            output_id,
-            TensorAtomMap::simple(base_id, count, dt, dims),
-        );
+        self.tensor_map
+            .insert(output_id, TensorAtomMap::simple(base_id, count, dt, dims));
     }
 
     /// Compute an InputRef mapping consumer atoms → producer atoms.
@@ -1558,8 +1627,7 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
                 }
             })
         };
-        let any_symbolic = op.inputs().any(|id| has_symbolic(id))
-            || op.outputs().any(|id| has_symbolic(id));
+        let any_symbolic = op.inputs().any(&has_symbolic) || op.outputs().any(&has_symbolic);
 
         let all_outputs_known = !any_symbolic
             && op.outputs().all(|out_id| {
@@ -1687,12 +1755,14 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
                 vec![1]
             };
             let strides = TensorAtomMap::compute_strides(&shape);
-            let dims: Vec<DimKind> = shape.iter().zip(strides.iter()).map(|(&size, &stride)| DimKind::Known { size, stride }).collect();
+            let dims: Vec<DimKind> = shape
+                .iter()
+                .zip(strides.iter())
+                .map(|(&size, &stride)| DimKind::Known { size, stride })
+                .collect();
             let count: u64 = shape.iter().product();
-            self.tensor_map.insert(
-                out_id,
-                TensorAtomMap::simple(base_id, count, dtype, dims),
-            );
+            self.tensor_map
+                .insert(out_id, TensorAtomMap::simple(base_id, count, dtype, dims));
         }
     }
 
@@ -1783,23 +1853,25 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
         let known_dims = in_map.known_dims();
         let out_strides = TensorAtomMap::compute_strides(&known_dims);
         let mut ki = 0;
-        let out_dims: Vec<DimKind> = in_map.dims.iter().map(|d| match d {
-            DimKind::Known { size, .. } => {
-                let s = out_strides[ki];
-                ki += 1;
-                DimKind::Known { size: *size, stride: s }
-            }
-            other => *other,
-        }).collect();
+        let out_dims: Vec<DimKind> = in_map
+            .dims
+            .iter()
+            .map(|d| match d {
+                DimKind::Known { size, .. } => {
+                    let s = out_strides[ki];
+                    ki += 1;
+                    DimKind::Known {
+                        size: *size,
+                        stride: s,
+                    }
+                }
+                other => *other,
+            })
+            .collect();
 
         self.tensor_map.insert(
             out_id,
-            TensorAtomMap::simple(
-                base_id,
-                in_map.count,
-                out_dt,
-                out_dims,
-            ),
+            TensorAtomMap::simple(base_id, in_map.count, out_dt, out_dims),
         );
 
         crate::milli_graph::ops::LowerResult::Lowered
@@ -1821,7 +1893,13 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
         let Some(dims) = self.classify_dims(out_info) else {
             return crate::milli_graph::ops::LowerResult::Unsupported;
         };
-        let known_dims: Vec<u64> = dims.iter().filter_map(|d| match d { DimKind::Known { size, .. } => Some(*size), _ => None }).collect();
+        let known_dims: Vec<u64> = dims
+            .iter()
+            .filter_map(|d| match d {
+                DimKind::Known { size, .. } => Some(*size),
+                _ => None,
+            })
+            .collect();
         let count: u64 = known_dims.iter().product::<u64>().max(1);
 
         if count == in_map.count {
@@ -1835,12 +1913,7 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
             if is_row_major && in_map.segments.is_empty() {
                 self.tensor_map.insert(
                     out_id,
-                    TensorAtomMap::simple(
-                        in_map.base_id,
-                        count,
-                        Self::ndt(out_info),
-                        dims,
-                    ),
+                    TensorAtomMap::simple(in_map.base_id, count, Self::ndt(out_info), dims),
                 );
             } else {
                 let dt = Self::ndt(out_info);
@@ -1853,15 +1926,8 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
                     in_map.sym_dims(),
                     vec![GroupInput::identity(input_ref, n_sym)],
                 );
-                self.tensor_map.insert(
-                    out_id,
-                    TensorAtomMap::simple(
-                        base_id,
-                        count,
-                        dt,
-                        dims,
-                    ),
-                );
+                self.tensor_map
+                    .insert(out_id, TensorAtomMap::simple(base_id, count, dt, dims));
             }
             crate::milli_graph::ops::LowerResult::Lowered
         } else {
@@ -1917,8 +1983,20 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
             let Some(dims) = self.classify_dims(out_info) else {
                 return crate::milli_graph::ops::LowerResult::Unsupported;
             };
-            let known_dims: Vec<u64> = dims.iter().filter_map(|d| match d { DimKind::Known { size, .. } => Some(*size), _ => None }).collect();
-            let sym_dims: Vec<GraphConstantId> = dims.iter().filter_map(|d| match d { DimKind::Sym { gc, .. } => Some(*gc), _ => None }).collect();
+            let known_dims: Vec<u64> = dims
+                .iter()
+                .filter_map(|d| match d {
+                    DimKind::Known { size, .. } => Some(*size),
+                    _ => None,
+                })
+                .collect();
+            let sym_dims: Vec<GraphConstantId> = dims
+                .iter()
+                .filter_map(|d| match d {
+                    DimKind::Sym { gc, .. } => Some(*gc),
+                    _ => None,
+                })
+                .collect();
             let count: u64 = known_dims.iter().product::<u64>().max(1);
             let dt = Self::ndt(out_info);
             let input_ref = Self::pointwise_input_ref(&in_map);
@@ -1930,15 +2008,8 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
                 sym_dims,
                 vec![GroupInput::identity(input_ref, n_sym)],
             );
-            self.tensor_map.insert(
-                out_id,
-                TensorAtomMap::simple(
-                    base_id,
-                    count,
-                    dt,
-                    dims,
-                ),
-            );
+            self.tensor_map
+                .insert(out_id, TensorAtomMap::simple(base_id, count, dt, dims));
             return crate::milli_graph::ops::LowerResult::Lowered;
         } else {
             // No axes tensor and not noop → reduce all axes.
@@ -2008,7 +2079,13 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
             let Some(out_dims) = self.classify_dims(out_info) else {
                 return crate::milli_graph::ops::LowerResult::Unsupported;
             };
-            let out_sym_dims: Vec<GraphConstantId> = out_dims.iter().filter_map(|d| match d { DimKind::Sym { gc, .. } => Some(*gc), _ => None }).collect();
+            let out_sym_dims: Vec<GraphConstantId> = out_dims
+                .iter()
+                .filter_map(|d| match d {
+                    DimKind::Sym { gc, .. } => Some(*gc),
+                    _ => None,
+                })
+                .collect();
 
             let out_dt = Self::ndt(out_info);
             let in_dt = all_infos.get(&in_id).map(Self::ndt).unwrap_or(out_dt);
@@ -2034,7 +2111,9 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
                     if producer_idx == sym_axis {
                         producer_idx += 1;
                     }
-                    map.push(crate::nano_graph::pattern::SymDimMap::Identity(producer_idx));
+                    map.push(crate::nano_graph::pattern::SymDimMap::Identity(
+                        producer_idx,
+                    ));
                     producer_idx += 1;
                 }
                 map
@@ -2063,7 +2142,13 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
 
             if reduce_known_indices.is_empty() {
                 // No known axes to reduce — SymReduce output is final.
-                let out_known: Vec<u64> = out_dims.iter().filter_map(|d| match d { DimKind::Known { size, .. } => Some(*size), _ => None }).collect();
+                let out_known: Vec<u64> = out_dims
+                    .iter()
+                    .filter_map(|d| match d {
+                        DimKind::Known { size, .. } => Some(*size),
+                        _ => None,
+                    })
+                    .collect();
                 let out_count = out_known.iter().product::<u64>().max(1);
                 self.tensor_map.insert(
                     out_id,
@@ -2124,9 +2209,9 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
             }
 
             let is_affine = final_count <= 1
-                || base_ids
-                    .windows(2)
-                    .all(|w| (w[1] as i64 - w[0] as i64) == (base_ids[1] as i64 - base_ids[0] as i64));
+                || base_ids.windows(2).all(|w| {
+                    (w[1] as i64 - w[0] as i64) == (base_ids[1] as i64 - base_ids[0] as i64)
+                });
 
             let chain_ref = if is_affine && final_count > 0 {
                 let stride_i = if final_count > 1 {
@@ -2262,7 +2347,13 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
         let Some(out_dims) = self.classify_dims(out_info) else {
             return crate::milli_graph::ops::LowerResult::Unsupported;
         };
-        let out_sym_dims: Vec<GraphConstantId> = out_dims.iter().filter_map(|d| match d { DimKind::Sym { gc, .. } => Some(*gc), _ => None }).collect();
+        let out_sym_dims: Vec<GraphConstantId> = out_dims
+            .iter()
+            .filter_map(|d| match d {
+                DimKind::Sym { gc, .. } => Some(*gc),
+                _ => None,
+            })
+            .collect();
 
         let reduce_op = make_reduce_op(compute_dt, reduce_extent, reduce_stride);
         let n_sym = out_sym_dims.len();
@@ -2276,12 +2367,7 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
 
         self.tensor_map.insert(
             out_id,
-            TensorAtomMap::simple(
-                base_id,
-                out_count,
-                out_dt,
-                out_dims,
-            ),
+            TensorAtomMap::simple(base_id, out_count, out_dt, out_dims),
         );
 
         crate::milli_graph::ops::LowerResult::Lowered
@@ -2429,7 +2515,8 @@ mod tests {
                 let idx = input_ids.iter().position(|&id| id == it.tensor_id)?;
                 // Build a contiguous TAMI for the input.
                 let tam_info = result
-                    .graph.tensor_map
+                    .graph
+                    .tensor_map
                     .values()
                     .find(|t| t.base_id == it.base_id)?;
                 Some((tam_info, idx))

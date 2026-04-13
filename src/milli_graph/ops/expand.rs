@@ -72,27 +72,30 @@ impl Expand {
         let Some(dims) = ctx.classify_dims(out_info) else {
             return crate::milli_graph::ops::LowerResult::Unsupported;
         };
-        let count: u64 = dims.iter().filter_map(|d| match d { DimKind::Known { size, .. } => Some(*size), _ => None }).product::<u64>().max(1);
-        let sym_dims: Vec<_> = dims.iter().filter_map(|d| match d { DimKind::Sym { gc, .. } => Some(*gc), _ => None }).collect();
+        let count: u64 = dims
+            .iter()
+            .filter_map(|d| match d {
+                DimKind::Known { size, .. } => Some(*size),
+                _ => None,
+            })
+            .product::<u64>()
+            .max(1);
+        let sym_dims: Vec<_> = dims
+            .iter()
+            .filter_map(|d| match d {
+                DimKind::Sym { gc, .. } => Some(*gc),
+                _ => None,
+            })
+            .collect();
 
         let dt = NanoLoweringContext::ndt(out_info);
         if count == in_map.count {
             ctx.tensor_map.insert(
                 out_id,
-                TensorAtomMap::simple(
-                    in_map.base_id,
-                    count,
-                    dt,
-                    dims,
-                ),
+                TensorAtomMap::simple(in_map.base_id, count, dt, dims),
             );
         } else {
-            let out_tmp = TensorAtomMap::simple(
-                AtomId(0),
-                count,
-                dt,
-                dims.clone(),
-            );
+            let out_tmp = TensorAtomMap::simple(AtomId(0), count, dt, dims.clone());
             let input_ref =
                 ctx.compute_input_ref(&out_tmp, &in_map, out_info, in_info.unwrap_or(out_info));
 
@@ -104,15 +107,8 @@ impl Expand {
                 vec![GroupInput::mapped(input_ref, &sym_dims, &in_map.sym_dims())],
             );
 
-            ctx.tensor_map.insert(
-                out_id,
-                TensorAtomMap::simple(
-                    base_id,
-                    count,
-                    dt,
-                    dims,
-                ),
-            );
+            ctx.tensor_map
+                .insert(out_id, TensorAtomMap::simple(base_id, count, dt, dims));
         }
         crate::milli_graph::ops::LowerResult::Lowered
     }

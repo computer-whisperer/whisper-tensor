@@ -1151,9 +1151,14 @@ impl MilliOpGraph {
 
         // Run pool_eval — returns correctly-shaped output tensors.
         let t_eval = std::time::Instant::now();
-        let eval_results =
-            pool_eval::pool_eval(&lower_result.graph, &eval_inputs, &output_tami_refs, &[], pool)
-                .map_err(|e| MilliOpGraphError::InvalidInput(format!("pool_eval: {e}")))?;
+        let eval_results = pool_eval::pool_eval(
+            &lower_result.graph,
+            &eval_inputs,
+            &output_tami_refs,
+            &[],
+            pool,
+        )
+        .map_err(|e| MilliOpGraphError::InvalidInput(format!("pool_eval: {e}")))?;
         let dt_eval = t_eval.elapsed();
 
         // Map results to external IDs.

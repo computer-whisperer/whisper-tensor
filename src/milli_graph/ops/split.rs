@@ -1,9 +1,9 @@
-use rand::Rng;
 use crate::graph::{GlobalId, Node};
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
 use crate::nano_graph::lower::{DimKind, NanoLoweringContext, TensorAtomMap};
 use crate::pool::Pool;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -96,8 +96,21 @@ impl Split {
         let Some(out_dims) = ctx.classify_dims(out_info) else {
             return crate::milli_graph::ops::LowerResult::Unsupported;
         };
-        let out_count: u64 = out_dims.iter().filter_map(|d| match d { DimKind::Known { size, .. } => Some(*size), _ => None }).product::<u64>().max(1);
-        let out_known_dims: Vec<u64> = out_dims.iter().filter_map(|d| match d { DimKind::Known { size, .. } => Some(*size), _ => None }).collect();
+        let out_count: u64 = out_dims
+            .iter()
+            .filter_map(|d| match d {
+                DimKind::Known { size, .. } => Some(*size),
+                _ => None,
+            })
+            .product::<u64>()
+            .max(1);
+        let out_known_dims: Vec<u64> = out_dims
+            .iter()
+            .filter_map(|d| match d {
+                DimKind::Known { size, .. } => Some(*size),
+                _ => None,
+            })
+            .collect();
 
         // Normalize axis.
         let rank = in_map.dims.len();
@@ -181,14 +194,20 @@ impl Split {
         let base_offset = offset_along_axis * in_known_strides[split_known_idx];
         // Build output dims with input's physical strides (not row-major).
         let mut ki = 0;
-        let out_dims_with_in_strides: Vec<DimKind> = out_dims.iter().map(|d| match d {
-            DimKind::Known { size, .. } => {
-                let stride = in_known_strides[ki];
-                ki += 1;
-                DimKind::Known { size: *size, stride }
-            },
-            other => other.clone(),
-        }).collect();
+        let out_dims_with_in_strides: Vec<DimKind> = out_dims
+            .iter()
+            .map(|d| match d {
+                DimKind::Known { size, .. } => {
+                    let stride = in_known_strides[ki];
+                    ki += 1;
+                    DimKind::Known {
+                        size: *size,
+                        stride,
+                    }
+                }
+                other => *other,
+            })
+            .collect();
         ctx.tensor_map.insert(
             out_id,
             TensorAtomMap::simple(

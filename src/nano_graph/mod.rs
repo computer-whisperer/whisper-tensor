@@ -11,9 +11,7 @@ pub mod ops;
 pub mod pattern;
 pub mod pool_eval;
 
-pub use lower::{
-    ConcatSegment, DimKind, NanoLoweringContext, ReduceAccessors, TensorAtomMap,
-};
+pub use lower::{ConcatSegment, DimKind, NanoLoweringContext, ReduceAccessors, TensorAtomMap};
 pub use ops::{ReduceKind, ScalarBinOp, ScalarOp, ScalarUnaryOp};
 pub use pattern::{
     AtomGroup, AtomId, AtomRange, GroupUseCount, InputRef, NanoGraph, NanoGraphStats, SymDim,

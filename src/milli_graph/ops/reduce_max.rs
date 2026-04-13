@@ -1,8 +1,8 @@
-use rand::Rng;
 use crate::graph::{GlobalId, Node};
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
 use crate::pool::Pool;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -168,9 +168,9 @@ impl MilliOp for ReduceMax {
                         ))
                     }
                 }
-                _ => ScalarInfoTyped::Symbolic(crate::symbolic_scalar::SymbolicScalarTyped::new(
-                    rng,
-                )),
+                _ => {
+                    ScalarInfoTyped::Symbolic(crate::symbolic_scalar::SymbolicScalarTyped::new(rng))
+                }
             };
 
             let first_elem = crate::scalar_info::ScalarInfo::Symbolic(

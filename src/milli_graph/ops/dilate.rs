@@ -1,8 +1,8 @@
-use rand::Rng;
 use crate::graph::GlobalId;
 use crate::milli_graph::MilliOpGraphError;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::pool::Pool;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -189,7 +189,10 @@ impl Dilate {
                         dt,
                         ScalarOp::Identity,
                         sym_dims.clone(),
-                        vec![GroupInput::identity(InputRef::affine(in_row_base, in_strides[last] as i64), n_sym)],
+                        vec![GroupInput::identity(
+                            InputRef::affine(in_row_base, in_strides[last] as i64),
+                            n_sym,
+                        )],
                     );
                     if first_base.is_none() {
                         first_base = Some(b);
@@ -219,7 +222,10 @@ impl Dilate {
                             dt,
                             ScalarOp::Identity,
                             sym_dims.clone(),
-                            vec![GroupInput::identity(InputRef::affine(in_map.base_id.offset(atom_offset), 1), n_sym)],
+                            vec![GroupInput::identity(
+                                InputRef::affine(in_map.base_id.offset(atom_offset), 1),
+                                n_sym,
+                            )],
                         );
                         if first_base.is_none() {
                             first_base = Some(b);
@@ -257,12 +263,7 @@ impl Dilate {
         };
         ctx.tensor_map.insert(
             self.output,
-            TensorAtomMap::simple(
-                base,
-                out_total,
-                dt,
-                out_dims,
-            ),
+            TensorAtomMap::simple(base, out_total, dt, out_dims),
         );
 
         crate::milli_graph::ops::LowerResult::Lowered

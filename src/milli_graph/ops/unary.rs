@@ -1,4 +1,3 @@
-use rand::Rng;
 use crate::TrigOp;
 use crate::graph::{GlobalId, Node};
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
@@ -8,6 +7,7 @@ use crate::nano_graph::ops::{ScalarBinOp, ScalarOp, ScalarUnaryOp};
 use crate::nano_graph::pattern::{GroupInput, InputRef};
 use crate::pool::Pool;
 use crate::tensor_info::TensorInfo;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -307,12 +307,7 @@ impl SimpleUnaryOp {
 
         ctx.tensor_map.insert(
             out_id,
-            TensorAtomMap::simple(
-                base_id,
-                in_map.count,
-                dt,
-                in_map.dims.clone(),
-            ),
+            TensorAtomMap::simple(base_id, in_map.count, dt, in_map.dims.clone()),
         );
         crate::milli_graph::ops::LowerResult::Lowered
     }
@@ -383,11 +378,7 @@ impl MilliOp for SimpleUnaryOp {
                     crate::numeric_dtype::NumericDType::Bool,
                     rng,
                 ));
-                TensorInfo::new_from_first_element_and_rank(
-                    first_elem,
-                    input_info.rank(),
-                    rng,
-                )
+                TensorInfo::new_from_first_element_and_rank(first_elem, input_info.rank(), rng)
             }
             _ => {
                 // Same dtype, same shape — clone input info for shape propagation.
@@ -655,12 +646,7 @@ impl ClampMin {
 
         ctx.tensor_map.insert(
             out_id,
-            TensorAtomMap::simple(
-                base_id,
-                in_map.count,
-                dt,
-                in_map.dims.clone(),
-            ),
+            TensorAtomMap::simple(base_id, in_map.count, dt, in_map.dims.clone()),
         );
         crate::milli_graph::ops::LowerResult::Lowered
     }

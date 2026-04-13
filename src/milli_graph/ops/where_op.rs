@@ -1,4 +1,3 @@
-use rand::Rng;
 use crate::graph::{GlobalId, Node};
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
@@ -6,6 +5,7 @@ use crate::nano_graph::lower::{DimKind, NanoLoweringContext, TensorAtomMap};
 use crate::nano_graph::ops::ScalarOp;
 use crate::nano_graph::pattern::{AtomId, GroupInput};
 use crate::pool::Pool;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -78,16 +78,24 @@ impl Where {
         let Some(dims) = ctx.classify_dims(out_info) else {
             return crate::milli_graph::ops::LowerResult::Unsupported;
         };
-        let count: u64 = dims.iter().filter_map(|d| match d { DimKind::Known { size, .. } => Some(*size), _ => None }).product::<u64>().max(1);
-        let sym_dims: Vec<_> = dims.iter().filter_map(|d| match d { DimKind::Sym { gc, .. } => Some(*gc), _ => None }).collect();
+        let count: u64 = dims
+            .iter()
+            .filter_map(|d| match d {
+                DimKind::Known { size, .. } => Some(*size),
+                _ => None,
+            })
+            .product::<u64>()
+            .max(1);
+        let sym_dims: Vec<_> = dims
+            .iter()
+            .filter_map(|d| match d {
+                DimKind::Sym { gc, .. } => Some(*gc),
+                _ => None,
+            })
+            .collect();
 
         let dt = NanoLoweringContext::ndt(out_info);
-        let out_tmp = TensorAtomMap::simple(
-            AtomId(0),
-            count,
-            dt,
-            dims.clone(),
-        );
+        let out_tmp = TensorAtomMap::simple(AtomId(0), count, dt, dims.clone());
 
         let cond_info = all_infos.get(&cond_id);
         let x_info = all_infos.get(&x_id);
@@ -112,10 +120,8 @@ impl Where {
             ],
         );
 
-        ctx.tensor_map.insert(
-            out_id,
-            TensorAtomMap::simple(base_id, count, dt, dims),
-        );
+        ctx.tensor_map
+            .insert(out_id, TensorAtomMap::simple(base_id, count, dt, dims));
         crate::milli_graph::ops::LowerResult::Lowered
     }
 
@@ -182,10 +188,8 @@ impl MilliOp for Where {
             let c_shape = cond_info.shape(rng);
             let x_shape = x_info.shape(rng);
             let y_shape = y_info.shape(rng);
-            let out_rank = super::infer_multidirectional_broadcasting_rank(
-                &[c_shape, x_shape, y_shape],
-                rng,
-            )?;
+            let out_rank =
+                super::infer_multidirectional_broadcasting_rank(&[c_shape, x_shape, y_shape], rng)?;
             let first_elem = crate::scalar_info::ScalarInfo::Symbolic(
                 crate::symbolic_scalar::SymbolicScalar::new(out_dtype, rng),
             );

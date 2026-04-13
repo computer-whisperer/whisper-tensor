@@ -605,7 +605,8 @@ pub fn execute_lowered<'p, P: Pool + 'p>(
         .filter_map(|ext_id| {
             let internal_id = resolve(ext_id).unwrap_or(*ext_id);
             cached
-                .graph.tensor_map
+                .graph
+                .tensor_map
                 .get(&internal_id)
                 .map(|tami| (*ext_id, tami))
         })

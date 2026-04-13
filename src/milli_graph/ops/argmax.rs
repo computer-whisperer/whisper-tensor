@@ -363,11 +363,7 @@ impl MilliOp for ArgMax {
         let first = ScalarInfo::Symbolic(SymbolicScalar::new(out_dtype, rng));
         Ok(vec![(
             self.output,
-            TensorInfo::new_from_first_element_and_rank(
-                first,
-                input_info.rank(),
-                rng,
-            ),
+            TensorInfo::new_from_first_element_and_rank(first, input_info.rank(), rng),
         )])
     }
 }

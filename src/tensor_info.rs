@@ -6,8 +6,8 @@ use crate::numeric_tensor::NumericTensorCOW;
 use crate::pool::Pool;
 use crate::scalar_info::{ScalarInfo, ScalarInfoTyped};
 use crate::symbolic_scalar::{SymbolicScalar, SymbolicScalarTyped};
-use rand::Rng;
 use crate::tensor_rank::{DimContainer, DynRank, KnownRank, Rank, RankError};
+use rand::Rng;
 use typenum::P1;
 
 #[derive(Debug, thiserror::Error)]
@@ -85,10 +85,7 @@ impl<R: Rank> ShapedTensor<R> {
         let num_values: u64 = shape.as_slice().iter().product();
         let mut values = vec![first_element];
         for _ in 1..num_values {
-            values.push(ScalarInfo::Symbolic(SymbolicScalar::new(
-                dtype,
-                rng,
-            )));
+            values.push(ScalarInfo::Symbolic(SymbolicScalar::new(dtype, rng)));
         }
         Self {
             dtype,
@@ -124,9 +121,7 @@ where
         let num_values = shape.as_slice().iter().product();
         let mut values = vec![first_element];
         for _ in 1..num_values {
-            values.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(
-                rng,
-            )));
+            values.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(rng)));
         }
         Self::new(shape, values)
     }
@@ -269,15 +264,10 @@ impl MinimalTensor {
     pub(crate) fn rank(&self) -> &SymbolicScalarTyped<u32> {
         &self.rank
     }
-    pub(crate) fn shape(
-        &self,
-        rng: &mut impl Rng,
-    ) -> RankedTensorTyped<u64, P1> {
+    pub(crate) fn shape(&self, rng: &mut impl Rng) -> RankedTensorTyped<u64, P1> {
         RankedTensorTyped::new(
             ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(rng)),
-            [ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(
-                rng,
-            ))],
+            [ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(rng))],
         )
     }
 }
@@ -418,9 +408,9 @@ where
     ) -> Option<ScalarInfoTyped<T>> {
         match self {
             TensorInfoTypedRanked::Shaped(shaped) => shaped.get(index).clone(),
-            TensorInfoTypedRanked::Ranked(_) => Some(ScalarInfoTyped::Symbolic(
-                SymbolicScalarTyped::new(rng),
-            )),
+            TensorInfoTypedRanked::Ranked(_) => {
+                Some(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(rng)))
+            }
         }
     }
 }
@@ -596,17 +586,12 @@ impl<'a, 'p, R: Rank, P: Pool + 'p> TensorInfoRanked<'a, 'p, R, P> {
         }
     }
 
-    pub(crate) fn get(
-        &self,
-        index: &R::KnownDims,
-        rng: &mut impl Rng,
-    ) -> Option<ScalarInfo> {
+    pub(crate) fn get(&self, index: &R::KnownDims, rng: &mut impl Rng) -> Option<ScalarInfo> {
         match self {
             TensorInfoRanked::Shaped(x) => x.get(index),
-            TensorInfoRanked::Ranked(_x) => Some(ScalarInfo::Symbolic(SymbolicScalar::new(
-                self.dtype(),
-                rng,
-            ))),
+            TensorInfoRanked::Ranked(_x) => {
+                Some(ScalarInfo::Symbolic(SymbolicScalar::new(self.dtype(), rng)))
+            }
         }
     }
 
@@ -658,13 +643,11 @@ impl<'a, 'p, R: Rank, P: Pool + 'p> TensorInfoRanked<'a, 'p, R, P> {
                 TensorInfoRanked::Shaped(x) => {
                     Ok(TensorInfoRanked::Shaped(x.reshape(new_shape, pool)?))
                 }
-                TensorInfoRanked::Ranked(_x) => Ok(TensorInfoRanked::Shaped(
-                    TensorInfoShaped::Symbolic(ShapedTensor::new_symbolic(
-                        self.first_element(),
-                        new_shape,
-                        rng,
-                    )),
-                )),
+                TensorInfoRanked::Ranked(_x) => {
+                    Ok(TensorInfoRanked::Shaped(TensorInfoShaped::Symbolic(
+                        ShapedTensor::new_symbolic(self.first_element(), new_shape, rng),
+                    )))
+                }
             }
         } else {
             Ok(TensorInfoRanked::Ranked(RankedTensor::new(
@@ -705,9 +688,7 @@ impl<'a, 'p, P: Pool + 'p> TensorInfo<'a, 'p, P> {
             ScalarInfoTyped::Numeric(x) => {
                 let mut new_dims = vec![];
                 for _ in 0..x {
-                    new_dims.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(
-                        rng,
-                    )));
+                    new_dims.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(rng)));
                 }
                 TensorInfo::Ranked(TensorInfoRanked::Ranked(RankedTensor::<DynRank>::new(
                     first_element,
@@ -731,11 +712,7 @@ impl<'a, 'p, P: Pool + 'p> TensorInfo<'a, 'p, P> {
                 TensorInfoTypedShaped::Numeric(shape) => {
                     let shape = shape.to_vec();
                     TensorInfo::Ranked(TensorInfoRanked::Shaped(TensorInfoShaped::Symbolic(
-                        ShapedTensor::<DynRank>::new_symbolic(
-                            first_element,
-                            shape,
-                            rng,
-                        ),
+                        ShapedTensor::<DynRank>::new_symbolic(first_element, shape, rng),
                     )))
                 }
                 TensorInfoTypedShaped::Shaped(shape) => {
@@ -745,11 +722,9 @@ impl<'a, 'p, P: Pool + 'p> TensorInfo<'a, 'p, P> {
                     )))
                 }
             },
-            TensorInfoTypedRanked::Ranked(shape) => Self::new_from_first_element_and_rank(
-                first_element,
-                shape.shape()[0].cast(),
-                rng,
-            ),
+            TensorInfoTypedRanked::Ranked(shape) => {
+                Self::new_from_first_element_and_rank(first_element, shape.shape()[0].cast(), rng)
+            }
         }
     }
 
@@ -761,10 +736,7 @@ impl<'a, 'p, P: Pool + 'p> TensorInfo<'a, 'p, P> {
     }
 
     #[allow(dead_code)]
-    pub(crate) fn shape(
-        &self,
-        rng: &mut impl Rng,
-    ) -> TensorInfoTypedRanked<u64, P1> {
+    pub(crate) fn shape(&self, rng: &mut impl Rng) -> TensorInfoTypedRanked<u64, P1> {
         match self {
             TensorInfo::Ranked(x) => {
                 let shape = x.shape();
@@ -795,20 +767,15 @@ impl<'a, 'p, P: Pool + 'p> TensorInfo<'a, 'p, P> {
     }
 
     #[allow(dead_code)]
-    pub(crate) fn get(
-        &self,
-        index: &Vec<u64>,
-        rng: &mut impl Rng,
-    ) -> Option<ScalarInfo> {
+    pub(crate) fn get(&self, index: &Vec<u64>, rng: &mut impl Rng) -> Option<ScalarInfo> {
         if index.iter().all(|x| *x == 0) {
             return Some(self.first_element());
         }
         match self {
             TensorInfo::Ranked(tensor) => tensor.get(index, rng),
-            TensorInfo::Minimal(_) => Some(ScalarInfo::Symbolic(SymbolicScalar::new(
-                self.dtype(),
-                rng,
-            ))),
+            TensorInfo::Minimal(_) => {
+                Some(ScalarInfo::Symbolic(SymbolicScalar::new(self.dtype(), rng)))
+            }
         }
     }
 
@@ -957,9 +924,7 @@ impl<'a, 'p, P: Pool + 'p> TensorInfo<'a, 'p, P> {
                 // Optimistically cast to new rank
                 let mut new_shape = vec![];
                 for _ in 0..R::KNOWN_LEN {
-                    new_shape.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(
-                        rng,
-                    )));
+                    new_shape.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(rng)));
                 }
                 let new_shape = R::UnknownDims::try_from_slice(new_shape.as_slice())?;
                 Ok(TensorInfoRanked::Ranked(RankedTensor::new(

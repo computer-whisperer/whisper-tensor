@@ -341,15 +341,23 @@ impl SimpleBinary {
         let Some(dims) = ctx.classify_dims(out_info) else {
             return crate::milli_graph::ops::LowerResult::Unsupported;
         };
-        let count: u64 = dims.iter().filter_map(|d| match d { DimKind::Known { size, .. } => Some(*size), _ => None }).product::<u64>().max(1);
-        let sym_dims: Vec<_> = dims.iter().filter_map(|d| match d { DimKind::Sym { gc, .. } => Some(*gc), _ => None }).collect();
+        let count: u64 = dims
+            .iter()
+            .filter_map(|d| match d {
+                DimKind::Known { size, .. } => Some(*size),
+                _ => None,
+            })
+            .product::<u64>()
+            .max(1);
+        let sym_dims: Vec<_> = dims
+            .iter()
+            .filter_map(|d| match d {
+                DimKind::Sym { gc, .. } => Some(*gc),
+                _ => None,
+            })
+            .collect();
 
-        let out_tmp = TensorAtomMap::simple(
-            AtomId(0),
-            count,
-            out_dt,
-            dims.clone(),
-        );
+        let out_tmp = TensorAtomMap::simple(AtomId(0), count, out_dt, dims.clone());
 
         let a_info = all_infos.get(&a_id);
         let b_info = all_infos.get(&b_id);
@@ -369,10 +377,8 @@ impl SimpleBinary {
             ],
         );
 
-        ctx.tensor_map.insert(
-            out_id,
-            TensorAtomMap::simple(base_id, count, out_dt, dims),
-        );
+        ctx.tensor_map
+            .insert(out_id, TensorAtomMap::simple(base_id, count, out_dt, dims));
         crate::milli_graph::ops::LowerResult::Lowered
     }
 
@@ -431,26 +437,18 @@ impl MilliOp for SimpleBinary {
                 } else {
                     let a_shape = a_info.shape(rng);
                     let b_shape = b_info.shape(rng);
-                    let out_rank = super::infer_multidirectional_broadcasting_rank(
-                        &[a_shape, b_shape],
-                        rng,
-                    )?;
+                    let out_rank =
+                        super::infer_multidirectional_broadcasting_rank(&[a_shape, b_shape], rng)?;
                     let first_elem = crate::scalar_info::ScalarInfo::Symbolic(
                         crate::symbolic_scalar::SymbolicScalar::new(out_dtype, rng),
                     );
-                    TensorInfo::new_from_first_element_and_rank(
-                        first_elem,
-                        out_rank,
-                        rng,
-                    )
+                    TensorInfo::new_from_first_element_and_rank(first_elem, out_rank, rng)
                 }
             } else {
                 let a_shape = a_info.shape(rng);
                 let b_shape = b_info.shape(rng);
-                let out_rank = super::infer_multidirectional_broadcasting_rank(
-                    &[a_shape, b_shape],
-                    rng,
-                )?;
+                let out_rank =
+                    super::infer_multidirectional_broadcasting_rank(&[a_shape, b_shape], rng)?;
                 let first_elem = crate::scalar_info::ScalarInfo::Symbolic(
                     crate::symbolic_scalar::SymbolicScalar::new(out_dtype, rng),
                 );
@@ -755,16 +753,24 @@ impl Pow {
         let Some(dims) = ctx.classify_dims(out_info) else {
             return crate::milli_graph::ops::LowerResult::Unsupported;
         };
-        let count: u64 = dims.iter().filter_map(|d| match d { DimKind::Known { size, .. } => Some(*size), _ => None }).product::<u64>().max(1);
-        let sym_dims: Vec<_> = dims.iter().filter_map(|d| match d { DimKind::Sym { gc, .. } => Some(*gc), _ => None }).collect();
+        let count: u64 = dims
+            .iter()
+            .filter_map(|d| match d {
+                DimKind::Known { size, .. } => Some(*size),
+                _ => None,
+            })
+            .product::<u64>()
+            .max(1);
+        let sym_dims: Vec<_> = dims
+            .iter()
+            .filter_map(|d| match d {
+                DimKind::Sym { gc, .. } => Some(*gc),
+                _ => None,
+            })
+            .collect();
 
         let dt = crate::nano_graph::NanoLoweringContext::ndt(out_info);
-        let out_tmp = TensorAtomMap::simple(
-            AtomId(0),
-            count,
-            dt,
-            dims.clone(),
-        );
+        let out_tmp = TensorAtomMap::simple(AtomId(0), count, dt, dims.clone());
 
         let a_info = all_infos.get(&a_id);
         let b_info = all_infos.get(&b_id);
@@ -787,10 +793,8 @@ impl Pow {
             ],
         );
 
-        ctx.tensor_map.insert(
-            out_id,
-            TensorAtomMap::simple(base_id, count, dt, dims),
-        );
+        ctx.tensor_map
+            .insert(out_id, TensorAtomMap::simple(base_id, count, dt, dims));
         crate::milli_graph::ops::LowerResult::Lowered
     }
 
@@ -839,26 +843,18 @@ impl MilliOp for Pow {
                 } else {
                     let a_shape = a_info.shape(rng);
                     let b_shape = b_info.shape(rng);
-                    let out_rank = super::infer_multidirectional_broadcasting_rank(
-                        &[a_shape, b_shape],
-                        rng,
-                    )?;
+                    let out_rank =
+                        super::infer_multidirectional_broadcasting_rank(&[a_shape, b_shape], rng)?;
                     let first_elem = crate::scalar_info::ScalarInfo::Symbolic(
                         crate::symbolic_scalar::SymbolicScalar::new(out_dtype, rng),
                     );
-                    TensorInfo::new_from_first_element_and_rank(
-                        first_elem,
-                        out_rank,
-                        rng,
-                    )
+                    TensorInfo::new_from_first_element_and_rank(first_elem, out_rank, rng)
                 }
             } else {
                 let a_shape = a_info.shape(rng);
                 let b_shape = b_info.shape(rng);
-                let out_rank = super::infer_multidirectional_broadcasting_rank(
-                    &[a_shape, b_shape],
-                    rng,
-                )?;
+                let out_rank =
+                    super::infer_multidirectional_broadcasting_rank(&[a_shape, b_shape], rng)?;
                 let first_elem = crate::scalar_info::ScalarInfo::Symbolic(
                     crate::symbolic_scalar::SymbolicScalar::new(out_dtype, rng),
                 );
@@ -1132,7 +1128,11 @@ impl MatMul {
         // strides. When K is Sym in either input, the atom layout doesn't match
         // what the merged Mul groups expect.
         let k = match (&a_layout[a_layout.len() - 1], &b_layout[b_layout.len() - 2]) {
-            (DimKind::Known { size: ka, .. }, DimKind::Known { size: kb, .. }) if ka == kb && *ka > 0 => *ka,
+            (DimKind::Known { size: ka, .. }, DimKind::Known { size: kb, .. })
+                if ka == kb && *ka > 0 =>
+            {
+                *ka
+            }
             _ => {
                 return crate::milli_graph::ops::LowerResult::Unsupported;
             }
@@ -1188,8 +1188,21 @@ impl MatMul {
         let Some(out_dims) = ctx.classify_dims(out_info) else {
             return crate::milli_graph::ops::LowerResult::Unsupported;
         };
-        let out_count: u64 = out_dims.iter().filter_map(|d| match d { DimKind::Known { size, .. } => Some(*size), _ => None }).product::<u64>().max(1);
-        let out_sym_dims: Vec<_> = out_dims.iter().filter_map(|d| match d { DimKind::Sym { gc, .. } => Some(*gc), _ => None }).collect();
+        let out_count: u64 = out_dims
+            .iter()
+            .filter_map(|d| match d {
+                DimKind::Known { size, .. } => Some(*size),
+                _ => None,
+            })
+            .product::<u64>()
+            .max(1);
+        let out_sym_dims: Vec<_> = out_dims
+            .iter()
+            .filter_map(|d| match d {
+                DimKind::Sym { gc, .. } => Some(*gc),
+                _ => None,
+            })
+            .collect();
 
         if out_count > 64_000_000 {
             return crate::milli_graph::ops::LowerResult::Unsupported;
@@ -1408,7 +1421,10 @@ impl MatMul {
                     compute_dtype: accumulate_dtype,
                 },
                 out_sym_dims.clone(),
-                vec![GroupInput::identity(InputRef::affine(row_mul_base, 1), out_sym_dims.len())],
+                vec![GroupInput::identity(
+                    InputRef::affine(row_mul_base, 1),
+                    out_sym_dims.len(),
+                )],
             );
 
             if reduce_base_id.is_none() {
@@ -1420,12 +1436,7 @@ impl MatMul {
 
         ctx.tensor_map.insert(
             out_id,
-            TensorAtomMap::simple(
-                base_id,
-                out_count,
-                out_dtype,
-                out_dims,
-            ),
+            TensorAtomMap::simple(base_id, out_count, out_dtype, out_dims),
         );
         crate::milli_graph::ops::LowerResult::Lowered
     }
@@ -1511,11 +1522,7 @@ impl MilliOp for MatMul {
                     let first_elem = crate::scalar_info::ScalarInfo::Symbolic(
                         crate::symbolic_scalar::SymbolicScalar::new(out_dtype, rng),
                     );
-                    TensorInfo::new_from_first_element_and_rank(
-                        first_elem,
-                        a_info.rank(),
-                        rng,
-                    )
+                    TensorInfo::new_from_first_element_and_rank(first_elem, a_info.rank(), rng)
                 }
             } else {
                 // Fallback: rank-only inference.

@@ -1,8 +1,8 @@
-use rand::Rng;
 use crate::graph::GlobalId;
 use crate::milli_graph::MilliOpGraphError;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::pool::Pool;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -287,7 +287,10 @@ impl Pad {
                     dt,
                     ScalarOp::Identity,
                     sym_dims.clone(),
-                    vec![GroupInput::identity(InputRef::affine(in_row_base, in_last_stride), n_sym)],
+                    vec![GroupInput::identity(
+                        InputRef::affine(in_row_base, in_last_stride),
+                        n_sym,
+                    )],
                 );
                 if first_base.is_none() {
                     first_base = Some(b);
@@ -321,12 +324,7 @@ impl Pad {
         };
         ctx.tensor_map.insert(
             self.output,
-            TensorAtomMap::simple(
-                first_base.unwrap(),
-                out_total,
-                dt,
-                out_dims,
-            ),
+            TensorAtomMap::simple(first_base.unwrap(), out_total, dt, out_dims),
         );
         crate::milli_graph::ops::LowerResult::Lowered
     }
@@ -539,9 +537,7 @@ impl MilliOp for Pad {
                 None => {
                     // Axes are symbolic — return same rank with symbolic dims
                     let out_dims: Vec<ScalarInfoTyped<u64>> = (0..rank)
-                        .map(|_| {
-                            ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(rng))
-                        })
+                        .map(|_| ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(rng)))
                         .collect();
                     return Ok(vec![(
                         self.output,
@@ -577,9 +573,7 @@ impl MilliOp for Pad {
                         out_dims.push(ScalarInfoTyped::Numeric((*v as i64 + pad_total) as u64));
                     }
                     ScalarInfoTyped::Symbolic(_) => {
-                        out_dims.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(
-                            rng,
-                        )));
+                        out_dims.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(rng)));
                     }
                 }
             }

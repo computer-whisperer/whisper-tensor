@@ -387,10 +387,7 @@ pub fn run_case_via_pool_eval(case: &TestCase) -> Result<(), String> {
 /// at that index is replaced with a shared SymbolicScalarTyped (same symbol_id).
 /// This exercises the symbolic dimension path end-to-end:
 /// lower → NanoGraph with sym_dims → pool_eval with gc_values → compare.
-pub fn run_case_with_symbolic_dims(
-    case: &TestCase,
-    withheld_dims: &[usize],
-) -> Result<(), String> {
+pub fn run_case_with_symbolic_dims(case: &TestCase, withheld_dims: &[usize]) -> Result<(), String> {
     use crate::nano_graph::lower;
     use crate::nano_graph::pool_eval;
     use crate::pool::TrackedPool;
@@ -408,7 +405,7 @@ pub fn run_case_with_symbolic_dims(
         // shared symbol semantically wrong.
         let mut skip = false;
         let mut seen_rank: Option<usize> = None;
-        for (_, t) in &ds.inputs {
+        for t in ds.inputs.values() {
             let r = t.view().shape().len();
             if let Some(prev) = seen_rank {
                 if prev != r {
@@ -422,7 +419,7 @@ pub fn run_case_with_symbolic_dims(
         if !skip {
             for &d in withheld_dims {
                 let mut seen_size: Option<u64> = None;
-                for (_, t) in &ds.inputs {
+                for t in ds.inputs.values() {
                     let shape = t.view().shape().clone();
                     if d < shape.len() && shape[d] > 1 {
                         if let Some(prev) = seen_size {
@@ -435,10 +432,14 @@ pub fn run_case_with_symbolic_dims(
                         }
                     }
                 }
-                if skip { break; }
+                if skip {
+                    break;
+                }
             }
         }
-        if skip { continue; }
+        if skip {
+            continue;
+        }
 
         // For each withheld dim index, create a shared SymbolicScalarTyped
         // so all inputs that have that dim share the same GraphConstant.
@@ -472,7 +473,10 @@ pub fn run_case_with_symbolic_dims(
                     })
                     .collect();
 
-                (id, TensorInfo::from_dtype_and_shape_scalars(view.dtype(), &dims))
+                (
+                    id,
+                    TensorInfo::from_dtype_and_shape_scalars(view.dtype(), &dims),
+                )
             })
             .collect();
 
@@ -497,10 +501,10 @@ pub fn run_case_with_symbolic_dims(
             };
             let shape = tensor.view().shape().clone();
             for (dim_idx, dk) in tam.dims.iter().enumerate() {
-                if let crate::nano_graph::lower::DimKind::Sym { gc, .. } = dk {
-                    if dim_idx < shape.len() {
-                        gc_values[gc.0 as usize] = shape[dim_idx];
-                    }
+                if let crate::nano_graph::lower::DimKind::Sym { gc, .. } = dk
+                    && dim_idx < shape.len()
+                {
+                    gc_values[gc.0 as usize] = shape[dim_idx];
                 }
             }
         }
@@ -788,8 +792,12 @@ mod tests {
                     eprintln!("  PASS: {name}");
                     passed += 1;
                 }
-                Ok(Err(e)) if e.contains("unsupported ops") || e.contains("lower failed")
-                    || e.contains("pool_eval failed") || e.contains("shape mismatch") => {
+                Ok(Err(e))
+                    if e.contains("unsupported ops")
+                        || e.contains("lower failed")
+                        || e.contains("pool_eval failed")
+                        || e.contains("shape mismatch") =>
+                {
                     eprintln!("  SKIP: {name}: {e}");
                     skipped += 1;
                 }

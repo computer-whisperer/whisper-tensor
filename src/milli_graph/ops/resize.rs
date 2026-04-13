@@ -1,9 +1,9 @@
-use rand::Rng;
 use crate::graph::GlobalId;
 use crate::milli_graph::MilliOpGraph;
 use crate::milli_graph::MilliOpGraphError;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::pool::Pool;
+use rand::Rng;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -770,9 +770,8 @@ impl MilliOp for Resize {
                     } else {
                         // Input shape is partially symbolic — can't compute aspect ratio
                         for &axis in &resolved_axes {
-                            out_dims[axis] = ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(
-                                rng,
-                            ));
+                            out_dims[axis] =
+                                ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(rng));
                         }
                     }
                 }
@@ -800,9 +799,8 @@ impl MilliOp for Resize {
                             out_dims[axis] = ScalarInfoTyped::Numeric(new_size);
                         }
                         ScalarInfoTyped::Symbolic(_) => {
-                            out_dims[axis] = ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(
-                                rng,
-                            ));
+                            out_dims[axis] =
+                                ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(rng));
                         }
                     }
                 }

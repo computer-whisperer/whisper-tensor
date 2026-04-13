@@ -516,9 +516,11 @@ impl<'p, P: Pool + 'p> NanoGraph<'p, P> {
     /// Otherwise allocates a new one with `max_value = u64::MAX`
     /// (caller should set a tighter bound via [`set_graph_constant_max`]).
     pub fn graph_constant(&mut self, name: &str) -> GraphConstantId {
-        if let Some(idx) = self.graph_constants.iter().position(|gc| {
-            gc.name.as_deref() == Some(name)
-        }) {
+        if let Some(idx) = self
+            .graph_constants
+            .iter()
+            .position(|gc| gc.name.as_deref() == Some(name))
+        {
             GraphConstantId(idx as u16)
         } else {
             let id = GraphConstantId(self.graph_constants.len() as u16);
@@ -1361,7 +1363,10 @@ mod tests {
                 compute_dtype: NumericDType::F32,
             },
             vec![],
-            vec![GroupInput::scalar(InputRef::affine(a, 1)), GroupInput::scalar(InputRef::affine(b, 1))],
+            vec![
+                GroupInput::scalar(InputRef::affine(a, 1)),
+                GroupInput::scalar(InputRef::affine(b, 1)),
+            ],
         );
 
         assert!(g.validate().is_empty(), "{:?}", g.validate());
@@ -1400,7 +1405,10 @@ mod tests {
                 compute_dtype: NumericDType::F32,
             },
             vec![],
-            vec![GroupInput::scalar(InputRef::affine(a, 1)), GroupInput::scalar(InputRef::Broadcast(b))],
+            vec![
+                GroupInput::scalar(InputRef::affine(a, 1)),
+                GroupInput::scalar(InputRef::Broadcast(b)),
+            ],
         );
 
         assert!(g.validate().is_empty(), "{:?}", g.validate());
