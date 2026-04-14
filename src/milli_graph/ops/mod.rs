@@ -595,8 +595,11 @@ fn infer_multidirectional_broadcasting_shape(
                                     }
                                 }
                                 _ => {
-                                    // The only way this is valid is if the unknown dim matches the known one, so be optimistic here
-                                    dim = local_dim.clone();
+                                    // `dim` is Symbolic and `local_dim` is a
+                                    // concrete > 1. Assume the runtime value
+                                    // matches and keep the symbolic identity
+                                    // so downstream lowering can carry the
+                                    // sym dim through binary ops.
                                 }
                             }
                         }
@@ -609,7 +612,11 @@ fn infer_multidirectional_broadcasting_shape(
                                     // Use the existing unknown dim
                                     dim = local_dim.clone();
                                 } else {
-                                    // The only way this is valid is if the unknown dim matches the known one, so be optimistic here
+                                    // `dim` is concrete > 1 and `local_dim`
+                                    // is Symbolic. Switch to the symbolic
+                                    // identity — see the symmetric branch
+                                    // above.
+                                    dim = local_dim.clone();
                                 }
                             }
                             _ => {
