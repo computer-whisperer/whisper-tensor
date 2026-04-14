@@ -284,7 +284,11 @@ fn build_simple_transformer_supergraph(
         logit_output_link: processed_logit_output_link,
         super_graph,
         cache_key_input_link: cache_key,
-        max_batch: 1,
+        // Stateless transformer: the ONNX model's batch axis flows
+        // through as a symbolic dim and the supergraph has no
+        // per-batch-row state to thread, so arbitrary batch sizes
+        // are supported at runtime.
+        max_batch: u64::MAX,
         max_seq: u64::MAX,
     }
 }
