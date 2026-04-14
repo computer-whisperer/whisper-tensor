@@ -629,6 +629,7 @@ pub fn summarize_plan(
 fn scalar_op_name(op: &ScalarOp) -> &'static str {
     match op {
         ScalarOp::Literal(_) => "Literal",
+        ScalarOp::GcLiteral(_) => "GcLiteral",
         ScalarOp::Identity | ScalarOp::Cast { .. } => "Identity",
         ScalarOp::Binary { .. } => "Binary",
         ScalarOp::Unary { .. } => "Unary",

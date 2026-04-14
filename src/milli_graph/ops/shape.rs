@@ -46,12 +46,57 @@ impl Shape {
         &self,
         ctx: &mut crate::nano_graph::NanoLoweringContext<'_, 'p, P>,
     ) -> crate::milli_graph::ops::LowerResult {
+        use crate::nano_graph::lower::{ConcatSegment, DimKind, TensorAtomMap};
+        use crate::nano_graph::ops::ScalarOp;
+        use crate::numeric_dtype::NumericDType;
+        use crate::numeric_scalar::NumericScalar;
+
+        let in_id = Node::inputs(self).next().unwrap();
         let out_id = self.output;
-        if let Some(info) = ctx.all_infos.get(&out_id) {
-            ctx.register_constant(out_id, info);
-        } else {
-            ctx.register_opaque(out_id);
+
+        // Walk the input's dim list and emit one 1-atom
+        // group per dim.  Known dims use `ScalarOp::Literal`; symbolic
+        // dims use `ScalarOp::GcLiteral(gc)` so the value is resolved
+        // from `gc_values` at evaluation time.  The output is a rank-1
+        // tensor of length input_rank, assembled from the per-dim
+        // groups via ConcatSegment.
+        let Some(in_map) = ctx.tensor_map.get(&in_id).cloned() else {
+            return crate::milli_graph::ops::LowerResult::Unsupported;
+        };
+        let input_rank = in_map.dims.len();
+        if input_rank == 0 {
+            // Scalar input: Shape returns an empty tensor [] of rank 1
+            // with size 0.  Unusual; let it fall through to opaque.
+            return crate::milli_graph::ops::LowerResult::Unsupported;
         }
+
+        let out_dt = NumericDType::I64;
+        let mut segments: Vec<ConcatSegment> = Vec::with_capacity(input_rank);
+        for (i, dim) in in_map.dims.iter().enumerate() {
+            let op = match dim {
+                DimKind::Known { size, .. } => {
+                    ScalarOp::Literal(NumericScalar::from_i64(*size as i64))
+                }
+                DimKind::Sym { gc, .. } => ScalarOp::GcLiteral(*gc),
+            };
+            let base = ctx.nano.push_group(1, out_dt, op, vec![], vec![]);
+            segments.push(ConcatSegment {
+                concat_dim: 0,
+                start: i as u64,
+                size: 1,
+                base_id: base,
+                known_strides: vec![1],
+            });
+        }
+
+        let out_dims = vec![DimKind::Known {
+            size: input_rank as u64,
+            stride: 1,
+        }];
+        ctx.tensor_map.insert(
+            out_id,
+            TensorAtomMap::segmented(input_rank as u64, out_dt, out_dims, segments),
+        );
         crate::milli_graph::ops::LowerResult::Lowered
     }
 
@@ -75,6 +120,7 @@ impl MilliOp for Shape {
     where
         'p: 'a,
     {
+        use crate::scalar_info::ScalarInfoTyped;
         use crate::tensor_info::TensorInfo;
 
         let input_info = known_inputs
@@ -108,9 +154,18 @@ impl MilliOp for Shape {
                     TensorInfo::from_view(&tensor.view(), pool),
                 )]);
             }
+
+            // Rank is known but some dims are symbolic.  The OUTPUT's shape
+            // is still concrete: rank-1 of length `rank`.  Only the element
+            // values are symbolic.
+            let out_info = TensorInfo::from_dtype_and_shape_scalars(
+                crate::numeric_dtype::NumericDType::I64,
+                &[ScalarInfoTyped::Numeric(rank as u64)],
+            );
+            return Ok(vec![(self.output, out_info)]);
         }
 
-        // Fallback: symbolic output with known rank=1.
+        // Input rank unknown — fall back to rank-1 with symbolic length.
         let first_elem =
             crate::scalar_info::ScalarInfo::Symbolic(crate::symbolic_scalar::SymbolicScalar::new(
                 crate::numeric_dtype::NumericDType::I64,

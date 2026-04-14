@@ -297,7 +297,10 @@ fn classify_group(
     num_lanes: usize,
 ) -> GroupKind {
     // Literals are always duplicated — every lane may need the values.
-    if matches!(group.op, ScalarOp::Literal(_) | ScalarOp::LiteralSpan(_)) {
+    if matches!(
+        group.op,
+        ScalarOp::Literal(_) | ScalarOp::GcLiteral(_) | ScalarOp::LiteralSpan(_)
+    ) {
         return GroupKind::Duplicate;
     }
 
@@ -310,7 +313,9 @@ fn classify_group(
     }
 
     match &group.op {
-        ScalarOp::Literal(_) | ScalarOp::LiteralSpan(_) => unreachable!(), // handled above
+        ScalarOp::Literal(_) | ScalarOp::GcLiteral(_) | ScalarOp::LiteralSpan(_) => {
+            unreachable!()
+        } // handled above
 
         // Elementwise ops: embarrassingly parallel, always split.
         ScalarOp::Binary { .. }
@@ -717,6 +722,7 @@ fn assign_phases(
                 ScalarOp::Identity => "Identity",
                 ScalarOp::Cast { .. } => "Cast",
                 ScalarOp::Literal(_) => "Literal",
+                ScalarOp::GcLiteral(_) => "GcLiteral",
                 ScalarOp::Reduce { .. } => "Reduce",
                 ScalarOp::IndirectLoad { .. } => "IndirectLoad",
                 ScalarOp::OpaqueOutput { .. } => "OpaqueOutput",

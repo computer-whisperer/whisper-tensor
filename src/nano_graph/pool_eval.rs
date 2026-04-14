@@ -235,7 +235,8 @@ pub fn pool_eval<'p, P: Pool + 'p>(
     let mut opaque_cache: HashMap<usize, Vec<NumericTensor<'p, DynRank, P>>> = HashMap::new();
 
     for (gi, group) in groups.iter().enumerate() {
-        if remaining[gi] == 0 && !matches!(&group.op, ScalarOp::Literal(_)) {
+        if remaining[gi] == 0 && !matches!(&group.op, ScalarOp::Literal(_) | ScalarOp::GcLiteral(_))
+        {
             continue;
         }
 
@@ -640,6 +641,12 @@ pub fn pool_eval<'p, P: Pool + 'p>(
                             ScalarOp::Literal(scalar) => {
                                 let raw = scalar.view().read_raw();
                                 scalar.dtype().cast_raw(raw, output_dtype)
+                            }
+                            ScalarOp::GcLiteral(gc) => {
+                                // Resolve the GraphConstant at eval time and
+                                // cast its u64 extent to the output dtype.
+                                let value = gc_values[gc.0 as usize];
+                                NumericDType::U64.cast_raw(value, output_dtype)
                             }
                             ScalarOp::Identity => {
                                 let src = group.inputs[0].input_ref.resolve(ri);

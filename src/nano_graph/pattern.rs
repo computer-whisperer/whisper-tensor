@@ -938,6 +938,7 @@ impl<'p, P: Pool + 'p> NanoGraph<'p, P> {
                 ScalarOp::Identity => "Identity",
                 ScalarOp::Cast { .. } => "Cast",
                 ScalarOp::Literal(_) => "Literal",
+                ScalarOp::GcLiteral(_) => "GcLiteral",
                 ScalarOp::Select => "Select",
                 ScalarOp::Reduce {
                     kind: ReduceKind::Sum,
@@ -1262,7 +1263,7 @@ impl<'p, P: Pool + 'p> NanoGraph<'p, P> {
 
             // Input count check.
             let expected_inputs = match &group.op {
-                ScalarOp::Literal(_) | ScalarOp::LiteralSpan(_) => 0,
+                ScalarOp::Literal(_) | ScalarOp::GcLiteral(_) | ScalarOp::LiteralSpan(_) => 0,
                 ScalarOp::Unary { .. }
                 | ScalarOp::Identity
                 | ScalarOp::Cast { .. }

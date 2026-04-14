@@ -1309,6 +1309,7 @@ impl EmbeddedTables {
 pub(crate) fn op_name_short(op: &ScalarOp) -> &'static str {
     match op {
         ScalarOp::Literal(_) => "Lit",
+        ScalarOp::GcLiteral(_) => "GcLit",
         ScalarOp::Identity | ScalarOp::Cast { .. } => "Id",
         ScalarOp::Binary { .. } => "Bin",
         ScalarOp::Unary { .. } => "Un",

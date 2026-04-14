@@ -1058,6 +1058,7 @@ fn op_tag(op: &crate::nano_graph::ops::ScalarOp<'_, SystemPool>) -> &'static str
     use crate::nano_graph::ops::ScalarOp;
     match op {
         ScalarOp::Literal(_) => "Literal",
+        ScalarOp::GcLiteral(_) => "GcLiteral",
         ScalarOp::LiteralSpan(_) => "LiteralSpan",
         ScalarOp::Identity => "Identity",
         ScalarOp::Cast { .. } => "Cast",

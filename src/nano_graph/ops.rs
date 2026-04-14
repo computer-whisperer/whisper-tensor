@@ -198,6 +198,12 @@ pub enum ScalarOp<'p, P: Pool + 'p = crate::pool::SystemPool> {
     /// the exact typed value (BF16, F32, etc.). All atoms in the group
     /// produce this same value (broadcast).
     Literal(NumericScalar),
+    /// Produce a GraphConstant's runtime value. No inputs. All atoms
+    /// in the group produce the same value: the GraphConstant's
+    /// extent resolved from the executor's `gc_values` table, cast
+    /// to the group's output dtype. Analogous to `Literal` but the
+    /// value is not known at lowering time.
+    GcLiteral(super::pattern::GraphConstantId),
     /// Produce constant values from a 1D pool-backed tensor. No inputs.
     /// Atom `i` reads element `i` from the tensor. The group's `count`
     /// must equal `tensor.numel()`.
@@ -273,6 +279,7 @@ impl<P: Pool> std::fmt::Debug for ScalarOp<'_, P> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ScalarOp::Literal(s) => f.debug_tuple("Literal").field(s).finish(),
+            ScalarOp::GcLiteral(gc) => f.debug_tuple("GcLiteral").field(gc).finish(),
             ScalarOp::LiteralSpan(t) => f
                 .debug_tuple("LiteralSpan")
                 .field(&format_args!("[{}; {}]", t.dtype(), t.numel()))
@@ -342,6 +349,7 @@ where
     fn clone(&self) -> Self {
         match self {
             ScalarOp::Literal(s) => ScalarOp::Literal(*s),
+            ScalarOp::GcLiteral(gc) => ScalarOp::GcLiteral(*gc),
             ScalarOp::LiteralSpan(t) => ScalarOp::LiteralSpan(t.clone()),
             ScalarOp::Identity => ScalarOp::Identity,
             ScalarOp::Cast { saturating } => ScalarOp::Cast {
@@ -399,6 +407,7 @@ impl<'p, P: Pool + 'p> ScalarOp<'p, P> {
     pub fn compute_dtype(&self) -> Option<NumericDType> {
         match self {
             ScalarOp::Literal(_)
+            | ScalarOp::GcLiteral(_)
             | ScalarOp::LiteralSpan(_)
             | ScalarOp::Identity
             | ScalarOp::Cast { .. }
