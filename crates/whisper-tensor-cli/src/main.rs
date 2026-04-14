@@ -44,6 +44,14 @@ enum Command {
         #[arg(long, short = 'n', default_value = "100")]
         max_tokens: usize,
 
+        /// Replicate the prompt across this many batch rows. The
+        /// interface must advertise max_batch >= this value.
+        /// All rows share a prompt, so every step is expected to
+        /// produce identical tokens across rows — used to exercise
+        /// the [batch, seq] plumbing end-to-end.
+        #[arg(long, default_value = "1")]
+        batch: u64,
+
         #[command(flatten)]
         eval: EvalArgs,
     },
@@ -500,12 +508,13 @@ fn main() {
             configs,
             prompt,
             max_tokens,
+            batch,
             eval,
         } => {
             let config = build_config(model, &configs);
             eprintln!("Loading model...");
             let output = load_model(&loader, config);
-            cmd_generate(output, prompt, max_tokens, eval);
+            cmd_generate(output, prompt, max_tokens, batch, eval);
         }
         Command::Image {
             model,
@@ -586,7 +595,13 @@ fn main() {
 // Text generation
 // ============================================================================
 
-fn cmd_generate(output: LoaderOutput, prompt: Option<String>, max_tokens: usize, eval: EvalArgs) {
+fn cmd_generate(
+    output: LoaderOutput,
+    prompt: Option<String>,
+    max_tokens: usize,
+    batch: u64,
+    eval: EvalArgs,
+) {
     let prompt = match prompt {
         Some(p) => p,
         None => {
@@ -597,6 +612,10 @@ fn cmd_generate(output: LoaderOutput, prompt: Option<String>, max_tokens: usize,
             line.trim_end_matches('\n').to_string()
         }
     };
+    if batch == 0 {
+        eprintln!("--batch must be >= 1");
+        std::process::exit(1);
+    }
 
     let model = &output.models[0].model;
 
@@ -612,6 +631,14 @@ fn cmd_generate(output: LoaderOutput, prompt: Option<String>, max_tokens: usize,
             std::process::exit(1);
         });
 
+    if batch > interface.max_batch {
+        eprintln!(
+            "--batch {batch} exceeds interface max_batch {}",
+            interface.max_batch
+        );
+        std::process::exit(1);
+    }
+
     eprintln!("Model loaded. Generating...\n");
 
     let mut tokenizer_cache = HashMap::new();
@@ -624,7 +651,8 @@ fn cmd_generate(output: LoaderOutput, prompt: Option<String>, max_tokens: usize,
     std::io::stdout().flush().unwrap();
 
     let pool = whisper_tensor::pool::SystemPool;
-    let mut context = prompt;
+    let batch_n = batch as usize;
+    let mut contexts: Vec<String> = vec![prompt; batch_n];
     let mut token_times: Vec<std::time::Duration> = Vec::with_capacity(max_tokens);
     for _ in 0..max_tokens {
         let caches = if eval.disable_cache {
@@ -633,10 +661,10 @@ fn cmd_generate(output: LoaderOutput, prompt: Option<String>, max_tokens: usize,
             Some(&mut super_graph_caches)
         };
         let t0 = std::time::Instant::now();
-        let token = interface
-            .run_string_in_string_out(
+        let tokens = interface
+            .run_strings_in_strings_out(
                 model,
-                context.clone(),
+                &contexts,
                 &mut tokenizer_cache,
                 caches,
                 eval_options.clone(),
@@ -648,9 +676,23 @@ fn cmd_generate(output: LoaderOutput, prompt: Option<String>, max_tokens: usize,
                 std::process::exit(1);
             });
         token_times.push(t0.elapsed());
+        assert_eq!(tokens.len(), batch_n);
+        // Same-prompt replication: every row must agree.
+        for (i, t) in tokens.iter().enumerate().skip(1) {
+            if t != &tokens[0] {
+                eprintln!(
+                    "\nBatch divergence at row {i}: row 0 produced {:?}, row {i} produced {:?}",
+                    tokens[0], t
+                );
+                std::process::exit(1);
+            }
+        }
+        let token = &tokens[0];
         print!("{token}");
         std::io::stdout().flush().unwrap();
-        context.push_str(&token);
+        for ctx in contexts.iter_mut() {
+            ctx.push_str(token);
+        }
     }
     println!();
     observer.write_outputs(&eval.dump_output);

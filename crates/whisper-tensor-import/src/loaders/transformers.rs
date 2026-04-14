@@ -145,8 +145,10 @@ impl Loader for TransformersLoader {
 
 /// Build a SuperGraph for a simple (non-RNN) transformer model.
 ///
-/// The model takes a 1D token sequence, produces 2D logits (seq_len, vocab).
-/// The SuperGraph handles dtype casting and rank adjustments.
+/// Per the [`TextInferenceTokensInLogitOutInterface`] contract, the
+/// token input is 2D `[batch, seq]` and the logit output is 3D
+/// `[batch, seq, vocab]`. Extra leading dims are inserted/removed
+/// only if the underlying ONNX rank exceeds these.
 fn build_simple_transformer_supergraph(
     tokenizer: TokenizerInfo,
     token_input_name: &str,
@@ -166,7 +168,8 @@ fn build_simple_transformer_supergraph(
     super_graph_builder.set_link_label(token_context_input_link, token_input_name);
     super_graph_builder.set_link_label(raw_logit_output_link, "raw_logits");
 
-    // Input processing: cast dtype + unsqueeze to match model rank
+    // Input: already [batch, seq]. Cast dtype; if the ONNX model's
+    // input rank is > 2, prepend leading axis-0 unsqueezes to match.
     let adjusted_token_context = {
         let (mut milli_graph, input_map) =
             MilliOpGraph::new(std::iter::once(token_context_input_link.global_id()), rng);
@@ -180,20 +183,23 @@ fn build_simple_transformer_supergraph(
             Some("input.cast_dtype".to_string()),
             rng,
         );
-        let zero_tid = Constant::from_vec_with_label(
-            &mut milli_graph,
-            vec![0i64],
-            Some("input.unsqueeze_axis".to_string()),
-            rng,
-        );
-        for _ in 0..(input_rank - 1) {
-            x = Unsqueeze::push_new_with_label(
+        let extra_leading_dims = input_rank.saturating_sub(2);
+        if extra_leading_dims > 0 {
+            let zero_tid = Constant::from_vec_with_label(
                 &mut milli_graph,
-                x,
-                zero_tid,
-                Some("input.add_batch_dim".to_string()),
+                vec![0i64],
+                Some("input.unsqueeze_axis".to_string()),
                 rng,
             );
+            for _ in 0..extra_leading_dims {
+                x = Unsqueeze::push_new_with_label(
+                    &mut milli_graph,
+                    x,
+                    zero_tid,
+                    Some("input.add_leading_dim".to_string()),
+                    rng,
+                );
+            }
         }
 
         let processed_input_link = super_graph_builder.new_tensor_link(rng);
@@ -213,26 +219,30 @@ fn build_simple_transformer_supergraph(
     model_exec.label = Some("model_forward".to_string());
     super_graph_builder.add_node(model_exec.to_any());
 
-    // Output processing: squeeze extra dims + cast to F32
+    // Output: target [batch, seq, vocab]. Squeeze any extra leading
+    // dims the ONNX output carries, then cast to F32.
     let processed_logit_output_link = {
         let (mut milli_graph, input_map) =
             MilliOpGraph::new(std::iter::once(raw_logit_output_link.global_id()), rng);
         let milli_op_graph_input = *input_map.get(&raw_logit_output_link.global_id()).unwrap();
         let mut x = milli_op_graph_input;
-        let zero_tid = Constant::from_vec_with_label(
-            &mut milli_graph,
-            vec![0i64],
-            Some("output.squeeze_axis".to_string()),
-            rng,
-        );
-        for _ in 0..(output_rank - 2) {
-            x = Squeeze::push_new_with_label(
+        let extra_leading_dims = output_rank.saturating_sub(3);
+        if extra_leading_dims > 0 {
+            let zero_tid = Constant::from_vec_with_label(
                 &mut milli_graph,
-                x,
-                zero_tid,
-                Some("output.remove_batch_dim".to_string()),
+                vec![0i64],
+                Some("output.squeeze_axis".to_string()),
                 rng,
             );
+            for _ in 0..extra_leading_dims {
+                x = Squeeze::push_new_with_label(
+                    &mut milli_graph,
+                    x,
+                    zero_tid,
+                    Some("output.remove_leading_dim".to_string()),
+                    rng,
+                );
+            }
         }
         x = Cast::push_new_with_label(
             &mut milli_graph,
@@ -274,5 +284,7 @@ fn build_simple_transformer_supergraph(
         logit_output_link: processed_logit_output_link,
         super_graph,
         cache_key_input_link: cache_key,
+        max_batch: 1,
+        max_seq: u64::MAX,
     }
 }

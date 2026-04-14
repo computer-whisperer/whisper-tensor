@@ -71,6 +71,13 @@ impl AnyInterface {
     }
 }
 
+/// Text inference interface operating on a [batch, seq] token tensor and
+/// a [batch, seq, vocab] logit tensor. `max_batch` and `max_seq`
+/// communicate the caller-facing limits of the underlying supergraph; a
+/// builder that can only process one row at a time must set
+/// `max_batch = 1`. No attention-mask input exists at this layer, so
+/// callers must supply equal-length token sequences across all batch
+/// rows.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TextInferenceTokensInLogitOutInterface {
     pub cache_key_input_link: SuperGraphLink,
@@ -79,20 +86,36 @@ pub struct TextInferenceTokensInLogitOutInterface {
     pub logit_output_link: SuperGraphLink,
     pub super_graph: SuperGraph,
     pub tokenizer: TokenizerInfo,
+    pub max_batch: u64,
+    pub max_seq: u64,
 }
 
 impl TextInferenceTokensInLogitOutInterface {
+    /// Run the supergraph on a batch of prompts and return one
+    /// next-token string per batch row. All prompts must tokenize to
+    /// the same length (no ragged batching at this layer).
     #[allow(clippy::too_many_arguments)]
-    pub fn run_string_in_string_out<'p, P: Pool + 'p>(
+    pub fn run_strings_in_strings_out<'p, P: Pool + 'p>(
         &self,
         model: &Model,
-        text_in: String,
+        texts_in: &[String],
         tokenizer_cache: &mut HashMap<TokenizerInfo, Arc<AnyTokenizer>>,
         super_graph_caches: Option<&mut SuperGraphCache>,
         eval_options: SuperGraphEvalOptions,
         observer: &mut impl SuperGraphObserver,
         pool: &'p P,
-    ) -> Result<String, SuperGraphError> {
+    ) -> Result<Vec<String>, SuperGraphError> {
+        if texts_in.is_empty() {
+            return Ok(Vec::new());
+        }
+        let batch = texts_in.len();
+        if (batch as u64) > self.max_batch {
+            return Err(SuperGraphError::InvalidInputError(format!(
+                "batch size {} exceeds interface max_batch {}",
+                batch, self.max_batch
+            )));
+        }
+
         let tokenizer = {
             if let Some(x) = tokenizer_cache.get(&self.tokenizer) {
                 x.clone()
@@ -102,12 +125,39 @@ impl TextInferenceTokensInLogitOutInterface {
                 x
             }
         };
-        let tokens = tokenizer.encode(text_in.as_str());
-        let tokens_tensor =
-            NumericTensor::from_fn(vec![tokens.len() as u64], NumericDType::U32, pool, |i| {
-                NumericScalar::from_u32(tokens[i])
-            })
-            .map_err(alloc_err)?;
+
+        let batched_tokens: Vec<Vec<u32>> = texts_in
+            .iter()
+            .map(|s| tokenizer.encode(s.as_str()))
+            .collect();
+        let seq_len = batched_tokens[0].len();
+        for (i, toks) in batched_tokens.iter().enumerate() {
+            if toks.len() != seq_len {
+                return Err(SuperGraphError::InvalidInputError(format!(
+                    "batch row {i} tokenizes to {} tokens, row 0 to {seq_len}; \
+                     ragged batching is not supported at this interface",
+                    toks.len()
+                )));
+            }
+        }
+        if (seq_len as u64) > self.max_seq {
+            return Err(SuperGraphError::InvalidInputError(format!(
+                "token sequence length {seq_len} exceeds interface max_seq {}",
+                self.max_seq
+            )));
+        }
+
+        let tokens_tensor = NumericTensor::from_fn(
+            vec![batch as u64, seq_len as u64],
+            NumericDType::U32,
+            pool,
+            |flat_i| {
+                let b = flat_i / seq_len;
+                let t = flat_i % seq_len;
+                NumericScalar::from_u32(batched_tokens[b][t])
+            },
+        )
+        .map_err(alloc_err)?;
 
         let super_graph_data = {
             let mut super_graph_data = SuperGraphData::new();
@@ -135,14 +185,61 @@ impl TextInferenceTokensInLogitOutInterface {
             .get(&self.logit_output_link)
             .unwrap();
         let shape = logits.shape();
-        // Select last position and argmax
-        let last_row = logits
-            .slice(&[(shape[0] - 1, shape[0]), (0, shape[1])])
-            .map_err(|e| SuperGraphError::InvalidInputError(format!("logits slice: {e}")))?;
-        let token_id = argmax_flat(&last_row);
+        if shape.len() != 3 {
+            return Err(SuperGraphError::InvalidInputError(format!(
+                "expected logits of rank 3 [batch, seq, vocab], got shape {:?}",
+                shape
+            )));
+        }
+        let out_batch = shape[0] as usize;
+        let out_seq = shape[1];
+        let vocab = shape[2];
+        if out_batch != batch {
+            return Err(SuperGraphError::InvalidInputError(format!(
+                "logits batch {} does not match input batch {}",
+                out_batch, batch
+            )));
+        }
 
-        let token_str = tokenizer.decode(&[token_id])?;
-        Ok(token_str)
+        let mut out = Vec::with_capacity(batch);
+        for row in 0..batch {
+            let last_row = logits
+                .slice(&[
+                    (row as u64, row as u64 + 1),
+                    (out_seq - 1, out_seq),
+                    (0, vocab),
+                ])
+                .map_err(|e| SuperGraphError::InvalidInputError(format!("logits slice: {e}")))?;
+            let token_id = argmax_flat(&last_row);
+            let token_str = tokenizer.decode(&[token_id])?;
+            out.push(token_str);
+        }
+        Ok(out)
+    }
+
+    /// Single-prompt convenience wrapper over [`Self::run_strings_in_strings_out`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_string_in_string_out<'p, P: Pool + 'p>(
+        &self,
+        model: &Model,
+        text_in: String,
+        tokenizer_cache: &mut HashMap<TokenizerInfo, Arc<AnyTokenizer>>,
+        super_graph_caches: Option<&mut SuperGraphCache>,
+        eval_options: SuperGraphEvalOptions,
+        observer: &mut impl SuperGraphObserver,
+        pool: &'p P,
+    ) -> Result<String, SuperGraphError> {
+        let batch = vec![text_in];
+        let mut out = self.run_strings_in_strings_out(
+            model,
+            &batch,
+            tokenizer_cache,
+            super_graph_caches,
+            eval_options,
+            observer,
+            pool,
+        )?;
+        Ok(out.remove(0))
     }
 
     pub fn get_tokenizer(&self) -> &TokenizerInfo {
