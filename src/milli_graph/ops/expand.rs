@@ -190,6 +190,13 @@ impl MilliOp for Expand {
                         ) => ScalarInfoTyped::Numeric(t.max(inp)),
                         (Some(t), None) => t,
                         (None, Some(inp)) => inp,
+                        // Input has size 1 and a concrete target: broadcast
+                        // to the target. Otherwise (input > 1), it must
+                        // match the target at runtime, so keep the symbolic
+                        // input identity for downstream lowering.
+                        (Some(ScalarInfoTyped::Numeric(t)), Some(ScalarInfoTyped::Symbolic(s))) => {
+                            ScalarInfoTyped::Symbolic(s)
+                        }
                         (Some(ScalarInfoTyped::Numeric(t)), Some(_)) => ScalarInfoTyped::Numeric(t),
                         (Some(_), Some(ScalarInfoTyped::Numeric(inp))) => {
                             ScalarInfoTyped::Numeric(inp)
@@ -249,8 +256,13 @@ impl MilliOp for Expand {
                         ) => ScalarInfoTyped::Numeric(t.max(inp)),
                         (Some(t), None) => t,
                         (None, Some(inp)) => inp,
+                        // Symbolic input with concrete target > 1: input
+                        // must equal target at runtime. Keep the symbolic
+                        // identity so downstream lowering can carry it.
+                        (Some(ScalarInfoTyped::Numeric(_)), Some(ScalarInfoTyped::Symbolic(s))) => {
+                            ScalarInfoTyped::Symbolic(s)
+                        }
                         (Some(ScalarInfoTyped::Numeric(t)), Some(_)) => {
-                            // Target is known, input is symbolic -- use target
                             ScalarInfoTyped::Numeric(t)
                         }
                         (Some(_), Some(ScalarInfoTyped::Numeric(inp))) => {
