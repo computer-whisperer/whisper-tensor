@@ -777,8 +777,10 @@ impl GraphExplorerApp {
                                                         let response_tokens =
                                                             data.tensor_outputs.remove(&link).unwrap();
                                                         let shape = response_tokens.shape();
-                                                        let logits_per_token = shape[1];
-                                                        let returned_tokens = shape[0];
+                                                        // Interface returns [batch, seq, vocab];
+                                                        // UI runs at batch=1, so we read row 0.
+                                                        let returned_tokens = shape[1];
+                                                        let logits_per_token = shape[2];
                                                         for i in 0..returned_tokens as usize {
                                                             let row_start = i * logits_per_token as usize;
                                                             let output_vec: Vec<f32> = (0..logits_per_token as usize)
@@ -862,8 +864,9 @@ impl GraphExplorerApp {
                                                     if ui.button("Run").clicked() {
                                                         let tokens =
                                                             text_inference_data.tokens.clone();
+                                                        // Interface contract is [batch, seq]; UI runs at batch=1.
                                                         let tokens_tensor = NumericTensor::<DynRank, SystemPool>::from_fn(
-                                                            vec![tokens.len() as u64],
+                                                            vec![1, tokens.len() as u64],
                                                             NumericDType::U32,
                                                             &SystemPool,
                                                             |i| NumericScalar::from_u32(tokens[i]),
