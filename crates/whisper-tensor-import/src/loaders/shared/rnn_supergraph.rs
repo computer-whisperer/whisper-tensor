@@ -3,7 +3,9 @@ use std::collections::HashMap;
 use whisper_tensor::interfaces::TextInferenceTokensInLogitOutInterface;
 use whisper_tensor::metadata::TokenizerInfo;
 use whisper_tensor::milli_graph::MilliOpGraph;
-use whisper_tensor::milli_graph::ops::{Cast, Constant, Shape, SimpleBinary, Squeeze, Unsqueeze};
+use whisper_tensor::milli_graph::ops::{
+    Cast, Concat, Constant, Expand, Shape, SimpleBinary, Slice, Squeeze, Unsqueeze,
+};
 use whisper_tensor::numeric_dtype::NumericDType;
 use whisper_tensor::super_graph::SuperGraphBuilder;
 use whisper_tensor::super_graph::links::{
@@ -41,38 +43,13 @@ pub(super) fn build_rnn_supergraph(
     super_graph_builder.set_link_label(model_input_link, "model_weights");
     super_graph_builder.set_link_label(token_context_input_link, token_input_name);
 
-    // The Interface contract gives us tokens as [batch=1, seq]; the
-    // RNN scan below iterates over tokens along axis 0 one at a time,
-    // so we squeeze the leading batch dim into a 1D [seq] tensor and
-    // feed that to the cache nodes and scan. The unsqueeze back to
-    // [1, seq, vocab] happens at the tail of the supergraph.
-    let tokens_1d_link = {
-        let (mut milli_graph, input_map) =
-            MilliOpGraph::new(std::iter::once(token_context_input_link.global_id()), rng);
-        let milli_in = *input_map
-            .get(&token_context_input_link.global_id())
-            .unwrap();
-        let zero_tid = Constant::from_vec_with_label(
-            &mut milli_graph,
-            vec![0i64],
-            Some("batch_squeeze_axis".to_string()),
-            rng,
-        );
-        let squeezed = Squeeze::push_new_with_label(
-            &mut milli_graph,
-            milli_in,
-            zero_tid,
-            Some("tokens.squeeze_batch".to_string()),
-            rng,
-        );
-        let tokens_1d = super_graph_builder.new_tensor_link(rng);
-        super_graph_builder.set_link_label(tokens_1d, "tokens_1d");
-        milli_graph.set_output_map(std::iter::once((squeezed, tokens_1d.global_id())));
-        let mut node = SuperGraphNodeMilliOpGraph::new(milli_graph, rng);
-        node.label = Some("tokens_squeeze_batch".to_string());
-        super_graph_builder.add_node(node.to_any());
-        tokens_1d
-    };
+    // Tokens flow through this supergraph as [batch, seq] per the
+    // TextInferenceTokensInLogitOutInterface contract. The scan
+    // iterates along axis 1 (seq), and the cache nodes key per row
+    // along axis 0.
+    const TOKENS_BATCH_AXIS: u32 = 0;
+    const TOKENS_SEQ_AXIS: u32 = 1;
+    const STATE_BATCH_AXIS: u32 = 0;
 
     let state_ids: Vec<usize> = (0..state_pairs.len()).collect();
 
@@ -90,7 +67,7 @@ pub(super) fn build_rnn_supergraph(
         let post_cache_tokens = super_graph_builder.new_tensor_link(rng);
         let mut node = SuperGraphNodeRNNCacheRead::new(
             cache_key,
-            tokens_1d_link,
+            token_context_input_link,
             post_cache_tokens,
             post_cache_state_init_links
                 .iter()
@@ -100,6 +77,9 @@ pub(super) fn build_rnn_supergraph(
                 .iter()
                 .map(|(id, link)| (id.to_string(), *link))
                 .collect(),
+            TOKENS_BATCH_AXIS,
+            TOKENS_SEQ_AXIS,
+            STATE_BATCH_AXIS,
             rng,
         );
         node.label = Some("cache_read".to_string());
@@ -107,7 +87,9 @@ pub(super) fn build_rnn_supergraph(
         (post_cache_tokens, post_cache_state_init_links)
     };
 
-    // Loop count from token sequence length
+    // Loop count: Shape(post_cache_tokens) is a rank-1 tensor
+    // [batch, seq]. Scan reads iteration count from element 0 of its
+    // input, so we slice the seq element out to a [1] tensor.
     let loop_count_link = {
         let loop_count_link = SuperGraphLink::new(SuperGraphLinkKind::Tensor, rng);
         let (mut milli_graph, input_map) =
@@ -119,7 +101,29 @@ pub(super) fn build_rnn_supergraph(
             Some("token_shape".to_string()),
             rng,
         );
-        milli_graph.set_output_map(std::iter::once((shape_out, loop_count_link.global_id())));
+        let seq_start = Constant::from_vec_with_label(
+            &mut milli_graph,
+            vec![TOKENS_SEQ_AXIS as i64],
+            Some("loop_count.seq_start".to_string()),
+            rng,
+        );
+        let seq_end = Constant::from_vec_with_label(
+            &mut milli_graph,
+            vec![TOKENS_SEQ_AXIS as i64 + 1],
+            Some("loop_count.seq_end".to_string()),
+            rng,
+        );
+        let seq_slice = Slice::push_new_with_label(
+            &mut milli_graph,
+            shape_out,
+            seq_start,
+            seq_end,
+            None,
+            None,
+            Some("loop_count.seq_slice".to_string()),
+            rng,
+        );
+        milli_graph.set_output_map(std::iter::once((seq_slice, loop_count_link.global_id())));
         let mut node = SuperGraphNodeMilliOpGraph::new(milli_graph, rng);
         node.label = Some("loop_count_from_shape".to_string());
         super_graph_builder.add_node(node.to_any());
@@ -142,9 +146,52 @@ pub(super) fn build_rnn_supergraph(
         progress_tier_link
     };
 
-    // State initialization (zeros matching model input shapes/dtypes)
+    // State initialization: runtime-batch-aware zeros.
+    //
+    // Each state tensor's declared shape is [batch_sym, d1, d2, ...]
+    // (batch along STATE_BATCH_AXIS = 0). We can't bake a constant of
+    // that shape because batch isn't known at supergraph build time.
+    // Instead, read batch from the live tokens tensor, compose the
+    // full target shape, and Expand a [1, d1, d2, ...] zero template
+    // to it. For batch=1 this degenerates to a one-row state; for
+    // batch=N it materializes N stacked zero rows.
     {
-        let (mut milli_graph, _) = MilliOpGraph::new(std::iter::empty(), rng);
+        let (mut milli_graph, input_map) =
+            MilliOpGraph::new(std::iter::once(token_context_input_link.global_id()), rng);
+        let tokens_in = *input_map
+            .get(&token_context_input_link.global_id())
+            .unwrap();
+
+        let tokens_shape = Shape::push_new_with_label(
+            &mut milli_graph,
+            tokens_in,
+            Some("state_init.tokens_shape".to_string()),
+            rng,
+        );
+        let batch_start = Constant::from_vec_with_label(
+            &mut milli_graph,
+            vec![TOKENS_BATCH_AXIS as i64],
+            Some("state_init.batch_start".to_string()),
+            rng,
+        );
+        let batch_end = Constant::from_vec_with_label(
+            &mut milli_graph,
+            vec![TOKENS_BATCH_AXIS as i64 + 1],
+            Some("state_init.batch_end".to_string()),
+            rng,
+        );
+        // [1]-tensor of dtype i64 carrying the current batch size.
+        let batch_piece = Slice::push_new_with_label(
+            &mut milli_graph,
+            tokens_shape,
+            batch_start,
+            batch_end,
+            None,
+            None,
+            Some("state_init.batch_piece".to_string()),
+            rng,
+        );
+
         let mut output_map = HashMap::new();
         let mut output_order = vec![];
         for (id, link) in &state_init_links {
@@ -156,25 +203,65 @@ pub(super) fn build_rnn_supergraph(
             let input_tensor_info = symbolic_graph
                 .get_tensor_info(input_tensor_id)
                 .expect("state pair input tensor has no info");
-            let input_tensor_shape: Vec<u64> = input_tensor_info
+            let declared_shape = input_tensor_info
                 .shape
                 .clone()
-                .expect("state pair input tensor has no shape")
+                .expect("state pair input tensor has no shape");
+            if declared_shape.is_empty() {
+                panic!(
+                    "state pair {input_name} has rank 0; expected batch axis at position \
+                     {STATE_BATCH_AXIS}"
+                );
+            }
+            // Non-batch dims: concrete → use that size; symbolic → use
+            // 0. Zero matches the convention for KV-cache sequence
+            // axes (empty cache at init, grows with each scan step)
+            // and degenerates to an empty-along-that-axis tensor,
+            // which is the correct initial shape for autoregressive
+            // models that concat new entries along the symbolic axis.
+            let other_dims: Vec<i64> = declared_shape
                 .iter()
-                .map(|x| x.as_numeric().copied().unwrap_or(0))
+                .enumerate()
+                .filter_map(|(i, s)| {
+                    if i == STATE_BATCH_AXIS as usize {
+                        None
+                    } else {
+                        Some(s.as_numeric().copied().unwrap_or(0) as i64)
+                    }
+                })
                 .collect();
             let input_tensor_ndt = input_tensor_info
                 .dtype
                 .expect("state pair input tensor has no dtype")
                 .expect_numeric("state pair input tensor dtype");
-            let input_tensor_tid = {
+
+            let other_dims_piece = Constant::from_vec_with_label(
+                &mut milli_graph,
+                other_dims.clone(),
+                Some(format!("state_init.other_dims_{}", input_name)),
+                rng,
+            );
+            let target_shape = Concat::push_new_with_label(
+                &mut milli_graph,
+                vec![batch_piece, other_dims_piece],
+                0,
+                Some(format!("state_init.target_shape_{}", input_name)),
+                rng,
+            );
+
+            // Zero template: [1, d1, d2, ...] (batch axis = 1). Expand
+            // broadcasts the leading 1 to the runtime batch size.
+            let template_shape: Vec<u64> = std::iter::once(1)
+                .chain(other_dims.iter().map(|&d| d as u64))
+                .collect();
+            let zero_template = {
                 use whisper_tensor::DynRank;
                 use whisper_tensor::numeric_scalar::NumericScalar;
                 use whisper_tensor::numeric_tensor::NumericTensor;
                 use whisper_tensor::pool::SystemPool;
                 use whisper_tensor::symbolic_graph::InlineConstantTensor;
                 let tensor = NumericTensor::<DynRank, SystemPool>::from_fn(
-                    input_tensor_shape,
+                    template_shape,
                     input_tensor_ndt,
                     &SystemPool,
                     |_| NumericScalar::zero(input_tensor_ndt),
@@ -184,11 +271,19 @@ pub(super) fn build_rnn_supergraph(
                 Constant::push_new_pool(
                     &mut milli_graph,
                     ict,
-                    Some(format!("state_init_{}", input_name)),
+                    Some(format!("state_init.zero_template_{}", input_name)),
                     rng,
                 )
             };
-            output_map.insert(input_tensor_tid, link.global_id());
+            let state_init_out = Expand::push_new_with_label(
+                &mut milli_graph,
+                zero_template,
+                target_shape,
+                Some(format!("state_init.expand_{}", input_name)),
+                rng,
+            );
+
+            output_map.insert(state_init_out, link.global_id());
             output_order.push(link.global_id());
         }
         milli_graph.set_output_map_ordered(output_map, output_order);
@@ -239,7 +334,12 @@ pub(super) fn build_rnn_supergraph(
         super_graph_builder.set_link_label(*link, format!("state_out_{}", state_pairs[*id].1));
     }
 
-    // Input processing in sub-graph: cast dtype + unsqueeze
+    // Input processing in sub-graph: cast dtype + unsqueeze.
+    //
+    // Per-iter `sub_token_input` is rank-1 [batch] (the seq axis was
+    // sliced+squeezed by the scan). Cast to the model's expected
+    // dtype, then unsqueeze at axis 1 (input_tensor_rank - 1) times so
+    // the model sees [batch, 1, ...] of its declared rank.
     let adjusted_token_context = {
         let input_tensor_id = *symbolic_graph
             .get_tensors_by_name()
@@ -268,18 +368,20 @@ pub(super) fn build_rnn_supergraph(
             Some("token.cast_dtype".to_string()),
             rng,
         );
-        let zero_tid = Constant::from_vec_with_label(
+        // Unsqueeze repeatedly at axis 1 to insert size-1 dims after
+        // the batch dim, until we reach the model's declared rank.
+        let one_axis = Constant::from_vec_with_label(
             &mut milli_graph,
-            vec![0i64],
+            vec![1i64],
             Some("token.unsqueeze_axis".to_string()),
             rng,
         );
-        for _ in 0..input_tensor_rank {
+        for _ in 0..input_tensor_rank.saturating_sub(1) {
             x = Unsqueeze::push_new_with_label(
                 &mut milli_graph,
                 x,
-                zero_tid,
-                Some("token.add_batch_dim".to_string()),
+                one_axis,
+                Some("token.add_seq_dim".to_string()),
                 rng,
             );
         }
@@ -316,7 +418,10 @@ pub(super) fn build_rnn_supergraph(
         sub_builder.add_node(node.to_any());
     }
 
-    // Output processing in sub-graph: squeeze + cast to F32
+    // Output processing in sub-graph: squeeze the inner seq=1 dims
+    // and cast to F32. Per-iter logits start as [batch, 1, ..., vocab]
+    // (output_tensor_rank); we squeeze (rank - 2) axes at position 1
+    // to leave rank-2 [batch, vocab].
     let processed_logit_output_link = {
         let output_tensor_id = *symbolic_graph
             .get_tensors_by_name()
@@ -335,18 +440,18 @@ pub(super) fn build_rnn_supergraph(
             MilliOpGraph::new(std::iter::once(sub_logit_output.global_id()), rng);
         let milli_op_graph_input = *input_map.get(&sub_logit_output.global_id()).unwrap();
         let mut x = milli_op_graph_input;
-        let zero_tid = Constant::from_vec_with_label(
+        let one_axis = Constant::from_vec_with_label(
             &mut milli_graph,
-            vec![0i64],
+            vec![1i64],
             Some("logits.squeeze_axis".to_string()),
             rng,
         );
-        for _ in 0..(output_tensor_rank - 1) {
+        for _ in 0..output_tensor_rank.saturating_sub(2) {
             x = Squeeze::push_new_with_label(
                 &mut milli_graph,
                 x,
-                zero_tid,
-                Some("logits.remove_batch_dim".to_string()),
+                one_axis,
+                Some("logits.remove_seq_dim".to_string()),
                 rng,
             );
         }
@@ -443,64 +548,42 @@ pub(super) fn build_rnn_supergraph(
             SuperGraphLinkDouble::new(loop_count_link, sub_total_steps),
         ],
         state_links,
-        vec![(post_cache_tokens_input, sub_token_input, 0)],
-        vec![(processed_logit_output_link, outer_logit_output_link, 0)],
+        // Slice tokens along the seq axis (axis 1 of [batch, seq])
+        // → per-iter [batch] (the scan eval squeezes the sliced axis).
+        vec![(post_cache_tokens_input, sub_token_input, TOKENS_SEQ_AXIS)],
+        // Per-iter output is [batch, vocab]; insert the seq axis back
+        // at position 1 so scan accumulates into [batch, seq, vocab].
+        vec![(processed_logit_output_link, outer_logit_output_link, 1)],
         final_state_outputs.clone(),
         rng,
     );
     scan_node.label = Some("token_decode_scan".to_string());
     super_graph_builder.add_node(scan_node.to_any());
 
-    // Cache write
+    // Cache write — uses the original [batch, seq] tokens for keys.
     {
         let mut node = SuperGraphNodeRNNCacheWrite::new(
             cache_key,
-            tokens_1d_link,
+            token_context_input_link,
             final_state_output_links
                 .iter()
                 .map(|(id, link)| (id.to_string(), *link))
                 .collect(),
+            TOKENS_BATCH_AXIS,
+            TOKENS_SEQ_AXIS,
+            STATE_BATCH_AXIS,
             rng,
         );
         node.label = Some("cache_write".to_string());
         super_graph_builder.add_node(node.to_any());
     }
 
-    // Scan collects per-iteration logits along axis 0, yielding
-    // [seq, vocab]. The Interface contract wants [batch, seq, vocab],
-    // so we unsqueeze the leading batch dim.
-    let batched_logit_output_link = {
-        let (mut milli_graph, input_map) =
-            MilliOpGraph::new(std::iter::once(outer_logit_output_link.global_id()), rng);
-        let milli_in = *input_map.get(&outer_logit_output_link.global_id()).unwrap();
-        let zero_tid = Constant::from_vec_with_label(
-            &mut milli_graph,
-            vec![0i64],
-            Some("batch_unsqueeze_axis".to_string()),
-            rng,
-        );
-        let unsqueezed = Unsqueeze::push_new_with_label(
-            &mut milli_graph,
-            milli_in,
-            zero_tid,
-            Some("logits.unsqueeze_batch".to_string()),
-            rng,
-        );
-        let batched = super_graph_builder.new_tensor_link(rng);
-        super_graph_builder.set_link_label(batched, "batched_logits");
-        milli_graph.set_output_map(std::iter::once((unsqueezed, batched.global_id())));
-        let mut node = SuperGraphNodeMilliOpGraph::new(milli_graph, rng);
-        node.label = Some("logits_unsqueeze_batch".to_string());
-        super_graph_builder.add_node(node.to_any());
-        batched
-    };
-
     let super_graph_inputs = vec![
         cache_key.to_any(),
         model_input_link.to_any(),
         token_context_input_link.to_any(),
     ];
-    let super_graph_outputs = vec![batched_logit_output_link.to_any()];
+    let super_graph_outputs = vec![outer_logit_output_link.to_any()];
     let super_graph = super_graph_builder.build(
         rng,
         super_graph_inputs.as_slice(),
@@ -511,13 +594,12 @@ pub(super) fn build_rnn_supergraph(
         tokenizer,
         model_input_link,
         token_context_input_link,
-        logit_output_link: batched_logit_output_link,
+        logit_output_link: outer_logit_output_link,
         super_graph,
         cache_key_input_link: cache_key,
-        // RNN scan iterates along axis 0 one token at a time with
-        // recurrent state; per-row state batching is the widening
-        // work queued after the CLI plumbing lands.
-        max_batch: 1,
+        // Per-row cache + runtime-batch state init + scan along the
+        // seq axis lets this supergraph handle arbitrary batch sizes.
+        max_batch: u64::MAX,
         max_seq: u64::MAX,
     }
 }

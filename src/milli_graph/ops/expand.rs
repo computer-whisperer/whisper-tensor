@@ -88,6 +88,25 @@ impl Expand {
             })
             .collect();
 
+        // Every output sym_dim must also appear as an input sym_dim —
+        // otherwise the nano group would reference a GraphConstant that
+        // has no runtime binding. This can happen when Expand's shape
+        // tensor is dynamic and inference mints fresh symbolics for the
+        // output dims (see `Shape → Slice → Concat → Expand` chains).
+        // Route those cases to opaque eval instead of producing a
+        // group that crashes at evaluation time.
+        let in_sym_set: std::collections::HashSet<_> = in_map
+            .dims
+            .iter()
+            .filter_map(|d| match d {
+                DimKind::Sym { gc, .. } => Some(*gc),
+                _ => None,
+            })
+            .collect();
+        if sym_dims.iter().any(|gc| !in_sym_set.contains(gc)) {
+            return crate::milli_graph::ops::LowerResult::Unsupported;
+        }
+
         let dt = NanoLoweringContext::ndt(out_info);
         if count == in_map.count {
             ctx.tensor_map.insert(

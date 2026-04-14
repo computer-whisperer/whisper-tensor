@@ -186,6 +186,61 @@ fn alloc_err(e: crate::pool::AllocationError) -> SuperGraphError {
     SuperGraphError::InvalidInputError(format!("allocation: {e}"))
 }
 
+/// Stack N tensors along `axis`. Each input must have size 1 along
+/// `axis`; all other dims must match. The output has size N along
+/// `axis` and preserves all other dims. Used by `RNNCacheRead` to
+/// assemble a batched state from per-row cached entries.
+fn stack_along_axis<'p, P: Pool + 'p>(
+    parts: &[&PoolNumericTensor<'p, DynRank, P>],
+    axis: usize,
+    pool: &'p P,
+) -> Result<PoolNumericTensor<'p, DynRank, P>, SuperGraphError> {
+    if parts.is_empty() {
+        return Err(SuperGraphError::InvalidInputError(
+            "stack_along_axis: empty parts".to_string(),
+        ));
+    }
+    let row_shape = parts[0].shape();
+    if axis >= row_shape.len() {
+        return Err(SuperGraphError::InvalidInputError(format!(
+            "stack_along_axis: axis {axis} out of range for shape {:?}",
+            row_shape
+        )));
+    }
+    if row_shape[axis] != 1 {
+        return Err(SuperGraphError::InvalidInputError(format!(
+            "stack_along_axis: each part must have size 1 at axis {axis}, got {}",
+            row_shape[axis]
+        )));
+    }
+    for (i, p) in parts.iter().enumerate().skip(1) {
+        if p.shape() != row_shape {
+            return Err(SuperGraphError::InvalidInputError(format!(
+                "stack_along_axis: part {i} shape {:?} != part 0 shape {:?}",
+                p.shape(),
+                row_shape
+            )));
+        }
+    }
+
+    let n = parts.len() as u64;
+    let mut out_shape = row_shape.clone();
+    out_shape[axis] = n;
+    let post_axis_size: u64 = out_shape.iter().skip(axis + 1).product();
+    let dtype = parts[0].dtype();
+    PoolNumericTensor::from_fn(out_shape, dtype, pool, |flat_idx| {
+        let f = flat_idx as u64;
+        let post_idx = f % post_axis_size;
+        let batch_row = (f / post_axis_size) % n;
+        let pre_idx = f / (post_axis_size * n);
+        // Per-row size at `axis` is 1, so per-row flat =
+        // pre_idx * post_axis_size + post_idx.
+        let per_row_flat = pre_idx * post_axis_size + post_idx;
+        parts[batch_row as usize].read_element(per_row_flat as usize)
+    })
+    .map_err(alloc_err)
+}
+
 fn check_rank0(shape: &[u64], input_name: &str) -> Result<(), SuperGraphError> {
     if shape.len() > 1 || (shape.len() == 1 && shape[0] != 1) {
         return Err(SuperGraphError::InvalidInputError(format!(
@@ -2948,9 +3003,12 @@ fn eval_scan<'short, 'model, 'p, P: Pool + 'p, T: SuperGraphObserver>(
                 link
             )));
         }
-        // Each part has shape [d0, ..., dk]. We unsqueeze at `axis` to get
-        // [d0, ..., 1, ..., dk], then concat along `axis` to get
-        // [d0, ..., N, ..., dk] where N = parts.len().
+        // Each part has shape [d0, ..., d{rank-1}]. Concatenating
+        // unsqueezes at `axis` (size 1 in each part) and stacks N parts,
+        // producing output [d0, ..., d{axis-1}, N, d{axis}, ..., d{rank-1}].
+        // The flat index math is general for any `axis`: split the
+        // output flat index into the contributions from axes < axis,
+        // axis itself (= part index), and axes > axis.
         let part_shape = parts[0].shape();
         let n_parts = parts.len() as u64;
         let mut concat_shape: Vec<u64> = Vec::with_capacity(part_shape.len() + 1);
@@ -2961,15 +3019,20 @@ fn eval_scan<'short, 'model, 'p, P: Pool + 'p, T: SuperGraphObserver>(
             concat_shape.push(d);
         }
         if axis >= part_shape.len() {
-            // axis == rank: append at the end
             concat_shape.push(n_parts);
         }
-        let part_numel = parts[0].numel();
+        // Row-major: post_axis_size is the product of all dims after
+        // the inserted N axis in the output (== product of part dims at
+        // positions >= axis).
+        let post_axis_size: u64 = part_shape.iter().skip(axis).product();
         let concat =
             PoolNumericTensor::from_fn(concat_shape, parts[0].dtype(), context.pool, |flat_idx| {
-                let part_idx = flat_idx / part_numel;
-                let elem_idx = flat_idx % part_numel;
-                parts[part_idx].read_element(elem_idx)
+                let f = flat_idx as u64;
+                let post_idx = f % post_axis_size;
+                let part_idx = (f / post_axis_size) % n_parts;
+                let pre_idx = f / (post_axis_size * n_parts);
+                let per_part_flat = pre_idx * post_axis_size + post_idx;
+                parts[part_idx as usize].read_element(per_part_flat as usize)
             })
             .map_err(alloc_err)?;
         output_data.tensors.insert(link, concat);
@@ -3154,15 +3217,35 @@ pub struct SuperGraphNodeRNNCacheRead {
     tokens_output: Option<SuperGraphLink>,
     state_outputs: Vec<(String, Option<SuperGraphLink>)>,
     default_state_inputs: Vec<(String, Option<SuperGraphLink>)>,
+    /// Axis of `tokens_input` that indexes the batch (one cache key per row).
+    #[serde(default)]
+    pub tokens_batch_axis: u32,
+    /// Axis of `tokens_input` that indexes the sequence (the axis we trim
+    /// when emitting `tokens_output` after a cache hit).
+    #[serde(default = "default_seq_axis")]
+    pub tokens_seq_axis: u32,
+    /// Axis of each state tensor that indexes the batch. Per-row states
+    /// stored in the cache have size 1 along this axis; on hit they are
+    /// stacked along this axis to form the batched state.
+    #[serde(default)]
+    pub state_batch_axis: u32,
+}
+
+fn default_seq_axis() -> u32 {
+    1
 }
 
 impl SuperGraphNodeRNNCacheRead {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         key_input: SuperGraphLink,
         tokens_input: SuperGraphLink,
         tokens_output: SuperGraphLink,
         state_outputs: Vec<(String, SuperGraphLink)>,
         default_state_inputs: Vec<(String, SuperGraphLink)>,
+        tokens_batch_axis: u32,
+        tokens_seq_axis: u32,
+        state_batch_axis: u32,
         rng: &mut impl Rng,
     ) -> Self {
         Self {
@@ -3179,6 +3262,9 @@ impl SuperGraphNodeRNNCacheRead {
                 .into_iter()
                 .map(|(name, link)| (name, Some(link)))
                 .collect(),
+            tokens_batch_axis,
+            tokens_seq_axis,
+            state_batch_axis,
         }
     }
 }
@@ -3203,61 +3289,144 @@ impl SuperGraphNode for SuperGraphNodeRNNCacheRead {
             .tensors
             .get(&tokens_input_link)
             .ok_or(SuperGraphError::MissingLinkError(String::new()))?;
-        // Read token values directly from the pool tensor
-        let tokens_vec: Vec<u32> = (0..tokens_input.numel())
-            .map(|i| tokens_input.read_element(i).to_i64() as u32)
-            .collect();
-        let mut found = false;
+        let tokens_shape = tokens_input.shape();
+        let batch_axis = self.tokens_batch_axis as usize;
+        let seq_axis = self.tokens_seq_axis as usize;
+        if batch_axis >= tokens_shape.len() || seq_axis >= tokens_shape.len() {
+            return Err(SuperGraphError::InvalidInputError(format!(
+                "RNNCacheRead axes batch={batch_axis} seq={seq_axis} out of range \
+                 for tokens shape {:?}",
+                tokens_shape
+            )));
+        }
+        if batch_axis == seq_axis {
+            return Err(SuperGraphError::InvalidInputError(
+                "RNNCacheRead tokens_batch_axis must differ from tokens_seq_axis".to_string(),
+            ));
+        }
+        let batch = tokens_shape[batch_axis] as usize;
+        let seq = tokens_shape[seq_axis] as usize;
+
+        // Per-row token extraction: slice tokens_input at batch_axis to a single row
+        // and read the elements as a flat sequence. For [batch, seq] inputs this
+        // yields exactly seq tokens per row.
+        let mut per_row_tokens: Vec<Vec<u32>> = Vec::with_capacity(batch);
+        for r in 0..batch {
+            let mut slice_ranges: Vec<(u64, u64)> = tokens_shape.iter().map(|&d| (0, d)).collect();
+            slice_ranges[batch_axis] = (r as u64, r as u64 + 1);
+            let row = tokens_input.slice(&slice_ranges).map_err(|e| {
+                SuperGraphError::InvalidInputError(format!("RNNCacheRead row slice: {e}"))
+            })?;
+            let toks: Vec<u32> = (0..row.numel())
+                .map(|i| row.read_element(i).to_i64() as u32)
+                .collect();
+            per_row_tokens.push(toks);
+        }
+
+        // Per-row longest-matched-prefix lookup, then min-L alignment so every
+        // row resumes the scan from the same position.
+        let mut chosen_l: usize = 0;
+        let mut per_row_state: Option<Vec<HashMap<String, PoolNumericTensor<'p, DynRank, P>>>> =
+            None;
         if let Some(caches) = &mut context.caches {
             let key_input = *data
                 .hashes
                 .get(&key_input_link)
                 .ok_or(SuperGraphError::MissingLinkError(String::new()))?;
             if let Some(rnn_cache) = caches.rnn_cache.get(&key_input) {
-                // Try to match as many tokens as possible
-                for i in (1..tokens_vec.len()).rev() {
-                    let matched_tokens = &tokens_vec[..i].to_vec();
-                    if let Some(state) = rnn_cache.get(matched_tokens) {
-                        found = true;
-                        for (key, value) in state.iter() {
-                            if let Some((_, output_link)) =
-                                self.state_outputs.iter().find(|(k, _)| k == key)
-                            {
-                                let output_link = require_node_link(
-                                    *output_link,
-                                    "RNNCacheRead",
-                                    "state_outputs",
-                                )?;
-                                data.tensors.insert(
-                                    output_link,
-                                    value.to_tensor(context.pool).map_err(|e| {
-                                        SuperGraphError::InvalidInputError(format!(
-                                            "allocation: {e}"
-                                        ))
-                                    })?,
-                                );
+                let mut matched_lens: Vec<usize> = vec![0; batch];
+                for (r, toks) in per_row_tokens.iter().enumerate() {
+                    for i in (1..=toks.len()).rev() {
+                        if rnn_cache.contains_key(&toks[..i].to_vec()) {
+                            matched_lens[r] = i;
+                            break;
+                        }
+                    }
+                }
+                let l_candidate = matched_lens.iter().copied().min().unwrap_or(0);
+                if l_candidate > 0 {
+                    // Confirm every row also has an entry at *exactly* L
+                    // tokens. Same-prompt batch hits this trivially; mixed
+                    // prompts may not, in which case we skip the cache.
+                    let mut row_states: Vec<HashMap<String, PoolNumericTensor<'p, DynRank, P>>> =
+                        Vec::with_capacity(batch);
+                    let mut all_have_l = true;
+                    for toks in per_row_tokens.iter() {
+                        let key = toks[..l_candidate].to_vec();
+                        match rnn_cache.get(&key) {
+                            Some(state) => {
+                                let materialized: HashMap<
+                                    String,
+                                    PoolNumericTensor<'p, DynRank, P>,
+                                > = state
+                                    .iter()
+                                    .map(|(k, v)| {
+                                        v.to_tensor(context.pool).map(|t| (k.clone(), t)).map_err(
+                                            |e| {
+                                                SuperGraphError::InvalidInputError(format!(
+                                                    "allocation: {e}"
+                                                ))
+                                            },
+                                        )
+                                    })
+                                    .collect::<Result<_, _>>()?;
+                                row_states.push(materialized);
+                            }
+                            None => {
+                                all_have_l = false;
+                                break;
                             }
                         }
-                        // Emit remaining tokens
-                        let remaining_tokens = &tokens_vec[i..];
-                        data.tensors.insert(
-                            tokens_output_link,
-                            PoolNumericTensor::from_fn(
-                                vec![remaining_tokens.len() as u64],
-                                NumericDType::U32,
-                                context.pool,
-                                |i| NumericScalar::from_u32(remaining_tokens[i]),
-                            )
-                            .map_err(alloc_err)?,
-                        );
-                        break;
+                    }
+                    if all_have_l {
+                        chosen_l = l_candidate;
+                        per_row_state = Some(row_states);
                     }
                 }
             }
         }
 
-        if !found {
-            // Emit default state
+        if chosen_l > 0 {
+            let row_states = per_row_state.expect("per_row_state set when chosen_l > 0");
+            let state_batch_axis = self.state_batch_axis as usize;
+
+            // Materialize the trimmed tokens first while we still hold
+            // the read borrow on `data.tensors`; after this the borrow
+            // ends and we can mutate data freely.
+            let trimmed_tensor = {
+                let mut trim_ranges: Vec<(u64, u64)> =
+                    tokens_shape.iter().map(|&d| (0, d)).collect();
+                trim_ranges[seq_axis] = (chosen_l as u64, seq as u64);
+                let trimmed = tokens_input.slice(&trim_ranges).map_err(|e| {
+                    SuperGraphError::InvalidInputError(format!("RNNCacheRead seq trim: {e}"))
+                })?;
+                let mut trimmed_shape = tokens_shape.clone();
+                trimmed_shape[seq_axis] = (seq - chosen_l) as u64;
+                PoolNumericTensor::from_fn(trimmed_shape, trimmed.dtype(), context.pool, |i| {
+                    trimmed.read_element(i)
+                })
+                .map_err(alloc_err)?
+            };
+
+            for (state_name, output_link) in self.state_outputs.iter() {
+                let output_link = require_node_link(*output_link, "RNNCacheRead", "state_outputs")?;
+                let per_row: Vec<&PoolNumericTensor<'p, DynRank, P>> = row_states
+                    .iter()
+                    .map(|s| {
+                        s.get(state_name).ok_or_else(|| {
+                            SuperGraphError::InvalidInputError(format!(
+                                "RNNCacheRead: cached state missing entry for {state_name}"
+                            ))
+                        })
+                    })
+                    .collect::<Result<_, _>>()?;
+                let stacked = stack_along_axis(&per_row, state_batch_axis, context.pool)?;
+                data.tensors.insert(output_link, stacked);
+            }
+
+            data.tensors.insert(tokens_output_link, trimmed_tensor);
+        } else {
+            // Cache miss — emit defaults and pass tokens through unchanged.
             for (key, value) in self.default_state_inputs.iter() {
                 let value_link = require_node_link(*value, "RNNCacheRead", "default_state_inputs")?;
                 let value = data
@@ -3273,7 +3442,6 @@ impl SuperGraphNode for SuperGraphNodeRNNCacheRead {
                     data.tensors.insert(output_link, value_copy);
                 }
             }
-            // Copy tokens_input to output
             let tokens_copy = data
                 .tensors
                 .get(&tokens_input_link)
@@ -3325,6 +3493,18 @@ pub struct SuperGraphNodeRNNCacheWrite {
     key_input: Option<SuperGraphLink>,
     tokens_input: Option<SuperGraphLink>,
     state_inputs: Vec<(String, Option<SuperGraphLink>)>,
+    /// Axis of `tokens_input` that indexes the batch (used to derive
+    /// per-row token sequences as cache keys).
+    #[serde(default)]
+    pub tokens_batch_axis: u32,
+    /// Axis of `tokens_input` that indexes the sequence (used to read
+    /// each row's token sequence in order).
+    #[serde(default = "default_seq_axis")]
+    pub tokens_seq_axis: u32,
+    /// Axis of each state tensor that indexes the batch. Per-row state
+    /// stored in the cache is sliced along this axis.
+    #[serde(default)]
+    pub state_batch_axis: u32,
 }
 
 impl SuperGraphNodeRNNCacheWrite {
@@ -3332,6 +3512,9 @@ impl SuperGraphNodeRNNCacheWrite {
         key_input: SuperGraphLink,
         tokens_input: SuperGraphLink,
         state_inputs: Vec<(String, SuperGraphLink)>,
+        tokens_batch_axis: u32,
+        tokens_seq_axis: u32,
+        state_batch_axis: u32,
         rng: &mut impl Rng,
     ) -> Self {
         Self {
@@ -3343,6 +3526,9 @@ impl SuperGraphNodeRNNCacheWrite {
                 .into_iter()
                 .map(|(name, link)| (name, Some(link)))
                 .collect(),
+            tokens_batch_axis,
+            tokens_seq_axis,
+            state_batch_axis,
         }
     }
 }
@@ -3361,44 +3547,108 @@ impl SuperGraphNode for SuperGraphNodeRNNCacheWrite {
         let key_input_link = require_node_link(self.key_input, "RNNCacheWrite", "key_input")?;
         let tokens_input_link =
             require_node_link(self.tokens_input, "RNNCacheWrite", "tokens_input")?;
-        if let Some(caches) = &mut context.caches {
-            let key_input = *data
-                .hashes
-                .get(&key_input_link)
-                .ok_or(SuperGraphError::MissingLinkError(String::new()))?;
-            let tokens_input = data
-                .tensors
-                .get(&tokens_input_link)
-                .ok_or(SuperGraphError::MissingLinkError(String::new()))?;
-            let tokens_vec: Vec<u32> = (0..tokens_input.numel())
-                .map(|i| tokens_input.read_element(i).to_i64() as u32)
+        let Some(caches) = &mut context.caches else {
+            return Ok(());
+        };
+        let key_input = *data
+            .hashes
+            .get(&key_input_link)
+            .ok_or(SuperGraphError::MissingLinkError(String::new()))?;
+        let tokens_input = data
+            .tensors
+            .get(&tokens_input_link)
+            .ok_or(SuperGraphError::MissingLinkError(String::new()))?;
+        let tokens_shape = tokens_input.shape();
+        let batch_axis = self.tokens_batch_axis as usize;
+        let seq_axis = self.tokens_seq_axis as usize;
+        if batch_axis >= tokens_shape.len() || seq_axis >= tokens_shape.len() {
+            return Err(SuperGraphError::InvalidInputError(format!(
+                "RNNCacheWrite axes batch={batch_axis} seq={seq_axis} out of range \
+                 for tokens shape {:?}",
+                tokens_shape
+            )));
+        }
+        if batch_axis == seq_axis {
+            return Err(SuperGraphError::InvalidInputError(
+                "RNNCacheWrite tokens_batch_axis must differ from tokens_seq_axis".to_string(),
+            ));
+        }
+        let batch = tokens_shape[batch_axis] as usize;
+
+        // Extract per-row token sequences (cache keys).
+        let mut per_row_tokens: Vec<Vec<u32>> = Vec::with_capacity(batch);
+        for r in 0..batch {
+            let mut slice_ranges: Vec<(u64, u64)> = tokens_shape.iter().map(|&d| (0, d)).collect();
+            slice_ranges[batch_axis] = (r as u64, r as u64 + 1);
+            let row = tokens_input.slice(&slice_ranges).map_err(|e| {
+                SuperGraphError::InvalidInputError(format!("RNNCacheWrite row slice: {e}"))
+            })?;
+            let toks: Vec<u32> = (0..row.numel())
+                .map(|i| row.read_element(i).to_i64() as u32)
                 .collect();
-            // Cache stores tensors in the slot's ArcTrackedPool so every
-            // cached byte is counted against the aggregate cache counter.
-            let cache_pool = caches.pool.clone();
-            let state_inputs: HashMap<
+            per_row_tokens.push(toks);
+        }
+
+        // For each state, slice per row along state_batch_axis and cache
+        // as [..., 1 at state_batch_axis, ...]. On read this is stacked
+        // back up along the same axis.
+        let state_batch_axis = self.state_batch_axis as usize;
+        let cache_pool = caches.pool.clone();
+        let mut per_row_state: Vec<
+            HashMap<
                 String,
                 crate::numeric_tensor::NumericTensor<'static, DynRank, crate::pool::ArcTrackedPool>,
-            > = self
-                .state_inputs
-                .iter()
-                .map(|(k, v)| {
-                    let link = require_node_link(*v, "RNNCacheWrite", "state_inputs")?;
-                    let tensor = data
-                        .tensors
-                        .get(&link)
-                        .ok_or(SuperGraphError::MissingLinkError(String::new()))?;
-                    let cached = tensor.to_arc_tracked_static(&cache_pool).map_err(|e| {
-                        SuperGraphError::InvalidInputError(format!("allocation: {e}"))
-                    })?;
-                    Ok((k.clone(), cached))
-                })
-                .collect::<Result<_, SuperGraphError>>()?;
-            caches
-                .rnn_cache
-                .entry(key_input)
-                .or_default()
-                .insert(tokens_vec, state_inputs);
+            >,
+        > = (0..batch).map(|_| HashMap::new()).collect();
+        for (state_name, link_opt) in self.state_inputs.iter() {
+            let link = require_node_link(*link_opt, "RNNCacheWrite", "state_inputs")?;
+            let state_tensor = data
+                .tensors
+                .get(&link)
+                .ok_or(SuperGraphError::MissingLinkError(String::new()))?;
+            let state_shape = state_tensor.shape();
+            if state_batch_axis >= state_shape.len() {
+                return Err(SuperGraphError::InvalidInputError(format!(
+                    "RNNCacheWrite state_batch_axis {state_batch_axis} out of range for \
+                     state {state_name} shape {:?}",
+                    state_shape
+                )));
+            }
+            if state_shape[state_batch_axis] as usize != batch {
+                return Err(SuperGraphError::InvalidInputError(format!(
+                    "RNNCacheWrite state {state_name} has {} rows at axis {state_batch_axis}, \
+                     tokens have {batch} rows",
+                    state_shape[state_batch_axis]
+                )));
+            }
+            for (r, per_row) in per_row_state.iter_mut().enumerate().take(batch) {
+                let mut slice_ranges: Vec<(u64, u64)> =
+                    state_shape.iter().map(|&d| (0, d)).collect();
+                slice_ranges[state_batch_axis] = (r as u64, r as u64 + 1);
+                let row_view = state_tensor.slice(&slice_ranges).map_err(|e| {
+                    SuperGraphError::InvalidInputError(format!(
+                        "RNNCacheWrite state row slice: {e}"
+                    ))
+                })?;
+                // Materialize into a contiguous tensor so the cache owns
+                // its own storage (the slice is a view over the eval pool).
+                let owned_in_eval_pool = PoolNumericTensor::from_fn(
+                    row_view.shape().to_vec(),
+                    row_view.dtype(),
+                    context.pool,
+                    |i| row_view.read_element(i),
+                )
+                .map_err(alloc_err)?;
+                let cached = owned_in_eval_pool
+                    .to_arc_tracked_static(&cache_pool)
+                    .map_err(|e| SuperGraphError::InvalidInputError(format!("allocation: {e}")))?;
+                per_row.insert(state_name.clone(), cached);
+            }
+        }
+
+        let entry = caches.rnn_cache.entry(key_input).or_default();
+        for (toks, state_map) in per_row_tokens.into_iter().zip(per_row_state.into_iter()) {
+            entry.insert(toks, state_map);
         }
         Ok(())
     }
