@@ -164,7 +164,7 @@ impl ReduceMean {
             sum_map.sym_dims(),
             vec![
                 GroupInput::identity(InputRef::affine(sum_map.base_id, 1), n_sym),
-                GroupInput::mapped(InputRef::Broadcast(extent_lit), &sum_map.sym_dims(), &[]),
+                GroupInput::broadcast_only(InputRef::Broadcast(extent_lit), n_sym),
             ],
         );
 

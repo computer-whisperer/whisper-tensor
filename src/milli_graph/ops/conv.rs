@@ -686,6 +686,11 @@ impl Conv {
                             dim_shape: spatial_dim_shape.clone(),
                         };
 
+                        // Conv guards above restrict sym to the batch axis
+                        // (C_in and spatial dims must be Known).  With that
+                        // restriction the input's sym-dims list is a prefix
+                        // of the output's (both are just the batch axis or
+                        // both empty) so an all-Identity mapping is correct.
                         let b = ctx.nano.push_group(
                             spatial_size,
                             original_dtype,
@@ -695,8 +700,11 @@ impl Conv {
                             },
                             out_sym_dims.clone(),
                             vec![
-                                GroupInput::mapped(InputRef::Broadcast(w_atom), &out_sym_dims, &[]),
-                                GroupInput::mapped(input_ref, &out_sym_dims, &in_map.sym_dims()),
+                                GroupInput::broadcast_only(
+                                    InputRef::Broadcast(w_atom),
+                                    out_sym_dims.len(),
+                                ),
+                                GroupInput::identity(input_ref, out_sym_dims.len()),
                             ],
                         );
                         if first_mul_base.is_none() {
@@ -759,7 +767,10 @@ impl Conv {
                         out_sym_dims.clone(),
                         vec![
                             GroupInput::identity(InputRef::affine(reduce_co_base, 1), n_sym_out),
-                            GroupInput::mapped(InputRef::Broadcast(bias_atom), &out_sym_dims, &[]),
+                            GroupInput::broadcast_only(
+                                InputRef::Broadcast(bias_atom),
+                                out_sym_dims.len(),
+                            ),
                         ],
                     );
                     if first_bias_base.is_none() {

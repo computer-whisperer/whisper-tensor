@@ -59,6 +59,18 @@ pub struct GroupInput {
 }
 
 impl GroupInput {
+    /// Direct constructor: caller supplies the sym-dim mapping explicitly.
+    ///
+    /// Per `docs/symbolic_dims_nano.md`, the mapping is always derived from
+    /// the op's own semantics by the lowering.  The nano layer does not
+    /// discover it via GraphConstant matching.
+    pub fn new(input_ref: InputRef, sym_dim_map: Vec<SymDimMap>) -> Self {
+        Self {
+            input_ref,
+            sym_dim_map,
+        }
+    }
+
     /// Wrap an InputRef with no sym-dim mapping (scalar atoms, no symbolic dims).
     pub fn scalar(input_ref: InputRef) -> Self {
         Self {
@@ -76,43 +88,12 @@ impl GroupInput {
         }
     }
 
-    /// Build the correct sym-dim mapping by matching GraphConstantIds.
-    ///
-    /// For each consumer sym axis, finds an unused producer axis with the
-    /// same GraphConstantId and creates an Identity entry, or Broadcast
-    /// if the producer doesn't have a matching axis.
-    ///
-    /// The "unused" bookkeeping matters when the producer has duplicate
-    /// GCs across axes (e.g. a matmul output `[1, M(gc_h), N(gc_h)]`
-    /// where both M and N reference the same sym). Without it, every
-    /// consumer axis would map to the first producer axis with the
-    /// matching GC and the second axis would be silently shadowed.
-    pub fn mapped(
-        input_ref: InputRef,
-        consumer_sym_dims: &[GraphConstantId],
-        producer_sym_dims: &[GraphConstantId],
-    ) -> Self {
-        let mut used = vec![false; producer_sym_dims.len()];
-        let sym_dim_map = consumer_sym_dims
-            .iter()
-            .map(|c_gc| {
-                let slot = producer_sym_dims
-                    .iter()
-                    .enumerate()
-                    .find(|&(i, p_gc)| !used[i] && p_gc == c_gc)
-                    .map(|(i, _)| i);
-                match slot {
-                    Some(p_idx) => {
-                        used[p_idx] = true;
-                        SymDimMap::Identity(p_idx)
-                    }
-                    None => SymDimMap::Broadcast,
-                }
-            })
-            .collect();
+    /// Wrap an InputRef whose producer has no sym dims: every consumer sym
+    /// axis reads the same producer value (all-Broadcast mapping).
+    pub fn broadcast_only(input_ref: InputRef, num_consumer_sym_dims: usize) -> Self {
         Self {
             input_ref,
-            sym_dim_map,
+            sym_dim_map: vec![SymDimMap::Broadcast; num_consumer_sym_dims],
         }
     }
 }

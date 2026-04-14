@@ -596,10 +596,11 @@ fn infer_multidirectional_broadcasting_shape(
                                 }
                                 _ => {
                                     // `dim` is Symbolic and `local_dim` is a
-                                    // concrete > 1. Assume the runtime value
-                                    // matches and keep the symbolic identity
-                                    // so downstream lowering can carry the
-                                    // sym dim through binary ops.
+                                    // concrete > 1.  Prefer the concrete value
+                                    // — under broadcast rules the symbolic
+                                    // side must be either 1 or equal to `x`,
+                                    // so the output extent is `x` either way.
+                                    dim = local_dim.clone();
                                 }
                             }
                         }
@@ -613,10 +614,8 @@ fn infer_multidirectional_broadcasting_shape(
                                     dim = local_dim.clone();
                                 } else {
                                     // `dim` is concrete > 1 and `local_dim`
-                                    // is Symbolic. Switch to the symbolic
-                                    // identity — see the symmetric branch
-                                    // above.
-                                    dim = local_dim.clone();
+                                    // is Symbolic — keep the concrete value
+                                    // (symmetric with the branch above).
                                 }
                             }
                             _ => {

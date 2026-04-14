@@ -395,8 +395,7 @@ pub fn pool_eval<'p, P: Pool + 'p>(
                     .collect();
                 let mut group_sym_strides = vec![1u64; group_sym_extents.len()];
                 for i in (0..group_sym_extents.len().saturating_sub(1)).rev() {
-                    group_sym_strides[i] =
-                        group_sym_strides[i + 1] * group_sym_extents[i + 1];
+                    group_sym_strides[i] = group_sym_strides[i + 1] * group_sym_extents[i + 1];
                 }
 
                 for flat_elem in 0..full_numel {
@@ -916,8 +915,7 @@ pub fn pool_eval<'p, P: Pool + 'p>(
             // following extent.
             let mut producer_sym_strides = vec![1u64; producer_sym_extents.len()];
             for i in (0..producer_sym_extents.len().saturating_sub(1)).rev() {
-                producer_sym_strides[i] =
-                    producer_sym_strides[i + 1] * producer_sym_extents[i + 1];
+                producer_sym_strides[i] = producer_sym_strides[i + 1] * producer_sym_extents[i + 1];
             }
 
             // Full output shape: resolve each dim's extent directly from

@@ -640,7 +640,7 @@ impl ClampMin {
             sym_dims.clone(),
             vec![
                 GroupInput::identity(input_ref, sym_dims.len()),
-                GroupInput::mapped(InputRef::Broadcast(min_id), &sym_dims, &[]),
+                GroupInput::broadcast_only(InputRef::Broadcast(min_id), sym_dims.len()),
             ],
         );
 

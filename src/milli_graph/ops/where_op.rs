@@ -105,18 +105,23 @@ impl Where {
         let input_x = ctx.compute_input_ref(&out_tmp, &x_map, out_info, x_info.unwrap_or(out_info));
         let input_y = ctx.compute_input_ref(&out_tmp, &y_map, out_info, y_info.unwrap_or(out_info));
 
-        let cond_sym = cond_map.sym_dims();
-        let x_sym = x_map.sym_dims();
-        let y_sym = y_map.sym_dims();
+        let (Some(cond_sym_map), Some(x_sym_map), Some(y_sym_map)) = (
+            crate::nano_graph::lower::build_broadcast_sym_dim_map(&dims, &cond_map.dims),
+            crate::nano_graph::lower::build_broadcast_sym_dim_map(&dims, &x_map.dims),
+            crate::nano_graph::lower::build_broadcast_sym_dim_map(&dims, &y_map.dims),
+        ) else {
+            return crate::milli_graph::ops::LowerResult::Unsupported;
+        };
+
         let base_id = ctx.nano.push_group(
             count,
             dt,
             ScalarOp::Select,
             sym_dims.clone(),
             vec![
-                GroupInput::mapped(input_cond, &sym_dims, &cond_sym),
-                GroupInput::mapped(input_x, &sym_dims, &x_sym),
-                GroupInput::mapped(input_y, &sym_dims, &y_sym),
+                GroupInput::new(input_cond, cond_sym_map),
+                GroupInput::new(input_x, x_sym_map),
+                GroupInput::new(input_y, y_sym_map),
             ],
         );
 

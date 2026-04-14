@@ -364,16 +364,21 @@ impl SimpleBinary {
         let input_a = ctx.compute_input_ref(&out_tmp, &a_map, out_info, a_info.unwrap_or(out_info));
         let input_b = ctx.compute_input_ref(&out_tmp, &b_map, out_info, b_info.unwrap_or(out_info));
 
-        let a_sym = a_map.sym_dims();
-        let b_sym = b_map.sym_dims();
+        let (Some(a_sym_map), Some(b_sym_map)) = (
+            crate::nano_graph::lower::build_broadcast_sym_dim_map(&dims, &a_map.dims),
+            crate::nano_graph::lower::build_broadcast_sym_dim_map(&dims, &b_map.dims),
+        ) else {
+            return crate::milli_graph::ops::LowerResult::Unsupported;
+        };
+
         let base_id = ctx.nano.push_group(
             count,
             out_dt,
             scalar_op,
             sym_dims.clone(),
             vec![
-                GroupInput::mapped(input_a, &sym_dims, &a_sym),
-                GroupInput::mapped(input_b, &sym_dims, &b_sym),
+                GroupInput::new(input_a, a_sym_map),
+                GroupInput::new(input_b, b_sym_map),
             ],
         );
 
@@ -777,8 +782,13 @@ impl Pow {
         let input_a = ctx.compute_input_ref(&out_tmp, &a_map, out_info, a_info.unwrap_or(out_info));
         let input_b = ctx.compute_input_ref(&out_tmp, &b_map, out_info, b_info.unwrap_or(out_info));
 
-        let a_sym = a_map.sym_dims();
-        let b_sym = b_map.sym_dims();
+        let (Some(a_sym_map), Some(b_sym_map)) = (
+            crate::nano_graph::lower::build_broadcast_sym_dim_map(&dims, &a_map.dims),
+            crate::nano_graph::lower::build_broadcast_sym_dim_map(&dims, &b_map.dims),
+        ) else {
+            return crate::milli_graph::ops::LowerResult::Unsupported;
+        };
+
         let base_id = ctx.nano.push_group(
             count,
             dt,
@@ -788,8 +798,8 @@ impl Pow {
             },
             sym_dims.clone(),
             vec![
-                GroupInput::mapped(input_a, &sym_dims, &a_sym),
-                GroupInput::mapped(input_b, &sym_dims, &b_sym),
+                GroupInput::new(input_a, a_sym_map),
+                GroupInput::new(input_b, b_sym_map),
             ],
         );
 
@@ -1275,6 +1285,51 @@ impl MatMul {
         let k_u64 = k;
         let merged_mul_count = k_u64 * n_u64;
 
+        // MatMul sym-dim mapping (explicit from op semantics) — hoisted out of
+        // the per-row-group loop since it doesn't depend on `g`.
+        //   out.dims = [batch_dims..., M, N]
+        //   a.dims   = [batch_dims..., M, K]
+        //   b.dims   = [batch_dims..., K, N]
+        // Batches align via right-aligned broadcast (helper handles that on
+        // batch-only sub-lists).  M is present on A and out; K is contracted.
+        //   → For A: batch sym mappings via helper, then Identity for M if Sym.
+        //   → For B: batch sym mappings via helper, then Broadcast for M.
+        let out_batch_rank = out_dims.len().saturating_sub(2);
+        let a_batch_rank = a_map.dims.len().saturating_sub(2);
+        let b_batch_rank = b_map.dims.len().saturating_sub(2);
+        let (Some(mut a_sym_map), Some(mut b_sym_map)) = (
+            crate::nano_graph::lower::build_broadcast_sym_dim_map(
+                &out_dims[..out_batch_rank],
+                &a_map.dims[..a_batch_rank],
+            ),
+            crate::nano_graph::lower::build_broadcast_sym_dim_map(
+                &out_dims[..out_batch_rank],
+                &b_map.dims[..b_batch_rank],
+            ),
+        ) else {
+            return crate::milli_graph::ops::LowerResult::Unsupported;
+        };
+        if out_batch_rank < out_dims.len()
+            && matches!(out_dims[out_batch_rank], DimKind::Sym { .. })
+        {
+            // M is Sym on the output; A must have it as Sym too.
+            let a_m_pos = a_batch_rank;
+            match a_map.dims[a_m_pos] {
+                DimKind::Sym { .. } => {
+                    let a_m_slot = a_map.dims[..a_m_pos]
+                        .iter()
+                        .filter(|d| matches!(d, DimKind::Sym { .. }))
+                        .count();
+                    a_sym_map.push(crate::nano_graph::pattern::SymDimMap::Identity(a_m_slot));
+                }
+                _ => {
+                    return crate::milli_graph::ops::LowerResult::Unsupported;
+                }
+            }
+            // B has no M axis → Broadcast.
+            b_sym_map.push(crate::nano_graph::pattern::SymDimMap::Broadcast);
+        }
+
         for g in 0..num_row_groups {
             let m_idx = if m_known.is_some() {
                 g as u64 % m_groups
@@ -1391,8 +1446,8 @@ impl MatMul {
                 },
                 out_sym_dims.clone(),
                 vec![
-                    GroupInput::mapped(input_a, &out_sym_dims, &a_map.sym_dims()),
-                    GroupInput::mapped(input_b, &out_sym_dims, &b_map.sym_dims()),
+                    GroupInput::new(input_a, a_sym_map.clone()),
+                    GroupInput::new(input_b, b_sym_map.clone()),
                 ],
             );
 

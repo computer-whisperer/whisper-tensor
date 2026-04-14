@@ -99,12 +99,18 @@ impl Expand {
             let input_ref =
                 ctx.compute_input_ref(&out_tmp, &in_map, out_info, in_info.unwrap_or(out_info));
 
+            let Some(in_sym_map) =
+                crate::nano_graph::lower::build_broadcast_sym_dim_map(&dims, &in_map.dims)
+            else {
+                return crate::milli_graph::ops::LowerResult::Unsupported;
+            };
+
             let base_id = ctx.nano.push_group(
                 count,
                 dt,
                 ScalarOp::Identity,
                 sym_dims.clone(),
-                vec![GroupInput::mapped(input_ref, &sym_dims, &in_map.sym_dims())],
+                vec![GroupInput::new(input_ref, in_sym_map)],
             );
 
             ctx.tensor_map
@@ -190,13 +196,12 @@ impl MilliOp for Expand {
                         ) => ScalarInfoTyped::Numeric(t.max(inp)),
                         (Some(t), None) => t,
                         (None, Some(inp)) => inp,
-                        // Input has size 1 and a concrete target: broadcast
-                        // to the target. Otherwise (input > 1), it must
-                        // match the target at runtime, so keep the symbolic
-                        // input identity for downstream lowering.
-                        (Some(ScalarInfoTyped::Numeric(t)), Some(ScalarInfoTyped::Symbolic(s))) => {
-                            ScalarInfoTyped::Symbolic(s)
-                        }
+                        // Target is concrete: the output takes the target
+                        // extent regardless of the input's kind.  Under
+                        // Expand/broadcast rules the input must be either 1
+                        // or equal to the target at runtime, so the output
+                        // extent is the target either way — prefer the
+                        // concrete value.
                         (Some(ScalarInfoTyped::Numeric(t)), Some(_)) => ScalarInfoTyped::Numeric(t),
                         (Some(_), Some(ScalarInfoTyped::Numeric(inp))) => {
                             ScalarInfoTyped::Numeric(inp)
@@ -256,15 +261,10 @@ impl MilliOp for Expand {
                         ) => ScalarInfoTyped::Numeric(t.max(inp)),
                         (Some(t), None) => t,
                         (None, Some(inp)) => inp,
-                        // Symbolic input with concrete target > 1: input
-                        // must equal target at runtime. Keep the symbolic
-                        // identity so downstream lowering can carry it.
-                        (Some(ScalarInfoTyped::Numeric(_)), Some(ScalarInfoTyped::Symbolic(s))) => {
-                            ScalarInfoTyped::Symbolic(s)
-                        }
-                        (Some(ScalarInfoTyped::Numeric(t)), Some(_)) => {
-                            ScalarInfoTyped::Numeric(t)
-                        }
+                        // Target is concrete: output takes the target
+                        // extent regardless of input kind.  See the
+                        // output-hint branch above for the reasoning.
+                        (Some(ScalarInfoTyped::Numeric(t)), Some(_)) => ScalarInfoTyped::Numeric(t),
                         (Some(_), Some(ScalarInfoTyped::Numeric(inp))) => {
                             ScalarInfoTyped::Numeric(inp)
                         }

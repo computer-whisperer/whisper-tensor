@@ -177,6 +177,103 @@ pub enum DimKind {
 /// Legacy alias — used by compiled_eval and executor during migration.
 pub type TensorDimKind = DimKind;
 
+/// Build the `SymDimMap` vector for an elementwise-broadcast consumer reading
+/// from one producer.
+///
+/// Consumer and producer dim lists are right-aligned per ONNX broadcast rules.
+/// For each Sym axis of the consumer (in its original dim order), the aligned
+/// producer axis is inspected:
+///
+/// - producer lacks the axis (lower rank)       → `Broadcast`
+/// - producer has `Known { size: 1 }` there     → `Broadcast`
+/// - producer has `Sym { .. }` there            → `Identity(k)` where `k` is
+///   the producer axis's position in its own sym-list
+/// - producer has `Known { size: > 1 }` there   → `None` (the producer has a
+///   concrete extent at an axis the consumer treats as symbolic — an inference
+///   gap; caller must refuse with `Unsupported`)
+///
+/// Also returns `None` when the consumer has a `Known` axis where the producer
+/// has a `Sym` axis (the mirror mismatch).
+///
+/// Per `docs/symbolic_dims_nano.md`, this is the lawful way for an
+/// elementwise-broadcast op's lowering to produce a sym-dim mapping: applying
+/// the op's semantic rule (ONNX right-aligned broadcast) to the dim lists of
+/// the TAMIs directly.  No `GraphConstantId` matching is involved.
+pub fn build_broadcast_sym_dim_map(
+    consumer_dims: &[DimKind],
+    producer_dims: &[DimKind],
+) -> Option<Vec<super::pattern::SymDimMap>> {
+    use super::pattern::SymDimMap;
+
+    let c_rank = consumer_dims.len();
+    let p_rank = producer_dims.len();
+    let offset = c_rank.saturating_sub(p_rank);
+
+    // Clash check: consumer `Known` where producer has `Sym` is the mirror
+    // of the inference-gap case (consumer treats an axis as concrete, producer
+    // does not).  Refuse.
+    for (c_idx, c_dim) in consumer_dims.iter().enumerate() {
+        if !matches!(c_dim, DimKind::Known { .. }) {
+            continue;
+        }
+        if c_idx < offset {
+            continue;
+        }
+        let p_idx = c_idx - offset;
+        if p_idx >= p_rank {
+            continue;
+        }
+        if matches!(producer_dims[p_idx], DimKind::Sym { .. }) {
+            return None;
+        }
+    }
+
+    // Map each original producer axis index to its position in the producer's
+    // sym-list (or `None` for a Known axis).
+    let mut p_sym_slot: Vec<Option<usize>> = Vec::with_capacity(p_rank);
+    let mut p_sym_counter = 0usize;
+    for p_dim in producer_dims {
+        match p_dim {
+            DimKind::Sym { .. } => {
+                p_sym_slot.push(Some(p_sym_counter));
+                p_sym_counter += 1;
+            }
+            DimKind::Known { .. } => p_sym_slot.push(None),
+        }
+    }
+
+    // Walk consumer axes; emit one `SymDimMap` per consumer Sym axis.
+    let mut out = Vec::new();
+    for (c_idx, c_dim) in consumer_dims.iter().enumerate() {
+        if !matches!(c_dim, DimKind::Sym { .. }) {
+            continue;
+        }
+        if c_idx < offset {
+            out.push(SymDimMap::Broadcast);
+            continue;
+        }
+        let p_idx = c_idx - offset;
+        if p_idx >= p_rank {
+            out.push(SymDimMap::Broadcast);
+            continue;
+        }
+        match producer_dims[p_idx] {
+            DimKind::Sym { .. } => {
+                out.push(SymDimMap::Identity(p_sym_slot[p_idx].unwrap()));
+            }
+            DimKind::Known { size: 1, .. } => {
+                out.push(SymDimMap::Broadcast);
+            }
+            DimKind::Known { .. } => {
+                // Producer has concrete > 1 where consumer has Sym —
+                // inference should have resolved this.  Refuse.
+                return None;
+            }
+        }
+    }
+    Some(out)
+}
+
 /// Public view of how a milli tensor maps to nano atoms.
 ///
 /// `dims` describes the original tensor's shape: one entry per dimension,
