@@ -93,6 +93,25 @@ impl<R: Rank> ShapedTensor<R> {
             values,
         }
     }
+
+    /// Construct from an explicit list of per-element ScalarInfo values.
+    /// Caller must ensure `values.len() == shape.as_slice().iter().product()`
+    /// and that every value's dtype matches `dtype`.
+    pub(crate) fn new_with_values(
+        dtype: NumericDType,
+        shape: R::KnownDims,
+        values: Vec<ScalarInfo>,
+    ) -> Self {
+        debug_assert_eq!(
+            values.len() as u64,
+            shape.as_slice().iter().product::<u64>(),
+        );
+        Self {
+            dtype,
+            shape,
+            values,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -807,6 +826,33 @@ impl<'a, 'p, P: Pool + 'p> TensorInfo<'a, 'p, P> {
     /// Useful for reading shape/axes/indices parameter tensors.
     pub(crate) fn to_i64_vec(&self) -> Option<Vec<i64>> {
         Some(self.as_concrete()?.to_i64_vec())
+    }
+
+    /// Extract per-element ScalarInfo for a rank-1 tensor. Returns None if
+    /// rank is not 1 or per-element info is not available (e.g. Minimal or
+    /// Ranked-only). Works for both concrete tensors and symbolic-per-element
+    /// shaped tensors — so callers can thread per-element symbolic info
+    /// through shape-manipulation chains like `Shape → Slice → Concat`.
+    pub(crate) fn to_scalar_infos_rank1(&self) -> Option<Vec<ScalarInfo>> {
+        let shaped = self.as_shaped()?;
+        if shaped.rank() != 1 {
+            return None;
+        }
+        let n = shaped.shape()[0] as usize;
+        let mut out = Vec::with_capacity(n);
+        for i in 0..n {
+            out.push(shaped.get(&vec![i as u64])?);
+        }
+        Some(out)
+    }
+
+    /// Build a rank-1 TensorInfo whose elements carry per-element ScalarInfo
+    /// (which may be Numeric or Symbolic).  Counterpart to
+    /// `to_scalar_infos_rank1`.
+    pub(crate) fn from_scalar_infos_rank1(dtype: NumericDType, values: Vec<ScalarInfo>) -> Self {
+        let n = values.len() as u64;
+        let shaped = ShapedTensor::<DynRank>::new_with_values(dtype, vec![n], values);
+        TensorInfo::Ranked(TensorInfoRanked::Shaped(TensorInfoShaped::Symbolic(shaped)))
     }
 
     /// Create a TensorInfo from a new-type tensor view. Copies data into a pool buffer.

@@ -100,4 +100,22 @@ impl SymbolicScalar {
             symbol_id: self.symbol_id,
         }
     }
+
+    /// Construct an untyped SymbolicScalar with the given dtype that shares
+    /// identity (symbol_id, offset) with a typed symbolic scalar. Used to
+    /// thread sym identity across the typed/untyped boundary — e.g. a
+    /// shape-dim `SymbolicScalarTyped<u64>` can become a
+    /// `SymbolicScalar { dtype: I64, .. }` for a Shape op's per-element
+    /// output, which downstream ops can cast back to `<u64>` for a
+    /// reconstructed shape.
+    pub(crate) fn from_typed<T>(typed: &SymbolicScalarTyped<T>, dtype: NumericDType) -> Self
+    where
+        T: Copy + Clone + NumericPrimitive,
+    {
+        SymbolicScalar {
+            offset: typed.offset,
+            dtype,
+            symbol_id: typed.symbol_id,
+        }
+    }
 }

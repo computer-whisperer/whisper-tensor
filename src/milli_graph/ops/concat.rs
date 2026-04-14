@@ -266,6 +266,40 @@ impl MilliOp for Concat {
 
         // Build output hint for constant folding.
         let out_dtype = input_infos[0].dtype();
+
+        // Per-element propagation for rank-1 inputs on axis 0.  If every
+        // input has per-element ScalarInfo available AND at least one
+        // element is symbolic, concatenate those values so downstream
+        // Expand can inherit sym identity (see shape-manipulation chains
+        // in rnn_supergraph state-init).  All-concrete inputs fall through
+        // to the constant_fold path so the output lands as a real
+        // `TensorInfoShaped::Numeric` (needed for `to_i64_vec` consumers).
+        let concat_axis_rank1 = self.axis == 0 || self.axis == -1;
+        if concat_axis_rank1 {
+            let per_input_vals: Option<Vec<Vec<crate::scalar_info::ScalarInfo>>> = input_infos
+                .iter()
+                .map(|info| {
+                    if info.rank_if_known() == Some(1) {
+                        info.to_scalar_infos_rank1()
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            if let Some(groups) = per_input_vals {
+                let mut values = Vec::new();
+                for g in groups {
+                    values.extend(g);
+                }
+                let has_sym = values
+                    .iter()
+                    .any(|v| matches!(v, crate::scalar_info::ScalarInfo::Symbolic(_)));
+                if has_sym {
+                    let out_info = TensorInfo::from_scalar_infos_rank1(out_dtype, values);
+                    return Ok(vec![(self.output, out_info)]);
+                }
+            }
+        }
         let rank = input_infos
             .iter()
             .filter_map(|info| info.rank_if_known())

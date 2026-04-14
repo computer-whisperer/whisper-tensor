@@ -443,6 +443,58 @@ impl MilliOp for Slice {
         }
 
         let out_dtype = data_info.dtype();
+
+        // Per-element propagation for rank-1 inputs with concrete slice params
+        // on axis 0.  Used by shape-manipulation chains (Shape → Slice →
+        // Concat → Expand) to thread symbolic identity through.  Only fires
+        // when at least one element is symbolic — all-concrete inputs should
+        // fall through to `constant_fold` below so downstream `to_i64_vec`
+        // sees a real `TensorInfoShaped::Numeric` (not a symbolic-shaped
+        // tensor that happens to hold all-numeric values).
+        if data_rank == 1
+            && let (Some(starts), Some(ends), Some(steps), Some(axes)) =
+                (&starts, &ends, &steps, &axes)
+            && axes.len() == 1
+            && axes[0] == 0
+            && steps[0] != 0
+            && let Some(vals) = data_info.to_scalar_infos_rank1()
+            && vals
+                .iter()
+                .any(|v| matches!(v, crate::scalar_info::ScalarInfo::Symbolic(_)))
+        {
+            let dim = vals.len() as i64;
+            let step = steps[0];
+            let (s, e) = if step > 0 {
+                let s = starts[0].clamp(-dim, dim);
+                let s = if s < 0 { s + dim } else { s };
+                let e = ends[0].clamp(-dim, dim);
+                let e = if e < 0 { e + dim } else { e };
+                (s, e)
+            } else {
+                let s = starts[0].clamp(-dim, dim - 1);
+                let s = if s < 0 { s + dim } else { s };
+                let e = ends[0].clamp(-dim - 1, dim);
+                let e = if e < 0 { e + dim } else { e };
+                (s, e)
+            };
+            let mut sliced_vals = Vec::new();
+            if step > 0 {
+                let mut i = s;
+                while i < e {
+                    sliced_vals.push(vals[i as usize].clone());
+                    i += step;
+                }
+            } else {
+                let mut i = s;
+                while i > e {
+                    sliced_vals.push(vals[i as usize].clone());
+                    i += step;
+                }
+            }
+            let out_info = TensorInfo::from_scalar_infos_rank1(out_dtype, sliced_vals);
+            return Ok(vec![(self.output, out_info)]);
+        }
+
         let out_info = TensorInfo::from_dtype_and_shape_scalars(out_dtype, &out_dims);
 
         // If all inputs are concrete, try constant fold via nano+pool_eval path.

@@ -155,12 +155,37 @@ impl MilliOp for Shape {
                 )]);
             }
 
-            // Rank is known but some dims are symbolic.  The OUTPUT's shape
-            // is still concrete: rank-1 of length `rank`.  Only the element
-            // values are symbolic.
-            let out_info = TensorInfo::from_dtype_and_shape_scalars(
+            // Rank is known but some dims are symbolic.  Produce per-element
+            // ScalarInfo for the rank-1 output: Numeric for concrete dims,
+            // Symbolic (with the same underlying symbol_id as the input's
+            // shape-dim sym) for symbolic dims.  Downstream Slice/Concat can
+            // thread this through to Expand so the output's sym_dim identity
+            // matches the input — avoiding the opaque-eval fallback in
+            // `Shape → Slice → Concat → Expand` state-init chains.
+            use crate::scalar_info::ScalarInfo;
+            use crate::symbolic_scalar::SymbolicScalar;
+            let input_ranked = input_info
+                .as_ranked()
+                .ok_or(crate::milli_graph::MilliOpGraphError::UnableToInfer)?;
+            let input_shape = input_ranked.shape();
+            let mut values: Vec<ScalarInfo> = Vec::with_capacity(rank);
+            for dim in input_shape.iter() {
+                let elem = match dim {
+                    ScalarInfoTyped::Numeric(n) => ScalarInfo::Numeric(
+                        crate::numeric_scalar::NumericScalar::from_i64(*n as i64),
+                    ),
+                    ScalarInfoTyped::Symbolic(sym_u64) => {
+                        ScalarInfo::Symbolic(SymbolicScalar::from_typed(
+                            sym_u64,
+                            crate::numeric_dtype::NumericDType::I64,
+                        ))
+                    }
+                };
+                values.push(elem);
+            }
+            let out_info = TensorInfo::from_scalar_infos_rank1(
                 crate::numeric_dtype::NumericDType::I64,
-                &[ScalarInfoTyped::Numeric(rank as u64)],
+                values,
             );
             return Ok(vec![(self.output, out_info)]);
         }

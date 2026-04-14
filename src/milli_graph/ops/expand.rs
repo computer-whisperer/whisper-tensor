@@ -172,7 +172,7 @@ impl MilliOp for Expand {
     where
         'p: 'a,
     {
-        use crate::scalar_info::ScalarInfoTyped;
+        use crate::scalar_info::{ScalarInfo, ScalarInfoTyped};
         use crate::symbolic_scalar::SymbolicScalarTyped;
         use crate::tensor_info::TensorInfo;
 
@@ -183,56 +183,116 @@ impl MilliOp for Expand {
             .get(&self.shape)
             .ok_or(MilliOpGraphError::UnableToInfer)?;
 
-        // Build output hint: same dtype as input, shape from target shape tensor.
         let out_dtype = input_info.dtype();
-        let output_hint = if let Some(shape_values) = shape_info.to_i64_vec() {
-            let target_shape: Vec<ScalarInfoTyped<u64>> = shape_values
-                .iter()
-                .map(|&v| ScalarInfoTyped::Numeric(v as u64))
-                .collect();
-            // Broadcast with input shape if known (take max of each dim).
-            if let Some(input_ranked) = input_info.as_ranked() {
-                let input_shape = input_ranked.shape();
-                let output_rank = target_shape.len().max(input_shape.len());
-                let mut final_shape: Vec<ScalarInfoTyped<u64>> = Vec::new();
-                for i in 0..output_rank {
-                    let target_i = (i as i64 - output_rank as i64) + target_shape.len() as i64;
-                    let input_i = (i as i64 - output_rank as i64) + input_shape.len() as i64;
-                    let target_dim = if target_i >= 0 {
-                        Some(target_shape[target_i as usize].clone())
-                    } else {
-                        None
-                    };
-                    let input_dim = if input_i >= 0 {
-                        Some(input_shape[input_i as usize].clone())
-                    } else {
-                        None
-                    };
-                    let dim = match (target_dim, input_dim) {
-                        (
-                            Some(ScalarInfoTyped::Numeric(t)),
-                            Some(ScalarInfoTyped::Numeric(inp)),
-                        ) => ScalarInfoTyped::Numeric(t.max(inp)),
-                        (Some(t), None) => t,
-                        (None, Some(inp)) => inp,
-                        // Target is concrete: the output takes the target
-                        // extent regardless of the input's kind.  Under
-                        // Expand/broadcast rules the input must be either 1
-                        // or equal to the target at runtime, so the output
-                        // extent is the target either way — prefer the
-                        // concrete value.
-                        (Some(ScalarInfoTyped::Numeric(t)), Some(_)) => ScalarInfoTyped::Numeric(t),
-                        (Some(_), Some(ScalarInfoTyped::Numeric(inp))) => {
-                            ScalarInfoTyped::Numeric(inp)
-                        }
-                        _ => ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(rng)),
-                    };
-                    final_shape.push(dim);
-                }
-                TensorInfo::from_dtype_and_shape_scalars(out_dtype, &final_shape)
+
+        // Extract target shape as ScalarInfoTyped<u64>. Tiered:
+        //   1) all-concrete i64 (fast path)
+        //   2) per-element ScalarInfo (symbolic identity preserved via
+        //      `.cast::<u64>()`, which keeps symbol_id across dtypes —
+        //      closing the loop with the input's shape sym_dims for
+        //      Shape → Slice → Concat → Expand state-init chains)
+        //   3) unknown
+        let target_shape: Option<Vec<ScalarInfoTyped<u64>>> =
+            if let Some(shape_values) = shape_info.to_i64_vec() {
+                Some(
+                    shape_values
+                        .iter()
+                        .map(|&v| ScalarInfoTyped::Numeric(v as u64))
+                        .collect(),
+                )
             } else {
-                TensorInfo::from_dtype_and_shape_scalars(out_dtype, &target_shape)
-            }
+                shape_info.to_scalar_infos_rank1().map(|vals| {
+                    vals.into_iter()
+                        .map(|si: ScalarInfo| si.cast::<u64>())
+                        .collect()
+                })
+            };
+
+        // Broadcast target_shape with input's shape (take max of each dim).
+        // Both sides may have symbolic entries; when the target is concrete
+        // the output extent is the target (runtime input extent must be 1 or
+        // equal). When both are symbolic, prefer the target's sym — Expand
+        // forces output extent = target, and the target's sym is the one
+        // downstream lowering can resolve against the input's sym set.
+        let build_final_shape =
+            |target_shape: &[ScalarInfoTyped<u64>]| -> Vec<ScalarInfoTyped<u64>> {
+                if let Some(input_ranked) = input_info.as_ranked() {
+                    let input_shape = input_ranked.shape();
+                    let output_rank = target_shape.len().max(input_shape.len());
+                    let mut final_shape: Vec<ScalarInfoTyped<u64>> = Vec::new();
+                    for i in 0..output_rank {
+                        let target_i = (i as i64 - output_rank as i64) + target_shape.len() as i64;
+                        let input_i = (i as i64 - output_rank as i64) + input_shape.len() as i64;
+                        let target_dim = if target_i >= 0 {
+                            Some(target_shape[target_i as usize].clone())
+                        } else {
+                            None
+                        };
+                        let input_dim = if input_i >= 0 {
+                            Some(input_shape[input_i as usize].clone())
+                        } else {
+                            None
+                        };
+                        let dim = match (target_dim, input_dim) {
+                            // Both concrete: exact max.
+                            (
+                                Some(ScalarInfoTyped::Numeric(t)),
+                                Some(ScalarInfoTyped::Numeric(inp)),
+                            ) => ScalarInfoTyped::Numeric(t.max(inp)),
+                            (Some(t), None) => t,
+                            (None, Some(inp)) => inp,
+                            // Target concrete, input symbolic.  If t == 1 the
+                            // runtime input dominates (it may be any extent);
+                            // else the runtime input must be 1 or equal to t,
+                            // so output = t either way.
+                            (
+                                Some(ScalarInfoTyped::Numeric(t)),
+                                Some(ScalarInfoTyped::Symbolic(inp_sym)),
+                            ) => {
+                                if t == 1 {
+                                    ScalarInfoTyped::Symbolic(inp_sym)
+                                } else {
+                                    ScalarInfoTyped::Numeric(t)
+                                }
+                            }
+                            // Target symbolic, input concrete.  Mirror case:
+                            // inp == 1 means target dominates (value unknown);
+                            // inp > 1 means target must be 1 or inp, so output
+                            // = inp either way.
+                            (
+                                Some(ScalarInfoTyped::Symbolic(t_sym)),
+                                Some(ScalarInfoTyped::Numeric(inp)),
+                            ) => {
+                                if inp == 1 {
+                                    ScalarInfoTyped::Symbolic(t_sym)
+                                } else {
+                                    ScalarInfoTyped::Numeric(inp)
+                                }
+                            }
+                            // Both symbolic: prefer the target's sym — it's
+                            // the one downstream lowering can resolve against
+                            // the input's sym set (state-init Expand relies on
+                            // this to close the Shape→Slice→Concat→Expand
+                            // sym_dim loop).
+                            (
+                                Some(t_sym @ ScalarInfoTyped::Symbolic(_)),
+                                Some(ScalarInfoTyped::Symbolic(_)),
+                            ) => t_sym,
+                            // Unreachable: output_rank = max(target, input) so
+                            // at least one side is always Some for every i.
+                            (None, None) => unreachable!(),
+                        };
+                        final_shape.push(dim);
+                    }
+                    final_shape
+                } else {
+                    target_shape.to_vec()
+                }
+            };
+
+        let output_hint = if let Some(ref target_shape) = target_shape {
+            let final_shape = build_final_shape(target_shape);
+            TensorInfo::from_dtype_and_shape_scalars(out_dtype, &final_shape)
         } else {
             TensorInfo::from_dtype_and_shape_scalars(out_dtype, &[])
         };
@@ -246,70 +306,18 @@ impl MilliOp for Expand {
 
         let first_elem = input_info.first_element();
 
-        // If shape tensor is concrete, use its values for output shape
-        if let Some(shape_values) = shape_info.to_i64_vec() {
-            let output_shape: Vec<ScalarInfoTyped<u64>> = shape_values
-                .iter()
-                .map(|&v| ScalarInfoTyped::Numeric(v as u64))
-                .collect();
-
-            // Like eval: broadcast with input shape (take max of each dim)
-            if let Some(input_ranked) = input_info.as_ranked() {
-                let input_shape = input_ranked.shape();
-                let output_rank = output_shape.len().max(input_shape.len());
-                let mut final_shape: Vec<ScalarInfoTyped<u64>> = Vec::new();
-                for i in 0..output_rank {
-                    let target_i = (i as i64 - output_rank as i64) + output_shape.len() as i64;
-                    let input_i = (i as i64 - output_rank as i64) + input_shape.len() as i64;
-
-                    let target_dim = if target_i >= 0 {
-                        Some(output_shape[target_i as usize].clone())
-                    } else {
-                        None
-                    };
-                    let input_dim = if input_i >= 0 {
-                        Some(input_shape[input_i as usize].clone())
-                    } else {
-                        None
-                    };
-
-                    let dim = match (target_dim, input_dim) {
-                        (
-                            Some(ScalarInfoTyped::Numeric(t)),
-                            Some(ScalarInfoTyped::Numeric(inp)),
-                        ) => ScalarInfoTyped::Numeric(t.max(inp)),
-                        (Some(t), None) => t,
-                        (None, Some(inp)) => inp,
-                        // Target is concrete: output takes the target
-                        // extent regardless of input kind.  See the
-                        // output-hint branch above for the reasoning.
-                        (Some(ScalarInfoTyped::Numeric(t)), Some(_)) => ScalarInfoTyped::Numeric(t),
-                        (Some(_), Some(ScalarInfoTyped::Numeric(inp))) => {
-                            ScalarInfoTyped::Numeric(inp)
-                        }
-                        _ => ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(rng)),
-                    };
-                    final_shape.push(dim);
-                }
-
-                let out = TensorInfo::Ranked(crate::tensor_info::TensorInfoRanked::new(
-                    first_elem,
-                    final_shape,
-                    rng,
-                ));
-                return Ok(vec![(self.output, out)]);
-            }
-
-            // Input shape not known, but target shape is
+        if let Some(target_shape) = target_shape {
+            let final_shape = build_final_shape(&target_shape);
             let out = TensorInfo::Ranked(crate::tensor_info::TensorInfoRanked::new(
                 first_elem,
-                output_shape,
+                final_shape,
                 rng,
             ));
             return Ok(vec![(self.output, out)]);
         }
 
-        // Shape tensor not concrete. Try to get output rank from shape tensor length.
+        // Shape tensor has neither concrete values nor per-element info.
+        // Try to get output rank from shape tensor length.
         if let Some(shape_ranked) = shape_info.as_ranked() {
             let shape_shape = shape_ranked.shape();
             if shape_shape.len() == 1
