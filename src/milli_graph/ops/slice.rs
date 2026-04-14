@@ -408,8 +408,21 @@ impl MilliOp for Slice {
                     };
                     let sliced = ((end - start + (step - step.signum())) / step).max(0) as u64;
                     out_dims[axis] = ScalarInfoTyped::Numeric(sliced);
+                } else {
+                    // Input axis is symbolic.  The sliced output extent is
+                    // `(clamped_end - clamped_start) / step` where clamping
+                    // happens against the runtime value of the input's sym
+                    // extent — arithmetic on extents, which is out of scope
+                    // for the nano IR (see docs/symbolic_dims_nano.md).  Use
+                    // a fresh symbolic for this axis so the output's gc does
+                    // not alias the input's, and `lower_default` will route
+                    // the op cleanly to the opaque boundary (rather than
+                    // producing silently-wrong results that assume the input
+                    // extent carried through unchanged).
+                    out_dims[axis] = ScalarInfoTyped::Symbolic(
+                        crate::symbolic_scalar::SymbolicScalarTyped::new(_rng),
+                    );
                 }
-                // If dim is symbolic, leave it symbolic.
             }
         } else if let Some(axes) = &axes {
             // We know which axes are sliced but not the exact values —
