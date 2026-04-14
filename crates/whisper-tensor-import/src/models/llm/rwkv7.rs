@@ -354,8 +354,12 @@ pub fn load_rwkv7(
 
         let value = reshape(value, vec![0, 0, n_heads as i64, -1])?;
 
-        // Reshape to standard
-        let out = reshape(out, vec![1, -1])?;
+        // Reshape to [batch, n_heads * head_dim] so GroupNorm with
+        // n_heads groups normalizes each batch row independently.
+        // Preserves batch via the leading `0`; the original
+        // `[1, -1]` hardcoded batch=1 here and in the two
+        // reshapes-back below.
+        let out = reshape(out, vec![0, -1])?;
 
         let out = group_norm(
             &block_weight_manager.prefix("att.ln_x"),
@@ -364,7 +368,7 @@ pub fn load_rwkv7(
             n_heads as i64,
         )?;
 
-        let out = reshape(out, vec![1, 1, -1])?;
+        let out = reshape(out, vec![0, 1, -1])?;
 
         let bonus = reshape(
             Mul::new(None, receptance, key)?,
@@ -372,7 +376,7 @@ pub fn load_rwkv7(
         )?;
         let bonus = Mul::new(None, bonus, block_weight_manager.get_tensor("att.r_k")?)?;
         let bonus = Mul::new(None, sum_dim(bonus, 3, Some(true))?, value)?;
-        let bonus = reshape(bonus, vec![1, 1, -1])?;
+        let bonus = reshape(bonus, vec![0, 1, -1])?;
         let out = Mul::new(None, Add::new(None, bonus, out)?, gate)?;
         let hidden_state = linear(&block_weight_manager.prefix("att.output"), out)?;
         // Done with time mixer
