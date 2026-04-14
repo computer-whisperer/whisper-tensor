@@ -380,6 +380,18 @@ pub fn run_case_via_pool_eval(case: &TestCase) -> Result<(), String> {
     Ok(())
 }
 
+/// Result of running a test case under the symbolic-dim harness.
+///
+/// `exercised` counts data sets where at least one dim was actually made
+/// symbolic (producer shapes > 1, ranks aligned, sizes agreeing). `vacuous`
+/// counts data sets the harness could not turn symbolic (all candidate dims
+/// were size 1, mismatched across inputs, or out of range).
+#[derive(Debug, Default, Clone, Copy)]
+pub struct SymDimCoverage {
+    pub exercised: u32,
+    pub vacuous: u32,
+}
+
 /// Run a test case with some dimensions withheld (made symbolic).
 ///
 /// `withheld_dims` lists dimension indices to withhold. For each input tensor,
@@ -387,13 +399,18 @@ pub fn run_case_via_pool_eval(case: &TestCase) -> Result<(), String> {
 /// at that index is replaced with a shared SymbolicScalarTyped (same symbol_id).
 /// This exercises the symbolic dimension path end-to-end:
 /// lower → NanoGraph with sym_dims → pool_eval with gc_values → compare.
-pub fn run_case_with_symbolic_dims(case: &TestCase, withheld_dims: &[usize]) -> Result<(), String> {
+pub fn run_case_with_symbolic_dims(
+    case: &TestCase,
+    withheld_dims: &[usize],
+) -> Result<SymDimCoverage, String> {
     use crate::nano_graph::lower;
     use crate::nano_graph::pool_eval;
     use crate::pool::TrackedPool;
     use crate::scalar_info::ScalarInfoTyped;
     use crate::symbolic_scalar::SymbolicScalarTyped;
     use crate::tensor_info::TensorInfo;
+
+    let mut coverage = SymDimCoverage::default();
 
     for ds in &case.data_sets {
         let mut rng = rand::rng();
@@ -438,6 +455,7 @@ pub fn run_case_with_symbolic_dims(case: &TestCase, withheld_dims: &[usize]) -> 
             }
         }
         if skip {
+            coverage.vacuous += 1;
             continue;
         }
 
@@ -448,7 +466,11 @@ pub fn run_case_with_symbolic_dims(case: &TestCase, withheld_dims: &[usize]) -> 
             .map(|&d| (d, SymbolicScalarTyped::new(&mut rng)))
             .collect();
 
-        // Build TensorInfo with withheld dims as Symbolic.
+        // Build TensorInfo with withheld dims as Symbolic. Track whether
+        // any dim was actually made symbolic — if not, this run is vacuous
+        // (all candidate dims were size-1 or out-of-rank) and shouldn't
+        // count as sym-dim coverage.
+        let mut any_sym_installed = false;
         let info_inputs: HashMap<GlobalId, TensorInfo<'_, '_, SystemPool>> = ds
             .inputs
             .iter()
@@ -465,6 +487,7 @@ pub fn run_case_with_symbolic_dims(case: &TestCase, withheld_dims: &[usize]) -> 
                             if shape[d] <= 1 {
                                 ScalarInfoTyped::Numeric(shape[d])
                             } else {
+                                any_sym_installed = true;
                                 ScalarInfoTyped::Symbolic(sym.clone())
                             }
                         } else {
@@ -479,6 +502,11 @@ pub fn run_case_with_symbolic_dims(case: &TestCase, withheld_dims: &[usize]) -> 
                 )
             })
             .collect();
+
+        if !any_sym_installed {
+            coverage.vacuous += 1;
+            continue;
+        }
 
         // Lower with partially symbolic info.
         let lower_result = lower::lower(&case.graph, &info_inputs, &SystemPool)
@@ -572,8 +600,10 @@ pub fn run_case_with_symbolic_dims(case: &TestCase, withheld_dims: &[usize]) -> 
                 &ctx,
             )?;
         }
+
+        coverage.exercised += 1;
     }
-    Ok(())
+    Ok(coverage)
 }
 
 /// Run all data sets of a test case through MilliOpGraph::pool_eval().
@@ -773,56 +803,97 @@ mod tests {
         );
     }
 
-    /// Run all test cases with dim 0 withheld (symbolic).
-    /// Tests the full symbolic dimension path: lower with partial shapes,
-    /// eval with gc_values, compare against ground truth.
+    /// Sweep test cases across symbolic-dim configurations.
+    ///
+    /// For each test case, run every non-empty subset of dims {0, 1, 2, 3}
+    /// as withheld (→ symbolic). Each (case, subset) configuration is
+    /// categorized as:
+    ///
+    /// - PASS: at least one data set was actually exercised with sym dims
+    ///   and matched expected output.
+    /// - VACUOUS: no data set had any dim in the subset that could be made
+    ///   symbolic (out of rank, size-1, or rank-mismatched inputs). Not a
+    ///   test of sym-dim machinery — reported but not counted as coverage.
+    /// - SKIP: the lowering explicitly reported unsupported ops for sym
+    ///   dims. This is a known gap to track but not a regression.
+    /// - FAIL: anything else — lower crash, pool_eval crash, shape
+    ///   mismatch, value mismatch, or panic. These are real bugs and
+    ///   fail the test.
     #[test]
-    fn test_all_cases_with_symbolic_dim0() {
+    fn test_all_cases_with_symbolic_dims_sweep() {
         let cases = build_test_set();
         assert!(!cases.is_empty(), "test set should not be empty");
-        let mut passed = 0;
-        let mut skipped = 0;
-        let mut failures = Vec::new();
+
+        // Non-empty subsets of {0, 1, 2, 3}. 15 configurations per case.
+        let subsets: Vec<Vec<usize>> = (1u32..(1 << 4))
+            .map(|mask| {
+                (0..4usize)
+                    .filter(|d| (mask & (1 << d)) != 0)
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+
+        let mut passed = 0u32;
+        let mut vacuous = 0u32;
+        let mut skipped = 0u32;
+        let mut failures: Vec<String> = Vec::new();
+        let mut skipped_details: Vec<String> = Vec::new();
+
         for case in &cases {
-            let name = case.name.clone();
-            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                run_case_with_symbolic_dims(case, &[0])
-            })) {
-                Ok(Ok(())) => {
-                    eprintln!("  PASS: {name}");
-                    passed += 1;
-                }
-                Ok(Err(e))
-                    if e.contains("unsupported ops")
-                        || e.contains("lower failed")
-                        || e.contains("pool_eval failed")
-                        || e.contains("shape mismatch") =>
-                {
-                    eprintln!("  SKIP: {name}: {e}");
-                    skipped += 1;
-                }
-                Ok(Err(e)) => {
-                    eprintln!("  FAIL: {e}");
-                    failures.push(e);
-                }
-                Err(panic_info) => {
-                    let msg = if let Some(s) = panic_info.downcast_ref::<String>() {
-                        s.clone()
-                    } else if let Some(s) = panic_info.downcast_ref::<&str>() {
-                        s.to_string()
-                    } else {
-                        "unknown panic".to_string()
-                    };
-                    eprintln!("  PANIC: {name}: {msg}");
-                    failures.push(format!("{name}: PANIC: {msg}"));
+            for subset in &subsets {
+                let tag = format!(
+                    "{}/sym{:?}",
+                    case.name,
+                    subset.iter().copied().collect::<Vec<_>>()
+                );
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    run_case_with_symbolic_dims(case, subset)
+                })) {
+                    Ok(Ok(coverage)) => {
+                        if coverage.exercised > 0 {
+                            passed += 1;
+                        } else {
+                            vacuous += 1;
+                        }
+                    }
+                    Ok(Err(e)) if e.contains("sym: unsupported ops") => {
+                        skipped += 1;
+                        skipped_details.push(format!("{tag}: {e}"));
+                    }
+                    Ok(Err(e)) => {
+                        eprintln!("  FAIL: {tag}: {e}");
+                        failures.push(format!("{tag}: {e}"));
+                    }
+                    Err(panic_info) => {
+                        let msg = if let Some(s) = panic_info.downcast_ref::<String>() {
+                            s.clone()
+                        } else if let Some(s) = panic_info.downcast_ref::<&str>() {
+                            s.to_string()
+                        } else {
+                            "unknown panic".to_string()
+                        };
+                        eprintln!("  PANIC: {tag}: {msg}");
+                        failures.push(format!("{tag}: PANIC: {msg}"));
+                    }
                 }
             }
         }
+
         eprintln!(
-            "{passed} passed, {} failed, {skipped} skipped",
+            "sym-dim sweep: {passed} exercised, {vacuous} vacuous, {skipped} unsupported-op skips, {} failures",
             failures.len(),
         );
-        assert!(failures.is_empty(), "Failures:\n{}", failures.join("\n"));
+        if !skipped_details.is_empty() {
+            eprintln!("unsupported-op skips (tracked gaps):");
+            for line in &skipped_details {
+                eprintln!("  {line}");
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "sym-dim sweep failures:\n{}",
+            failures.join("\n")
+        );
     }
 
     /// JIT compiled eval with trivial plan (1 phase, no partitioning).
