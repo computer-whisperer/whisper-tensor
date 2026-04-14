@@ -1,5 +1,21 @@
 # Symbolic Dimensions in the NanoGraph
 
+## Scope
+
+This spec intentionally accepts many milli-op graphs as
+unrepresentable in the nano IR.  Keeping the IR narrow is what lets
+it codegen cleanly across multiple targets while preserving good
+optimization on the axes it does handle.  The goal of symbolic-dim
+support is to cover the patterns common in transformer inference —
+batched seq-len broadcasts, attention's `[seq, seq]` score matrix,
+sym reductions — not to be universal.  Ops that fall outside this
+scope route through the opaque-op boundary; that is the design's
+pressure-release valve, not a bug.
+
+If the supported space proves insufficient for the transformer
+patterns we actually need, step back and re-evaluate the design — do
+not extend the nano IR piecemeal to capture edge cases.
+
 ## Core Concept
 
 A NanoGraph is a DAG of **atoms**, where each atom computes a scalar
@@ -21,6 +37,37 @@ Known dimensions never appear as sym\_dims — they are already
 expanded into the atom count.  Sym\_dims are the *remaining*
 dimensions that could not be expanded because their size is unknown.
 
+## The Sym/Atom Separation
+
+Atom-ID space and sym-coord space are **disjoint at every input-read
+boundary** in the nano graph.  A consumer's sym coord never indexes a
+producer's atom-ID space; a consumer's atom offset never indexes a
+producer's sym coords.  The only operations the nano IR supports over
+a sym axis are:
+
+- **Elementwise**: consumer and producer carry the same sym position
+  (same GraphConstant, same ordered slot).  The sym coord is shared
+  across the read — consumer coord `s` at position `j` reads
+  producer coord `s` at position `k` that the lowering mapped to.
+- **Broadcast**: the consumer has a sym axis the producer lacks.
+  The producer's value is replicated across the consumer's sym coord.
+- **Reduce** (`SymReduce`): the consumer collapses one of its sym
+  positions by accumulating over the producer's.
+
+Nothing else.  Anything that appears to require mixing the two spaces
+is either:
+
+1. An **inference gap** — the extent is in fact known at lowering
+   time, but inference failed to propagate the constraint.  The axis
+   should be Known on both sides, not Sym.  Fix inference.
+2. An op **outside the nano IR's vocabulary**, which must be routed
+   through the opaque-op boundary so the milli evaluator handles it
+   directly.
+
+This restriction is what keeps the nano IR narrow enough to codegen
+cleanly for multiple targets.  It is not relaxed by adding
+input-ref variants that bridge the two spaces.
+
 ## GraphConstant
 
 A **GraphConstant** is a graph-level unknown scalar: an integer value
@@ -36,9 +83,13 @@ self-attention the score matrix has two sym\_dim axes — both reference
 the same GraphConstant `seq_len`, producing a `[seq_len, seq_len]`
 matrix.
 
-The axes themselves are fungible — their identity is determined by
-their position in the group's sym\_dims list and the GraphConstant
-that sizes them.  Any metadata about their original tensor-level
+An axis's identity within a nano group is its **position in the
+ordered `sym_dims` list**.  Two positions that happen to reference
+the same GraphConstant (e.g. attention's `[seq_len, seq_len]` score
+matrix) are still distinct axes — position 0 and position 1 index
+different dimensions of the output.  Position tells you *which*
+axis; the GraphConstant tells you *how big* it is.  These are not
+interchangeable.  Any metadata about an axis's original tensor-level
 meaning (e.g. "this was dim 0 of the attention output") is a concern
 of the input/output boundary (TensorAtomMapInfo), not of the
 NanoGraph evaluation.
@@ -52,11 +103,17 @@ iteration extents, buffer sizes, and addressing math.
 InputRef (Broadcast, Strided, Explicit) operates entirely in
 **atom-ID space**.  It maps a consumer atom index `i` to a producer
 atom ID.  Symbolic dimensions do not change InputRef — it continues
-to address atoms by their known-dimension index.
+to address atoms by their known-dimension index, and its inputs are
+never consumer sym coords (see the Sym/Atom Separation above).
 
 What changes is that each atom referenced by an InputRef is no longer
-a single scalar but an n-dimensional array.  The **op** must declare
-how it operates across the sym\_dim axes of its inputs and output.
+a single scalar but an n-dimensional array.  The **op** declares how
+it operates across the sym\_dim axes of its inputs and output; the
+per-input `SymDimMap` describes the axis correspondence.  Atom-space
+addressing and sym-space addressing compose independently — the
+producer atom chosen by InputRef is then indexed at the sym point
+chosen by `SymDimMap`.  The two mechanisms never participate in each
+other's arithmetic.
 
 ## Per-Input Sym\_dim Mapping
 
@@ -74,6 +131,15 @@ The mapping is a `Vec<SymDimMap>` parallel to the consumer group's
 sym\_dims.  It tells evaluation (and codegen) how to select the right
 element from each input's sym\_dim array for a given point in the
 output's sym\_dim space.
+
+The mapping is **always supplied explicitly by the op's lowering** —
+the nano layer never discovers it by matching GraphConstants or
+walking positions.  The lowering has just read its input TAMIs and
+knows, from the milli op's semantics, exactly how each input's sym
+positions correspond to the output's; it emits the `SymDimMap`
+entries directly.  If a lowering cannot state the mapping from the
+op's semantics, the op is under-specified — do not add heuristic
+matching at the nano level to paper over it.
 
 ## Ops and Symbolic Dimensions
 
@@ -235,11 +301,18 @@ Concrete tensor data is always available for comparison — only the
   atom count depends on tensor values, not on GraphConstants.  These
   are preprocessing ops, not part of standard transformer inference.
 
-Note that "reshaping" between symbolic and known dims is not a
-concern.  Known dims are spans of atom IDs addressed by InputRef;
-symbolic dims are per-atom unknown-dimensional arrays handled by op
-semantics and sym\_dim mappings.  These are orthogonal —
-reinterpreting how known dims are addressed is just a different
-InputRef, and reinterpreting how symbolic dims are accessed is just a
-different sym\_dim mapping.  No data movement or conversion between
-the two categories is needed.
+- **Sym-to-atom or atom-to-sym conversion at the nano level**: not
+  supported.  An axis is classified as Sym or Known at lowering time
+  based on whether its extent is known, and it remains in that space
+  throughout its entire presence in the nano graph.  Changes of
+  extent-knowledge happen at lowering via inference, not at
+  evaluation time.  A milli op that appears to require such a
+  conversion is either an inference gap (strengthen inference so the
+  axis becomes Known on both sides) or goes through the opaque-op
+  boundary.
+
+An axis is either Known or Sym — never both, never converted.  Known
+dims are spans of atom IDs addressed by InputRef; sym dims are
+per-atom axes handled by the sym\_dim mappings described above.  No
+data movement or conversion between the two categories exists in the
+nano IR.
