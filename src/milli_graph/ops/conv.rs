@@ -320,6 +320,20 @@ impl Conv {
             return crate::milli_graph::ops::LowerResult::Unsupported;
         }
 
+        // C_in and all spatial dims of the input must be Known — the lowering
+        // below computes padding, kernel placement, and strides from them as
+        // concrete sizes. Only the batch dims (everything before C_in) can be
+        // symbolic. Without this guard, a symbolic spatial dim would be
+        // skipped by the Known-only filter a few lines down and the code
+        // would misindex batch as C_in, eventually dividing by zero.
+        if in_layout
+            .iter()
+            .skip(in_layout.len() - 1 - n_spatial)
+            .any(|d| matches!(d, DimKind::Sym { .. }))
+        {
+            return crate::milli_graph::ops::LowerResult::Unsupported;
+        }
+
         // No segmented inputs.
         if !in_map.segments.is_empty() || !w_map.segments.is_empty() {
             return crate::milli_graph::ops::LowerResult::Unsupported;

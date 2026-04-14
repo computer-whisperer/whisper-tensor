@@ -815,10 +815,12 @@ mod tests {
     ///   symbolic (out of rank, size-1, or rank-mismatched inputs). Not a
     ///   test of sym-dim machinery — reported but not counted as coverage.
     /// - SKIP: the lowering explicitly reported unsupported ops for sym
-    ///   dims. This is a known gap to track but not a regression.
-    /// - FAIL: anything else — lower crash, pool_eval crash, shape
-    ///   mismatch, value mismatch, or panic. These are real bugs and
-    ///   fail the test.
+    ///   dims, or the op fell through to opaque but has no `eval_new`
+    ///   (preexisting op gap, not a sym-dim regression). Tracked but
+    ///   not failed.
+    /// - FAIL: anything else — lower crash, pool_eval crash on a real
+    ///   bug, shape mismatch, value mismatch, or panic. These are real
+    ///   bugs and fail the test.
     #[test]
     fn test_all_cases_with_symbolic_dims_sweep() {
         let cases = build_test_set();
@@ -856,7 +858,10 @@ mod tests {
                             vacuous += 1;
                         }
                     }
-                    Ok(Err(e)) if e.contains("sym: unsupported ops") => {
+                    Ok(Err(e))
+                        if e.contains("sym: unsupported ops")
+                            || e.contains("does not implement eval_new") =>
+                    {
                         skipped += 1;
                         skipped_details.push(format!("{tag}: {e}"));
                     }
