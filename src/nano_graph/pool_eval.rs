@@ -858,18 +858,46 @@ pub fn pool_eval<'p, P: Pool + 'p>(
         if !sym_dims_v.is_empty() {
             // Output has symbolic dims — reconstruct full tensor shape from
             // dims and read each element from the n-d atom store.
-            let sym_extents: Vec<u64> = sym_dims_v
+            //
+            // The TAM's dim_layout may reorder sym dims relative to the
+            // producing group's storage layout (e.g. after transpose). To
+            // compute the correct sym_flat index into the group store, we
+            // resolve strides against the producer's sym_dims order (found
+            // via the TAM's base atom), and use each DimKind::Sym's `axis`
+            // as an index into that producer sym_dims list.
+            let producer_sym_dims: Vec<super::pattern::GraphConstantId> =
+                if let Some(gi) = graph.find_group_idx(tam.base_id) {
+                    groups[gi].sym_dims.clone()
+                } else if let Some((ti, _)) = graph.find_input_idx(tam.base_id) {
+                    input_sym_dims[ti].clone()
+                } else {
+                    // Fall back to the TAM's own order — at worst, this
+                    // matches the pre-fix behavior.
+                    sym_dims_v.clone()
+                };
+            let producer_sym_extents: Vec<u64> = producer_sym_dims
                 .iter()
                 .map(|gc| gc_values[gc.0 as usize])
                 .collect();
-            let sym_prod: u64 = sym_extents.iter().product::<u64>().max(1);
+            let producer_sym_prod: u64 = producer_sym_extents.iter().product::<u64>().max(1);
+            // Row-major strides over the producer's sym-dim axes: last axis
+            // has stride 1, each earlier axis is that stride times the
+            // following extent.
+            let mut producer_sym_strides = vec![1u64; producer_sym_extents.len()];
+            for i in (0..producer_sym_extents.len().saturating_sub(1)).rev() {
+                producer_sym_strides[i] =
+                    producer_sym_strides[i + 1] * producer_sym_extents[i + 1];
+            }
 
+            // Full output shape: resolve each dim's extent directly from
+            // its gc, so permuted dim_layouts produce correctly permuted
+            // output shapes.
             let full_shape: Vec<u64> = tam
                 .dims
                 .iter()
                 .map(|dk| match dk {
                     super::lower::DimKind::Known { size, .. } => *size,
-                    super::lower::DimKind::Sym { axis, .. } => sym_extents[*axis],
+                    super::lower::DimKind::Sym { gc, .. } => gc_values[gc.0 as usize],
                 })
                 .collect();
             let full_numel: u64 = full_shape.iter().product();
@@ -893,11 +921,11 @@ pub fn pool_eval<'p, P: Pool + 'p>(
                     }
                 }
 
-                // Split into atom_idx and sym_flat.
+                // Split into atom_idx (from known dims, row-major) and
+                // sym_flat (indexing into the producer's sym storage).
                 let mut atom_idx = 0u64;
                 let mut atom_stride = 1u64;
                 let mut sym_flat = 0u64;
-                let mut sym_stride = 1u64;
 
                 for d in (0..full_shape.len()).rev() {
                     match &tam.dims[d] {
@@ -905,9 +933,8 @@ pub fn pool_eval<'p, P: Pool + 'p>(
                             atom_idx += coords[d] * atom_stride;
                             atom_stride *= full_shape[d];
                         }
-                        super::lower::DimKind::Sym { .. } => {
-                            sym_flat += coords[d] * sym_stride;
-                            sym_stride *= full_shape[d];
+                        super::lower::DimKind::Sym { axis, .. } => {
+                            sym_flat += coords[d] * producer_sym_strides[*axis];
                         }
                     }
                 }
@@ -916,7 +943,7 @@ pub fn pool_eval<'p, P: Pool + 'p>(
                 let scalar = lookup_atom_scalar(
                     atom,
                     sym_flat,
-                    sym_prod,
+                    producer_sym_prod,
                     graph,
                     &group_stores,
                     &input_stores,
