@@ -78,21 +78,35 @@ impl GroupInput {
 
     /// Build the correct sym-dim mapping by matching GraphConstantIds.
     ///
-    /// For each consumer sym axis, finds the corresponding producer axis
-    /// (same GraphConstantId) and creates an Identity entry, or Broadcast
-    /// if the producer doesn't have that axis.
+    /// For each consumer sym axis, finds an unused producer axis with the
+    /// same GraphConstantId and creates an Identity entry, or Broadcast
+    /// if the producer doesn't have a matching axis.
+    ///
+    /// The "unused" bookkeeping matters when the producer has duplicate
+    /// GCs across axes (e.g. a matmul output `[1, M(gc_h), N(gc_h)]`
+    /// where both M and N reference the same sym). Without it, every
+    /// consumer axis would map to the first producer axis with the
+    /// matching GC and the second axis would be silently shadowed.
     pub fn mapped(
         input_ref: InputRef,
         consumer_sym_dims: &[GraphConstantId],
         producer_sym_dims: &[GraphConstantId],
     ) -> Self {
+        let mut used = vec![false; producer_sym_dims.len()];
         let sym_dim_map = consumer_sym_dims
             .iter()
             .map(|c_gc| {
-                if let Some(p_idx) = producer_sym_dims.iter().position(|p_gc| p_gc == c_gc) {
-                    SymDimMap::Identity(p_idx)
-                } else {
-                    SymDimMap::Broadcast
+                let slot = producer_sym_dims
+                    .iter()
+                    .enumerate()
+                    .find(|&(i, p_gc)| !used[i] && p_gc == c_gc)
+                    .map(|(i, _)| i);
+                match slot {
+                    Some(p_idx) => {
+                        used[p_idx] = true;
+                        SymDimMap::Identity(p_idx)
+                    }
+                    None => SymDimMap::Broadcast,
                 }
             })
             .collect();

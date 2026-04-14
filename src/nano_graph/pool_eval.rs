@@ -262,12 +262,30 @@ pub fn pool_eval<'p, P: Pool + 'p>(
                     } else {
                         full_shape.iter().product::<u64>().max(1)
                     };
-                    let inp_sym_dims = inp.sym_dims();
-                    let inp_sym_extents: Vec<u64> = inp_sym_dims
+
+                    // The input's dim_layout may reorder sym dims relative to
+                    // the producing group's storage (e.g. after transpose),
+                    // so resolve strides against the producer's sym_dims and
+                    // index via each DimKind::Sym.axis.
+                    let producer_sym_dims: Vec<super::pattern::GraphConstantId> =
+                        if let Some(gi2) = graph.find_group_idx(inp.base) {
+                            graph.groups()[gi2].sym_dims.clone()
+                        } else if let Some((ti, _)) = graph.find_input_idx(inp.base) {
+                            input_sym_dims[ti].clone()
+                        } else {
+                            inp.sym_dims()
+                        };
+                    let producer_sym_extents: Vec<u64> = producer_sym_dims
                         .iter()
                         .map(|gc| gc_values[gc.0 as usize])
                         .collect();
-                    let inp_sym_prod: u64 = inp_sym_extents.iter().product::<u64>().max(1);
+                    let producer_sym_prod: u64 =
+                        producer_sym_extents.iter().product::<u64>().max(1);
+                    let mut producer_sym_strides = vec![1u64; producer_sym_extents.len()];
+                    for i in (0..producer_sym_extents.len().saturating_sub(1)).rev() {
+                        producer_sym_strides[i] =
+                            producer_sym_strides[i + 1] * producer_sym_extents[i + 1];
+                    }
 
                     let inp_layout =
                         TensorLayout::<DynRank>::row_major(full_shape.clone(), inp.dtype);
@@ -278,12 +296,13 @@ pub fn pool_eval<'p, P: Pool + 'p>(
                         NumericTensor::from_parts(inp_buf, inp_layout);
 
                     for flat_elem in 0..full_numel {
-                        // Decompose flat_elem into per-dim coordinates.
+                        // Decompose flat_elem into per-dim coordinates and
+                        // split into (atom_idx, sym_flat). Sym_flat is in the
+                        // producer's sym-dim storage order.
                         let mut remaining = flat_elem;
                         let mut atom_idx = 0u64;
                         let mut atom_stride = 1u64;
                         let mut sym_flat = 0u64;
-                        let mut sym_stride = 1u64;
 
                         for d in (0..full_shape.len()).rev() {
                             let coord = remaining % full_shape[d];
@@ -293,9 +312,8 @@ pub fn pool_eval<'p, P: Pool + 'p>(
                                     atom_idx += coord * atom_stride;
                                     atom_stride *= full_shape[d];
                                 }
-                                super::lower::DimKind::Sym { .. } => {
-                                    sym_flat += coord * sym_stride;
-                                    sym_stride *= full_shape[d];
+                                super::lower::DimKind::Sym { axis, .. } => {
+                                    sym_flat += coord * producer_sym_strides[*axis];
                                 }
                             }
                         }
@@ -304,7 +322,7 @@ pub fn pool_eval<'p, P: Pool + 'p>(
                         let scalar = lookup_atom_scalar(
                             atom_id,
                             sym_flat,
-                            inp_sym_prod,
+                            producer_sym_prod,
                             graph,
                             &group_stores,
                             &input_stores,
@@ -361,17 +379,31 @@ pub fn pool_eval<'p, P: Pool + 'p>(
                 }
             } else {
                 // Has sym dims — decompose result elements into atom + sym positions.
+                // The out_mapping's dim_layout may reorder sym dims relative
+                // to this group's sym_dims storage order, so strides for sym
+                // axes come from group.sym_dims and DimKind::Sym.axis picks
+                // the right one.
                 let opaque_op = &graph.opaque_ops()[*opaque_idx];
                 let out_mapping = &opaque_op.outputs[*output_idx];
                 let result_shape = result_tensor.shape();
                 let full_numel = result_tensor.numel();
+
+                let group_sym_extents: Vec<u64> = group
+                    .sym_dims
+                    .iter()
+                    .map(|gc| gc_values[gc.0 as usize])
+                    .collect();
+                let mut group_sym_strides = vec![1u64; group_sym_extents.len()];
+                for i in (0..group_sym_extents.len().saturating_sub(1)).rev() {
+                    group_sym_strides[i] =
+                        group_sym_strides[i + 1] * group_sym_extents[i + 1];
+                }
 
                 for flat_elem in 0..full_numel {
                     let mut remaining = flat_elem as u64;
                     let mut atom_idx = 0u64;
                     let mut atom_stride = 1u64;
                     let mut sf = 0u64;
-                    let mut sf_stride = 1u64;
 
                     for d in (0..result_shape.len()).rev() {
                         let coord = remaining % result_shape[d];
@@ -381,9 +413,8 @@ pub fn pool_eval<'p, P: Pool + 'p>(
                                 atom_idx += coord * atom_stride;
                                 atom_stride *= result_shape[d];
                             }
-                            super::lower::DimKind::Sym { .. } => {
-                                sf += coord * sf_stride;
-                                sf_stride *= result_shape[d];
+                            super::lower::DimKind::Sym { axis, .. } => {
+                                sf += coord * group_sym_strides[*axis];
                             }
                         }
                     }
