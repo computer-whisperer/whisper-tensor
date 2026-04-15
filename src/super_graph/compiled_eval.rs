@@ -110,8 +110,10 @@ pub struct CachedCompiledPlan {
     /// Output atom ranges and their external IDs, for extracting results
     /// from the PhaseStore after execution.
     pub output_ranges: Vec<(GlobalId, Vec<AtomRange>)>,
-    /// Output tensor shapes for reassembly.
-    pub output_shapes: Vec<(GlobalId, Vec<u64>)>,
+    /// Output tensor dim layouts — full `DimKind` list per external ID
+    /// so sym dims get resolved against runtime bindings at extract time
+    /// (concrete shape = known × bindings[gc] per sym).
+    pub output_dims: Vec<(GlobalId, Vec<DimKind>)>,
     /// Structured summary of the execution plan for Build Inspector reporting.
     pub plan_summary: PlanSummary,
 }
@@ -123,8 +125,10 @@ pub struct CachedCompiledPlan {
 /// Build output atom ranges and shapes from a tensor_map for the given output IDs.
 ///
 /// For each output ID, looks up its TAMI via `resolve_id` (which maps external
-/// IDs to internal tensor_map keys) and collects its atom ranges and dims.
-/// Returns (output_ranges, output_shapes, all_output_atom_ranges).
+/// IDs to internal tensor_map keys) and collects its atom ranges and dim layout.
+/// Returns (output_ranges, output_dims, all_output_atom_ranges). The dim layout
+/// keeps `DimKind::Sym` entries verbatim — `extract_outputs` resolves them
+/// against the runtime bindings HashMap.
 #[allow(clippy::type_complexity)]
 pub(crate) fn build_output_ranges(
     graph: &NanoGraph<'static, SystemPool>,
@@ -133,11 +137,11 @@ pub(crate) fn build_output_ranges(
     resolve_id: impl Fn(&GlobalId) -> GlobalId,
 ) -> (
     Vec<(GlobalId, Vec<AtomRange>)>,
-    Vec<(GlobalId, Vec<u64>)>,
+    Vec<(GlobalId, Vec<DimKind>)>,
     Vec<AtomRange>,
 ) {
     let mut output_ranges: Vec<(GlobalId, Vec<AtomRange>)> = Vec::new();
-    let mut output_shapes: Vec<(GlobalId, Vec<u64>)> = Vec::new();
+    let mut output_dims: Vec<(GlobalId, Vec<DimKind>)> = Vec::new();
     let mut all_output_atom_ranges: Vec<AtomRange> = Vec::new();
 
     for ext_id in output_ids {
@@ -145,12 +149,84 @@ pub(crate) fn build_output_ranges(
         if let Some(tami) = tensor_map.get(&internal_id) {
             let ranges = tami.atom_ranges(graph);
             all_output_atom_ranges.extend(ranges.iter().cloned());
-            output_shapes.push((*ext_id, tami.known_dims()));
+            output_dims.push((*ext_id, tami.dims.clone()));
             output_ranges.push((*ext_id, ranges));
         }
     }
 
-    (output_ranges, output_shapes, all_output_atom_ranges)
+    (output_ranges, output_dims, all_output_atom_ranges)
+}
+
+/// Resolve a `Vec<DimKind>` to a concrete `Vec<u64>` using runtime bindings.
+/// Sym dims look up their extent in `bindings`; missing entries panic
+/// since every gc the plan references must be bound by the caller.
+fn resolve_dim_kinds_to_shape(
+    dims: &[DimKind],
+    bindings: &HashMap<crate::nano_graph::pattern::GraphConstantId, u64>,
+) -> Vec<u64> {
+    dims.iter()
+        .map(|d| match d {
+            DimKind::Known { size, .. } => *size,
+            DimKind::Sym { gc, .. } => bindings.get(gc).copied().unwrap_or_else(|| {
+                panic!(
+                    "resolve_dim_kinds_to_shape: sym gc {:?} missing from bindings",
+                    gc
+                )
+            }),
+        })
+        .collect()
+}
+
+/// Compute per-dim element strides for our internal atom-major-sym-
+/// innermost layout. Tami ordering is preserved (same slot count as
+/// `dims`); each dim gets:
+///   - Sym: suffix-product of later sym extents (innermost sym = 1)
+///   - Known: tami-stored stride × ∏ bindings[gc] for gc in sym dims
+///
+/// This matches the convention used by `relayout_to_flat` and
+/// `PoolEvalSpan::execute`, so outputs extracted with these strides
+/// read correctly from the internal buffer.
+fn sym_aware_element_strides(
+    dims: &[DimKind],
+    bindings: &HashMap<crate::nano_graph::pattern::GraphConstantId, u64>,
+) -> Vec<u64> {
+    let sym_extents_in_order: Vec<u64> = dims
+        .iter()
+        .filter_map(|d| match d {
+            DimKind::Sym { gc, .. } => Some(bindings.get(gc).copied().unwrap_or_else(|| {
+                panic!(
+                    "sym_aware_element_strides: sym gc {:?} missing from bindings",
+                    gc
+                )
+            })),
+            _ => None,
+        })
+        .collect();
+    let sym_prod: u64 = sym_extents_in_order.iter().product();
+    let sym_suffix: Vec<u64> = {
+        let mut out = Vec::with_capacity(sym_extents_in_order.len());
+        let mut acc = 1u64;
+        for &e in sym_extents_in_order.iter().rev() {
+            out.push(acc);
+            acc *= e;
+        }
+        out.reverse();
+        out
+    };
+    let mut strides: Vec<u64> = Vec::with_capacity(dims.len());
+    let mut sym_idx = 0;
+    for d in dims {
+        match d {
+            DimKind::Sym { .. } => {
+                strides.push(sym_suffix[sym_idx]);
+                sym_idx += 1;
+            }
+            DimKind::Known { stride, .. } => {
+                strides.push(*stride * sym_prod);
+            }
+        }
+    }
+    strides
 }
 
 fn resolve_partitioner_override(requested: &PartitionerKind) -> PartitionerKind {
@@ -200,13 +276,29 @@ fn resolve_partitioner_override(requested: &PartitionerKind) -> PartitionerKind 
 pub(crate) fn compile_nano_graph(
     graph: &NanoGraph<'static, SystemPool>,
     all_output_atom_ranges: &[AtomRange],
+    external_input_sym_dims: &HashMap<AtomId, Vec<crate::nano_graph::pattern::GraphConstantId>>,
     options: &CompileOptions,
     provenance: Option<&report::GroupProvenance>,
     obs: &mut dyn CompiledEvalObserver,
 ) -> Result<(ExecutablePlan, PlanSummary, usize), String> {
     // Partition the NanoGraph — dispatch on the selected partitioner.
+    //
+    // Phase 1b gate: if the graph contains any sym-dim group, force
+    // Trivial (single span covering the whole graph) regardless of the
+    // caller's partitioner choice. Cross-span flow through the
+    // placer-sized intermediate buffer would need max-bound sizing to
+    // accommodate sym expansion, and the current placer is sym-
+    // oblivious. Single-span avoids the intermediate buffer entirely —
+    // PoolEvalSpan handles I/O with user pointers and fresh per-call
+    // output allocations. Phase 2 will make the placer sym-aware and
+    // remove this gate.
     let t0 = Instant::now();
-    let partitioner = resolve_partitioner_override(&options.partitioner);
+    let has_sym = graph.groups().iter().any(|g| !g.sym_dims.is_empty());
+    let partitioner = if has_sym {
+        PartitionerKind::Trivial
+    } else {
+        resolve_partitioner_override(&options.partitioner)
+    };
     let phases = match &partitioner {
         PartitionerKind::Trivial => {
             // 1 phase, 1 span containing the whole graph. Debug baseline
@@ -345,7 +437,21 @@ pub(crate) fn compile_nano_graph(
     // per-span. For PoolEval, every span uses pool_eval unconditionally.
     let t0 = Instant::now();
     let mut plan_builder = ExecutablePlanBuilder::new();
-    plan_builder.pin_outputs(all_output_atom_ranges);
+    // For each output range, look up the producing group's sym_dims so
+    // execute() can size the output tensor at runtime (count × sym_prod).
+    // A range with no producing group in the main graph (rare but
+    // possible — e.g. a literal output) gets an empty sym_dims vec.
+    let output_sym_dims: Vec<Vec<crate::nano_graph::pattern::GraphConstantId>> =
+        all_output_atom_ranges
+            .iter()
+            .map(|r| {
+                graph
+                    .find_group_idx(r.base)
+                    .map(|gi| graph.groups()[gi].sym_dims.clone())
+                    .unwrap_or_default()
+            })
+            .collect();
+    plan_builder.pin_outputs(all_output_atom_ranges, &output_sym_dims);
     let mut compile_errors = 0usize;
     let force_pool_eval = matches!(options.codegen, CodegenKind::PoolEval);
 
@@ -356,9 +462,15 @@ pub(crate) fn compile_nano_graph(
 
     for (pi, phase) in phases.iter().enumerate() {
         let lanes = if use_parallel {
-            compile_phase_parallel(pi, &phase.spans, &placement, &mut compile_errors)
+            compile_phase_parallel(
+                pi,
+                &phase.spans,
+                &placement,
+                external_input_sym_dims,
+                &mut compile_errors,
+            )
         } else {
-            compile_phase_pool_eval(&phase.spans, &placement)
+            compile_phase_pool_eval(&phase.spans, &placement, external_input_sym_dims)
         };
         plan_builder.add_phase(lanes);
     }
@@ -378,6 +490,7 @@ fn compile_phase_parallel(
     pi: usize,
     spans: &[crate::compiler::attempts::v14::types::Span],
     placement: &AtomPlacementMap,
+    external_input_sym_dims: &HashMap<AtomId, Vec<crate::nano_graph::pattern::GraphConstantId>>,
     compile_errors: &mut usize,
 ) -> Vec<LaneTuple> {
     use rayon::prelude::*;
@@ -407,6 +520,7 @@ fn compile_phase_parallel(
                     span.inputs.clone(),
                     span.outputs.clone(),
                     placement,
+                    external_input_sym_dims,
                 )) as Box<dyn CompiledSpanFn>)
             } else {
                 compile_one_span_native(&span.graph, &span.outputs, placement)
@@ -433,6 +547,7 @@ fn compile_phase_parallel(
                         spans[si].inputs.clone(),
                         spans[si].outputs.clone(),
                         placement,
+                        external_input_sym_dims,
                     )) as Box<dyn CompiledSpanFn>,
                     spans[si].inputs.clone(),
                     spans[si].outputs.clone(),
@@ -446,6 +561,7 @@ fn compile_phase_parallel(
 fn compile_phase_pool_eval(
     spans: &[crate::compiler::attempts::v14::types::Span],
     placement: &AtomPlacementMap,
+    external_input_sym_dims: &HashMap<AtomId, Vec<crate::nano_graph::pattern::GraphConstantId>>,
 ) -> Vec<LaneTuple> {
     spans
         .iter()
@@ -456,6 +572,7 @@ fn compile_phase_pool_eval(
                     span.inputs.clone(),
                     span.outputs.clone(),
                     placement,
+                    external_input_sym_dims,
                 )) as Box<dyn CompiledSpanFn>,
                 span.inputs.clone(),
                 span.outputs.clone(),
@@ -570,13 +687,33 @@ mod x86_jit_stats {
 pub(crate) fn relayout_to_flat<'a, 'p, P: Pool + 'p>(
     tami: &TensorAtomMapInfo,
     view: &NumericTensorView<'a, DynRank>,
+    bindings: &HashMap<crate::nano_graph::pattern::GraphConstantId, u64>,
     pool: &'p P,
 ) -> Result<NumericTensorCOW<'a, 'p, DynRank, P>, String> {
     let element_bits = tami.dtype.total_bits() as u64;
-    let known_strides_v = tami.known_strides();
-    let strides_bits: Vec<u64> = known_strides_v.iter().map(|&s| s * element_bits).collect();
+
+    // Determine target shape and per-dim element strides for our internal
+    // atom-major-sym-innermost convention. See docs/symbolic_dims_nano.md
+    // → "Memory Layout". For sym-free tamis this reduces to the
+    // TAMI-stored known strides with sym_prod=1.
+    let target_shape = resolve_dim_kinds_to_shape(&tami.dims, bindings);
+    let target_elem_strides = sym_aware_element_strides(&tami.dims, bindings);
+    let sym_prod: u64 = tami
+        .dims
+        .iter()
+        .filter_map(|d| match d {
+            DimKind::Sym { gc, .. } => bindings.get(gc).copied(),
+            _ => None,
+        })
+        .product::<u64>()
+        .max(1);
+
+    let strides_bits: Vec<u64> = target_elem_strides
+        .iter()
+        .map(|&s| s * element_bits)
+        .collect();
     let target = TensorLayout::<DynRank>::ElementStrided {
-        shape: tami.known_dims(),
+        shape: target_shape,
         dtype: tami.dtype,
         strides: strides_bits,
         offset_bits: 0,
@@ -589,7 +726,8 @@ pub(crate) fn relayout_to_flat<'a, 'p, P: Pool + 'p>(
         .relayout(target, pool)
         .map_err(|e| format!("relayout failed: {e}"))?;
 
-    let flat_layout = TensorLayout::<DynRank>::row_major(vec![tami.count], tami.dtype);
+    let flat_count = tami.count * sym_prod;
+    let flat_layout = TensorLayout::<DynRank>::row_major(vec![flat_count], tami.dtype);
     match cow {
         NumericTensorCOW::Borrowed(borrow_view) => {
             // Zero-copy: reinterpret the borrow's data as flat 1D and pass
@@ -619,6 +757,7 @@ pub(crate) fn prepare_compiled_inputs<'a, 'p, P: Pool + 'p>(
     all_views: &[(GlobalId, &NumericTensorView<'a, DynRank>)],
     input_map: &HashMap<GlobalId, GlobalId>,
     tensor_map: &HashMap<GlobalId, TensorAtomMapInfo>,
+    bindings: &HashMap<crate::nano_graph::pattern::GraphConstantId, u64>,
     pool: &'p P,
 ) -> Result<Vec<(AtomId, NumericTensorCOW<'a, 'p, DynRank, P>)>, String> {
     let mut initial_inputs: Vec<(AtomId, NumericTensorCOW<'a, 'p, DynRank, P>)> = Vec::new();
@@ -631,7 +770,7 @@ pub(crate) fn prepare_compiled_inputs<'a, 'p, P: Pool + 'p>(
 
         if tami.segments.is_empty() {
             // Simple tensor: relayout to TAMI strides, store as flat 1D.
-            let flat = relayout_to_flat(tami, view, pool)?;
+            let flat = relayout_to_flat(tami, view, bindings, pool)?;
             initial_inputs.push((tami.base_id, flat));
         } else {
             // Segmented tensor: process each segment separately.
@@ -685,7 +824,7 @@ pub(crate) fn prepare_compiled_inputs<'a, 'p, P: Pool + 'p>(
                 // Owned (allocated in pool). For the segmented Borrowed
                 // case the resulting Cow's `'a` is `view`'s `'a` — sliced
                 // itself is dropped but its underlying bytes belong to `view`.
-                let flat = relayout_to_flat(&seg_tami, &sliced, pool)?;
+                let flat = relayout_to_flat(&seg_tami, &sliced, bindings, pool)?;
                 initial_inputs.push((seg_base, flat));
             }
         }
@@ -707,35 +846,42 @@ pub(crate) fn prepare_compiled_inputs<'a, 'p, P: Pool + 'p>(
 /// with the target layout directly — no copy.
 pub(crate) fn extract_outputs<'p, P: Pool + 'p>(
     output_ranges: &[(GlobalId, Vec<AtomRange>)],
-    output_shapes: &[(GlobalId, Vec<u64>)],
+    output_dims: &[(GlobalId, Vec<DimKind>)],
+    bindings: &HashMap<crate::nano_graph::pattern::GraphConstantId, u64>,
     executor_outputs: Vec<NumericTensor<'p, DynRank, P>>,
     pool: &'p P,
 ) -> Result<HashMap<GlobalId, NumericTensor<'p, DynRank, P>>, String> {
     let mut results: HashMap<GlobalId, NumericTensor<'p, DynRank, P>> = HashMap::new();
     let mut iter = executor_outputs.into_iter();
 
-    for ((ext_id, ranges), (_, shape)) in output_ranges.iter().zip(output_shapes.iter()) {
+    // Resolve each output's sym dims against bindings to get a concrete shape.
+    let resolved_shapes: Vec<Vec<u64>> = output_dims
+        .iter()
+        .map(|(_, dims)| resolve_dim_kinds_to_shape(dims, bindings))
+        .collect();
+
+    for (((ext_id, ranges), shape), (_, dims_raw)) in output_ranges
+        .iter()
+        .zip(resolved_shapes.iter())
+        .zip(output_dims.iter())
+    {
         let dtype = ranges
             .first()
             .map(|r| r.dtype)
             .unwrap_or(crate::numeric_dtype::NumericDType::F32);
         let elem_bytes = dtype.bytes_per_element();
+        let bpe_bits = elem_bytes as u64 * 8;
 
         // Single-range fast path: take the executor's tensor and
-        // reshape in place (no copy).
+        // reshape in place (no copy). Strides match the internal
+        // atom-major-sym-innermost layout so downstream reads land at
+        // the correct bytes for each (atom, sym) coordinate.
         if ranges.len() == 1 {
             let flat = iter.next().ok_or_else(|| {
                 format!("extract_outputs: executor ran out of tensors for {ext_id:?}")
             })?;
-            let bpe_bits = elem_bytes as u64 * 8;
-            let dims = shape.as_slice();
-            let mut strides = vec![0u64; dims.len()];
-            if !dims.is_empty() {
-                strides[dims.len() - 1] = bpe_bits;
-                for i in (0..dims.len() - 1).rev() {
-                    strides[i] = strides[i + 1] * dims[i + 1];
-                }
-            }
+            let elem_strides = sym_aware_element_strides(dims_raw, bindings);
+            let strides: Vec<u64> = elem_strides.iter().map(|&s| s * bpe_bits).collect();
             let layout = TensorLayout::<DynRank>::ElementStrided {
                 shape: shape.clone(),
                 dtype,
@@ -817,7 +963,7 @@ pub fn compile_lowered_model(
         .collect();
 
     let ordered_outputs = sym_graph.get_ordered_outputs();
-    let (output_ranges, output_shapes, all_output_atom_ranges) =
+    let (output_ranges, output_dims, all_output_atom_ranges) =
         build_output_ranges(graph, &cached.graph.tensor_map, ordered_outputs, |ext_id| {
             reverse_output
                 .get(ext_id)
@@ -838,14 +984,37 @@ pub fn compile_lowered_model(
     } else {
         Some(&cached.group_provenance)
     };
-    let (executable_plan, plan_summary, _compile_errors) =
-        compile_nano_graph(graph, &all_output_atom_ranges, options, provenance, obs).ok()?;
+    // Build sym_dims_by_base for the graph's external inputs from the
+    // lowering's TAMIs. Each InputTensor's atom range carries the sym
+    // dims declared in its TAMI; PoolEvalSpans use this to understand
+    // how many sym-expanded elements live per input atom at runtime.
+    let mut external_input_sym_dims: HashMap<
+        AtomId,
+        Vec<crate::nano_graph::pattern::GraphConstantId>,
+    > = HashMap::new();
+    for it in graph.input_tensors() {
+        if let Some(tami) = cached.graph.tensor_map.get(&it.tensor_id) {
+            let sd = tami.sym_dims();
+            if !sd.is_empty() {
+                external_input_sym_dims.insert(it.base_id, sd);
+            }
+        }
+    }
+    let (executable_plan, plan_summary, _compile_errors) = compile_nano_graph(
+        graph,
+        &all_output_atom_ranges,
+        &external_input_sym_dims,
+        options,
+        provenance,
+        obs,
+    )
+    .ok()?;
 
     Some(CachedCompiledPlan {
         info_inputs_hash: cached.info_inputs_hash,
         executable_plan,
         output_ranges,
-        output_shapes,
+        output_dims,
         plan_summary,
     })
 }
@@ -892,18 +1061,46 @@ pub fn execute_compiled<'p, P: Pool + 'p>(
     let weight_views = prepared.views();
     obs.on_milestone("compiled.exec.weight_load", None, t_load, Instant::now());
 
-    // --- Input prep: relayout each input/weight view to TAMI strides. ---
-    let t_prep = Instant::now();
     let all_views: Vec<(GlobalId, &NumericTensorView<'_, DynRank>)> = user_input_views
         .iter()
         .map(|(&id, v)| (id, v))
         .chain(weight_views.iter().map(|(id, v)| (*id, v)))
         .collect();
 
+    // --- Build sym-dim bindings from runtime input shapes ---
+    //
+    // Walk each declared input TAMI, match each Sym dim's position
+    // against the runtime shape of the corresponding tensor view,
+    // and populate `bindings` with the resolved extent. Must happen
+    // before input prep so the sym-aware relayout can pack user
+    // tensors with the correct runtime strides.
+    let mut bindings: HashMap<crate::nano_graph::pattern::GraphConstantId, u64> = HashMap::new();
+    for (ext_id, view) in &all_views {
+        let internal_id = cached_lower
+            .input_map
+            .get(ext_id)
+            .copied()
+            .unwrap_or(*ext_id);
+        let Some(tami) = cached_lower.graph.tensor_map.get(&internal_id) else {
+            continue;
+        };
+        let shape = view.shape();
+        for (dim_idx, dk) in tami.dims.iter().enumerate() {
+            if let DimKind::Sym { gc, .. } = dk
+                && dim_idx < shape.len()
+            {
+                bindings.insert(*gc, shape[dim_idx]);
+            }
+        }
+    }
+
+    // --- Input prep: relayout each input/weight view to TAMI strides. ---
+    let t_prep = Instant::now();
     let initial_inputs = prepare_compiled_inputs(
         &all_views,
         &cached_lower.input_map,
         &cached_lower.graph.tensor_map,
+        &bindings,
         pool,
     )
     .map_err(|e| super::SuperGraphError::InvalidGraph(format!("compiled_eval: {e}")))?;
@@ -933,34 +1130,6 @@ pub fn execute_compiled<'p, P: Pool + 'p>(
         }
     }
 
-    // --- Build sym-dim bindings from runtime input shapes ---
-    //
-    // Walk each declared input TAMI, match each Sym dim's position
-    // against the runtime shape of the corresponding tensor view,
-    // and populate `bindings` with the resolved extent. Mirrors
-    // `lowered_eval::execute_lowered`'s binding construction —
-    // any GC not resolvable here will fault in pool_eval, preferable
-    // to a silently-wrong default.
-    let mut bindings: HashMap<crate::nano_graph::pattern::GraphConstantId, u64> = HashMap::new();
-    for (ext_id, view) in &all_views {
-        let internal_id = cached_lower
-            .input_map
-            .get(ext_id)
-            .copied()
-            .unwrap_or(*ext_id);
-        let Some(tami) = cached_lower.graph.tensor_map.get(&internal_id) else {
-            continue;
-        };
-        let shape = view.shape();
-        for (dim_idx, dk) in tami.dims.iter().enumerate() {
-            if let DimKind::Sym { gc, .. } = dk
-                && dim_idx < shape.len()
-            {
-                bindings.insert(*gc, shape[dim_idx]);
-            }
-        }
-    }
-
     // --- JIT execute ---
     let t_jit = Instant::now();
     let executor_outputs = compiled
@@ -975,7 +1144,8 @@ pub fn execute_compiled<'p, P: Pool + 'p>(
     let t_extract = Instant::now();
     let result = extract_outputs(
         &compiled.output_ranges,
-        &compiled.output_shapes,
+        &compiled.output_dims,
+        &bindings,
         executor_outputs,
         pool,
     )

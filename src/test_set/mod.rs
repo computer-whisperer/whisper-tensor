@@ -699,7 +699,7 @@ pub fn run_case_via_compiled_eval(case: &TestCase, num_lanes: usize) -> Result<(
         let output_ids: Vec<GlobalId> = case.graph.output_ordering.clone().unwrap_or_default();
 
         // Build output atom ranges from TAMIs.
-        let (output_ranges, output_shapes, all_output_atom_ranges) =
+        let (output_ranges, output_dims, all_output_atom_ranges) =
             compiled_eval::build_output_ranges(
                 &lower_result.graph,
                 &lower_result.graph.tensor_map,
@@ -707,10 +707,13 @@ pub fn run_case_via_compiled_eval(case: &TestCase, num_lanes: usize) -> Result<(
                 |id| *id, // test graphs: ext == internal for outputs
             );
 
-        // Compile the NanoGraph.
+        // Compile the NanoGraph. test_set graphs are always concrete
+        // shapes — no external input sym dims.
+        let empty_sym_dims: std::collections::HashMap<_, _> = std::collections::HashMap::new();
         let (executable_plan, _plan_summary, _compile_errors) = compiled_eval::compile_nano_graph(
             &lower_result.graph,
             &all_output_atom_ranges,
+            &empty_sym_dims,
             &options,
             Some(&lower_result.group_provenance),
             &mut (), // tests don't observe milestones
@@ -723,10 +726,13 @@ pub fn run_case_via_compiled_eval(case: &TestCase, num_lanes: usize) -> Result<(
             input_views.iter().map(|(id, v)| (*id, v)).collect();
 
         let pool = TrackedPool::new(None);
+        // test_set graphs are always concrete shapes — empty bindings.
+        let bindings = std::collections::HashMap::new();
         let initial_inputs = compiled_eval::prepare_compiled_inputs(
             &input_view_refs,
             &case.graph.input_map,
             &lower_result.graph.tensor_map,
+            &bindings,
             &pool,
         )
         .map_err(|e| format!("{}[{}]: prepare inputs failed: {e}", case.name, ds.label))?;
@@ -750,9 +756,14 @@ pub fn run_case_via_compiled_eval(case: &TestCase, num_lanes: usize) -> Result<(
         drop(initial_inputs);
 
         // Extract outputs.
-        let results =
-            compiled_eval::extract_outputs(&output_ranges, &output_shapes, executor_outputs, &pool)
-                .map_err(|e| format!("{}[{}]: extract outputs failed: {e}", case.name, ds.label))?;
+        let results = compiled_eval::extract_outputs(
+            &output_ranges,
+            &output_dims,
+            &bindings,
+            executor_outputs,
+            &pool,
+        )
+        .map_err(|e| format!("{}[{}]: extract outputs failed: {e}", case.name, ds.label))?;
 
         // Compare.
         for (out_id, expected_tensor) in &ds.expected_outputs {

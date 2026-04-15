@@ -127,6 +127,7 @@ pub fn ab_test_bytes(
         pool_input_ranges,
         outputs.to_vec(),
         &placement,
+        &std::collections::HashMap::new(),
     );
     let pool_outs = run_harness(&pool_span, graph, &placement, inputs, outputs);
 

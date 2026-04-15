@@ -78,6 +78,11 @@ struct PoolEvalRange {
     range: AtomRange,
     buffer_id: u8,
     byte_offset: u64,
+    /// Sym dims the range's producer iterates over. Each atom in the
+    /// range stores `∏ bindings[gc]` elements at runtime; this list
+    /// resolves to that product via `bindings`. Empty for sym-free
+    /// ranges (atom = scalar).
+    sym_dims: Vec<GraphConstantId>,
 }
 
 /// A span that evaluates its NanoGraph via `pool_eval` instead of JIT.
@@ -94,12 +99,30 @@ pub struct PoolEvalSpan {
 }
 
 impl PoolEvalSpan {
+    /// `sym_dims_by_base` supplies sym_dims for atom ranges whose base
+    /// does not match a producing group in the span's graph — i.e. external
+    /// input tensors, whose sym structure lives in the caller's TAMI map.
+    /// For atoms produced by groups in the span's graph, sym_dims are
+    /// read directly from the group.
     pub fn new(
         graph: crate::nano_graph::pattern::NanoGraph<'static, crate::pool::SystemPool>,
         inputs: Vec<AtomRange>,
         outputs: Vec<AtomRange>,
         placement: &AtomPlacementMap,
+        sym_dims_by_base: &HashMap<AtomId, Vec<GraphConstantId>>,
     ) -> Self {
+        let resolve_sym =
+            |base: AtomId,
+             g: &crate::nano_graph::pattern::NanoGraph<'static, crate::pool::SystemPool>|
+             -> Vec<GraphConstantId> {
+                if let Some(gi) = g.find_group_idx(base) {
+                    g.groups()[gi].sym_dims.clone()
+                } else if let Some(sd) = sym_dims_by_base.get(&base) {
+                    sd.clone()
+                } else {
+                    Vec::new()
+                }
+            };
         let resolve = |range: AtomRange| -> PoolEvalRange {
             let (buf, off) = placement.byte_offset_of(range.base).unwrap_or_else(|| {
                 panic!(
@@ -107,16 +130,18 @@ impl PoolEvalSpan {
                     range.base.0
                 )
             });
+            let sym_dims = resolve_sym(range.base, &graph);
             PoolEvalRange {
                 range,
                 buffer_id: buf.0,
                 byte_offset: off,
+                sym_dims,
             }
         };
         Self {
-            graph,
             inputs: inputs.into_iter().map(resolve).collect(),
             outputs: outputs.into_iter().map(resolve).collect(),
+            graph,
         }
     }
 }
@@ -129,40 +154,80 @@ impl CompiledSpanFn for PoolEvalSpan {
     }
 
     fn execute(&self, buffer_ptrs: &[*mut u8], bindings: &HashMap<GraphConstantId, u64>) {
-        use crate::nano_graph::lower::TensorAtomMapInfo;
+        use crate::nano_graph::lower::{DimKind, TensorAtomMapInfo};
         use crate::nano_graph::pool_eval;
         use crate::numeric_tensor::{NumericTensor, NumericTensorView};
         use crate::pool::SystemPool;
 
         static SYS: SystemPool = SystemPool;
 
+        // Helpers -------------------------------------------------------
+        // Resolve sym_prod for a range's sym_dims using the runtime
+        // bindings. Sym-free ranges yield 1. Missing binding panics —
+        // callers must supply every gc the plan references.
+        let sym_prod = |sym_dims: &[GraphConstantId]| -> u64 {
+            sym_dims
+                .iter()
+                .map(|gc| {
+                    bindings.get(gc).copied().unwrap_or_else(|| {
+                        panic!("pool_eval span: sym gc {:?} missing from bindings", gc)
+                    })
+                })
+                .product()
+        };
+        // Build a TAMI that describes a range's internal atom-major-
+        // sym-innermost layout: a single Known dim spanning the atoms
+        // with stride 1 (so atom i has atom_id=i within the store),
+        // followed by one Sym entry per sym_dim in insertion order.
+        // Pool_eval uses this to decompose the flat view's elements
+        // into (atom_idx, sym_point) positions.
+        let build_tami = |base: AtomId,
+                          count: u64,
+                          dtype: crate::numeric_dtype::NumericDType,
+                          sym_dims: &[GraphConstantId]|
+         -> TensorAtomMapInfo {
+            let mut dims: Vec<DimKind> = Vec::with_capacity(1 + sym_dims.len());
+            dims.push(DimKind::Known {
+                size: count,
+                stride: 1,
+            });
+            for (axis, _gc) in sym_dims.iter().enumerate() {
+                dims.push(DimKind::Sym {
+                    gc: sym_dims[axis],
+                    axis,
+                });
+            }
+            TensorAtomMapInfo {
+                base_id: base,
+                count,
+                dtype,
+                dims,
+                segments: vec![],
+            }
+        };
+
         // Gather inputs: copy each range's bytes out of its assigned
         // buffer into a pool-allocated flat tensor. pool_eval expects
         // owned tensors, not raw pointers — this boundary copy is
-        // unavoidable.
+        // unavoidable. Size accounts for sym-prod expansion.
         let mut input_tamis: Vec<TensorAtomMapInfo> = Vec::new();
         let mut input_tensors: Vec<NumericTensor<'_, DynRank, SystemPool>> = Vec::new();
 
         for pr in &self.inputs {
             let range = &pr.range;
             let bpe = range.dtype.bytes_per_element();
-            let needed_bytes = range.count as usize * bpe;
-            let layout = jit_flat_layout(range.count, range.dtype);
+            let sp = sym_prod(&pr.sym_dims);
+            let total_elems = range.count * sp;
+            let needed_bytes = total_elems as usize * bpe;
+            let layout = jit_flat_layout(total_elems, range.dtype);
             let mut buf = SYS
                 .allocate(layout.buffer_size_bytes().max(needed_bytes))
                 .expect("pool_eval span: alloc failed");
 
-            // Input buffers that the lowering left declared-but-unused
-            // (e.g. Resize's ROI/scales scalars when sizes is provided)
-            // come in as null pointers — the executor skips providing
-            // a pointer for them. Pool_eval still asks for them
-            // mechanically, so we hand it a zeroed tensor. Matches the
-            // old PhaseStore behavior where missing atoms silently
-            // read as zero.
+            // Null input pointer → zero-fill (see explanation above for
+            // declared-but-unused lowering inputs).
             let base_ptr = buffer_ptrs[pr.buffer_id as usize];
-            if base_ptr.is_null() {
-                // `buf` is already zero-initialized by the pool.
-            } else {
+            if !base_ptr.is_null() {
                 // SAFETY: the executor guarantees each non-null
                 // buffer_ptrs slot is valid for the declared buffer
                 // size and the placer's byte range sits inside it.
@@ -173,8 +238,12 @@ impl CompiledSpanFn for PoolEvalSpan {
                 }
             }
 
-            let tami = TensorAtomMapInfo::flat(range.base, range.count, range.dtype);
-            input_tamis.push(tami);
+            input_tamis.push(build_tami(
+                range.base,
+                range.count,
+                range.dtype,
+                &pr.sym_dims,
+            ));
             input_tensors.push(NumericTensor::from_parts(buf, layout));
         }
 
@@ -186,7 +255,7 @@ impl CompiledSpanFn for PoolEvalSpan {
         let output_tamis: Vec<TensorAtomMapInfo> = self
             .outputs
             .iter()
-            .map(|pr| TensorAtomMapInfo::flat(pr.range.base, pr.range.count, pr.range.dtype))
+            .map(|pr| build_tami(pr.range.base, pr.range.count, pr.range.dtype, &pr.sym_dims))
             .collect();
         let output_tami_refs: Vec<&TensorAtomMapInfo> = output_tamis.iter().collect();
 
@@ -194,11 +263,13 @@ impl CompiledSpanFn for PoolEvalSpan {
             pool_eval::pool_eval(&self.graph, &eval_inputs, &output_tami_refs, bindings, &SYS)
                 .expect("pool_eval span: eval failed");
 
-        // Scatter results back into buffer_ptrs.
+        // Scatter results back into buffer_ptrs. Copy sizes match
+        // sym-prod expansion so outputs with sym dims land correctly.
         for (pr, result_tensor) in self.outputs.iter().zip(results.iter()) {
             let src = result_tensor.buffer();
             let bpe = pr.range.dtype.bytes_per_element();
-            let needed = pr.range.count as usize * bpe;
+            let sp = sym_prod(&pr.sym_dims);
+            let needed = (pr.range.count * sp) as usize * bpe;
             let copy = src.len().min(needed);
             let dst_ptr =
                 unsafe { buffer_ptrs[pr.buffer_id as usize].add(pr.byte_offset as usize) };
@@ -245,7 +316,18 @@ pub struct ExecutablePlan {
     scratch_sizes: Vec<usize>,
     /// Model output atom ranges in declaration order. Each entry
     /// corresponds to one output buffer_id in the placement map.
-    output_ranges: Vec<AtomRange>,
+    /// Carries the producing group's `sym_dims` so `execute` can
+    /// allocate the tensor at runtime size `count × sym_prod`.
+    output_ranges: Vec<OutputSlot>,
+}
+
+/// One pinned model output: atom range + the sym dims its producing
+/// group iterates over. The sym dims resolve at execute-time via the
+/// `bindings` HashMap to determine the buffer's runtime size.
+#[derive(Clone)]
+pub struct OutputSlot {
+    pub range: AtomRange,
+    pub sym_dims: Vec<GraphConstantId>,
 }
 
 struct ExecutablePhase {
@@ -263,7 +345,7 @@ struct ExecutableLane {
 /// Builder for constructing an ExecutablePlan from compiled spans.
 pub struct ExecutablePlanBuilder {
     phases: Vec<ExecutablePhase>,
-    pinned_output_ranges: Vec<AtomRange>,
+    pinned_output_ranges: Vec<OutputSlot>,
 }
 
 impl ExecutablePlanBuilder {
@@ -274,10 +356,25 @@ impl ExecutablePlanBuilder {
         }
     }
 
-    /// Register model-output atom ranges. Stored verbatim; the order
-    /// matches the output buffer_ids the placer assigned.
-    pub fn pin_outputs(&mut self, ranges: &[AtomRange]) {
-        self.pinned_output_ranges.extend_from_slice(ranges);
+    /// Register model-output atom ranges with their producing group's
+    /// sym_dims. Stored verbatim; the order matches the output
+    /// buffer_ids the placer assigned.
+    pub fn pin_outputs(
+        &mut self,
+        ranges: &[AtomRange],
+        sym_dims_by_range: &[Vec<GraphConstantId>],
+    ) {
+        assert_eq!(
+            ranges.len(),
+            sym_dims_by_range.len(),
+            "pin_outputs: ranges and sym_dims_by_range length mismatch"
+        );
+        for (r, s) in ranges.iter().zip(sym_dims_by_range.iter()) {
+            self.pinned_output_ranges.push(OutputSlot {
+                range: r.clone(),
+                sym_dims: s.clone(),
+            });
+        }
     }
 
     /// Add a phase with one compiled span per lane.
@@ -488,8 +585,21 @@ impl ExecutablePlan {
         // the order here is defensive.)
         let mut output_tensors: Vec<NumericTensor<'p, DynRank, P>> =
             Vec::with_capacity(self.output_ranges.len());
-        for range in &self.output_ranges {
-            let layout = jit_flat_layout(range.count, range.dtype);
+        for slot in &self.output_ranges {
+            // Output tensor sizes include runtime sym expansion:
+            //   elements = count × ∏ bindings[gc] for gc in sym_dims
+            // For sym-free outputs sym_dims is empty → sym_prod = 1
+            // and the allocation matches the prior concrete-only path.
+            let sym_prod: u64 = slot
+                .sym_dims
+                .iter()
+                .map(|gc| {
+                    bindings.get(gc).copied().unwrap_or_else(|| {
+                        panic!("execute: output sym gc {:?} missing from bindings", gc)
+                    })
+                })
+                .product();
+            let layout = jit_flat_layout(slot.range.count * sym_prod, slot.range.dtype);
             let buf = pool
                 .allocate(layout.buffer_size_bytes())
                 .expect("output tensor allocation failed");
