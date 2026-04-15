@@ -267,13 +267,17 @@ impl MilliOp for Concat {
         // Build output hint for constant folding.
         let out_dtype = input_infos[0].dtype();
 
-        // Per-element propagation for rank-1 inputs on axis 0.  If every
-        // input has per-element ScalarInfo available AND at least one
-        // element is symbolic, concatenate those values so downstream
-        // Expand can inherit sym identity (see shape-manipulation chains
-        // in rnn_supergraph state-init).  All-concrete inputs fall through
-        // to the constant_fold path so the output lands as a real
-        // `TensorInfoShaped::Numeric` (needed for `to_i64_vec` consumers).
+        // Per-element propagation for rank-1 inputs on axis 0. Fires when
+        // every input carries per-element ScalarInfo AND at least one input
+        // is *not* already `Shaped::Numeric` (= not concrete). If all inputs
+        // are concrete, constant_fold below handles it and emits a proper
+        // `Shaped::Numeric` output — we don't want to demote that case to
+        // `Shaped::Symbolic`. But when even one input is `Shaped::Symbolic`
+        // (e.g. `Slice(Shape(x), 1, 2)` with all-numeric-values but
+        // symbolic-typed shape), constant_fold can't fire, and without
+        // this path we fall all the way down to a `Ranked::Ranked` output
+        // with no per-element info — silently losing the shape-tensor
+        // plumbing that Reshape/Expand need to preserve sym identity.
         let concat_axis_rank1 = self.axis == 0 || self.axis == -1;
         if concat_axis_rank1 {
             let per_input_vals: Option<Vec<Vec<crate::scalar_info::ScalarInfo>>> = input_infos
@@ -286,18 +290,16 @@ impl MilliOp for Concat {
                     }
                 })
                 .collect();
-            if let Some(groups) = per_input_vals {
+            let any_non_concrete = input_infos.iter().any(|info| info.as_concrete().is_none());
+            if any_non_concrete
+                && let Some(groups) = per_input_vals
+            {
                 let mut values = Vec::new();
                 for g in groups {
                     values.extend(g);
                 }
-                let has_sym = values
-                    .iter()
-                    .any(|v| matches!(v, crate::scalar_info::ScalarInfo::Symbolic(_)));
-                if has_sym {
-                    let out_info = TensorInfo::from_scalar_infos_rank1(out_dtype, values);
-                    return Ok(vec![(self.output, out_info)]);
-                }
+                let out_info = TensorInfo::from_scalar_infos_rank1(out_dtype, values);
+                return Ok(vec![(self.output, out_info)]);
             }
         }
         let rank = input_infos

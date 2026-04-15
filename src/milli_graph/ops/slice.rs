@@ -445,22 +445,22 @@ impl MilliOp for Slice {
         let out_dtype = data_info.dtype();
 
         // Per-element propagation for rank-1 inputs with concrete slice params
-        // on axis 0.  Used by shape-manipulation chains (Shape → Slice →
-        // Concat → Expand) to thread symbolic identity through.  Only fires
-        // when at least one element is symbolic — all-concrete inputs should
-        // fall through to `constant_fold` below so downstream `to_i64_vec`
-        // sees a real `TensorInfoShaped::Numeric` (not a symbolic-shaped
-        // tensor that happens to hold all-numeric values).
+        // on axis 0. Used by shape-manipulation chains (Shape → Slice →
+        // Concat → Expand) to thread per-element info through.  Fires when
+        // the input isn't already concrete — if it *is* concrete, we let
+        // `constant_fold` below handle it so the output lands as
+        // `Shaped::Numeric` (which `to_i64_vec` consumers need). But when
+        // the input is `Shaped::Symbolic` (even if its values happen to
+        // all be Numeric), constant_fold can't fire, and without this
+        // path we'd lose the per-element info entirely.
         if data_rank == 1
             && let (Some(starts), Some(ends), Some(steps), Some(axes)) =
                 (&starts, &ends, &steps, &axes)
             && axes.len() == 1
             && axes[0] == 0
             && steps[0] != 0
+            && data_info.as_concrete().is_none()
             && let Some(vals) = data_info.to_scalar_infos_rank1()
-            && vals
-                .iter()
-                .any(|v| matches!(v, crate::scalar_info::ScalarInfo::Symbolic(_)))
         {
             let dim = vals.len() as i64;
             let step = steps[0];

@@ -118,9 +118,34 @@ impl MilliOp for Cast {
             .get(&self.data)
             .ok_or(MilliOpGraphError::UnableToInfer)?;
 
-        // Same shape, new dtype. Preserve per-dim shape info.
+        // Same shape, new dtype. Preserve per-dim shape info, and — if the
+        // input is a rank-1 tensor with per-element ScalarInfo — preserve
+        // that per-element info too, casting each element's dtype while
+        // keeping `symbol_id` across the typed boundary. Shape-tensor
+        // chains (`Shape → Slice → Concat → Cast → Reshape`) depend on
+        // this: without per-element preservation across Cast, symbolic
+        // dim identity would be dropped every time an ONNX exporter
+        // inserts a dtype conversion on a computed shape.
         let out_ndt = self.dtype;
-        let out_info = if let Some(ranked) = input_info.as_ranked() {
+        let out_info = if let Some(per_elem) = input_info.to_scalar_infos_rank1() {
+            let casted: Vec<crate::scalar_info::ScalarInfo> = per_elem
+                .into_iter()
+                .map(|s| match s {
+                    crate::scalar_info::ScalarInfo::Numeric(n) => {
+                        crate::scalar_info::ScalarInfo::Numeric(n.cast_to(out_ndt))
+                    }
+                    crate::scalar_info::ScalarInfo::Symbolic(sym) => {
+                        crate::scalar_info::ScalarInfo::Symbolic(
+                            crate::symbolic_scalar::SymbolicScalar::from_typed(
+                                &sym.cast::<u64>(),
+                                out_ndt,
+                            ),
+                        )
+                    }
+                })
+                .collect();
+            TensorInfo::from_scalar_infos_rank1(out_ndt, casted)
+        } else if let Some(ranked) = input_info.as_ranked() {
             let dims = ranked.shape();
             TensorInfo::from_dtype_and_shape_scalars(out_ndt, &dims)
         } else {
