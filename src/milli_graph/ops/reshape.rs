@@ -157,82 +157,111 @@ impl MilliOp for Reshape {
         let data_shape_full: Option<Vec<ScalarInfoTyped<u64>>> =
             data_info.as_ranked().map(|r| r.shape().to_vec());
 
-        // Helper: given concrete shape-tensor values, produce the output dims.
-        // For ONNX 0-values, copy the input dim through — crucially keeping
-        // the full `ScalarInfoTyped` so a Symbolic input dim survives as the
-        // same Symbolic in the output (this is what ties batch sym identity
-        // across the graph).
-        let mut compose_reshape_dims = |shape_values: &[i64]| -> Vec<ScalarInfoTyped<u64>> {
-            let mut dims: Vec<ScalarInfoTyped<u64>> = Vec::with_capacity(shape_values.len());
-            let mut has_minus_one = false;
-            for (i, &sv) in shape_values.iter().enumerate() {
-                if sv == 0 {
-                    // Copy-through semantic: preserve identity (Numeric or Symbolic).
-                    let inherited = data_shape_full.as_ref().and_then(|ds| ds.get(i).cloned());
-                    dims.push(inherited.unwrap_or_else(|| {
-                        ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(rng))
-                    }));
-                } else if sv == -1 {
-                    has_minus_one = true;
-                    dims.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(rng)));
-                } else if sv > 0 {
-                    dims.push(ScalarInfoTyped::Numeric(sv as u64));
-                } else {
-                    dims.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(rng)));
-                }
-            }
-            // Try to resolve the -1 dim. The -1 position is constrained by
-            // total-elements balance:
-            //   prod(input_dims) = prod(output_dims_with_-1_resolved)
-            // If the symbolic factors on both sides cancel (same multiset of
-            // symbol_ids appears in input and in the non-(-1) output dims),
-            // the -1 resolves to a purely numeric value — prod(num_in) /
-            // prod(num_out). Otherwise leave it as the fresh Symbolic minted
-            // above (still correct, just less informative).
-            if has_minus_one
-                && let Some(ds) = data_shape_full.as_ref()
-            {
-                use std::collections::HashMap;
-                let collect_syms = |vals: &[ScalarInfoTyped<u64>]| -> HashMap<u64, u32> {
-                    let mut map: HashMap<u64, u32> = HashMap::new();
-                    for v in vals {
-                        if let ScalarInfoTyped::Symbolic(s) = v {
-                            *map.entry(s.symbol_id()).or_insert(0) += 1;
+        // Extract shape tensor as per-element typed scalar infos. Tiered:
+        //   1) all-concrete i64 (fast path — classic ONNX shape)
+        //   2) per-element ScalarInfo (shape tensor built via
+        //      Shape→Slice→Concat, so some elements are symbolic and
+        //      directly carry a dim from an earlier tensor — the
+        //      symbol_id lets the lowered graph tie the output dim
+        //      back to the original input dim's GC)
+        //   3) None — shape has no per-element info; fall back later
+        let shape_scalars: Option<Vec<ScalarInfoTyped<i64>>> =
+            if let Some(values) = shape_info.to_i64_vec() {
+                Some(values.into_iter().map(ScalarInfoTyped::Numeric).collect())
+            } else {
+                shape_info.to_scalar_infos_rank1().map(|vals| {
+                    vals.into_iter()
+                        .map(|s: crate::scalar_info::ScalarInfo| s.cast::<i64>())
+                        .collect()
+                })
+            };
+
+        // Produce output dims from per-element shape info. Each element:
+        //   Numeric(0)   — ONNX "preserve" semantic: copy input dim through
+        //                  (preserves Symbolic identity if input dim is sym)
+        //   Numeric(-1)  — ONNX "infer" placeholder; resolved below if
+        //                  symbolic factors cancel between input and output
+        //   Numeric(v>0) — literal dim extent
+        //   Numeric(v<-1) — invalid, caller-level error
+        //   Symbolic(s)  — sym shape value (e.g. batch from a Shape op);
+        //                  output dim shares the same symbol_id via cast
+        let mut compose_reshape_dims =
+            |shape: &[ScalarInfoTyped<i64>]| -> Result<Vec<ScalarInfoTyped<u64>>, MilliOpGraphError> {
+                let mut dims: Vec<ScalarInfoTyped<u64>> = Vec::with_capacity(shape.len());
+                let mut has_minus_one = false;
+                for (i, sv) in shape.iter().enumerate() {
+                    match sv {
+                        ScalarInfoTyped::Numeric(0) => {
+                            let inherited =
+                                data_shape_full.as_ref().and_then(|ds| ds.get(i).cloned());
+                            dims.push(inherited.unwrap_or_else(|| {
+                                ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(rng))
+                            }));
+                        }
+                        ScalarInfoTyped::Numeric(-1) => {
+                            has_minus_one = true;
+                            dims.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(rng)));
+                        }
+                        ScalarInfoTyped::Numeric(v) if *v > 0 => {
+                            dims.push(ScalarInfoTyped::Numeric(*v as u64));
+                        }
+                        ScalarInfoTyped::Numeric(_) => {
+                            return Err(MilliOpGraphError::InvalidInput("Reshape".to_string()));
+                        }
+                        ScalarInfoTyped::Symbolic(s) => {
+                            // Preserve symbol_id across the i64 → u64 cast.
+                            dims.push(ScalarInfoTyped::Symbolic(s.cast::<u64>()));
                         }
                     }
-                    map
-                };
-                let output_non_minus: Vec<ScalarInfoTyped<u64>> = dims
-                    .iter()
-                    .enumerate()
-                    .filter(|(idx, _)| shape_values[*idx] != -1)
-                    .map(|(_, d)| d.clone())
-                    .collect();
-                let input_syms = collect_syms(ds);
-                let output_syms = collect_syms(&output_non_minus);
-                if input_syms == output_syms {
-                    // Syms cancel; -1 is determined purely by the numeric parts.
-                    let in_num: u64 =
-                        ds.iter().filter_map(|d| d.as_numeric().copied()).product();
-                    let out_num: u64 = output_non_minus
+                }
+                // -1 resolver: input/output total-elements balance. If
+                // symbolic factors cancel (same symbol_id multiset on both
+                // sides of the balance), -1 is prod(input_num)/prod(output_num).
+                if has_minus_one
+                    && let Some(ds) = data_shape_full.as_ref()
+                {
+                    use std::collections::HashMap;
+                    let collect_syms = |vals: &[ScalarInfoTyped<u64>]| -> HashMap<u64, u32> {
+                        let mut map: HashMap<u64, u32> = HashMap::new();
+                        for v in vals {
+                            if let ScalarInfoTyped::Symbolic(s) = v {
+                                *map.entry(s.symbol_id()).or_insert(0) += 1;
+                            }
+                        }
+                        map
+                    };
+                    let output_non_minus: Vec<ScalarInfoTyped<u64>> = dims
                         .iter()
-                        .filter_map(|d| d.as_numeric().copied())
-                        .product();
-                    if out_num > 0 && in_num % out_num == 0 {
-                        let inferred = in_num / out_num;
-                        let idx = shape_values.iter().position(|&v| v == -1).unwrap();
-                        dims[idx] = ScalarInfoTyped::Numeric(inferred);
+                        .enumerate()
+                        .filter(|(idx, _)| {
+                            !matches!(shape[*idx], ScalarInfoTyped::Numeric(-1))
+                        })
+                        .map(|(_, d)| d.clone())
+                        .collect();
+                    if collect_syms(ds) == collect_syms(&output_non_minus) {
+                        let in_num: u64 =
+                            ds.iter().filter_map(|d| d.as_numeric().copied()).product();
+                        let out_num: u64 = output_non_minus
+                            .iter()
+                            .filter_map(|d| d.as_numeric().copied())
+                            .product();
+                        if out_num > 0 && in_num % out_num == 0 {
+                            let idx = shape
+                                .iter()
+                                .position(|s| matches!(s, ScalarInfoTyped::Numeric(-1)))
+                                .unwrap();
+                            dims[idx] = ScalarInfoTyped::Numeric(in_num / out_num);
+                        }
                     }
                 }
-            }
-            dims
-        };
+                Ok(dims)
+            };
 
-        let output_hint = if let Some(shape_values) = shape_info.to_i64_vec() {
-            let hint_dims = compose_reshape_dims(&shape_values);
-            TensorInfo::from_dtype_and_shape_scalars(out_dtype, &hint_dims)
+        let output_hint = if let Some(shape) = shape_scalars.as_ref() {
+            compose_reshape_dims(shape)
+                .map(|hint_dims| TensorInfo::from_dtype_and_shape_scalars(out_dtype, &hint_dims))
+                .unwrap_or_else(|_| TensorInfo::from_dtype_and_shape_scalars(out_dtype, &[]))
         } else {
-            // Shape tensor not concrete — just provide dtype hint.
             TensorInfo::from_dtype_and_shape_scalars(out_dtype, &[])
         };
 
@@ -245,13 +274,10 @@ impl MilliOp for Reshape {
 
         let first_elem = data_info.first_element();
 
-        // If shape tensor is concrete, we can determine the output shape.
-        if let Some(shape_values) = shape_info.to_i64_vec() {
-            if shape_values.iter().any(|&v| v < -1) {
-                return Err(MilliOpGraphError::InvalidInput("Reshape".to_string()));
-            }
-            let output_dims = compose_reshape_dims(&shape_values);
-
+        // If the shape tensor provided per-element info (tiers 1 or 2),
+        // we can determine the full output dim vector.
+        if let Some(shape) = shape_scalars {
+            let output_dims = compose_reshape_dims(&shape)?;
             let out = TensorInfo::Ranked(crate::tensor_info::TensorInfoRanked::new(
                 first_elem,
                 output_dims,
