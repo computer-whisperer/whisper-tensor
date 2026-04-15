@@ -849,8 +849,34 @@ impl<'a, 'p, P: Pool + 'p> TensorInfo<'a, 'p, P> {
     /// Build a rank-1 TensorInfo whose elements carry per-element ScalarInfo
     /// (which may be Numeric or Symbolic).  Counterpart to
     /// `to_scalar_infos_rank1`.
-    pub(crate) fn from_scalar_infos_rank1(dtype: NumericDType, values: Vec<ScalarInfo>) -> Self {
+    ///
+    /// Auto-promotes to `Shaped::Numeric` when every element is `Numeric` —
+    /// required so downstream `as_concrete()` / `to_i64_vec()` / the
+    /// `lower_default` all-numeric constant-fold path can see the tensor as
+    /// fully concrete. Without promotion, `Shape → Slice → …` chains where
+    /// the slice drops all symbolic elements still land as `Shaped::Symbolic`
+    /// and route every consumer through opaque eval at lowering time.
+    pub(crate) fn from_scalar_infos_rank1(
+        dtype: NumericDType,
+        values: Vec<ScalarInfo>,
+        pool: &'p P,
+    ) -> Self {
         let n = values.len() as u64;
+        let all_numeric = values.iter().all(|v| matches!(v, ScalarInfo::Numeric(_)));
+        if all_numeric {
+            let layout = crate::numeric_tensor::TensorLayout::<DynRank>::row_major(vec![n], dtype);
+            if let Ok(buf) = pool.allocate(layout.buffer_size_bytes()) {
+                let mut tensor = NewNumericTensor::from_parts(buf, layout);
+                for (i, v) in values.iter().enumerate() {
+                    if let ScalarInfo::Numeric(s) = v {
+                        tensor.write_element(i, s.cast_to(dtype));
+                    }
+                }
+                return TensorInfo::Ranked(TensorInfoRanked::Shaped(TensorInfoShaped::Numeric(
+                    NumericTensorCOW::Owned(tensor),
+                )));
+            }
+        }
         let shaped = ShapedTensor::<DynRank>::new_with_values(dtype, vec![n], values);
         TensorInfo::Ranked(TensorInfoRanked::Shaped(TensorInfoShaped::Symbolic(shaped)))
     }

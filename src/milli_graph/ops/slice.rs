@@ -491,7 +491,7 @@ impl MilliOp for Slice {
                     i += step;
                 }
             }
-            let out_info = TensorInfo::from_scalar_infos_rank1(out_dtype, sliced_vals);
+            let out_info = TensorInfo::from_scalar_infos_rank1(out_dtype, sliced_vals, pool);
             return Ok(vec![(self.output, out_info)]);
         }
 

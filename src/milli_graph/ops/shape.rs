@@ -186,6 +186,7 @@ impl MilliOp for Shape {
             let out_info = TensorInfo::from_scalar_infos_rank1(
                 crate::numeric_dtype::NumericDType::I64,
                 values,
+                pool,
             );
             return Ok(vec![(self.output, out_info)]);
         }

@@ -245,7 +245,7 @@ impl MilliOp for Reshape {
                             .iter()
                             .filter_map(|d| d.as_numeric().copied())
                             .product();
-                        if out_num > 0 && in_num % out_num == 0 {
+                        if out_num > 0 && in_num.is_multiple_of(out_num) {
                             let idx = shape
                                 .iter()
                                 .position(|s| matches!(s, ScalarInfoTyped::Numeric(-1)))

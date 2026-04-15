@@ -144,7 +144,7 @@ impl MilliOp for Cast {
                     }
                 })
                 .collect();
-            TensorInfo::from_scalar_infos_rank1(out_ndt, casted)
+            TensorInfo::from_scalar_infos_rank1(out_ndt, casted, pool)
         } else if let Some(ranked) = input_info.as_ranked() {
             let dims = ranked.shape();
             TensorInfo::from_dtype_and_shape_scalars(out_ndt, &dims)

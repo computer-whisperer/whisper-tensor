@@ -291,14 +291,12 @@ impl MilliOp for Concat {
                 })
                 .collect();
             let any_non_concrete = input_infos.iter().any(|info| info.as_concrete().is_none());
-            if any_non_concrete
-                && let Some(groups) = per_input_vals
-            {
+            if any_non_concrete && let Some(groups) = per_input_vals {
                 let mut values = Vec::new();
                 for g in groups {
                     values.extend(g);
                 }
-                let out_info = TensorInfo::from_scalar_infos_rank1(out_dtype, values);
+                let out_info = TensorInfo::from_scalar_infos_rank1(out_dtype, values, pool);
                 return Ok(vec![(self.output, out_info)]);
             }
         }

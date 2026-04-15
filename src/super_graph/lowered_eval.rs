@@ -262,24 +262,21 @@ pub fn build_info_inputs(
 
     // Compose the dims slice for an input given its concrete shape and any
     // configured symbolic overrides.
-    let compose_dims =
-        |shape: &[u64],
-         overrides: Option<&Vec<(usize, String)>>,
-         sym_for: &mut dyn FnMut(&str) -> SymbolicScalarTyped<u64>|
-         -> Vec<ScalarInfoTyped<u64>> {
-            let mut dims: Vec<ScalarInfoTyped<u64>> = shape
-                .iter()
-                .map(|&v| ScalarInfoTyped::Numeric(v))
-                .collect();
-            if let Some(entries) = overrides {
-                for (dim_idx, group) in entries {
-                    if *dim_idx < dims.len() {
-                        dims[*dim_idx] = ScalarInfoTyped::Symbolic(sym_for(group));
-                    }
+    let compose_dims = |shape: &[u64],
+                        overrides: Option<&Vec<(usize, String)>>,
+                        sym_for: &mut dyn FnMut(&str) -> SymbolicScalarTyped<u64>|
+     -> Vec<ScalarInfoTyped<u64>> {
+        let mut dims: Vec<ScalarInfoTyped<u64>> =
+            shape.iter().map(|&v| ScalarInfoTyped::Numeric(v)).collect();
+        if let Some(entries) = overrides {
+            for (dim_idx, group) in entries {
+                if *dim_idx < dims.len() {
+                    dims[*dim_idx] = ScalarInfoTyped::Symbolic(sym_for(group));
                 }
             }
-            dims
-        };
+        }
+        dims
+    };
 
     // Declared model inputs: always shape+dtype only, never inlined.
     // These are runtime-overridable slots — even if the model provides default
@@ -388,6 +385,28 @@ pub fn lower_symbolic_graph(
     // lower() expects keys matching the milli graph's external input IDs,
     // which generate_milli_graph preserves from the symbolic graph tensor IDs.
     let lower_result = lower::lower(&milli_graph, info_inputs, &POOL_S).ok()?;
+
+    // Report opaque-op count by kind. These are milli ops that `lower_default`
+    // wrapped in `MilliOpOpaqueEval` — functional at runtime (via eval_new in
+    // pool_eval) but not a true nano-level lowering.
+    {
+        let opaque_ops = lower_result.graph.opaque_ops();
+        if opaque_ops.is_empty() {
+            eprintln!("[lowered_eval] 0 opaque ops (full nano lowering)");
+        } else {
+            let mut by_kind: std::collections::BTreeMap<&str, u32> =
+                std::collections::BTreeMap::new();
+            for op in opaque_ops {
+                *by_kind.entry(op.name.as_str()).or_insert(0) += 1;
+            }
+            let breakdown: Vec<String> = by_kind.iter().map(|(k, n)| format!("{k}={n}")).collect();
+            eprintln!(
+                "[lowered_eval] {} opaque op(s): {}",
+                opaque_ops.len(),
+                breakdown.join(", ")
+            );
+        }
+    }
 
     // Report unsupported ops with diagnostics.
     if !lower_result.unsupported.is_empty() {
@@ -729,9 +748,14 @@ pub fn execute_lowered<'p, P: Pool + 'p>(
 
     // Run pool_eval.
     let t0 = std::time::Instant::now();
-    let eval_results =
-        pool_eval::pool_eval(&cached.graph, &eval_inputs, &output_tami_refs, &bindings, pool)
-            .map_err(|e| super::SuperGraphError::InvalidGraph(format!("lowered pool_eval: {e}")))?;
+    let eval_results = pool_eval::pool_eval(
+        &cached.graph,
+        &eval_inputs,
+        &output_tami_refs,
+        &bindings,
+        pool,
+    )
+    .map_err(|e| super::SuperGraphError::InvalidGraph(format!("lowered pool_eval: {e}")))?;
     let dt = t0.elapsed();
     if dt.as_millis() > 10 {
         eprintln!("[lowered_eval] pool_eval: {:.0}ms", dt.as_secs_f64() * 1e3,);
