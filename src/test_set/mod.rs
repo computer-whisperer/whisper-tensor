@@ -708,12 +708,14 @@ pub fn run_case_via_compiled_eval(case: &TestCase, num_lanes: usize) -> Result<(
             );
 
         // Compile the NanoGraph. test_set graphs are always concrete
-        // shapes — no external input sym dims.
+        // shapes — no external input sym dims and no GC bounds.
         let empty_sym_dims: std::collections::HashMap<_, _> = std::collections::HashMap::new();
+        let empty_gc_bounds: std::collections::HashMap<_, _> = std::collections::HashMap::new();
         let (executable_plan, _plan_summary, _compile_errors) = compiled_eval::compile_nano_graph(
             &lower_result.graph,
             &all_output_atom_ranges,
             &empty_sym_dims,
+            &empty_gc_bounds,
             &options,
             Some(&lower_result.group_provenance),
             &mut (), // tests don't observe milestones

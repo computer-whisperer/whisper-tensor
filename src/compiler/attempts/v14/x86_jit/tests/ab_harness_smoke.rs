@@ -23,7 +23,8 @@ fn empty_span_compiles_and_executes() {
             outputs: Vec::new(),
         }],
     }];
-    let placement = run_placer(&graph, &phases, &[]).expect("empty placement");
+    let placement = run_placer(&graph, &phases, &[], &std::collections::HashMap::new())
+        .expect("empty placement");
     let span = X86JitSpan::compile(&graph, &[], &placement).expect("empty span compile");
 
     // Build a minimal buffer_ptrs sized to the scratch slot. Every

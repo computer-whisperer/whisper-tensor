@@ -33,9 +33,36 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use crate::nano_graph::pattern::{AtomId, AtomRange, InputRef, NanoGraph};
+use crate::nano_graph::pattern::{AtomId, AtomRange, GraphConstantId, InputRef, NanoGraph};
 use crate::numeric_dtype::NumericDType;
 use crate::pool::SystemPool;
+
+/// Maximum compile-time sym expansion for a group: product of
+/// per-`GraphConstantId` max-bound values across the group's `sym_dims`.
+///
+/// Per-`gc` lookup prefers `gc_max_overrides` (set by the compile path
+/// from `SymbolicInputDims::group_bounds` resolution) and falls back to
+/// `graph.graph_constants[gc].max_value`. The fallback is `u64::MAX` for
+/// sym dims with no configured bound — which the caller (`run_placer`)
+/// treats as a hard error in compile mode (see the unbounded-GC check
+/// at the top of `run_placer`).
+///
+/// Returns 1 for sym-free groups so callers can multiply unconditionally.
+fn group_max_sym_prod(
+    graph: &NanoGraph<'static, SystemPool>,
+    g: &crate::nano_graph::pattern::AtomGroup<'static, SystemPool>,
+    gc_max_overrides: &HashMap<GraphConstantId, u64>,
+) -> u64 {
+    let mut prod: u64 = 1;
+    for gc in &g.sym_dims {
+        let max = gc_max_overrides
+            .get(gc)
+            .copied()
+            .unwrap_or_else(|| graph.graph_constant_info(*gc).max_value);
+        prod = prod.saturating_mul(max);
+    }
+    prod
+}
 
 use super::partitioner_m::input_access_segments;
 use super::types::Phase;
@@ -302,6 +329,15 @@ struct SlabInterval {
     atom_hi: u64,
     /// Element size — the slab's bytes-per-atom. All members must agree.
     elem_bytes: u64,
+    /// Compile-time max sym expansion factor for the slab. Sym-free
+    /// slabs (the common case for coalesced cross-span data) have
+    /// `max_sym_prod = 1`. Sym slabs are always singletons (sym
+    /// groups can't coalesce — see step 3) and carry the producing
+    /// group's max-bound sym product so the intermediate buffer
+    /// reserves the worst-case footprint at plan-build. PoolEvalSpan
+    /// writes packed at runtime sym, leaving any unused tail of the
+    /// reservation untouched.
+    max_sym_prod: u64,
     /// Dtype — kept for the PlacementEntry emission.
     dtype: NumericDType,
     /// Liveness interval (inclusive both ends).
@@ -317,12 +353,48 @@ struct SlabInterval {
 const CACHE_LINE_BYTES: u64 = 64;
 
 /// Run the placer against a partitioned model.
+///
+/// `gc_max_overrides` supplies the compile-time max for each
+/// `GraphConstantId` referenced by sym groups in `main_graph`. Compile
+/// mode requires every sym GC reachable from a group's `sym_dims` to
+/// either appear in this map OR carry a non-`u64::MAX` `max_value` on
+/// `main_graph.graph_constants`. An unbounded GC produces an error
+/// rather than a 18-EB allocation request.
 pub fn run_placer(
     main_graph: &NanoGraph<'static, SystemPool>,
     phases: &[Phase],
     all_output_atom_ranges: &[AtomRange],
+    gc_max_overrides: &HashMap<GraphConstantId, u64>,
 ) -> Result<AtomPlacementMap, String> {
     use crate::nano_graph::ops::ScalarOp;
+
+    // Hard fail on unbounded sym GCs reachable from a group's
+    // `sym_dims`. The placer multiplies these to size buffers and a
+    // missing bound produces a u64-MAX request.
+    {
+        let mut seen: HashSet<GraphConstantId> = HashSet::new();
+        for g in main_graph.groups() {
+            for gc in &g.sym_dims {
+                if !seen.insert(*gc) {
+                    continue;
+                }
+                let bound = gc_max_overrides
+                    .get(gc)
+                    .copied()
+                    .unwrap_or_else(|| main_graph.graph_constant_info(*gc).max_value);
+                if bound == u64::MAX {
+                    let info = main_graph.graph_constant_info(*gc);
+                    return Err(format!(
+                        "placer: sym GraphConstantId {} ({:?}) has no \
+                         compile-time bound (max_value=u64::MAX, no \
+                         override). Set SymbolicInputDims::group_bounds \
+                         for this group via with_group_bound(...).",
+                        gc.0, info.name,
+                    ));
+                }
+            }
+        }
+    }
 
     let groups = main_graph.groups();
     let input_tensors = main_graph.input_tensors();
@@ -602,6 +674,25 @@ pub fn run_placer(
                         })
                         .collect();
 
+                    // Sym groups cannot coalesce. PoolEvalSpan writes
+                    // each sym group's bytes packed at runtime sym_prod
+                    // (atom-major-sym-innermost, contiguous), but a
+                    // coalesced slab member's byte_offset within the
+                    // slab is recorded at compile time as
+                    // `(member.base - slab.lo) * atom_stride`. With
+                    // sym, atom_stride = runtime_sym_prod * bpe — not
+                    // a compile-time constant — so the inter-member
+                    // offset can't be pre-computed. Skip the entire
+                    // constraint if any member carries sym_dims; each
+                    // sym group ends up as its own singleton slab,
+                    // sized at max_sym_prod * count * bpe in step 4.
+                    let any_sym_member = coalescable_members
+                        .iter()
+                        .any(|&gi| !groups[gi].sym_dims.is_empty());
+                    if any_sym_member {
+                        continue;
+                    }
+
                     let has_non_coalescable = items.iter().any(|&gi| {
                         !matches!(
                             group_kind[gi],
@@ -689,6 +780,10 @@ pub fn run_placer(
         let mut last_p = 0usize;
         let mut split = false;
         let mut any_live = false;
+        // Sym groups can't coalesce (step 3 skips them entirely), so
+        // any sym slab is a singleton and the max_sym_prod is just
+        // the single member's. Sym-free slabs have max_sym_prod == 1.
+        let mut max_sym_prod: u64 = 1;
 
         for &gi in &members {
             let g = &groups[gi];
@@ -707,6 +802,21 @@ pub fn run_placer(
                      (member {gi} dtype={:?})",
                     g.output_dtype
                 ));
+            }
+
+            let g_max = group_max_sym_prod(main_graph, g, gc_max_overrides);
+            if g_max > 1 {
+                if members.len() > 1 {
+                    // Sym groups must not coalesce — step 3's gate
+                    // should have prevented this. Defensive check.
+                    return Err(format!(
+                        "placer: sym group {gi} (base={}, sym_dims={:?}) \
+                         landed in a multi-member slab — step 3 should \
+                         have skipped this constraint",
+                        g.base_id.0, g.sym_dims
+                    ));
+                }
+                max_sym_prod = g_max;
             }
 
             if let Some(&(fp, lp)) = liveness.get(&gi) {
@@ -746,6 +856,7 @@ pub fn run_placer(
             atom_lo: lo,
             atom_hi: hi,
             elem_bytes,
+            max_sym_prod,
             dtype,
             first_phase,
             last_phase: last_p,
@@ -759,12 +870,16 @@ pub fn run_placer(
     // allocations ordered by end-phase. Before placing a slab, free
     // any entries whose `last_phase < slab.first_phase`.
 
-    // Sort by first_phase ascending, breaking ties by descending size
-    // (bigger slabs get choice placement first).
+    // Sort by first_phase ascending, breaking ties by descending byte
+    // size (bigger slabs get choice placement first). Sym slabs use
+    // max-bound footprint so the comparison reflects worst-case
+    // pressure on the intermediate buffer.
+    let slab_byte_size =
+        |s: &SlabInterval| -> u64 { (s.atom_hi - s.atom_lo) * s.elem_bytes * s.max_sym_prod };
     slabs.sort_by(|a, b| {
         a.first_phase
             .cmp(&b.first_phase)
-            .then_with(|| (b.atom_hi - b.atom_lo).cmp(&(a.atom_hi - a.atom_lo)))
+            .then_with(|| slab_byte_size(b).cmp(&slab_byte_size(a)))
     });
 
     // Placement state.
@@ -806,7 +921,7 @@ pub fn run_placer(
         }
         free_list = merged;
 
-        let size = (slab.atom_hi - slab.atom_lo) * slab.elem_bytes;
+        let size = (slab.atom_hi - slab.atom_lo) * slab.elem_bytes * slab.max_sym_prod;
         let align = if slab.split_written {
             CACHE_LINE_BYTES.max(slab.elem_bytes)
         } else {
@@ -985,11 +1100,21 @@ pub fn run_placer(
     }
 
     // Intermediate entries — one per group in each slab.
+    //
+    // For sym-free slabs (the common case) the per-member offset is
+    // `(g.base - slab.lo) * elem_bytes`. Sym slabs are always
+    // singletons, so `g.base == slab.atom_lo` and the offset is zero;
+    // the `* max_sym_prod` factor in the slab's reserved size is
+    // already baked into the inter-slab `slab_off` first-fit packing
+    // above. PoolEvalSpan writes into [slab_off, slab_off +
+    // count * runtime_sym_prod * bpe), leaving the remaining
+    // `count * (max_sym_prod - runtime_sym_prod) * bpe` of the
+    // reservation untouched.
     for (si, slab_off) in slab_placements {
         let slab = &slabs[si];
         for &gi in &slab.members {
             let g = &groups[gi];
-            let off_in_slab = (g.base_id.0 - slab.atom_lo) * slab.elem_bytes;
+            let off_in_slab = (g.base_id.0 - slab.atom_lo) * slab.elem_bytes * slab.max_sym_prod;
             entries.push(PlacementEntry {
                 atom_base: g.base_id,
                 count: g.count,
@@ -1021,14 +1146,14 @@ pub fn run_placer(
         .filter(|&&k| k == BufferKind::Scratch)
         .count();
 
-    // Diagnostic: top slabs by size.
+    // Diagnostic: top slabs by max-bound footprint.
     let mut diag_slabs: Vec<SlabDiag> = slabs
         .iter()
         .map(|s| {
             let sample_gi = s.members[0];
             let g = &groups[sample_gi];
             SlabDiag {
-                size_bytes: (s.atom_hi - s.atom_lo) * s.elem_bytes,
+                size_bytes: (s.atom_hi - s.atom_lo) * s.elem_bytes * s.max_sym_prod,
                 first_phase: s.first_phase,
                 last_phase: s.last_phase,
                 member_count: s.members.len(),

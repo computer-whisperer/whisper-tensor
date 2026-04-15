@@ -105,6 +105,13 @@ pub fn record_stage<R>(
 pub struct CachedCompiledPlan {
     /// Hash of the info_inputs used to produce this plan.
     pub info_inputs_hash: u64,
+    /// Hash of the resolved compile-time GC max bounds. The placer
+    /// reserves max-bound footprint per sym group, so a plan compiled
+    /// for `batch_max=2` is unsafe to reuse when the caller later
+    /// supplies `batch=4` (Headroom triggers recompile, Fixed errors).
+    /// Cache hit requires both `info_inputs_hash` AND
+    /// `compile_bounds_hash` to match — see `nodes.rs::try_compiled_eval`.
+    pub compile_bounds_hash: u64,
     /// The compiled execution plan ready to run.
     pub executable_plan: ExecutablePlan,
     /// Output atom ranges and their external IDs, for extracting results
@@ -277,21 +284,34 @@ pub(crate) fn compile_nano_graph(
     graph: &NanoGraph<'static, SystemPool>,
     all_output_atom_ranges: &[AtomRange],
     external_input_sym_dims: &HashMap<AtomId, Vec<crate::nano_graph::pattern::GraphConstantId>>,
+    gc_max_overrides: &HashMap<crate::nano_graph::pattern::GraphConstantId, u64>,
     options: &CompileOptions,
     provenance: Option<&report::GroupProvenance>,
     obs: &mut dyn CompiledEvalObserver,
 ) -> Result<(ExecutablePlan, PlanSummary, usize), String> {
     // Partition the NanoGraph — dispatch on the selected partitioner.
     //
-    // Phase 1b gate: if the graph contains any sym-dim group, force
-    // Trivial (single span covering the whole graph) regardless of the
-    // caller's partitioner choice. Cross-span flow through the
-    // placer-sized intermediate buffer would need max-bound sizing to
-    // accommodate sym expansion, and the current placer is sym-
-    // oblivious. Single-span avoids the intermediate buffer entirely —
-    // PoolEvalSpan handles I/O with user pointers and fresh per-call
-    // output allocations. Phase 2 will make the placer sym-aware and
-    // remove this gate.
+    // Sym graphs still force Trivial partitioning. Phase 2a got the
+    // placer to size sym groups at `count * max_sym_prod * bpe` — a
+    // necessary correctness step — but **multi-phase** sym flow has a
+    // remaining layout/stride mismatch that needs more surgery:
+    //
+    // - The placer's `byte_offset_of(sym_atom_k)` returns
+    //   `group_off + k * bpe`, but PoolEvalSpan writes runtime-stride
+    //   packed (`group_off + k * runtime_sym_prod * bpe`). Whole-group
+    //   reads land at the right offset (atom 0); sub-range or
+    //   non-aligned reads do not.
+    //
+    // - Coalescing sym groups in a slab would require per-atom
+    //   byte_offsets that depend on runtime sym_prod, which the
+    //   compile-time placer can't pre-compute.
+    //
+    // Phase 2b will resolve this by switching cross-span sym layout to
+    // **max-stride** (atom k always at `k * max_sym_prod * bpe`) and
+    // teaching PoolEvalSpan to do strided I/O against placer buffers.
+    // Until then, gate sym graphs to Trivial (single span = no
+    // cross-span flow) and let the placer's sym-aware sizing keep the
+    // path correct for the JIT-doesn't-speak-sym case.
     let t0 = Instant::now();
     let has_sym = graph.groups().iter().any(|g| !g.sym_dims.is_empty());
     let partitioner = if has_sym {
@@ -353,8 +373,8 @@ pub(crate) fn compile_nano_graph(
     // Run the global memory placer. Its output drives both per-span
     // codegen (`SlotInfo::buffer_id` / `BufferBases`) and the executor
     // (`buffer_ptrs` layout).
-    let placement =
-        run_placer(graph, &phases, all_output_atom_ranges).map_err(|e| format!("placer: {e}"))?;
+    let placement = run_placer(graph, &phases, all_output_atom_ranges, gc_max_overrides)
+        .map_err(|e| format!("placer: {e}"))?;
 
     if std::env::var("WT_PRINT_PLACEMENT")
         .ok()
@@ -950,6 +970,7 @@ pub(crate) fn extract_outputs<'p, P: Pool + 'p>(
 pub fn compile_lowered_model(
     cached: &CachedLoweredModel,
     sym_graph: &crate::symbolic_graph::SymbolicGraph,
+    gc_max_overrides: &HashMap<crate::nano_graph::pattern::GraphConstantId, u64>,
     options: &CompileOptions,
     obs: &mut dyn CompiledEvalObserver,
 ) -> Option<CachedCompiledPlan> {
@@ -984,10 +1005,27 @@ pub fn compile_lowered_model(
     } else {
         Some(&cached.group_provenance)
     };
-    // Build sym_dims_by_base for the graph's external inputs from the
-    // lowering's TAMIs. Each InputTensor's atom range carries the sym
-    // dims declared in its TAMI; PoolEvalSpans use this to understand
-    // how many sym-expanded elements live per input atom at runtime.
+    // Build sym_dims_by_base covering every atom range a PoolEvalSpan
+    // might receive as an input.
+    //
+    // Two flavors of input atom range:
+    //
+    // 1. **Model-external inputs** — declared via `graph.input_tensors()`,
+    //    no producing group in the main graph. Their sym structure
+    //    lives in the lowering's TAMI for the corresponding tensor_id.
+    //
+    // 2. **Cross-span intermediates** — produced by an `AtomGroup` in
+    //    one span, consumed by another. Span B's graph contains only
+    //    a stub for the input atom range, not the producing group, so
+    //    `PoolEvalSpan::new`'s span-local lookup misses and falls back
+    //    to this map. We populate every main-graph group's
+    //    `(base_id → sym_dims)` so the lookup always succeeds for any
+    //    atom that flows between spans.
+    //
+    // Without (2), span B reads `count * 1 * bpe` bytes from a sym
+    // intermediate (sym_prod defaults to 1 when sym_dims is empty),
+    // truncating the actually-written `count * runtime_sym_prod * bpe`
+    // bytes and producing garbage downstream.
     let mut external_input_sym_dims: HashMap<
         AtomId,
         Vec<crate::nano_graph::pattern::GraphConstantId>,
@@ -1000,10 +1038,16 @@ pub fn compile_lowered_model(
             }
         }
     }
+    for group in graph.groups() {
+        if !group.sym_dims.is_empty() {
+            external_input_sym_dims.insert(group.base_id, group.sym_dims.clone());
+        }
+    }
     let (executable_plan, plan_summary, _compile_errors) = compile_nano_graph(
         graph,
         &all_output_atom_ranges,
         &external_input_sym_dims,
+        gc_max_overrides,
         options,
         provenance,
         obs,
@@ -1012,11 +1056,32 @@ pub fn compile_lowered_model(
 
     Some(CachedCompiledPlan {
         info_inputs_hash: cached.info_inputs_hash,
+        compile_bounds_hash: hash_gc_max_overrides(gc_max_overrides),
         executable_plan,
         output_ranges,
         output_dims,
         plan_summary,
     })
+}
+
+/// Stable hash of the resolved per-`GraphConstantId` max bounds. Two
+/// compile calls with the same overrides produce the same hash; any
+/// change in bounds (including Headroom resolved to a different value
+/// at a different runtime size) produces a different hash and forces
+/// the compiled plan cache to miss.
+pub fn hash_gc_max_overrides(
+    overrides: &HashMap<crate::nano_graph::pattern::GraphConstantId, u64>,
+) -> u64 {
+    use std::collections::BTreeMap;
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    "gc_max_overrides:".hash(&mut h);
+    let sorted: BTreeMap<u16, u64> = overrides.iter().map(|(gc, m)| (gc.0, *m)).collect();
+    for (gc, m) in sorted {
+        gc.hash(&mut h);
+        m.hash(&mut h);
+    }
+    h.finish()
 }
 
 /// Execute a compiled plan with the given inputs.

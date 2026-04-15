@@ -14,7 +14,7 @@ use whisper_tensor::super_graph::links::{
 use whisper_tensor::super_graph::nodes::{
     SuperGraphNode, SuperGraphNodeMilliOpGraph, SuperGraphNodeModelExecution,
     SuperGraphNodeRNNCacheRead, SuperGraphNodeRNNCacheWrite, SuperGraphNodeReportProgress,
-    SuperGraphNodeScan, SymbolicInputDims,
+    SuperGraphNodeScan, SymDimBound, SymbolicInputDims,
 };
 
 /// Get the default weight storage strategy for loaders.
@@ -420,6 +420,12 @@ pub(super) fn build_rnn_supergraph(
         for pair in state_pairs.iter() {
             symbolic_dims.push(pair.0.clone(), STATE_BATCH_AXIS as usize, "batch");
         }
+        // Default compile-time bound for "batch": 2× the runtime size
+        // that triggers compilation. A larger batch on a later call
+        // forces a cache miss → recompile at the new size. Callers
+        // wanting a hard cap can override post-construction with
+        // `set_group_bound("batch", SymDimBound::Fixed { max })`.
+        symbolic_dims.set_group_bound("batch", SymDimBound::Headroom { factor: 2 });
 
         let mut node = SuperGraphNodeModelExecution::new(
             rng,

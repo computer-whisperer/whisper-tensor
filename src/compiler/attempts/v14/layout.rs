@@ -1354,7 +1354,8 @@ mod tests {
                 outputs: outputs.to_vec(),
             }],
         }];
-        run_placer(graph, &phases, outputs).expect("placer failed in test helper")
+        run_placer(graph, &phases, outputs, &std::collections::HashMap::new())
+            .expect("placer failed in test helper")
     }
 
     // ─── SlotInfo helper invariants ─────────────────────────────────────────

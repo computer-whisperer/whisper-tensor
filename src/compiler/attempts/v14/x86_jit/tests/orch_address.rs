@@ -67,7 +67,8 @@ fn test_placement(
             outputs: outputs.to_vec(),
         }],
     }];
-    run_placer(graph, &phases, outputs).expect("placer failed in test harness")
+    run_placer(graph, &phases, outputs, &std::collections::HashMap::new())
+        .expect("placer failed in test harness")
 }
 
 /// Build a flat 1D NanoGraph: one input tensor of `dtype` followed by

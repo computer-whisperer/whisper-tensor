@@ -150,6 +150,13 @@ pub struct LowerResult<'a, 'p, P: crate::pool::Pool + 'p = crate::pool::SystemPo
     /// Full tensor info map from inference (dtype + shape + concrete values).
     /// Populated by `lower()` so callers don't need to run `infer_all` separately.
     pub all_infos: HashMap<GlobalId, LowerTensorInfo<'a, 'p, P>>,
+    /// Map from milli `SymbolicScalarTyped::symbol_id()` to the
+    /// `GraphConstantId` it was lowered to. Anonymous sym dims allocated
+    /// without a milli sid (`alloc_sym_dim` callers) are not in this map.
+    /// Used by the compile path to compose `(group_name → max) ∘ (sid →
+    /// GC)` so the placer can size sym groups at their max-bound
+    /// footprint.
+    pub symbol_id_map: HashMap<u64, GraphConstantId>,
 }
 
 impl<'a, 'p, P: crate::pool::Pool + 'p> LowerResult<'a, 'p, P> {
@@ -772,12 +779,24 @@ pub fn lower<'a, 'p: 'a, P: crate::pool::Pool + 'p>(
         .map(|(id, tam)| (*id, tam.to_info()))
         .collect();
 
+    // Drop the `&all_infos` borrow held by `ctx` before moving `all_infos`
+    // into the result by destructuring the context first.
+    let NanoLoweringContext {
+        nano,
+        unsupported,
+        unsupported_details,
+        group_provenance,
+        symbol_id_map,
+        ..
+    } = ctx;
+
     Ok(LowerResult {
-        graph: ctx.nano,
-        unsupported: ctx.unsupported,
-        unsupported_details: ctx.unsupported_details,
-        group_provenance: ctx.group_provenance,
+        graph: nano,
+        unsupported,
+        unsupported_details,
+        group_provenance,
         all_infos,
+        symbol_id_map,
     })
 }
 

@@ -357,13 +357,38 @@ pub struct ModelReference {
     idx: usize,
 }
 
+/// Compile-time upper bound for a symbolic dim group.
+///
+/// Sym dims have no inherent bound — at lowering they're just identities.
+/// The compiled path needs a max so the placer can reserve a worst-case
+/// footprint per atom for max-bound sym expansion. Each variant resolves
+/// to a single u64 at the moment compilation runs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum SymDimBound {
+    /// Compile-time hard cap. The plan handles any runtime dim ≤ `max`.
+    /// Use this when you know the maximum exactly (e.g. interface
+    /// `max_batch`).
+    Fixed { max: u64 },
+    /// Compile at `factor` × the runtime dim size that triggered
+    /// compilation. A future call exceeding the resolved bound forces
+    /// a cache miss → recompile at the new size. Useful when the dim
+    /// grows over time and you want amortized recompile cost.
+    Headroom { factor: u64 },
+}
+
 /// Sparse symbolic-dim declaration for a `SuperGraphNodeModelExecution`.
 ///
-/// Each entry pins a single `(tensor_input_name, dim_index)` to a named group.
-/// Dims sharing a group name are bound to the same symbolic scalar during
-/// lowering — two matmul inputs with `(A, 0)` and `(B, 1)` both in group "K"
-/// produce a nano graph whose contraction dim is symbolic and shared. Dims
-/// not listed stay concrete (bound to the runtime input shape at eval time).
+/// Each entry in `entries` pins a single `(tensor_input_name, dim_index)`
+/// to a named group. Dims sharing a group name are bound to the same
+/// symbolic scalar during lowering — two matmul inputs with `(A, 0)` and
+/// `(B, 1)` both in group "K" produce a nano graph whose contraction
+/// dim is symbolic and shared. Dims not listed stay concrete (bound to
+/// the runtime input shape at eval time).
+///
+/// `group_bounds` carries a per-group compile-time max for the compiled
+/// path. Lowered eval ignores it. Groups appearing in `entries` but not
+/// in `group_bounds` cause the compiled path to error — every symbolic
+/// dim must have a bound for the placer to size buffers.
 ///
 /// The runtime input tensors still have concrete shapes; the override only
 /// controls how `build_info_inputs` describes those inputs to the lowering
@@ -375,6 +400,11 @@ pub struct SymbolicInputDims {
     /// (rather than a HashMap) keeps the serialization order stable and makes
     /// it trivial to author by hand.
     pub entries: Vec<((String, usize), String)>,
+    /// Per-group compile-time bound. Compiled mode requires every group
+    /// referenced in `entries` to appear here. Lowered mode ignores
+    /// the field entirely.
+    #[serde(default)]
+    pub group_bounds: HashMap<String, SymDimBound>,
 }
 
 impl SymbolicInputDims {
@@ -396,6 +426,18 @@ impl SymbolicInputDims {
             .push(((input_name.into(), dim_index), group.into()));
     }
 
+    /// Set the compile-time max for a group. Required for every group
+    /// referenced in `entries` when using compiled mode.
+    pub fn with_group_bound(mut self, group: impl Into<String>, bound: SymDimBound) -> Self {
+        self.group_bounds.insert(group.into(), bound);
+        self
+    }
+
+    /// Mutating variant of `with_group_bound`.
+    pub fn set_group_bound(&mut self, group: impl Into<String>, bound: SymDimBound) {
+        self.group_bounds.insert(group.into(), bound);
+    }
+
     /// Lookup the group name, if any, assigned to a given (input_name, dim_index).
     pub fn group_for(&self, input_name: &str, dim_index: usize) -> Option<&str> {
         self.entries.iter().find_map(|((name, dim), group)| {
@@ -406,6 +448,89 @@ impl SymbolicInputDims {
             }
         })
     }
+}
+
+/// Reproduce the symbol-id derivation used by `lowered_eval::build_info_inputs`.
+/// Same hash, same namespace prefix — two paths produce identical sids for
+/// the same group name so the compile path can map group → GraphConstantId
+/// via the lower's `symbol_id_map`.
+#[cfg(feature = "x86_compile")]
+fn group_name_to_symbol_id(group: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    "symbolic_input_dims:".hash(&mut h);
+    group.hash(&mut h);
+    h.finish()
+}
+
+/// Resolve `SymbolicInputDims::group_bounds` against runtime input shapes
+/// and the lowered model's `symbol_id_map`, producing the per-GC max
+/// overrides the placer needs.
+///
+/// Returns `Err` if any group referenced in `symbolic_dim_overrides` lacks
+/// a configured bound, or if a Headroom group's input has no runtime view.
+/// The caller treats `Err` as "fall back to symbolic eval" rather than a
+/// hard panic — bounds misconfiguration is recoverable.
+#[cfg(feature = "x86_compile")]
+fn resolve_gc_max_overrides(
+    sym_dims: &SymbolicInputDims,
+    symbolic_dim_overrides: &HashMap<GlobalId, Vec<(usize, String)>>,
+    user_input_view_map: &HashMap<GlobalId, crate::numeric_tensor::NumericTensorView<'_, DynRank>>,
+    symbol_id_map: &HashMap<u64, crate::nano_graph::pattern::GraphConstantId>,
+) -> Result<HashMap<crate::nano_graph::pattern::GraphConstantId, u64>, String> {
+    let mut group_max_by_name: HashMap<String, u64> = HashMap::new();
+
+    for (tensor_id, entries) in symbolic_dim_overrides {
+        for (dim_idx, group_name) in entries {
+            if group_max_by_name.contains_key(group_name) {
+                continue;
+            }
+            let bound = sym_dims.group_bounds.get(group_name).ok_or_else(|| {
+                format!(
+                    "no SymDimBound configured for sym group {:?} \
+                     (set via SymbolicInputDims::with_group_bound)",
+                    group_name
+                )
+            })?;
+            let max = match bound {
+                SymDimBound::Fixed { max } => *max,
+                SymDimBound::Headroom { factor } => {
+                    let view = user_input_view_map.get(tensor_id).ok_or_else(|| {
+                        format!(
+                            "Headroom bound on group {:?} requires a runtime \
+                             view for tensor {:?}, none supplied",
+                            group_name, tensor_id
+                        )
+                    })?;
+                    let shape = view.shape();
+                    let dim_val = *shape.get(*dim_idx).ok_or_else(|| {
+                        format!(
+                            "Headroom bound on group {:?}: dim_idx {} out of \
+                             range for tensor {:?} (rank {})",
+                            group_name,
+                            dim_idx,
+                            tensor_id,
+                            shape.len()
+                        )
+                    })?;
+                    dim_val.saturating_mul(*factor)
+                }
+            };
+            group_max_by_name.insert(group_name.clone(), max);
+        }
+    }
+
+    let mut out = HashMap::new();
+    for (group_name, max) in group_max_by_name {
+        let sid = group_name_to_symbol_id(&group_name);
+        // A group can be in symbolic_dim_overrides but not in the
+        // lowered graph (lowering may have constant-folded the dim
+        // away). Skip silently in that case — there's no GC to bind.
+        if let Some(&gc) = symbol_id_map.get(&sid) {
+            out.insert(gc, max);
+        }
+    }
+    Ok(out)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1046,6 +1171,39 @@ impl SuperGraphNodeModelExecution {
                 .expect("lowered model available")
         };
 
+        // Resolve per-group sym bounds → per-GraphConstantId max overrides.
+        // Required for the placer to size sym groups at max-bound footprint.
+        // Errors here surface as "fall back to symbolic eval" rather than
+        // hard failures so an incomplete bound config doesn't take down
+        // the call.
+        let gc_max_overrides = match resolve_gc_max_overrides(
+            &self.symbolic_input_dims,
+            symbolic_dim_overrides,
+            &user_input_view_map,
+            &lower_ref.symbol_id_map,
+        ) {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!(
+                    "[compiled_eval] sym-bound resolution failed; falling back \
+                     to symbolic eval: {e}"
+                );
+                return Ok(None);
+            }
+        };
+
+        // Compile cache hit also requires the compile-time bounds match
+        // — a plan compiled for batch_max=2 isn't safe to reuse for
+        // batch=4, regardless of info_inputs equality.
+        let compile_bounds_hash = compiled_eval::hash_gc_max_overrides(&gc_max_overrides);
+        let compile_cache_hit = compile_cache_hit
+            && context
+                .caches
+                .as_ref()
+                .and_then(|c| c.compiled_plan_cache.get(&sym_graph_id))
+                .map(|cached| cached.compile_bounds_hash == compile_bounds_hash)
+                .unwrap_or(false);
+
         // --- Ensure compiled plan available (cached or owned) ---
         //
         // Compile if needed, then re-borrow both from cache (or owned).
@@ -1063,6 +1221,7 @@ impl SuperGraphNodeModelExecution {
                 match compiled_eval::compile_lowered_model(
                     lower_ref,
                     symbolic_graph,
+                    &gc_max_overrides,
                     compile_options,
                     &mut wrapper,
                 ) {

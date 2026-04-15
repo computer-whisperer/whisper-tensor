@@ -106,6 +106,12 @@ pub struct CachedLoweredModel {
     pub unsupported: Vec<(GlobalId, String)>,
     /// Human-readable detail for each unsupported op (input/output shapes).
     pub unsupported_details: Vec<String>,
+    /// Map from milli `SymbolicScalarTyped::symbol_id()` to the
+    /// `GraphConstantId` it was lowered to. The compile path uses this
+    /// to thread per-group max bounds (resolved from
+    /// `SymbolicInputDims::group_bounds`) into placer sizing without
+    /// re-lowering. Empty for sym-free models.
+    pub symbol_id_map: HashMap<u64, crate::nano_graph::pattern::GraphConstantId>,
 }
 
 /// Compute a hash over the info_inputs map that captures everything affecting
@@ -484,6 +490,7 @@ pub fn lower_symbolic_graph(
         group_provenance: lower_result.group_provenance,
         unsupported: lower_result.unsupported,
         unsupported_details: lower_result.unsupported_details,
+        symbol_id_map: lower_result.symbol_id_map,
     })
 }
 
