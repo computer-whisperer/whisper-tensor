@@ -166,9 +166,18 @@ impl CompiledSpanFn for X86JitSpan {
         self.layout.total_bytes + CODEC_TAIL_SLACK
     }
 
-    fn execute(&self, buffer_ptrs: &[*mut u8]) {
+    fn execute(
+        &self,
+        buffer_ptrs: &[*mut u8],
+        _bindings: &std::collections::HashMap<crate::nano_graph::pattern::GraphConstantId, u64>,
+    ) {
         // Zero-body spans: the prologue/epilogue is the entire
         // function and the argument array is unused.
+        //
+        // Sym-dim bindings are ignored here: the JIT path only runs
+        // on sym-free spans (the partitioner routes sym-touching
+        // spans to PoolEvalSpan). Phase 2 will emit dynamic loops
+        // keyed off `_bindings`.
         let func: unsafe extern "C" fn(*const *mut u8) =
             unsafe { std::mem::transmute(self.code.ptr(self.entry)) };
         // SAFETY: bytes at `code.ptr(entry)` were emitted as a

@@ -1036,6 +1036,74 @@ impl SuperGraphNodeModelExecution {
             owned_lower = None;
         }
 
+        // Phase 1a sym-dim gate: if the lowered graph has any
+        // GraphConstants (sym dims), the compile path can't handle
+        // it correctly yet — `prepare_compiled_inputs` filters sym
+        // dims out of the relayout, `PoolEvalSpan`'s flat TAMIs
+        // drop sym structure, and the executor's output allocation
+        // skips the sym_prod multiplier. Delegate to the lowered
+        // eval path so sym graphs still run correctly through the
+        // public CompiledEval API. Phase 1b will teach the compile
+        // path proper sym-awareness; the groundwork (bindings
+        // threading, sym-span routing to PoolEvalSpan) is already
+        // in place for that.
+        //
+        // Split-borrow pattern: read `has_sym` out of whichever
+        // place cached_lower lives, then drop that borrow before
+        // taking a mutable borrow on `context.caches` for
+        // loaded_tensor_cache.
+        let has_sym = {
+            let lower_ref = if let Some(ref owned) = owned_lower {
+                owned
+            } else {
+                context
+                    .caches
+                    .as_ref()
+                    .and_then(|c| c.lowered_model_cache.get(&sym_graph_id))
+                    .expect("lowered model available")
+            };
+            !lower_ref.graph.graph_constants.is_empty()
+        };
+        if has_sym {
+            let intermediate_ids: Vec<GlobalId> = Vec::new();
+            let (cached_lower_ref, loaded_cache): (
+                &lowered_eval::CachedLoweredModel,
+                Option<&mut crate::super_graph::cache::LoadedTensorCache>,
+            ) = match (&owned_lower, context.caches.as_deref_mut()) {
+                (Some(ol), Some(caches)) => (ol, Some(&mut caches.loaded_tensor_cache)),
+                (Some(ol), None) => (ol, None),
+                (None, Some(caches)) => {
+                    let cl = caches
+                        .lowered_model_cache
+                        .get(&sym_graph_id)
+                        .expect("lowered model available");
+                    let loaded = &mut caches.loaded_tensor_cache;
+                    (cl, Some(loaded))
+                }
+                _ => unreachable!("owned_lower must be Some when no caches are available"),
+            };
+            let results = lowered_eval::execute_lowered(
+                cached_lower_ref,
+                symbolic_graph,
+                tensor_store,
+                &user_input_view_map,
+                &intermediate_ids,
+                context.pool,
+                loaded_cache,
+            )?;
+            for (&tensor_id, tensor) in &results {
+                let full_path: Vec<GlobalId> = observer_path
+                    .iter()
+                    .chain(core::iter::once(&tensor_id))
+                    .copied()
+                    .collect();
+                context
+                    .observer
+                    .on_tensor_assigned(&full_path, &tensor.view());
+            }
+            return Ok(Some(results));
+        }
+
         let lower_ref = if let Some(ref owned) = owned_lower {
             owned
         } else {

@@ -30,7 +30,7 @@ fn empty_span_compiles_and_executes() {
     // slot is null/empty since the empty graph needs no data.
     let len = (placement.scratch_buffer_id as usize) + 1;
     let buffer_ptrs: Vec<*mut u8> = vec![std::ptr::null_mut(); len];
-    span.execute(&buffer_ptrs);
+    span.execute(&buffer_ptrs, &std::collections::HashMap::new());
 }
 
 #[test]

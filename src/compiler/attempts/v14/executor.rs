@@ -14,11 +14,13 @@
 //! The plan mutates nothing and `execute` is safely callable from
 //! concurrent threads (subject to the pool's own rules).
 
+use std::collections::HashMap;
 use std::env;
 use std::time::Instant;
 
 use rayon::{ThreadPool, ThreadPoolBuilder};
 
+use crate::nano_graph::pattern::GraphConstantId;
 use crate::nano_graph::{AtomId, AtomRange};
 use crate::numeric_dtype::NumericDType;
 use crate::numeric_tensor::{NumericTensor, TensorLayout};
@@ -54,7 +56,13 @@ pub trait CompiledSpanFn: Send + Sync {
     fn scratch_bytes(&self) -> usize;
 
     /// Execute the span. See the buffer_ptrs contract above.
-    fn execute(&self, buffer_ptrs: &[*mut u8]);
+    ///
+    /// `bindings` supplies runtime values for every `GraphConstantId`
+    /// referenced by the span's sym_dims. Empty when the span has no
+    /// sym dims. The JIT path ignores this (sym dims are compiled out
+    /// of its code) — the pool-eval path threads it into
+    /// `pool_eval` so sym extents resolve correctly at runtime.
+    fn execute(&self, buffer_ptrs: &[*mut u8], bindings: &HashMap<GraphConstantId, u64>);
 }
 
 // ─── Pool-eval fallback span ────────────────────────────────────────────────
@@ -120,7 +128,7 @@ impl CompiledSpanFn for PoolEvalSpan {
         0
     }
 
-    fn execute(&self, buffer_ptrs: &[*mut u8]) {
+    fn execute(&self, buffer_ptrs: &[*mut u8], bindings: &HashMap<GraphConstantId, u64>) {
         use crate::nano_graph::lower::TensorAtomMapInfo;
         use crate::nano_graph::pool_eval;
         use crate::numeric_tensor::{NumericTensor, NumericTensorView};
@@ -182,14 +190,9 @@ impl CompiledSpanFn for PoolEvalSpan {
             .collect();
         let output_tami_refs: Vec<&TensorAtomMapInfo> = output_tamis.iter().collect();
 
-        let results = pool_eval::pool_eval(
-            &self.graph,
-            &eval_inputs,
-            &output_tami_refs,
-            &std::collections::HashMap::new(),
-            &SYS,
-        )
-        .expect("pool_eval span: eval failed");
+        let results =
+            pool_eval::pool_eval(&self.graph, &eval_inputs, &output_tami_refs, bindings, &SYS)
+                .expect("pool_eval span: eval failed");
 
         // Scatter results back into buffer_ptrs.
         for (pr, result_tensor) in self.outputs.iter().zip(results.iter()) {
@@ -422,26 +425,33 @@ impl ExecutablePlan {
     /// executor fills intermediate / literal / output / scratch slots
     /// itself). The caller must keep every input pointer alive for
     /// the duration of this call.
+    ///
+    /// `bindings` supplies runtime values for every `GraphConstantId`
+    /// the plan references (sym dims in any span or output tensor).
+    /// Empty for sym-free graphs.
     pub fn execute<'p, P: Pool + 'p>(
         &self,
         input_ptrs: &[*mut u8],
+        bindings: &HashMap<GraphConstantId, u64>,
         pool: &'p P,
     ) -> Vec<NumericTensor<'p, DynRank, P>> {
-        self.execute_inner(input_ptrs, pool, false)
+        self.execute_inner(input_ptrs, bindings, pool, false)
     }
 
     /// Execute with per-phase timing diagnostics.
     pub fn execute_timed<'p, P: Pool + 'p>(
         &self,
         input_ptrs: &[*mut u8],
+        bindings: &HashMap<GraphConstantId, u64>,
         pool: &'p P,
     ) -> Vec<NumericTensor<'p, DynRank, P>> {
-        self.execute_inner(input_ptrs, pool, true)
+        self.execute_inner(input_ptrs, bindings, pool, true)
     }
 
     fn execute_inner<'p, P: Pool + 'p>(
         &self,
         input_ptrs: &[*mut u8],
+        bindings: &HashMap<GraphConstantId, u64>,
         pool: &'p P,
         timed: bool,
     ) -> Vec<NumericTensor<'p, DynRank, P>> {
@@ -563,6 +573,7 @@ impl ExecutablePlan {
                 &template,
                 &lane_scratch_ptrs,
                 scratch_id,
+                bindings,
             );
             let dt = t0.elapsed();
             total_spans += dt;
@@ -598,6 +609,7 @@ impl ExecutablePlan {
         template: &[*mut u8],
         lane_scratch_ptrs: &[*mut u8],
         scratch_buffer_id: u8,
+        bindings: &HashMap<GraphConstantId, u64>,
     ) {
         use std::sync::atomic::{AtomicPtr, Ordering};
 
@@ -632,7 +644,7 @@ impl ExecutablePlan {
                 if scratch_id < local.len() {
                     local[scratch_id] = scratch_atomic[lane_idx].load(Ordering::Relaxed);
                 }
-                phase.lanes[lane_idx].span.execute(&local);
+                phase.lanes[lane_idx].span.execute(&local, bindings);
             });
         } else {
             // Single-lane fallback.
@@ -641,7 +653,7 @@ impl ExecutablePlan {
                 if scratch_id < local.len() {
                     local[scratch_id] = lane_scratch_ptrs[lane_idx];
                 }
-                lane.span.execute(&local);
+                lane.span.execute(&local, bindings);
             }
         }
     }

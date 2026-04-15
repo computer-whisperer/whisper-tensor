@@ -391,7 +391,16 @@ fn compile_phase_parallel(
                 .iter()
                 .any(|g| matches!(g.op, crate::nano_graph::ops::ScalarOp::OpaqueOutput { .. }));
 
-            if has_opaque || (span.graph.groups().is_empty() && !span.graph.opaque_ops().is_empty())
+            // Phase 1 sym-dim gate: any group with non-empty sym_dims
+            // routes the span through PoolEvalSpan. The JIT path has no
+            // sym-aware loop emission yet; routing here ensures sym
+            // graphs run correctly through the hybrid fallback until
+            // Phase 2 teaches x86_jit to emit dynamic sym loops.
+            let has_sym = span.graph.groups().iter().any(|g| !g.sym_dims.is_empty());
+
+            if has_opaque
+                || has_sym
+                || (span.graph.groups().is_empty() && !span.graph.opaque_ops().is_empty())
             {
                 Ok(Box::new(PoolEvalSpan::new(
                     span.graph.clone(),
@@ -924,9 +933,39 @@ pub fn execute_compiled<'p, P: Pool + 'p>(
         }
     }
 
+    // --- Build sym-dim bindings from runtime input shapes ---
+    //
+    // Walk each declared input TAMI, match each Sym dim's position
+    // against the runtime shape of the corresponding tensor view,
+    // and populate `bindings` with the resolved extent. Mirrors
+    // `lowered_eval::execute_lowered`'s binding construction —
+    // any GC not resolvable here will fault in pool_eval, preferable
+    // to a silently-wrong default.
+    let mut bindings: HashMap<crate::nano_graph::pattern::GraphConstantId, u64> = HashMap::new();
+    for (ext_id, view) in &all_views {
+        let internal_id = cached_lower
+            .input_map
+            .get(ext_id)
+            .copied()
+            .unwrap_or(*ext_id);
+        let Some(tami) = cached_lower.graph.tensor_map.get(&internal_id) else {
+            continue;
+        };
+        let shape = view.shape();
+        for (dim_idx, dk) in tami.dims.iter().enumerate() {
+            if let DimKind::Sym { gc, .. } = dk
+                && dim_idx < shape.len()
+            {
+                bindings.insert(*gc, shape[dim_idx]);
+            }
+        }
+    }
+
     // --- JIT execute ---
     let t_jit = Instant::now();
-    let executor_outputs = compiled.executable_plan.execute_timed(&input_ptrs, pool);
+    let executor_outputs = compiled
+        .executable_plan
+        .execute_timed(&input_ptrs, &bindings, pool);
     // Keep initial_inputs alive until after execute returns so the
     // input byte pointers remain valid. Explicit drop for clarity.
     drop(initial_inputs);

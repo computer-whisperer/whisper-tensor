@@ -193,7 +193,7 @@ fn run_harness(
     }
     buffer_ptrs[scratch_id as usize] = scratch_buf.as_mut_ptr();
 
-    span.execute(&buffer_ptrs);
+    span.execute(&buffer_ptrs, &std::collections::HashMap::new());
     let _ = &scratch_buf;
 
     outputs

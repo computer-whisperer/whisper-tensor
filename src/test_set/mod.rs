@@ -744,8 +744,9 @@ pub fn run_case_via_compiled_eval(case: &TestCase, num_lanes: usize) -> Result<(
             }
         }
 
-        // Execute.
-        let executor_outputs = executable_plan.execute(&input_ptrs, &pool);
+        // Execute. Empty bindings — test_set graphs are always concrete shapes.
+        let bindings = std::collections::HashMap::new();
+        let executor_outputs = executable_plan.execute(&input_ptrs, &bindings, &pool);
         drop(initial_inputs);
 
         // Extract outputs.
