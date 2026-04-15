@@ -291,27 +291,15 @@ pub(crate) fn compile_nano_graph(
 ) -> Result<(ExecutablePlan, PlanSummary, usize), String> {
     // Partition the NanoGraph — dispatch on the selected partitioner.
     //
-    // Sym graphs still force Trivial partitioning. Phase 2a got the
-    // placer to size sym groups at `count * max_sym_prod * bpe` — a
-    // necessary correctness step — but **multi-phase** sym flow has a
-    // remaining layout/stride mismatch that needs more surgery:
-    //
-    // - The placer's `byte_offset_of(sym_atom_k)` returns
-    //   `group_off + k * bpe`, but PoolEvalSpan writes runtime-stride
-    //   packed (`group_off + k * runtime_sym_prod * bpe`). Whole-group
-    //   reads land at the right offset (atom 0); sub-range or
-    //   non-aligned reads do not.
-    //
-    // - Coalescing sym groups in a slab would require per-atom
-    //   byte_offsets that depend on runtime sym_prod, which the
-    //   compile-time placer can't pre-compute.
-    //
-    // Phase 2b will resolve this by switching cross-span sym layout to
-    // **max-stride** (atom k always at `k * max_sym_prod * bpe`) and
-    // teaching PoolEvalSpan to do strided I/O against placer buffers.
-    // Until then, gate sym graphs to Trivial (single span = no
-    // cross-span flow) and let the placer's sym-aware sizing keep the
-    // path correct for the JIT-doesn't-speak-sym case.
+    // Sym graphs still force Trivial partitioning. Phase 2b added the
+    // max-stride atom layout on the placer side and strided I/O in
+    // PoolEvalSpan — both architecturally needed — but real-model
+    // multi-phase LaneSplit flow still produces garbage at batch>1.
+    // The strided paths work in isolation (Trivial sym + batch=N
+    // still produces correct outputs, and the placer reserves the
+    // right footprint) so the bug is elsewhere in the cross-span
+    // handoff. Keeping the gate on leaves the strided infrastructure
+    // as dead code until we can diagnose and fix the remaining issue.
     let t0 = Instant::now();
     let has_sym = graph.groups().iter().any(|g| !g.sym_dims.is_empty());
     let partitioner = if has_sym {

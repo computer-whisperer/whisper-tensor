@@ -118,7 +118,16 @@ pub struct BufferInfo {
 ///
 /// The placer emits one entry per cross-span group (or slab member).
 /// Lookup is by `atom_base` with a binary search; atom `i` within the
-/// group lives at `byte_offset + (i - atom_base) * bytes_per_element`.
+/// group lives at `byte_offset + (i - atom_base) * atom_byte_stride`.
+///
+/// `atom_byte_stride` differs from `bytes_per_element` for sym groups
+/// in the intermediate buffer: the placer reserves `max_sym_prod` slots
+/// per atom, so atom `i` lives `max_sym_prod * bpe` bytes after atom
+/// `i-1`. At runtime only the first `runtime_sym_prod * bpe` bytes of
+/// each atom's slot hold live data; the remainder is slack. Consumers
+/// using this field see placer-consistent positions for every atom
+/// regardless of whether the buffer is sym-expanded. Sym-free groups
+/// and input/output/literal entries have `atom_byte_stride == bpe`.
 #[derive(Debug, Clone)]
 pub struct PlacementEntry {
     pub atom_base: AtomId,
@@ -126,6 +135,11 @@ pub struct PlacementEntry {
     pub dtype: NumericDType,
     pub buffer_id: BufferId,
     pub byte_offset: u64,
+    /// Byte distance between consecutive atoms in this entry's buffer.
+    /// Always a multiple of `dtype.bytes_per_element()`. See the struct
+    /// doc for why this differs between intermediate sym groups and
+    /// everything else.
+    pub atom_byte_stride: u64,
 }
 
 /// Output of the placer.
@@ -197,11 +211,22 @@ impl AtomPlacementMap {
     }
 
     /// Byte offset (within the entry's buffer) of a specific atom.
+    ///
+    /// Uses `atom_byte_stride`, so sub-atom lookups on intermediate sym
+    /// groups land on the max-stride slot boundary (the `runtime_sym_prod
+    /// * bpe` prefix of each slot is the live-data window).
     pub fn byte_offset_of(&self, atom: AtomId) -> Option<(BufferId, u64)> {
         let e = self.find(atom)?;
         let idx = atom.0 - e.atom_base.0;
-        let off = e.byte_offset + idx * e.dtype.bytes_per_element() as u64;
+        let off = e.byte_offset + idx * e.atom_byte_stride;
         Some((e.buffer_id, off))
+    }
+
+    /// Atom-to-atom byte stride for the entry containing `atom`. Useful
+    /// when a consumer needs to step across atoms without repeatedly
+    /// calling `byte_offset_of`.
+    pub fn atom_byte_stride_of(&self, atom: AtomId) -> Option<u64> {
+        self.find(atom).map(|e| e.atom_byte_stride)
     }
 
     /// The placement entries (read-only). Callers that need to walk
@@ -1045,9 +1070,19 @@ pub fn run_placer(
     });
 
     // Input buffers.
+    //
+    // Input atoms live in buffers the caller writes at runtime-stride:
+    // byte k*bpe is atom 0's sym-index 0; byte k*bpe+bpe is atom 0's
+    // sym-index 1 (if input has sym); once all of atom 0's sym values
+    // are written, atom 1 starts. Atom stride in the caller's packing
+    // is `sym_prod * bpe` — not a compile-time constant. The placer
+    // therefore stores `atom_byte_stride = bpe` for input entries and
+    // consumers of inputs-with-sym should access at the range base
+    // (atom 0) rather than sub-atom indices.
     for (ii, it) in input_tensors.iter().enumerate() {
         let bid = BufferId(next_id(buffers.len(), "buffers (input)")?);
-        let size = it.count * it.dtype.bytes_per_element() as u64;
+        let bpe = it.dtype.bytes_per_element() as u64;
+        let size = it.count * bpe;
         buffers.push(BufferInfo {
             id: bid,
             kind: BufferKind::Input,
@@ -1060,13 +1095,15 @@ pub fn run_placer(
             dtype: it.dtype,
             buffer_id: bid,
             byte_offset: 0,
+            atom_byte_stride: bpe,
         });
     }
 
-    // Output buffers.
+    // Output buffers — same runtime-stride contract as inputs.
     for (oi, range) in all_output_atom_ranges.iter().enumerate() {
         let bid = BufferId(next_id(buffers.len(), "buffers (output)")?);
-        let size = range.count * range.dtype.bytes_per_element() as u64;
+        let bpe = range.dtype.bytes_per_element() as u64;
+        let size = range.count * bpe;
         buffers.push(BufferInfo {
             id: bid,
             kind: BufferKind::Output,
@@ -1079,48 +1116,53 @@ pub fn run_placer(
             dtype: range.dtype,
             buffer_id: bid,
             byte_offset: 0,
+            atom_byte_stride: bpe,
         });
     }
 
     // scratch_buffer_id sits above every real buffer.
     let scratch_buffer_id = next_id(buffers.len(), "buffers (scratch slot)")?;
 
-    // Literal entries.
+    // Literal entries. Literals never sym-iterate, so atom stride is
+    // just bpe.
     for (gi, offset_opt) in literal_offsets.iter().enumerate() {
         if let Some(offset) = *offset_opt {
             let g = &groups[gi];
+            let bpe = g.output_dtype.bytes_per_element() as u64;
             entries.push(PlacementEntry {
                 atom_base: g.base_id,
                 count: g.count,
                 dtype: g.output_dtype,
                 buffer_id: LITERAL_BUFFER,
                 byte_offset: offset,
+                atom_byte_stride: bpe,
             });
         }
     }
 
     // Intermediate entries — one per group in each slab.
     //
-    // For sym-free slabs (the common case) the per-member offset is
-    // `(g.base - slab.lo) * elem_bytes`. Sym slabs are always
-    // singletons, so `g.base == slab.atom_lo` and the offset is zero;
-    // the `* max_sym_prod` factor in the slab's reserved size is
-    // already baked into the inter-slab `slab_off` first-fit packing
-    // above. PoolEvalSpan writes into [slab_off, slab_off +
-    // count * runtime_sym_prod * bpe), leaving the remaining
-    // `count * (max_sym_prod - runtime_sym_prod) * bpe` of the
-    // reservation untouched.
+    // For sym-free slabs (the common case) the atom stride is `bpe`.
+    // For sym slabs (always singletons under the current placer
+    // invariant), the atom stride is `max_sym_prod * bpe` — the slab
+    // reserves max-bound footprint per atom. PoolEvalSpan writes
+    // runtime data into the first `runtime_sym_prod * bpe` of each
+    // atom's slot and reads the same prefix; downstream spans see
+    // placer-consistent positions via `byte_offset_of` because it
+    // uses the same stride.
     for (si, slab_off) in slab_placements {
         let slab = &slabs[si];
+        let atom_stride = slab.elem_bytes * slab.max_sym_prod;
         for &gi in &slab.members {
             let g = &groups[gi];
-            let off_in_slab = (g.base_id.0 - slab.atom_lo) * slab.elem_bytes * slab.max_sym_prod;
+            let off_in_slab = (g.base_id.0 - slab.atom_lo) * atom_stride;
             entries.push(PlacementEntry {
                 atom_base: g.base_id,
                 count: g.count,
                 dtype: g.output_dtype,
                 buffer_id: INTERMEDIATE_BUFFER,
                 byte_offset: slab_off + off_in_slab,
+                atom_byte_stride: atom_stride,
             });
         }
     }

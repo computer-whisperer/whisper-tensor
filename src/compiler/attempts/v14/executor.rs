@@ -83,6 +83,16 @@ struct PoolEvalRange {
     /// resolves to that product via `bindings`. Empty for sym-free
     /// ranges (atom = scalar).
     sym_dims: Vec<GraphConstantId>,
+    /// Atom-to-atom byte stride in the placer buffer the range points
+    /// into. For intermediate-buffer sym groups this is
+    /// `max_sym_prod * bpe` (max-bound slot reservation); for sym-free
+    /// groups and input/output/literal entries it's just `bpe`. When
+    /// this differs from `sym_prod * bpe`, `PoolEvalSpan::execute`
+    /// does per-atom strided I/O between the placer buffer and its
+    /// internal packed buffer. The contract: live data occupies the
+    /// first `sym_prod * bpe` bytes of each max-stride atom slot;
+    /// the trailing `(max_sym_prod - sym_prod) * bpe` bytes are slack.
+    atom_byte_stride: u64,
 }
 
 /// A span that evaluates its NanoGraph via `pool_eval` instead of JIT.
@@ -130,12 +140,16 @@ impl PoolEvalSpan {
                     range.base.0
                 )
             });
+            let atom_byte_stride = placement
+                .atom_byte_stride_of(range.base)
+                .unwrap_or_else(|| range.dtype.bytes_per_element() as u64);
             let sym_dims = resolve_sym(range.base, &graph);
             PoolEvalRange {
                 range,
                 buffer_id: buf.0,
                 byte_offset: off,
                 sym_dims,
+                atom_byte_stride,
             }
         };
         Self {
@@ -210,6 +224,14 @@ impl CompiledSpanFn for PoolEvalSpan {
         // buffer into a pool-allocated flat tensor. pool_eval expects
         // owned tensors, not raw pointers — this boundary copy is
         // unavoidable. Size accounts for sym-prod expansion.
+        //
+        // When `atom_byte_stride > runtime_sym_prod * bpe` — true for
+        // intermediate-buffer sym groups, which reserve `max_sym_prod`
+        // slots per atom — the copy is per-atom strided: atom `k`'s
+        // live data sits at `byte_offset + k * atom_byte_stride` in
+        // the placer buffer, and we pack it into `k * sym_prod * bpe`
+        // in the local buffer. Sym-free and runtime-packed cases hit
+        // the degenerate branch (stride == row_bytes, one memcpy).
         let mut input_tamis: Vec<TensorAtomMapInfo> = Vec::new();
         let mut input_tensors: Vec<NumericTensor<'_, DynRank, SystemPool>> = Vec::new();
 
@@ -231,10 +253,46 @@ impl CompiledSpanFn for PoolEvalSpan {
                 // SAFETY: the executor guarantees each non-null
                 // buffer_ptrs slot is valid for the declared buffer
                 // size and the placer's byte range sits inside it.
-                let src_ptr = unsafe { base_ptr.add(pr.byte_offset as usize) as *const u8 };
-                let copy_bytes = needed_bytes.min(buf.len());
-                unsafe {
-                    std::ptr::copy_nonoverlapping(src_ptr, buf.as_mut_ptr(), copy_bytes);
+                let src_base = unsafe { base_ptr.add(pr.byte_offset as usize) as *const u8 };
+                let row_bytes = sp as usize * bpe;
+                if (pr.atom_byte_stride as usize) >= row_bytes {
+                    // Strided path. `atom_byte_stride == row_bytes`
+                    // (sym-free or sym-prod == max) degenerates to a
+                    // single memcpy pattern; `>` is the sym-max-stride
+                    // case where each atom's live data sits in the
+                    // first `row_bytes` of a larger slot.
+                    if pr.atom_byte_stride as usize == row_bytes {
+                        let copy_bytes = needed_bytes.min(buf.len());
+                        unsafe {
+                            std::ptr::copy_nonoverlapping(src_base, buf.as_mut_ptr(), copy_bytes);
+                        }
+                    } else {
+                        let dst_base = buf.as_mut_ptr();
+                        for k in 0..range.count as usize {
+                            let src = unsafe {
+                                src_base.add(k * pr.atom_byte_stride as usize) as *const u8
+                            };
+                            let dst = unsafe { dst_base.add(k * row_bytes) };
+                            let copy = row_bytes.min(buf.len().saturating_sub(k * row_bytes));
+                            if copy == 0 {
+                                break;
+                            }
+                            unsafe {
+                                std::ptr::copy_nonoverlapping(src, dst, copy);
+                            }
+                        }
+                    }
+                } else {
+                    // Runtime-packed path: placer entry's
+                    // `atom_byte_stride == bpe` but the source actually
+                    // stores each atom at `row_bytes` (= sym_prod *
+                    // bpe) because the caller / executor wrote it that
+                    // way (input/output buffers with sym). Whole range
+                    // is a contiguous `count * row_bytes` block.
+                    let copy_bytes = needed_bytes.min(buf.len());
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(src_base, buf.as_mut_ptr(), copy_bytes);
+                    }
                 }
             }
 
@@ -263,18 +321,49 @@ impl CompiledSpanFn for PoolEvalSpan {
             pool_eval::pool_eval(&self.graph, &eval_inputs, &output_tami_refs, bindings, &SYS)
                 .expect("pool_eval span: eval failed");
 
-        // Scatter results back into buffer_ptrs. Copy sizes match
-        // sym-prod expansion so outputs with sym dims land correctly.
+        // Scatter results back into buffer_ptrs. Same strided contract
+        // as the input gather: when `atom_byte_stride > row_bytes`
+        // (intermediate sym slot), write each atom's `row_bytes` into
+        // the head of its max-stride slot and leave the trailing slack
+        // untouched. Downstream spans read the same prefix via the
+        // same `atom_byte_stride` and get the live data back.
         for (pr, result_tensor) in self.outputs.iter().zip(results.iter()) {
             let src = result_tensor.buffer();
             let bpe = pr.range.dtype.bytes_per_element();
             let sp = sym_prod(&pr.sym_dims);
-            let needed = (pr.range.count * sp) as usize * bpe;
-            let copy = src.len().min(needed);
-            let dst_ptr =
+            let row_bytes = sp as usize * bpe;
+            let needed = pr.range.count as usize * row_bytes;
+            let dst_base =
                 unsafe { buffer_ptrs[pr.buffer_id as usize].add(pr.byte_offset as usize) };
-            unsafe {
-                std::ptr::copy_nonoverlapping(src.as_ptr(), dst_ptr, copy);
+            if (pr.atom_byte_stride as usize) >= row_bytes {
+                if pr.atom_byte_stride as usize == row_bytes {
+                    let copy = src.len().min(needed);
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(src.as_ptr(), dst_base, copy);
+                    }
+                } else {
+                    let src_base = src.as_ptr();
+                    for k in 0..pr.range.count as usize {
+                        let src_off = k * row_bytes;
+                        if src_off >= src.len() {
+                            break;
+                        }
+                        let copy = row_bytes.min(src.len() - src_off);
+                        let dst = unsafe { dst_base.add(k * pr.atom_byte_stride as usize) };
+                        let srcp = unsafe { src_base.add(src_off) };
+                        unsafe {
+                            std::ptr::copy_nonoverlapping(srcp, dst, copy);
+                        }
+                    }
+                }
+            } else {
+                // Runtime-packed destination (input/output buffer with
+                // sym — `atom_byte_stride == bpe`, but writes need to
+                // pack at `sym_prod * bpe`). Whole range is contiguous.
+                let copy = src.len().min(needed);
+                unsafe {
+                    std::ptr::copy_nonoverlapping(src.as_ptr(), dst_base, copy);
+                }
             }
         }
     }
