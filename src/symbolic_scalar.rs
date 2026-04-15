@@ -26,6 +26,19 @@ where
         }
     }
 
+    /// Construct with an explicit symbol id. Used by the model-execution
+    /// symbolic-input-dim config where deterministic ids (derived from the
+    /// user-provided group name) are required to get stable cache keys —
+    /// random ids from `new` would invalidate the lowered/compiled caches
+    /// on every call even for identical configs.
+    pub(crate) fn from_symbol_id(symbol_id: u64) -> Self {
+        Self {
+            _phantom_type: PhantomData,
+            offset: 0,
+            symbol_id,
+        }
+    }
+
     pub(crate) fn cast<T2>(&self) -> SymbolicScalarTyped<T2>
     where
         T2: Clone + Copy + NumericPrimitive,

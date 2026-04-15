@@ -33,9 +33,30 @@ pub fn pool_eval<'p, P: Pool + 'p>(
     graph: &NanoGraph<'_, impl Pool>,
     inputs: &[(&TensorAtomMapInfo, &NumericTensorView<'_, DynRank>)],
     outputs: &[&TensorAtomMapInfo],
-    gc_values: &[u64],
+    bindings: &HashMap<super::pattern::GraphConstantId, u64>,
     pool: &'p P,
 ) -> Result<Vec<NumericTensor<'p, DynRank, P>>, PoolEvalError> {
+    // Resolve every graph constant into a dense index-addressed Vec so the
+    // hot-path code below can use infallible `[]` access. Missing bindings
+    // surface as `UnboundGraphConstant` — there is no fallback default
+    // because `0` is a legal dim extent and we must not silently pretend
+    // an unbound constant is zero.
+    let gc_values: Vec<u64> = {
+        let mut resolved = Vec::with_capacity(graph.graph_constants.len());
+        for (i, info) in graph.graph_constants.iter().enumerate() {
+            let id = super::pattern::GraphConstantId(i as u16);
+            let Some(&v) = bindings.get(&id) else {
+                return Err(PoolEvalError::UnboundGraphConstant {
+                    id,
+                    name: info.name.clone(),
+                });
+            };
+            resolved.push(v);
+        }
+        resolved
+    };
+    let gc_values = gc_values.as_slice();
+
     let groups = graph.groups();
     let n = groups.len();
     let input_tensors = graph.input_tensors();
@@ -1018,6 +1039,16 @@ pub enum PoolEvalError {
     Allocation(#[from] AllocationError),
     #[error("unsupported op: {0}")]
     Unsupported(String),
+    /// The caller didn't supply a runtime value for one of the graph's
+    /// symbolic dim constants. Every `GraphConstantId` in
+    /// `NanoGraph::graph_constants` must have a binding — there's no
+    /// safe default (`0` is a legal extent, so we can't silently fill).
+    /// `name` is the GC's debug name when available (e.g. "batch").
+    #[error("graph constant {id:?} ({name:?}) has no runtime binding")]
+    UnboundGraphConstant {
+        id: super::pattern::GraphConstantId,
+        name: Option<String>,
+    },
 }
 
 // ---------------------------------------------------------------------------

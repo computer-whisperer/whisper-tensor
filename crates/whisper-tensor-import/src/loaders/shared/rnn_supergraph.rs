@@ -14,7 +14,7 @@ use whisper_tensor::super_graph::links::{
 use whisper_tensor::super_graph::nodes::{
     SuperGraphNode, SuperGraphNodeMilliOpGraph, SuperGraphNodeModelExecution,
     SuperGraphNodeRNNCacheRead, SuperGraphNodeRNNCacheWrite, SuperGraphNodeReportProgress,
-    SuperGraphNodeScan,
+    SuperGraphNodeScan, SymbolicInputDims,
 };
 
 /// Get the default weight storage strategy for loaders.
@@ -407,13 +407,28 @@ pub(super) fn build_rnn_supergraph(
         for (id, pair) in state_pairs.iter().enumerate() {
             tensor_outputs.push((pair.1.clone(), *state_output_links.get(&id).unwrap()));
         }
+        // Tag every input's batch axis with a shared group so lowering
+        // keeps the batch dim symbolic. Tokens arrive as
+        // [batch, 1, ...] per-iter (Scan slices axis 1) and states as
+        // [batch, ...]; batch is axis 0 for both (see
+        // TOKENS_BATCH_AXIS / STATE_BATCH_AXIS above). Sharing group
+        // "batch" forces the lowered nano graph to resolve all these
+        // dims against one symbolic, exercising sym-dim lowering
+        // end-to-end instead of baking the concrete batch value in.
+        let mut symbolic_dims = SymbolicInputDims::new();
+        symbolic_dims.push(token_input_name, TOKENS_BATCH_AXIS as usize, "batch");
+        for pair in state_pairs.iter() {
+            symbolic_dims.push(pair.0.clone(), STATE_BATCH_AXIS as usize, "batch");
+        }
+
         let mut node = SuperGraphNodeModelExecution::new(
             rng,
             sub_model_input_link,
             0,
             tensor_inputs,
             tensor_outputs,
-        );
+        )
+        .with_symbolic_input_dims(symbolic_dims);
         node.label = Some("decoder_forward".to_string());
         sub_builder.add_node(node.to_any());
     }

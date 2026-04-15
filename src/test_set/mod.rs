@@ -357,7 +357,13 @@ pub fn run_case_via_pool_eval(case: &TestCase) -> Result<(), String> {
         // Run pool_eval — returns correctly-shaped output tensors.
         let pool = TrackedPool::new(None);
         let eval_results =
-            pool_eval::pool_eval(&lower_result.graph, &eval_inputs, &output_tamis, &[], &pool)
+            pool_eval::pool_eval(
+                &lower_result.graph,
+                &eval_inputs,
+                &output_tamis,
+                &std::collections::HashMap::new(),
+                &pool,
+            )
                 .map_err(|e| format!("{}[{}]: pool_eval failed: {e}", case.name, ds.label))?;
 
         // Compare outputs — pool_eval returns tensors in the same order as output_tamis,
@@ -512,14 +518,13 @@ pub fn run_case_with_symbolic_dims(
         let lower_result = lower::lower(&case.graph, &info_inputs, &SystemPool)
             .map_err(|e| format!("{}[{}] sym: lower failed: {e}", case.name, ds.label))?;
 
-        // Collect gc_values: for each GraphConstant, look up the actual dim size
-        // from one of the inputs. The lowering mapped symbol_ids to GraphConstantIds,
-        // so we need to find what actual size each GC corresponds to.
-        let gc_count = lower_result.graph.graph_constants.len();
-        let mut gc_values = vec![0u64; gc_count];
-
-        // Populate gc_values from the TAMIs — each TAMI's sym_dims tells us which
-        // GraphConstants are used, and dim_layout tells us the original shape position.
+        // Collect GC bindings: for each GraphConstant referenced by an input
+        // TAMI, look up the actual dim size from that input. pool_eval will
+        // reject any unbound GC at entry — no implicit zero-fill.
+        let mut bindings: std::collections::HashMap<
+            crate::nano_graph::pattern::GraphConstantId,
+            u64,
+        > = std::collections::HashMap::new();
         for (&ext_id, tensor) in &ds.inputs {
             let Some(&int_id) = case.graph.input_map.get(&ext_id) else {
                 continue;
@@ -532,7 +537,7 @@ pub fn run_case_with_symbolic_dims(
                 if let crate::nano_graph::lower::DimKind::Sym { gc, .. } = dk
                     && dim_idx < shape.len()
                 {
-                    gc_values[gc.0 as usize] = shape[dim_idx];
+                    bindings.insert(*gc, shape[dim_idx]);
                 }
             }
         }
@@ -574,13 +579,13 @@ pub fn run_case_with_symbolic_dims(
             .filter_map(|out_id| lower_result.graph.tensor_map.get(out_id))
             .collect();
 
-        // Run pool_eval with gc_values.
+        // Run pool_eval with GC bindings.
         let pool = TrackedPool::new(None);
         let eval_results = pool_eval::pool_eval(
             &lower_result.graph,
             &eval_inputs,
             &output_tamis,
-            &gc_values,
+            &bindings,
             &pool,
         )
         .map_err(|e| format!("{}[{}] sym: pool_eval failed: {e}", case.name, ds.label))?;

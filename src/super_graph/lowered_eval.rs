@@ -124,7 +124,10 @@ pub fn hash_info_inputs(info_inputs: &HashMap<GlobalId, TensorInfo<'_, '_, Syste
         // Hash dtype (including payload — Float(F32) vs Float(BF16), etc.).
         info.dtype().hash(&mut hasher);
 
-        // Hash shape (as concrete dims where available).
+        // Hash shape. For symbolic dims we must fold the symbol identity
+        // (symbol_id + offset) into the hash so two configs with different
+        // group assignments — or same shape but different sym-vs-concrete
+        // mix — don't collide on the cache key.
         if let Some(ranked) = info.as_ranked() {
             let shape = ranked.shape();
             shape.len().hash(&mut hasher);
@@ -134,8 +137,9 @@ pub fn hash_info_inputs(info_inputs: &HashMap<GlobalId, TensorInfo<'_, '_, Syste
                         0u8.hash(&mut hasher);
                         v.hash(&mut hasher);
                     }
-                    _ => {
+                    crate::scalar_info::ScalarInfoTyped::Symbolic(sym) => {
                         1u8.hash(&mut hasher);
+                        sym.symbol_id().hash(&mut hasher);
                     }
                 }
             }
@@ -159,6 +163,7 @@ pub fn hash_info_inputs(info_inputs: &HashMap<GlobalId, TensorInfo<'_, '_, Syste
 pub fn hash_user_input_views(
     user_input_views: &HashMap<GlobalId, NumericTensorView<'_, DynRank>>,
     inline_constant_threshold: u64,
+    symbolic_dim_overrides: &HashMap<GlobalId, Vec<(usize, String)>>,
 ) -> u64 {
     use std::collections::BTreeMap;
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -172,6 +177,20 @@ pub fn hash_user_input_views(
         shape.len().hash(&mut hasher);
         for &dim in shape {
             dim.hash(&mut hasher);
+        }
+    }
+    // Fold in the symbolic-dim overrides. Two otherwise identical runs with
+    // different override configs must not share a signature (which would let
+    // the compiled_info_signature_cache short-circuit to a stale
+    // info_inputs_hash).
+    let sorted_ov: BTreeMap<&GlobalId, &Vec<(usize, String)>> =
+        symbolic_dim_overrides.iter().collect();
+    for (&id, entries) in &sorted_ov {
+        id.hash(&mut hasher);
+        entries.len().hash(&mut hasher);
+        for (dim_idx, group) in *entries {
+            dim_idx.hash(&mut hasher);
+            group.hash(&mut hasher);
         }
     }
     hasher.finish()
@@ -205,15 +224,62 @@ pub fn build_info_inputs(
     tensor_store: &TensorStore,
     user_input_views: &HashMap<GlobalId, NumericTensorView<'_, DynRank>>,
     inline_constant_threshold: u64,
+    symbolic_dim_overrides: &HashMap<GlobalId, Vec<(usize, String)>>,
 ) -> (
     HashMap<GlobalId, TensorInfo<'static, 'static, SystemPool>>,
     Vec<GlobalId>, // user_input_ext_ids
     Vec<GlobalId>, // weight_input_ext_ids (above threshold)
 ) {
+    use crate::scalar_info::ScalarInfoTyped;
+    use crate::symbolic_scalar::SymbolicScalarTyped;
+
     let mut info_inputs: HashMap<GlobalId, TensorInfo<'static, 'static, SystemPool>> =
         HashMap::new();
     let mut user_input_ext_ids = Vec::new();
     let mut weight_input_ext_ids = Vec::new();
+
+    // Map each group name to a stable symbolic scalar. The symbol id is
+    // derived from a hash of the group name (rather than drawn from an RNG)
+    // so repeated calls with the same config produce identical
+    // `info_inputs_hash` values — without this, every ModelExecution eval
+    // would invalidate the lowered/compiled caches.
+    //
+    // Namespace-prefixed to keep the id in its own subspace, well away from
+    // the random ids minted by `SymbolicScalarTyped::new` elsewhere in the
+    // pipeline. A 64-bit hash collision with a rng-generated id is ~2^-64.
+    let mut group_syms: HashMap<String, SymbolicScalarTyped<u64>> = HashMap::new();
+    let mut sym_for = |group: &str| -> SymbolicScalarTyped<u64> {
+        group_syms
+            .entry(group.to_string())
+            .or_insert_with(|| {
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                "symbolic_input_dims:".hash(&mut h);
+                group.hash(&mut h);
+                SymbolicScalarTyped::<u64>::from_symbol_id(h.finish())
+            })
+            .clone()
+    };
+
+    // Compose the dims slice for an input given its concrete shape and any
+    // configured symbolic overrides.
+    let compose_dims =
+        |shape: &[u64],
+         overrides: Option<&Vec<(usize, String)>>,
+         sym_for: &mut dyn FnMut(&str) -> SymbolicScalarTyped<u64>|
+         -> Vec<ScalarInfoTyped<u64>> {
+            let mut dims: Vec<ScalarInfoTyped<u64>> = shape
+                .iter()
+                .map(|&v| ScalarInfoTyped::Numeric(v))
+                .collect();
+            if let Some(entries) = overrides {
+                for (dim_idx, group) in entries {
+                    if *dim_idx < dims.len() {
+                        dims[*dim_idx] = ScalarInfoTyped::Symbolic(sym_for(group));
+                    }
+                }
+            }
+            dims
+        };
 
     // Declared model inputs: always shape+dtype only, never inlined.
     // These are runtime-overridable slots — even if the model provides default
@@ -222,11 +288,18 @@ pub fn build_info_inputs(
         sym_graph.get_ordered_inputs().iter().copied().collect();
 
     for &input_id in sym_graph.get_ordered_inputs() {
+        let overrides = symbolic_dim_overrides.get(&input_id);
         if let Some(view) = user_input_views.get(&input_id) {
             // User provided data — use its shape/dtype.
             let shape: Vec<u64> = view.shape().to_vec();
             let dtype = view.dtype();
-            info_inputs.insert(input_id, TensorInfo::from_dtype_and_shape(dtype, &shape));
+            let info = if overrides.is_some() {
+                let dims = compose_dims(&shape, overrides, &mut sym_for);
+                TensorInfo::from_dtype_and_shape_scalars(dtype, &dims)
+            } else {
+                TensorInfo::from_dtype_and_shape(dtype, &shape)
+            };
+            info_inputs.insert(input_id, info);
             user_input_ext_ids.push(input_id);
         } else if let Some(tensor_meta) = sym_graph.get_tensor_info(input_id) {
             // No user view — read shape/dtype from the model's stored default
@@ -235,7 +308,13 @@ pub fn build_info_inputs(
             if let TensorType::Input(Some(stored_ref)) = &tensor_meta.tensor_type
                 && let Some((shape, dtype)) = cheap_shape_dtype(stored_ref, tensor_store)
             {
-                info_inputs.insert(input_id, TensorInfo::from_dtype_and_shape(dtype, &shape));
+                let info = if overrides.is_some() {
+                    let dims = compose_dims(&shape, overrides, &mut sym_for);
+                    TensorInfo::from_dtype_and_shape_scalars(dtype, &dims)
+                } else {
+                    TensorInfo::from_dtype_and_shape(dtype, &shape)
+                };
+                info_inputs.insert(input_id, info);
                 user_input_ext_ids.push(input_id);
             }
         }
@@ -627,10 +706,31 @@ pub fn execute_lowered<'p, P: Pool + 'p>(
     let output_tami_refs: Vec<&TensorAtomMapInfo> =
         output_tamis.iter().map(|(_, tami)| *tami).collect();
 
+    // Resolve runtime extents for each GraphConstant (symbolic dim) by
+    // walking the TAMIs of the actual input views. Matches the pattern
+    // used in test_set::run_case_via_sym_nano_dims.
+    //
+    // Any GC that the lowering minted but doesn't correspond to an input
+    // dim stays absent from the bindings map — pool_eval will return
+    // `UnboundGraphConstant` and we surface it. There's no safe default
+    // value: `0` is a legal extent, so pretending we have a binding
+    // when we don't would silently corrupt eval.
+    let mut bindings: HashMap<crate::nano_graph::pattern::GraphConstantId, u64> = HashMap::new();
+    for (tami, view) in &eval_inputs {
+        let shape = view.shape();
+        for (dim_idx, dk) in tami.dims.iter().enumerate() {
+            if let crate::nano_graph::lower::DimKind::Sym { gc, .. } = dk
+                && dim_idx < shape.len()
+            {
+                bindings.insert(*gc, shape[dim_idx]);
+            }
+        }
+    }
+
     // Run pool_eval.
     let t0 = std::time::Instant::now();
     let eval_results =
-        pool_eval::pool_eval(&cached.graph, &eval_inputs, &output_tami_refs, &[], pool)
+        pool_eval::pool_eval(&cached.graph, &eval_inputs, &output_tami_refs, &bindings, pool)
             .map_err(|e| super::SuperGraphError::InvalidGraph(format!("lowered pool_eval: {e}")))?;
     let dt = t0.elapsed();
     if dt.as_millis() > 10 {

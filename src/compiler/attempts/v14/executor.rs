@@ -182,8 +182,14 @@ impl CompiledSpanFn for PoolEvalSpan {
             .collect();
         let output_tami_refs: Vec<&TensorAtomMapInfo> = output_tamis.iter().collect();
 
-        let results = pool_eval::pool_eval(&self.graph, &eval_inputs, &output_tami_refs, &[], &SYS)
-            .expect("pool_eval span: eval failed");
+        let results = pool_eval::pool_eval(
+            &self.graph,
+            &eval_inputs,
+            &output_tami_refs,
+            &std::collections::HashMap::new(),
+            &SYS,
+        )
+        .expect("pool_eval span: eval failed");
 
         // Scatter results back into buffer_ptrs.
         for (pr, result_tensor) in self.outputs.iter().zip(results.iter()) {

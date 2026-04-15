@@ -1155,7 +1155,7 @@ impl MilliOpGraph {
             &lower_result.graph,
             &eval_inputs,
             &output_tami_refs,
-            &[],
+            &std::collections::HashMap::new(),
             pool,
         )
         .map_err(|e| MilliOpGraphError::InvalidInput(format!("pool_eval: {e}")))?;

@@ -357,6 +357,57 @@ pub struct ModelReference {
     idx: usize,
 }
 
+/// Sparse symbolic-dim declaration for a `SuperGraphNodeModelExecution`.
+///
+/// Each entry pins a single `(tensor_input_name, dim_index)` to a named group.
+/// Dims sharing a group name are bound to the same symbolic scalar during
+/// lowering — two matmul inputs with `(A, 0)` and `(B, 1)` both in group "K"
+/// produce a nano graph whose contraction dim is symbolic and shared. Dims
+/// not listed stay concrete (bound to the runtime input shape at eval time).
+///
+/// The runtime input tensors still have concrete shapes; the override only
+/// controls how `build_info_inputs` describes those inputs to the lowering
+/// pipeline, which in turn determines what shows up as symbolic in the
+/// resulting nano graph.
+#[derive(Default, Debug, Clone, Serialize, Deserialize)]
+pub struct SymbolicInputDims {
+    /// `((tensor_input_name, dim_index), group_name)` entries. Using a Vec
+    /// (rather than a HashMap) keeps the serialization order stable and makes
+    /// it trivial to author by hand.
+    pub entries: Vec<((String, usize), String)>,
+}
+
+impl SymbolicInputDims {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub fn push(
+        &mut self,
+        input_name: impl Into<String>,
+        dim_index: usize,
+        group: impl Into<String>,
+    ) {
+        self.entries
+            .push(((input_name.into(), dim_index), group.into()));
+    }
+
+    /// Lookup the group name, if any, assigned to a given (input_name, dim_index).
+    pub fn group_for(&self, input_name: &str, dim_index: usize) -> Option<&str> {
+        self.entries.iter().find_map(|((name, dim), group)| {
+            if name == input_name && *dim == dim_index {
+                Some(group.as_str())
+            } else {
+                None
+            }
+        })
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SuperGraphNodeModelExecution {
     global_id: GlobalId,
@@ -365,6 +416,10 @@ pub struct SuperGraphNodeModelExecution {
     pub symbolic_graph_id: usize, // Which graph (passed to
     tensor_inputs: Vec<(Option<SuperGraphLink>, String)>,
     tensor_outputs: Vec<(String, Option<SuperGraphLink>)>,
+    /// Optional per-input dim symbolic overrides. Dims listed here are lowered
+    /// as symbolic scalars (shared across entries with the same group name)
+    /// instead of being bound to the runtime shape. Empty = current behavior.
+    pub symbolic_input_dims: SymbolicInputDims,
 }
 
 impl SuperGraphNodeModelExecution {
@@ -388,7 +443,14 @@ impl SuperGraphNodeModelExecution {
                 .into_iter()
                 .map(|(name, link)| (name, Some(link)))
                 .collect(),
+            symbolic_input_dims: SymbolicInputDims::default(),
         }
+    }
+
+    /// Builder-style setter for the symbolic-dim config.
+    pub fn with_symbolic_input_dims(mut self, dims: SymbolicInputDims) -> Self {
+        self.symbolic_input_dims = dims;
+        self
     }
 }
 
@@ -481,6 +543,25 @@ impl SuperGraphNode for SuperGraphNodeModelExecution {
             })
             .collect();
 
+        // Resolve the user-facing (input_name, dim) → group config into a
+        // GlobalId-keyed map that matches what `build_info_inputs` expects.
+        // Entries that don't resolve (unknown input name) are silently
+        // dropped — the user's config referred to a tensor the model does
+        // not expose, which is either a typo or stale config. Surfacing
+        // this via an error would force every caller to handle a new
+        // error variant; silently ignoring keeps the knob additive.
+        let symbolic_dim_overrides: HashMap<GlobalId, Vec<(usize, String)>> = {
+            let mut out: HashMap<GlobalId, Vec<(usize, String)>> = HashMap::new();
+            for ((input_name, dim_idx), group) in &self.symbolic_input_dims.entries {
+                if let Some(&tensor_id) = tensors_by_name.get(input_name) {
+                    out.entry(tensor_id)
+                        .or_default()
+                        .push((*dim_idx, group.clone()));
+                }
+            }
+            out
+        };
+
         // Try the lowered or compiled eval path if configured.
         match &context.eval_options.model_eval_mode {
             crate::super_graph::ModelEvalMode::LoweredEval {
@@ -492,6 +573,7 @@ impl SuperGraphNode for SuperGraphNodeModelExecution {
                     tensor_store,
                     &input_views,
                     *inline_constant_threshold,
+                    &symbolic_dim_overrides,
                     context,
                 )? {
                     self.insert_results(results, &tensors_by_name, data)?;
@@ -512,6 +594,7 @@ impl SuperGraphNode for SuperGraphNodeModelExecution {
                     &input_views,
                     *inline_constant_threshold,
                     &compile_options,
+                    &symbolic_dim_overrides,
                     context,
                 )? {
                     self.insert_results(results, &tensors_by_name, data)?;
@@ -605,7 +688,7 @@ impl SuperGraphNodeModelExecution {
     /// - `Ok(Some(results))` if lowered eval succeeded
     /// - `Ok(None)` if the graph can't be lowered (fall back to symbolic eval)
     /// - `Err(e)` on hard failure
-    #[allow(clippy::type_complexity)]
+    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
     fn try_lowered_eval<'short, 'model, 'p, P: Pool + 'p, T: SuperGraphObserver>(
         &self,
         node_path: &[GlobalId],
@@ -616,6 +699,7 @@ impl SuperGraphNodeModelExecution {
             crate::numeric_tensor::NumericTensorView<'_, DynRank>,
         )],
         inline_constant_threshold: u64,
+        symbolic_dim_overrides: &HashMap<GlobalId, Vec<(usize, String)>>,
         context: &mut SuperGraphContext<'short, 'model, 'p, P, T>,
     ) -> Result<
         Option<HashMap<GlobalId, crate::numeric_tensor::NumericTensor<'p, DynRank, P>>>,
@@ -649,6 +733,7 @@ impl SuperGraphNodeModelExecution {
                 tensor_store,
                 &user_input_view_map,
                 inline_constant_threshold,
+                symbolic_dim_overrides,
             );
 
         let info_hash = lowered_eval::hash_info_inputs(&info_inputs);
@@ -771,6 +856,7 @@ impl SuperGraphNodeModelExecution {
         )],
         inline_constant_threshold: u64,
         compile_options: &crate::compiler::CompileOptions,
+        symbolic_dim_overrides: &HashMap<GlobalId, Vec<(usize, String)>>,
         context: &mut SuperGraphContext<'short, 'model, 'p, P, T>,
     ) -> Result<
         Option<HashMap<GlobalId, crate::numeric_tensor::NumericTensor<'p, DynRank, P>>>,
@@ -811,8 +897,11 @@ impl SuperGraphNodeModelExecution {
             symbolic_graph.global_id()
         };
 
-        let user_inputs_signature =
-            lowered_eval::hash_user_input_views(&user_input_view_map, inline_constant_threshold);
+        let user_inputs_signature = lowered_eval::hash_user_input_views(
+            &user_input_view_map,
+            inline_constant_threshold,
+            symbolic_dim_overrides,
+        );
 
         // Fast path: reuse the previously computed info-inputs hash when the
         // user-input shape/dtype signature and inline-constant policy match.
@@ -843,6 +932,7 @@ impl SuperGraphNodeModelExecution {
                 tensor_store,
                 &user_input_view_map,
                 inline_constant_threshold,
+                symbolic_dim_overrides,
             );
             context.observer.on_compiled_milestone(
                 &observer_path,
