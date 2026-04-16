@@ -304,7 +304,8 @@ pub(crate) fn compile_nano_graph(
     // as dead code until we can diagnose and fix the remaining issue.
     let t0 = Instant::now();
     let has_sym = graph.groups().iter().any(|g| !g.sym_dims.is_empty());
-    let partitioner = if has_sym {
+    let force_lanesplit = env::var("WT_DIAG_SYM_LANESPLIT").is_ok();
+    let partitioner = if has_sym && !force_lanesplit {
         PartitionerKind::Trivial
     } else {
         resolve_partitioner_override(&options.partitioner)
@@ -463,7 +464,8 @@ pub(crate) fn compile_nano_graph(
             .collect();
     plan_builder.pin_outputs(all_output_atom_ranges, &output_sym_dims);
     let mut compile_errors = 0usize;
-    let force_pool_eval = matches!(options.codegen, CodegenKind::PoolEval);
+    let force_pool_eval = matches!(options.codegen, CodegenKind::PoolEval)
+        || env::var("WT_FORCE_POOL_EVAL").is_ok();
 
     x86_jit_stats::enable();
 

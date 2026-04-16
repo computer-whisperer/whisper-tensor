@@ -1464,7 +1464,12 @@ pub fn plan(
     // reduce_stride=1), so each lane's N/L output atoms access a contiguous
     // K*(N/L) chunk of the producer — exactly lane-local.
     let mut graph = graph.clone();
-    let relayouted = relayout_matmul_groups(&mut graph);
+    let skip_relayout = std::env::var("WT_SKIP_RELAYOUT").is_ok();
+    let relayouted = if skip_relayout {
+        0
+    } else {
+        relayout_matmul_groups(&mut graph)
+    };
     if relayouted > 0 {
         eprintln!(
             "  Relayouted {} matmul Mul→Reduce pairs from [K,N] to [N,K]",
