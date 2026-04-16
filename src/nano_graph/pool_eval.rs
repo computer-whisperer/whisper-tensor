@@ -19,6 +19,12 @@ use super::lower::TensorAtomMapInfo;
 use super::ops::{ReduceKind, ScalarBinOp, ScalarOp, ScalarUnaryOp};
 use super::pattern::{AtomId, NanoGraph, SymDimMap};
 
+fn pool_eval_trace() -> bool {
+    std::env::var("WT_POOLEVAL_TRACE")
+        .map(|v| v != "0" && !v.is_empty())
+        .unwrap_or(false)
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -485,6 +491,29 @@ pub fn pool_eval<'p, P: Pool + 'p>(
                 }
             }
 
+            if pool_eval_trace() && !group.sym_dims.is_empty() {
+                let store_ref = group_stores[gi].as_ref().unwrap();
+                let total = count as u64 * opaque_sym_prod;
+                let show = total.min(8) as usize;
+                let mut vals = Vec::with_capacity(show);
+                for idx in 0..show {
+                    let s = store_ref.read_element(idx);
+                    vals.push(format!("{}", s.to_f64()));
+                }
+                eprintln!(
+                    "[POOLEVAL_GROUP] gi={} base={} count={} off={} op=Opaque({}:{}) sd={:?} sp={} elems=[{}]",
+                    gi,
+                    group.base_id.0,
+                    count,
+                    group.atom_offset,
+                    opaque_idx,
+                    output_idx,
+                    group.sym_dims.iter().map(|gc| gc.0).collect::<Vec<_>>(),
+                    opaque_sym_prod,
+                    vals.join(", "),
+                );
+            }
+
             // Free spent producers.
             for &pi in &producers[gi] {
                 remaining[pi] -= 1;
@@ -903,6 +932,43 @@ pub fn pool_eval<'p, P: Pool + 'p>(
         // Put the store back.
         group_stores[gi] = Some(store);
 
+        if pool_eval_trace() && !group.sym_dims.is_empty() {
+            let store_ref = group_stores[gi].as_ref().unwrap();
+            let total = count as u64 * sym_prod;
+            let show = total.min(8) as usize;
+            let mut vals = Vec::with_capacity(show);
+            for idx in 0..show {
+                let s = store_ref.read_element(idx);
+                vals.push(format!("{}", s.to_f64()));
+            }
+            let inputs_info: Vec<String> = group
+                .inputs
+                .iter()
+                .enumerate()
+                .map(|(idx, inp)| {
+                    let r0 = inp.input_ref.resolve(group.atom_offset).0;
+                    let r1 = if count >= 2 {
+                        inp.input_ref.resolve(group.atom_offset + 1).0
+                    } else {
+                        r0
+                    };
+                    format!("in{}:({:?},r0={},r1={})", idx, inp.input_ref, r0, r1)
+                })
+                .collect();
+            eprintln!(
+                "[POOLEVAL_GROUP] gi={} base={} count={} off={} op={:?} sd={:?} sp={} elems=[{}] inputs=[{}]",
+                gi,
+                group.base_id.0,
+                count,
+                group.atom_offset,
+                &group.op,
+                group.sym_dims.iter().map(|gc| gc.0).collect::<Vec<_>>(),
+                sym_prod,
+                vals.join(", "),
+                inputs_info.join(" | "),
+            );
+        }
+
         // Free spent producer buffers.
         for &pi in &producers[gi] {
             remaining[pi] -= 1;
@@ -1045,6 +1111,23 @@ pub fn pool_eval<'p, P: Pool + 'p>(
                     &input_stores,
                 );
                 out_tensor.write_element(flat_elem as usize, scalar.cast_to(tam.dtype));
+            }
+            if pool_eval_trace() {
+                let show = full_numel.min(8) as usize;
+                let mut vals = Vec::with_capacity(show);
+                for idx in 0..show {
+                    let s = out_tensor.read_element(idx);
+                    vals.push(format!("{}", s.to_f64()));
+                }
+                eprintln!(
+                    "[POOLEVAL_OUT] base={} count={} sd={:?} sp={} shape={:?} elems=[{}]",
+                    tam.base_id.0,
+                    tam.count,
+                    sym_dims_v.iter().map(|gc| gc.0).collect::<Vec<_>>(),
+                    producer_sym_prod,
+                    full_shape,
+                    vals.join(", "),
+                );
             }
             result_tensors.push(out_tensor);
             continue;
