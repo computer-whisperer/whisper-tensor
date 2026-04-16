@@ -954,13 +954,19 @@ pub fn run_placer(
         };
 
         // First-fit over free list.
+        // DIAG WT_NO_SLAB_REUSE: gate to disable byte reuse so each slab
+        // bumps from the watermark. Tests whether liveness/packing is the
+        // source of the LaneSplit+sym+batch>1 bug at max_sym_prod=4.
+        let no_reuse = std::env::var("WT_NO_SLAB_REUSE").is_ok();
         let mut chosen: Option<(usize, u64)> = None; // (free_list_idx, aligned_offset)
-        for (idx, &(off, sz)) in free_list.iter().enumerate() {
-            let aligned = align_up(off, align);
-            let pad = aligned - off;
-            if sz >= size + pad {
-                chosen = Some((idx, aligned));
-                break;
+        if !no_reuse {
+            for (idx, &(off, sz)) in free_list.iter().enumerate() {
+                let aligned = align_up(off, align);
+                let pad = aligned - off;
+                if sz >= size + pad {
+                    chosen = Some((idx, aligned));
+                    break;
+                }
             }
         }
 
@@ -993,6 +999,27 @@ pub fn run_placer(
         });
         slab_placements.push((si, placement_off));
         peak = peak.max(watermark);
+
+        // DIAG WT_DUMP_SLAB_PLACEMENT: per-slab placement record with
+        // [first_phase, last_phase) liveness window, byte offset, size,
+        // and member info. Used to detect byte-overlapping slabs whose
+        // liveness windows actually overlap (placer reuse bug).
+        if std::env::var("WT_DUMP_SLAB_PLACEMENT")
+            .ok()
+            .is_some_and(|v| v != "0")
+        {
+            let sample_gi = slab.members[0];
+            let sg = &groups[sample_gi];
+            eprintln!(
+                "[SLABPLACE] si={si} off={placement_off} size={size} first={} last={} sym={} base={} count={} op={}",
+                slab.first_phase,
+                slab.last_phase,
+                slab.max_sym_prod,
+                sg.base_id.0,
+                sg.count,
+                op_tag(&sg.op),
+            );
+        }
     }
 
     // ── Step 6: build literal buffer layout ──
