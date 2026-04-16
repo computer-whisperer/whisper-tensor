@@ -83,10 +83,39 @@ pub fn pool_eval<'p, P: Pool + 'p>(
     let mut input_stores: Vec<Option<AtomStore<'_, 'p, P>>> =
         (0..input_tensors.len()).map(|_| None).collect();
 
+    // Multiple main-graph groups may read overlapping sub-ranges of the
+    // same input tensor, and partitioner_m records each access as a
+    // separate `insert_input_tensor_at_allow_overlap` call. That produces
+    // multiple graph `input_tensors` entries sharing a base_id or sitting
+    // inside each other's range. The caller (PoolEvalSpan) in turn
+    // supplies one input tuple per declared access, so we must match
+    // each tuple to a *distinct* input_tensor index. Exact-match on
+    // (base, count, dtype) wins first; then fall back to the first
+    // unfilled slot whose range contains tam.base_id. Without this the
+    // first matching slot absorbs every tuple and later slots get
+    // zero-filled.
     for &(tam, view) in inputs {
-        let input_index = graph
-            .find_input_idx_by_base(tam.base_id)
-            .or_else(|| graph.find_input_idx(tam.base_id).map(|(ti, _)| ti));
+        let input_index = input_tensors
+            .iter()
+            .enumerate()
+            .find(|(ti, it)| {
+                input_stores[*ti].is_none()
+                    && it.base_id == tam.base_id
+                    && it.count == tam.count
+                    && it.dtype == tam.dtype
+            })
+            .map(|(ti, _)| ti)
+            .or_else(|| {
+                input_tensors
+                    .iter()
+                    .enumerate()
+                    .find(|(ti, it)| {
+                        input_stores[*ti].is_none()
+                            && it.base_id.0 <= tam.base_id.0
+                            && tam.base_id.0 < it.base_id.0 + it.count
+                    })
+                    .map(|(ti, _)| ti)
+            });
         if let Some(ti) = input_index {
             let sym_dims_v = tam.sym_dims();
             if sym_dims_v.is_empty() {
@@ -196,9 +225,19 @@ pub fn pool_eval<'p, P: Pool + 'p>(
             .filter(|(_, s)| s.is_none())
             .map(|(ti, _)| input_tensors[ti].count)
             .sum();
+        let detail: Vec<String> = input_stores
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.is_none())
+            .map(|(ti, _)| {
+                let it = &input_tensors[ti];
+                format!("ti={ti} base={} count={}", it.base_id.0, it.count)
+            })
+            .collect();
         eprintln!(
-            "[pool_eval] WARNING: {n_unfilled} of {} input tensors unfilled ({unfilled_atoms} atoms) — zero-filling",
+            "[pool_eval] WARNING: {n_unfilled} of {} input tensors unfilled ({unfilled_atoms} atoms) — zero-filling [{}]",
             input_tensors.len(),
+            detail.join(", "),
         );
     }
     let input_stores: Vec<AtomStore<'_, 'p, P>> = input_stores

@@ -109,9 +109,13 @@ pub struct PoolEvalSpan {
 }
 
 impl PoolEvalSpan {
-    /// `sym_dims_by_base` supplies sym_dims for atom ranges whose base
+    /// `sym_dims_by_range` supplies sym_dims for atom ranges whose base
     /// does not match a producing group in the span's graph — i.e. external
-    /// input tensors, whose sym structure lives in the caller's TAMI map.
+    /// input tensors or cross-span intermediates, whose sym structure lives
+    /// in the caller's main-graph map. Lookup is range-based so a span
+    /// receiving an AtomRange with base in the middle of a main-graph
+    /// group still resolves sym_dims (the partitioner may split a group
+    /// into count=1 ranges across spans).
     /// For atoms produced by groups in the span's graph, sym_dims are
     /// read directly from the group.
     pub fn new(
@@ -119,7 +123,7 @@ impl PoolEvalSpan {
         inputs: Vec<AtomRange>,
         outputs: Vec<AtomRange>,
         placement: &AtomPlacementMap,
-        sym_dims_by_base: &HashMap<AtomId, Vec<GraphConstantId>>,
+        sym_dims_by_range: &crate::range_map::RangeMap<Vec<GraphConstantId>>,
     ) -> Self {
         let resolve_sym =
             |base: AtomId,
@@ -127,7 +131,7 @@ impl PoolEvalSpan {
              -> Vec<GraphConstantId> {
                 if let Some(gi) = g.find_group_idx(base) {
                     g.groups()[gi].sym_dims.clone()
-                } else if let Some(sd) = sym_dims_by_base.get(&base) {
+                } else if let Some((sd, _)) = sym_dims_by_range.get(base.0) {
                     sd.clone()
                 } else {
                     Vec::new()
@@ -160,6 +164,24 @@ impl PoolEvalSpan {
     }
 }
 
+// Deterministic FNV-1a hash of a byte slice. Used for the
+// `WT_POOLEVAL_TRACE` diagnostic log so the trace line stays short but
+// still detects any byte-level divergence between runs.
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for &b in bytes {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
+}
+
+fn trace_enabled() -> bool {
+    env::var("WT_POOLEVAL_TRACE")
+        .map(|v| v != "0" && !v.is_empty())
+        .unwrap_or(false)
+}
+
 impl CompiledSpanFn for PoolEvalSpan {
     fn scratch_bytes(&self) -> usize {
         // pool_eval manages its own tensor allocations internally;
@@ -174,6 +196,24 @@ impl CompiledSpanFn for PoolEvalSpan {
         use crate::pool::SystemPool;
 
         static SYS: SystemPool = SystemPool;
+
+        // WT_POOLEVAL_TRACE=1 → log every input/output range's bytes at
+        // gather/scatter boundaries. Stable span_id lets a Trivial vs
+        // LaneSplit diff line up by base-atom across runs.
+        let trace = trace_enabled();
+        let span_id: u64 = {
+            let mut h: u64 = 0xcbf29ce484222325;
+            for pr in &self.inputs {
+                h ^= pr.range.base.0;
+                h = h.wrapping_mul(0x100000001b3);
+            }
+            h ^= 0x9E3779B97F4A7C15;
+            for pr in &self.outputs {
+                h ^= pr.range.base.0;
+                h = h.wrapping_mul(0x100000001b3);
+            }
+            h
+        };
 
         // Helpers -------------------------------------------------------
         // Resolve sym_prod for a range's sym_dims using the runtime
@@ -296,6 +336,37 @@ impl CompiledSpanFn for PoolEvalSpan {
                 }
             }
 
+            if trace {
+                let live = needed_bytes.min(buf.len());
+                let hash = fnv1a64(&buf[..live]);
+                let preview_len = live.min(16);
+                let mut hex = String::with_capacity(preview_len * 2);
+                for b in &buf[..preview_len] {
+                    hex.push_str(&format!("{:02x}", b));
+                }
+                let sym_dims_str = pr
+                    .sym_dims
+                    .iter()
+                    .map(|gc| format!("gc{}", gc.0))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                eprintln!(
+                    "[POOLTRACE] span={:016x} IN  base={} buf={} off={} stride={} sd=[{}] sp={} count={} bpe={} bytes={} first16={} hash={:016x}",
+                    span_id,
+                    range.base.0,
+                    pr.buffer_id,
+                    pr.byte_offset,
+                    pr.atom_byte_stride,
+                    sym_dims_str,
+                    sp,
+                    range.count,
+                    bpe,
+                    live,
+                    hex,
+                    hash,
+                );
+            }
+
             input_tamis.push(build_tami(
                 range.base,
                 range.count,
@@ -335,6 +406,36 @@ impl CompiledSpanFn for PoolEvalSpan {
             let needed = pr.range.count as usize * row_bytes;
             let dst_base =
                 unsafe { buffer_ptrs[pr.buffer_id as usize].add(pr.byte_offset as usize) };
+            if trace {
+                let live = needed.min(src.len());
+                let hash = fnv1a64(&src[..live]);
+                let preview_len = live.min(16);
+                let mut hex = String::with_capacity(preview_len * 2);
+                for b in &src[..preview_len] {
+                    hex.push_str(&format!("{:02x}", b));
+                }
+                let sym_dims_str = pr
+                    .sym_dims
+                    .iter()
+                    .map(|gc| format!("gc{}", gc.0))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                eprintln!(
+                    "[POOLTRACE] span={:016x} OUT base={} buf={} off={} stride={} sd=[{}] sp={} count={} bpe={} bytes={} first16={} hash={:016x}",
+                    span_id,
+                    pr.range.base.0,
+                    pr.buffer_id,
+                    pr.byte_offset,
+                    pr.atom_byte_stride,
+                    sym_dims_str,
+                    sp,
+                    pr.range.count,
+                    bpe,
+                    live,
+                    hex,
+                    hash,
+                );
+            }
             if (pr.atom_byte_stride as usize) >= row_bytes {
                 if pr.atom_byte_stride as usize == row_bytes {
                     let copy = src.len().min(needed);

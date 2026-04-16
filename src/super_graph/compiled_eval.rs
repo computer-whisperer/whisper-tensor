@@ -283,7 +283,9 @@ fn resolve_partitioner_override(requested: &PartitionerKind) -> PartitionerKind 
 pub(crate) fn compile_nano_graph(
     graph: &NanoGraph<'static, SystemPool>,
     all_output_atom_ranges: &[AtomRange],
-    external_input_sym_dims: &HashMap<AtomId, Vec<crate::nano_graph::pattern::GraphConstantId>>,
+    external_input_sym_dims: &crate::range_map::RangeMap<
+        Vec<crate::nano_graph::pattern::GraphConstantId>,
+    >,
     gc_max_overrides: &HashMap<crate::nano_graph::pattern::GraphConstantId, u64>,
     options: &CompileOptions,
     provenance: Option<&report::GroupProvenance>,
@@ -498,7 +500,9 @@ fn compile_phase_parallel(
     pi: usize,
     spans: &[crate::compiler::attempts::v14::types::Span],
     placement: &AtomPlacementMap,
-    external_input_sym_dims: &HashMap<AtomId, Vec<crate::nano_graph::pattern::GraphConstantId>>,
+    external_input_sym_dims: &crate::range_map::RangeMap<
+        Vec<crate::nano_graph::pattern::GraphConstantId>,
+    >,
     compile_errors: &mut usize,
 ) -> Vec<LaneTuple> {
     use rayon::prelude::*;
@@ -569,7 +573,9 @@ fn compile_phase_parallel(
 fn compile_phase_pool_eval(
     spans: &[crate::compiler::attempts::v14::types::Span],
     placement: &AtomPlacementMap,
-    external_input_sym_dims: &HashMap<AtomId, Vec<crate::nano_graph::pattern::GraphConstantId>>,
+    external_input_sym_dims: &crate::range_map::RangeMap<
+        Vec<crate::nano_graph::pattern::GraphConstantId>,
+    >,
 ) -> Vec<LaneTuple> {
     spans
         .iter()
@@ -1014,21 +1020,28 @@ pub fn compile_lowered_model(
     // intermediate (sym_prod defaults to 1 when sym_dims is empty),
     // truncating the actually-written `count * runtime_sym_prod * bpe`
     // bytes and producing garbage downstream.
-    let mut external_input_sym_dims: HashMap<
-        AtomId,
+    // Build a RangeMap so `PoolEvalSpan::new` resolves sym_dims for any
+    // atom inside a main-graph group's range, not just the group's base.
+    // The partitioner may split a group's atom range into count=1
+    // AtomRanges across spans; a flat base-keyed map misses those.
+    let mut external_input_sym_dims: crate::range_map::RangeMap<
         Vec<crate::nano_graph::pattern::GraphConstantId>,
-    > = HashMap::new();
+    > = crate::range_map::RangeMap::new();
     for it in graph.input_tensors() {
         if let Some(tami) = cached.graph.tensor_map.get(&it.tensor_id) {
             let sd = tami.sym_dims();
             if !sd.is_empty() {
-                external_input_sym_dims.insert(it.base_id, sd);
+                external_input_sym_dims.insert_allow_overlap(it.base_id.0, it.count, sd);
             }
         }
     }
     for group in graph.groups() {
         if !group.sym_dims.is_empty() {
-            external_input_sym_dims.insert(group.base_id, group.sym_dims.clone());
+            external_input_sym_dims.insert_allow_overlap(
+                group.base_id.0,
+                group.count,
+                group.sym_dims.clone(),
+            );
         }
     }
     let (executable_plan, plan_summary, _compile_errors) = compile_nano_graph(

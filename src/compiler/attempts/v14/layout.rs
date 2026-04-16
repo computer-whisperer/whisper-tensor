@@ -943,12 +943,19 @@ pub fn compute_layout(
                 it.base_id.0
             )
         })?;
+        // Atom-to-atom stride must follow the placer — when the input
+        // points into a max-stride intermediate slab (e.g. a main-graph
+        // sym group that this JIT span reads via its input tensor),
+        // atoms sit at `max_sym_prod * bpe` bytes apart, not `bpe`.
+        let atom_stride_bytes = placement
+            .atom_byte_stride_of(it.base_id)
+            .unwrap_or(elem_bytes as u64);
         all_slots.push(SlotInfo {
             atom_base: it.base_id,
             count: it.count,
             buffer_id: buf_id.0,
             bit_offset: byte_off * 8,
-            bit_stride: (elem_bytes as u64) * 8,
+            bit_stride: atom_stride_bytes * 8,
             elem_bits: elem_bits_semantic,
             dtype: it.dtype,
         });
@@ -1008,12 +1015,17 @@ pub fn compute_layout(
                     group.base_id, item_kinds[item_idx]
                 )
             })?;
+            // Respect the placer's atom stride (see matching note on
+            // the input_tensors loop above).
+            let atom_stride_bytes = placement
+                .atom_byte_stride_of(group.base_id)
+                .unwrap_or(elem_bytes as u64);
             all_slots.push(SlotInfo {
                 atom_base: group.base_id,
                 count: group.count,
                 buffer_id: buf_id.0,
                 bit_offset: byte_off * 8,
-                bit_stride: (elem_bytes as u64) * 8,
+                bit_stride: atom_stride_bytes * 8,
                 elem_bits: elem_bits_semantic,
                 dtype: group.output_dtype,
             });
