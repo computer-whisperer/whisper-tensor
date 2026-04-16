@@ -156,9 +156,65 @@ impl PoolEvalSpan {
                 atom_byte_stride,
             }
         };
+        let resolved_inputs: Vec<PoolEvalRange> = inputs.into_iter().map(resolve).collect();
+        let resolved_outputs: Vec<PoolEvalRange> = outputs.into_iter().map(resolve).collect();
+
+        // DIAG WT_DUMP_POOLSPAN_INPUTS: dump caller-side PoolEvalRange
+        // vs sub-graph input_tensors alignment at construction time.
+        // If graph.input_tensors[ti] range doesn't match the caller's
+        // resolved input range for that slot, pool_eval will compute
+        // (offset * sym_prod + sym_flat) from graph.input_tensors[ti]
+        // while the store is sized by the caller's TAM count → OOB or
+        // wrong data.
+        if std::env::var("WT_DUMP_POOLSPAN_INPUTS")
+            .ok()
+            .is_some_and(|v| v != "0")
+        {
+            let span_id: u64 = {
+                let mut h: u64 = 0xcbf29ce484222325;
+                for pr in &resolved_inputs {
+                    h ^= pr.range.base.0;
+                    h = h.wrapping_mul(0x100000001b3);
+                }
+                h ^= 0x9E3779B97F4A7C15;
+                for pr in &resolved_outputs {
+                    h ^= pr.range.base.0;
+                    h = h.wrapping_mul(0x100000001b3);
+                }
+                h
+            };
+            for (i, pr) in resolved_inputs.iter().enumerate() {
+                let sdstr = pr
+                    .sym_dims
+                    .iter()
+                    .map(|gc| format!("gc{}", gc.0))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                eprintln!(
+                    "[SPANDECL] span={:016x} kind=CALLER_IN i={} base={} count={} stride={} sd=[{}]",
+                    span_id,
+                    i,
+                    pr.range.base.0,
+                    pr.range.count,
+                    pr.atom_byte_stride,
+                    sdstr,
+                );
+            }
+            for (ti, it) in graph.input_tensors().iter().enumerate() {
+                eprintln!(
+                    "[SPANDECL] span={:016x} kind=GRAPH_IN  ti={} base={} count={} dtype={:?}",
+                    span_id,
+                    ti,
+                    it.base_id.0,
+                    it.count,
+                    it.dtype,
+                );
+            }
+        }
+
         Self {
-            inputs: inputs.into_iter().map(resolve).collect(),
-            outputs: outputs.into_iter().map(resolve).collect(),
+            inputs: resolved_inputs,
+            outputs: resolved_outputs,
             graph,
         }
     }
