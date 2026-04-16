@@ -67,18 +67,13 @@ pub fn pool_eval<'p, P: Pool + 'p>(
     let n = groups.len();
     let input_tensors = graph.input_tensors();
 
-    // Build a lookup from input tensor index → sym_dims (from TAMIs).
-    // This lets resolve_producer_sym determine sym_dims for input atoms.
+    // Parallel to `input_stores` below: `input_sym_dims[ti]` carries the
+    // sym_dims of the caller TAM that populated `input_stores[ti]`.
+    // Populated inside the same prefer-unfilled matching loop so the two
+    // arrays stay index-consistent even when the partitioner declares
+    // multiple `input_tensors` at overlapping bases.
     let mut input_sym_dims: Vec<Vec<super::pattern::GraphConstantId>> =
         (0..input_tensors.len()).map(|_| vec![]).collect();
-    for &(tam, _) in inputs {
-        let input_index = graph
-            .find_input_idx_by_base(tam.base_id)
-            .or_else(|| graph.find_input_idx(tam.base_id).map(|(ti, _)| ti));
-        if let Some(ti) = input_index {
-            input_sym_dims[ti] = tam.sym_dims();
-        }
-    }
 
     // --- Step 1: Populate input stores ---
     //
@@ -124,6 +119,7 @@ pub fn pool_eval<'p, P: Pool + 'p>(
             });
         if let Some(ti) = input_index {
             let sym_dims_v = tam.sym_dims();
+            input_sym_dims[ti] = sym_dims_v.clone();
             if sym_dims_v.is_empty() {
                 // No symbolic dims — relayout to TAMI's known_dims shape.
                 let element_bits = tam.dtype.total_bits() as u64;
