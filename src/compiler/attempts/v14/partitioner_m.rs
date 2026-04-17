@@ -1691,6 +1691,78 @@ fn build_phase(
         }
     }
 
+    // Propagate aligned_splits upstream through elementwise (stride=1)
+    // Split→Split chains. Without this, a Split producer whose unique
+    // in-phase consumer is itself aligned-split (e.g. Select→Reduce
+    // via stride=K, giving Select a non-default per-lane split) would
+    // keep its generic `split_count_cl` split. The consumer's lane k
+    // input window then spans two of the producer's lanes, creating a
+    // same-phase cross-lane dependency that the layout/placer can't
+    // resolve — manifests as "input tensor base=... not in placement
+    // map" at compute_layout. Repeat until fixpoint so deeper chains
+    // (A → B → C → Reduce where B and C are aligned Selects) also
+    // pick up alignment.
+    //
+    // Safety rails, mirroring the direct Reduce case:
+    // - Producer must have a single successor (unique consumer in the
+    //   phase) — adopting a consumer-specific split would misalign any
+    //   siblings that read the producer with a different pattern.
+    // - Elementwise stride=1 InputRef from consumer to producer with
+    //   matching atom counts — otherwise the scale factor isn't 1 and
+    //   we'd need to recompute (cons_count, stride), not just inherit.
+    // - Producer and consumer share an output_dtype, so
+    //   `split_range_aligned` derives the same cl_atoms and lands the
+    //   producer's lane fragments on identical atom boundaries.
+    loop {
+        let mut changed = false;
+        for &gi in phase_group_indices {
+            if kinds[gi] != GroupKind::Split || aligned_splits.contains_key(&gi) {
+                continue;
+            }
+            let group = &all_groups[gi];
+            if successors[gi].len() != 1 {
+                continue;
+            }
+            let ci = successors[gi][0];
+            if !phase_set.contains(&ci) || kinds[ci] != GroupKind::Split {
+                continue;
+            }
+            let Some(&(cons_count, stride)) = aligned_splits.get(&ci) else {
+                continue;
+            };
+            let cons = &all_groups[ci];
+            if group.count != cons.count || group.output_dtype != cons.output_dtype {
+                continue;
+            }
+            let feeds_elementwise = cons.inputs.iter().any(|inp| {
+                if let InputRef::Strided {
+                    base,
+                    dim_strides,
+                    dim_shape,
+                } = &inp.input_ref
+                {
+                    let refs_our_group = base.0 >= group.base_id.0
+                        && base.0 < group.base_id.0 + group.count.max(1);
+                    refs_our_group
+                        && dim_strides.len() == 1
+                        && dim_strides[0] == 1
+                        && dim_shape.len() == 1
+                        && dim_shape[0] == u64::MAX
+                } else {
+                    false
+                }
+            });
+            if !feeds_elementwise {
+                continue;
+            }
+            aligned_splits.insert(gi, (cons_count, stride));
+            changed = true;
+        }
+        if !changed {
+            break;
+        }
+    }
+
     // Process groups in topological order (they're already sorted by index
     // which is topological order in NanoGraph).
     let mut sorted_indices = phase_group_indices.to_vec();
