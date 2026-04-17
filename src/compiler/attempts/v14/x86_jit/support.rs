@@ -26,9 +26,12 @@ pub fn check_supported(graph: &NanoGraph<'static, SystemPool>) -> Result<(), Str
     }
 
     for (gi, group) in graph.groups().iter().enumerate() {
-        // Phase 2b+2c sym support: Identity, Cast, Binary, Unary,
-        // and Select groups accept sym_dims. Reduce + IndirectLoad
-        // with sym_dims still fall back to pool_eval (later phases).
+        // Phase 3 sym support: Identity, Cast, Binary, Unary, Select,
+        // and Reduce groups accept sym_dims. IndirectLoad with
+        // sym_dims still falls back (later phase). Reduce + inline
+        // producer with sym_dims returns Err at emit time (cranelift
+        // fallback) — the outer-loop-only version of Reduce sym
+        // is handled here.
         if !group.sym_dims.is_empty() {
             if !matches!(
                 group.op,
@@ -36,11 +39,12 @@ pub fn check_supported(graph: &NanoGraph<'static, SystemPool>) -> Result<(), Str
                     | ScalarOp::Cast { .. }
                     | ScalarOp::Binary { .. }
                     | ScalarOp::Unary { .. }
-                    | ScalarOp::Select,
+                    | ScalarOp::Select
+                    | ScalarOp::Reduce { .. },
             ) {
                 return Err(format!(
                     "x86_jit: group {gi} op {:?} with sym_dims not yet supported \
-                     (Phase 2b/2c: Identity+Cast+Binary+Unary+Select only)",
+                     (Phase 3: Identity+Cast+Binary+Unary+Select+Reduce only)",
                     group.op
                 ));
             }

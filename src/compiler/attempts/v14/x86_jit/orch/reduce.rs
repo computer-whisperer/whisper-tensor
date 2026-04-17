@@ -51,11 +51,13 @@ const CODEC_SCRATCH: u8 = 8; // r8
 /// Scratch XMM for codec.
 const CODEC_XMM_SCRATCH: u8 = 1; // xmm1
 
+#[allow(clippy::too_many_arguments)]
 pub fn emit_reduce_group(
     asm: &mut Assembler,
     layout: &BufferLayout,
     graph: &NanoGraph<'static, SystemPool>,
     group: &AtomGroup<'static, SystemPool>,
+    gi: usize,
     kind: ReduceKind,
     reduce_count: u64,
     reduce_stride: i64,
@@ -103,72 +105,37 @@ pub fn emit_reduce_group(
     });
     let src_dtype = src_info_opt.as_ref().map_or(compute_dtype, |s| s.src_dtype);
 
-    if group.count == 1 {
-        emit_reduce_body(
-            asm,
-            layout,
-            &group.inputs[0].input_ref,
-            group.base_id,
-            group.atom_offset,
-            kind,
-            reduce_count,
-            k_bit_stride,
-            compute_dtype,
-            group.output_dtype,
-            repr,
-            n_bits,
-            src_dtype,
-            inline_producer,
-            IterVar::Const(group.atom_offset),
-            group.atom_offset,
-            addr_tables,
-            codec_tables,
-        )
-    } else {
-        let start = group.atom_offset as i64;
-        let end = (group.atom_offset + group.count) as i64;
-        if !(i32::MIN as i64..=i32::MAX as i64).contains(&end) {
-            return Err(format!(
-                "x86_jit reduce: loop end {end} doesn't fit in i32 — \
-                 falling back to pool_eval"
-            ));
-        }
-        dynasm!(asm
-            ; .arch x64
-            ; mov Rq(LOOP_VAR_REG), QWORD start
-        );
-        let loop_top = asm.new_dynamic_label();
-        let loop_exit = asm.new_dynamic_label();
-        dynasm!(asm
-            ; =>loop_top
-            ; cmp Rq(LOOP_VAR_REG), DWORD end as i32
-            ; jge =>loop_exit
-        );
-
-        emit_reduce_body(
-            asm,
-            layout,
-            &group.inputs[0].input_ref,
-            group.base_id,
-            group.atom_offset,
-            kind,
-            reduce_count,
-            k_bit_stride,
-            compute_dtype,
-            group.output_dtype,
-            repr,
-            n_bits,
-            src_dtype,
-            inline_producer,
-            IterVar::Reg(LOOP_VAR_REG),
-            group.atom_offset,
-            addr_tables,
-            codec_tables,
-        )?;
-
-        dynasm!(asm; add Rq(LOOP_VAR_REG), 1; jmp =>loop_top; =>loop_exit);
-        Ok(())
-    }
+    super::group::emit_atom_body_loop(
+        asm,
+        &layout.buffer_bases,
+        group.atom_offset,
+        group.count,
+        gi,
+        &layout.group_sym_dims[gi],
+        |asm, iter, sym_ctx| {
+            emit_reduce_body(
+                asm,
+                layout,
+                &group.inputs[0].input_ref,
+                group.base_id,
+                group.atom_offset,
+                kind,
+                reduce_count,
+                k_bit_stride,
+                compute_dtype,
+                group.output_dtype,
+                repr,
+                n_bits,
+                src_dtype,
+                inline_producer,
+                iter,
+                group.atom_offset,
+                sym_ctx,
+                addr_tables,
+                codec_tables,
+            )
+        },
+    )
 }
 
 struct ReduceSourceInfo {
@@ -235,6 +202,13 @@ fn resolve_reduce_source_info(
 }
 
 /// Emit one outer iteration of the Reduce body.
+///
+/// When `sym_ctx` is `Some`, every input/output address in this body
+/// is shifted by `sym_i * elem_bits` via the address layer, so the
+/// caller's sym inner loop visits each `sym_flat` slot of the atom's
+/// max-stride region. The inline-producer path doesn't yet support
+/// sym; sym_ctx.is_some() && inline_producer.is_some() returns Err
+/// and forces a cranelift fallback.
 #[allow(clippy::too_many_arguments)]
 fn emit_reduce_body(
     asm: &mut Assembler,
@@ -253,9 +227,17 @@ fn emit_reduce_body(
     inline_producer: Option<&AtomGroup<'static, SystemPool>>,
     iter: IterVar,
     atom_offset: u64,
+    sym_ctx: Option<super::address::SymCtx>,
     addr_tables: &mut AddressTables,
     codec_tables: &mut CodecTables,
 ) -> Result<(), String> {
+    if sym_ctx.is_some() && inline_producer.is_some() {
+        return Err(
+            "x86_jit reduce: sym_dims + reduce-fold inline producer not yet supported \
+             (Step 3 scope: non-inline only) — falling back to cranelift"
+                .to_string(),
+        );
+    }
     let acc_slot = match repr {
         ComputeRepr::F32 | ComputeRepr::F64 => CodecSlot::Xmm(FLT_SLOT_C),
         ComputeRepr::Int => CodecSlot::Gp(INT_SLOT_C),
@@ -414,7 +396,7 @@ fn emit_reduce_body(
             atom_offset,
             BIT_OFF,
             SCRATCH,
-            None,
+            sym_ctx,
             addr_tables,
         )?;
         let src_fast_reg = layout.buffer_bases.reg_for_opt(src_info.buffer_id);
@@ -509,7 +491,7 @@ fn emit_reduce_body(
         iter,
         BIT_OFF,
         SCRATCH,
-        None,
+        sym_ctx,
     )?;
     let dst_base = materialize_buffer_base(
         asm,

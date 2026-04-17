@@ -219,7 +219,7 @@ fn emit_loop_cmp_end(asm: &mut Assembler, end: i64) -> Result<(), String> {
 ///   strictly equivalent to a direct `body(asm, IterVar::Const(ao),
 ///   None)` call (no loop emitted).
 #[allow(clippy::too_many_arguments)]
-fn emit_atom_body_loop<F>(
+pub(super) fn emit_atom_body_loop<F>(
     asm: &mut Assembler,
     bases: &crate::compiler::attempts::v14::layout::BufferBases,
     atom_offset: u64,
@@ -531,6 +531,7 @@ pub fn emit_group(
             layout,
             graph,
             group,
+            gi,
             *kind,
             *reduce_count,
             *reduce_stride,
