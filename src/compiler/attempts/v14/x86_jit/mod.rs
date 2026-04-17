@@ -123,6 +123,7 @@ impl X86JitSpan {
                 &layout,
                 graph,
                 group,
+                gi,
                 placement,
                 &mut addr_tables,
                 &mut tables,
@@ -169,22 +170,45 @@ impl CompiledSpanFn for X86JitSpan {
     fn execute(
         &self,
         buffer_ptrs: &[*mut u8],
-        _bindings: &std::collections::HashMap<crate::nano_graph::pattern::GraphConstantId, u64>,
+        bindings: &std::collections::HashMap<crate::nano_graph::pattern::GraphConstantId, u64>,
     ) {
-        // Zero-body spans: the prologue/epilogue is the entire
-        // function and the argument array is unused.
-        //
-        // Sym-dim bindings are ignored here: the JIT path only runs
-        // on sym-free spans (the partitioner routes sym-touching
-        // spans to PoolEvalSpan). Phase 2 will emit dynamic loops
-        // keyed off `_bindings`.
-        let func: unsafe extern "C" fn(*const *mut u8) =
+        // Build the per-group sym_prods array. Each entry is the
+        // product of that group's `sym_dims` evaluated against the
+        // runtime bindings; sym-free groups yield 1. The JIT emits a
+        // lookup `sym_prods[gi]` when emitting a sym'd group's inner
+        // sym loop. Must be kept alive across the JIT call.
+        let sym_prods = self.build_sym_prods(bindings);
+        let func: unsafe extern "C" fn(*const *mut u8, *const u64) =
             unsafe { std::mem::transmute(self.code.ptr(self.entry)) };
         // SAFETY: bytes at `code.ptr(entry)` were emitted as a
-        // System V AMD64 function taking a `*const *mut u8` — a
-        // pointer to an array of buffer base pointers — and
-        // returning nothing. Each pointer in `buffer_ptrs` is valid
-        // for this call's duration per the executor's contract.
-        unsafe { func(buffer_ptrs.as_ptr()) };
+        // System V AMD64 function taking (`*const *mut u8`,
+        // `*const u64`) — a pointer to an array of buffer base
+        // pointers followed by a pointer to an array of per-group
+        // sym_prod values — and returning nothing. Each pointer in
+        // `buffer_ptrs` is valid for this call's duration per the
+        // executor's contract; `sym_prods` is a local we own.
+        unsafe { func(buffer_ptrs.as_ptr(), sym_prods.as_ptr()) };
+    }
+}
+
+impl X86JitSpan {
+    /// Compute the per-group `sym_prod` vector the JIT expects at
+    /// execute time. Indexed by the graph's group index; sym-free
+    /// groups get 1.
+    pub(crate) fn build_sym_prods(
+        &self,
+        bindings: &std::collections::HashMap<crate::nano_graph::pattern::GraphConstantId, u64>,
+    ) -> Vec<u64> {
+        self.layout
+            .group_sym_dims
+            .iter()
+            .map(|sym_dims| {
+                let mut prod: u64 = 1;
+                for gc in sym_dims {
+                    prod = prod.saturating_mul(*bindings.get(gc).unwrap_or(&1));
+                }
+                prod.max(1)
+            })
+            .collect()
     }
 }

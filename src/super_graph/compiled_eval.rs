@@ -518,15 +518,12 @@ fn compile_phase_parallel(
                 .iter()
                 .any(|g| matches!(g.op, crate::nano_graph::ops::ScalarOp::OpaqueOutput { .. }));
 
-            // Phase 1 sym-dim gate: any group with non-empty sym_dims
-            // routes the span through PoolEvalSpan. The JIT path has no
-            // sym-aware loop emission yet; routing here ensures sym
-            // graphs run correctly through the hybrid fallback until
-            // Phase 2 teaches x86_jit to emit dynamic sym loops.
-            let has_sym = span.graph.groups().iter().any(|g| !g.sym_dims.is_empty());
-
+            // Sym-dim routing: the JIT path rejects unsupported sym
+            // cases via `support::check_supported` (Phase 1: Identity
+            // only; other ops with sym_dims route to PoolEvalSpan via
+            // the per-span fallback). Opaque ops and graph-level
+            // opaque spans remain hard-routed to PoolEvalSpan.
             if has_opaque
-                || has_sym
                 || (span.graph.groups().is_empty() && !span.graph.opaque_ops().is_empty())
             {
                 Ok(Box::new(PoolEvalSpan::new(

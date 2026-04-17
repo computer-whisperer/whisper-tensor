@@ -125,6 +125,7 @@ fn broadcast_returns_constant_bit_offset() {
             0,
             RAX,
             SCRATCH,
+            None,
             &mut AddressTables::new(),
         )
         .expect("Broadcast address emit");
@@ -154,6 +155,7 @@ fn explicit_single_atom_returns_constant_bit_offset() {
             0,
             RAX,
             SCRATCH,
+            None,
             &mut AddressTables::new(),
         )
         .expect("Explicit single emit");
@@ -179,6 +181,7 @@ fn strided_1d_const_iter() {
                 0,
                 RAX,
                 SCRATCH,
+                None,
                 &mut AddressTables::new(),
             )
             .expect("Strided 1D const emit");
@@ -203,6 +206,7 @@ fn strided_1d_reg_iter_stride_one() {
             0,
             RAX,
             SCRATCH,
+            None,
             &mut AddressTables::new(),
         )
         .expect("Strided 1D reg emit");
@@ -232,6 +236,7 @@ fn strided_1d_reg_iter_stride_two() {
             0,
             RAX,
             SCRATCH,
+            None,
             &mut AddressTables::new(),
         )
         .expect("Strided 1D stride-2 emit");
@@ -274,6 +279,7 @@ fn strided_1d_const_with_atom_offset() {
             4, // atom_offset — non-zero, but base is in layout
             RAX,
             SCRATCH,
+            None,
             &mut AddressTables::new(),
         )
         .expect("Strided 1D const+atom_offset emit");
@@ -306,6 +312,7 @@ fn strided_1d_reg_iter_with_bool_input() {
             0,
             RAX,
             SCRATCH,
+            None,
             &mut AddressTables::new(),
         )
         .expect("Bool affine reg emit");
@@ -334,6 +341,7 @@ fn rejects_register_aliasing_for_reg_iter() {
         0,
         RAX,
         SCRATCH,
+        None,
         &mut AddressTables::new(),
     )
     .expect_err("dst aliasing iter should reject");
@@ -409,6 +417,7 @@ fn strided_2d_modular_const() {
                 0,
                 RAX,
                 SCRATCH,
+                None,
                 &mut AddressTables::new(),
             )
             .expect("modular const emit");
@@ -435,6 +444,7 @@ fn strided_2d_modular_reg_power_of_two() {
             0,
             ND_DST,
             SCRATCH,
+            None,
             &mut AddressTables::new(),
         )
         .expect("modular reg emit");
@@ -465,6 +475,7 @@ fn strided_2d_modular_reg_non_power_of_two() {
             0,
             ND_DST,
             SCRATCH,
+            None,
             &mut AddressTables::new(),
         )
         .expect("modular reg non-pow2 emit");
@@ -509,6 +520,7 @@ fn strided_2d_broadcast_reg() {
             0,
             ND_DST,
             SCRATCH,
+            None,
             &mut AddressTables::new(),
         )
         .expect("strided_broadcast reg emit");
@@ -546,6 +558,7 @@ fn explicit_multi_const() {
                 0,
                 RAX,
                 SCRATCH,
+                None,
                 &mut AddressTables::new(),
             )
             .expect("explicit multi const emit");
@@ -587,6 +600,7 @@ fn explicit_multi_reg() {
             0,
             RAX,
             SCRATCH,
+            None,
             &mut tables,
         )
         .expect("explicit multi reg emit");

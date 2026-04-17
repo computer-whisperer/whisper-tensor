@@ -93,6 +93,27 @@ pub enum IterVar {
     Reg(u8),
 }
 
+/// Per-call sym-loop context threaded through the address layer.
+///
+/// When [`emit_compute_bit_offset`] receives `Some(SymCtx)`, it
+/// adds `sym_i * info.elem_bits` (or `info.elem_bits / 8` for the
+/// byte-aligned fast path) to the atom bit offset after the atom
+/// term is computed. `sym_i` is loaded from `[rsp + sym_i_rsp_off]`
+/// — the caller (the atom-body loop skeleton in `orch::group`)
+/// reserves that stack slot and increments it once per inner sym
+/// iteration. `scratch_reg` is reused for the `mov`/`imul`
+/// sequence, so it must still be dead at the post-dispatch point
+/// (it is, at every existing call site).
+///
+/// Sym-free groups pass `None` — no sym term is emitted and the
+/// address layer behaves identically to the pre-sym version.
+#[derive(Clone, Copy, Debug)]
+pub struct SymCtx {
+    /// Stack offset (relative to the current `rsp`) where the inner
+    /// sym loop stores its `sym_i` counter as a `u64`.
+    pub sym_i_rsp_off: i32,
+}
+
 /// Information returned by [`emit_compute_bit_offset`] so the caller
 /// knows how to read the bits the offset addresses.
 #[derive(Clone, Copy, Debug)]
@@ -137,6 +158,7 @@ pub struct AddressInfo {
 /// - Missing slot in the layout (typically a layout bug)
 /// - Register-aliasing violations
 /// - Negative absolute bit offsets (typically an InputRef stride bug)
+#[allow(clippy::too_many_arguments)]
 pub fn emit_compute_bit_offset(
     asm: &mut Assembler,
     layout: &BufferLayout,
@@ -145,20 +167,21 @@ pub fn emit_compute_bit_offset(
     atom_offset: u64,
     dst_bit_reg: u8,
     scratch_reg: u8,
+    sym_ctx: Option<SymCtx>,
     tables: &mut AddressTables,
 ) -> Result<AddressInfo, String> {
-    match input {
-        InputRef::Broadcast(atom_id) => emit_constant_atom(asm, layout, *atom_id, dst_bit_reg),
+    let info = match input {
+        InputRef::Broadcast(atom_id) => emit_constant_atom(asm, layout, *atom_id, dst_bit_reg)?,
 
         InputRef::Explicit(ids) if ids.len() <= 1 => {
             if ids.is_empty() {
                 return Err("address: empty Explicit InputRef".to_string());
             }
-            emit_constant_atom(asm, layout, ids[0], dst_bit_reg)
+            emit_constant_atom(asm, layout, ids[0], dst_bit_reg)?
         }
 
         InputRef::Explicit(ids) => {
-            emit_explicit_multi(asm, layout, ids, iter, dst_bit_reg, scratch_reg, tables)
+            emit_explicit_multi(asm, layout, ids, iter, dst_bit_reg, scratch_reg, tables)?
         }
 
         InputRef::Strided {
@@ -174,7 +197,7 @@ pub fn emit_compute_bit_offset(
             atom_offset,
             dst_bit_reg,
             scratch_reg,
-        ),
+        )?,
 
         InputRef::Strided {
             base,
@@ -190,8 +213,69 @@ pub fn emit_compute_bit_offset(
             atom_offset,
             dst_bit_reg,
             scratch_reg,
-        ),
+        )?,
+    };
+
+    apply_sym_offset(asm, sym_ctx, &info, dst_bit_reg, scratch_reg)?;
+    Ok(info)
+}
+
+/// Add `sym_i * step` to `dst_bit_reg` when a sym loop is active.
+///
+/// `step` is `info.n_bits` (bit-mode offsets) or `info.n_bits / 8`
+/// (byte-aligned fast-path offsets). `sym_i` is loaded from
+/// `[rsp + ctx.sym_i_rsp_off]`; `scratch_reg` is clobbered but was
+/// already live as a scratch in the preceding address computation
+/// and is dead at every caller's post-return point.
+///
+/// No-op when `sym_ctx` is `None` (sym-free groups); this keeps the
+/// historical sym-free code path identical at asm level.
+fn apply_sym_offset(
+    asm: &mut Assembler,
+    sym_ctx: Option<SymCtx>,
+    info: &AddressInfo,
+    dst_bit_reg: u8,
+    scratch_reg: u8,
+) -> Result<(), String> {
+    apply_sym_offset_pub(asm, sym_ctx, info, dst_bit_reg, scratch_reg)
+}
+
+/// Module-visible wrapper so `orch::group::emit_output_bit_offset`
+/// (which lives in a sibling module but computes an address outside
+/// the `emit_compute_bit_offset` dispatcher) can reuse the same
+/// sym-offset emission without duplicating the code.
+pub(super) fn apply_sym_offset_pub(
+    asm: &mut Assembler,
+    sym_ctx: Option<SymCtx>,
+    info: &AddressInfo,
+    dst_bit_reg: u8,
+    scratch_reg: u8,
+) -> Result<(), String> {
+    let Some(ctx) = sym_ctx else {
+        return Ok(());
+    };
+    let step: i32 = if info.byte_aligned {
+        if info.n_bits % 8 != 0 {
+            return Err(format!(
+                "address: byte_aligned slot with n_bits={} not /8 — sym offset \
+                 would desync against caller's byte-offset expectation",
+                info.n_bits
+            ));
+        }
+        (info.n_bits / 8) as i32
+    } else {
+        info.n_bits as i32
+    };
+    if step == 0 {
+        return Ok(());
     }
+    dynasm!(asm
+        ; .arch x64
+        ; mov Rq(scratch_reg), QWORD [rsp + ctx.sym_i_rsp_off]
+        ; imul Rq(scratch_reg), Rq(scratch_reg), step
+        ; add Rq(dst_bit_reg), Rq(scratch_reg)
+    );
+    Ok(())
 }
 
 /// Emit a constant bit-offset materialization for a single atom.

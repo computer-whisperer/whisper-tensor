@@ -413,6 +413,7 @@ fn emit_reduce_body(
             atom_offset,
             BIT_OFF,
             SCRATCH,
+            None,
             addr_tables,
         )?;
         let src_fast_reg = layout.buffer_bases.reg_for_opt(src_info.buffer_id);
@@ -507,6 +508,7 @@ fn emit_reduce_body(
         iter,
         BIT_OFF,
         SCRATCH,
+        None,
     )?;
     let dst_base = materialize_buffer_base(
         asm,

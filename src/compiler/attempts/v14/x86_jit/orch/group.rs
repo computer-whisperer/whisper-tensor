@@ -176,6 +176,168 @@ fn emit_loop_cmp_end(asm: &mut Assembler, end: i64) -> Result<(), String> {
     Ok(())
 }
 
+/// Shared atom-loop skeleton used by every per-atom op emitter
+/// (Identity, Cast, Binary, Unary, Select, and the literal-copy
+/// fallback). Emits the outer atom loop over `[atom_offset,
+/// atom_offset + count)` with `r13` as induction register, and —
+/// when `sym_dims` is non-empty — wraps the body with an inner sym
+/// loop driven by `sym_prods[gi]`.
+///
+/// The body closure emits one per-iteration work unit (compute
+/// input addresses, load, compute, store). It is called **once at
+/// emission time**; the emitted asm executes it atom*sym times at
+/// runtime. The closure receives the current `IterVar` and an
+/// `Option<SymCtx>` — when `Some`, every address call inside the
+/// body must forward that `SymCtx` to the address layer so the
+/// returned bit offset includes `sym_i * elem_bits`.
+///
+/// # Stack frame
+///
+/// Sym-free (`sym_dims.is_empty()`): no stack usage; the shape
+/// matches the historical open-coded atom loop byte-for-byte.
+///
+/// Sym (`sym_dims` non-empty): reserves 16 bytes at entry and
+/// releases them at exit. Layout under the body:
+///
+/// ```text
+/// [rsp + 0]       — sym_i (u64, inner-loop counter)
+/// [rsp + 8]       — sym_prod cached from sym_prods[gi]
+/// [rsp + 16 + …]  — prologue-saved registers (shift by +16 from
+///                   the prologue's view; use
+///                   `prologue::sym_prods_stack_offset(bases) + 16`
+///                   to recover the saved sym_prods pointer).
+/// ```
+///
+/// # Guarantees
+///
+/// - The body closure never sees a stale `rsp` — the 16-byte
+///   reservation is set up before the atom loop and released after.
+/// - The sym loop compares `sym_i` against the cached sym_prod via
+///   `[rsp + 8]`, so address-layer sym adjustments and this loop
+///   agree on the same `[rsp + 0]` slot.
+/// - For `count == 1` and `sym_dims.is_empty()`, this function is
+///   strictly equivalent to a direct `body(asm, IterVar::Const(ao),
+///   None)` call (no loop emitted).
+#[allow(clippy::too_many_arguments)]
+fn emit_atom_body_loop<F>(
+    asm: &mut Assembler,
+    bases: &crate::compiler::attempts::v14::layout::BufferBases,
+    atom_offset: u64,
+    count: u64,
+    gi: usize,
+    sym_dims: &[crate::nano_graph::pattern::GraphConstantId],
+    mut body: F,
+) -> Result<(), String>
+where
+    F: FnMut(
+        &mut Assembler,
+        IterVar,
+        Option<super::address::SymCtx>,
+    ) -> Result<(), String>,
+{
+    if count == 0 {
+        return Ok(());
+    }
+
+    let has_sym = !sym_dims.is_empty();
+
+    // Reserve 16 bytes and cache sym_prods[gi] into [rsp+8] when we
+    // need a sym inner loop. The saved sym_prods pointer (from rsi)
+    // sits at a fixed prologue offset that shifts by +16 because of
+    // this reservation.
+    if has_sym {
+        let gi_i32: i32 = (gi as i64)
+            .try_into()
+            .map_err(|_| format!("x86_jit emit_atom_body_loop: gi {gi} exceeds i32"))?;
+        let gi_byte_off: i32 = gi_i32
+            .checked_mul(8)
+            .ok_or_else(|| format!("x86_jit emit_atom_body_loop: gi*8 overflow"))?;
+        let saved_rsi_off_after_sub = super::super::prologue::sym_prods_stack_offset(bases)
+            .checked_add(16)
+            .ok_or_else(|| format!("x86_jit emit_atom_body_loop: rsi offset overflow"))?;
+        dynasm!(asm
+            ; .arch x64
+            ; sub rsp, 16
+            ; mov rdi, QWORD [rsp + saved_rsi_off_after_sub]
+            ; mov rdi, QWORD [rdi + gi_byte_off]
+            ; mov QWORD [rsp + 8], rdi
+        );
+    }
+
+    let end = (atom_offset + count) as i64;
+    if !(i32::MIN as i64..=i32::MAX as i64).contains(&end) {
+        if has_sym {
+            dynasm!(asm; .arch x64; add rsp, 16);
+        }
+        return Err(format!(
+            "x86_jit: loop end {end} doesn't fit in i32 — falling back to pool_eval"
+        ));
+    }
+
+    let use_atom_loop = count > 1;
+    let atom_top = asm.new_dynamic_label();
+    let atom_end = asm.new_dynamic_label();
+
+    if use_atom_loop {
+        dynasm!(asm
+            ; .arch x64
+            ; mov Rq(LOOP_VAR_REG), QWORD atom_offset as i64
+            ; =>atom_top
+            ; cmp Rq(LOOP_VAR_REG), DWORD end as i32
+            ; jge =>atom_end
+        );
+    }
+
+    let iter = if use_atom_loop {
+        IterVar::Reg(LOOP_VAR_REG)
+    } else {
+        IterVar::Const(atom_offset)
+    };
+
+    if has_sym {
+        let sym_top = asm.new_dynamic_label();
+        let sym_end = asm.new_dynamic_label();
+        dynasm!(asm
+            ; .arch x64
+            ; mov QWORD [rsp + 0], 0
+            ; =>sym_top
+            ; mov rdi, QWORD [rsp + 0]
+            ; cmp rdi, QWORD [rsp + 8]
+            ; jge =>sym_end
+        );
+        body(
+            asm,
+            iter,
+            Some(super::address::SymCtx { sym_i_rsp_off: 0 }),
+        )?;
+        dynasm!(asm
+            ; .arch x64
+            ; inc QWORD [rsp + 0]
+            ; jmp =>sym_top
+            ; =>sym_end
+        );
+    } else {
+        body(asm, iter, None)?;
+    }
+
+    if use_atom_loop {
+        dynasm!(asm
+            ; .arch x64
+            ; add Rq(LOOP_VAR_REG), 1
+            ; jmp =>atom_top
+            ; =>atom_end
+        );
+    }
+
+    if has_sym {
+        dynasm!(asm
+            ; .arch x64
+            ; add rsp, 16
+        );
+    }
+    Ok(())
+}
+
 /// Emit the compute portion of any inlinable op (Binary, Unary,
 /// Select, Identity, Cast) for a single iteration at index `iter`.
 ///
@@ -278,13 +440,18 @@ pub fn emit_group(
     layout: &BufferLayout,
     graph: &NanoGraph<'static, SystemPool>,
     group: &AtomGroup<'static, SystemPool>,
+    gi: usize,
     placement: &AtomPlacementMap,
     addr_tables: &mut AddressTables,
     codec_tables: &mut CodecTables,
 ) -> Result<(), String> {
     match &group.op {
-        ScalarOp::Identity => emit_identity_group(asm, layout, group, addr_tables, codec_tables),
-        ScalarOp::Cast { .. } => emit_cast_group(asm, layout, group, addr_tables, codec_tables),
+        ScalarOp::Identity => {
+            emit_identity_group(asm, layout, group, gi, addr_tables, codec_tables)
+        }
+        ScalarOp::Cast { .. } => {
+            emit_cast_group(asm, layout, group, gi, addr_tables, codec_tables)
+        }
         ScalarOp::Literal(_) | ScalarOp::LiteralSpan(_) => {
             // A literal group's source bytes live in the plan-wide
             // literal buffer at `placement.literal_sources[base]`,
@@ -375,6 +542,7 @@ fn emit_identity_group(
     asm: &mut Assembler,
     layout: &BufferLayout,
     group: &AtomGroup<'static, SystemPool>,
+    gi: usize,
     tables: &mut AddressTables,
     codec_tables: &mut CodecTables,
 ) -> Result<(), String> {
@@ -389,10 +557,10 @@ fn emit_identity_group(
     // route through the Cast path which does decode(src) → encode(dst).
     let src_dtype = lookup_input_dtype(layout, &group.inputs[0].input_ref, group.atom_offset)?;
     if src_dtype != group.output_dtype {
-        return emit_cast_group(asm, layout, group, tables, codec_tables);
+        return emit_cast_group(asm, layout, group, gi, tables, codec_tables);
     }
 
-    if group.count == 1 {
+    if group.count == 1 && group.sym_dims.is_empty() {
         emit_identity_iter(
             asm,
             layout,
@@ -401,6 +569,7 @@ fn emit_identity_group(
             group.atom_offset,
             IterVar::Const(group.atom_offset),
             group.atom_offset,
+            None,
             tables,
         )
     } else {
@@ -412,6 +581,8 @@ fn emit_identity_group(
             group.atom_offset,
             group.atom_offset,
             group.count,
+            gi,
+            &layout.group_sym_dims[gi],
             tables,
         )
     }
@@ -419,6 +590,13 @@ fn emit_identity_group(
 
 /// Emit one iteration of the Identity body: load raw bits from the
 /// source bit offset, then store them at the destination bit offset.
+///
+/// `sym_ctx` threads sym-loop context through to the address layer.
+/// When `Some`, `emit_compute_bit_offset` / `emit_output_bit_offset`
+/// emit a `sym_i * elem_bits` add against the atom bit offset so the
+/// load/store land inside the correct sym slot of the atom's
+/// max-stride region.
+#[allow(clippy::too_many_arguments)]
 fn emit_identity_iter(
     asm: &mut Assembler,
     layout: &BufferLayout,
@@ -427,6 +605,7 @@ fn emit_identity_iter(
     output_atom_offset: u64,
     iter: IterVar,
     atom_offset: u64,
+    sym_ctx: Option<super::address::SymCtx>,
     tables: &mut AddressTables,
 ) -> Result<(), String> {
     // 1. Compute src bit offset → r10.
@@ -438,6 +617,7 @@ fn emit_identity_iter(
         atom_offset,
         BIT_OFF_REG,
         ADDR_SCRATCH,
+        sym_ctx,
         tables,
     )?;
 
@@ -465,6 +645,7 @@ fn emit_identity_iter(
         iter,
         BIT_OFF_REG,
         ADDR_SCRATCH,
+        sym_ctx,
     )?;
 
     if src_info.n_bits != dst_info.n_bits {
@@ -508,6 +689,12 @@ fn emit_identity_iter(
 ///     jmp loop_top
 /// loop_end:
 /// ```
+///
+/// When `sym_dims` is non-empty the body is wrapped with an inner
+/// sym loop via [`emit_atom_body_loop`]; the `sym_ctx` threaded
+/// through to `emit_identity_iter` tells the address layer to add
+/// `sym_i * elem_bits` after each atom-bit-offset computation.
+#[allow(clippy::too_many_arguments)]
 fn emit_identity_loop(
     asm: &mut Assembler,
     layout: &BufferLayout,
@@ -516,43 +703,31 @@ fn emit_identity_loop(
     output_atom_offset: u64,
     atom_offset: u64,
     count: u64,
+    gi: usize,
+    sym_dims: &[crate::nano_graph::pattern::GraphConstantId],
     tables: &mut AddressTables,
 ) -> Result<(), String> {
-    let start = atom_offset as i64;
-    let end = (atom_offset + count) as i64;
-
-    dynasm!(asm
-        ; .arch x64
-        ; mov Rq(LOOP_VAR_REG), QWORD start
-    );
-
-    let loop_top = asm.new_dynamic_label();
-    let loop_exit = asm.new_dynamic_label();
-
-    dynasm!(asm; =>loop_top);
-    emit_loop_cmp_end(asm, end)?;
-    dynasm!(asm; jge =>loop_exit);
-
-    // Inside the loop, the iter register IS the absolute intra-slab
-    // index — pass atom_offset so address.rs can resolve split-group slots.
-    emit_identity_iter(
+    emit_atom_body_loop(
         asm,
-        layout,
-        src_input,
-        output_base,
-        output_atom_offset,
-        IterVar::Reg(LOOP_VAR_REG),
+        &layout.buffer_bases,
         atom_offset,
-        tables,
-    )?;
-
-    dynasm!(asm
-        ; add Rq(LOOP_VAR_REG), 1
-        ; jmp =>loop_top
-        ; =>loop_exit
-    );
-
-    Ok(())
+        count,
+        gi,
+        sym_dims,
+        |asm, iter, sym_ctx| {
+            emit_identity_iter(
+                asm,
+                layout,
+                src_input,
+                output_base,
+                output_atom_offset,
+                iter,
+                atom_offset,
+                sym_ctx,
+                tables,
+            )
+        },
+    )
 }
 
 // ─── Literal→output copy ────────────────────────────────────────────
@@ -760,10 +935,17 @@ fn emit_linear_bit_offset(
 
 /// Emit a Cast group: load raw bits, decode via src dtype, optionally
 /// convert between compute reprs, encode via dst dtype, store raw bits.
+///
+/// `gi` is accepted to match the sym-aware calling convention used
+/// by the shared atom-loop helper. Cast doesn't emit a sym loop yet
+/// (Step 2 work); groups with `sym_dims` are rejected upstream in
+/// `support.rs`.
+#[allow(clippy::too_many_arguments)]
 fn emit_cast_group(
     asm: &mut Assembler,
     layout: &BufferLayout,
     group: &AtomGroup<'static, SystemPool>,
+    _gi: usize,
     addr_tables: &mut AddressTables,
     codec_tables: &mut CodecTables,
 ) -> Result<(), String> {
@@ -835,6 +1017,7 @@ fn emit_cast_compute(
         atom_offset,
         BIT_OFF_REG,
         ADDR_SCRATCH,
+        None,
         addr_tables,
     )?;
     let src_base = bbase(asm, layout, src_info.buffer_id);
@@ -1319,6 +1502,7 @@ fn emit_load_decode_input(
         atom_offset,
         BIT_OFF_REG,
         ADDR_SCRATCH,
+        None,
         addr_tables,
     )?;
     let base = bbase(asm, layout, info.buffer_id);
@@ -1421,6 +1605,7 @@ fn emit_encode_store_output(
         iter,
         BIT_OFF_REG,
         ADDR_SCRATCH,
+        None,
     )?;
     let base = bbase(asm, layout, dst_info.buffer_id);
 
@@ -1901,6 +2086,7 @@ fn emit_select_compute(
         atom_offset,
         BIT_OFF_REG,
         ADDR_SCRATCH,
+        None,
         addr_tables,
     )?;
     let __bbase4 = bbase(asm, layout, cond_info.buffer_id);
@@ -2233,6 +2419,7 @@ fn emit_indirect_load_iter(
         atom_offset,
         BIT_OFF_REG,
         ADDR_SCRATCH,
+        None,
         addr_tables,
     )?;
     let __bbase6 = bbase(asm, layout, idx_info.buffer_id);
@@ -2379,6 +2566,7 @@ fn emit_indirect_load_iter(
 /// compensates: `store_base = slot.byte_offset() - atom_offset * elem_bytes`.
 /// We do the same in bits so that `i = atom_offset` maps to
 /// `slot.bit_offset`.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn emit_output_bit_offset(
     asm: &mut Assembler,
     layout: &BufferLayout,
@@ -2387,6 +2575,7 @@ pub(super) fn emit_output_bit_offset(
     iter: IterVar,
     dst_bit_reg: u8,
     scratch_reg: u8,
+    sym_ctx: Option<super::address::SymCtx>,
 ) -> Result<super::address::AddressInfo, String> {
     let (slot, elem_idx) = layout
         .find(group_base_id)
@@ -2447,6 +2636,8 @@ pub(super) fn emit_output_bit_offset(
             }
         }
     }
+
+    super::address::apply_sym_offset_pub(asm, sym_ctx, &info, dst_bit_reg, scratch_reg)?;
     Ok(info)
 }
 

@@ -251,6 +251,13 @@ pub struct BufferLayout {
     /// producer, this is `Some(producer_index)`. The producer's expression is
     /// evaluated in the reduce's inner k-loop instead of loaded from memory.
     pub inlines_producer: Vec<Option<usize>>,
+    /// Per-group sym_dims lists (clone of `group.sym_dims`). The JIT
+    /// execute path walks this to build the per-group `sym_prods`
+    /// array passed to the compiled function as its second argument.
+    /// Separate from `AtomGroup::sym_dims` so `BufferLayout` stays
+    /// self-contained (no borrow back into the graph at execute
+    /// time).
+    pub group_sym_dims: Vec<Vec<crate::nano_graph::pattern::GraphConstantId>>,
 }
 
 impl BufferLayout {
@@ -263,6 +270,7 @@ impl BufferLayout {
             group_use_counts: Vec::new(),
             inlinable: Vec::new(),
             inlines_producer: Vec::new(),
+            group_sym_dims: Vec::new(),
         }
     }
 
@@ -1096,6 +1104,12 @@ pub fn compute_layout(
     used_ids.dedup();
     let buffer_bases = BufferBases::assign(&used_ids)?;
 
+    let group_sym_dims: Vec<Vec<crate::nano_graph::pattern::GraphConstantId>> = graph
+        .groups()
+        .iter()
+        .map(|g| g.sym_dims.clone())
+        .collect();
+
     Ok(BufferLayout {
         total_bytes: allocator.watermark,
         slots: all_slots,
@@ -1103,6 +1117,7 @@ pub fn compute_layout(
         group_use_counts: use_counts,
         inlinable,
         inlines_producer,
+        group_sym_dims,
     })
 }
 /// Read a NumericScalar from raw bytes in a given dtype.
