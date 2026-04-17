@@ -178,16 +178,22 @@ impl CompiledSpanFn for X86JitSpan {
         // lookup `sym_prods[gi]` when emitting a sym'd group's inner
         // sym loop. Must be kept alive across the JIT call.
         let sym_prods = self.build_sym_prods(bindings);
-        let func: unsafe extern "C" fn(*const *mut u8, *const u64) =
+        // Build the gc_values array indexed by GraphConstantId.0. The
+        // JIT reads `gc_values[gc.0]` when emitting GcLiteral ops
+        // (runtime-resolved scalar constants).
+        let gc_values = self.build_gc_values(bindings);
+        let func: unsafe extern "C" fn(*const *mut u8, *const u64, *const u64) =
             unsafe { std::mem::transmute(self.code.ptr(self.entry)) };
         // SAFETY: bytes at `code.ptr(entry)` were emitted as a
         // System V AMD64 function taking (`*const *mut u8`,
-        // `*const u64`) — a pointer to an array of buffer base
-        // pointers followed by a pointer to an array of per-group
-        // sym_prod values — and returning nothing. Each pointer in
+        // `*const u64`, `*const u64`) — a pointer to an array of
+        // buffer base pointers followed by two pointers to arrays
+        // (per-group sym_prod values, and gc_values indexed by
+        // GraphConstantId) — and returning nothing. Each pointer in
         // `buffer_ptrs` is valid for this call's duration per the
-        // executor's contract; `sym_prods` is a local we own.
-        unsafe { func(buffer_ptrs.as_ptr(), sym_prods.as_ptr()) };
+        // executor's contract; `sym_prods` and `gc_values` are locals
+        // we own.
+        unsafe { func(buffer_ptrs.as_ptr(), sym_prods.as_ptr(), gc_values.as_ptr()) };
     }
 }
 
@@ -210,5 +216,22 @@ impl X86JitSpan {
                 prod.max(1)
             })
             .collect()
+    }
+
+    /// Build the flat gc_values array the JIT indexes by
+    /// `GraphConstantId.0`. Sized to `max(gc.0) + 1` over the
+    /// bindings; unbound slots default to 0. Matches pool_eval's
+    /// access pattern (`gc_values[gc.0 as usize]`).
+    pub(crate) fn build_gc_values(
+        &self,
+        bindings: &std::collections::HashMap<crate::nano_graph::pattern::GraphConstantId, u64>,
+    ) -> Vec<u64> {
+        let max_gc = bindings.keys().map(|gc| gc.0).max().unwrap_or(0);
+        let len = max_gc as usize + 1;
+        let mut out = vec![0u64; len];
+        for (gc, v) in bindings {
+            out[gc.0 as usize] = *v;
+        }
+        out
     }
 }

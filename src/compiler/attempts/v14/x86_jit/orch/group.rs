@@ -518,6 +518,9 @@ pub fn emit_group(
             codec_tables,
         ),
         ScalarOp::Select => emit_select_group(asm, layout, group, gi, addr_tables, codec_tables),
+        ScalarOp::GcLiteral(gc) => {
+            emit_gc_literal_group(asm, layout, group, gi, *gc, codec_tables)
+        }
         ScalarOp::IndirectLoad { table_base, .. } => {
             emit_indirect_load_group(
                 asm,
@@ -946,6 +949,120 @@ fn emit_linear_bit_offset(
             }
         }
     }
+}
+
+// ─── GcLiteral emission ────────────────────────────────────────────
+//
+// Runtime-resolved scalar constant: the group writes the u64 value at
+// `gc_values[gc.0]` (cast to `output_dtype`) into every (atom, sym)
+// slot. `gc_values` is passed as the third pointer arg to the JIT
+// function and saved to the stack by [`super::super::prologue`].
+// Each iteration reloads the pointer + value (two movs) rather than
+// stashing in a dedicated register — this is a rare op and the extra
+// loads come straight out of L1.
+
+/// Emit a GcLiteral group.
+fn emit_gc_literal_group(
+    asm: &mut Assembler,
+    layout: &BufferLayout,
+    group: &AtomGroup<'static, SystemPool>,
+    gi: usize,
+    gc: crate::nano_graph::pattern::GraphConstantId,
+    codec_tables: &mut CodecTables,
+) -> Result<(), String> {
+    if !group.inputs.is_empty() {
+        return Err(format!(
+            "GcLiteral group has {} inputs, expected 0",
+            group.inputs.len()
+        ));
+    }
+    let output_dtype = group.output_dtype;
+    let out_repr = ComputeRepr::for_dtype(output_dtype);
+    let has_sym = !layout.group_sym_dims[gi].is_empty();
+    // emit_atom_body_loop reserves 16 bytes on the stack when it
+    // emits its inner sym loop (sym_i at [rsp+0], cached sym_prod at
+    // [rsp+8]). All [rsp + prologue_offset] references inside that
+    // body need `+ 16` to account for the reservation; sym-free
+    // groups skip the reservation and use the prologue offset
+    // directly.
+    let saved_rdx_off_base =
+        super::super::prologue::gc_values_stack_offset(&layout.buffer_bases);
+    let saved_rdx_off: i32 = if has_sym {
+        saved_rdx_off_base
+            .checked_add(16)
+            .ok_or_else(|| "x86_jit GcLiteral: gc_values stack offset overflow".to_string())?
+    } else {
+        saved_rdx_off_base
+    };
+    let gc_byte_off: i32 = (gc.0 as i64)
+        .checked_mul(8)
+        .and_then(|v| i32::try_from(v).ok())
+        .ok_or_else(|| format!("x86_jit GcLiteral: gc.0={} byte offset overflow", gc.0))?;
+
+    emit_atom_body_loop(
+        asm,
+        &layout.buffer_bases,
+        group.atom_offset,
+        group.count,
+        gi,
+        &layout.group_sym_dims[gi],
+        |asm, iter, sym_ctx| {
+            // 1. Load gc_values[gc.0] → rax.
+            //    mov rdi, [rsp + saved_rdx_off]   ; rdi = gc_values_ptr
+            //    mov rax, [rdi + gc.0 * 8]        ; rax = u64 value
+            dynasm!(asm
+                ; .arch x64
+                ; mov rdi, QWORD [rsp + saved_rdx_off]
+                ; mov Rq(RAW_REG), QWORD [rdi + gc_byte_off]
+            );
+
+            // 2. Cast u64 → compute repr for output_dtype.
+            //    NumericDType::U64 compute repr is Int, so for Int
+            //    output we already have the value in the right form.
+            //    For Float output we need an int→float conversion.
+            let src_repr = ComputeRepr::Int;
+            match out_repr {
+                ComputeRepr::F32 => {
+                    dynasm!(asm
+                        ; .arch x64
+                        ; vcvtsi2ss Rx(FLT_SLOT), Rx(FLT_SLOT), Rq(RAW_REG)
+                    );
+                }
+                ComputeRepr::F64 => {
+                    dynasm!(asm
+                        ; .arch x64
+                        ; vcvtsi2sd Rx(FLT_SLOT), Rx(FLT_SLOT), Rq(RAW_REG)
+                    );
+                }
+                ComputeRepr::Int => {
+                    // rax already holds the value.
+                    let _ = src_repr;
+                }
+            }
+
+            // 3. Encode + compute output address + store.
+            let encode_slot = match out_repr {
+                ComputeRepr::F32 | ComputeRepr::F64 => CodecSlot::Xmm(FLT_SLOT),
+                ComputeRepr::Int => CodecSlot::Gp(RAW_REG),
+            };
+            emit_encode_store_output(
+                asm,
+                layout,
+                output_dtype,
+                encode_slot,
+                group.base_id,
+                group.atom_offset,
+                iter,
+                sym_ctx,
+            )?;
+
+            // Suppress unused-variable warning for `codec_tables` —
+            // we don't need it in this path (no decode table lookup
+            // for the U64 → compute conversion).
+            let _ = &codec_tables;
+            Ok(())
+        },
+    )
 }
 
 // ─── Cast emission ──────────────────────────────────────────────────

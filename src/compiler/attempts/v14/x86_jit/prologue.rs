@@ -1,14 +1,17 @@
 //! Function prologue, epilogue, and register allocation map.
 //!
-//! ABI: `extern "C" fn(buffer_ptrs: *const *mut u8, sym_prods: *const u64) -> ()`,
+//! ABI: `extern "C" fn(buffer_ptrs: *const *mut u8, sym_prods: *const u64,
+//!                     gc_values: *const u64) -> ()`,
 //! System V AMD64. `rdi` holds a pointer to an array of buffer base
 //! pointers; `buffer_ptrs[buffer_id]` is the base of the buffer the
 //! span's `buffer_id` addresses. `rsi` holds a pointer to an array of
 //! per-group runtime sym_prod values (length = num_groups in the
 //! span's graph); `sym_prods[gi]` is the product of group gi's
 //! `sym_dims` evaluated against the runtime bindings (1 for sym-free
-//! groups). The compiled function saves/restores all callee-saved
-//! registers it clobbers.
+//! groups). `rdx` holds a pointer to an array of GraphConstant runtime
+//! values, indexed by `GraphConstantId.0`; used by the GcLiteral op to
+//! materialize runtime-resolved scalar constants.  The compiled
+//! function saves/restores all callee-saved registers it clobbers.
 //!
 //! # Buffer base layout
 //!
@@ -69,14 +72,16 @@
 //! At function entry System V guarantees `rsp % 16 == 8` (the CALL
 //! pushed an 8-byte return address onto a 16-byte aligned stack). We
 //! push an even number of 8-byte values so post-prologue `rsp` is
-//! 16-byte aligned for any libm trampoline the body issues. r13, r14
-//! and the saved sym_prods pointer (from rsi) contribute three
-//! pushes; each buffer base register contributes one more. If
-//! `(3 + num_buf_pushes)` is odd we pad with `sub rsp, 8`.
+//! 16-byte aligned for any libm trampoline the body issues. r13, r14,
+//! the saved sym_prods pointer (from rsi), and the saved gc_values
+//! pointer (from rdx) contribute four pushes; each buffer base
+//! register contributes one more. If `(4 + num_buf_pushes)` is odd
+//! we pad with `sub rsp, 8`.
 //!
-//! Post-prologue, the saved sym_prods pointer sits at
-//! `[rsp + SYM_PRODS_STACK_OFFSET]` where the offset is recomputed
-//! from the buffer-bases table (see [`sym_prods_stack_offset`]).
+//! Post-prologue, the saved pointers live at:
+//! - `[rsp + gc_values_stack_offset(bases)]` — gc_values ptr.
+//! - `[rsp + sym_prods_stack_offset(bases)]` — sym_prods ptr (one
+//!   slot above gc_values; see the helper fns).
 
 #![allow(dead_code)]
 
@@ -121,7 +126,7 @@ pub const LOOP_VAR_REG: u8 = 13;
 /// bases via `[r14 + buffer_id*8]`.
 pub const BUFFER_PTRS_REG: u8 = 14;
 
-/// Offset from post-prologue `rsp` to the saved sym_prods pointer.
+/// Offset from post-prologue `rsp` to the saved gc_values pointer.
 ///
 /// Stack layout immediately after prologue (lower addresses first):
 ///
@@ -130,44 +135,56 @@ pub const BUFFER_PTRS_REG: u8 = 14;
 /// [rsp + pad]                        -- top fast-pool push
 /// ...
 /// [rsp + pad + (N-1)*8]              -- bottom fast-pool push
-/// [rsp + pad + N*8]                  -- saved rsi (sym_prods ptr)
-/// [rsp + pad + (N+1)*8]              -- saved r14
-/// [rsp + pad + (N+2)*8]              -- saved r13
+/// [rsp + pad + N*8]                  -- saved rdx (gc_values ptr)
+/// [rsp + pad + (N+1)*8]              -- saved rsi (sym_prods ptr)
+/// [rsp + pad + (N+2)*8]              -- saved r14
+/// [rsp + pad + (N+3)*8]              -- saved r13
 /// ```
 ///
 /// where `N = num_buf_pushes`. Callers emit
-/// `mov <reg>, QWORD [rsp + sym_prods_stack_offset(bases)]` to
+/// `mov <reg>, QWORD [rsp + gc_values_stack_offset(bases)]` to
 /// recover the pointer on demand. The offset is 16-byte-stable for
 /// the whole body since no subsequent push/pop happens between
 /// prologue and epilogue.
-pub fn sym_prods_stack_offset(bases: &BufferBases) -> i32 {
+pub fn gc_values_stack_offset(bases: &BufferBases) -> i32 {
     let num_buf_pushes = bases.loads().len() as i32;
-    let frame_misaligned = ((3 + num_buf_pushes) % 2) != 0;
+    let frame_misaligned = ((4 + num_buf_pushes) % 2) != 0;
     let pad: i32 = if frame_misaligned { 8 } else { 0 };
     pad + num_buf_pushes * 8
+}
+
+/// Offset from post-prologue `rsp` to the saved sym_prods pointer.
+/// See [`gc_values_stack_offset`] for the full stack layout; sym_prods
+/// sits exactly one slot (8 bytes) higher than gc_values because it
+/// was pushed immediately before gc_values.
+pub fn sym_prods_stack_offset(bases: &BufferBases) -> i32 {
+    gc_values_stack_offset(bases) + 8
 }
 
 /// Emit the function prologue.
 ///
 /// Saves the loop induction register (`r13`), the `buffer_ptrs`
-/// register (`r14`), the sym_prods pointer (from `rsi`), and every
-/// callee-saved buffer-base register the span's body will use. Then
-/// copies `rdi` (the `buffer_ptrs` arg) into `r14` and loads each
-/// fast-pool buffer base from `[r14 + id*8]`. After this returns the
-/// stack is 16-byte aligned.
+/// register (`r14`), the sym_prods pointer (from `rsi`), the
+/// gc_values pointer (from `rdx`), and every callee-saved buffer-base
+/// register the span's body will use. Then copies `rdi` (the
+/// `buffer_ptrs` arg) into `r14` and loads each fast-pool buffer base
+/// from `[r14 + id*8]`. After this returns the stack is 16-byte
+/// aligned.
 pub fn emit_prologue(asm: &mut Assembler, bases: &BufferBases) {
     let buffer_loads = bases.loads();
     let num_buf_pushes = buffer_loads.len();
 
     // Push the registers we'll clobber. r13 holds the loop induction
     // var; r14 holds the buffer_ptrs array pointer. rsi carries the
-    // sym_prods pointer — save it so the body can recover it on
-    // demand (no callee-saved register free to park it in).
+    // sym_prods pointer and rdx carries the gc_values pointer — save
+    // them so the body can recover them on demand (no callee-saved
+    // register free to park them in).
     dynasm!(asm
         ; .arch x64
         ; push r13
         ; push r14
         ; push rsi
+        ; push rdx
     );
     // Push each fast-pool buffer base register in the order the
     // table assigns. The epilogue pops them in reverse.
@@ -178,10 +195,10 @@ pub fn emit_prologue(asm: &mut Assembler, bases: &BufferBases) {
         );
     }
     // Pad to 16-byte alignment. Entry rsp ≡ 8 (mod 16); each push
-    // toggles by 8. After `3 + num_buf_pushes` pushes we need an
+    // toggles by 8. After `4 + num_buf_pushes` pushes we need an
     // odd total count (since entry is 8 mod 16, odd pushes return
     // rsp to 0 mod 16).
-    let frame_misaligned = ((3 + num_buf_pushes) % 2) != 0;
+    let frame_misaligned = ((4 + num_buf_pushes) % 2) != 0;
     if frame_misaligned {
         dynasm!(asm
             ; .arch x64
@@ -213,7 +230,7 @@ pub fn emit_epilogue(asm: &mut Assembler, bases: &BufferBases) {
     let buffer_loads = bases.loads();
     let num_buf_pushes = buffer_loads.len();
 
-    let frame_misaligned = ((3 + num_buf_pushes) % 2) != 0;
+    let frame_misaligned = ((4 + num_buf_pushes) % 2) != 0;
     if frame_misaligned {
         dynasm!(asm
             ; .arch x64
@@ -229,6 +246,7 @@ pub fn emit_epilogue(asm: &mut Assembler, bases: &BufferBases) {
     }
     dynasm!(asm
         ; .arch x64
+        ; pop rdx
         ; pop rsi
         ; pop r14
         ; pop r13

@@ -27,13 +27,16 @@ pub fn check_supported(graph: &NanoGraph<'static, SystemPool>) -> Result<(), Str
 
     for (gi, group) in graph.groups().iter().enumerate() {
         // Phase 4 sym support: Identity, Cast, Binary, Unary, Select,
-        // Reduce, and IndirectLoad groups accept sym_dims. SymReduce
-        // still falls back (semantically distinct). Reduce + inline
-        // producer with sym_dims returns Err at emit time (cranelift
-        // fallback) — the outer-loop-only version of Reduce sym is
-        // handled here. IndirectLoad's table lookup is sym-independent
-        // by design (the table IS the gather table, not per-sym) —
-        // only the index load and output store carry sym_ctx.
+        // Reduce, IndirectLoad, and GcLiteral groups accept sym_dims.
+        // SymReduce still falls back (semantically distinct). Reduce
+        // + inline producer with sym_dims returns Err at emit time
+        // (cranelift fallback) — the outer-loop-only version of
+        // Reduce sym is handled here. IndirectLoad's table lookup is
+        // sym-independent by design (the table IS the gather table,
+        // not per-sym) — only the index load and output store carry
+        // sym_ctx. GcLiteral writes a runtime-resolved scalar that is
+        // constant across every (atom, sym_flat) slot in the group;
+        // only the output store is sym-aware.
         if !group.sym_dims.is_empty() {
             if !matches!(
                 group.op,
@@ -43,11 +46,12 @@ pub fn check_supported(graph: &NanoGraph<'static, SystemPool>) -> Result<(), Str
                     | ScalarOp::Unary { .. }
                     | ScalarOp::Select
                     | ScalarOp::Reduce { .. }
-                    | ScalarOp::IndirectLoad { .. },
+                    | ScalarOp::IndirectLoad { .. }
+                    | ScalarOp::GcLiteral(_),
             ) {
                 return Err(format!(
                     "x86_jit: group {gi} op {:?} with sym_dims not yet supported \
-                     (Phase 4: Identity+Cast+Binary+Unary+Select+Reduce+IndirectLoad only)",
+                     (Phase 4: Identity+Cast+Binary+Unary+Select+Reduce+IndirectLoad+GcLiteral only)",
                     group.op
                 ));
             }
@@ -123,6 +127,14 @@ pub fn check_supported(graph: &NanoGraph<'static, SystemPool>) -> Result<(), Str
                 }
             }
             ScalarOp::Literal(_) | ScalarOp::LiteralSpan(_) => {}
+            ScalarOp::GcLiteral(_) => {
+                if !group.inputs.is_empty() {
+                    return Err(format!(
+                        "x86_jit: group {gi} GcLiteral has {} inputs, expected 0",
+                        group.inputs.len()
+                    ));
+                }
+            }
             op => {
                 return Err(format!("x86_jit: group {gi} op {op:?} not yet supported"));
             }
