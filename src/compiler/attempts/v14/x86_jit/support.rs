@@ -26,30 +26,35 @@ pub fn check_supported(graph: &NanoGraph<'static, SystemPool>) -> Result<(), Str
     }
 
     for (gi, group) in graph.groups().iter().enumerate() {
-        // Phase 1 sym support: only Identity groups accept sym_dims.
-        // Other ops with sym_dims fall back to pool_eval.
+        // Phase 2a sym support: Identity and Cast groups accept
+        // sym_dims. Other ops with sym_dims fall back to pool_eval.
         if !group.sym_dims.is_empty() {
-            if !matches!(group.op, ScalarOp::Identity) {
+            if !matches!(group.op, ScalarOp::Identity | ScalarOp::Cast { .. }) {
                 return Err(format!(
                     "x86_jit: group {gi} op {:?} with sym_dims not yet supported \
-                     (Phase 1: Identity only)",
+                     (Phase 2a: Identity + Cast only)",
                     group.op
                 ));
             }
-            // Require identity sym_dim_map: consumer axis j reads from
-            // producer axis j. Producer and consumer sym_dims match,
-            // so sym_flat indexes the same byte across both.
+            // Require identity sym_dim_map on every input: consumer
+            // axis j reads from producer axis j. Producer and consumer
+            // sym_dims match, so sym_flat indexes the same byte across
+            // both. (Cast has a single input like Identity; loop here
+            // anyway to stay general for future ops.)
             let expected_len = group.sym_dims.len();
-            let map = &group.inputs[0].sym_dim_map;
-            if map.len() != expected_len
-                || !map.iter().enumerate().all(|(j, m)| {
-                    matches!(m, crate::nano_graph::pattern::SymDimMap::Identity(k) if *k == j)
-                })
-            {
-                return Err(format!(
-                    "x86_jit: group {gi} Identity with non-identity sym_dim_map \
-                     not yet supported (Phase 1: identity mapping only)"
-                ));
+            for (ii, inp) in group.inputs.iter().enumerate() {
+                let map = &inp.sym_dim_map;
+                if map.len() != expected_len
+                    || !map.iter().enumerate().all(|(j, m)| {
+                        matches!(m, crate::nano_graph::pattern::SymDimMap::Identity(k) if *k == j)
+                    })
+                {
+                    return Err(format!(
+                        "x86_jit: group {gi} {:?} input {ii} with non-identity sym_dim_map \
+                         not yet supported (Phase 2a: identity mapping only)",
+                        group.op
+                    ));
+                }
             }
         }
         match &group.op {

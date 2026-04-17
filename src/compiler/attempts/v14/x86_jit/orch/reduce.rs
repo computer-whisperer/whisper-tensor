@@ -340,6 +340,7 @@ fn emit_reduce_body(
             producer,
             IterVar::Reg(REDUCE_K_END),
             producer.atom_offset,
+            None,
             addr_tables,
             codec_tables,
         )?;

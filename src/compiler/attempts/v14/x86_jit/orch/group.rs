@@ -355,6 +355,7 @@ pub(super) fn emit_op_compute(
     group: &AtomGroup<'static, SystemPool>,
     iter: IterVar,
     atom_offset: u64,
+    sym_ctx: Option<super::address::SymCtx>,
     addr_tables: &mut AddressTables,
     codec_tables: &mut CodecTables,
 ) -> Result<CodecSlot, String> {
@@ -368,6 +369,7 @@ pub(super) fn emit_op_compute(
             *compute_dtype,
             iter,
             atom_offset,
+            sym_ctx,
             addr_tables,
             codec_tables,
         ),
@@ -379,6 +381,7 @@ pub(super) fn emit_op_compute(
             *compute_dtype,
             iter,
             atom_offset,
+            sym_ctx,
             addr_tables,
             codec_tables,
         ),
@@ -388,6 +391,7 @@ pub(super) fn emit_op_compute(
             group,
             iter,
             atom_offset,
+            sym_ctx,
             addr_tables,
             codec_tables,
         ),
@@ -406,6 +410,7 @@ pub(super) fn emit_op_compute(
                 &group.inputs[0].input_ref,
                 iter,
                 atom_offset,
+                sym_ctx,
                 addr_tables,
                 codec_tables,
                 slot,
@@ -422,6 +427,7 @@ pub(super) fn emit_op_compute(
                 group.output_dtype,
                 iter,
                 atom_offset,
+                sym_ctx,
                 addr_tables,
                 codec_tables,
             )
@@ -936,16 +942,15 @@ fn emit_linear_bit_offset(
 /// Emit a Cast group: load raw bits, decode via src dtype, optionally
 /// convert between compute reprs, encode via dst dtype, store raw bits.
 ///
-/// `gi` is accepted to match the sym-aware calling convention used
-/// by the shared atom-loop helper. Cast doesn't emit a sym loop yet
-/// (Step 2 work); groups with `sym_dims` are rejected upstream in
-/// `support.rs`.
+/// Uses the shared [`emit_atom_body_loop`] scaffolding so the sym
+/// inner loop and sym-aware addressing are picked up for free when
+/// the group has `sym_dims`.
 #[allow(clippy::too_many_arguments)]
 fn emit_cast_group(
     asm: &mut Assembler,
     layout: &BufferLayout,
     group: &AtomGroup<'static, SystemPool>,
-    _gi: usize,
+    gi: usize,
     addr_tables: &mut AddressTables,
     codec_tables: &mut CodecTables,
 ) -> Result<(), String> {
@@ -959,35 +964,30 @@ fn emit_cast_group(
     let src_dtype = lookup_input_dtype(layout, &group.inputs[0].input_ref, group.atom_offset)?;
     let dst_dtype = group.output_dtype;
 
-    if group.count == 1 {
-        emit_cast_iter(
-            asm,
-            layout,
-            &group.inputs[0].input_ref,
-            group.base_id,
-            group.atom_offset,
-            src_dtype,
-            dst_dtype,
-            IterVar::Const(group.atom_offset),
-            group.atom_offset,
-            addr_tables,
-            codec_tables,
-        )
-    } else {
-        emit_cast_loop(
-            asm,
-            layout,
-            &group.inputs[0].input_ref,
-            group.base_id,
-            group.atom_offset,
-            src_dtype,
-            dst_dtype,
-            group.atom_offset,
-            group.count,
-            addr_tables,
-            codec_tables,
-        )
-    }
+    emit_atom_body_loop(
+        asm,
+        &layout.buffer_bases,
+        group.atom_offset,
+        group.count,
+        gi,
+        &layout.group_sym_dims[gi],
+        |asm, iter, sym_ctx| {
+            emit_cast_iter(
+                asm,
+                layout,
+                &group.inputs[0].input_ref,
+                group.base_id,
+                group.atom_offset,
+                src_dtype,
+                dst_dtype,
+                iter,
+                group.atom_offset,
+                sym_ctx,
+                addr_tables,
+                codec_tables,
+            )
+        },
+    )
 }
 
 /// Emit one iteration of the Cast body: load raw bits, decode to
@@ -1006,6 +1006,7 @@ fn emit_cast_compute(
     dst_dtype: crate::numeric_dtype::NumericDType,
     iter: IterVar,
     atom_offset: u64,
+    sym_ctx: Option<super::address::SymCtx>,
     addr_tables: &mut AddressTables,
     codec_tables: &mut CodecTables,
 ) -> Result<CodecSlot, String> {
@@ -1017,7 +1018,7 @@ fn emit_cast_compute(
         atom_offset,
         BIT_OFF_REG,
         ADDR_SCRATCH,
-        None,
+        sym_ctx,
         addr_tables,
     )?;
     let src_base = bbase(asm, layout, src_info.buffer_id);
@@ -1069,6 +1070,7 @@ fn emit_cast_iter(
     dst_dtype: crate::numeric_dtype::NumericDType,
     iter: IterVar,
     atom_offset: u64,
+    sym_ctx: Option<super::address::SymCtx>,
     addr_tables: &mut AddressTables,
     codec_tables: &mut CodecTables,
 ) -> Result<(), String> {
@@ -1080,6 +1082,7 @@ fn emit_cast_iter(
         dst_dtype,
         iter,
         atom_offset,
+        sym_ctx,
         addr_tables,
         codec_tables,
     )?;
@@ -1091,60 +1094,8 @@ fn emit_cast_iter(
         output_base,
         output_atom_offset,
         iter,
+        sym_ctx,
     )
-}
-
-/// Emit a count-loop around `emit_cast_iter`.
-#[allow(clippy::too_many_arguments)]
-fn emit_cast_loop(
-    asm: &mut Assembler,
-    layout: &BufferLayout,
-    src_input: &InputRef,
-    output_base: crate::nano_graph::pattern::AtomId,
-    output_atom_offset: u64,
-    src_dtype: crate::numeric_dtype::NumericDType,
-    dst_dtype: crate::numeric_dtype::NumericDType,
-    atom_offset: u64,
-    count: u64,
-    addr_tables: &mut AddressTables,
-    codec_tables: &mut CodecTables,
-) -> Result<(), String> {
-    let start = atom_offset as i64;
-    let end = (atom_offset + count) as i64;
-
-    dynasm!(asm
-        ; .arch x64
-        ; mov Rq(LOOP_VAR_REG), QWORD start
-    );
-
-    let loop_top = asm.new_dynamic_label();
-    let loop_exit = asm.new_dynamic_label();
-
-    dynasm!(asm; =>loop_top);
-    emit_loop_cmp_end(asm, end)?;
-    dynasm!(asm; jge =>loop_exit);
-
-    emit_cast_iter(
-        asm,
-        layout,
-        src_input,
-        output_base,
-        output_atom_offset,
-        src_dtype,
-        dst_dtype,
-        IterVar::Reg(LOOP_VAR_REG),
-        atom_offset,
-        addr_tables,
-        codec_tables,
-    )?;
-
-    dynasm!(asm
-        ; add Rq(LOOP_VAR_REG), 1
-        ; jmp =>loop_top
-        ; =>loop_exit
-    );
-
-    Ok(())
 }
 
 // ─── Binary op emission ─────────────────────────────────────────────
@@ -1179,6 +1130,7 @@ fn emit_binary_group(
             group.output_dtype,
             IterVar::Const(group.atom_offset),
             group.atom_offset,
+            None,
             addr_tables,
             codec_tables,
         )
@@ -1230,6 +1182,7 @@ fn emit_binary_compute(
     compute_dtype: NumericDType,
     iter: IterVar,
     atom_offset: u64,
+    sym_ctx: Option<super::address::SymCtx>,
     addr_tables: &mut AddressTables,
     codec_tables: &mut CodecTables,
 ) -> Result<CodecSlot, String> {
@@ -1245,6 +1198,7 @@ fn emit_binary_compute(
         input_a,
         iter,
         atom_offset,
+        sym_ctx,
         addr_tables,
         codec_tables,
         match repr {
@@ -1269,6 +1223,7 @@ fn emit_binary_compute(
         input_b,
         iter,
         atom_offset,
+        sym_ctx,
         addr_tables,
         codec_tables,
         b_slot,
@@ -1310,6 +1265,7 @@ fn emit_binary_iter(
     output_dtype: NumericDType,
     iter: IterVar,
     atom_offset: u64,
+    sym_ctx: Option<super::address::SymCtx>,
     addr_tables: &mut AddressTables,
     codec_tables: &mut CodecTables,
 ) -> Result<(), String> {
@@ -1322,6 +1278,7 @@ fn emit_binary_iter(
         compute_dtype,
         iter,
         atom_offset,
+        sym_ctx,
         addr_tables,
         codec_tables,
     )?;
@@ -1333,6 +1290,7 @@ fn emit_binary_iter(
         output_base,
         output_atom_offset,
         iter,
+        sym_ctx,
     )
 }
 
@@ -1460,13 +1418,18 @@ fn emit_load_decode_input(
     input: &InputRef,
     iter: IterVar,
     atom_offset: u64,
+    sym_ctx: Option<super::address::SymCtx>,
     addr_tables: &mut AddressTables,
     codec_tables: &mut CodecTables,
     slot: CodecSlot,
 ) -> Result<AddressInfo, String> {
     // SIB fast path: fold address into the load instruction, skip
-    // emit_compute_bit_offset entirely.
-    if let Some((sib, info)) = try_sib_input(layout, input, iter, atom_offset) {
+    // emit_compute_bit_offset entirely. Disabled under sym loops
+    // because the SIB index*scale+disp form has no room for the
+    // sym_i * elem_bits term; fall through to the explicit offset
+    // computation which handles it via the address layer.
+    let sib_mode = sym_ctx.is_none().then(|| try_sib_input(layout, input, iter, atom_offset)).flatten();
+    if let Some((sib, info)) = sib_mode {
         let base = bbase(asm, layout, info.buffer_id);
         if info.dtype == NumericDType::F32 {
             if let CodecSlot::Xmm(xmm) = slot {
@@ -1502,7 +1465,7 @@ fn emit_load_decode_input(
         atom_offset,
         BIT_OFF_REG,
         ADDR_SCRATCH,
-        None,
+        sym_ctx,
         addr_tables,
     )?;
     let base = bbase(asm, layout, info.buffer_id);
@@ -1566,9 +1529,14 @@ fn emit_encode_store_output(
     output_base: crate::nano_graph::pattern::AtomId,
     output_atom_offset: u64,
     iter: IterVar,
+    sym_ctx: Option<super::address::SymCtx>,
 ) -> Result<(), String> {
     // SIB fast path: fold address into store, skip emit_output_bit_offset.
-    if let Some((sib, dst_info)) = try_sib_output(layout, output_base, output_atom_offset, iter) {
+    // Disabled under sym loops (SIB index*scale+disp has no room for
+    // sym_i * elem_bits); fall through to the explicit offset path.
+    let sib_mode =
+        sym_ctx.is_none().then(|| try_sib_output(layout, output_base, output_atom_offset, iter)).flatten();
+    if let Some((sib, dst_info)) = sib_mode {
         let base = bbase(asm, layout, dst_info.buffer_id);
         if output_dtype == NumericDType::F32 {
             if let CodecSlot::Xmm(xmm) = result_slot {
@@ -1605,7 +1573,7 @@ fn emit_encode_store_output(
         iter,
         BIT_OFF_REG,
         ADDR_SCRATCH,
-        None,
+        sym_ctx,
     )?;
     let base = bbase(asm, layout, dst_info.buffer_id);
 
@@ -1706,6 +1674,7 @@ fn emit_binary_loop(
         output_dtype,
         IterVar::Reg(LOOP_VAR_REG),
         atom_offset,
+        None,
         addr_tables,
         codec_tables,
     )?;
@@ -1750,6 +1719,7 @@ fn emit_unary_group(
             group.output_dtype,
             IterVar::Const(group.atom_offset),
             group.atom_offset,
+            None,
             addr_tables,
             codec_tables,
         )
@@ -1784,6 +1754,7 @@ fn emit_unary_compute(
     compute_dtype: NumericDType,
     iter: IterVar,
     atom_offset: u64,
+    sym_ctx: Option<super::address::SymCtx>,
     addr_tables: &mut AddressTables,
     codec_tables: &mut CodecTables,
 ) -> Result<CodecSlot, String> {
@@ -1798,6 +1769,7 @@ fn emit_unary_compute(
         input,
         iter,
         atom_offset,
+        sym_ctx,
         addr_tables,
         codec_tables,
         match repr {
@@ -1835,6 +1807,7 @@ fn emit_unary_iter(
     output_dtype: NumericDType,
     iter: IterVar,
     atom_offset: u64,
+    sym_ctx: Option<super::address::SymCtx>,
     addr_tables: &mut AddressTables,
     codec_tables: &mut CodecTables,
 ) -> Result<(), String> {
@@ -1846,6 +1819,7 @@ fn emit_unary_iter(
         compute_dtype,
         iter,
         atom_offset,
+        sym_ctx,
         addr_tables,
         codec_tables,
     )?;
@@ -1857,6 +1831,7 @@ fn emit_unary_iter(
         output_base,
         output_atom_offset,
         iter,
+        sym_ctx,
     )
 }
 
@@ -1902,6 +1877,7 @@ fn emit_unary_loop(
         output_dtype,
         IterVar::Reg(LOOP_VAR_REG),
         atom_offset,
+        None,
         addr_tables,
         codec_tables,
     )?;
@@ -2039,6 +2015,7 @@ fn emit_select_group(
             group.atom_offset,
             IterVar::Const(group.atom_offset),
             group.atom_offset,
+            None,
             addr_tables,
             codec_tables,
         )
@@ -2069,6 +2046,7 @@ fn emit_select_compute(
     group: &AtomGroup<'static, SystemPool>,
     iter: IterVar,
     atom_offset: u64,
+    sym_ctx: Option<super::address::SymCtx>,
     addr_tables: &mut AddressTables,
     codec_tables: &mut CodecTables,
 ) -> Result<CodecSlot, String> {
@@ -2086,7 +2064,7 @@ fn emit_select_compute(
         atom_offset,
         BIT_OFF_REG,
         ADDR_SCRATCH,
-        None,
+        sym_ctx,
         addr_tables,
     )?;
     let __bbase4 = bbase(asm, layout, cond_info.buffer_id);
@@ -2159,6 +2137,7 @@ fn emit_select_compute(
         &group.inputs[1].input_ref,
         iter,
         atom_offset,
+        sym_ctx,
         addr_tables,
         codec_tables,
         match out_repr {
@@ -2179,6 +2158,7 @@ fn emit_select_compute(
         &group.inputs[2].input_ref,
         iter,
         atom_offset,
+        sym_ctx,
         addr_tables,
         codec_tables,
         match out_repr {
@@ -2233,6 +2213,7 @@ fn emit_select_iter(
     output_atom_offset: u64,
     iter: IterVar,
     atom_offset: u64,
+    sym_ctx: Option<super::address::SymCtx>,
     addr_tables: &mut AddressTables,
     codec_tables: &mut CodecTables,
 ) -> Result<(), String> {
@@ -2242,6 +2223,7 @@ fn emit_select_iter(
         group,
         iter,
         atom_offset,
+        sym_ctx,
         addr_tables,
         codec_tables,
     )?;
@@ -2253,6 +2235,7 @@ fn emit_select_iter(
         output_base,
         output_atom_offset,
         iter,
+        sym_ctx,
     )
 }
 
@@ -2287,6 +2270,7 @@ fn emit_select_loop(
         output_atom_offset,
         IterVar::Reg(LOOP_VAR_REG),
         atom_offset,
+        None,
         addr_tables,
         codec_tables,
     )?;
@@ -2552,6 +2536,7 @@ fn emit_indirect_load_iter(
         output_base,
         output_atom_offset,
         iter,
+        None,
     )?;
 
     Ok(())
