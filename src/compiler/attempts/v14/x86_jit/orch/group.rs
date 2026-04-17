@@ -359,6 +359,9 @@ pub(super) fn emit_op_compute(
     addr_tables: &mut AddressTables,
     codec_tables: &mut CodecTables,
 ) -> Result<CodecSlot, String> {
+    let in_sym = |idx: usize| {
+        super::address::input_sym_ctx(sym_ctx, &group.inputs[idx].sym_dim_map)
+    };
     match &group.op {
         ScalarOp::Binary { op, compute_dtype } => emit_binary_compute(
             asm,
@@ -369,7 +372,8 @@ pub(super) fn emit_op_compute(
             *compute_dtype,
             iter,
             atom_offset,
-            sym_ctx,
+            in_sym(0),
+            in_sym(1),
             addr_tables,
             codec_tables,
         ),
@@ -381,7 +385,7 @@ pub(super) fn emit_op_compute(
             *compute_dtype,
             iter,
             atom_offset,
-            sym_ctx,
+            in_sym(0),
             addr_tables,
             codec_tables,
         ),
@@ -391,7 +395,9 @@ pub(super) fn emit_op_compute(
             group,
             iter,
             atom_offset,
-            sym_ctx,
+            in_sym(0),
+            in_sym(1),
+            in_sym(2),
             addr_tables,
             codec_tables,
         ),
@@ -410,7 +416,7 @@ pub(super) fn emit_op_compute(
                 &group.inputs[0].input_ref,
                 iter,
                 atom_offset,
-                sym_ctx,
+                in_sym(0),
                 addr_tables,
                 codec_tables,
                 slot,
@@ -427,7 +433,7 @@ pub(super) fn emit_op_compute(
                 group.output_dtype,
                 iter,
                 atom_offset,
-                sym_ctx,
+                in_sym(0),
                 addr_tables,
                 codec_tables,
             )
@@ -590,6 +596,7 @@ fn emit_identity_group(
             IterVar::Const(group.atom_offset),
             group.atom_offset,
             None,
+            None,
             tables,
         )
     } else {
@@ -597,6 +604,7 @@ fn emit_identity_group(
             asm,
             layout,
             &group.inputs[0].input_ref,
+            &group.inputs[0].sym_dim_map,
             group.base_id,
             group.atom_offset,
             group.atom_offset,
@@ -625,7 +633,8 @@ fn emit_identity_iter(
     output_atom_offset: u64,
     iter: IterVar,
     atom_offset: u64,
-    sym_ctx: Option<super::address::SymCtx>,
+    sym_ctx_in: Option<super::address::SymCtx>,
+    sym_ctx_out: Option<super::address::SymCtx>,
     tables: &mut AddressTables,
 ) -> Result<(), String> {
     // 1. Compute src bit offset → r10.
@@ -637,7 +646,7 @@ fn emit_identity_iter(
         atom_offset,
         BIT_OFF_REG,
         ADDR_SCRATCH,
-        sym_ctx,
+        sym_ctx_in,
         tables,
     )?;
 
@@ -665,7 +674,7 @@ fn emit_identity_iter(
         iter,
         BIT_OFF_REG,
         ADDR_SCRATCH,
-        sym_ctx,
+        sym_ctx_out,
     )?;
 
     if src_info.n_bits != dst_info.n_bits {
@@ -719,6 +728,7 @@ fn emit_identity_loop(
     asm: &mut Assembler,
     layout: &BufferLayout,
     src_input: &InputRef,
+    src_sym_dim_map: &[crate::nano_graph::pattern::SymDimMap],
     output_base: crate::nano_graph::pattern::AtomId,
     output_atom_offset: u64,
     atom_offset: u64,
@@ -735,6 +745,7 @@ fn emit_identity_loop(
         gi,
         sym_dims,
         |asm, iter, sym_ctx| {
+            let sym_ctx_in = super::address::input_sym_ctx(sym_ctx, src_sym_dim_map);
             emit_identity_iter(
                 asm,
                 layout,
@@ -743,6 +754,7 @@ fn emit_identity_loop(
                 output_atom_offset,
                 iter,
                 atom_offset,
+                sym_ctx_in,
                 sym_ctx,
                 tables,
             )
@@ -1100,6 +1112,8 @@ fn emit_cast_group(
         gi,
         &layout.group_sym_dims[gi],
         |asm, iter, sym_ctx| {
+            let sym_ctx_in =
+                super::address::input_sym_ctx(sym_ctx, &group.inputs[0].sym_dim_map);
             emit_cast_iter(
                 asm,
                 layout,
@@ -1110,6 +1124,7 @@ fn emit_cast_group(
                 dst_dtype,
                 iter,
                 group.atom_offset,
+                sym_ctx_in,
                 sym_ctx,
                 addr_tables,
                 codec_tables,
@@ -1198,7 +1213,8 @@ fn emit_cast_iter(
     dst_dtype: crate::numeric_dtype::NumericDType,
     iter: IterVar,
     atom_offset: u64,
-    sym_ctx: Option<super::address::SymCtx>,
+    sym_ctx_in: Option<super::address::SymCtx>,
+    sym_ctx_out: Option<super::address::SymCtx>,
     addr_tables: &mut AddressTables,
     codec_tables: &mut CodecTables,
 ) -> Result<(), String> {
@@ -1210,7 +1226,7 @@ fn emit_cast_iter(
         dst_dtype,
         iter,
         atom_offset,
-        sym_ctx,
+        sym_ctx_in,
         addr_tables,
         codec_tables,
     )?;
@@ -1222,7 +1238,7 @@ fn emit_cast_iter(
         output_base,
         output_atom_offset,
         iter,
-        sym_ctx,
+        sym_ctx_out,
     )
 }
 
@@ -1258,6 +1274,10 @@ fn emit_binary_group(
         gi,
         &layout.group_sym_dims[gi],
         |asm, iter, sym_ctx| {
+            let sym_ctx_a =
+                super::address::input_sym_ctx(sym_ctx, &group.inputs[0].sym_dim_map);
+            let sym_ctx_b =
+                super::address::input_sym_ctx(sym_ctx, &group.inputs[1].sym_dim_map);
             emit_binary_iter(
                 asm,
                 layout,
@@ -1270,6 +1290,8 @@ fn emit_binary_group(
                 group.output_dtype,
                 iter,
                 group.atom_offset,
+                sym_ctx_a,
+                sym_ctx_b,
                 sym_ctx,
                 addr_tables,
                 codec_tables,
@@ -1307,7 +1329,8 @@ fn emit_binary_compute(
     compute_dtype: NumericDType,
     iter: IterVar,
     atom_offset: u64,
-    sym_ctx: Option<super::address::SymCtx>,
+    sym_ctx_a: Option<super::address::SymCtx>,
+    sym_ctx_b: Option<super::address::SymCtx>,
     addr_tables: &mut AddressTables,
     codec_tables: &mut CodecTables,
 ) -> Result<CodecSlot, String> {
@@ -1323,7 +1346,7 @@ fn emit_binary_compute(
         input_a,
         iter,
         atom_offset,
-        sym_ctx,
+        sym_ctx_a,
         addr_tables,
         codec_tables,
         match repr {
@@ -1348,7 +1371,7 @@ fn emit_binary_compute(
         input_b,
         iter,
         atom_offset,
-        sym_ctx,
+        sym_ctx_b,
         addr_tables,
         codec_tables,
         b_slot,
@@ -1390,7 +1413,9 @@ fn emit_binary_iter(
     output_dtype: NumericDType,
     iter: IterVar,
     atom_offset: u64,
-    sym_ctx: Option<super::address::SymCtx>,
+    sym_ctx_a: Option<super::address::SymCtx>,
+    sym_ctx_b: Option<super::address::SymCtx>,
+    sym_ctx_out: Option<super::address::SymCtx>,
     addr_tables: &mut AddressTables,
     codec_tables: &mut CodecTables,
 ) -> Result<(), String> {
@@ -1403,7 +1428,8 @@ fn emit_binary_iter(
         compute_dtype,
         iter,
         atom_offset,
-        sym_ctx,
+        sym_ctx_a,
+        sym_ctx_b,
         addr_tables,
         codec_tables,
     )?;
@@ -1415,7 +1441,7 @@ fn emit_binary_iter(
         output_base,
         output_atom_offset,
         iter,
-        sym_ctx,
+        sym_ctx_out,
     )
 }
 
@@ -1787,6 +1813,8 @@ fn emit_unary_group(
         gi,
         &layout.group_sym_dims[gi],
         |asm, iter, sym_ctx| {
+            let sym_ctx_in =
+                super::address::input_sym_ctx(sym_ctx, &group.inputs[0].sym_dim_map);
             emit_unary_iter(
                 asm,
                 layout,
@@ -1798,6 +1826,7 @@ fn emit_unary_group(
                 group.output_dtype,
                 iter,
                 group.atom_offset,
+                sym_ctx_in,
                 sym_ctx,
                 addr_tables,
                 codec_tables,
@@ -1872,7 +1901,8 @@ fn emit_unary_iter(
     output_dtype: NumericDType,
     iter: IterVar,
     atom_offset: u64,
-    sym_ctx: Option<super::address::SymCtx>,
+    sym_ctx_in: Option<super::address::SymCtx>,
+    sym_ctx_out: Option<super::address::SymCtx>,
     addr_tables: &mut AddressTables,
     codec_tables: &mut CodecTables,
 ) -> Result<(), String> {
@@ -1884,7 +1914,7 @@ fn emit_unary_iter(
         compute_dtype,
         iter,
         atom_offset,
-        sym_ctx,
+        sym_ctx_in,
         addr_tables,
         codec_tables,
     )?;
@@ -1896,7 +1926,7 @@ fn emit_unary_iter(
         output_base,
         output_atom_offset,
         iter,
-        sym_ctx,
+        sym_ctx_out,
     )
 }
 
@@ -2024,6 +2054,12 @@ fn emit_select_group(
         gi,
         &layout.group_sym_dims[gi],
         |asm, iter, sym_ctx| {
+            let sym_ctx_cond =
+                super::address::input_sym_ctx(sym_ctx, &group.inputs[0].sym_dim_map);
+            let sym_ctx_x =
+                super::address::input_sym_ctx(sym_ctx, &group.inputs[1].sym_dim_map);
+            let sym_ctx_y =
+                super::address::input_sym_ctx(sym_ctx, &group.inputs[2].sym_dim_map);
             emit_select_iter(
                 asm,
                 layout,
@@ -2032,6 +2068,9 @@ fn emit_select_group(
                 group.atom_offset,
                 iter,
                 group.atom_offset,
+                sym_ctx_cond,
+                sym_ctx_x,
+                sym_ctx_y,
                 sym_ctx,
                 addr_tables,
                 codec_tables,
@@ -2052,7 +2091,9 @@ fn emit_select_compute(
     group: &AtomGroup<'static, SystemPool>,
     iter: IterVar,
     atom_offset: u64,
-    sym_ctx: Option<super::address::SymCtx>,
+    sym_ctx_cond: Option<super::address::SymCtx>,
+    sym_ctx_x: Option<super::address::SymCtx>,
+    sym_ctx_y: Option<super::address::SymCtx>,
     addr_tables: &mut AddressTables,
     codec_tables: &mut CodecTables,
 ) -> Result<CodecSlot, String> {
@@ -2070,7 +2111,7 @@ fn emit_select_compute(
         atom_offset,
         BIT_OFF_REG,
         ADDR_SCRATCH,
-        sym_ctx,
+        sym_ctx_cond,
         addr_tables,
     )?;
     let __bbase4 = bbase(asm, layout, cond_info.buffer_id);
@@ -2143,7 +2184,7 @@ fn emit_select_compute(
         &group.inputs[1].input_ref,
         iter,
         atom_offset,
-        sym_ctx,
+        sym_ctx_x,
         addr_tables,
         codec_tables,
         match out_repr {
@@ -2164,7 +2205,7 @@ fn emit_select_compute(
         &group.inputs[2].input_ref,
         iter,
         atom_offset,
-        sym_ctx,
+        sym_ctx_y,
         addr_tables,
         codec_tables,
         match out_repr {
@@ -2219,7 +2260,10 @@ fn emit_select_iter(
     output_atom_offset: u64,
     iter: IterVar,
     atom_offset: u64,
-    sym_ctx: Option<super::address::SymCtx>,
+    sym_ctx_cond: Option<super::address::SymCtx>,
+    sym_ctx_x: Option<super::address::SymCtx>,
+    sym_ctx_y: Option<super::address::SymCtx>,
+    sym_ctx_out: Option<super::address::SymCtx>,
     addr_tables: &mut AddressTables,
     codec_tables: &mut CodecTables,
 ) -> Result<(), String> {
@@ -2229,7 +2273,9 @@ fn emit_select_iter(
         group,
         iter,
         atom_offset,
-        sym_ctx,
+        sym_ctx_cond,
+        sym_ctx_x,
+        sym_ctx_y,
         addr_tables,
         codec_tables,
     )?;
@@ -2241,7 +2287,7 @@ fn emit_select_iter(
         output_base,
         output_atom_offset,
         iter,
-        sym_ctx,
+        sym_ctx_out,
     )
 }
 
@@ -2295,6 +2341,8 @@ fn emit_indirect_load_group(
         gi,
         &layout.group_sym_dims[gi],
         |asm, iter, sym_ctx| {
+            let sym_ctx_idx =
+                super::address::input_sym_ctx(sym_ctx, &group.inputs[0].sym_dim_map);
             emit_indirect_load_iter(
                 asm,
                 layout,
@@ -2310,6 +2358,7 @@ fn emit_indirect_load_group(
                 group.output_dtype,
                 iter,
                 group.atom_offset,
+                sym_ctx_idx,
                 sym_ctx,
                 addr_tables,
                 codec_tables,
@@ -2341,7 +2390,8 @@ fn emit_indirect_load_iter(
     output_dtype: NumericDType,
     iter: IterVar,
     atom_offset: u64,
-    sym_ctx: Option<super::address::SymCtx>,
+    sym_ctx_in: Option<super::address::SymCtx>,
+    sym_ctx_out: Option<super::address::SymCtx>,
     addr_tables: &mut AddressTables,
     codec_tables: &mut CodecTables,
 ) -> Result<(), String> {
@@ -2354,7 +2404,7 @@ fn emit_indirect_load_iter(
         atom_offset,
         BIT_OFF_REG,
         ADDR_SCRATCH,
-        sym_ctx,
+        sym_ctx_in,
         addr_tables,
     )?;
     let __bbase6 = bbase(asm, layout, idx_info.buffer_id);
@@ -2487,7 +2537,7 @@ fn emit_indirect_load_iter(
         output_base,
         output_atom_offset,
         iter,
-        sym_ctx,
+        sym_ctx_out,
     )?;
 
     Ok(())

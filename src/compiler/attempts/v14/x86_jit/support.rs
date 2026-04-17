@@ -55,22 +55,42 @@ pub fn check_supported(graph: &NanoGraph<'static, SystemPool>) -> Result<(), Str
                     group.op
                 ));
             }
-            // Require identity sym_dim_map on every input: consumer
-            // axis j reads from producer axis j. Producer and consumer
-            // sym_dims match, so sym_flat indexes the same byte across
-            // both. (Cast has a single input like Identity; loop here
-            // anyway to stay general for future ops.)
+            // Each input's sym_dim_map must be one of:
+            //   (a) empty — no sym component, input is scalar.
+            //   (b) all-Identity(j==index) with map.len() ==
+            //       consumer.sym_dims.len() — producer's sym axes
+            //       align 1:1 with consumer's.
+            //   (c) all-Broadcast with map.len() ==
+            //       consumer.sym_dims.len() — producer has no sym
+            //       axes; its atom address is constant across the
+            //       consumer's sym loop.
+            // Mixed maps (some Identity, some Broadcast) and
+            // permutations (Identity(k != j)) still fall back — the
+            // address layer doesn't yet emit per-axis sym offsets.
             let expected_len = group.sym_dims.len();
             for (ii, inp) in group.inputs.iter().enumerate() {
                 let map = &inp.sym_dim_map;
-                if map.len() != expected_len
-                    || !map.iter().enumerate().all(|(j, m)| {
-                        matches!(m, crate::nano_graph::pattern::SymDimMap::Identity(k) if *k == j)
-                    })
-                {
+                if map.is_empty() {
+                    continue;
+                }
+                if map.len() != expected_len {
                     return Err(format!(
-                        "x86_jit: group {gi} {:?} input {ii} with non-identity sym_dim_map \
-                         not yet supported (Phase 2a: identity mapping only)",
+                        "x86_jit: group {gi} {:?} input {ii} sym_dim_map has {} entries, \
+                         expected {expected_len} (or empty)",
+                        group.op,
+                        map.len()
+                    ));
+                }
+                let all_identity = map.iter().enumerate().all(|(j, m)| {
+                    matches!(m, crate::nano_graph::pattern::SymDimMap::Identity(k) if *k == j)
+                });
+                let all_broadcast = map
+                    .iter()
+                    .all(|m| matches!(m, crate::nano_graph::pattern::SymDimMap::Broadcast));
+                if !(all_identity || all_broadcast) {
+                    return Err(format!(
+                        "x86_jit: group {gi} {:?} input {ii} sym_dim_map is mixed / permuted \
+                         ({map:?}) — only empty, all-identity, or all-broadcast supported",
                         group.op
                     ));
                 }

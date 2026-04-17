@@ -113,6 +113,8 @@ pub fn emit_reduce_group(
         gi,
         &layout.group_sym_dims[gi],
         |asm, iter, sym_ctx| {
+            let sym_ctx_in =
+                super::address::input_sym_ctx(sym_ctx, &group.inputs[0].sym_dim_map);
             emit_reduce_body(
                 asm,
                 layout,
@@ -130,6 +132,7 @@ pub fn emit_reduce_group(
                 inline_producer,
                 iter,
                 group.atom_offset,
+                sym_ctx_in,
                 sym_ctx,
                 addr_tables,
                 codec_tables,
@@ -227,14 +230,21 @@ fn emit_reduce_body(
     inline_producer: Option<&AtomGroup<'static, SystemPool>>,
     iter: IterVar,
     atom_offset: u64,
-    sym_ctx: Option<super::address::SymCtx>,
+    sym_ctx_in: Option<super::address::SymCtx>,
+    sym_ctx_out: Option<super::address::SymCtx>,
     addr_tables: &mut AddressTables,
     codec_tables: &mut CodecTables,
 ) -> Result<(), String> {
-    if sym_ctx.is_some() && inline_producer.is_some() {
+    if (sym_ctx_in.is_some() || sym_ctx_out.is_some()) && inline_producer.is_some() {
+        // Known regression: the inline-producer path produces incorrect
+        // runtime values when sym_ctx is active, even at sym_prod=1.
+        // The plumbing is in place (see the `producer_sym_ctx`
+        // adjustment below) but something about this path is still
+        // wrong. Forcing cranelift fallback here keeps the JIT
+        // coverage for the non-inline sym path (which works).
         return Err(
-            "x86_jit reduce: sym_dims + reduce-fold inline producer not yet supported \
-             (Step 3 scope: non-inline only) — falling back to cranelift"
+            "x86_jit reduce: sym_dims + reduce-fold inline producer disabled pending \
+             diagnosis — falling back to cranelift"
                 .to_string(),
         );
     }
@@ -316,13 +326,23 @@ fn emit_reduce_body(
                 dynasm!(asm; .arch x64; push Rq(INT_SLOT_C));
             }
         }
+        // For Int repr the `push INT_SLOT_C` above shifted rsp by -8,
+        // so any [rsp + sym_i_rsp_off] access inside emit_op_compute
+        // must add 8 to find the real sym_i slot. Float repr saves
+        // the accumulator in xmm3 without touching rsp.
+        let producer_sym_ctx = match (repr, sym_ctx_out) {
+            (ComputeRepr::Int, Some(ctx)) => Some(super::address::SymCtx {
+                sym_i_rsp_off: ctx.sym_i_rsp_off + 8,
+            }),
+            _ => sym_ctx_out,
+        };
         let result_slot = super::group::emit_op_compute(
             asm,
             layout,
             producer,
             IterVar::Reg(REDUCE_K_END),
             producer.atom_offset,
-            None,
+            producer_sym_ctx,
             addr_tables,
             codec_tables,
         )?;
@@ -396,7 +416,7 @@ fn emit_reduce_body(
             atom_offset,
             BIT_OFF,
             SCRATCH,
-            sym_ctx,
+            sym_ctx_in,
             addr_tables,
         )?;
         let src_fast_reg = layout.buffer_bases.reg_for_opt(src_info.buffer_id);
@@ -491,7 +511,7 @@ fn emit_reduce_body(
         iter,
         BIT_OFF,
         SCRATCH,
-        sym_ctx,
+        sym_ctx_out,
     )?;
     let dst_base = materialize_buffer_base(
         asm,

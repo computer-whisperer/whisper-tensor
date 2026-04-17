@@ -114,6 +114,35 @@ pub struct SymCtx {
     pub sym_i_rsp_off: i32,
 }
 
+/// Return the effective sym_ctx to use at a specific input's
+/// address-compute site, given the outer consumer sym_ctx (from the
+/// atom-body loop) and the input's `sym_dim_map`.
+///
+/// - Empty `sym_dim_map` → input has no sym component at all; return
+///   `None`.
+/// - All-`Broadcast` map → producer has no sym axes that vary with
+///   the consumer; the same producer atom is read for every
+///   `(atom_i, sym_flat)` slot; return `None` so the address layer
+///   doesn't add a `sym_i * elem_bits` term.
+/// - Any other shape (all-`Identity(j == index)` — the only other
+///   variant `support::check_supported` admits today) → return
+///   `outer` unchanged.
+pub fn input_sym_ctx(
+    outer: Option<SymCtx>,
+    sym_dim_map: &[crate::nano_graph::pattern::SymDimMap],
+) -> Option<SymCtx> {
+    if sym_dim_map.is_empty() {
+        return None;
+    }
+    if sym_dim_map
+        .iter()
+        .all(|m| matches!(m, crate::nano_graph::pattern::SymDimMap::Broadcast))
+    {
+        return None;
+    }
+    outer
+}
+
 /// Information returned by [`emit_compute_bit_offset`] so the caller
 /// knows how to read the bits the offset addresses.
 #[derive(Clone, Copy, Debug)]
