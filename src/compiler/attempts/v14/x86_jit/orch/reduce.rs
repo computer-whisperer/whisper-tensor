@@ -236,15 +236,17 @@ fn emit_reduce_body(
     codec_tables: &mut CodecTables,
 ) -> Result<(), String> {
     if (sym_ctx_in.is_some() || sym_ctx_out.is_some()) && inline_producer.is_some() {
-        // Known regression: the inline-producer path produces incorrect
-        // runtime values when sym_ctx is active, even at sym_prod=1.
-        // The plumbing is in place (see the `producer_sym_ctx`
-        // adjustment below) but something about this path is still
-        // wrong. Forcing cranelift fallback here keeps the JIT
-        // coverage for the non-inline sym path (which works).
+        // Known regression: enabling this path makes the whole RWKV
+        // span compile 100% but produces wrong runtime values. The
+        // bug isn't in sym_ctx propagation itself (nullifying input,
+        // output, and the sym loop scaffolding individually still
+        // leaves the output wrong) so something else in the full-
+        // span JIT path is broken and only surfaces when the span
+        // compiles all the way through. Needs dedicated diagnosis
+        // outside this edit-compile-test session.
         return Err(
             "x86_jit reduce: sym_dims + reduce-fold inline producer disabled pending \
-             diagnosis — falling back to cranelift"
+             diagnosis of a broader full-span JIT codegen regression — falling back"
                 .to_string(),
         );
     }
