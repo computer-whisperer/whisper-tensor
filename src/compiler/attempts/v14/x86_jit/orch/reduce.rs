@@ -209,9 +209,7 @@ fn resolve_reduce_source_info(
 /// When `sym_ctx` is `Some`, every input/output address in this body
 /// is shifted by `sym_i * elem_bits` via the address layer, so the
 /// caller's sym inner loop visits each `sym_flat` slot of the atom's
-/// max-stride region. The inline-producer path doesn't yet support
-/// sym; sym_ctx.is_some() && inline_producer.is_some() returns Err
-/// and forces a cranelift fallback.
+/// max-stride region.
 #[allow(clippy::too_many_arguments)]
 fn emit_reduce_body(
     asm: &mut Assembler,
@@ -235,21 +233,6 @@ fn emit_reduce_body(
     addr_tables: &mut AddressTables,
     codec_tables: &mut CodecTables,
 ) -> Result<(), String> {
-    if (sym_ctx_in.is_some() || sym_ctx_out.is_some()) && inline_producer.is_some() {
-        // Known regression: enabling this path makes the whole RWKV
-        // span compile 100% but produces wrong runtime values. The
-        // bug isn't in sym_ctx propagation itself (nullifying input,
-        // output, and the sym loop scaffolding individually still
-        // leaves the output wrong) so something else in the full-
-        // span JIT path is broken and only surfaces when the span
-        // compiles all the way through. Needs dedicated diagnosis
-        // outside this edit-compile-test session.
-        return Err(
-            "x86_jit reduce: sym_dims + reduce-fold inline producer disabled pending \
-             diagnosis of a broader full-span JIT codegen regression — falling back"
-                .to_string(),
-        );
-    }
     let acc_slot = match repr {
         ComputeRepr::F32 | ComputeRepr::F64 => CodecSlot::Xmm(FLT_SLOT_C),
         ComputeRepr::Int => CodecSlot::Gp(INT_SLOT_C),
@@ -366,21 +349,46 @@ fn emit_reduce_body(
             codec_tables,
         )?;
 
-        // Move result to slot A, then restore the accumulator.
-        // The result is in FLT_SLOT_C (same as acc) — move to A first,
-        // then restore acc from the saved copy.
-        match repr {
-            ComputeRepr::F32 | ComputeRepr::F64 => {
-                // xmm0 = result (from xmm2)
+        // Move the producer's result into slot A so the accumulator
+        // step can consume it, then restore the saved accumulator into
+        // slot C. `emit_op_compute` does not guarantee which slot
+        // holds the result — Binary/Unary/Select settle it in the C
+        // slot, but Cast and Identity leave it in the A slot. Handle
+        // both so the accumulator step always reads from A.
+        match (repr, result_slot) {
+            (ComputeRepr::F32 | ComputeRepr::F64, CodecSlot::Xmm(reg))
+                if reg == super::super::prologue::FLT_SLOT_C =>
+            {
+                // Result in xmm2 — move to xmm0, restore xmm2 from xmm3.
                 dynasm!(asm; .arch x64; vmovaps Rx(FLT_SLOT_A), Rx(FLT_SLOT_C));
-                // xmm2 = saved accumulator (from xmm3)
                 dynasm!(asm; .arch x64; vmovaps Rx(FLT_SLOT_C), Rx(ACC_SAVE_XMM));
             }
-            ComputeRepr::Int => {
+            (ComputeRepr::F32 | ComputeRepr::F64, CodecSlot::Xmm(reg))
+                if reg == super::super::prologue::FLT_SLOT_A =>
+            {
+                // Result already in xmm0 — just restore xmm2 from xmm3.
+                dynasm!(asm; .arch x64; vmovaps Rx(FLT_SLOT_C), Rx(ACC_SAVE_XMM));
+            }
+            (ComputeRepr::F32 | ComputeRepr::F64, slot) => {
+                return Err(format!(
+                    "x86_jit reduce-inline: unexpected Float result slot {slot:?}"
+                ));
+            }
+            (ComputeRepr::Int, CodecSlot::Gp(reg)) if reg == INT_SLOT_C => {
+                // Result in rdx — move to rax, pop saved rdx.
                 dynasm!(asm; .arch x64
                     ; mov Rq(RAW), Rq(INT_SLOT_C)
                     ; pop Rq(INT_SLOT_C)
                 );
+            }
+            (ComputeRepr::Int, CodecSlot::Gp(reg)) if reg == RAW => {
+                // Result already in rax — just pop saved rdx.
+                dynasm!(asm; .arch x64; pop Rq(INT_SLOT_C));
+            }
+            (ComputeRepr::Int, slot) => {
+                return Err(format!(
+                    "x86_jit reduce-inline: unexpected Int result slot {slot:?}"
+                ));
             }
         }
 
