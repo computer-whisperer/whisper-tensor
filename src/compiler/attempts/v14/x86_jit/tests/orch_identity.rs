@@ -1320,3 +1320,111 @@ fn indirect_load_f32_gather() {
     let expected = f32_input_bytes(&[30.0, 10.0, 40.0, 20.0]);
     assert_eq!(outs[0], expected, "IndirectLoad F32 gather");
 }
+
+// ─── Reduce-fold inline regression tests ────────────────────────────
+
+// Regression guards for the `emit_op_compute` slot-contract bug that
+// surfaced in RWKV's compiled forward pass (sum-of-cast). The layout
+// heuristic folds a pure-scalar producer into the reduce's k-loop
+// whenever: producer has a single consumer that is a Reduce with
+// `reduce_stride == 1`, the consumer reads the producer via a
+// Strided ref with `dim_strides = [reduce_count]`, and the atom
+// counts line up. Construct that shape explicitly with a Cast
+// producer so every path through `emit_reduce_body`'s inline branch
+// (Int repr, Float repr) is exercised. Pre-fix these tests panicked
+// inside `ab_test_bytes` with a byte mismatch vs `pool_eval`.
+
+#[test]
+fn reduce_sum_inline_cast_int() {
+    // Cast i64 → i32 folded into Sum. Int repr: the pre-fix bug
+    // overwrote rax (Cast result) with rdx before accumulation,
+    // yielding garbage sums.
+    let mut g = NanoGraph::new();
+    let inp = g.add_input_tensor(GlobalId(0), 6, NumericDType::I64);
+    let cast = g.push_group(
+        6,
+        NumericDType::I32,
+        ScalarOp::Cast { saturating: false },
+        vec![],
+        vec![GroupInput::scalar(InputRef::affine(inp, 1))],
+    );
+    // reduce_count = 3, output count = 2, consumer stride = reduce_count = 3.
+    // The layout inlinability criteria require exactly this shape.
+    let out = g.push_group(
+        2,
+        NumericDType::I32,
+        ScalarOp::Reduce {
+            kind: ReduceKind::Sum,
+            reduce_count: 3,
+            reduce_stride: 1,
+            compute_dtype: NumericDType::I32,
+        },
+        vec![],
+        vec![GroupInput::scalar(InputRef::affine(cast, 3))],
+    );
+
+    let values: [i64; 6] = [10, 20, 30, 40, 50, 60];
+    let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+    let outs = ab_test_bytes(
+        &g,
+        &[(inp, NumericDType::I64, bytes)],
+        &[AtomRange {
+            base: out,
+            count: 2,
+            dtype: NumericDType::I32,
+        }],
+    );
+    // Expected: [10+20+30, 40+50+60] = [60, 150].
+    let expected: Vec<u8> = [60i32, 150]
+        .iter()
+        .flat_map(|v| v.to_le_bytes())
+        .collect();
+    assert_eq!(outs[0], expected, "Sum(Cast<i64→i32>) reduce-fold inline");
+}
+
+#[test]
+fn reduce_sum_inline_cast_float() {
+    // Cast f32 → bf16 folded into Sum (bf16 compute → F32 compute repr).
+    // Float repr: pre-fix the post-inline move clobbered xmm0 (the
+    // Cast result) with xmm2, yielding garbage sums.
+    let mut g = NanoGraph::new();
+    let inp = g.add_input_tensor(GlobalId(0), 6, NumericDType::F32);
+    let cast = g.push_group(
+        6,
+        NumericDType::BF16,
+        ScalarOp::Cast { saturating: false },
+        vec![],
+        vec![GroupInput::scalar(InputRef::affine(inp, 1))],
+    );
+    let out = g.push_group(
+        2,
+        NumericDType::BF16,
+        ScalarOp::Reduce {
+            kind: ReduceKind::Sum,
+            reduce_count: 3,
+            reduce_stride: 1,
+            compute_dtype: NumericDType::BF16,
+        },
+        vec![],
+        vec![GroupInput::scalar(InputRef::affine(cast, 3))],
+    );
+
+    // Values chosen to be bf16-exactly-representable so the
+    // byte-equal assertion against pool_eval is deterministic.
+    let values: [f32; 6] = [1.0, 2.0, 4.0, 8.0, 16.0, 32.0];
+    let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+    let outs = ab_test_bytes(
+        &g,
+        &[(inp, NumericDType::F32, bytes)],
+        &[AtomRange {
+            base: out,
+            count: 2,
+            dtype: NumericDType::BF16,
+        }],
+    );
+    // ab_test_bytes already asserts pool_eval == x86_jit; the
+    // relaxation here is that bf16 doesn't round-trip every f32, so
+    // we don't recompute an expected ourselves — equality between
+    // backends is the regression signal.
+    assert_eq!(outs[0].len(), 4, "bf16 output = 2 atoms × 2 bytes");
+}
