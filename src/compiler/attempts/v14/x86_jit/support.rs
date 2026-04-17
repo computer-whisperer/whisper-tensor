@@ -26,13 +26,21 @@ pub fn check_supported(graph: &NanoGraph<'static, SystemPool>) -> Result<(), Str
     }
 
     for (gi, group) in graph.groups().iter().enumerate() {
-        // Phase 2a sym support: Identity and Cast groups accept
-        // sym_dims. Other ops with sym_dims fall back to pool_eval.
+        // Phase 2b+2c sym support: Identity, Cast, Binary, Unary,
+        // and Select groups accept sym_dims. Reduce + IndirectLoad
+        // with sym_dims still fall back to pool_eval (later phases).
         if !group.sym_dims.is_empty() {
-            if !matches!(group.op, ScalarOp::Identity | ScalarOp::Cast { .. }) {
+            if !matches!(
+                group.op,
+                ScalarOp::Identity
+                    | ScalarOp::Cast { .. }
+                    | ScalarOp::Binary { .. }
+                    | ScalarOp::Unary { .. }
+                    | ScalarOp::Select,
+            ) {
                 return Err(format!(
                     "x86_jit: group {gi} op {:?} with sym_dims not yet supported \
-                     (Phase 2a: Identity + Cast only)",
+                     (Phase 2b/2c: Identity+Cast+Binary+Unary+Select only)",
                     group.op
                 ));
             }

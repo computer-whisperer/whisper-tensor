@@ -501,6 +501,7 @@ pub fn emit_group(
             asm,
             layout,
             group,
+            gi,
             *op,
             *compute_dtype,
             addr_tables,
@@ -510,12 +511,13 @@ pub fn emit_group(
             asm,
             layout,
             group,
+            gi,
             *op,
             *compute_dtype,
             addr_tables,
             codec_tables,
         ),
-        ScalarOp::Select => emit_select_group(asm, layout, group, addr_tables, codec_tables),
+        ScalarOp::Select => emit_select_group(asm, layout, group, gi, addr_tables, codec_tables),
         ScalarOp::IndirectLoad { table_base, .. } => {
             emit_indirect_load_group(asm, layout, group, *table_base, addr_tables, codec_tables)
         }
@@ -1101,11 +1103,16 @@ fn emit_cast_iter(
 // ─── Binary op emission ─────────────────────────────────────────────
 
 /// Emit a Binary group: load two inputs, apply the op, store result.
+///
+/// Goes through [`emit_atom_body_loop`] so the sym inner loop and
+/// sym-aware addressing come for free when `group.sym_dims` is
+/// non-empty.
 #[allow(clippy::too_many_arguments)]
 fn emit_binary_group(
     asm: &mut Assembler,
     layout: &BufferLayout,
     group: &AtomGroup<'static, SystemPool>,
+    gi: usize,
     op: ScalarBinOp,
     compute_dtype: NumericDType,
     addr_tables: &mut AddressTables,
@@ -1117,40 +1124,32 @@ fn emit_binary_group(
             group.inputs.len()
         ));
     }
-    if group.count == 1 {
-        emit_binary_iter(
-            asm,
-            layout,
-            &group.inputs[0].input_ref,
-            &group.inputs[1].input_ref,
-            group.base_id,
-            group.atom_offset,
-            op,
-            compute_dtype,
-            group.output_dtype,
-            IterVar::Const(group.atom_offset),
-            group.atom_offset,
-            None,
-            addr_tables,
-            codec_tables,
-        )
-    } else {
-        emit_binary_loop(
-            asm,
-            layout,
-            &group.inputs[0].input_ref,
-            &group.inputs[1].input_ref,
-            group.base_id,
-            group.atom_offset,
-            op,
-            compute_dtype,
-            group.output_dtype,
-            group.atom_offset,
-            group.count,
-            addr_tables,
-            codec_tables,
-        )
-    }
+    emit_atom_body_loop(
+        asm,
+        &layout.buffer_bases,
+        group.atom_offset,
+        group.count,
+        gi,
+        &layout.group_sym_dims[gi],
+        |asm, iter, sym_ctx| {
+            emit_binary_iter(
+                asm,
+                layout,
+                &group.inputs[0].input_ref,
+                &group.inputs[1].input_ref,
+                group.base_id,
+                group.atom_offset,
+                op,
+                compute_dtype,
+                group.output_dtype,
+                iter,
+                group.atom_offset,
+                sym_ctx,
+                addr_tables,
+                codec_tables,
+            )
+        },
+    )
 }
 
 /// Emit one iteration of a Binary body.
@@ -1630,72 +1629,19 @@ fn emit_encode_store_output(
     Ok(())
 }
 
-/// Emit a count-loop around `emit_binary_iter`.
-#[allow(clippy::too_many_arguments)]
-fn emit_binary_loop(
-    asm: &mut Assembler,
-    layout: &BufferLayout,
-    input_a: &InputRef,
-    input_b: &InputRef,
-    output_base: crate::nano_graph::pattern::AtomId,
-    output_atom_offset: u64,
-    op: ScalarBinOp,
-    compute_dtype: NumericDType,
-    output_dtype: NumericDType,
-    atom_offset: u64,
-    count: u64,
-    addr_tables: &mut AddressTables,
-    codec_tables: &mut CodecTables,
-) -> Result<(), String> {
-    let start = atom_offset as i64;
-    let end = (atom_offset + count) as i64;
-
-    dynasm!(asm
-        ; .arch x64
-        ; mov Rq(LOOP_VAR_REG), QWORD start
-    );
-
-    let loop_top = asm.new_dynamic_label();
-    let loop_exit = asm.new_dynamic_label();
-
-    dynasm!(asm; =>loop_top);
-    emit_loop_cmp_end(asm, end)?;
-    dynasm!(asm; jge =>loop_exit);
-
-    emit_binary_iter(
-        asm,
-        layout,
-        input_a,
-        input_b,
-        output_base,
-        output_atom_offset,
-        op,
-        compute_dtype,
-        output_dtype,
-        IterVar::Reg(LOOP_VAR_REG),
-        atom_offset,
-        None,
-        addr_tables,
-        codec_tables,
-    )?;
-
-    dynasm!(asm
-        ; add Rq(LOOP_VAR_REG), 1
-        ; jmp =>loop_top
-        ; =>loop_exit
-    );
-
-    Ok(())
-}
-
 // ─── Unary op emission ──────────────────────────────────────────────
 
 /// Emit a Unary group: load one input, apply the op, store result.
+///
+/// Goes through [`emit_atom_body_loop`] so the sym inner loop and
+/// sym-aware addressing come for free when `group.sym_dims` is
+/// non-empty.
 #[allow(clippy::too_many_arguments)]
 fn emit_unary_group(
     asm: &mut Assembler,
     layout: &BufferLayout,
     group: &AtomGroup<'static, SystemPool>,
+    gi: usize,
     op: ScalarUnaryOp,
     compute_dtype: NumericDType,
     addr_tables: &mut AddressTables,
@@ -1707,38 +1653,31 @@ fn emit_unary_group(
             group.inputs.len()
         ));
     }
-    if group.count == 1 {
-        emit_unary_iter(
-            asm,
-            layout,
-            &group.inputs[0].input_ref,
-            group.base_id,
-            group.atom_offset,
-            op,
-            compute_dtype,
-            group.output_dtype,
-            IterVar::Const(group.atom_offset),
-            group.atom_offset,
-            None,
-            addr_tables,
-            codec_tables,
-        )
-    } else {
-        emit_unary_loop(
-            asm,
-            layout,
-            &group.inputs[0].input_ref,
-            group.base_id,
-            group.atom_offset,
-            op,
-            compute_dtype,
-            group.output_dtype,
-            group.atom_offset,
-            group.count,
-            addr_tables,
-            codec_tables,
-        )
-    }
+    emit_atom_body_loop(
+        asm,
+        &layout.buffer_bases,
+        group.atom_offset,
+        group.count,
+        gi,
+        &layout.group_sym_dims[gi],
+        |asm, iter, sym_ctx| {
+            emit_unary_iter(
+                asm,
+                layout,
+                &group.inputs[0].input_ref,
+                group.base_id,
+                group.atom_offset,
+                op,
+                compute_dtype,
+                group.output_dtype,
+                iter,
+                group.atom_offset,
+                sym_ctx,
+                addr_tables,
+                codec_tables,
+            )
+        },
+    )
 }
 
 /// Emit one iteration of a Unary body.
@@ -1833,62 +1772,6 @@ fn emit_unary_iter(
         iter,
         sym_ctx,
     )
-}
-
-/// Emit a count-loop around `emit_unary_iter`.
-#[allow(clippy::too_many_arguments)]
-fn emit_unary_loop(
-    asm: &mut Assembler,
-    layout: &BufferLayout,
-    input: &InputRef,
-    output_base: crate::nano_graph::pattern::AtomId,
-    output_atom_offset: u64,
-    op: ScalarUnaryOp,
-    compute_dtype: NumericDType,
-    output_dtype: NumericDType,
-    atom_offset: u64,
-    count: u64,
-    addr_tables: &mut AddressTables,
-    codec_tables: &mut CodecTables,
-) -> Result<(), String> {
-    let start = atom_offset as i64;
-    let end = (atom_offset + count) as i64;
-
-    dynasm!(asm
-        ; .arch x64
-        ; mov Rq(LOOP_VAR_REG), QWORD start
-    );
-
-    let loop_top = asm.new_dynamic_label();
-    let loop_exit = asm.new_dynamic_label();
-
-    dynasm!(asm; =>loop_top);
-    emit_loop_cmp_end(asm, end)?;
-    dynasm!(asm; jge =>loop_exit);
-
-    emit_unary_iter(
-        asm,
-        layout,
-        input,
-        output_base,
-        output_atom_offset,
-        op,
-        compute_dtype,
-        output_dtype,
-        IterVar::Reg(LOOP_VAR_REG),
-        atom_offset,
-        None,
-        addr_tables,
-        codec_tables,
-    )?;
-
-    dynasm!(asm
-        ; add Rq(LOOP_VAR_REG), 1
-        ; jmp =>loop_top
-        ; =>loop_exit
-    );
-
-    Ok(())
 }
 
 /// Look up the storage dtype the codec will read for an `InputRef`.
@@ -1997,6 +1880,7 @@ fn emit_select_group(
     asm: &mut Assembler,
     layout: &BufferLayout,
     group: &AtomGroup<'static, SystemPool>,
+    gi: usize,
     addr_tables: &mut AddressTables,
     codec_tables: &mut CodecTables,
 ) -> Result<(), String> {
@@ -2006,32 +1890,28 @@ fn emit_select_group(
             group.inputs.len()
         ));
     }
-    if group.count == 1 {
-        emit_select_iter(
-            asm,
-            layout,
-            group,
-            group.base_id,
-            group.atom_offset,
-            IterVar::Const(group.atom_offset),
-            group.atom_offset,
-            None,
-            addr_tables,
-            codec_tables,
-        )
-    } else {
-        emit_select_loop(
-            asm,
-            layout,
-            group,
-            group.base_id,
-            group.atom_offset,
-            group.atom_offset,
-            group.count,
-            addr_tables,
-            codec_tables,
-        )
-    }
+    emit_atom_body_loop(
+        asm,
+        &layout.buffer_bases,
+        group.atom_offset,
+        group.count,
+        gi,
+        &layout.group_sym_dims[gi],
+        |asm, iter, sym_ctx| {
+            emit_select_iter(
+                asm,
+                layout,
+                group,
+                group.base_id,
+                group.atom_offset,
+                iter,
+                group.atom_offset,
+                sym_ctx,
+                addr_tables,
+                codec_tables,
+            )
+        },
+    )
 }
 
 /// Emit the compute portion of a Select iteration: load condition,
@@ -2237,45 +2117,6 @@ fn emit_select_iter(
         iter,
         sym_ctx,
     )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn emit_select_loop(
-    asm: &mut Assembler,
-    layout: &BufferLayout,
-    group: &AtomGroup<'static, SystemPool>,
-    output_base: crate::nano_graph::pattern::AtomId,
-    output_atom_offset: u64,
-    atom_offset: u64,
-    count: u64,
-    addr_tables: &mut AddressTables,
-    codec_tables: &mut CodecTables,
-) -> Result<(), String> {
-    let start = atom_offset as i64;
-    let end = (atom_offset + count) as i64;
-    dynasm!(asm
-        ; .arch x64
-        ; mov Rq(LOOP_VAR_REG), QWORD start
-    );
-    let loop_top = asm.new_dynamic_label();
-    let loop_exit = asm.new_dynamic_label();
-    dynasm!(asm; =>loop_top);
-    emit_loop_cmp_end(asm, end)?;
-    dynasm!(asm; jge =>loop_exit);
-    emit_select_iter(
-        asm,
-        layout,
-        group,
-        output_base,
-        output_atom_offset,
-        IterVar::Reg(LOOP_VAR_REG),
-        atom_offset,
-        None,
-        addr_tables,
-        codec_tables,
-    )?;
-    dynasm!(asm; add Rq(LOOP_VAR_REG), 1; jmp =>loop_top; =>loop_exit);
-    Ok(())
 }
 
 // ─── IndirectLoad emission ──────────────────────────────────────────
