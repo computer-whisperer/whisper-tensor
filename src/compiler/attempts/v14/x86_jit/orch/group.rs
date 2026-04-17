@@ -519,7 +519,15 @@ pub fn emit_group(
         ),
         ScalarOp::Select => emit_select_group(asm, layout, group, gi, addr_tables, codec_tables),
         ScalarOp::IndirectLoad { table_base, .. } => {
-            emit_indirect_load_group(asm, layout, group, *table_base, addr_tables, codec_tables)
+            emit_indirect_load_group(
+                asm,
+                layout,
+                group,
+                gi,
+                *table_base,
+                addr_tables,
+                codec_tables,
+            )
         }
         ScalarOp::Reduce {
             kind,
@@ -2124,10 +2132,12 @@ fn emit_select_iter(
 
 /// Emit an IndirectLoad group: load a runtime index, look up a value
 /// from the table at `table_base + index`, store.
+#[allow(clippy::too_many_arguments)]
 fn emit_indirect_load_group(
     asm: &mut Assembler,
     layout: &BufferLayout,
     group: &AtomGroup<'static, SystemPool>,
+    gi: usize,
     table_base: crate::nano_graph::pattern::AtomId,
     addr_tables: &mut AddressTables,
     codec_tables: &mut CodecTables,
@@ -2160,63 +2170,44 @@ fn emit_indirect_load_group(
     let table_dtype = table_slot.dtype;
     let table_buffer_id = table_slot.buffer_id;
 
-    if group.count == 1 {
-        emit_indirect_load_iter(
-            asm,
-            layout,
-            &group.inputs[0].input_ref,
-            group.base_id,
-            group.atom_offset,
-            table_offset,
-            table_stride,
-            table_n_bits,
-            table_dtype,
-            table_buffer_id,
-            table_byte_fast,
-            group.output_dtype,
-            IterVar::Const(group.atom_offset),
-            group.atom_offset,
-            addr_tables,
-            codec_tables,
-        )
-    } else {
-        let start = group.atom_offset as i64;
-        let end = (group.atom_offset + group.count) as i64;
-        dynasm!(asm
-            ; .arch x64
-            ; mov Rq(LOOP_VAR_REG), QWORD start
-        );
-        let loop_top = asm.new_dynamic_label();
-        let loop_exit = asm.new_dynamic_label();
-        dynasm!(asm; =>loop_top);
-        emit_loop_cmp_end(asm, end)?;
-        dynasm!(asm; jge =>loop_exit);
-
-        emit_indirect_load_iter(
-            asm,
-            layout,
-            &group.inputs[0].input_ref,
-            group.base_id,
-            group.atom_offset,
-            table_offset,
-            table_stride,
-            table_n_bits,
-            table_dtype,
-            table_buffer_id,
-            table_byte_fast,
-            group.output_dtype,
-            IterVar::Reg(LOOP_VAR_REG),
-            group.atom_offset,
-            addr_tables,
-            codec_tables,
-        )?;
-
-        dynasm!(asm; add Rq(LOOP_VAR_REG), 1; jmp =>loop_top; =>loop_exit);
-        Ok(())
-    }
+    emit_atom_body_loop(
+        asm,
+        &layout.buffer_bases,
+        group.atom_offset,
+        group.count,
+        gi,
+        &layout.group_sym_dims[gi],
+        |asm, iter, sym_ctx| {
+            emit_indirect_load_iter(
+                asm,
+                layout,
+                &group.inputs[0].input_ref,
+                group.base_id,
+                group.atom_offset,
+                table_offset,
+                table_stride,
+                table_n_bits,
+                table_dtype,
+                table_buffer_id,
+                table_byte_fast,
+                group.output_dtype,
+                iter,
+                group.atom_offset,
+                sym_ctx,
+                addr_tables,
+                codec_tables,
+            )
+        },
+    )
 }
 
 /// Emit one iteration of IndirectLoad.
+///
+/// `sym_ctx` threads the outer sym coordinate through to the index
+/// load and the output store. The table lookup itself is deliberately
+/// sym-independent — the table IS the gather table, not per-sym — so
+/// the computed `table_offset + index * table_stride` in step 3 stays
+/// the same regardless of `sym_i`.
 #[allow(clippy::too_many_arguments)]
 fn emit_indirect_load_iter(
     asm: &mut Assembler,
@@ -2233,6 +2224,7 @@ fn emit_indirect_load_iter(
     output_dtype: NumericDType,
     iter: IterVar,
     atom_offset: u64,
+    sym_ctx: Option<super::address::SymCtx>,
     addr_tables: &mut AddressTables,
     codec_tables: &mut CodecTables,
 ) -> Result<(), String> {
@@ -2245,7 +2237,7 @@ fn emit_indirect_load_iter(
         atom_offset,
         BIT_OFF_REG,
         ADDR_SCRATCH,
-        None,
+        sym_ctx,
         addr_tables,
     )?;
     let __bbase6 = bbase(asm, layout, idx_info.buffer_id);
@@ -2378,7 +2370,7 @@ fn emit_indirect_load_iter(
         output_base,
         output_atom_offset,
         iter,
-        None,
+        sym_ctx,
     )?;
 
     Ok(())

@@ -26,12 +26,14 @@ pub fn check_supported(graph: &NanoGraph<'static, SystemPool>) -> Result<(), Str
     }
 
     for (gi, group) in graph.groups().iter().enumerate() {
-        // Phase 3 sym support: Identity, Cast, Binary, Unary, Select,
-        // and Reduce groups accept sym_dims. IndirectLoad with
-        // sym_dims still falls back (later phase). Reduce + inline
+        // Phase 4 sym support: Identity, Cast, Binary, Unary, Select,
+        // Reduce, and IndirectLoad groups accept sym_dims. SymReduce
+        // still falls back (semantically distinct). Reduce + inline
         // producer with sym_dims returns Err at emit time (cranelift
-        // fallback) — the outer-loop-only version of Reduce sym
-        // is handled here.
+        // fallback) — the outer-loop-only version of Reduce sym is
+        // handled here. IndirectLoad's table lookup is sym-independent
+        // by design (the table IS the gather table, not per-sym) —
+        // only the index load and output store carry sym_ctx.
         if !group.sym_dims.is_empty() {
             if !matches!(
                 group.op,
@@ -40,11 +42,12 @@ pub fn check_supported(graph: &NanoGraph<'static, SystemPool>) -> Result<(), Str
                     | ScalarOp::Binary { .. }
                     | ScalarOp::Unary { .. }
                     | ScalarOp::Select
-                    | ScalarOp::Reduce { .. },
+                    | ScalarOp::Reduce { .. }
+                    | ScalarOp::IndirectLoad { .. },
             ) {
                 return Err(format!(
                     "x86_jit: group {gi} op {:?} with sym_dims not yet supported \
-                     (Phase 3: Identity+Cast+Binary+Unary+Select+Reduce only)",
+                     (Phase 4: Identity+Cast+Binary+Unary+Select+Reduce+IndirectLoad only)",
                     group.op
                 ));
             }
