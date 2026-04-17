@@ -349,46 +349,20 @@ fn emit_reduce_body(
             codec_tables,
         )?;
 
-        // Move the producer's result into slot A so the accumulator
-        // step can consume it, then restore the saved accumulator into
-        // slot C. `emit_op_compute` does not guarantee which slot
-        // holds the result — Binary/Unary/Select settle it in the C
-        // slot, but Cast and Identity leave it in the A slot. Handle
-        // both so the accumulator step always reads from A.
-        match (repr, result_slot) {
-            (ComputeRepr::F32 | ComputeRepr::F64, CodecSlot::Xmm(reg))
-                if reg == super::super::prologue::FLT_SLOT_C =>
-            {
-                // Result in xmm2 — move to xmm0, restore xmm2 from xmm3.
+        // `emit_op_compute` always lands its result in the C slot.
+        // Move it to slot A for the accumulator step, then restore
+        // the saved accumulator back into C.
+        let _ = result_slot; // slot is fixed by emit_op_compute's contract
+        match repr {
+            ComputeRepr::F32 | ComputeRepr::F64 => {
                 dynasm!(asm; .arch x64; vmovaps Rx(FLT_SLOT_A), Rx(FLT_SLOT_C));
                 dynasm!(asm; .arch x64; vmovaps Rx(FLT_SLOT_C), Rx(ACC_SAVE_XMM));
             }
-            (ComputeRepr::F32 | ComputeRepr::F64, CodecSlot::Xmm(reg))
-                if reg == super::super::prologue::FLT_SLOT_A =>
-            {
-                // Result already in xmm0 — just restore xmm2 from xmm3.
-                dynasm!(asm; .arch x64; vmovaps Rx(FLT_SLOT_C), Rx(ACC_SAVE_XMM));
-            }
-            (ComputeRepr::F32 | ComputeRepr::F64, slot) => {
-                return Err(format!(
-                    "x86_jit reduce-inline: unexpected Float result slot {slot:?}"
-                ));
-            }
-            (ComputeRepr::Int, CodecSlot::Gp(reg)) if reg == INT_SLOT_C => {
-                // Result in rdx — move to rax, pop saved rdx.
+            ComputeRepr::Int => {
                 dynasm!(asm; .arch x64
                     ; mov Rq(RAW), Rq(INT_SLOT_C)
                     ; pop Rq(INT_SLOT_C)
                 );
-            }
-            (ComputeRepr::Int, CodecSlot::Gp(reg)) if reg == RAW => {
-                // Result already in rax — just pop saved rdx.
-                dynasm!(asm; .arch x64; pop Rq(INT_SLOT_C));
-            }
-            (ComputeRepr::Int, slot) => {
-                return Err(format!(
-                    "x86_jit reduce-inline: unexpected Int result slot {slot:?}"
-                ));
             }
         }
 

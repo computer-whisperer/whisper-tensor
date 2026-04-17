@@ -341,7 +341,13 @@ where
 /// Emit the compute portion of any inlinable op (Binary, Unary,
 /// Select, Identity, Cast) for a single iteration at index `iter`.
 ///
-/// Returns the `CodecSlot` holding the result in compute repr.
+/// **Contract:** the returned slot is always the compute-repr `C`
+/// slot (`FLT_SLOT_C` / `INT_SLOT_C`). Ops whose `*_compute` helpers
+/// naturally land in the `A` slot (Cast, Identity) get a tail move
+/// inserted here so every caller can assume a single result location.
+/// Callers must treat the `C` slot as clobbered across this call —
+/// save it first if the value is live.
+///
 /// Does NOT store to memory — the caller either stores via
 /// `emit_encode_store_output` (unfused) or forwards the slot to a
 /// consumer (fused chain / reduce-fold inline).
@@ -362,7 +368,7 @@ pub(super) fn emit_op_compute(
     let in_sym = |idx: usize| {
         super::address::input_sym_ctx(sym_ctx, &group.inputs[idx].sym_dim_map)
     };
-    match &group.op {
+    let raw_slot = match &group.op {
         ScalarOp::Binary { op, compute_dtype } => emit_binary_compute(
             asm,
             layout,
@@ -376,7 +382,7 @@ pub(super) fn emit_op_compute(
             in_sym(1),
             addr_tables,
             codec_tables,
-        ),
+        )?,
         ScalarOp::Unary { op, compute_dtype } => emit_unary_compute(
             asm,
             layout,
@@ -388,7 +394,7 @@ pub(super) fn emit_op_compute(
             in_sym(0),
             addr_tables,
             codec_tables,
-        ),
+        )?,
         ScalarOp::Select => emit_select_compute(
             asm,
             layout,
@@ -400,7 +406,7 @@ pub(super) fn emit_op_compute(
             in_sym(2),
             addr_tables,
             codec_tables,
-        ),
+        )?,
         ScalarOp::Identity => {
             // Identity compute = load + decode the single input.
             let repr = ComputeRepr::for_dtype(group.output_dtype);
@@ -421,7 +427,7 @@ pub(super) fn emit_op_compute(
                 codec_tables,
                 slot,
             )?;
-            Ok(slot)
+            slot
         }
         ScalarOp::Cast { .. } => {
             let src_dtype = lookup_input_dtype(layout, &group.inputs[0].input_ref, atom_offset)?;
@@ -436,9 +442,35 @@ pub(super) fn emit_op_compute(
                 in_sym(0),
                 addr_tables,
                 codec_tables,
-            )
+            )?
         }
-        op => Err(format!("emit_op_compute: {op:?} is not inlinable")),
+        op => return Err(format!("emit_op_compute: {op:?} is not inlinable")),
+    };
+    Ok(normalize_result_to_c_slot(asm, raw_slot))
+}
+
+/// Move an `emit_op_compute` helper's natural result into the `C`
+/// slot if it isn't already there, so `emit_op_compute` can offer a
+/// uniform slot contract. Helpers that already return the `C` slot
+/// (Binary/Unary/Select) are a no-op; Cast and Identity get a single
+/// move inserted.
+fn normalize_result_to_c_slot(asm: &mut Assembler, slot: CodecSlot) -> CodecSlot {
+    use super::super::prologue::{FLT_SLOT_A, FLT_SLOT_C, INT_SLOT_A, INT_SLOT_C};
+    match slot {
+        CodecSlot::Xmm(reg) if reg == FLT_SLOT_C => slot,
+        CodecSlot::Xmm(reg) if reg == FLT_SLOT_A => {
+            dynasm!(asm; .arch x64; vmovaps Rx(FLT_SLOT_C), Rx(FLT_SLOT_A));
+            CodecSlot::Xmm(FLT_SLOT_C)
+        }
+        CodecSlot::Gp(reg) if reg == INT_SLOT_C => slot,
+        CodecSlot::Gp(reg) if reg == INT_SLOT_A => {
+            dynasm!(asm; .arch x64; mov Rq(INT_SLOT_C), Rq(INT_SLOT_A));
+            CodecSlot::Gp(INT_SLOT_C)
+        }
+        // Any other slot is unexpected — propagate unchanged so a
+        // mismatch surfaces as a downstream assertion rather than
+        // getting silently hidden here.
+        _ => slot,
     }
 }
 
