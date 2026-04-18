@@ -282,6 +282,13 @@ impl MilliOp for GatherElements {
             vec![],
             vec![],
         );
+        // `zero_lit`, `axis_len_lit`, `stride_lit`, `col_lit_base..`
+        // are sym-free scalar Literal atoms — `broadcast_only` so the
+        // consumer's sym loop re-reads the same producer scalar at
+        // every sym_i (identity would walk `sym_i * bpe` past the
+        // literal's own bytes into the next literal's slot in the
+        // plan-wide literal buffer). See Gather::lower_to_nano for
+        // the same pattern and the RWKV --batch 2 repro.
         let cmp_base = ctx.nano.push_group(
             out_count,
             NumericDType::I64,
@@ -292,7 +299,7 @@ impl MilliOp for GatherElements {
             out_sym_dims.clone(),
             vec![
                 GroupInput::identity(InputRef::affine(indices_map.base_id, 1), n_sym),
-                GroupInput::identity(InputRef::Broadcast(zero_lit), n_sym),
+                GroupInput::broadcast_only(InputRef::Broadcast(zero_lit), n_sym),
             ],
         );
         let offset_base = ctx.nano.push_group(
@@ -305,7 +312,7 @@ impl MilliOp for GatherElements {
             out_sym_dims.clone(),
             vec![
                 GroupInput::identity(InputRef::affine(cmp_base, 1), n_sym),
-                GroupInput::identity(InputRef::Broadcast(axis_len_lit), n_sym),
+                GroupInput::broadcast_only(InputRef::Broadcast(axis_len_lit), n_sym),
             ],
         );
         let norm_base = ctx.nano.push_group(
@@ -349,7 +356,7 @@ impl MilliOp for GatherElements {
             out_sym_dims.clone(),
             vec![
                 GroupInput::identity(InputRef::affine(norm_base, 1), n_sym),
-                GroupInput::identity(InputRef::Broadcast(stride_lit), n_sym),
+                GroupInput::broadcast_only(InputRef::Broadcast(stride_lit), n_sym),
             ],
         );
 
@@ -364,7 +371,7 @@ impl MilliOp for GatherElements {
             out_sym_dims.clone(),
             vec![
                 GroupInput::identity(InputRef::affine(mul_base, 1), n_sym),
-                GroupInput::identity(InputRef::modular(col_lit_base, 1, cols), n_sym),
+                GroupInput::broadcast_only(InputRef::modular(col_lit_base, 1, cols), n_sym),
             ],
         );
 
