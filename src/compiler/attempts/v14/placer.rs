@@ -48,7 +48,7 @@ use crate::pool::SystemPool;
 /// at the top of `run_placer`).
 ///
 /// Returns 1 for sym-free groups so callers can multiply unconditionally.
-fn group_max_sym_prod(
+pub(crate) fn group_max_sym_prod(
     graph: &NanoGraph<'static, SystemPool>,
     g: &crate::nano_graph::pattern::AtomGroup<'static, SystemPool>,
     gc_max_overrides: &HashMap<GraphConstantId, u64>,

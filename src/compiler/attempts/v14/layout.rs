@@ -470,8 +470,21 @@ pub fn compute_layout(
     output_ranges: &[AtomRange],
     allow_inline: bool,
     placement: &AtomPlacementMap,
+    gc_max_overrides: &std::collections::HashMap<crate::nano_graph::pattern::GraphConstantId, u64>,
 ) -> Result<BufferLayout, String> {
     let groups = graph.groups();
+
+    // Per-group max_sym_prod. Mirrors `placer::group_max_sym_prod`: for
+    // each sym gc take the override if present, else the graph's
+    // declared max_value. Used to size span-local slots for sym groups
+    // that don't get a placer entry (Scratch groups) so the atom slot
+    // has room for the full `max_sym_prod * bpe` footprint the JIT's
+    // sym inner loop writes.
+    let group_max_syms: Vec<u64> = groups
+        .iter()
+        .map(|g| super::placer::group_max_sym_prod(graph, g, gc_max_overrides).max(1))
+        .collect();
+
     let n = groups.len();
     let num_inputs = graph.input_tensors().len();
     let total_items = num_inputs + n; // inputs then groups
@@ -694,6 +707,11 @@ pub fn compute_layout(
         atom_lo: u64,
         atom_hi: u64, // exclusive
         elem_bytes: usize,
+        /// Per-atom byte stride = `elem_bytes * max_sym_prod`. Sym-free
+        /// slabs keep this equal to `elem_bytes`; sym slabs (all
+        /// members share the same `sym_dims`) reserve full max-bound
+        /// footprint so the JIT's sym inner loop has room to write.
+        atom_byte_stride: usize,
         byte_offset: usize, // filled during allocation
     }
     let mut slabs: Vec<Slab> = Vec::new();
@@ -715,27 +733,66 @@ pub fn compute_layout(
         if all_literal {
             continue;
         }
-        // Find atom range and elem_bytes for this component.
+        // Find atom range, elem_bytes, and max_sym_prod for this
+        // component. Sym/non-sym can't mix in one slab (their atom
+        // strides differ); sym members with different sym_dims also
+        // can't share a slab safely — mirroring the placer's step-3
+        // gate. When the component violates these, bail and leave
+        // the items to be allocated standalone via the FreeList.
         let mut lo = u64::MAX;
         let mut hi = 0u64;
         let mut eb = 4usize;
+        let mut max_sym: u64 = 1;
+        let mut first_sym: Option<Vec<crate::nano_graph::pattern::GraphConstantId>> = None;
+        let mut component_ok = true;
         for &idx in members {
-            let (atom_base, count, dtype) = if idx < num_inputs {
+            let (atom_base, count, dtype, sym_dims_opt) = if idx < num_inputs {
                 let it = &graph.input_tensors()[idx];
-                (it.base_id.0, it.count, it.dtype)
+                (it.base_id.0, it.count, it.dtype, None)
             } else {
                 let g = &groups[idx - num_inputs];
-                (g.base_id.0, g.count, g.output_dtype)
+                (
+                    g.base_id.0,
+                    g.count,
+                    g.output_dtype,
+                    Some(g.sym_dims.clone()),
+                )
             };
             lo = lo.min(atom_base);
             hi = hi.max(atom_base + count);
             eb = eb.max(dtype_elem_bytes(dtype));
+            if let Some(sd) = sym_dims_opt {
+                if !sd.is_empty() {
+                    match &first_sym {
+                        None => {
+                            first_sym = Some(sd.clone());
+                            max_sym = group_max_syms[idx - num_inputs].max(1);
+                        }
+                        Some(prev) => {
+                            if prev != &sd {
+                                component_ok = false;
+                                break;
+                            }
+                        }
+                    }
+                } else if first_sym.is_some() {
+                    // Mixing sym with non-sym in one slab is unsafe
+                    // (different atom strides). Skip and fall back.
+                    component_ok = false;
+                    break;
+                }
+            }
         }
+        if !component_ok {
+            continue;
+        }
+        let atom_byte_stride = eb * max_sym as usize;
         let slab_idx = slabs.len();
         slabs.push(Slab {
             atom_lo: lo,
             atom_hi: hi,
             elem_bytes: eb,
+            atom_byte_stride,
             byte_offset: 0,
         });
         for &idx in members {
@@ -744,7 +801,7 @@ pub fn compute_layout(
             } else {
                 groups[idx - num_inputs].base_id.0
             };
-            let off_in_slab = (atom_base - lo) as usize * eb;
+            let off_in_slab = (atom_base - lo) as usize * atom_byte_stride;
             slab_assignment[idx] = Some((slab_idx, off_in_slab));
         }
     }
@@ -929,8 +986,8 @@ pub fn compute_layout(
     ) -> usize {
         if !slab_allocated[slab_idx] {
             let slab = &slabs[slab_idx];
-            let size = (slab.atom_hi - slab.atom_lo) as usize * slab.elem_bytes;
-            let offset = allocator.alloc(size, slab.elem_bytes);
+            let size = (slab.atom_hi - slab.atom_lo) as usize * slab.atom_byte_stride;
+            let offset = allocator.alloc(size, slab.atom_byte_stride.max(slab.elem_bytes));
             slabs[slab_idx].byte_offset = offset;
             slab_allocated[slab_idx] = true;
         }
@@ -1012,7 +1069,7 @@ pub fn compute_layout(
                 count: group.count,
                 buffer_id: scratch_buffer_id,
                 bit_offset: ((slab_base + off_in_slab) as u64) * 8,
-                bit_stride: (slabs[slab_idx].elem_bytes as u64) * 8,
+                bit_stride: (slabs[slab_idx].atom_byte_stride as u64) * 8,
                 elem_bits: elem_bits_semantic,
                 dtype: group.output_dtype,
             });
@@ -1038,14 +1095,19 @@ pub fn compute_layout(
                 dtype: group.output_dtype,
             });
         } else {
-            let size = group.count as usize * elem_bytes;
-            let offset = allocator.alloc(size, elem_bytes);
+            // Sym groups need room for `max_sym_prod` elements per atom
+            // (matching the placer's intermediate-slab stride). Sym-free
+            // groups keep the old `count * bpe` tight packing.
+            let max_sym_prod = group_max_syms[gi] as usize;
+            let atom_stride_bytes = elem_bytes * max_sym_prod;
+            let size = group.count as usize * atom_stride_bytes;
+            let offset = allocator.alloc(size, atom_stride_bytes.max(elem_bytes));
             all_slots.push(SlotInfo {
                 atom_base: group.base_id,
                 count: group.count,
                 buffer_id: scratch_buffer_id,
                 bit_offset: (offset as u64) * 8,
-                bit_stride: (elem_bytes as u64) * 8,
+                bit_stride: (atom_stride_bytes as u64) * 8,
                 elem_bits: elem_bits_semantic,
                 dtype: group.output_dtype,
             });
@@ -1463,7 +1525,14 @@ mod tests {
             dtype: NumericDType::BOOL,
         }];
         let placement = test_placement(&g, &outputs);
-        let layout = compute_layout(&g, &outputs, true, &placement).expect("layout");
+        let layout = compute_layout(
+            &g,
+            &outputs,
+            true,
+            &placement,
+            &std::collections::HashMap::new(),
+        )
+        .expect("layout");
 
         let (input_slot, _) = layout.find(bool_input).expect("bool input slot present");
         assert_eq!(input_slot.dtype, NumericDType::BOOL);

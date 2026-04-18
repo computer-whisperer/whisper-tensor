@@ -132,8 +132,13 @@ pub fn ab_test_bytes(
     );
     let pool_outs = run_harness(&pool_span, graph, &placement, inputs, outputs);
 
-    let x86_span = X86JitSpan::compile(graph, outputs, &placement)
-        .expect("x86_jit compile (ab_test_bytes is for spans inside the support envelope)");
+    let x86_span = X86JitSpan::compile(
+        graph,
+        outputs,
+        &placement,
+        &std::collections::HashMap::new(),
+    )
+    .expect("x86_jit compile (ab_test_bytes is for spans inside the support envelope)");
     let x86_outs = run_harness(&x86_span, graph, &placement, inputs, outputs);
 
     for (i, (a, b)) in pool_outs.iter().zip(x86_outs.iter()).enumerate() {

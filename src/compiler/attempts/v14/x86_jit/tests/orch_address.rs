@@ -90,7 +90,14 @@ fn flat_layout(count: u64, dtype: NumericDType) -> (BufferLayout, AtomId, AtomId
         dtype,
     };
     let placement = test_placement(&g, std::slice::from_ref(&out));
-    let layout = compute_layout(&g, std::slice::from_ref(&out), false, &placement).expect("layout");
+    let layout = compute_layout(
+        &g,
+        std::slice::from_ref(&out),
+        false,
+        &placement,
+        &std::collections::HashMap::new(),
+    )
+    .expect("layout");
     (layout, inp, ident, out)
 }
 
@@ -378,7 +385,14 @@ fn modular_layout(
         dtype,
     };
     let placement = test_placement(&g, std::slice::from_ref(&out));
-    let layout = compute_layout(&g, std::slice::from_ref(&out), false, &placement).expect("layout");
+    let layout = compute_layout(
+        &g,
+        std::slice::from_ref(&out),
+        false,
+        &placement,
+        &std::collections::HashMap::new(),
+    )
+    .expect("layout");
     (layout, inp, ident, out)
 }
 
@@ -505,7 +519,14 @@ fn strided_2d_broadcast_reg() {
         dtype: NumericDType::F32,
     };
     let placement = test_placement(&g, std::slice::from_ref(&out));
-    let layout = compute_layout(&g, std::slice::from_ref(&out), false, &placement).expect("layout");
+    let layout = compute_layout(
+        &g,
+        std::slice::from_ref(&out),
+        false,
+        &placement,
+        &std::collections::HashMap::new(),
+    )
+    .expect("layout");
     let (slot, _) = layout.find(inp).expect("input slot");
     let base_bit = slot.bit_offset;
     let bit_stride = slot.bit_stride;

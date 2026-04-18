@@ -88,10 +88,14 @@ impl X86JitSpan {
         graph: &NanoGraph<'static, SystemPool>,
         output_ranges: &[AtomRange],
         placement: &AtomPlacementMap,
+        gc_max_overrides: &std::collections::HashMap<
+            crate::nano_graph::pattern::GraphConstantId,
+            u64,
+        >,
     ) -> Result<Self, String> {
         support::check_supported(graph)?;
 
-        let layout = compute_layout(graph, output_ranges, true, placement)?;
+        let layout = compute_layout(graph, output_ranges, true, placement, gc_max_overrides)?;
 
         let mut tables = CodecTables::new();
         let mut addr_tables = AddressTables::new();

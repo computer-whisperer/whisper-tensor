@@ -476,6 +476,7 @@ pub(crate) fn compile_nano_graph(
                 &phase.spans,
                 &placement,
                 external_input_sym_dims,
+                gc_max_overrides,
                 &mut compile_errors,
             )
         } else {
@@ -502,6 +503,7 @@ fn compile_phase_parallel(
     external_input_sym_dims: &crate::range_map::RangeMap<
         Vec<crate::nano_graph::pattern::GraphConstantId>,
     >,
+    gc_max_overrides: &HashMap<crate::nano_graph::pattern::GraphConstantId, u64>,
     compile_errors: &mut usize,
 ) -> Vec<LaneTuple> {
     use rayon::prelude::*;
@@ -534,7 +536,7 @@ fn compile_phase_parallel(
                     external_input_sym_dims,
                 )) as Box<dyn CompiledSpanFn>)
             } else {
-                compile_one_span_native(&span.graph, &span.outputs, placement)
+                compile_one_span_native(&span.graph, &span.outputs, placement, gc_max_overrides)
             }
         })
         .collect();
@@ -626,8 +628,14 @@ fn compile_one_span_native(
     graph: &NanoGraph<'static, SystemPool>,
     outputs: &[AtomRange],
     placement: &AtomPlacementMap,
+    gc_max_overrides: &HashMap<crate::nano_graph::pattern::GraphConstantId, u64>,
 ) -> Result<Box<dyn CompiledSpanFn>, String> {
-    match crate::compiler::attempts::v14::x86_jit::X86JitSpan::compile(graph, outputs, placement) {
+    match crate::compiler::attempts::v14::x86_jit::X86JitSpan::compile(
+        graph,
+        outputs,
+        placement,
+        gc_max_overrides,
+    ) {
         Ok(s) => {
             x86_jit_stats::record_accept();
             Ok(Box::new(s) as Box<dyn CompiledSpanFn>)
