@@ -1507,6 +1507,12 @@ fn try_sib_input(
     if !slot.is_byte_aligned() || !matches!(slot.elem_bits, 8 | 16 | 32 | 64) {
         return None;
     }
+    // Runtime-stride slots need a runtime sym_prod multiply the SIB
+    // `index*scale+disp` form can't encode. Fall through to the
+    // general strided-1d path.
+    if !slot.sym_dims.is_empty() {
+        return None;
+    }
     let slot_bit = slot.bit_offset + elem_idx * slot.bit_stride;
     let base_bit = if layout.find(base_id).is_some() {
         slot_bit as i64
@@ -1549,6 +1555,11 @@ fn try_sib_output(
     };
     let (slot, elem_idx) = layout.find(group_base_id)?;
     if !slot.is_byte_aligned() || !matches!(slot.elem_bits, 8 | 16 | 32 | 64) {
+        return None;
+    }
+    // Runtime-stride output slot: can't bake runtime sym_prod into a
+    // SIB `index*scale+disp`. Fall through to the general store path.
+    if !slot.sym_dims.is_empty() {
         return None;
     }
     let slot_off = slot.bit_offset as i64 + elem_idx as i64 * slot.bit_stride as i64;
@@ -2598,40 +2609,114 @@ pub(super) fn emit_output_bit_offset(
         (slot_off - atom_offset as i64 * stride, stride)
     };
 
+    let runtime_sym = !slot.sym_dims.is_empty();
+
     match iter {
         IterVar::Const(c) => {
-            let abs = eff_base + eff_stride * c as i64;
-            dynasm!(asm
-                ; .arch x64
-                ; mov Rq(dst_bit_reg), QWORD abs
-            );
+            if runtime_sym {
+                // dst = c * runtime_sym_prod * eff_stride + eff_base
+                let c_times_stride = (c as i64)
+                    .checked_mul(eff_stride)
+                    .ok_or_else(|| format!("output: Const overflow c={c} stride={eff_stride}"))?;
+                super::address::emit_runtime_sym_prod_pub(
+                    asm,
+                    &layout.buffer_bases,
+                    &slot.sym_dims,
+                    dst_bit_reg,
+                    sym_ctx,
+                )?;
+                if (i32::MIN as i64..=i32::MAX as i64).contains(&c_times_stride) {
+                    dynasm!(asm
+                        ; .arch x64
+                        ; imul Rq(dst_bit_reg), Rq(dst_bit_reg), c_times_stride as i32
+                    );
+                } else {
+                    dynasm!(asm
+                        ; .arch x64
+                        ; mov Rq(scratch_reg), QWORD c_times_stride
+                        ; imul Rq(dst_bit_reg), Rq(scratch_reg)
+                    );
+                }
+                if (i32::MIN as i64..=i32::MAX as i64).contains(&eff_base) {
+                    dynasm!(asm; .arch x64; add Rq(dst_bit_reg), eff_base as i32);
+                } else {
+                    dynasm!(asm
+                        ; .arch x64
+                        ; mov Rq(scratch_reg), QWORD eff_base
+                        ; add Rq(dst_bit_reg), Rq(scratch_reg)
+                    );
+                }
+            } else {
+                let abs = eff_base + eff_stride * c as i64;
+                dynasm!(asm
+                    ; .arch x64
+                    ; mov Rq(dst_bit_reg), QWORD abs
+                );
+            }
         }
         IterVar::Reg(iter_reg) => {
-            // dst = iter * stride + base
-            if (i32::MIN as i64..=i32::MAX as i64).contains(&eff_stride) {
+            if runtime_sym {
+                // dst = iter_reg * runtime_sym_prod * eff_stride + eff_base
+                super::address::emit_runtime_sym_prod_pub(
+                    asm,
+                    &layout.buffer_bases,
+                    &slot.sym_dims,
+                    scratch_reg,
+                    sym_ctx,
+                )?;
                 dynasm!(asm
                     ; .arch x64
-                    ; imul Rq(dst_bit_reg), Rq(iter_reg), eff_stride as i32
-                );
-            } else {
-                dynasm!(asm
-                    ; .arch x64
-                    ; mov Rq(scratch_reg), QWORD eff_stride
                     ; mov Rq(dst_bit_reg), Rq(iter_reg)
                     ; imul Rq(dst_bit_reg), Rq(scratch_reg)
                 );
-            }
-            if (i32::MIN as i64..=i32::MAX as i64).contains(&eff_base) {
-                dynasm!(asm
-                    ; .arch x64
-                    ; add Rq(dst_bit_reg), eff_base as i32
-                );
+                if (i32::MIN as i64..=i32::MAX as i64).contains(&eff_stride) {
+                    dynasm!(asm
+                        ; .arch x64
+                        ; imul Rq(dst_bit_reg), Rq(dst_bit_reg), eff_stride as i32
+                    );
+                } else {
+                    dynasm!(asm
+                        ; .arch x64
+                        ; mov Rq(scratch_reg), QWORD eff_stride
+                        ; imul Rq(dst_bit_reg), Rq(scratch_reg)
+                    );
+                }
+                if (i32::MIN as i64..=i32::MAX as i64).contains(&eff_base) {
+                    dynasm!(asm; .arch x64; add Rq(dst_bit_reg), eff_base as i32);
+                } else {
+                    dynasm!(asm
+                        ; .arch x64
+                        ; mov Rq(scratch_reg), QWORD eff_base
+                        ; add Rq(dst_bit_reg), Rq(scratch_reg)
+                    );
+                }
             } else {
-                dynasm!(asm
-                    ; .arch x64
-                    ; mov Rq(scratch_reg), QWORD eff_base
-                    ; add Rq(dst_bit_reg), Rq(scratch_reg)
-                );
+                // dst = iter * stride + base
+                if (i32::MIN as i64..=i32::MAX as i64).contains(&eff_stride) {
+                    dynasm!(asm
+                        ; .arch x64
+                        ; imul Rq(dst_bit_reg), Rq(iter_reg), eff_stride as i32
+                    );
+                } else {
+                    dynasm!(asm
+                        ; .arch x64
+                        ; mov Rq(scratch_reg), QWORD eff_stride
+                        ; mov Rq(dst_bit_reg), Rq(iter_reg)
+                        ; imul Rq(dst_bit_reg), Rq(scratch_reg)
+                    );
+                }
+                if (i32::MIN as i64..=i32::MAX as i64).contains(&eff_base) {
+                    dynasm!(asm
+                        ; .arch x64
+                        ; add Rq(dst_bit_reg), eff_base as i32
+                    );
+                } else {
+                    dynasm!(asm
+                        ; .arch x64
+                        ; mov Rq(scratch_reg), QWORD eff_base
+                        ; add Rq(dst_bit_reg), Rq(scratch_reg)
+                    );
+                }
             }
         }
     }

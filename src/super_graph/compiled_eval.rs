@@ -536,7 +536,13 @@ fn compile_phase_parallel(
                     external_input_sym_dims,
                 )) as Box<dyn CompiledSpanFn>)
             } else {
-                compile_one_span_native(&span.graph, &span.outputs, placement, gc_max_overrides)
+                compile_one_span_native(
+                    &span.graph,
+                    &span.outputs,
+                    placement,
+                    gc_max_overrides,
+                    external_input_sym_dims,
+                )
             }
         })
         .collect();
@@ -629,12 +635,16 @@ fn compile_one_span_native(
     outputs: &[AtomRange],
     placement: &AtomPlacementMap,
     gc_max_overrides: &HashMap<crate::nano_graph::pattern::GraphConstantId, u64>,
+    external_input_sym_dims: &crate::range_map::RangeMap<
+        Vec<crate::nano_graph::pattern::GraphConstantId>,
+    >,
 ) -> Result<Box<dyn CompiledSpanFn>, String> {
     match crate::compiler::attempts::v14::x86_jit::X86JitSpan::compile(
         graph,
         outputs,
         placement,
         gc_max_overrides,
+        external_input_sym_dims,
     ) {
         Ok(s) => {
             x86_jit_stats::record_accept();

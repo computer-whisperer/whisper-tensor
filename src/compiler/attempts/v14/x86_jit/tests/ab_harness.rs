@@ -137,6 +137,7 @@ pub fn ab_test_bytes(
         outputs,
         &placement,
         &std::collections::HashMap::new(),
+        &crate::range_map::RangeMap::new(),
     )
     .expect("x86_jit compile (ab_test_bytes is for spans inside the support envelope)");
     let x86_outs = run_harness(&x86_span, graph, &placement, inputs, outputs);

@@ -96,6 +96,7 @@ fn flat_layout(count: u64, dtype: NumericDType) -> (BufferLayout, AtomId, AtomId
         false,
         &placement,
         &std::collections::HashMap::new(),
+        &crate::range_map::RangeMap::new(),
     )
     .expect("layout");
     (layout, inp, ident, out)
@@ -391,6 +392,7 @@ fn modular_layout(
         false,
         &placement,
         &std::collections::HashMap::new(),
+        &crate::range_map::RangeMap::new(),
     )
     .expect("layout");
     (layout, inp, ident, out)
@@ -525,6 +527,7 @@ fn strided_2d_broadcast_reg() {
         false,
         &placement,
         &std::collections::HashMap::new(),
+        &crate::range_map::RangeMap::new(),
     )
     .expect("layout");
     let (slot, _) = layout.find(inp).expect("input slot");

@@ -92,10 +92,20 @@ impl X86JitSpan {
             crate::nano_graph::pattern::GraphConstantId,
             u64,
         >,
+        external_input_sym_dims: &crate::range_map::RangeMap<
+            Vec<crate::nano_graph::pattern::GraphConstantId>,
+        >,
     ) -> Result<Self, String> {
         support::check_supported(graph)?;
 
-        let layout = compute_layout(graph, output_ranges, true, placement, gc_max_overrides)?;
+        let layout = compute_layout(
+            graph,
+            output_ranges,
+            true,
+            placement,
+            gc_max_overrides,
+            external_input_sym_dims,
+        )?;
 
         let mut tables = CodecTables::new();
         let mut addr_tables = AddressTables::new();

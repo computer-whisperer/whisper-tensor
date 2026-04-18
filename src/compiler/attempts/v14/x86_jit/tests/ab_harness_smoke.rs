@@ -25,8 +25,14 @@ fn empty_span_compiles_and_executes() {
     }];
     let placement = run_placer(&graph, &phases, &[], &std::collections::HashMap::new())
         .expect("empty placement");
-    let span = X86JitSpan::compile(&graph, &[], &placement, &std::collections::HashMap::new())
-        .expect("empty span compile");
+    let span = X86JitSpan::compile(
+        &graph,
+        &[],
+        &placement,
+        &std::collections::HashMap::new(),
+        &crate::range_map::RangeMap::new(),
+    )
+    .expect("empty span compile");
 
     // Build a minimal buffer_ptrs sized to the scratch slot. Every
     // slot is null/empty since the empty graph needs no data.

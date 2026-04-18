@@ -65,6 +65,21 @@ pub struct SlotInfo {
     pub elem_bits: u64,
     /// Storage dtype.
     pub dtype: NumericDType,
+    /// Sym dims whose runtime extent must be multiplied into the
+    /// per-atom stride at execute time. Non-empty only for input
+    /// tensor slots that follow the TAMI's runtime-tight packing
+    /// contract: atom `i` sits at `i * (∏ bindings[gc]) * bpe` bytes,
+    /// not at the compile-time `i * bpe` the `bit_stride` field
+    /// encodes. When non-empty the JIT emits a runtime multiply
+    /// against `gc_values[gc.0]` for each gc, so the address matches
+    /// the TAMI-native layout without a copy at the boundary.
+    ///
+    /// Empty for everything else: sym-free slots, placer-owned
+    /// intermediate / output / literal slots (which already use
+    /// `max_sym_prod * bpe` compile-time stride), and span-local
+    /// Scratch slots (which likewise use `max_sym_prod * bpe` after
+    /// the compile-time Scratch stride fix).
+    pub sym_dims: Vec<crate::nano_graph::pattern::GraphConstantId>,
 }
 
 impl SlotInfo {
@@ -471,6 +486,9 @@ pub fn compute_layout(
     allow_inline: bool,
     placement: &AtomPlacementMap,
     gc_max_overrides: &std::collections::HashMap<crate::nano_graph::pattern::GraphConstantId, u64>,
+    external_input_sym_dims: &crate::range_map::RangeMap<
+        Vec<crate::nano_graph::pattern::GraphConstantId>,
+    >,
 ) -> Result<BufferLayout, String> {
     let groups = graph.groups();
 
@@ -1015,6 +1033,25 @@ pub fn compute_layout(
         let atom_stride_bytes = placement
             .atom_byte_stride_of(it.base_id)
             .unwrap_or(elem_bytes as u64);
+        // TAMI-native runtime-stride inputs: when the placer keeps
+        // `atom_byte_stride == bpe` AND the input carries sym_dims,
+        // the caller's `relayout_to_flat` writes this tensor at
+        // runtime-tight `sym_prod * bpe` per atom (atom-major,
+        // sym-innermost). The JIT reads at that runtime stride by
+        // multiplying the atom index by `∏ bindings[gc]` at execute
+        // time — see `emit_strided_1d` / `emit_broadcast`. Anything
+        // stored max-stride by the placer (placer gave us
+        // `atom_byte_stride > bpe`) keeps empty `sym_dims` and
+        // uses the compile-time `bit_stride` as-is.
+        let input_sym_dims: Vec<crate::nano_graph::pattern::GraphConstantId> =
+            if atom_stride_bytes == elem_bytes as u64 {
+                external_input_sym_dims
+                    .get(it.base_id.0)
+                    .map(|(sd, _)| sd.clone())
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
         all_slots.push(SlotInfo {
             atom_base: it.base_id,
             count: it.count,
@@ -1023,6 +1060,7 @@ pub fn compute_layout(
             bit_stride: atom_stride_bytes * 8,
             elem_bits: elem_bits_semantic,
             dtype: it.dtype,
+            sym_dims: input_sym_dims,
         });
     }
 
@@ -1072,6 +1110,7 @@ pub fn compute_layout(
                 bit_stride: (slabs[slab_idx].atom_byte_stride as u64) * 8,
                 elem_bits: elem_bits_semantic,
                 dtype: group.output_dtype,
+                sym_dims: Vec::new(),
             });
         } else if matches!(item_kinds[item_idx], ItemKind::Fixed | ItemKind::Literal) {
             let (buf_id, byte_off) = placement.byte_offset_of(group.base_id).ok_or_else(|| {
@@ -1085,6 +1124,20 @@ pub fn compute_layout(
             let atom_stride_bytes = placement
                 .atom_byte_stride_of(group.base_id)
                 .unwrap_or(elem_bytes as u64);
+            // Same TAMI-runtime-stride rule as input tensors (see
+            // `input_sym_dims` comment above): a placer entry with
+            // `atom_byte_stride == bpe` on a group that carries
+            // `sym_dims` means the buffer holds caller-native tight
+            // packing at runtime stride `sym_prod * bpe` per atom.
+            // Model output buffers hit this: the executor allocates
+            // them at `count * sym_prod * bpe` and the JIT must write
+            // atom `i` at `i * sym_prod * bpe` bytes.
+            let output_sym_dims: Vec<crate::nano_graph::pattern::GraphConstantId> =
+                if atom_stride_bytes == elem_bytes as u64 && !group.sym_dims.is_empty() {
+                    group.sym_dims.clone()
+                } else {
+                    Vec::new()
+                };
             all_slots.push(SlotInfo {
                 atom_base: group.base_id,
                 count: group.count,
@@ -1093,6 +1146,7 @@ pub fn compute_layout(
                 bit_stride: atom_stride_bytes * 8,
                 elem_bits: elem_bits_semantic,
                 dtype: group.output_dtype,
+                sym_dims: output_sym_dims,
             });
         } else {
             // Sym groups need room for `max_sym_prod` elements per atom
@@ -1110,6 +1164,7 @@ pub fn compute_layout(
                 bit_stride: (atom_stride_bytes as u64) * 8,
                 elem_bits: elem_bits_semantic,
                 dtype: group.output_dtype,
+                sym_dims: Vec::new(),
             });
         }
 
@@ -1466,6 +1521,7 @@ mod tests {
                 bit_stride: (dtype.bytes_per_element() as u64) * 8,
                 elem_bits: dtype.total_bits() as u64,
                 dtype,
+                sym_dims: Vec::new(),
             };
             assert!(slot.is_byte_aligned(), "{dtype:?}");
             assert_eq!(slot.byte_offset(), 2);
@@ -1484,6 +1540,7 @@ mod tests {
             bit_stride: 8,
             elem_bits: 1,
             dtype: NumericDType::BOOL,
+            sym_dims: Vec::new(),
         };
         assert!(slot.is_byte_aligned());
         assert_eq!(slot.byte_offset(), 3);
@@ -1502,6 +1559,7 @@ mod tests {
             bit_stride: 1,
             elem_bits: 1,
             dtype: NumericDType::BOOL,
+            sym_dims: Vec::new(),
         };
         assert!(!slot.is_byte_aligned());
     }
@@ -1531,6 +1589,7 @@ mod tests {
             true,
             &placement,
             &std::collections::HashMap::new(),
+            &crate::range_map::RangeMap::new(),
         )
         .expect("layout");
 
