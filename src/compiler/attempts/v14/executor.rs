@@ -192,22 +192,13 @@ impl PoolEvalSpan {
                     .join(",");
                 eprintln!(
                     "[SPANDECL] span={:016x} kind=CALLER_IN i={} base={} count={} stride={} sd=[{}]",
-                    span_id,
-                    i,
-                    pr.range.base.0,
-                    pr.range.count,
-                    pr.atom_byte_stride,
-                    sdstr,
+                    span_id, i, pr.range.base.0, pr.range.count, pr.atom_byte_stride, sdstr,
                 );
             }
             for (ti, it) in graph.input_tensors().iter().enumerate() {
                 eprintln!(
                     "[SPANDECL] span={:016x} kind=GRAPH_IN  ti={} base={} count={} dtype={:?}",
-                    span_id,
-                    ti,
-                    it.base_id.0,
-                    it.count,
-                    it.dtype,
+                    span_id, ti, it.base_id.0, it.count, it.dtype,
                 );
             }
         }
@@ -527,6 +518,174 @@ impl CompiledSpanFn for PoolEvalSpan {
 }
 
 // ─── Executable plan ────────────────────────────────────────────────────────
+
+// ─── Shadow-compare span wrapper (diagnostic) ───────────────────────────
+//
+// When `WT_SHADOW_POOL_EVAL=1`, `compile_phase_parallel` wraps every
+// JIT span in this shadow so the executor runs both backends per span
+// and logs the first byte-level divergence. The pool_eval result wins
+// (authoritative) so downstream spans see correct data and the bug
+// can't cascade across phase boundaries.
+//
+// Only compares the **output** byte regions (one per declared output
+// range): buffer_ptrs bytes at
+// `placement.byte_offset_of(range.base).1 ..
+//  byte_offset + range.count * placement.atom_byte_stride_of(range.base)`.
+// This covers the live data the JIT or pool_eval wrote; the trailing
+// slack bytes in max-stride slots are invariant and don't affect the
+// comparison.
+
+struct ShadowOutputRegion {
+    base_atom: u64,
+    buffer_id: u8,
+    byte_offset: usize,
+    size_bytes: usize,
+    atom_byte_stride: u64,
+    dtype: NumericDType,
+    count: u64,
+}
+
+pub(crate) struct ShadowCompareSpan {
+    jit: Box<dyn CompiledSpanFn>,
+    pool: PoolEvalSpan,
+    output_regions: Vec<ShadowOutputRegion>,
+    span_tag: String,
+}
+
+impl ShadowCompareSpan {
+    pub(crate) fn new(
+        jit: Box<dyn CompiledSpanFn>,
+        pool: PoolEvalSpan,
+        outputs: &[AtomRange],
+        placement: &AtomPlacementMap,
+        phase_idx: usize,
+        span_idx: usize,
+    ) -> Self {
+        let output_regions: Vec<ShadowOutputRegion> = outputs
+            .iter()
+            .map(|r| {
+                let (buf, off) = placement
+                    .byte_offset_of(r.base)
+                    .expect("ShadowCompareSpan: output range not in placement");
+                let stride = placement
+                    .atom_byte_stride_of(r.base)
+                    .unwrap_or(r.dtype.bytes_per_element() as u64);
+                ShadowOutputRegion {
+                    base_atom: r.base.0,
+                    buffer_id: buf.0,
+                    byte_offset: off as usize,
+                    size_bytes: (r.count * stride) as usize,
+                    atom_byte_stride: stride,
+                    dtype: r.dtype,
+                    count: r.count,
+                }
+            })
+            .collect();
+        let span_tag = format!("p{phase_idx}s{span_idx}");
+        ShadowCompareSpan {
+            jit,
+            pool,
+            output_regions,
+            span_tag,
+        }
+    }
+}
+
+impl CompiledSpanFn for ShadowCompareSpan {
+    fn scratch_bytes(&self) -> usize {
+        self.jit.scratch_bytes().max(self.pool.scratch_bytes())
+    }
+
+    fn execute(&self, buffer_ptrs: &[*mut u8], bindings: &HashMap<GraphConstantId, u64>) {
+        // Snapshot output regions pre-execute.
+        let pre: Vec<Vec<u8>> = self
+            .output_regions
+            .iter()
+            .map(|r| unsafe {
+                let base = buffer_ptrs[r.buffer_id as usize];
+                let src = base.add(r.byte_offset);
+                std::slice::from_raw_parts(src as *const u8, r.size_bytes).to_vec()
+            })
+            .collect();
+
+        // JIT first.
+        self.jit.execute(buffer_ptrs, bindings);
+        let jit_post: Vec<Vec<u8>> = self
+            .output_regions
+            .iter()
+            .map(|r| unsafe {
+                let base = buffer_ptrs[r.buffer_id as usize];
+                let src = base.add(r.byte_offset);
+                std::slice::from_raw_parts(src as *const u8, r.size_bytes).to_vec()
+            })
+            .collect();
+
+        // Restore pre-state so pool_eval sees the same input conditions.
+        for (r, bytes) in self.output_regions.iter().zip(pre.iter()) {
+            unsafe {
+                let base = buffer_ptrs[r.buffer_id as usize];
+                let dst = base.add(r.byte_offset);
+                std::ptr::copy_nonoverlapping(bytes.as_ptr(), dst, r.size_bytes);
+            }
+        }
+
+        // Pool_eval now.
+        self.pool.execute(buffer_ptrs, bindings);
+        let pool_post: Vec<Vec<u8>> = self
+            .output_regions
+            .iter()
+            .map(|r| unsafe {
+                let base = buffer_ptrs[r.buffer_id as usize];
+                let src = base.add(r.byte_offset);
+                std::slice::from_raw_parts(src as *const u8, r.size_bytes).to_vec()
+            })
+            .collect();
+
+        // Compare per-output.
+        for (oi, r) in self.output_regions.iter().enumerate() {
+            if jit_post[oi] != pool_post[oi] {
+                let diff_idx = jit_post[oi]
+                    .iter()
+                    .zip(pool_post[oi].iter())
+                    .position(|(a, b)| a != b)
+                    .unwrap_or(0);
+                let mut diff_count = 0usize;
+                for (a, b) in jit_post[oi].iter().zip(pool_post[oi].iter()) {
+                    if a != b {
+                        diff_count += 1;
+                    }
+                }
+                let preview_start = diff_idx.saturating_sub(4);
+                let preview_end = (diff_idx + 16).min(r.size_bytes);
+                let jit_hex: String = jit_post[oi][preview_start..preview_end]
+                    .iter()
+                    .map(|b| format!("{:02x}", b))
+                    .collect();
+                let pool_hex: String = pool_post[oi][preview_start..preview_end]
+                    .iter()
+                    .map(|b| format!("{:02x}", b))
+                    .collect();
+                eprintln!(
+                    "[SHADOW_DIFF] {} out[{}] base={} buf={} off={} size={} count={} stride={} dtype={:?} first_diff@{} (atom={}) diff_bytes={} jit={} pool={}",
+                    self.span_tag,
+                    oi,
+                    r.base_atom,
+                    r.buffer_id,
+                    r.byte_offset,
+                    r.size_bytes,
+                    r.count,
+                    r.atom_byte_stride,
+                    r.dtype,
+                    diff_idx,
+                    diff_idx as u64 / r.atom_byte_stride,
+                    diff_count,
+                    jit_hex,
+                    pool_hex,
+                );
+            }
+        }
+    }
+}
 
 /// A fully compiled execution plan, ready to run.
 ///
