@@ -209,6 +209,12 @@ impl Gather {
             }
 
             // Normalize negative indices: normalized = index + (index < 0) * axis_len
+            //
+            // `stride_lit`, `axis_len_lit`, `zero_lit` are sym-free
+            // scalar Literal atoms — `broadcast_only` so the consumer's
+            // sym loop reads the same producer value at every sym_i
+            // (not a sym-varying lookup that'd walk off into the next
+            // literal's bytes at `sym_i * bpe`).
             let n_sym = indices_map.sym_dims().len();
             let cmp_id = ctx.nano.push_atom(
                 NumericDType::I64,
@@ -219,7 +225,7 @@ impl Gather {
                 indices_map.sym_dims(),
                 vec![
                     GroupInput::identity(InputRef::Broadcast(indices_map.base_id), n_sym),
-                    GroupInput::identity(InputRef::Broadcast(zero_lit), n_sym),
+                    GroupInput::broadcast_only(InputRef::Broadcast(zero_lit), n_sym),
                 ],
             );
             let offset_id = ctx.nano.push_atom(
@@ -231,7 +237,7 @@ impl Gather {
                 indices_map.sym_dims(),
                 vec![
                     GroupInput::identity(InputRef::Broadcast(cmp_id), n_sym),
-                    GroupInput::identity(InputRef::Broadcast(axis_len_lit), n_sym),
+                    GroupInput::broadcast_only(InputRef::Broadcast(axis_len_lit), n_sym),
                 ],
             );
             let norm_idx = ctx.nano.push_atom(
@@ -257,7 +263,7 @@ impl Gather {
                 indices_map.sym_dims(),
                 vec![
                     GroupInput::identity(InputRef::Broadcast(norm_idx), n_sym),
-                    GroupInput::identity(InputRef::Broadcast(stride_lit), n_sym),
+                    GroupInput::broadcast_only(InputRef::Broadcast(stride_lit), n_sym),
                 ],
             );
 
@@ -287,7 +293,11 @@ impl Gather {
                 indices_map.sym_dims(),
                 vec![
                     GroupInput::identity(InputRef::Broadcast(mul_id), n_sym),
-                    GroupInput::identity(InputRef::affine(col_offsets_base, 1), n_sym),
+                    // `col_offsets_base..` are sym-free Literal atoms;
+                    // the consumer iterates d_total atoms via affine
+                    // stride and each sym_i should re-read the same
+                    // producer scalar (broadcast across sym).
+                    GroupInput::broadcast_only(InputRef::affine(col_offsets_base, 1), n_sym),
                 ],
             );
 
