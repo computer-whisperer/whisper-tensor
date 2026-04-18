@@ -113,8 +113,7 @@ pub fn emit_reduce_group(
         gi,
         &layout.group_sym_dims[gi],
         |asm, iter, sym_ctx| {
-            let sym_ctx_in =
-                super::address::input_sym_ctx(sym_ctx, &group.inputs[0].sym_dim_map);
+            let sym_ctx_in = super::address::input_sym_ctx(sym_ctx, &group.inputs[0].sym_dim_map);
             emit_reduce_body(
                 asm,
                 layout,

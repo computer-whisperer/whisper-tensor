@@ -1741,8 +1741,8 @@ fn build_phase(
                     dim_shape,
                 } = &inp.input_ref
                 {
-                    let refs_our_group = base.0 >= group.base_id.0
-                        && base.0 < group.base_id.0 + group.count.max(1);
+                    let refs_our_group =
+                        base.0 >= group.base_id.0 && base.0 < group.base_id.0 + group.count.max(1);
                     refs_our_group
                         && dim_strides.len() == 1
                         && dim_strides[0] == 1

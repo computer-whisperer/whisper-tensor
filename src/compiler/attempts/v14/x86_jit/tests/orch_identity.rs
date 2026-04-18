@@ -1375,10 +1375,7 @@ fn reduce_sum_inline_cast_int() {
         }],
     );
     // Expected: [10+20+30, 40+50+60] = [60, 150].
-    let expected: Vec<u8> = [60i32, 150]
-        .iter()
-        .flat_map(|v| v.to_le_bytes())
-        .collect();
+    let expected: Vec<u8> = [60i32, 150].iter().flat_map(|v| v.to_le_bytes()).collect();
     assert_eq!(outs[0], expected, "Sum(Cast<i64→i32>) reduce-fold inline");
 }
 

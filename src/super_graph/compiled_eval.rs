@@ -293,23 +293,20 @@ pub(crate) fn compile_nano_graph(
 ) -> Result<(ExecutablePlan, PlanSummary, usize), String> {
     // Partition the NanoGraph — dispatch on the selected partitioner.
     //
-    // Sym graphs still force Trivial partitioning. Phase 2b added the
-    // max-stride atom layout on the placer side and strided I/O in
-    // PoolEvalSpan — both architecturally needed — but real-model
-    // multi-phase LaneSplit flow still produces garbage at batch>1.
-    // The strided paths work in isolation (Trivial sym + batch=N
-    // still produces correct outputs, and the placer reserves the
-    // right footprint) so the bug is elsewhere in the cross-span
-    // handoff. Keeping the gate on leaves the strided infrastructure
-    // as dead code until we can diagnose and fix the remaining issue.
+    // Sym graphs now follow the regular partitioner selection. The
+    // `has_sym → Trivial` gate was dropped after the placer learned
+    // to coalesce sym groups that share `sym_dims` into a single
+    // contiguous slab: previously the placer bailed on any sym
+    // coalescing, which left logically-contiguous per-head producer
+    // outputs scattered across the intermediate buffer and broke
+    // LaneSplit's cross-phase Strided consumer reads.
+    //
+    // Batch>1 still has a separate JIT bug (sym Scratch groups
+    // allocate `count * bpe` instead of `count * max_sym_prod * bpe`
+    // in layout.rs's FreeList path); that affects Trivial equally
+    // and is orthogonal to the partitioner choice.
     let t0 = Instant::now();
-    let has_sym = graph.groups().iter().any(|g| !g.sym_dims.is_empty());
-    let force_lanesplit = env::var("WT_DIAG_SYM_LANESPLIT").is_ok();
-    let partitioner = if has_sym && !force_lanesplit {
-        PartitionerKind::Trivial
-    } else {
-        resolve_partitioner_override(&options.partitioner)
-    };
+    let partitioner = resolve_partitioner_override(&options.partitioner);
     let phases = match &partitioner {
         PartitionerKind::Trivial => {
             // 1 phase, 1 span containing the whole graph. Debug baseline
@@ -464,8 +461,8 @@ pub(crate) fn compile_nano_graph(
             .collect();
     plan_builder.pin_outputs(all_output_atom_ranges, &output_sym_dims);
     let mut compile_errors = 0usize;
-    let force_pool_eval = matches!(options.codegen, CodegenKind::PoolEval)
-        || env::var("WT_FORCE_POOL_EVAL").is_ok();
+    let force_pool_eval =
+        matches!(options.codegen, CodegenKind::PoolEval) || env::var("WT_FORCE_POOL_EVAL").is_ok();
 
     x86_jit_stats::enable();
 
@@ -509,6 +506,10 @@ fn compile_phase_parallel(
 ) -> Vec<LaneTuple> {
     use rayon::prelude::*;
 
+    let shadow_compare = env::var("WT_SHADOW_POOL_EVAL")
+        .ok()
+        .is_some_and(|v| v != "0" && !v.is_empty());
+
     let results: Vec<_> = spans
         .par_iter()
         .map(|span| {
@@ -523,8 +524,7 @@ fn compile_phase_parallel(
             // only; other ops with sym_dims route to PoolEvalSpan via
             // the per-span fallback). Opaque ops and graph-level
             // opaque spans remain hard-routed to PoolEvalSpan.
-            if has_opaque
-                || (span.graph.groups().is_empty() && !span.graph.opaque_ops().is_empty())
+            if has_opaque || (span.graph.groups().is_empty() && !span.graph.opaque_ops().is_empty())
             {
                 Ok(Box::new(PoolEvalSpan::new(
                     span.graph.clone(),
@@ -543,7 +543,31 @@ fn compile_phase_parallel(
         .into_iter()
         .enumerate()
         .map(|(si, result)| match result {
-            Ok(boxed) => (boxed, spans[si].inputs.clone(), spans[si].outputs.clone()),
+            Ok(boxed) => {
+                let span_ref = &spans[si];
+                let wrapped: Box<dyn CompiledSpanFn> = if shadow_compare {
+                    let pool = PoolEvalSpan::new(
+                        span_ref.graph.clone(),
+                        span_ref.inputs.clone(),
+                        span_ref.outputs.clone(),
+                        placement,
+                        external_input_sym_dims,
+                    );
+                    Box::new(
+                        crate::compiler::attempts::v14::executor::ShadowCompareSpan::new(
+                            boxed,
+                            pool,
+                            &span_ref.outputs,
+                            placement,
+                            pi,
+                            si,
+                        ),
+                    ) as Box<dyn CompiledSpanFn>
+                } else {
+                    boxed
+                };
+                (wrapped, span_ref.inputs.clone(), span_ref.outputs.clone())
+            }
             Err(e) => {
                 *compile_errors += 1;
                 if *compile_errors <= 5 {

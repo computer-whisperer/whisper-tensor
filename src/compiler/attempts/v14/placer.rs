@@ -699,23 +699,49 @@ pub fn run_placer(
                         })
                         .collect();
 
-                    // Sym groups cannot coalesce. PoolEvalSpan writes
-                    // each sym group's bytes packed at runtime sym_prod
-                    // (atom-major-sym-innermost, contiguous), but a
-                    // coalesced slab member's byte_offset within the
-                    // slab is recorded at compile time as
-                    // `(member.base - slab.lo) * atom_stride`. With
-                    // sym, atom_stride = runtime_sym_prod * bpe — not
-                    // a compile-time constant — so the inter-member
-                    // offset can't be pre-computed. Skip the entire
-                    // constraint if any member carries sym_dims; each
-                    // sym group ends up as its own singleton slab,
-                    // sized at max_sym_prod * count * bpe in step 4.
-                    let any_sym_member = coalescable_members
+                    // Sym groups can coalesce iff they all share identical
+                    // `sym_dims`. Phase 2b reserves `max_sym_prod * bpe`
+                    // bytes per atom in every intermediate slab (whether
+                    // sym or not), so a compile-time `atom_stride` is
+                    // available. PoolEvalSpan already does strided I/O at
+                    // span boundaries when `atom_byte_stride > row_bytes`,
+                    // so the slack bytes inside each atom slot are
+                    // correctly ignored at runtime.
+                    //
+                    // Without this, logically-contiguous sym producer
+                    // groups (e.g. 192 × 64-atom per-head Reduce outputs
+                    // in an RWKV layer) end up as 192 singleton slabs at
+                    // arbitrary byte offsets. A cross-phase consumer
+                    // reading them via a single Strided InputRef then
+                    // addresses `base + i*stride` for i > member_count,
+                    // stepping off the end of one slab into whatever
+                    // happens to sit next to it in the intermediate
+                    // buffer.
+                    //
+                    // Mixing sym and non-sym members in one slab still
+                    // bails — their atom strides differ (sym uses
+                    // `max_sym_prod * bpe`, non-sym uses just `bpe`).
+                    // Sym members with different sym_dims also bail for
+                    // now: even when `max_sym_prod` happens to match,
+                    // giving them a shared slab would let a single
+                    // Strided consumer walk across atoms whose axes
+                    // don't mean the same thing — safer to leave that
+                    // for a later relaxation.
+                    let sym_count = coalescable_members
                         .iter()
-                        .any(|&gi| !groups[gi].sym_dims.is_empty());
-                    if any_sym_member {
+                        .filter(|&&gi| !groups[gi].sym_dims.is_empty())
+                        .count();
+                    if sym_count > 0 && sym_count != coalescable_members.len() {
                         continue;
+                    }
+                    if sym_count > 0 {
+                        let first_sym = &groups[coalescable_members[0]].sym_dims;
+                        let all_same = coalescable_members
+                            .iter()
+                            .all(|&gi| groups[gi].sym_dims == *first_sym);
+                        if !all_same {
+                            continue;
+                        }
                     }
 
                     let has_non_coalescable = items.iter().any(|&gi| {
@@ -831,14 +857,16 @@ pub fn run_placer(
 
             let g_max = group_max_sym_prod(main_graph, g, gc_max_overrides);
             if g_max > 1 {
-                if members.len() > 1 {
-                    // Sym groups must not coalesce — step 3's gate
-                    // should have prevented this. Defensive check.
+                // Step 3 allows a multi-member slab only when all
+                // sym members share the same `sym_dims` list, which
+                // forces a shared `max_sym_prod`. Defensive check:
+                // bail if slab picks up sym members whose bounds
+                // disagree (could happen if overrides diverge).
+                if max_sym_prod > 1 && max_sym_prod != g_max {
                     return Err(format!(
-                        "placer: sym group {gi} (base={}, sym_dims={:?}) \
-                         landed in a multi-member slab — step 3 should \
-                         have skipped this constraint",
-                        g.base_id.0, g.sym_dims
+                        "placer: sym slab members disagree on max_sym_prod \
+                         (member {gi} sym_dims={:?} max={} vs slab max={})",
+                        g.sym_dims, g_max, max_sym_prod
                     ));
                 }
                 max_sym_prod = g_max;

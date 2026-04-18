@@ -229,11 +229,7 @@ pub(super) fn emit_atom_body_loop<F>(
     mut body: F,
 ) -> Result<(), String>
 where
-    F: FnMut(
-        &mut Assembler,
-        IterVar,
-        Option<super::address::SymCtx>,
-    ) -> Result<(), String>,
+    F: FnMut(&mut Assembler, IterVar, Option<super::address::SymCtx>) -> Result<(), String>,
 {
     if count == 0 {
         return Ok(());
@@ -305,11 +301,7 @@ where
             ; cmp rdi, QWORD [rsp + 8]
             ; jge =>sym_end
         );
-        body(
-            asm,
-            iter,
-            Some(super::address::SymCtx { sym_i_rsp_off: 0 }),
-        )?;
+        body(asm, iter, Some(super::address::SymCtx { sym_i_rsp_off: 0 }))?;
         dynasm!(asm
             ; .arch x64
             ; inc QWORD [rsp + 0]
@@ -365,9 +357,8 @@ pub(super) fn emit_op_compute(
     addr_tables: &mut AddressTables,
     codec_tables: &mut CodecTables,
 ) -> Result<CodecSlot, String> {
-    let in_sym = |idx: usize| {
-        super::address::input_sym_ctx(sym_ctx, &group.inputs[idx].sym_dim_map)
-    };
+    let in_sym =
+        |idx: usize| super::address::input_sym_ctx(sym_ctx, &group.inputs[idx].sym_dim_map);
     let raw_slot = match &group.op {
         ScalarOp::Binary { op, compute_dtype } => emit_binary_compute(
             asm,
@@ -493,9 +484,7 @@ pub fn emit_group(
         ScalarOp::Identity => {
             emit_identity_group(asm, layout, group, gi, addr_tables, codec_tables)
         }
-        ScalarOp::Cast { .. } => {
-            emit_cast_group(asm, layout, group, gi, addr_tables, codec_tables)
-        }
+        ScalarOp::Cast { .. } => emit_cast_group(asm, layout, group, gi, addr_tables, codec_tables),
         ScalarOp::Literal(_) | ScalarOp::LiteralSpan(_) => {
             // A literal group's source bytes live in the plan-wide
             // literal buffer at `placement.literal_sources[base]`,
@@ -556,20 +545,16 @@ pub fn emit_group(
             codec_tables,
         ),
         ScalarOp::Select => emit_select_group(asm, layout, group, gi, addr_tables, codec_tables),
-        ScalarOp::GcLiteral(gc) => {
-            emit_gc_literal_group(asm, layout, group, gi, *gc, codec_tables)
-        }
-        ScalarOp::IndirectLoad { table_base, .. } => {
-            emit_indirect_load_group(
-                asm,
-                layout,
-                group,
-                gi,
-                *table_base,
-                addr_tables,
-                codec_tables,
-            )
-        }
+        ScalarOp::GcLiteral(gc) => emit_gc_literal_group(asm, layout, group, gi, *gc, codec_tables),
+        ScalarOp::IndirectLoad { table_base, .. } => emit_indirect_load_group(
+            asm,
+            layout,
+            group,
+            gi,
+            *table_base,
+            addr_tables,
+            codec_tables,
+        ),
         ScalarOp::Reduce {
             kind,
             reduce_count,
@@ -1029,8 +1014,7 @@ fn emit_gc_literal_group(
     // body need `+ 16` to account for the reservation; sym-free
     // groups skip the reservation and use the prologue offset
     // directly.
-    let saved_rdx_off_base =
-        super::super::prologue::gc_values_stack_offset(&layout.buffer_bases);
+    let saved_rdx_off_base = super::super::prologue::gc_values_stack_offset(&layout.buffer_bases);
     let saved_rdx_off: i32 = if has_sym {
         saved_rdx_off_base
             .checked_add(16)
@@ -1144,8 +1128,7 @@ fn emit_cast_group(
         gi,
         &layout.group_sym_dims[gi],
         |asm, iter, sym_ctx| {
-            let sym_ctx_in =
-                super::address::input_sym_ctx(sym_ctx, &group.inputs[0].sym_dim_map);
+            let sym_ctx_in = super::address::input_sym_ctx(sym_ctx, &group.inputs[0].sym_dim_map);
             emit_cast_iter(
                 asm,
                 layout,
@@ -1306,10 +1289,8 @@ fn emit_binary_group(
         gi,
         &layout.group_sym_dims[gi],
         |asm, iter, sym_ctx| {
-            let sym_ctx_a =
-                super::address::input_sym_ctx(sym_ctx, &group.inputs[0].sym_dim_map);
-            let sym_ctx_b =
-                super::address::input_sym_ctx(sym_ctx, &group.inputs[1].sym_dim_map);
+            let sym_ctx_a = super::address::input_sym_ctx(sym_ctx, &group.inputs[0].sym_dim_map);
+            let sym_ctx_b = super::address::input_sym_ctx(sym_ctx, &group.inputs[1].sym_dim_map);
             emit_binary_iter(
                 asm,
                 layout,
@@ -1611,7 +1592,10 @@ fn emit_load_decode_input(
     // because the SIB index*scale+disp form has no room for the
     // sym_i * elem_bits term; fall through to the explicit offset
     // computation which handles it via the address layer.
-    let sib_mode = sym_ctx.is_none().then(|| try_sib_input(layout, input, iter, atom_offset)).flatten();
+    let sib_mode = sym_ctx
+        .is_none()
+        .then(|| try_sib_input(layout, input, iter, atom_offset))
+        .flatten();
     if let Some((sib, info)) = sib_mode {
         let base = bbase(asm, layout, info.buffer_id);
         if info.dtype == NumericDType::F32 {
@@ -1717,8 +1701,10 @@ fn emit_encode_store_output(
     // SIB fast path: fold address into store, skip emit_output_bit_offset.
     // Disabled under sym loops (SIB index*scale+disp has no room for
     // sym_i * elem_bits); fall through to the explicit offset path.
-    let sib_mode =
-        sym_ctx.is_none().then(|| try_sib_output(layout, output_base, output_atom_offset, iter)).flatten();
+    let sib_mode = sym_ctx
+        .is_none()
+        .then(|| try_sib_output(layout, output_base, output_atom_offset, iter))
+        .flatten();
     if let Some((sib, dst_info)) = sib_mode {
         let base = bbase(asm, layout, dst_info.buffer_id);
         if output_dtype == NumericDType::F32 {
@@ -1845,8 +1831,7 @@ fn emit_unary_group(
         gi,
         &layout.group_sym_dims[gi],
         |asm, iter, sym_ctx| {
-            let sym_ctx_in =
-                super::address::input_sym_ctx(sym_ctx, &group.inputs[0].sym_dim_map);
+            let sym_ctx_in = super::address::input_sym_ctx(sym_ctx, &group.inputs[0].sym_dim_map);
             emit_unary_iter(
                 asm,
                 layout,
@@ -2086,12 +2071,9 @@ fn emit_select_group(
         gi,
         &layout.group_sym_dims[gi],
         |asm, iter, sym_ctx| {
-            let sym_ctx_cond =
-                super::address::input_sym_ctx(sym_ctx, &group.inputs[0].sym_dim_map);
-            let sym_ctx_x =
-                super::address::input_sym_ctx(sym_ctx, &group.inputs[1].sym_dim_map);
-            let sym_ctx_y =
-                super::address::input_sym_ctx(sym_ctx, &group.inputs[2].sym_dim_map);
+            let sym_ctx_cond = super::address::input_sym_ctx(sym_ctx, &group.inputs[0].sym_dim_map);
+            let sym_ctx_x = super::address::input_sym_ctx(sym_ctx, &group.inputs[1].sym_dim_map);
+            let sym_ctx_y = super::address::input_sym_ctx(sym_ctx, &group.inputs[2].sym_dim_map);
             emit_select_iter(
                 asm,
                 layout,
@@ -2373,8 +2355,7 @@ fn emit_indirect_load_group(
         gi,
         &layout.group_sym_dims[gi],
         |asm, iter, sym_ctx| {
-            let sym_ctx_idx =
-                super::address::input_sym_ctx(sym_ctx, &group.inputs[0].sym_dim_map);
+            let sym_ctx_idx = super::address::input_sym_ctx(sym_ctx, &group.inputs[0].sym_dim_map);
             emit_indirect_load_iter(
                 asm,
                 layout,

@@ -1104,11 +1104,8 @@ pub fn compute_layout(
     used_ids.dedup();
     let buffer_bases = BufferBases::assign(&used_ids)?;
 
-    let group_sym_dims: Vec<Vec<crate::nano_graph::pattern::GraphConstantId>> = graph
-        .groups()
-        .iter()
-        .map(|g| g.sym_dims.clone())
-        .collect();
+    let group_sym_dims: Vec<Vec<crate::nano_graph::pattern::GraphConstantId>> =
+        graph.groups().iter().map(|g| g.sym_dims.clone()).collect();
 
     Ok(BufferLayout {
         total_bytes: allocator.watermark,
