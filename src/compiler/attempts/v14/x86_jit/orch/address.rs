@@ -200,18 +200,27 @@ pub fn emit_compute_bit_offset(
     tables: &mut AddressTables,
 ) -> Result<AddressInfo, String> {
     let info = match input {
-        InputRef::Broadcast(atom_id) => emit_constant_atom(asm, layout, *atom_id, dst_bit_reg)?,
+        InputRef::Broadcast(atom_id) => {
+            emit_constant_atom(asm, layout, *atom_id, dst_bit_reg, scratch_reg, sym_ctx)?
+        }
 
         InputRef::Explicit(ids) if ids.len() <= 1 => {
             if ids.is_empty() {
                 return Err("address: empty Explicit InputRef".to_string());
             }
-            emit_constant_atom(asm, layout, ids[0], dst_bit_reg)?
+            emit_constant_atom(asm, layout, ids[0], dst_bit_reg, scratch_reg, sym_ctx)?
         }
 
-        InputRef::Explicit(ids) => {
-            emit_explicit_multi(asm, layout, ids, iter, dst_bit_reg, scratch_reg, tables)?
-        }
+        InputRef::Explicit(ids) => emit_explicit_multi(
+            asm,
+            layout,
+            ids,
+            iter,
+            dst_bit_reg,
+            scratch_reg,
+            tables,
+            sym_ctx,
+        )?,
 
         InputRef::Strided {
             base,
@@ -316,30 +325,44 @@ fn emit_constant_atom(
     layout: &BufferLayout,
     atom_id: AtomId,
     dst_bit_reg: u8,
+    scratch_reg: u8,
+    sym_ctx: Option<SymCtx>,
 ) -> Result<AddressInfo, String> {
     let (slot, elem_idx) = layout
         .find(atom_id)
         .ok_or_else(|| format!("address: no slot for atom={atom_id}"))?;
-    // Runtime-stride slots: the atom offset `elem_idx * slot.bit_stride`
-    // needs a runtime `sym_prod` multiplier. `elem_idx == 0` is still
-    // safe (zero times anything is zero); other cases need a runtime
-    // mul which this constant-offset path doesn't emit. Route those
-    // through the Strided path or fall back.
-    if !slot.sym_dims.is_empty() && elem_idx != 0 {
-        return Err(format!(
-            "address: constant-offset access at elem_idx={elem_idx} on \
-             runtime-sym input slot (sym_dims={:?}) not supported — \
-             atom offset would need a runtime multiply",
-            slot.sym_dims
-        ));
-    }
     let byte_fast = slot_is_byte_fast(slot);
     let bit_off = slot.bit_offset + elem_idx * slot.bit_stride;
-    if byte_fast {
-        emit_mov_imm64(asm, dst_bit_reg, bit_off / 8);
+    let compile_off = if byte_fast { bit_off / 8 } else { bit_off };
+
+    if !slot.sym_dims.is_empty() {
+        // TAMI-native runtime-tight sym slot: the caller writes at
+        // `sym_prod * bpe` per atom, so the compile-time offset
+        // (computed assuming tight `bpe` stride) must be multiplied
+        // by the runtime sym_prod. Load sym_prod into dst, then
+        // `imul dst, dst, compile_off` so the result is the real
+        // byte/bit offset.
+        emit_runtime_sym_prod(
+            asm,
+            &layout.buffer_bases,
+            &slot.sym_dims,
+            dst_bit_reg,
+            sym_ctx,
+        )?;
+        let compile_signed = compile_off as i64;
+        if (i32::MIN as i64..=i32::MAX as i64).contains(&compile_signed) {
+            dynasm!(asm
+                ; .arch x64
+                ; imul Rq(dst_bit_reg), Rq(dst_bit_reg), compile_signed as i32
+            );
+        } else {
+            emit_mov_imm64(asm, scratch_reg, compile_off);
+            dynasm!(asm; .arch x64; imul Rq(dst_bit_reg), Rq(scratch_reg));
+        }
     } else {
-        emit_mov_imm64(asm, dst_bit_reg, bit_off);
+        emit_mov_imm64(asm, dst_bit_reg, compile_off);
     }
+
     Ok(AddressInfo {
         dtype: slot.dtype,
         n_bits: slot.elem_bits as u32,
@@ -428,11 +451,22 @@ fn emit_strided_1d(
     match iter {
         IterVar::Const(c) => {
             if runtime_sym {
-                // dst = c * runtime_sym_prod * eff_stride + eff_base
-                // Compute (c * eff_stride) at compile time; multiply by
-                // runtime_sym_prod at execute; add eff_base.
+                // Full runtime byte offset for TAMI-native tight sym
+                // layout: sym_prod * (eff_base + c * eff_stride) + sym_i*bpe.
+                // The caller writes at runtime stride `sym_prod * bpe`
+                // per atom, so the slot's compile-time `eff_base`
+                // (computed assuming tight `bpe` stride) and the
+                // per-iter `eff_stride` both need the sym_prod factor.
+                // Factor sym_prod out so we only need one runtime
+                // multiply; eff_base + c*eff_stride is compile-time.
                 let c_times_stride = (c as i64).checked_mul(eff_stride).ok_or_else(|| {
                     format!("address: Strided Const overflow c={c} stride={eff_stride}")
+                })?;
+                let pre_sym = eff_base.checked_add(c_times_stride).ok_or_else(|| {
+                    format!(
+                        "address: Strided Const eff_base+c*stride overflow \
+                         (eff_base={eff_base} c_times_stride={c_times_stride})"
+                    )
                 })?;
                 emit_runtime_sym_prod(
                     asm,
@@ -441,20 +475,14 @@ fn emit_strided_1d(
                     dst_bit_reg,
                     sym_ctx,
                 )?;
-                if (i32::MIN as i64..=i32::MAX as i64).contains(&c_times_stride) {
+                if (i32::MIN as i64..=i32::MAX as i64).contains(&pre_sym) {
                     dynasm!(asm
                         ; .arch x64
-                        ; imul Rq(dst_bit_reg), Rq(dst_bit_reg), c_times_stride as i32
+                        ; imul Rq(dst_bit_reg), Rq(dst_bit_reg), pre_sym as i32
                     );
                 } else {
-                    emit_mov_imm64(asm, scratch_reg, c_times_stride as u64);
+                    emit_mov_imm64(asm, scratch_reg, pre_sym as u64);
                     dynasm!(asm; .arch x64; imul Rq(dst_bit_reg), Rq(scratch_reg));
-                }
-                if (i32::MIN as i64..=i32::MAX as i64).contains(&eff_base) {
-                    dynasm!(asm; .arch x64; add Rq(dst_bit_reg), eff_base as i32);
-                } else {
-                    emit_mov_imm64(asm, scratch_reg, eff_base as u64);
-                    dynasm!(asm; .arch x64; add Rq(dst_bit_reg), Rq(scratch_reg));
                 }
             } else {
                 let abs = eff_base + eff_stride * c as i64;
@@ -471,22 +499,12 @@ fn emit_strided_1d(
             assert_distinct(dst_bit_reg, scratch_reg, iter_reg)?;
 
             if runtime_sym {
-                // dst = iter_reg * runtime_sym_prod * eff_stride + eff_base
-                // 1. scratch = runtime_sym_prod
-                emit_runtime_sym_prod(
-                    asm,
-                    &layout.buffer_bases,
-                    &slot.sym_dims,
-                    scratch_reg,
-                    sym_ctx,
-                )?;
-                // 2. dst = iter_reg * scratch
-                dynasm!(asm
-                    ; .arch x64
-                    ; mov Rq(dst_bit_reg), Rq(iter_reg)
-                    ; imul Rq(dst_bit_reg), Rq(scratch_reg)
-                );
-                // 3. dst *= eff_stride
+                // dst = sym_prod * (iter_reg * eff_stride + eff_base).
+                // See the Const comment above; factored form needs only
+                // one runtime multiply and one scratch register.
+                // 1. dst = iter_reg
+                dynasm!(asm; .arch x64; mov Rq(dst_bit_reg), Rq(iter_reg));
+                // 2. dst *= eff_stride (compile-time tight stride)
                 if (i32::MIN as i64..=i32::MAX as i64).contains(&eff_stride) {
                     dynasm!(asm
                         ; .arch x64
@@ -496,13 +514,22 @@ fn emit_strided_1d(
                     emit_mov_imm64(asm, scratch_reg, eff_stride as u64);
                     dynasm!(asm; .arch x64; imul Rq(dst_bit_reg), Rq(scratch_reg));
                 }
-                // 4. dst += eff_base
+                // 3. dst += eff_base (compile-time, assumes tight pack)
                 if (i32::MIN as i64..=i32::MAX as i64).contains(&eff_base) {
                     dynasm!(asm; .arch x64; add Rq(dst_bit_reg), eff_base as i32);
                 } else {
                     emit_mov_imm64(asm, scratch_reg, eff_base as u64);
                     dynasm!(asm; .arch x64; add Rq(dst_bit_reg), Rq(scratch_reg));
                 }
+                // 4. scratch = runtime sym_prod, then dst *= scratch.
+                emit_runtime_sym_prod(
+                    asm,
+                    &layout.buffer_bases,
+                    &slot.sym_dims,
+                    scratch_reg,
+                    sym_ctx,
+                )?;
+                dynasm!(asm; .arch x64; imul Rq(dst_bit_reg), Rq(scratch_reg));
             } else {
                 // dst = iter_reg
                 dynasm!(asm
@@ -855,6 +882,7 @@ fn emit_imul_accum(asm: &mut Assembler, src_reg: u8, imm: i64, dst_reg: u8, scra
 /// Multi-entry Explicit address: build a heap-resident lookup table of
 /// bit offsets (one `i64` per entry), embed the table pointer as imm64
 /// in the JIT, and load `table[i]` at runtime.
+#[allow(clippy::too_many_arguments)]
 fn emit_explicit_multi(
     asm: &mut Assembler,
     layout: &BufferLayout,
@@ -863,6 +891,7 @@ fn emit_explicit_multi(
     dst_bit_reg: u8,
     scratch_reg: u8,
     tables: &mut AddressTables,
+    sym_ctx: Option<SymCtx>,
 ) -> Result<AddressInfo, String> {
     debug_assert!(ids.len() >= 2);
 
@@ -891,11 +920,16 @@ fn emit_explicit_multi(
             // Delegate to the single-atom path — just a constant mov.
             // Override info with what emit_constant_atom returns (it
             // sets byte_aligned consistently).
-            return emit_constant_atom(asm, layout, ids[idx], dst_bit_reg);
+            return emit_constant_atom(asm, layout, ids[idx], dst_bit_reg, scratch_reg, sym_ctx);
         }
         IterVar::Reg(iter_reg) => {
             // Build the offset lookup table. When byte-aligned, store
-            // byte offsets; otherwise bit offsets.
+            // byte offsets; otherwise bit offsets. Compile-time offsets
+            // assume tight `bpe` stride; for runtime-sym slots we apply
+            // an `imul dst, sym_prod` after the table load so the real
+            // byte offset follows the caller's `sym_prod * bpe` packing.
+            let mut shared_sym_dims: Option<Vec<crate::nano_graph::pattern::GraphConstantId>> =
+                None;
             let offsets: Vec<i64> = ids
                 .iter()
                 .enumerate()
@@ -903,6 +937,16 @@ fn emit_explicit_multi(
                     let (slot, elem_idx) = layout
                         .find(*id)
                         .ok_or_else(|| format!("address: no slot for Explicit[{i}] atom={id}"))?;
+                    if i == 0 {
+                        shared_sym_dims = Some(slot.sym_dims.clone());
+                    } else if shared_sym_dims.as_ref() != Some(&slot.sym_dims) {
+                        return Err(format!(
+                            "address: Explicit multi atoms span slots with \
+                             heterogeneous sym_dims (first={:?}, [{i}]={:?}) — \
+                             runtime sym_prod mul would apply inconsistently",
+                            shared_sym_dims, slot.sym_dims
+                        ));
+                    }
                     let bit_off = (slot.bit_offset + elem_idx * slot.bit_stride) as i64;
                     Ok(if byte_fast { bit_off / 8 } else { bit_off })
                 })
@@ -916,6 +960,13 @@ fn emit_explicit_multi(
                 ; mov Rq(scratch_reg), QWORD table_ptr as i64
                 ; mov Rq(dst_bit_reg), QWORD [Rq(scratch_reg) + Rq(iter_reg) * 8]
             );
+
+            if let Some(sd) = shared_sym_dims.as_ref() {
+                if !sd.is_empty() {
+                    emit_runtime_sym_prod(asm, &layout.buffer_bases, sd, scratch_reg, sym_ctx)?;
+                    dynasm!(asm; .arch x64; imul Rq(dst_bit_reg), Rq(scratch_reg));
+                }
+            }
         }
     }
     Ok(info)

@@ -55,6 +55,31 @@ pub fn check_supported(graph: &NanoGraph<'static, SystemPool>) -> Result<(), Str
                     group.op
                 ));
             }
+            // Diagnostic gates — set WT_SYMJIT_REJECT=Bin,Id,Ind,Un,Sel,Red,Cast,Gc
+            // to route specific sym ops to pool_eval fallback. Used to
+            // bisect which sym codegen is producing wrong addresses.
+            if let Ok(rej) = std::env::var("WT_SYMJIT_REJECT") {
+                for tag in rej.split(',') {
+                    let t = tag.trim();
+                    let matches_op = match t {
+                        "Bin" => matches!(group.op, ScalarOp::Binary { .. }),
+                        "Un" => matches!(group.op, ScalarOp::Unary { .. }),
+                        "Sel" => matches!(group.op, ScalarOp::Select),
+                        "Red" => matches!(group.op, ScalarOp::Reduce { .. }),
+                        "Cast" => matches!(group.op, ScalarOp::Cast { .. }),
+                        "Id" => matches!(group.op, ScalarOp::Identity),
+                        "Ind" => matches!(group.op, ScalarOp::IndirectLoad { .. }),
+                        "Gc" => matches!(group.op, ScalarOp::GcLiteral(_)),
+                        _ => false,
+                    };
+                    if matches_op {
+                        return Err(format!(
+                            "x86_jit: sym op {:?} rejected by WT_SYMJIT_REJECT={tag}",
+                            group.op
+                        ));
+                    }
+                }
+            }
             // Each input's sym_dim_map must be one of:
             //   (a) empty — no sym component, input is scalar.
             //   (b) all-Identity(j==index) with map.len() ==

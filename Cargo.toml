@@ -69,3 +69,8 @@ whisper-tensor-ui = {path = "crates/whisper-tensor-ui"}
 whisper-tensor-import = {path = "crates/whisper-tensor-import"}
 whisper-tensor-server = {path = "crates/whisper-tensor-server", default-features=false}
 
+
+[profile.release-dbg]
+inherits = "release"
+debug = true
+strip = "none"

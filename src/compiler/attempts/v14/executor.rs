@@ -597,6 +597,21 @@ impl CompiledSpanFn for ShadowCompareSpan {
     }
 
     fn execute(&self, buffer_ptrs: &[*mut u8], bindings: &HashMap<GraphConstantId, u64>) {
+        let trace_exec = std::env::var("WT_TRACE_SPAN_EXEC")
+            .ok()
+            .is_some_and(|v| v != "0" && !v.is_empty());
+        if trace_exec {
+            let groups = self.pool.graph.groups();
+            let sym_total = groups.iter().filter(|g| !g.sym_dims.is_empty()).count();
+            eprintln!(
+                "[SHADOW_EXEC] {} jit_begin groups={} sym_groups={} out_regions={}",
+                self.span_tag,
+                groups.len(),
+                sym_total,
+                self.output_regions.len(),
+            );
+        }
+
         // Snapshot output regions pre-execute.
         let pre: Vec<Vec<u8>> = self
             .output_regions
@@ -610,6 +625,9 @@ impl CompiledSpanFn for ShadowCompareSpan {
 
         // JIT first.
         self.jit.execute(buffer_ptrs, bindings);
+        if trace_exec {
+            eprintln!("[SHADOW_EXEC] {} jit_done", self.span_tag);
+        }
         let jit_post: Vec<Vec<u8>> = self
             .output_regions
             .iter()
