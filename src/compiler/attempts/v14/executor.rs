@@ -461,9 +461,36 @@ impl CompiledSpanFn for PoolEvalSpan {
         // untouched. Downstream spans read the same prefix via the
         // same `atom_byte_stride` and get the live data back.
         for (pr, result_tensor) in self.outputs.iter().zip(results.iter()) {
-            let src = result_tensor.buffer();
             let bpe = pr.range.dtype.bytes_per_element();
             let sp = sym_prod(&pr.sym_dims);
+            let total_elems = pr.range.count * sp;
+            // Pool_eval stores sub-byte dtypes bit-packed (e.g. 8 bools
+            // per byte) because its internal stores use `row_major`
+            // which sets `stride_bits = total_bits`. The executor
+            // pipeline uses the byte-padded `jit_flat_layout` (bpe
+            // bytes per element) so every downstream consumer — JIT
+            // spans, read_buffer_to_output, shadow-compare — addresses
+            // one element per byte for sub-byte types. For sub-byte
+            // results, expand bit-packed → byte-padded into a local
+            // buffer before the byte-copy scatter below. Non-sub-byte
+            // (bpe_bits == total_bits) borrows the tensor's buffer
+            // directly with no copy.
+            let bpe_bits = (bpe as u64) * 8;
+            let elem_bits = pr.range.dtype.total_bits() as u64;
+            let expanded: Vec<u8>;
+            let src: &[u8] = if bpe_bits == elem_bits {
+                result_tensor.buffer()
+            } else {
+                let needed = total_elems as usize * bpe;
+                let mut buf = vec![0u8; needed];
+                let flat_layout = jit_flat_layout(total_elems, pr.range.dtype);
+                for i in 0..total_elems as usize {
+                    let scalar = result_tensor.read_element(i);
+                    flat_layout.write_element(&mut buf, i, scalar);
+                }
+                expanded = buf;
+                &expanded
+            };
             let row_bytes = sp as usize * bpe;
             let needed = pr.range.count as usize * row_bytes;
             // Same scaling rule as the input gather (see comment there):
@@ -550,22 +577,77 @@ impl CompiledSpanFn for PoolEvalSpan {
 // (authoritative) so downstream spans see correct data and the bug
 // can't cascade across phase boundaries.
 //
-// Only compares the **output** byte regions (one per declared output
-// range): buffer_ptrs bytes at
-// `placement.byte_offset_of(range.base).1 ..
-//  byte_offset + range.count * placement.atom_byte_stride_of(range.base)`.
-// This covers the live data the JIT or pool_eval wrote; the trailing
-// slack bytes in max-stride slots are invariant and don't affect the
-// comparison.
+// Compares only the **live-data** bytes each backend writes:
+//   live_bytes_per_atom = sym_prod * bpe  (= bpe for sym-free)
+//   runtime_stride      = max(atom_byte_stride, live_bytes_per_atom)
+//
+// For runtime-tight sym outputs (atom_byte_stride == bpe): atoms are
+// contiguous at `sym_prod * bpe` apart at runtime.
+// For max-stride sym intermediates (atom_byte_stride > bpe): atoms
+// live `max_sym_prod * bpe` apart with `(max_sym_prod - sym_prod) * bpe`
+// slack bytes per atom that may differ between backends and are
+// skipped from the comparison.
 
 struct ShadowOutputRegion {
     base_atom: u64,
     buffer_id: u8,
     byte_offset: usize,
-    size_bytes: usize,
     atom_byte_stride: u64,
     dtype: NumericDType,
     count: u64,
+    /// Producing group's sym axes. Empty for sym-free groups; otherwise
+    /// `∏ bindings[gc]` at execute time gives `sym_prod` — the count of
+    /// elements per atom the span actually wrote.
+    sym_dims: Vec<GraphConstantId>,
+}
+
+impl ShadowOutputRegion {
+    /// Resolve runtime sym_prod, live-bytes-per-atom, and actual stride
+    /// between consecutive atoms from `bindings`.
+    fn runtime_geometry(&self, bindings: &HashMap<GraphConstantId, u64>) -> (u64, u64, u64) {
+        let sym_prod: u64 = self
+            .sym_dims
+            .iter()
+            .map(|gc| *bindings.get(gc).unwrap_or(&1))
+            .product::<u64>()
+            .max(1);
+        let bpe = self.dtype.bytes_per_element() as u64;
+        let live_bpa = sym_prod * bpe;
+        // Runtime-tight sym: atom_byte_stride = bpe (compile-time) but
+        // actual stride = live_bpa. Max-stride sym: atom_byte_stride
+        // is already max_sym_prod * bpe. `max` handles both cleanly,
+        // plus the sym-free case where live_bpa == atom_byte_stride.
+        let runtime_stride = self.atom_byte_stride.max(live_bpa);
+        (sym_prod, live_bpa, runtime_stride)
+    }
+
+    /// Total spanned bytes (including any slack in max-stride slots).
+    /// Used for pre/post snapshots that capture every byte the JIT
+    /// might have touched so the restore before pool_eval is faithful.
+    fn spanned_bytes(&self, bindings: &HashMap<GraphConstantId, u64>) -> usize {
+        let (_, _, runtime_stride) = self.runtime_geometry(bindings);
+        (self.count * runtime_stride) as usize
+    }
+
+    /// Collect only the live-data bytes (slack skipped) into a fresh
+    /// Vec for byte-level equality checks. Layout is atom-major:
+    /// `[atom0 live_bpa bytes][atom1 live_bpa bytes]…`.
+    unsafe fn collect_live_bytes(
+        &self,
+        buffer_ptrs: &[*mut u8],
+        bindings: &HashMap<GraphConstantId, u64>,
+    ) -> Vec<u8> {
+        let (_, live_bpa, runtime_stride) = self.runtime_geometry(bindings);
+        let mut out = Vec::with_capacity((self.count * live_bpa) as usize);
+        let base = buffer_ptrs[self.buffer_id as usize];
+        for i in 0..self.count {
+            let off = self.byte_offset as u64 + i * runtime_stride;
+            let src = unsafe { base.add(off as usize) as *const u8 };
+            let slice = unsafe { std::slice::from_raw_parts(src, live_bpa as usize) };
+            out.extend_from_slice(slice);
+        }
+        out
+    }
 }
 
 pub(crate) struct ShadowCompareSpan {
@@ -581,6 +663,7 @@ impl ShadowCompareSpan {
         pool: PoolEvalSpan,
         outputs: &[AtomRange],
         placement: &AtomPlacementMap,
+        graph: &crate::nano_graph::pattern::NanoGraph<'static, crate::pool::SystemPool>,
         phase_idx: usize,
         span_idx: usize,
     ) -> Self {
@@ -593,14 +676,24 @@ impl ShadowCompareSpan {
                 let stride = placement
                     .atom_byte_stride_of(r.base)
                     .unwrap_or(r.dtype.bytes_per_element() as u64);
+                // Producing group's sym_dims: outputs produced by this
+                // span always have a matching group in `graph.groups()`
+                // whose `base_id` equals `r.base`. External inputs
+                // aren't outputs, so `find_group_idx` should hit every
+                // time; fall back to an empty sym list if it doesn't
+                // (defensive — the diagnostic would just skip slack).
+                let sym_dims: Vec<GraphConstantId> = graph
+                    .find_group_idx(r.base)
+                    .map(|gi| graph.groups()[gi].sym_dims.clone())
+                    .unwrap_or_default();
                 ShadowOutputRegion {
                     base_atom: r.base.0,
                     buffer_id: buf.0,
                     byte_offset: off as usize,
-                    size_bytes: (r.count * stride) as usize,
                     atom_byte_stride: stride,
                     dtype: r.dtype,
                     count: r.count,
+                    sym_dims,
                 }
             })
             .collect();
@@ -635,90 +728,96 @@ impl CompiledSpanFn for ShadowCompareSpan {
             );
         }
 
-        // Snapshot output regions pre-execute.
+        // Snapshot the full spanned region (including slack) pre-execute
+        // so the restore before pool_eval is faithful byte-for-byte.
         let pre: Vec<Vec<u8>> = self
             .output_regions
             .iter()
             .map(|r| unsafe {
+                let span = r.spanned_bytes(bindings);
                 let base = buffer_ptrs[r.buffer_id as usize];
                 let src = base.add(r.byte_offset);
-                std::slice::from_raw_parts(src as *const u8, r.size_bytes).to_vec()
+                std::slice::from_raw_parts(src as *const u8, span).to_vec()
             })
             .collect();
 
-        // JIT first.
+        // JIT first. Collect live bytes only (slack excluded) for
+        // comparison.
         self.jit.execute(buffer_ptrs, bindings);
         if trace_exec {
             eprintln!("[SHADOW_EXEC] {} jit_done", self.span_tag);
         }
-        let jit_post: Vec<Vec<u8>> = self
+        let jit_live: Vec<Vec<u8>> = self
             .output_regions
             .iter()
-            .map(|r| unsafe {
-                let base = buffer_ptrs[r.buffer_id as usize];
-                let src = base.add(r.byte_offset);
-                std::slice::from_raw_parts(src as *const u8, r.size_bytes).to_vec()
-            })
+            .map(|r| unsafe { r.collect_live_bytes(buffer_ptrs, bindings) })
             .collect();
 
-        // Restore pre-state so pool_eval sees the same input conditions.
+        // Restore pre-state (full spanned region, slack included) so
+        // pool_eval sees the same input conditions.
         for (r, bytes) in self.output_regions.iter().zip(pre.iter()) {
             unsafe {
                 let base = buffer_ptrs[r.buffer_id as usize];
                 let dst = base.add(r.byte_offset);
-                std::ptr::copy_nonoverlapping(bytes.as_ptr(), dst, r.size_bytes);
+                std::ptr::copy_nonoverlapping(bytes.as_ptr(), dst, bytes.len());
             }
         }
 
-        // Pool_eval now.
+        // Pool_eval now. Collect its live bytes for comparison.
         self.pool.execute(buffer_ptrs, bindings);
-        let pool_post: Vec<Vec<u8>> = self
+        let pool_live: Vec<Vec<u8>> = self
             .output_regions
             .iter()
-            .map(|r| unsafe {
-                let base = buffer_ptrs[r.buffer_id as usize];
-                let src = base.add(r.byte_offset);
-                std::slice::from_raw_parts(src as *const u8, r.size_bytes).to_vec()
-            })
+            .map(|r| unsafe { r.collect_live_bytes(buffer_ptrs, bindings) })
             .collect();
 
-        // Compare per-output.
+        // Compare per-output. Diff indices are into the concatenated
+        // live-bytes stream; derive the atom by dividing by live_bpa.
         for (oi, r) in self.output_regions.iter().enumerate() {
-            if jit_post[oi] != pool_post[oi] {
-                let diff_idx = jit_post[oi]
+            if jit_live[oi] != pool_live[oi] {
+                let (sym_prod, live_bpa, runtime_stride) = r.runtime_geometry(bindings);
+                let live_total = jit_live[oi].len();
+                let diff_idx = jit_live[oi]
                     .iter()
-                    .zip(pool_post[oi].iter())
+                    .zip(pool_live[oi].iter())
                     .position(|(a, b)| a != b)
                     .unwrap_or(0);
                 let mut diff_count = 0usize;
-                for (a, b) in jit_post[oi].iter().zip(pool_post[oi].iter()) {
+                for (a, b) in jit_live[oi].iter().zip(pool_live[oi].iter()) {
                     if a != b {
                         diff_count += 1;
                     }
                 }
                 let preview_start = diff_idx.saturating_sub(4);
-                let preview_end = (diff_idx + 16).min(r.size_bytes);
-                let jit_hex: String = jit_post[oi][preview_start..preview_end]
+                let preview_end = (diff_idx + 16).min(live_total);
+                let jit_hex: String = jit_live[oi][preview_start..preview_end]
                     .iter()
                     .map(|b| format!("{:02x}", b))
                     .collect();
-                let pool_hex: String = pool_post[oi][preview_start..preview_end]
+                let pool_hex: String = pool_live[oi][preview_start..preview_end]
                     .iter()
                     .map(|b| format!("{:02x}", b))
                     .collect();
+                let atom_of_diff = if live_bpa > 0 {
+                    diff_idx as u64 / live_bpa
+                } else {
+                    0
+                };
                 eprintln!(
-                    "[SHADOW_DIFF] {} out[{}] base={} buf={} off={} size={} count={} stride={} dtype={:?} first_diff@{} (atom={}) diff_bytes={} jit={} pool={}",
+                    "[SHADOW_DIFF] {} out[{}] base={} buf={} off={} live_bytes={} count={} stride={} live_bpa={} sym_prod={} dtype={:?} first_diff@{} (atom={}) diff_bytes={} jit={} pool={}",
                     self.span_tag,
                     oi,
                     r.base_atom,
                     r.buffer_id,
                     r.byte_offset,
-                    r.size_bytes,
+                    live_total,
                     r.count,
-                    r.atom_byte_stride,
+                    runtime_stride,
+                    live_bpa,
+                    sym_prod,
                     r.dtype,
                     diff_idx,
-                    diff_idx as u64 / r.atom_byte_stride,
+                    atom_of_diff,
                     diff_count,
                     jit_hex,
                     pool_hex,

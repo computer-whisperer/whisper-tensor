@@ -13,7 +13,7 @@
 //! Each test builds a tiny graph, supplies a few raw input bytes,
 //! and lets `ab_test_bytes` panic on any byte mismatch.
 
-use super::ab_harness::ab_test_bytes;
+use super::ab_harness::{ab_test_bytes, ab_test_bytes_sym};
 use crate::graph::GlobalId;
 use crate::nano_graph::ops::ScalarOp;
 use crate::nano_graph::pattern::{AtomRange, GroupInput, InputRef, NanoGraph};
@@ -180,15 +180,32 @@ fn identity_bf16_count_four() {
     assert_eq!(outs[0], bytes, "BF16 identity byte equality");
 }
 
-// NOTE: A `BOOL` Identity A/B test would belong here but is blocked
-// by a `PoolEvalSpan` output divergence for sub-byte dtypes:
-// `PoolEvalSpan::execute` raw-copies the result NumericTensor's
-// bit-packed bytes (e.g. one byte per 8 bools) into the SpanOutput
-// buffer, while the JIT pipeline goes through `read_buffer_to_output`
-// which produces the byte-padded format (one byte per bool). The
-// two formats disagree even though the bits represent the same data.
-// Re-enable once `PoolEvalSpan` either expands sub-byte storage on
-// output or the SpanOutput contract picks one canonical layout.
+#[test]
+fn identity_bool_count_five() {
+    // Sub-byte dtype: PoolEvalSpan expands pool_eval's bit-packed
+    // output into byte-padded layout before scattering to buffer_ptrs,
+    // matching the JIT pipeline's one-byte-per-bool convention.
+    let mut g = NanoGraph::new();
+    let inp = g.add_input_tensor(GlobalId(0), 5, NumericDType::BOOL);
+    let out = g.push_group(
+        5,
+        NumericDType::BOOL,
+        ScalarOp::Identity,
+        vec![],
+        vec![GroupInput::scalar(InputRef::affine(inp, 1))],
+    );
+    let bytes: Vec<u8> = vec![1, 0, 1, 1, 1];
+    let outs = ab_test_bytes(
+        &g,
+        &[(inp, NumericDType::BOOL, bytes.clone())],
+        &[AtomRange {
+            base: out,
+            count: 5,
+            dtype: NumericDType::BOOL,
+        }],
+    );
+    assert_eq!(outs[0], bytes, "BOOL identity byte equality");
+}
 
 #[test]
 fn identity_f32_broadcast_input() {
@@ -1424,4 +1441,685 @@ fn reduce_sum_inline_cast_float() {
     // we don't recompute an expected ourselves — equality between
     // backends is the regression signal.
     assert_eq!(outs[0].len(), 4, "bf16 output = 2 atoms × 2 bytes");
+}
+
+// ─── SymReduce tests ────────────────────────────────────────────────
+
+/// SymReduce(Sum, axis=0) over a sym input tensor with 2 atoms × seq_len.
+/// At seq_len=3 and data [[1,2,3],[4,5,6]] (atom-major, sym-innermost)
+/// the expected output is [6.0, 15.0] — one scalar per atom.
+#[test]
+fn sym_reduce_sum_f32_1_sym_to_0() {
+    let mut g = NanoGraph::new();
+    let seq = g.bounded_graph_constant("seq_len", 4);
+
+    let inp = g.add_input_tensor(GlobalId(0), 2, NumericDType::F32);
+    let out = g.push_group(
+        2,
+        NumericDType::F32,
+        ScalarOp::SymReduce {
+            kind: crate::nano_graph::ops::ReduceKind::Sum,
+            axis: 0,
+            compute_dtype: NumericDType::F32,
+        },
+        vec![], // consumer has no sym
+        vec![GroupInput {
+            input_ref: InputRef::affine(inp, 1),
+            sym_dim_map: vec![], // 0 consumer sym axes
+        }],
+    );
+
+    // Input bytes: atom 0 = [1.0, 2.0, 3.0], atom 1 = [4.0, 5.0, 6.0].
+    // Runtime-tight TAMI layout: 2 atoms × 3 sym × 4 bytes = 24 bytes.
+    let bytes = f32_input_bytes(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    let mut bindings = std::collections::HashMap::new();
+    bindings.insert(seq, 3u64);
+
+    let outs = ab_test_bytes_sym(
+        &g,
+        &[(inp, NumericDType::F32, bytes)],
+        &[AtomRange {
+            base: out,
+            count: 2,
+            dtype: NumericDType::F32,
+        }],
+        &[(inp, vec![seq])],
+        &bindings,
+    );
+
+    let expected = f32_input_bytes(&[6.0, 15.0]);
+    assert_eq!(outs[0], expected, "SymReduce Sum F32 per-atom accumulation");
+}
+
+#[test]
+fn sym_reduce_max_f32_1_sym_to_0() {
+    let mut g = NanoGraph::new();
+    let seq = g.bounded_graph_constant("seq_len", 4);
+
+    let inp = g.add_input_tensor(GlobalId(0), 2, NumericDType::F32);
+    let out = g.push_group(
+        2,
+        NumericDType::F32,
+        ScalarOp::SymReduce {
+            kind: crate::nano_graph::ops::ReduceKind::Max,
+            axis: 0,
+            compute_dtype: NumericDType::F32,
+        },
+        vec![],
+        vec![GroupInput {
+            input_ref: InputRef::affine(inp, 1),
+            sym_dim_map: vec![],
+        }],
+    );
+
+    let bytes = f32_input_bytes(&[1.0, 3.0, 2.0, 5.0, 4.0, 6.0]);
+    let mut bindings = std::collections::HashMap::new();
+    bindings.insert(seq, 3u64);
+
+    let outs = ab_test_bytes_sym(
+        &g,
+        &[(inp, NumericDType::F32, bytes)],
+        &[AtomRange {
+            base: out,
+            count: 2,
+            dtype: NumericDType::F32,
+        }],
+        &[(inp, vec![seq])],
+        &bindings,
+    );
+
+    let expected = f32_input_bytes(&[3.0, 6.0]);
+    assert_eq!(outs[0], expected, "SymReduce Max F32 per-atom");
+}
+
+#[test]
+fn sym_reduce_sum_i32_1_sym_to_0() {
+    let mut g = NanoGraph::new();
+    let seq = g.bounded_graph_constant("seq_len", 4);
+
+    let inp = g.add_input_tensor(GlobalId(0), 2, NumericDType::I32);
+    let out = g.push_group(
+        2,
+        NumericDType::I32,
+        ScalarOp::SymReduce {
+            kind: crate::nano_graph::ops::ReduceKind::Sum,
+            axis: 0,
+            compute_dtype: NumericDType::I32,
+        },
+        vec![],
+        vec![GroupInput {
+            input_ref: InputRef::affine(inp, 1),
+            sym_dim_map: vec![],
+        }],
+    );
+
+    // Atom 0: [10, 20, 30] → 60. Atom 1: [-1, -2, -3] → -6.
+    let bytes: Vec<u8> = [10i32, 20, 30, -1, -2, -3]
+        .iter()
+        .flat_map(|v| v.to_le_bytes())
+        .collect();
+    let mut bindings = std::collections::HashMap::new();
+    bindings.insert(seq, 3u64);
+
+    let outs = ab_test_bytes_sym(
+        &g,
+        &[(inp, NumericDType::I32, bytes)],
+        &[AtomRange {
+            base: out,
+            count: 2,
+            dtype: NumericDType::I32,
+        }],
+        &[(inp, vec![seq])],
+        &bindings,
+    );
+
+    let expected: Vec<u8> = [60i32, -6].iter().flat_map(|v| v.to_le_bytes()).collect();
+    assert_eq!(outs[0], expected, "SymReduce Sum I32 per-atom");
+}
+
+/// N=2 producer, axis=0. Consumer keeps the second sym axis.
+/// Input 1 atom × [a=2, b=3]: data [1..6] at sym_flat = a*3 + b.
+/// Reducing axis=0 (a) gives output[b] = prod[0*3+b] + prod[1*3+b].
+/// Expected: [1+4, 2+5, 3+6] = [5, 7, 9].
+#[test]
+fn sym_reduce_sum_f32_2_sym_to_1_axis0() {
+    let mut g = NanoGraph::new();
+    let a = g.bounded_graph_constant("a", 4);
+    let b = g.bounded_graph_constant("b", 4);
+
+    let inp = g.add_input_tensor(GlobalId(0), 1, NumericDType::F32);
+    let out = g.push_group(
+        1,
+        NumericDType::F32,
+        ScalarOp::SymReduce {
+            kind: crate::nano_graph::ops::ReduceKind::Sum,
+            axis: 0,
+            compute_dtype: NumericDType::F32,
+        },
+        vec![b], // consumer keeps the inner axis (producer's axis 1)
+        vec![GroupInput {
+            input_ref: InputRef::affine(inp, 1),
+            sym_dim_map: vec![crate::nano_graph::pattern::SymDimMap::Identity(1)],
+        }],
+    );
+
+    let bytes = f32_input_bytes(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    let mut bindings = std::collections::HashMap::new();
+    bindings.insert(a, 2u64);
+    bindings.insert(b, 3u64);
+
+    let outs = ab_test_bytes_sym(
+        &g,
+        &[(inp, NumericDType::F32, bytes)],
+        &[AtomRange {
+            base: out,
+            count: 1,
+            dtype: NumericDType::F32,
+        }],
+        &[(inp, vec![a, b])],
+        &bindings,
+    );
+
+    let expected = f32_input_bytes(&[5.0, 7.0, 9.0]);
+    assert_eq!(outs[0], expected, "SymReduce N=2 axis=0 over a, retains b");
+}
+
+/// N=2 producer, axis=1. Consumer keeps the first sym axis.
+/// Input 1 atom × [a=2, b=3]: data [1..6]. Reducing axis=1 (b) gives
+/// output[a] = sum over b of prod[a*3+b]. Expected: [1+2+3, 4+5+6] =
+/// [6, 15].
+#[test]
+fn sym_reduce_sum_f32_2_sym_to_1_axis_last() {
+    let mut g = NanoGraph::new();
+    let a = g.bounded_graph_constant("a", 4);
+    let b = g.bounded_graph_constant("b", 4);
+
+    let inp = g.add_input_tensor(GlobalId(0), 1, NumericDType::F32);
+    let out = g.push_group(
+        1,
+        NumericDType::F32,
+        ScalarOp::SymReduce {
+            kind: crate::nano_graph::ops::ReduceKind::Sum,
+            axis: 1,
+            compute_dtype: NumericDType::F32,
+        },
+        vec![a],
+        vec![GroupInput {
+            input_ref: InputRef::affine(inp, 1),
+            sym_dim_map: vec![crate::nano_graph::pattern::SymDimMap::Identity(0)],
+        }],
+    );
+
+    let bytes = f32_input_bytes(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    let mut bindings = std::collections::HashMap::new();
+    bindings.insert(a, 2u64);
+    bindings.insert(b, 3u64);
+
+    let outs = ab_test_bytes_sym(
+        &g,
+        &[(inp, NumericDType::F32, bytes)],
+        &[AtomRange {
+            base: out,
+            count: 1,
+            dtype: NumericDType::F32,
+        }],
+        &[(inp, vec![a, b])],
+        &bindings,
+    );
+
+    let expected = f32_input_bytes(&[6.0, 15.0]);
+    assert_eq!(outs[0], expected, "SymReduce N=2 axis=1 over b, retains a");
+}
+
+/// N=3 producer, axis=1 (middle). Consumer keeps first + third.
+/// Input 1 atom × [a=2, b=2, c=2]: data [1..8] at sym_flat = a*4+b*2+c.
+/// consumer[a*2+c] = sum over b of prod[a*4+b*2+c]. Expected:
+/// [1+3, 2+4, 5+7, 6+8] = [4, 6, 12, 14]. Exercises the runtime
+/// `div` path for S_outer / S_inner.
+#[test]
+fn sym_reduce_sum_f32_3_sym_to_2_axis_middle() {
+    let mut g = NanoGraph::new();
+    let a = g.bounded_graph_constant("a", 4);
+    let b = g.bounded_graph_constant("b", 4);
+    let c = g.bounded_graph_constant("c", 4);
+
+    let inp = g.add_input_tensor(GlobalId(0), 1, NumericDType::F32);
+    let out = g.push_group(
+        1,
+        NumericDType::F32,
+        ScalarOp::SymReduce {
+            kind: crate::nano_graph::ops::ReduceKind::Sum,
+            axis: 1,
+            compute_dtype: NumericDType::F32,
+        },
+        vec![a, c], // axis=1 (b) removed; keep a, c
+        vec![GroupInput {
+            input_ref: InputRef::affine(inp, 1),
+            sym_dim_map: vec![
+                crate::nano_graph::pattern::SymDimMap::Identity(0),
+                crate::nano_graph::pattern::SymDimMap::Identity(2),
+            ],
+        }],
+    );
+
+    let bytes = f32_input_bytes(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
+    let mut bindings = std::collections::HashMap::new();
+    bindings.insert(a, 2u64);
+    bindings.insert(b, 2u64);
+    bindings.insert(c, 2u64);
+
+    let outs = ab_test_bytes_sym(
+        &g,
+        &[(inp, NumericDType::F32, bytes)],
+        &[AtomRange {
+            base: out,
+            count: 1,
+            dtype: NumericDType::F32,
+        }],
+        &[(inp, vec![a, b, c])],
+        &bindings,
+    );
+
+    let expected = f32_input_bytes(&[4.0, 6.0, 12.0, 14.0]);
+    assert_eq!(
+        outs[0], expected,
+        "SymReduce N=3 axis=1 (middle) over b, retains a,c"
+    );
+}
+
+/// N=2 axis=0 with a larger atom count — exercises the outer atom
+/// loop alongside the consumer-sym inner loop.
+#[test]
+fn sym_reduce_sum_f32_2_sym_atoms_plus_sym() {
+    let mut g = NanoGraph::new();
+    let a = g.bounded_graph_constant("a", 4);
+    let b = g.bounded_graph_constant("b", 4);
+
+    // 2 atoms × [a=2, b=3]. Per-atom flat: a*3 + b. Atom 0 = [1..6],
+    // atom 1 = [11..16].
+    let inp = g.add_input_tensor(GlobalId(0), 2, NumericDType::F32);
+    let out = g.push_group(
+        2,
+        NumericDType::F32,
+        ScalarOp::SymReduce {
+            kind: crate::nano_graph::ops::ReduceKind::Sum,
+            axis: 0,
+            compute_dtype: NumericDType::F32,
+        },
+        vec![b],
+        vec![GroupInput {
+            input_ref: InputRef::affine(inp, 1),
+            sym_dim_map: vec![crate::nano_graph::pattern::SymDimMap::Identity(1)],
+        }],
+    );
+
+    let bytes = f32_input_bytes(&[
+        1.0, 2.0, 3.0, 4.0, 5.0, 6.0, // atom 0
+        11.0, 12.0, 13.0, 14.0, 15.0, 16.0, // atom 1
+    ]);
+    let mut bindings = std::collections::HashMap::new();
+    bindings.insert(a, 2u64);
+    bindings.insert(b, 3u64);
+
+    let outs = ab_test_bytes_sym(
+        &g,
+        &[(inp, NumericDType::F32, bytes)],
+        &[AtomRange {
+            base: out,
+            count: 2,
+            dtype: NumericDType::F32,
+        }],
+        &[(inp, vec![a, b])],
+        &bindings,
+    );
+
+    // atom 0 / b=0: 1+4=5, b=1: 2+5=7, b=2: 3+6=9.
+    // atom 1 / b=0: 11+14=25, b=1: 12+15=27, b=2: 13+16=29.
+    let expected = f32_input_bytes(&[5.0, 7.0, 9.0, 25.0, 27.0, 29.0]);
+    assert_eq!(outs[0], expected, "SymReduce atoms × consumer sym");
+}
+
+/// Runtime extent = 1 exercises the single-k path (loop body runs
+/// exactly once, accumulator ends up holding the sole loaded value).
+#[test]
+fn sym_reduce_sum_f32_extent_one() {
+    let mut g = NanoGraph::new();
+    let seq = g.bounded_graph_constant("seq_len", 4);
+
+    let inp = g.add_input_tensor(GlobalId(0), 3, NumericDType::F32);
+    let out = g.push_group(
+        3,
+        NumericDType::F32,
+        ScalarOp::SymReduce {
+            kind: crate::nano_graph::ops::ReduceKind::Sum,
+            axis: 0,
+            compute_dtype: NumericDType::F32,
+        },
+        vec![],
+        vec![GroupInput {
+            input_ref: InputRef::affine(inp, 1),
+            sym_dim_map: vec![],
+        }],
+    );
+
+    let bytes = f32_input_bytes(&[7.0, 8.0, 9.0]);
+    let mut bindings = std::collections::HashMap::new();
+    bindings.insert(seq, 1u64);
+
+    let outs = ab_test_bytes_sym(
+        &g,
+        &[(inp, NumericDType::F32, bytes)],
+        &[AtomRange {
+            base: out,
+            count: 3,
+            dtype: NumericDType::F32,
+        }],
+        &[(inp, vec![seq])],
+        &bindings,
+    );
+
+    let expected = f32_input_bytes(&[7.0, 8.0, 9.0]);
+    assert_eq!(outs[0], expected, "SymReduce extent=1 passes value through");
+}
+
+// ─── Non-identity sym_dim_map Binary tests ───────────────────────────
+//
+// These exercise the general `sym_dim_map` remap in
+// `address::apply_sym_offset_pub`: the consumer loop's `sym_i` must be
+// decomposed into consumer coords and reassembled into the producer's
+// sym flat index when the map is not trivially all-`Identity(j==j)`.
+
+/// Consumer `[B, S]` + producer `[S]` broadcast: map = `[Broadcast,
+/// Identity(0)]`. The inner axis is shared, the outer B axis is a
+/// broadcast over the producer. Producer sym flat = `jS = sym_i % S`.
+#[test]
+fn binary_f32_sym_broadcast_outer_only() {
+    use crate::nano_graph::pattern::SymDimMap;
+    let mut g = NanoGraph::new();
+    let big_b = g.bounded_graph_constant("B", 4);
+    let big_s = g.bounded_graph_constant("S", 4);
+
+    let inp_a = g.add_input_tensor(GlobalId(0), 1, NumericDType::F32);
+    let inp_b = g.add_input_tensor(GlobalId(1), 1, NumericDType::F32);
+    let out = g.push_group(
+        1,
+        NumericDType::F32,
+        ScalarOp::Binary {
+            op: ScalarBinOp::Add,
+            compute_dtype: NumericDType::F32,
+        },
+        vec![big_b, big_s],
+        vec![
+            GroupInput {
+                input_ref: InputRef::affine(inp_a, 1),
+                sym_dim_map: vec![SymDimMap::Identity(0), SymDimMap::Identity(1)],
+            },
+            GroupInput {
+                input_ref: InputRef::affine(inp_b, 1),
+                sym_dim_map: vec![SymDimMap::Broadcast, SymDimMap::Identity(0)],
+            },
+        ],
+    );
+
+    // B=2, S=3. A (6 values, row-major jB,jS): [10..60 step 10].
+    // B (3 values, one per jS): [1, 2, 3].
+    // Expected out[jB*3+jS] = A[jB*3+jS] + B[jS]:
+    // row 0 (jB=0): 10+1, 20+2, 30+3 = 11, 22, 33
+    // row 1 (jB=1): 40+1, 50+2, 60+3 = 41, 52, 63
+    let a_bytes = f32_input_bytes(&[10.0, 20.0, 30.0, 40.0, 50.0, 60.0]);
+    let b_bytes = f32_input_bytes(&[1.0, 2.0, 3.0]);
+    let mut bindings = std::collections::HashMap::new();
+    bindings.insert(big_b, 2u64);
+    bindings.insert(big_s, 3u64);
+
+    let outs = ab_test_bytes_sym(
+        &g,
+        &[
+            (inp_a, NumericDType::F32, a_bytes),
+            (inp_b, NumericDType::F32, b_bytes),
+        ],
+        &[AtomRange {
+            base: out,
+            count: 1,
+            dtype: NumericDType::F32,
+        }],
+        &[(inp_a, vec![big_b, big_s]), (inp_b, vec![big_s])],
+        &bindings,
+    );
+
+    let expected = f32_input_bytes(&[11.0, 22.0, 33.0, 41.0, 52.0, 63.0]);
+    assert_eq!(
+        outs[0], expected,
+        "Binary Add with [Broadcast, Identity(0)] map (inner-axis broadcast)"
+    );
+}
+
+/// Consumer `[B, S]` + producer `[B]` broadcast: map = `[Identity(0),
+/// Broadcast]`. The outer B axis is shared, the inner S axis is a
+/// broadcast. Producer sym flat = `jB = sym_i / S`. Exercises the
+/// runtime `div` path for outer-coord extraction.
+#[test]
+fn binary_f32_sym_broadcast_inner_only() {
+    use crate::nano_graph::pattern::SymDimMap;
+    let mut g = NanoGraph::new();
+    let big_b = g.bounded_graph_constant("B", 4);
+    let big_s = g.bounded_graph_constant("S", 4);
+
+    let inp_a = g.add_input_tensor(GlobalId(0), 1, NumericDType::F32);
+    let inp_b = g.add_input_tensor(GlobalId(1), 1, NumericDType::F32);
+    let out = g.push_group(
+        1,
+        NumericDType::F32,
+        ScalarOp::Binary {
+            op: ScalarBinOp::Add,
+            compute_dtype: NumericDType::F32,
+        },
+        vec![big_b, big_s],
+        vec![
+            GroupInput {
+                input_ref: InputRef::affine(inp_a, 1),
+                sym_dim_map: vec![SymDimMap::Identity(0), SymDimMap::Identity(1)],
+            },
+            GroupInput {
+                input_ref: InputRef::affine(inp_b, 1),
+                sym_dim_map: vec![SymDimMap::Identity(0), SymDimMap::Broadcast],
+            },
+        ],
+    );
+
+    // B=2, S=3. A row-major (jB,jS): [10..60 step 10].
+    // B (one per jB): [100, 200].
+    // Expected out[jB*3+jS] = A[jB*3+jS] + B[jB]:
+    // row 0 (jB=0): 10+100, 20+100, 30+100 = 110, 120, 130
+    // row 1 (jB=1): 40+200, 50+200, 60+200 = 240, 250, 260
+    let a_bytes = f32_input_bytes(&[10.0, 20.0, 30.0, 40.0, 50.0, 60.0]);
+    let b_bytes = f32_input_bytes(&[100.0, 200.0]);
+    let mut bindings = std::collections::HashMap::new();
+    bindings.insert(big_b, 2u64);
+    bindings.insert(big_s, 3u64);
+
+    let outs = ab_test_bytes_sym(
+        &g,
+        &[
+            (inp_a, NumericDType::F32, a_bytes),
+            (inp_b, NumericDType::F32, b_bytes),
+        ],
+        &[AtomRange {
+            base: out,
+            count: 1,
+            dtype: NumericDType::F32,
+        }],
+        &[(inp_a, vec![big_b, big_s]), (inp_b, vec![big_b])],
+        &bindings,
+    );
+
+    let expected = f32_input_bytes(&[110.0, 120.0, 130.0, 240.0, 250.0, 260.0]);
+    assert_eq!(
+        outs[0], expected,
+        "Binary Add with [Identity(0), Broadcast] map (outer-axis broadcast)"
+    );
+}
+
+/// Consumer `[a, b, c]` + producer `[a, c]` (drop middle axis). Map =
+/// `[Identity(0), Broadcast, Identity(1)]`. Producer sym flat =
+/// `ja * c_ext + jc`. Interleaved — exercises the stride-fold-over-
+/// unmapped-axes path.
+#[test]
+fn binary_f32_sym_broadcast_middle_interleaved() {
+    use crate::nano_graph::pattern::SymDimMap;
+    let mut g = NanoGraph::new();
+    let a = g.bounded_graph_constant("a", 4);
+    let b = g.bounded_graph_constant("b", 4);
+    let c = g.bounded_graph_constant("c", 4);
+
+    let inp_a = g.add_input_tensor(GlobalId(0), 1, NumericDType::F32);
+    let inp_b = g.add_input_tensor(GlobalId(1), 1, NumericDType::F32);
+    let out = g.push_group(
+        1,
+        NumericDType::F32,
+        ScalarOp::Binary {
+            op: ScalarBinOp::Add,
+            compute_dtype: NumericDType::F32,
+        },
+        vec![a, b, c],
+        vec![
+            GroupInput {
+                input_ref: InputRef::affine(inp_a, 1),
+                sym_dim_map: vec![
+                    SymDimMap::Identity(0),
+                    SymDimMap::Identity(1),
+                    SymDimMap::Identity(2),
+                ],
+            },
+            GroupInput {
+                input_ref: InputRef::affine(inp_b, 1),
+                sym_dim_map: vec![
+                    SymDimMap::Identity(0),
+                    SymDimMap::Broadcast,
+                    SymDimMap::Identity(1),
+                ],
+            },
+        ],
+    );
+
+    // a=2, b=2, c=3. A row-major (ja, jb, jc): sym_i = ja*6 + jb*3 + jc.
+    // Values [1..12]:
+    //   ja=0, jb=0: [1, 2, 3]
+    //   ja=0, jb=1: [4, 5, 6]
+    //   ja=1, jb=0: [7, 8, 9]
+    //   ja=1, jb=1: [10, 11, 12]
+    // B row-major (ja, jc): prod_sym_flat = ja*3 + jc.
+    // Values [100, 200, 300, 400, 500, 600]:
+    //   ja=0: [100, 200, 300]
+    //   ja=1: [400, 500, 600]
+    // Expected:
+    //   ja=0,jb=0: [1+100, 2+200, 3+300]
+    //   ja=0,jb=1: [4+100, 5+200, 6+300]
+    //   ja=1,jb=0: [7+400, 8+500, 9+600]
+    //   ja=1,jb=1: [10+400, 11+500, 12+600]
+    let a_vals: Vec<f32> = (1..=12).map(|v| v as f32).collect();
+    let b_vals: Vec<f32> = vec![100.0, 200.0, 300.0, 400.0, 500.0, 600.0];
+    let a_bytes = f32_input_bytes(&a_vals);
+    let b_bytes = f32_input_bytes(&b_vals);
+    let mut bindings = std::collections::HashMap::new();
+    bindings.insert(a, 2u64);
+    bindings.insert(b, 2u64);
+    bindings.insert(c, 3u64);
+
+    let outs = ab_test_bytes_sym(
+        &g,
+        &[
+            (inp_a, NumericDType::F32, a_bytes),
+            (inp_b, NumericDType::F32, b_bytes),
+        ],
+        &[AtomRange {
+            base: out,
+            count: 1,
+            dtype: NumericDType::F32,
+        }],
+        &[(inp_a, vec![a, b, c]), (inp_b, vec![a, c])],
+        &bindings,
+    );
+
+    let expected = f32_input_bytes(&[
+        101.0, 202.0, 303.0, //  ja=0,jb=0
+        104.0, 205.0, 306.0, //  ja=0,jb=1
+        407.0, 508.0, 609.0, //  ja=1,jb=0
+        410.0, 511.0, 612.0, //  ja=1,jb=1
+    ]);
+    assert_eq!(
+        outs[0], expected,
+        "Binary Add with interleaved map [Identity(0), Broadcast, Identity(1)]"
+    );
+}
+
+/// Pure outer broadcast with more atoms — exercises the atom-loop
+/// interaction with the remap sequence (atom stride multiplication
+/// plus per-atom sym loop).
+#[test]
+fn binary_f32_sym_broadcast_outer_multi_atom() {
+    use crate::nano_graph::pattern::SymDimMap;
+    let mut g = NanoGraph::new();
+    let big_b = g.bounded_graph_constant("B", 4);
+    let big_s = g.bounded_graph_constant("S", 4);
+
+    // 2 atoms × [B=2, S=2] for A; 2 atoms × [B=2] for B.
+    let inp_a = g.add_input_tensor(GlobalId(0), 2, NumericDType::F32);
+    let inp_b = g.add_input_tensor(GlobalId(1), 2, NumericDType::F32);
+    let out = g.push_group(
+        2,
+        NumericDType::F32,
+        ScalarOp::Binary {
+            op: ScalarBinOp::Add,
+            compute_dtype: NumericDType::F32,
+        },
+        vec![big_b, big_s],
+        vec![
+            GroupInput {
+                input_ref: InputRef::affine(inp_a, 1),
+                sym_dim_map: vec![SymDimMap::Identity(0), SymDimMap::Identity(1)],
+            },
+            GroupInput {
+                input_ref: InputRef::affine(inp_b, 1),
+                sym_dim_map: vec![SymDimMap::Identity(0), SymDimMap::Broadcast],
+            },
+        ],
+    );
+
+    // B=2, S=2.
+    // A[atom][jB][jS]:
+    //   atom 0: [[1, 2], [3, 4]]
+    //   atom 1: [[5, 6], [7, 8]]
+    // B[atom][jB]:
+    //   atom 0: [10, 20]
+    //   atom 1: [30, 40]
+    // Expected out[atom][jB][jS] = A + B[atom][jB]:
+    //   atom 0: [[1+10, 2+10], [3+20, 4+20]] = [[11, 12], [23, 24]]
+    //   atom 1: [[5+30, 6+30], [7+40, 8+40]] = [[35, 36], [47, 48]]
+    let a_bytes = f32_input_bytes(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
+    let b_bytes = f32_input_bytes(&[10.0, 20.0, 30.0, 40.0]);
+    let mut bindings = std::collections::HashMap::new();
+    bindings.insert(big_b, 2u64);
+    bindings.insert(big_s, 2u64);
+
+    let outs = ab_test_bytes_sym(
+        &g,
+        &[
+            (inp_a, NumericDType::F32, a_bytes),
+            (inp_b, NumericDType::F32, b_bytes),
+        ],
+        &[AtomRange {
+            base: out,
+            count: 2,
+            dtype: NumericDType::F32,
+        }],
+        &[(inp_a, vec![big_b, big_s]), (inp_b, vec![big_b])],
+        &bindings,
+    );
+
+    let expected = f32_input_bytes(&[11.0, 12.0, 23.0, 24.0, 35.0, 36.0, 47.0, 48.0]);
+    assert_eq!(
+        outs[0], expected,
+        "Binary Add [Identity(0), Broadcast] with 2 atoms"
+    );
 }

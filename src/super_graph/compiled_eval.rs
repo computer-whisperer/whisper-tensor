@@ -567,6 +567,7 @@ fn compile_phase_parallel(
                             pool,
                             &span_ref.outputs,
                             placement,
+                            &span_ref.graph,
                             pi,
                             si,
                         ),

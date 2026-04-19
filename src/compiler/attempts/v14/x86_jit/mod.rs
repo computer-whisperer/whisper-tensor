@@ -96,7 +96,7 @@ impl X86JitSpan {
             Vec<crate::nano_graph::pattern::GraphConstantId>,
         >,
     ) -> Result<Self, String> {
-        support::check_supported(graph)?;
+        support::check_supported(graph, external_input_sym_dims)?;
 
         let layout = compute_layout(
             graph,

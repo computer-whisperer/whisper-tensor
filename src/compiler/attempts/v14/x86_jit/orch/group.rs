@@ -301,7 +301,7 @@ where
             ; cmp rdi, QWORD [rsp + 8]
             ; jge =>sym_end
         );
-        body(asm, iter, Some(super::address::SymCtx { sym_i_rsp_off: 0 }))?;
+        body(asm, iter, Some(super::address::SymCtx::new(0)))?;
         dynasm!(asm
             ; .arch x64
             ; inc QWORD [rsp + 0]
@@ -357,8 +357,9 @@ pub(super) fn emit_op_compute(
     addr_tables: &mut AddressTables,
     codec_tables: &mut CodecTables,
 ) -> Result<CodecSlot, String> {
-    let in_sym =
-        |idx: usize| super::address::input_sym_ctx(sym_ctx, &group.inputs[idx].sym_dim_map);
+    let in_sym = |idx: usize| {
+        super::address::input_sym_ctx(sym_ctx, &group.sym_dims, &group.inputs[idx].sym_dim_map)
+    };
     let raw_slot = match &group.op {
         ScalarOp::Binary { op, compute_dtype } => emit_binary_compute(
             asm,
@@ -573,6 +574,22 @@ pub fn emit_group(
             addr_tables,
             codec_tables,
         ),
+        ScalarOp::SymReduce {
+            kind,
+            axis,
+            compute_dtype,
+        } => super::reduce::emit_sym_reduce_group(
+            asm,
+            layout,
+            graph,
+            group,
+            gi,
+            *kind,
+            *axis,
+            *compute_dtype,
+            addr_tables,
+            codec_tables,
+        ),
         op => Err(format!(
             "x86_jit emit_group: unsupported op {op:?} not yet supported"
         )),
@@ -762,7 +779,7 @@ fn emit_identity_loop(
         gi,
         sym_dims,
         |asm, iter, sym_ctx| {
-            let sym_ctx_in = super::address::input_sym_ctx(sym_ctx, src_sym_dim_map);
+            let sym_ctx_in = super::address::input_sym_ctx(sym_ctx, sym_dims, src_sym_dim_map);
             emit_identity_iter(
                 asm,
                 layout,
@@ -1128,7 +1145,11 @@ fn emit_cast_group(
         gi,
         &layout.group_sym_dims[gi],
         |asm, iter, sym_ctx| {
-            let sym_ctx_in = super::address::input_sym_ctx(sym_ctx, &group.inputs[0].sym_dim_map);
+            let sym_ctx_in = super::address::input_sym_ctx(
+                sym_ctx,
+                &group.sym_dims,
+                &group.inputs[0].sym_dim_map,
+            );
             emit_cast_iter(
                 asm,
                 layout,
@@ -1289,8 +1310,16 @@ fn emit_binary_group(
         gi,
         &layout.group_sym_dims[gi],
         |asm, iter, sym_ctx| {
-            let sym_ctx_a = super::address::input_sym_ctx(sym_ctx, &group.inputs[0].sym_dim_map);
-            let sym_ctx_b = super::address::input_sym_ctx(sym_ctx, &group.inputs[1].sym_dim_map);
+            let sym_ctx_a = super::address::input_sym_ctx(
+                sym_ctx,
+                &group.sym_dims,
+                &group.inputs[0].sym_dim_map,
+            );
+            let sym_ctx_b = super::address::input_sym_ctx(
+                sym_ctx,
+                &group.sym_dims,
+                &group.inputs[1].sym_dim_map,
+            );
             emit_binary_iter(
                 asm,
                 layout,
@@ -1485,12 +1514,12 @@ fn emit_binary_iter(
 ///
 /// When successful, no address code is emitted — the caller uses the
 /// SIB mode directly in the load/store instruction.
-fn try_sib_input(
-    layout: &BufferLayout,
+fn try_sib_input<'a>(
+    layout: &'a BufferLayout,
     input: &InputRef,
     iter: IterVar,
     atom_offset: u64,
-) -> Option<(SibMode, AddressInfo)> {
+) -> Option<(SibMode, AddressInfo<'a>)> {
     let iter_reg = match iter {
         IterVar::Reg(r) => r,
         _ => return None,
@@ -1538,17 +1567,18 @@ fn try_sib_input(
             n_bits: slot.elem_bits as u32,
             buffer_id: slot.buffer_id,
             byte_aligned: true,
+            producer_sym_dims: &slot.sym_dims,
         },
     ))
 }
 
 /// Try to resolve an output slot as a SIB addressing mode.
-fn try_sib_output(
-    layout: &BufferLayout,
+fn try_sib_output<'a>(
+    layout: &'a BufferLayout,
     group_base_id: crate::nano_graph::pattern::AtomId,
     atom_offset: u64,
     iter: IterVar,
-) -> Option<(SibMode, AddressInfo)> {
+) -> Option<(SibMode, AddressInfo<'a>)> {
     let iter_reg = match iter {
         IterVar::Reg(r) => r,
         _ => return None,
@@ -1582,14 +1612,15 @@ fn try_sib_output(
             n_bits: slot.elem_bits as u32,
             buffer_id: slot.buffer_id,
             byte_aligned: true,
+            producer_sym_dims: &slot.sym_dims,
         },
     ))
 }
 
 #[allow(clippy::too_many_arguments)]
-fn emit_load_decode_input(
+fn emit_load_decode_input<'a>(
     asm: &mut Assembler,
-    layout: &BufferLayout,
+    layout: &'a BufferLayout,
     input: &InputRef,
     iter: IterVar,
     atom_offset: u64,
@@ -1597,7 +1628,7 @@ fn emit_load_decode_input(
     addr_tables: &mut AddressTables,
     codec_tables: &mut CodecTables,
     slot: CodecSlot,
-) -> Result<AddressInfo, String> {
+) -> Result<AddressInfo<'a>, String> {
     // SIB fast path: fold address into the load instruction, skip
     // emit_compute_bit_offset entirely. Disabled under sym loops
     // because the SIB index*scale+disp form has no room for the
@@ -1842,7 +1873,11 @@ fn emit_unary_group(
         gi,
         &layout.group_sym_dims[gi],
         |asm, iter, sym_ctx| {
-            let sym_ctx_in = super::address::input_sym_ctx(sym_ctx, &group.inputs[0].sym_dim_map);
+            let sym_ctx_in = super::address::input_sym_ctx(
+                sym_ctx,
+                &group.sym_dims,
+                &group.inputs[0].sym_dim_map,
+            );
             emit_unary_iter(
                 asm,
                 layout,
@@ -2082,9 +2117,21 @@ fn emit_select_group(
         gi,
         &layout.group_sym_dims[gi],
         |asm, iter, sym_ctx| {
-            let sym_ctx_cond = super::address::input_sym_ctx(sym_ctx, &group.inputs[0].sym_dim_map);
-            let sym_ctx_x = super::address::input_sym_ctx(sym_ctx, &group.inputs[1].sym_dim_map);
-            let sym_ctx_y = super::address::input_sym_ctx(sym_ctx, &group.inputs[2].sym_dim_map);
+            let sym_ctx_cond = super::address::input_sym_ctx(
+                sym_ctx,
+                &group.sym_dims,
+                &group.inputs[0].sym_dim_map,
+            );
+            let sym_ctx_x = super::address::input_sym_ctx(
+                sym_ctx,
+                &group.sym_dims,
+                &group.inputs[1].sym_dim_map,
+            );
+            let sym_ctx_y = super::address::input_sym_ctx(
+                sym_ctx,
+                &group.sym_dims,
+                &group.inputs[2].sym_dim_map,
+            );
             emit_select_iter(
                 asm,
                 layout,
@@ -2366,7 +2413,11 @@ fn emit_indirect_load_group(
         gi,
         &layout.group_sym_dims[gi],
         |asm, iter, sym_ctx| {
-            let sym_ctx_idx = super::address::input_sym_ctx(sym_ctx, &group.inputs[0].sym_dim_map);
+            let sym_ctx_idx = super::address::input_sym_ctx(
+                sym_ctx,
+                &group.sym_dims,
+                &group.inputs[0].sym_dim_map,
+            );
             emit_indirect_load_iter(
                 asm,
                 layout,
@@ -2577,16 +2628,16 @@ fn emit_indirect_load_iter(
 /// We do the same in bits so that `i = atom_offset` maps to
 /// `slot.bit_offset`.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn emit_output_bit_offset(
+pub(super) fn emit_output_bit_offset<'a>(
     asm: &mut Assembler,
-    layout: &BufferLayout,
+    layout: &'a BufferLayout,
     group_base_id: crate::nano_graph::pattern::AtomId,
     atom_offset: u64,
     iter: IterVar,
     dst_bit_reg: u8,
     scratch_reg: u8,
     sym_ctx: Option<super::address::SymCtx>,
-) -> Result<super::address::AddressInfo, String> {
+) -> Result<super::address::AddressInfo<'a>, String> {
     let (slot, elem_idx) = layout
         .find(group_base_id)
         .ok_or_else(|| format!("output: no slot for group base={group_base_id}"))?;
@@ -2597,6 +2648,7 @@ pub(super) fn emit_output_bit_offset(
         n_bits: slot.elem_bits as u32,
         buffer_id: slot.buffer_id,
         byte_aligned: byte_fast,
+        producer_sym_dims: &slot.sym_dims,
     };
 
     // store_base = slot_offset - atom_offset * stride
@@ -2633,6 +2685,7 @@ pub(super) fn emit_output_bit_offset(
                     &layout.buffer_bases,
                     &slot.sym_dims,
                     dst_bit_reg,
+                    scratch_reg,
                     sym_ctx,
                 )?;
                 if (i32::MIN as i64..=i32::MAX as i64).contains(&pre_sym) {
@@ -2681,13 +2734,39 @@ pub(super) fn emit_output_bit_offset(
                         ; add Rq(dst_bit_reg), Rq(scratch_reg)
                     );
                 }
-                super::address::emit_runtime_sym_prod_pub(
-                    asm,
-                    &layout.buffer_bases,
-                    &slot.sym_dims,
-                    scratch_reg,
-                    sym_ctx,
-                )?;
+                if slot.sym_dims.len() > 1 {
+                    dynasm!(asm; .arch x64; push Rq(dst_bit_reg));
+                    let shifted_sym_ctx = match sym_ctx {
+                        Some(ctx) => Some(super::address::SymCtx {
+                            sym_i_rsp_off: ctx.sym_i_rsp_off.checked_add(8).ok_or_else(|| {
+                                format!(
+                                    "output: sym_i_rsp_off {} + 8 overflow in multi-sym output push",
+                                    ctx.sym_i_rsp_off
+                                )
+                            })?,
+                            ..ctx
+                        }),
+                        None => None,
+                    };
+                    super::address::emit_runtime_sym_prod_pub(
+                        asm,
+                        &layout.buffer_bases,
+                        &slot.sym_dims,
+                        scratch_reg,
+                        dst_bit_reg,
+                        shifted_sym_ctx,
+                    )?;
+                    dynasm!(asm; .arch x64; pop Rq(dst_bit_reg));
+                } else {
+                    super::address::emit_runtime_sym_prod_pub(
+                        asm,
+                        &layout.buffer_bases,
+                        &slot.sym_dims,
+                        scratch_reg,
+                        dst_bit_reg,
+                        sym_ctx,
+                    )?;
+                }
                 dynasm!(asm; .arch x64; imul Rq(dst_bit_reg), Rq(scratch_reg));
             } else {
                 // dst = iter * stride + base
@@ -2720,7 +2799,14 @@ pub(super) fn emit_output_bit_offset(
         }
     }
 
-    super::address::apply_sym_offset_pub(asm, sym_ctx, &info, dst_bit_reg, scratch_reg)?;
+    super::address::apply_sym_offset_pub(
+        asm,
+        sym_ctx,
+        &info,
+        dst_bit_reg,
+        scratch_reg,
+        &layout.buffer_bases,
+    )?;
     Ok(info)
 }
 

@@ -41,7 +41,7 @@ use dynasmrt::x64::Assembler;
 use dynasmrt::{DynasmApi, dynasm};
 
 use crate::compiler::attempts::v14::layout::{BufferLayout, SlotInfo, strided_resolve_offset};
-use crate::nano_graph::pattern::{AtomId, InputRef};
+use crate::nano_graph::pattern::{AtomId, GraphConstantId, InputRef, SymDimMap};
 use crate::numeric_dtype::NumericDType;
 
 /// Whether a slot qualifies for the byte-aligned fast path.
@@ -93,6 +93,23 @@ pub enum IterVar {
     Reg(u8),
 }
 
+/// Per-input sym-dim remap descriptor.
+///
+/// Present in [`SymCtx`] when the input's `sym_dim_map` is not the
+/// trivial all-`Identity(j==j)` case — i.e., when the producer's
+/// sym flat index differs from the consumer's `sym_i` and we must
+/// decompose + reassemble at runtime.
+///
+/// The consumer_sym_dims slice tells the decomposer which runtime
+/// extents (via `gc_values`) to divide by. The sym_dim_map tells the
+/// reassembler which producer axis each consumer coord contributes
+/// to (`Identity(p)`) or skips (`Broadcast`).
+#[derive(Clone, Copy, Debug)]
+pub struct SymRemap<'a> {
+    pub consumer_sym_dims: &'a [GraphConstantId],
+    pub sym_dim_map: &'a [SymDimMap],
+}
+
 /// Per-call sym-loop context threaded through the address layer.
 ///
 /// When [`emit_compute_bit_offset`] receives `Some(SymCtx)`, it
@@ -105,18 +122,70 @@ pub enum IterVar {
 /// sequence, so it must still be dead at the post-dispatch point
 /// (it is, at every existing call site).
 ///
+/// When `remap` is `Some`, the producer's sym flat index is computed
+/// from consumer sym_i via coord decomposition + producer-axis
+/// reassembly (see [`SymRemap`]). Otherwise the producer flat index
+/// equals consumer sym_i directly (all-`Identity(j==j)` case).
+///
 /// Sym-free groups pass `None` — no sym term is emitted and the
 /// address layer behaves identically to the pre-sym version.
 #[derive(Clone, Copy, Debug)]
-pub struct SymCtx {
+pub struct SymCtx<'a> {
     /// Stack offset (relative to the current `rsp`) where the inner
     /// sym loop stores its `sym_i` counter as a `u64`.
     pub sym_i_rsp_off: i32,
+    /// When false, [`apply_sym_offset`] skips emitting the
+    /// `sym_i * elem_bits` addend. Used by SymReduce where the
+    /// caller steps through producer sym axes explicitly and the
+    /// automatic "consumer sym_i → producer offset" addition would be
+    /// wrong. `emit_runtime_sym_prod`'s stack-offset math still honors
+    /// `sym_i_rsp_off` so gc_values lookups land correctly even when
+    /// the caller is inside `emit_atom_body_loop`'s reserve.
+    pub emit_sym_term: bool,
+    /// Optional non-identity sym_dim_map remap. When `Some`, the
+    /// sym term computation walks consumer coords + producer axes
+    /// at runtime instead of using `sym_i` directly.
+    pub remap: Option<SymRemap<'a>>,
+}
+
+impl<'a> SymCtx<'a> {
+    /// Standard consumer sym_ctx: both the sym_i address term AND
+    /// the gc_values rsp-delta lookup use `sym_i_rsp_off`. No remap —
+    /// producer's sym flat equals consumer sym_i directly.
+    pub fn new(sym_i_rsp_off: i32) -> Self {
+        Self {
+            sym_i_rsp_off,
+            emit_sym_term: true,
+            remap: None,
+        }
+    }
+
+    /// Address-only sym_ctx: propagates the rsp-delta for gc_values
+    /// lookups without auto-applying `sym_i * elem_bits` at the end
+    /// of address compute. Callers that handle sym stepping manually
+    /// (e.g. SymReduce) use this when computing the producer's
+    /// sym=0 atom base.
+    pub fn address_only(sym_i_rsp_off: i32) -> Self {
+        Self {
+            sym_i_rsp_off,
+            emit_sym_term: false,
+            remap: None,
+        }
+    }
+
+    /// Attach a non-trivial `sym_dim_map` remap. Used by
+    /// [`input_sym_ctx`] when the consumer/producer sym axes aren't
+    /// 1:1 aligned.
+    pub fn with_remap(mut self, remap: SymRemap<'a>) -> Self {
+        self.remap = Some(remap);
+        self
+    }
 }
 
 /// Return the effective sym_ctx to use at a specific input's
 /// address-compute site, given the outer consumer sym_ctx (from the
-/// atom-body loop) and the input's `sym_dim_map`.
+/// atom-body loop), the consumer group's sym_dims, and the input's
+/// `sym_dim_map`.
 ///
 /// - Empty `sym_dim_map` → input has no sym component at all; return
 ///   `None`.
@@ -124,29 +193,44 @@ pub struct SymCtx {
 ///   the consumer; the same producer atom is read for every
 ///   `(atom_i, sym_flat)` slot; return `None` so the address layer
 ///   doesn't add a `sym_i * elem_bits` term.
-/// - Any other shape (all-`Identity(j == index)` — the only other
-///   variant `support::check_supported` admits today) → return
-///   `outer` unchanged.
-pub fn input_sym_ctx(
-    outer: Option<SymCtx>,
-    sym_dim_map: &[crate::nano_graph::pattern::SymDimMap],
-) -> Option<SymCtx> {
+/// - All-`Identity(j == j)` map → return `outer` unchanged (fast path:
+///   producer sym flat equals consumer sym_i).
+/// - Any other shape (mixed Identity + Broadcast, or non-trivial
+///   Identity(k) indices) → return `outer` with a [`SymRemap`]
+///   attached so `apply_sym_offset_pub` emits a runtime decompose +
+///   reassemble sequence.
+pub fn input_sym_ctx<'a>(
+    outer: Option<SymCtx<'a>>,
+    consumer_sym_dims: &'a [GraphConstantId],
+    sym_dim_map: &'a [SymDimMap],
+) -> Option<SymCtx<'a>> {
     if sym_dim_map.is_empty() {
         return None;
     }
     if sym_dim_map
         .iter()
-        .all(|m| matches!(m, crate::nano_graph::pattern::SymDimMap::Broadcast))
+        .all(|m| matches!(m, SymDimMap::Broadcast))
     {
         return None;
     }
-    outer
+    let all_identity_same_index = sym_dim_map
+        .iter()
+        .enumerate()
+        .all(|(j, m)| matches!(m, SymDimMap::Identity(k) if *k == j));
+    let outer = outer?;
+    if all_identity_same_index {
+        return Some(outer);
+    }
+    Some(outer.with_remap(SymRemap {
+        consumer_sym_dims,
+        sym_dim_map,
+    }))
 }
 
 /// Information returned by [`emit_compute_bit_offset`] so the caller
 /// knows how to read the bits the offset addresses.
 #[derive(Clone, Copy, Debug)]
-pub struct AddressInfo {
+pub struct AddressInfo<'a> {
     /// Storage dtype of the slot the offset addresses.
     pub dtype: NumericDType,
     /// Number of bits per element, equal to `slot.elem_bits`.
@@ -158,6 +242,11 @@ pub struct AddressInfo {
     /// number of bytes (1, 2, 4, or 8). The caller can use the
     /// byte-aligned load/store fast path in `bit_io`.
     pub byte_aligned: bool,
+    /// Producer's sym axes (from `slot.sym_dims`). Empty for sym-free
+    /// slots. Needed by [`apply_sym_offset_pub`] to emit the general
+    /// `sym_dim_map` remap when the consumer/producer sym axes aren't
+    /// 1:1 aligned.
+    pub producer_sym_dims: &'a [GraphConstantId],
 }
 
 /// Emit code that materializes the bit offset of `input.resolve(i)`
@@ -188,9 +277,9 @@ pub struct AddressInfo {
 /// - Register-aliasing violations
 /// - Negative absolute bit offsets (typically an InputRef stride bug)
 #[allow(clippy::too_many_arguments)]
-pub fn emit_compute_bit_offset(
+pub fn emit_compute_bit_offset<'a>(
     asm: &mut Assembler,
-    layout: &BufferLayout,
+    layout: &'a BufferLayout,
     input: &InputRef,
     iter: IterVar,
     atom_offset: u64,
@@ -198,7 +287,7 @@ pub fn emit_compute_bit_offset(
     scratch_reg: u8,
     sym_ctx: Option<SymCtx>,
     tables: &mut AddressTables,
-) -> Result<AddressInfo, String> {
+) -> Result<AddressInfo<'a>, String> {
     let info = match input {
         InputRef::Broadcast(atom_id) => {
             emit_constant_atom(asm, layout, *atom_id, dst_bit_reg, scratch_reg, sym_ctx)?
@@ -256,7 +345,14 @@ pub fn emit_compute_bit_offset(
         )?,
     };
 
-    apply_sym_offset(asm, sym_ctx, &info, dst_bit_reg, scratch_reg)?;
+    apply_sym_offset(
+        asm,
+        sym_ctx,
+        &info,
+        dst_bit_reg,
+        scratch_reg,
+        &layout.buffer_bases,
+    )?;
     Ok(info)
 }
 
@@ -276,8 +372,9 @@ fn apply_sym_offset(
     info: &AddressInfo,
     dst_bit_reg: u8,
     scratch_reg: u8,
+    bases: &crate::compiler::attempts::v14::layout::BufferBases,
 ) -> Result<(), String> {
-    apply_sym_offset_pub(asm, sym_ctx, info, dst_bit_reg, scratch_reg)
+    apply_sym_offset_pub(asm, sym_ctx, info, dst_bit_reg, scratch_reg, bases)
 }
 
 /// Module-visible wrapper so `orch::group::emit_output_bit_offset`
@@ -290,10 +387,14 @@ pub(super) fn apply_sym_offset_pub(
     info: &AddressInfo,
     dst_bit_reg: u8,
     scratch_reg: u8,
+    bases: &crate::compiler::attempts::v14::layout::BufferBases,
 ) -> Result<(), String> {
     let Some(ctx) = sym_ctx else {
         return Ok(());
     };
+    if !ctx.emit_sym_term {
+        return Ok(());
+    }
     let step: i32 = if info.byte_aligned {
         if info.n_bits % 8 != 0 {
             return Err(format!(
@@ -309,6 +410,24 @@ pub(super) fn apply_sym_offset_pub(
     if step == 0 {
         return Ok(());
     }
+
+    // Non-identity sym_dim_map: compute producer's sym flat index from
+    // consumer sym_i by decomposing into consumer coords and reassembling
+    // along producer axes. See [`emit_producer_sym_flat_remap`] for the
+    // asm shape. Trivial (all-Identity-same-index) maps skip this path.
+    if let Some(remap) = ctx.remap {
+        return emit_producer_sym_flat_remap(
+            asm,
+            ctx,
+            remap,
+            info.producer_sym_dims,
+            step,
+            dst_bit_reg,
+            scratch_reg,
+            bases,
+        );
+    }
+
     dynasm!(asm
         ; .arch x64
         ; mov Rq(scratch_reg), QWORD [rsp + ctx.sym_i_rsp_off]
@@ -318,16 +437,211 @@ pub(super) fn apply_sym_offset_pub(
     Ok(())
 }
 
+/// Emit the general `sym_dim_map` remap: compute
+/// `producer_sym_flat * step` and add to `dst_bit_reg`.
+///
+/// # Algorithm
+///
+/// Walks consumer sym axes innermost→outermost. At each axis:
+///
+/// 1. **Decompose** consumer `sym_i` into a coord: for `d > 0`, `div`
+///    by the runtime extent `gc_values[consumer_sym_dims[d]]`; for the
+///    outermost axis (`d == 0`) the remaining register IS the coord.
+/// 2. **Reassemble** when `sym_dim_map[d] == Identity(p)`: fold the
+///    stride for any producer axes strictly between `p` and the
+///    previously processed producer index into the running stride,
+///    then `accum += coord * stride` and `stride *= producer_extents[p]`.
+///
+/// At the end, `accum = producer_sym_flat`. Multiply by `step` and
+/// add to `dst_bit_reg`.
+///
+/// # Register clobbers
+///
+/// - `rax`, `rdx` — x86 `div` dividend/remainder. Callers must not
+///   have live values in these registers across the call. (The input
+///   address compute site is inside a per-input sequence where `rax`
+///   is either about to be overwritten by a load or was already
+///   stashed to xmm via the int-compute pattern in
+///   `emit_binary_compute`, matching the existing N-d Strided
+///   clobber discipline.)
+/// - `scratch_reg` — consumed as a general scratch.
+/// - `dst_bit_reg` — preserved across decomposition, only updated at
+///   the final `add`.
+///
+/// # Stack
+///
+/// Reserves 16 bytes at entry, releases at exit:
+/// - `[rsp + 0]` — producer_sym_flat accumulator
+/// - `[rsp + 8]` — producer stride (running fold over producer
+///   extents from innermost upward)
+///
+/// The 16-byte push shifts all existing rsp-based offsets (sym_i,
+/// gc_values) by +16 for the duration of this call.
+#[allow(clippy::too_many_arguments)]
+fn emit_producer_sym_flat_remap(
+    asm: &mut Assembler,
+    ctx: SymCtx,
+    remap: SymRemap,
+    producer_sym_dims: &[GraphConstantId],
+    step: i32,
+    dst_bit_reg: u8,
+    scratch_reg: u8,
+    bases: &crate::compiler::attempts::v14::layout::BufferBases,
+) -> Result<(), String> {
+    const RAX: u8 = 0;
+    const RDX: u8 = 2;
+
+    if dst_bit_reg == RAX || dst_bit_reg == RDX {
+        return Err(format!(
+            "address: emit_producer_sym_flat_remap dst_bit_reg={dst_bit_reg} \
+             aliases rax/rdx (used by div)"
+        ));
+    }
+    if scratch_reg == RAX || scratch_reg == RDX {
+        return Err(format!(
+            "address: emit_producer_sym_flat_remap scratch_reg={scratch_reg} \
+             aliases rax/rdx (used by div)"
+        ));
+    }
+    if remap.sym_dim_map.len() != remap.consumer_sym_dims.len() {
+        return Err(format!(
+            "address: sym_dim_map.len()={} != consumer_sym_dims.len()={}",
+            remap.sym_dim_map.len(),
+            remap.consumer_sym_dims.len()
+        ));
+    }
+
+    let gc_elem_off = |gc: GraphConstantId| -> Result<i32, String> {
+        (gc.0 as i64)
+            .checked_mul(8)
+            .and_then(|v| i32::try_from(v).ok())
+            .ok_or_else(|| format!("address: gc index {} overflow", gc.0))
+    };
+
+    // rsp shifts by -16 during this sequence. Pre-compute the adjusted
+    // stack offsets from the shifted rsp:
+    // - sym_i_off: ctx.sym_i_rsp_off measured from the pre-shift rsp,
+    //   so after our `sub rsp, 16` the offset grows by 16.
+    // - gc_values_off: the `emit_runtime_sym_prod` formula —
+    //   `gc_values_stack_offset + (total rsp shift from post-prologue)`.
+    //   Post-prologue → body-loop → ours adds two 16-byte shifts on top
+    //   of any ctx.sym_i_rsp_off the caller already saw.
+    let sym_i_off = ctx
+        .sym_i_rsp_off
+        .checked_add(16)
+        .ok_or_else(|| format!("address: sym_i_rsp_off {} + 16 overflow", ctx.sym_i_rsp_off))?;
+    let gc_values_off = super::super::prologue::gc_values_stack_offset(bases)
+        .checked_add(ctx.sym_i_rsp_off)
+        .and_then(|v| v.checked_add(32))
+        .ok_or_else(|| "address: gc_values offset overflow in remap".to_string())?;
+
+    // Reserve: [rsp+0] = accumulator, [rsp+8] = stride
+    dynasm!(asm
+        ; .arch x64
+        ; sub rsp, 16
+        ; mov QWORD [rsp + 0], 0
+        ; mov QWORD [rsp + 8], 1
+        // rax = remaining (starts as consumer sym_i)
+        ; mov Rq(RAX), QWORD [rsp + sym_i_off]
+    );
+
+    // Walk consumer axes innermost → outermost. `next_p` tracks how far
+    // we've folded the producer stride from the innermost axis upward.
+    let n = remap.consumer_sym_dims.len();
+    let m = producer_sym_dims.len();
+    let mut next_p = m;
+
+    for d in (0..n).rev() {
+        // Get the consumer coord for axis d into rdx (or copy from rax
+        // for d=0).
+        // For d > 0: div by consumer extent.
+        //   xor rdx, rdx  (via Rq(2), Rq(2))
+        //   mov scratch, [rsp + gc_values_off]
+        //   mov scratch, [scratch + consumer_sym_dims[d] * 8]
+        //   div scratch
+        //   (rdx = coord = remaining % extent, rax = new remaining)
+        // For d == 0: coord = rax (no div since remaining < outermost_extent).
+        //   mov rdx, rax
+        let coord_in_rdx = d > 0;
+        if coord_in_rdx {
+            let off = gc_elem_off(remap.consumer_sym_dims[d])?;
+            dynasm!(asm
+                ; .arch x64
+                ; xor Rq(RDX), Rq(RDX)
+                ; mov Rq(scratch_reg), QWORD [rsp + gc_values_off]
+                ; mov Rq(scratch_reg), QWORD [Rq(scratch_reg) + off]
+                ; div Rq(scratch_reg)
+            );
+        } else {
+            dynasm!(asm; .arch x64; mov Rq(RDX), Rq(RAX));
+        }
+
+        let SymDimMap::Identity(p) = remap.sym_dim_map[d] else {
+            continue;
+        };
+        if p >= m {
+            return Err(format!(
+                "address: sym_dim_map[{d}] = Identity({p}) out of range \
+                 for producer with {m} sym_dims"
+            ));
+        }
+
+        // Fold producer_extents[q] into the stride for q in (p..next_p-1],
+        // i.e. producer axes strictly between p and our previous position
+        // that were NOT mapped by any consumer axis. (Unmapped producer
+        // axes contribute 0 to producer_coords but still contribute to
+        // stride for outer axes.)
+        while next_p > p + 1 {
+            next_p -= 1;
+            let off = gc_elem_off(producer_sym_dims[next_p])?;
+            dynasm!(asm
+                ; .arch x64
+                ; mov Rq(scratch_reg), QWORD [rsp + gc_values_off]
+                ; mov Rq(scratch_reg), QWORD [Rq(scratch_reg) + off]
+                ; imul Rq(scratch_reg), QWORD [rsp + 8]
+                ; mov QWORD [rsp + 8], Rq(scratch_reg)
+            );
+        }
+        // accum += coord * stride. Coord is in rdx (copied from rax for d=0).
+        dynasm!(asm
+            ; .arch x64
+            ; imul Rq(RDX), QWORD [rsp + 8]
+            ; add QWORD [rsp + 0], Rq(RDX)
+        );
+        // stride *= producer_extents[p]
+        let off = gc_elem_off(producer_sym_dims[p])?;
+        dynasm!(asm
+            ; .arch x64
+            ; mov Rq(scratch_reg), QWORD [rsp + gc_values_off]
+            ; mov Rq(scratch_reg), QWORD [Rq(scratch_reg) + off]
+            ; imul Rq(scratch_reg), QWORD [rsp + 8]
+            ; mov QWORD [rsp + 8], Rq(scratch_reg)
+        );
+        next_p = p;
+    }
+
+    // accum (= producer_sym_flat) is at [rsp+0]. Multiply by step and
+    // fold into dst_bit_reg.
+    dynasm!(asm
+        ; .arch x64
+        ; mov Rq(scratch_reg), QWORD [rsp + 0]
+        ; add rsp, 16
+        ; imul Rq(scratch_reg), Rq(scratch_reg), step
+        ; add Rq(dst_bit_reg), Rq(scratch_reg)
+    );
+    Ok(())
+}
+
 /// Emit a constant bit-offset materialization for a single atom.
 /// Used by `Broadcast` and single-element `Explicit`.
-fn emit_constant_atom(
+fn emit_constant_atom<'a>(
     asm: &mut Assembler,
-    layout: &BufferLayout,
+    layout: &'a BufferLayout,
     atom_id: AtomId,
     dst_bit_reg: u8,
     scratch_reg: u8,
     sym_ctx: Option<SymCtx>,
-) -> Result<AddressInfo, String> {
+) -> Result<AddressInfo<'a>, String> {
     let (slot, elem_idx) = layout
         .find(atom_id)
         .ok_or_else(|| format!("address: no slot for atom={atom_id}"))?;
@@ -347,6 +661,7 @@ fn emit_constant_atom(
             &layout.buffer_bases,
             &slot.sym_dims,
             dst_bit_reg,
+            scratch_reg,
             sym_ctx,
         )?;
         let compile_signed = compile_off as i64;
@@ -368,6 +683,7 @@ fn emit_constant_atom(
         n_bits: slot.elem_bits as u32,
         buffer_id: slot.buffer_id,
         byte_aligned: byte_fast,
+        producer_sym_dims: &slot.sym_dims,
     })
 }
 
@@ -385,9 +701,9 @@ fn emit_constant_atom(
 /// path emits a `mov`/`imul` sequence instead of baking `bit_stride`
 /// into an `imm32`.
 #[allow(clippy::too_many_arguments)]
-fn emit_strided_1d(
+fn emit_strided_1d<'a>(
     asm: &mut Assembler,
-    layout: &BufferLayout,
+    layout: &'a BufferLayout,
     base: AtomId,
     stride_atoms: i64,
     iter: IterVar,
@@ -395,7 +711,7 @@ fn emit_strided_1d(
     dst_bit_reg: u8,
     scratch_reg: u8,
     sym_ctx: Option<SymCtx>,
-) -> Result<AddressInfo, String> {
+) -> Result<AddressInfo<'a>, String> {
     // Resolve the slot via `base` directly, or fall back to the first
     // accessed atom if `base` itself isn't in the layout (split groups).
     let first_offset_atoms = stride_atoms * atom_offset as i64;
@@ -436,6 +752,7 @@ fn emit_strided_1d(
         n_bits: slot.elem_bits as u32,
         buffer_id: slot.buffer_id,
         byte_aligned: byte_fast,
+        producer_sym_dims: &slot.sym_dims,
     };
 
     // When byte-aligned, emit byte offsets (divide by 8 at JIT-build
@@ -473,6 +790,7 @@ fn emit_strided_1d(
                     &layout.buffer_bases,
                     &slot.sym_dims,
                     dst_bit_reg,
+                    scratch_reg,
                     sym_ctx,
                 )?;
                 if (i32::MIN as i64..=i32::MAX as i64).contains(&pre_sym) {
@@ -521,14 +839,49 @@ fn emit_strided_1d(
                     emit_mov_imm64(asm, scratch_reg, eff_base as u64);
                     dynasm!(asm; .arch x64; add Rq(dst_bit_reg), Rq(scratch_reg));
                 }
-                // 4. scratch = runtime sym_prod, then dst *= scratch.
-                emit_runtime_sym_prod(
-                    asm,
-                    &layout.buffer_bases,
-                    &slot.sym_dims,
-                    scratch_reg,
-                    sym_ctx,
-                )?;
+                // 4. scratch = runtime sym_prod. For single-sym the
+                //    fold uses only `scratch` internally (the mov
+                //    sequence consumes and replaces the ptr). For
+                //    multi-sym we need a second register to hold the
+                //    gc_values ptr across the imul fold — push the
+                //    iter*stride+base accumulator to the stack and
+                //    reuse dst_bit_reg as the ptr scratch, then
+                //    restore it. The `push` shifts rsp by -8, so the
+                //    sym_ctx we forward to emit_runtime_sym_prod
+                //    advertises `sym_i_rsp_off + 8` to compensate.
+                if slot.sym_dims.len() > 1 {
+                    dynasm!(asm; .arch x64; push Rq(dst_bit_reg));
+                    let shifted_sym_ctx = match sym_ctx {
+                        Some(ctx) => Some(SymCtx {
+                            sym_i_rsp_off: ctx.sym_i_rsp_off.checked_add(8).ok_or_else(|| {
+                                format!(
+                                    "address: sym_i_rsp_off {} + 8 overflow in multi-sym Strided Reg push",
+                                    ctx.sym_i_rsp_off
+                                )
+                            })?,
+                            ..ctx
+                        }),
+                        None => None,
+                    };
+                    emit_runtime_sym_prod(
+                        asm,
+                        &layout.buffer_bases,
+                        &slot.sym_dims,
+                        scratch_reg,
+                        dst_bit_reg,
+                        shifted_sym_ctx,
+                    )?;
+                    dynasm!(asm; .arch x64; pop Rq(dst_bit_reg));
+                } else {
+                    emit_runtime_sym_prod(
+                        asm,
+                        &layout.buffer_bases,
+                        &slot.sym_dims,
+                        scratch_reg,
+                        dst_bit_reg,
+                        sym_ctx,
+                    )?;
+                }
                 dynasm!(asm; .arch x64; imul Rq(dst_bit_reg), Rq(scratch_reg));
             } else {
                 // dst = iter_reg
@@ -570,23 +923,32 @@ fn emit_strided_1d(
 }
 
 /// Emit code that loads `∏ gc_values[gc.0]` for `sym_dims` into
-/// `dst_reg`. Uses `dst_reg` itself as the accumulator and one
-/// additional stack-loaded pointer to the gc_values array.
+/// `dst_reg`. `ptr_scratch_reg` holds the gc_values pointer across the
+/// multi-sym fold (ignored when `sym_dims.len() == 1`; the single-sym
+/// fast path reuses `dst_reg` as its own ptr scratch since the final
+/// `mov` discards it).
 ///
-/// Single sym dim (the overwhelming majority — RWKV's batch, etc.):
-/// one `mov` from the gc_values array, no multiplies. Multi sym dim:
-/// subsequent `imul` ops against each gc's slot. The gc_values
-/// pointer sits at `[rsp + gc_values_stack_offset(bases) + rsp_delta]`
-/// where `rsp_delta` accounts for `emit_atom_body_loop`'s `sub rsp, 16`
-/// (and any inner `push`es threaded via `sym_ctx.sym_i_rsp_off`).
+/// Multi-sym fold pattern:
+///
+/// ```text
+/// mov  ptr_scratch, [rsp + gc_values_off]
+/// mov  dst,   [ptr_scratch + sym[0].0 * 8]
+/// imul dst,   [ptr_scratch + sym[1].0 * 8]
+/// imul dst,   [ptr_scratch + sym[2].0 * 8]
+/// ...
+/// ```
+///
+/// `dst_reg` and `ptr_scratch_reg` must be pairwise distinct when
+/// `sym_dims.len() > 1`. For single-sym, `ptr_scratch_reg` is unused.
 pub(super) fn emit_runtime_sym_prod_pub(
     asm: &mut Assembler,
     bases: &crate::compiler::attempts::v14::layout::BufferBases,
     sym_dims: &[crate::nano_graph::pattern::GraphConstantId],
     dst_reg: u8,
+    ptr_scratch_reg: u8,
     sym_ctx: Option<SymCtx>,
 ) -> Result<(), String> {
-    emit_runtime_sym_prod(asm, bases, sym_dims, dst_reg, sym_ctx)
+    emit_runtime_sym_prod(asm, bases, sym_dims, dst_reg, ptr_scratch_reg, sym_ctx)
 }
 
 fn emit_runtime_sym_prod(
@@ -594,6 +956,7 @@ fn emit_runtime_sym_prod(
     bases: &crate::compiler::attempts::v14::layout::BufferBases,
     sym_dims: &[crate::nano_graph::pattern::GraphConstantId],
     dst_reg: u8,
+    ptr_scratch_reg: u8,
     sym_ctx: Option<SymCtx>,
 ) -> Result<(), String> {
     if sym_dims.is_empty() {
@@ -612,29 +975,44 @@ fn emit_runtime_sym_prod(
         .checked_add(rsp_delta)
         .ok_or_else(|| "address: gc_values offset overflow".to_string())?;
 
-    // dst = gc_values_ptr
-    dynasm!(asm
-        ; .arch x64
-        ; mov Rq(dst_reg), QWORD [rsp + gc_values_off]
-    );
-    // dst = gc_values_ptr[sym_dims[0].0]
-    let first_off: i32 = (sym_dims[0].0 as i64)
-        .checked_mul(8)
-        .and_then(|v| i32::try_from(v).ok())
-        .ok_or_else(|| format!("address: gc index {} overflow", sym_dims[0].0))?;
-    dynasm!(asm
-        ; .arch x64
-        ; mov Rq(dst_reg), QWORD [Rq(dst_reg) + first_off]
-    );
-    // Multi-sym fold-in: imul dst, gc_values_ptr[sym_dims[k].0]. We'd
-    // need another scratch register to reload the gc_values_ptr after
-    // the first mov clobbered dst; reject until a real case shows up.
-    if sym_dims.len() > 1 {
+    let gc_elem_off = |gc: crate::nano_graph::pattern::GraphConstantId| -> Result<i32, String> {
+        (gc.0 as i64)
+            .checked_mul(8)
+            .and_then(|v| i32::try_from(v).ok())
+            .ok_or_else(|| format!("address: gc index {} overflow", gc.0))
+    };
+
+    if sym_dims.len() == 1 {
+        // Single-sym fast path: no separate ptr scratch needed since
+        // we consume the ptr with the first and only indirection.
+        let first_off = gc_elem_off(sym_dims[0])?;
+        dynasm!(asm
+            ; .arch x64
+            ; mov Rq(dst_reg), QWORD [rsp + gc_values_off]
+            ; mov Rq(dst_reg), QWORD [Rq(dst_reg) + first_off]
+        );
+        return Ok(());
+    }
+
+    if dst_reg == ptr_scratch_reg {
         return Err(format!(
-            "address: multi-sym-dim runtime stride not yet supported \
-             (slot has {} sym dims); add second scratch reg first",
-            sym_dims.len()
+            "address: emit_runtime_sym_prod multi-sym requires distinct \
+             dst_reg={dst_reg} and ptr_scratch_reg={ptr_scratch_reg}"
         ));
+    }
+
+    let first_off = gc_elem_off(sym_dims[0])?;
+    dynasm!(asm
+        ; .arch x64
+        ; mov Rq(ptr_scratch_reg), QWORD [rsp + gc_values_off]
+        ; mov Rq(dst_reg), QWORD [Rq(ptr_scratch_reg) + first_off]
+    );
+    for gc in &sym_dims[1..] {
+        let off = gc_elem_off(*gc)?;
+        dynasm!(asm
+            ; .arch x64
+            ; imul Rq(dst_reg), QWORD [Rq(ptr_scratch_reg) + off]
+        );
     }
     Ok(())
 }
@@ -647,9 +1025,9 @@ fn emit_runtime_sym_prod(
 /// (innermost first, matching [`InputRef::resolve`]) and sums
 /// `coord[d] * dim_strides[d] * bit_stride` into a total bit offset.
 #[allow(clippy::too_many_arguments)]
-fn emit_strided_nd(
+fn emit_strided_nd<'a>(
     asm: &mut Assembler,
-    layout: &BufferLayout,
+    layout: &'a BufferLayout,
     base: AtomId,
     dim_strides: &[i64],
     dim_shape: &[u64],
@@ -658,7 +1036,7 @@ fn emit_strided_nd(
     dst_bit_reg: u8,
     scratch_reg: u8,
     _sym_ctx: Option<SymCtx>,
-) -> Result<AddressInfo, String> {
+) -> Result<AddressInfo<'a>, String> {
     let nd = dim_strides.len();
     assert!(nd >= 2, "emit_strided_nd called with nd < 2");
     assert_eq!(nd, dim_shape.len(), "dim_strides/dim_shape length mismatch");
@@ -702,6 +1080,7 @@ fn emit_strided_nd(
         n_bits: slot.elem_bits as u32,
         buffer_id: slot.buffer_id,
         byte_aligned: byte_fast,
+        producer_sym_dims: &slot.sym_dims,
     };
 
     let (eff_base, eff_stride) = if byte_fast {
@@ -883,16 +1262,16 @@ fn emit_imul_accum(asm: &mut Assembler, src_reg: u8, imm: i64, dst_reg: u8, scra
 /// bit offsets (one `i64` per entry), embed the table pointer as imm64
 /// in the JIT, and load `table[i]` at runtime.
 #[allow(clippy::too_many_arguments)]
-fn emit_explicit_multi(
+fn emit_explicit_multi<'a>(
     asm: &mut Assembler,
-    layout: &BufferLayout,
+    layout: &'a BufferLayout,
     ids: &[AtomId],
     iter: IterVar,
     dst_bit_reg: u8,
     scratch_reg: u8,
     tables: &mut AddressTables,
     sym_ctx: Option<SymCtx>,
-) -> Result<AddressInfo, String> {
+) -> Result<AddressInfo<'a>, String> {
     debug_assert!(ids.len() >= 2);
 
     // Resolve dtype from the first entry. All entries are expected to
@@ -906,6 +1285,7 @@ fn emit_explicit_multi(
         n_bits: first_slot.elem_bits as u32,
         buffer_id: first_slot.buffer_id,
         byte_aligned: byte_fast,
+        producer_sym_dims: &first_slot.sym_dims,
     };
 
     match iter {
@@ -963,7 +1343,46 @@ fn emit_explicit_multi(
 
             if let Some(sd) = shared_sym_dims.as_ref() {
                 if !sd.is_empty() {
-                    emit_runtime_sym_prod(asm, &layout.buffer_bases, sd, scratch_reg, sym_ctx)?;
+                    if sd.len() > 1 {
+                        // Multi-sym fold: dst_bit_reg holds the
+                        // table-loaded offset and must survive the
+                        // mul. Spill to stack, reuse dst_bit_reg as
+                        // ptr scratch inside emit_runtime_sym_prod,
+                        // restore.
+                        dynasm!(asm; .arch x64; push Rq(dst_bit_reg));
+                        let shifted_sym_ctx = match sym_ctx {
+                            Some(ctx) => Some(SymCtx {
+                                sym_i_rsp_off: ctx.sym_i_rsp_off.checked_add(8).ok_or_else(
+                                    || {
+                                        format!(
+                                            "address: sym_i_rsp_off {} + 8 overflow in multi-sym Explicit-multi push",
+                                            ctx.sym_i_rsp_off
+                                        )
+                                    },
+                                )?,
+                                ..ctx
+                            }),
+                            None => None,
+                        };
+                        emit_runtime_sym_prod(
+                            asm,
+                            &layout.buffer_bases,
+                            sd,
+                            scratch_reg,
+                            dst_bit_reg,
+                            shifted_sym_ctx,
+                        )?;
+                        dynasm!(asm; .arch x64; pop Rq(dst_bit_reg));
+                    } else {
+                        emit_runtime_sym_prod(
+                            asm,
+                            &layout.buffer_bases,
+                            sd,
+                            scratch_reg,
+                            dst_bit_reg,
+                            sym_ctx,
+                        )?;
+                    }
                     dynasm!(asm; .arch x64; imul Rq(dst_bit_reg), Rq(scratch_reg));
                 }
             }
