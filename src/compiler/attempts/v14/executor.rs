@@ -337,11 +337,26 @@ impl CompiledSpanFn for PoolEvalSpan {
             // declared-but-unused lowering inputs).
             let base_ptr = buffer_ptrs[pr.buffer_id as usize];
             if !base_ptr.is_null() {
+                let row_bytes = sp as usize * bpe;
+                // `pr.byte_offset` is the placer's compile-time offset,
+                // computed at `atom_byte_stride * (atom - atom_base)` —
+                // i.e. it assumes the placer's compile-time stride.
+                // For max-stride / non-sym slots (stride ≥ row_bytes)
+                // that matches the runtime layout. For runtime-tight
+                // sym slots (stride == bpe but actual layout packs at
+                // `sp * bpe` per atom) we scale the offset by sp so a
+                // lane-sharded atom base lands at its real byte in the
+                // buffer. With sp == 1 this is a no-op, matching the
+                // prior behavior.
+                let runtime_byte_offset = if (pr.atom_byte_stride as usize) < row_bytes {
+                    pr.byte_offset * sp
+                } else {
+                    pr.byte_offset
+                };
                 // SAFETY: the executor guarantees each non-null
                 // buffer_ptrs slot is valid for the declared buffer
                 // size and the placer's byte range sits inside it.
-                let src_base = unsafe { base_ptr.add(pr.byte_offset as usize) as *const u8 };
-                let row_bytes = sp as usize * bpe;
+                let src_base = unsafe { base_ptr.add(runtime_byte_offset as usize) as *const u8 };
                 if (pr.atom_byte_stride as usize) >= row_bytes {
                     // Strided path. `atom_byte_stride == row_bytes`
                     // (sym-free or sym-prod == max) degenerates to a
@@ -451,8 +466,16 @@ impl CompiledSpanFn for PoolEvalSpan {
             let sp = sym_prod(&pr.sym_dims);
             let row_bytes = sp as usize * bpe;
             let needed = pr.range.count as usize * row_bytes;
+            // Same scaling rule as the input gather (see comment there):
+            // runtime-tight sym slots have placer byte_offset computed
+            // at `bpe` stride but the actual layout packs at `sp * bpe`.
+            let runtime_byte_offset = if (pr.atom_byte_stride as usize) < row_bytes {
+                pr.byte_offset * sp
+            } else {
+                pr.byte_offset
+            };
             let dst_base =
-                unsafe { buffer_ptrs[pr.buffer_id as usize].add(pr.byte_offset as usize) };
+                unsafe { buffer_ptrs[pr.buffer_id as usize].add(runtime_byte_offset as usize) };
             if trace {
                 let live = needed.min(src.len());
                 let hash = fnv1a64(&src[..live]);
