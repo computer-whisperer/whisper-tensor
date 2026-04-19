@@ -419,7 +419,7 @@ impl GraphLayout {
         // Calculate node x positions
         // Sort by height again
         let mut nodes_and_heights = node_heights.clone().into_iter().collect::<Vec<_>>();
-        nodes_and_heights.sort_by(|(_, a), (_, b)| a.cmp(b));
+        nodes_and_heights.sort_by_key(|(_, a)| *a);
 
         let mut node_x_positions = HashMap::new();
         let mut last_height_max_x = 0.0f32;

@@ -180,7 +180,7 @@ pub fn format_cache_report_text(report: &CacheReport) -> String {
             if !model.milli_op_census.is_empty() {
                 writeln!(out, "\n  Milli op census:").unwrap();
                 let mut ops: Vec<_> = model.milli_op_census.iter().collect();
-                ops.sort_by(|a, b| b.1.1.cmp(&a.1.1));
+                ops.sort_by_key(|b| std::cmp::Reverse(b.1.1));
                 for (op, (groups, atoms)) in ops {
                     writeln!(out, "    {:>6} groups {:>12} atoms  {}", groups, atoms, op).unwrap();
                 }

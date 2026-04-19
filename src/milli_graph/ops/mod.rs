@@ -633,15 +633,13 @@ fn infer_multidirectional_broadcasting_shape(
                                         dim =
                                             ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(rng))
                                     }
-                                    Some(is_same) => {
-                                        if is_same {
-                                            // Ok, use the unknown dim already in there
-                                        } else {
-                                            // Must use new unknown dimension
-                                            dim = ScalarInfoTyped::Symbolic(
-                                                SymbolicScalarTyped::new(rng),
-                                            )
-                                        }
+                                    Some(false) => {
+                                        // Must use new unknown dimension
+                                        dim =
+                                            ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(rng))
+                                    }
+                                    Some(true) => {
+                                        // Ok, use the unknown dim already in there
                                     }
                                 }
                             }

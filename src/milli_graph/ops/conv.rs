@@ -512,8 +512,8 @@ impl Conv {
                         let mut coords = vec![0usize; last];
                         let mut rem = row_idx;
                         for d in 0..last {
-                            if outer_strides[d] > 0 {
-                                coords[d] = rem / outer_strides[d];
+                            if let Some(idx) = rem.checked_div(outer_strides[d]) {
+                                coords[d] = idx;
                                 rem %= outer_strides[d];
                             }
                         }
@@ -661,8 +661,8 @@ impl Conv {
                         let mut k_coords = vec![0usize; n_spatial];
                         let mut k_rem = k_flat as usize;
                         for d in 0..n_spatial {
-                            if kernel_strides[d] > 0 {
-                                k_coords[d] = k_rem / kernel_strides[d];
+                            if let Some(idx) = k_rem.checked_div(kernel_strides[d]) {
+                                k_coords[d] = idx;
                                 k_rem %= kernel_strides[d];
                             }
                         }

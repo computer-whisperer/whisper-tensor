@@ -3896,7 +3896,7 @@ impl SuperGraphNode for SuperGraphNodeRNNCacheWrite {
         }
 
         let entry = caches.rnn_cache.entry(key_input).or_default();
-        for (toks, state_map) in per_row_tokens.into_iter().zip(per_row_state.into_iter()) {
+        for (toks, state_map) in per_row_tokens.into_iter().zip(per_row_state) {
             entry.insert(toks, state_map);
         }
         Ok(())

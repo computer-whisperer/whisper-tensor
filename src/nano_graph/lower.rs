@@ -421,8 +421,8 @@ impl TensorAtomMapInfo {
         let mut indices = vec![0u64; known_dims.len()];
         let mut rem = flat;
         for (i, &rm_stride) in row_major.iter().enumerate() {
-            if rm_stride > 0 {
-                indices[i] = rem / rm_stride;
+            if let Some(idx) = rem.checked_div(rm_stride) {
+                indices[i] = idx;
                 rem %= rm_stride;
             }
         }
@@ -650,8 +650,8 @@ impl TensorAtomMap {
         let mut indices = vec![0u64; known_dims.len()];
         let mut rem = flat;
         for (i, &rm_stride) in row_major.iter().enumerate() {
-            if rm_stride > 0 {
-                indices[i] = rem / rm_stride;
+            if let Some(idx) = rem.checked_div(rm_stride) {
+                indices[i] = idx;
                 rem %= rm_stride;
             }
         }
@@ -1436,8 +1436,8 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
             let mut c_indices = vec![0u64; c_known_sizes.len()];
             let mut rem = flat_c;
             for (i, &stride) in c_strides.iter().enumerate() {
-                if stride > 0 {
-                    c_indices[i] = rem / stride;
+                if let Some(idx) = rem.checked_div(stride) {
+                    c_indices[i] = idx;
                     rem %= stride;
                 }
             }
@@ -1637,8 +1637,8 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
             let mut c_indices = vec![0u64; c_known_sizes.len()];
             let mut rem = flat_c;
             for (i, &stride) in c_strides.iter().enumerate() {
-                if stride > 0 {
-                    c_indices[i] = rem / stride;
+                if let Some(idx) = rem.checked_div(stride) {
+                    c_indices[i] = idx;
                     rem %= stride;
                 }
             }
@@ -2322,8 +2322,8 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
                 let mut out_indices = vec![0u64; final_known.len()];
                 let mut rem = flat_out;
                 for (i, &stride) in final_strides.iter().enumerate() {
-                    if stride > 0 {
-                        out_indices[i] = rem / stride;
+                    if let Some(idx) = rem.checked_div(stride) {
+                        out_indices[i] = idx;
                         rem %= stride;
                     }
                 }
@@ -2422,8 +2422,8 @@ impl<'a, 'p, P: crate::pool::Pool + 'p> NanoLoweringContext<'a, 'p, P> {
             let mut out_indices = vec![0u64; out_known.len()];
             let mut rem = flat_out;
             for (i, &stride) in out_strides_local.iter().enumerate() {
-                if stride > 0 {
-                    out_indices[i] = rem / stride;
+                if let Some(idx) = rem.checked_div(stride) {
+                    out_indices[i] = idx;
                     rem %= stride;
                 }
             }

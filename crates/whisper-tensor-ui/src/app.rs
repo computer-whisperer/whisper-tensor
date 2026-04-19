@@ -770,7 +770,7 @@ impl WebUIApp {
                                     .show(ui, |ui| {
                                         let mut ops: Vec<_> =
                                             model.milli_op_census.iter().collect();
-                                        ops.sort_by(|a, b| b.1.1.cmp(&a.1.1));
+                                        ops.sort_by_key(|b| std::cmp::Reverse(b.1.1));
                                         egui::Grid::new(format!(
                                             "milli_ops_{}_{}",
                                             entry.cache_key, model.graph_id

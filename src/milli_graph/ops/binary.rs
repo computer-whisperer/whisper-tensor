@@ -1347,8 +1347,7 @@ impl MatMul {
             let mut batch_rem = batch_idx;
             let a_batch_strides = TensorAtomMap::compute_strides(&a_batch_known);
             for (i, &stride) in a_batch_strides.iter().enumerate() {
-                if stride > 0 {
-                    let idx = batch_rem / stride;
+                if let Some(idx) = batch_rem.checked_div(stride) {
                     batch_rem %= stride;
                     a_offset += idx * a_strides[i];
                 }
@@ -1363,8 +1362,7 @@ impl MatMul {
                 let mut batch_rem_b = batch_idx;
                 let b_batch_strides = TensorAtomMap::compute_strides(&b_batch_known);
                 for (i, &stride) in b_batch_strides.iter().enumerate() {
-                    if stride > 0 {
-                        let idx = batch_rem_b / stride;
+                    if let Some(idx) = batch_rem_b.checked_div(stride) {
                         batch_rem_b %= stride;
                         b_offset += idx * b_strides[i];
                     }
@@ -1397,8 +1395,8 @@ impl MatMul {
                     for d in 0..a_known_dims.len() {
                         if d == a_k_known_idx {
                             indices[d] = 0;
-                        } else if a_strides[d] > 0 {
-                            indices[d] = remaining / a_strides[d];
+                        } else if let Some(idx) = remaining.checked_div(a_strides[d]) {
+                            indices[d] = idx;
                             remaining %= a_strides[d];
                         }
                     }

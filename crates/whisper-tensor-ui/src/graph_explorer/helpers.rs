@@ -430,7 +430,7 @@ impl GraphExplorerApp {
                 (path, op_kind, *dur)
             })
             .collect();
-        nodes_by_duration.sort_by(|a, b| b.2.cmp(&a.2));
+        nodes_by_duration.sort_by_key(|b| std::cmp::Reverse(b.2));
 
         // Accumulated by op type
         let mut by_op_type: HashMap<String, (Duration, usize)> = HashMap::new();
@@ -440,7 +440,7 @@ impl GraphExplorerApp {
             entry.1 += 1;
         }
         let mut op_type_sorted: Vec<_> = by_op_type.into_iter().collect();
-        op_type_sorted.sort_by(|a, b| b.1.0.cmp(&a.1.0));
+        op_type_sorted.sort_by_key(|b| std::cmp::Reverse(b.1.0));
 
         ui.label(format!("{} nodes", nodes_by_duration.len()));
         ui.separator();

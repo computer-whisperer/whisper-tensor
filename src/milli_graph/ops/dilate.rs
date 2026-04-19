@@ -133,8 +133,8 @@ impl Dilate {
             let mut rem = row_idx;
             for d in 0..last {
                 let dim_stride = out_strides_rm[d] / out_shape[last];
-                if dim_stride > 0 {
-                    coords[d] = rem / dim_stride;
+                if let Some(idx) = rem.checked_div(dim_stride) {
+                    coords[d] = idx;
                     rem %= dim_stride;
                 }
             }
