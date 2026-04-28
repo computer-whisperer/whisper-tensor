@@ -16,7 +16,7 @@ half = { version="2.5.0", features = ["serde", "num-traits", "zerocopy"] }
 tracing-subscriber = { version = "0.3", features = [ "env-filter", "fmt" ] }
 tempfile = "3.27.0"
 zerocopy = "0.8.42"
-tokenizers = {optional=true, version="0.22.1", default-features = false, features = ["unstable_wasm"]}
+tokenizers = {optional=true, version="0.23.1", default-features = false, features = ["unstable_wasm"]}
 safetensors = {optional=true, version="0.7.0"}
 memmap2 = {optional=true, version="0.9"}
 wyrand = "0.4.1"
