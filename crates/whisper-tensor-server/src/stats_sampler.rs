@@ -62,7 +62,7 @@ impl StatsSampler {
     pub async fn run(self) {
         let pid = Pid::from_u32(std::process::id());
         let mut sys = System::new();
-        let refresh_kind = ProcessRefreshKind::new().with_memory().with_cpu();
+        let refresh_kind = ProcessRefreshKind::nothing().with_memory().with_cpu();
 
         // Prime CPU sampling: sysinfo computes %CPU as a delta between two
         // refreshes, so the first reading after a single refresh is always 0.
