@@ -982,9 +982,11 @@ fn interface_type_label(interface: &AnyInterface) -> &'static str {
 
 impl eframe::App for WebUIApp {
     /// Called each time the UI needs repainting, which may be many times per second.
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         // Put your widgets into a `SidePanel`, `TopBottomPanel`, `CentralPanel`, `Window` or `Area`.
         // For inspiration and more examples, go to https://emilk.github.io/egui
+
+        let ctx = ui.ctx().clone();
 
         loop {
             match self.websocket_server_client_receiver.try_recv() {
@@ -1189,7 +1191,7 @@ impl eframe::App for WebUIApp {
             }
         }
 
-        egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
+        egui::Panel::top("top_panel").show_inside(ui, |ui| {
             // The top panel is often a good place for a menu bar:
             egui::MenuBar::new().ui(ui, |ui| {
                 egui::widgets::global_theme_preference_switch(ui);
@@ -1237,9 +1239,9 @@ impl eframe::App for WebUIApp {
             });
         });
 
-        self.render_loader_dialog(ctx);
+        self.render_loader_dialog(&ctx);
 
-        egui::CentralPanel::default().show(ctx, |ui| {
+        egui::CentralPanel::default().show_inside(ui, |ui| {
             // The central panel the region left after adding TopPanel's and SidePanel's
             match &self.app_state.selected_tab {
                 SelectedTab::Models => {
@@ -1614,7 +1616,7 @@ impl eframe::App for WebUIApp {
         {
             app.update_inspect_windows(
                 &mut self.app_state.graph_explorer_settings,
-                ctx,
+                &ctx,
                 &mut self.loaded_models,
                 &mut self.server_request_manager,
             )
