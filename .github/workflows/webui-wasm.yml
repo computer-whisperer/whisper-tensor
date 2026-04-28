@@ -33,7 +33,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           submodules: recursive
 
@@ -45,12 +45,13 @@ jobs:
 
       # protoc for prost-build (runs in build.rs)
       - name: Install protoc
-        uses: arduino/setup-protoc@v2
+        uses: arduino/setup-protoc@v3
         with:
           version: "28.x"   # modern protoc; adjust if you need to pin
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Cache cargo (registry, git, target)
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
@@ -61,7 +62,7 @@ jobs:
             ${{ runner.os }}-cargo-wasm-
 
       - name: Cache wasm-pack tool cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.cache/.wasm-pack
           key: ${{ runner.os }}-wasm-pack-${{ hashFiles('**/Cargo.lock') }}
